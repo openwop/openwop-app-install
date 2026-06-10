@@ -1,0 +1,50 @@
+# Fly.io deploy config for the OpenWOP app BACKEND.
+#
+# Builds the shared root Dockerfile and runs it as a Fly Machine. Fly's proxy
+# does not buffer responses, so SSE run streams work over the same origin — no
+# special edge config needed (this is the Fly shape of the non-buffering-edge
+# requirement every pack documents).
+#
+# Edit `app` to your name, then see ../fly/README.md for the full sequence
+# (postgres create + attach, secrets set, deploy). The frontend (static SPA) is
+# deployed separately — see the README.
+
+app = "openwop-app"
+primary_region = "iad"
+
+[build]
+  # Build context is the repo root (run `fly deploy` from there, or pass
+  # `--dockerfile Dockerfile`). The image is identical to every other pack.
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+  OPENWOP_DEPLOY_POSTURE = "cookie-per-visitor"
+  OPENWOP_COOKIE_SECURE = "true"
+  OPENWOP_SURFACE_BACKEND = "durable"
+  # OPENWOP_STORAGE_DSN is injected by `fly postgres attach` as DATABASE_URL;
+  # the README maps it to OPENWOP_STORAGE_DSN. Secrets (session/BYOK/KMS) are
+  # set with `fly secrets set` and never live in this file.
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 1
+  # SSE correctness: do not let the proxy idle-kill a long-lived stream.
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 200
+    hard_limit = 250
+
+[[http_service.checks]]
+  interval = "15s"
+  timeout = "5s"
+  method = "GET"
+  path = "/api/readiness"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"

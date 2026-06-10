@@ -1,0 +1,76 @@
+# Render Blueprint for the OpenWOP app — backend (Docker) + managed Postgres +
+# static SPA, in one file. Point Render at this repo with this blueprint and it
+# provisions all three. Railway users: see ../render/README.md (same Dockerfile,
+# no blueprint file).
+#
+# Render web services stream SSE without buffering, so the SPA talks to the
+# backend directly (cross-origin) with CORS wired below.
+#
+# Status: syntax-reviewed scaffold; validate against a live Render deploy.
+
+databases:
+  - name: openwop-db
+    databaseName: openwop
+    plan: basic-256mb
+
+services:
+  # ── Backend (the shared container image) ─────────────────────────────────
+  - type: web
+    name: openwop-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /api/readiness
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: '8080'
+      - key: OPENWOP_DEPLOY_POSTURE
+        value: cookie-per-visitor
+      - key: OPENWOP_COOKIE_SECURE
+        value: 'true'
+      - key: OPENWOP_SURFACE_BACKEND
+        value: durable
+      # Managed Postgres connection string, injected by Render.
+      - key: OPENWOP_STORAGE_DSN
+        fromDatabase:
+          name: openwop-db
+          property: connectionString
+      # Render generates and persists these once.
+      - key: OPENWOP_SESSION_SECRET
+        generateValue: true
+      - key: OPENWOP_BYOK_ENCRYPTION_KEY
+        generateValue: true
+      # Allow the static SPA origin (cross-origin + SSE-direct deploy). Set
+      # manually after the first deploy to the frontend's URL — done this way
+      # (not fromService) to avoid a circular service reference with the
+      # frontend's VITE_OPENWOP_BASE_URL below.
+      - key: OPENWOP_CORS_ORIGINS
+        sync: false
+
+  # ── Frontend (static SPA) ────────────────────────────────────────────────
+  - type: web
+    name: openwop-frontend
+    runtime: static
+    buildCommand: cd frontend/react && npm ci && npm run build
+    staticPublishPath: ./frontend/react/dist
+    # SPA client-side routing: serve index.html for unmatched paths.
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      # Baked into the bundle at build time. The SPA calls the backend directly;
+      # SSE rides the same backend origin (Render does not buffer it). Set both
+      # to the backend service URL (https://openwop-backend.onrender.com) after
+      # the first deploy. Done manually (sync:false) rather than via
+      # `fromService` — Render's fromService exposes host/port/hostport, not a
+      # ready-made full URL, and the SPA needs the scheme baked in.
+      - key: VITE_OPENWOP_BASE_URL
+        sync: false
+      - key: VITE_OPENWOP_SSE_BASE_URL
+        sync: false
+      - key: VITE_OPENWOP_AUTH_MODE
+        value: cookie

@@ -1,0 +1,28 @@
+{
+  "name": "feature.kb.nodes",
+  "version": "1.0.0",
+  "description": "Knowledge Base feature node pack (ADR 0014 Phase 2) — workflow nodes over the `ctx.features.kb` surface shipped by the KB feature (ADR 0011). `search` retrieves chunks from one collection; `rag` retrieves + builds an augmented prompt + citations for an agent/callPrompt downstream. Action nodes — they read the tenant KB store (a side-effect), so their outputs are recorded and replay/fork read the recorded result.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "kb", "knowledge", "rag"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.kb.nodes.search",
+      "version": "1.0.0",
+      "label": "KB Search",
+      "description": "Semantic search within one KB collection via ctx.features.kb.search. Inputs: { orgId, collectionId, query, topK? }. Output: { results }.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.kb.nodes.rag",
+      "version": "1.0.0",
+      "label": "KB RAG (retrieve + augment)",
+      "description": "Retrieve + assemble a grounded augmented prompt + citations via ctx.features.kb.rag. Inputs: { orgId, collectionId, query, topK? }. Output: { augmentedPrompt, citations, contexts } — feed augmentedPrompt to a downstream callPrompt/agent (generation is run-scoped).",
+      "category": "integration",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

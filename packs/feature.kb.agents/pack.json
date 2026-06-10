@@ -1,0 +1,30 @@
+{
+  "name": "feature.kb.agents",
+  "version": "1.0.0",
+  "description": "Knowledge Base feature agent pack (ADR 0014 Phase 3) — a manifest agent shipped by the KB feature whose tools are the feature.kb.nodes (search / rag) over the ctx.features.kb surface. The first feature-bound agent: a feature ships an agent tool-allowlisted to its own workflow surface (RFC 0003 agents[] + RFC 0002 §A14 allowlist).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "kb", "knowledge", "agent", "rag"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.kb.agents.researcher",
+      "persona": "RESEARCH",
+      "label": "Knowledge Base Researcher",
+      "description": "Answers questions grounded in an org's Knowledge Base. Retrieves with feature.kb.nodes.search / feature.kb.nodes.rag (over ctx.features.kb), then composes a cited answer from the augmented context. Tools are allowlisted to the KB feature surface only.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/kb-researcher.md",
+      "toolAllowlist": [
+        "openwop:feature.kb.nodes.search",
+        "openwop:feature.kb.nodes.rag"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

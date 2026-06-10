@@ -1,0 +1,120 @@
+# OpenWOP app — vendor-neutral Docker Compose stack.
+#
+# The default deploy pack: runs the SAME container image used by every cloud
+# pack, with a bundled Postgres and an nginx edge that serves the SPA and
+# streams `/api` (SSE-safe, single origin → no CORS). No cloud SDK, no gcloud,
+# no Firebase. Runs anywhere Docker runs: a laptop, a VPS, a homelab.
+#
+#   cp .env.example .env   &&   edit secrets   &&   docker compose up --build
+#   open http://localhost:8080
+#
+# Optional S3-compatible object store (host.blob): `--profile blob` adds MinIO.
+#
+# This stack maps the host contract onto local containers:
+#   runtime  → backend container ($PORT=8080)
+#   database → postgres service     (OPENWOP_STORAGE_DSN)
+#   BYOK key → local-AES master key (OPENWOP_BYOK_ENCRYPTION_KEY)
+#   identity → anon cookie (default) or any OIDC issuer (OPENWOP_OIDC_*)
+#   blob     → optional MinIO        (OPENWOP_BLOB_S3_*)
+
+name: openwop-app
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-openwop}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-openwop}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-openwop} -d ${POSTGRES_DB:-openwop}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  backend:
+    build:
+      # Build context is the repo root so the shared providers.json, schemas/,
+      # packs/, and conformance-fixtures/ are reachable (see ../../Dockerfile).
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: '8080'
+      NODE_ENV: production
+      OPENWOP_DEPLOY_POSTURE: ${OPENWOP_DEPLOY_POSTURE:-cookie-per-visitor}
+      # Persist to the bundled Postgres (any Postgres DSN works).
+      OPENWOP_STORAGE_DSN: postgres://${POSTGRES_USER:-openwop}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-openwop}
+      # Durable host surfaces (kv/table/cache/queue) over the same Postgres.
+      OPENWOP_SURFACE_BACKEND: ${OPENWOP_SURFACE_BACKEND:-durable}
+      # Portable BYOK secret encryption — local AES master key, no cloud KMS.
+      OPENWOP_BYOK_ENCRYPTION_KEY: ${OPENWOP_BYOK_ENCRYPTION_KEY:?generate with - openssl rand -base64 32}
+      OPENWOP_SESSION_SECRET: ${OPENWOP_SESSION_SECRET:?generate with - openssl rand -base64 32}
+      OPENWOP_ADMIN_TOKEN: ${OPENWOP_ADMIN_TOKEN:-}
+      # nginx terminates TLS in front (or you do); cookies Secure unless local.
+      OPENWOP_COOKIE_SECURE: ${OPENWOP_COOKIE_SECURE:-false}
+      OPENWOP_CORS_ORIGINS: ${OPENWOP_CORS_ORIGINS:-}
+      OPENWOP_LOG_LEVEL: ${OPENWOP_LOG_LEVEL:-info}
+      # Optional OIDC (any issuer). Leave blank for anon cookie mode.
+      OPENWOP_OIDC_ISSUER: ${OPENWOP_OIDC_ISSUER:-}
+      OPENWOP_OIDC_AUDIENCE: ${OPENWOP_OIDC_AUDIENCE:-}
+      OPENWOP_OIDC_JWKS_URL: ${OPENWOP_OIDC_JWKS_URL:-}
+      # Optional S3-compatible blob (enabled by the `blob` profile + MinIO).
+      OPENWOP_SURFACE_BLOB: ${OPENWOP_SURFACE_BLOB:-}
+      OPENWOP_BLOB_S3_BUCKET: ${OPENWOP_BLOB_S3_BUCKET:-}
+      OPENWOP_BLOB_S3_REGION: ${OPENWOP_BLOB_S3_REGION:-us-east-1}
+      OPENWOP_BLOB_S3_ENDPOINT: ${OPENWOP_BLOB_S3_ENDPOINT:-}
+      OPENWOP_BLOB_S3_ACCESS_KEY_ID: ${OPENWOP_BLOB_S3_ACCESS_KEY_ID:-}
+      OPENWOP_BLOB_S3_SECRET_ACCESS_KEY: ${OPENWOP_BLOB_S3_SECRET_ACCESS_KEY:-}
+      OPENWOP_BLOB_S3_FORCE_PATH_STYLE: ${OPENWOP_BLOB_S3_FORCE_PATH_STYLE:-true}
+    expose:
+      - '8080'
+    networks: [internal]
+
+  web:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/frontend.Dockerfile
+      args:
+        # Same-origin: the SPA calls /api, nginx proxies it to the backend with
+        # buffering OFF so SSE streams. No separate SSE origin needed.
+        VITE_OPENWOP_BASE_URL: /api
+        VITE_OPENWOP_SSE_BASE_URL: ''
+        VITE_OPENWOP_AUTH_MODE: ${VITE_OPENWOP_AUTH_MODE:-cookie}
+        VITE_BRAND_PRODUCT_NAME: ${VITE_BRAND_PRODUCT_NAME:-}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    ports:
+      - '${WEB_PORT:-8080}:80'
+    networks: [internal]
+
+  # Optional S3-compatible object store. Enable with: docker compose --profile blob up
+  minio:
+    image: minio/minio:latest
+    profiles: [blob]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${OPENWOP_BLOB_S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${OPENWOP_BLOB_S3_SECRET_ACCESS_KEY:-minioadmin}
+    volumes:
+      - miniodata:/data
+    ports:
+      - '${MINIO_PORT:-9000}:9000'
+      - '${MINIO_CONSOLE_PORT:-9001}:9001'
+    networks: [internal]
+
+volumes:
+  pgdata:
+  miniodata:
+
+networks:
+  internal:

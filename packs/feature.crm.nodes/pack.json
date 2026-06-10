@@ -1,0 +1,30 @@
+{
+  "name": "feature.crm.nodes",
+  "version": "1.0.0",
+  "description": "CRM feature node pack — contact-triage nodes shipped by the CRM feature package (ADR 0001 §4 reference feature). The two variants (basic / enriched) back the CRM toggle's A/B bindings.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "crm", "triage"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.crm.nodes.triage",
+      "version": "1.0.0",
+      "label": "CRM Triage (basic)",
+      "description": "Rule-based contact triage — scores a contact from its stage. The `basic` variant binding.",
+      "category": "integration",
+      "role": "pure",
+      "capabilities": ["cacheable"]
+    },
+    {
+      "typeId": "feature.crm.nodes.triage-enriched",
+      "version": "1.0.0",
+      "label": "CRM Triage (enriched)",
+      "description": "Enriched contact triage — adds company-signal weighting. The `enriched` variant binding.",
+      "category": "integration",
+      "role": "pure",
+      "capabilities": ["cacheable"]
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}
