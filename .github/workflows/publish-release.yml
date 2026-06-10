@@ -1,0 +1,38 @@
+# Builds the white-label release zip from THIS public repo's tree and publishes
+# it to the rolling `whitelabel` release WITH a sigstore build-provenance
+# attestation (works because this repo is public). The tree itself is synced
+# here from the private openwop-app via scripts/publish-install-repo.sh, which
+# pushes to `main` and thereby triggers this workflow.
+name: Publish white-label release (attested)
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['README.md']   # the sync banner alone shouldn't re-release
+  workflow_dispatch:
+permissions:
+  contents: write       # create/upload the rolling release asset
+  id-token: write       # sigstore OIDC
+  attestations: write   # record the provenance attestation
+concurrency:
+  group: publish-release
+  cancel-in-progress: true
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the white-label bundle
+        run: bash scripts/build-whitelabel-zip.sh
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist-whitelabel/openwop-demo-app.zip
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view whitelabel >/dev/null 2>&1 || \
+            gh release create whitelabel --title "White-label install bundle (rolling)" \
+              --notes "Rebuilt + attested on each sync from openwop-app. Verify with the .sha256 sidecar or \`gh attestation verify\`; deploy via frontend/react/WHITE-LABEL.md." --latest=false
+          gh release upload whitelabel --clobber \
+            dist-whitelabel/openwop-demo-app.zip dist-whitelabel/openwop-demo-app.zip.sha256
