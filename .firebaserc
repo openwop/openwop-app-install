@@ -1,0 +1,12 @@
+{
+  "projects": {
+    "default": "openwop-dev"
+  },
+  "targets": {
+    "openwop-dev": {
+      "hosting": {
+        "app": ["app-openwop-dev"]
+      }
+    }
+  }
+}

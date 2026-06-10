@@ -1,5 +1,3 @@
-> **Published white-label install bundle.** Auto-synced from the OpenWOP reference app (`openwop/openwop-app`, source `e25d0bd`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Dev/issues happen upstream — this repo is generated, so PRs here won't be merged.
-
 # openwop-app — OpenWOP Application
 
 > **The live reference deployment of an OpenWOP host** — and a white-label starting point you can fork and rebrand. Consumes the protocol via the published [`@openwop/openwop`](https://www.npmjs.com/package/@openwop/openwop) SDK; the protocol spec itself lives in [`openwop/openwop`](https://github.com/openwop/openwop). Carved from that monorepo (`apps/workflow-engine`) with full history.

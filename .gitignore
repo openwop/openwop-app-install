@@ -1,0 +1,56 @@
+# deps / build output
+node_modules/
+**/node_modules/
+dist/
+lib/
+*.tsbuildinfo
+
+# runtime / local
+data/
+.env
+.env.local
+.env.*.local
+*.log
+
+# test artifacts
+coverage/
+test-results/
+playwright-report/
+.playwright/
+**/.vite/
+
+# os
+.DS_Store
+
+# firebase deploy cache (local)
+.firebase/
+
+# white-label distributable (scripts/build-whitelabel-zip.sh)
+dist-whitelabel/
+
+# ── secrets / credentials — NEVER commit (this repo is public) ──
+# Private keys, certs, key material
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+# GCP / Firebase / cloud service-account keys + ADC
+*service-account*.json
+*serviceaccount*.json
+*-credentials.json
+application_default_credentials.json
+gcloud-*.json
+gha-creds-*.json
+# npm auth
+.npmrc
+# terraform state (may embed secrets)
+*.tfstate
+*.tfstate.*
+*.tfvars
+# any .env variant EXCEPT the intentionally-tracked public build config + examples
+.env.*
+!.env.production
+!.env.production.example
+!.env.example
+!.env*.example
