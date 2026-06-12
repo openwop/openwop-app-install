@@ -1,17 +1,18 @@
 /**
- * Notifications-as-a-feature (ADR 0010) — the MIGRATION's regression oracle.
+ * Notifications-as-a-feature (ADR 0010) — the regression oracle.
  *
- * The pre-existing notification surface kept working (see notifications.test.ts);
- * this asserts the NEW feature-package behavior the migration adds:
- *   1. Toggle gating — with the toggle OFF the WHOLE surface 404s, including the
- *      `…notifications:mark-all-read` colon sub-resource (a string-prefix gate
- *      would have leaked it) and the push-config read.
- *   2. Default ON — a fresh deploy keeps the surface (no regression on upgrade).
- *   3. Durable, per-(tenant, user) preferences (Phase 2): GET returns seeded
- *      defaults, PUT validates + persists + round-trips, bad bodies are 400.
+ * Notifications is CORE platform infrastructure: the toggle was removed
+ * (2026-06-11 — § Correction) because the emit path was never gated, so a toggle
+ * only hid the UI while rows + Web-Push kept flowing. This asserts:
+ *   1. Always-on — there is NO `notifications` toggle, and the WHOLE surface
+ *      (inbox, the `…notifications:mark-all-read` colon sub-resource, push,
+ *      prefs) serves without any toggle config.
+ *   2. Durable, per-(tenant, user) preferences — the real control: GET returns
+ *      seeded defaults, PUT validates + persists + round-trips, bad bodies 400.
  */
 
 import http from 'node:http';
+import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -24,6 +25,7 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(PORT, res); });
@@ -38,7 +40,7 @@ function client(initialCookie = ''): Client {
   let cookie = initialCookie;
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    const sc = typeof (res.headers as any).getSetCookie === 'function' ? (res.headers as any).getSetCookie() : [];
+    const sc = getSetCookies(res.headers);
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
     return { status: res.status, body: out };
@@ -47,53 +49,33 @@ function client(initialCookie = ''): Client {
 }
 
 let n = 0;
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam.
 async function signedIn(): Promise<Client> {
   const c = client();
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email: `notif-${Date.now()}-${n++}@acme.test`, password: 'password123' });
+  const r = await c.post('/v1/host/sample/test/login', { email: `notif-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }
-const enableNotifications = async (status: 'on' | 'off'): Promise<void> => {
-  const d = getToggleDefault('notifications');
-  if (d) await saveConfig({ ...d, status }, 'test');
-};
-
 const BASE_PATH = '/v1/host/sample/notifications';
 
-describe('notifications feature — default ON + surface works', () => {
-  it('the toggle seeds ON (no regression on upgrade)', () => {
-    const d = getToggleDefault('notifications');
-    expect(d?.status).toBe('on');
+describe('notifications feature — core, always-on (no toggle)', () => {
+  it('has NO `notifications` toggle (it is core platform infrastructure)', () => {
+    expect(getToggleDefault('notifications')).toBeNull();
   });
 
-  it('serves the inbox, mark-all-read, and push-config when ON', async () => {
-    await enableNotifications('on');
+  it('serves the WHOLE surface with no toggle config — inbox, colon mark-all-read, push, prefs', async () => {
     const c = await signedIn();
     expect((await c.get(BASE_PATH)).status).toBe(200);
+    // The colon sub-resource — a `/`-boundary gate used to be able to leak it.
     expect((await c.post(`${BASE_PATH}:mark-all-read`)).status).toBe(200);
     expect((await c.get(`${BASE_PATH}/push/config`)).status).toBe(200);
-  });
-});
-
-describe('notifications feature — toggle gating (backend authority)', () => {
-  it('404s the WHOLE surface when OFF — inbox, the colon mark-all-read, push, prefs', async () => {
-    const c = await signedIn();
-    await enableNotifications('off');
-    try {
-      expect((await c.get(BASE_PATH)).status).toBe(404);
-      // The colon sub-resource — a `/`-boundary string gate would have leaked it.
-      expect((await c.post(`${BASE_PATH}:mark-all-read`)).status).toBe(404);
-      expect((await c.get(`${BASE_PATH}/push/config`)).status).toBe(404);
-      expect((await c.get(`${BASE_PATH}/preferences`)).status).toBe(404);
-    } finally {
-      await enableNotifications('on');
-    }
+    expect((await c.get(`${BASE_PATH}/preferences`)).status).toBe(200);
   });
 });
 
 describe('notifications feature — durable preferences (Phase 2)', () => {
   it('GET returns seeded defaults for a user who never saved', async () => {
-    await enableNotifications('on');
     const c = await signedIn();
     const r = await c.get(`${BASE_PATH}/preferences`);
     expect(r.status).toBe(200);

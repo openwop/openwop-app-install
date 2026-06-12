@@ -16,7 +16,8 @@
  *   GET    /orgs/:orgId/members           list members
  *   POST   /orgs/:orgId/members           add a member               [host:members:manage]
  *   PATCH  /orgs/:orgId/members/:memberId edit roles/teams/identity  [host:members:manage]
- *   DELETE /orgs/:orgId/members/:memberId remove                     [host:members:manage]
+ *   DELETE /orgs/:orgId/members/:memberId remove (≥1-owner guarded)  [host:members:manage]
+ *   POST   /orgs/:orgId/members/:memberId/transfer-ownership  grant owner (+stepDown) [host:org:manage]
  *   GET    /orgs/:orgId/groups            list groups
  *   POST   /orgs/:orgId/groups            create a group (roles+members) [host:groups:manage]
  *   PATCH  /orgs/:orgId/groups/:groupId   edit roles/members          [host:groups:manage]
@@ -477,6 +478,9 @@ export function registerAccessControlRoutes(app: Express): void {
         roles?: unknown;
         teamIds?: unknown;
       };
+      // ≥1-owner invariant is enforced inside `updateMember` (the single mutator
+      // chokepoint): a role change that strips `owner` from the last owner is
+      // rejected atomically with `conflict` (409). ADR 0015.
       const updated = await updateMember(req.params.memberId, {
         displayName: optionalString(body.displayName, 'displayName'),
         email: patchString(body.email, 'email'),
@@ -498,8 +502,54 @@ export function registerAccessControlRoutes(app: Express): void {
       if (!member || member.tenantId !== tenantOf(req) || member.orgId !== req.params.orgId) {
         throw new OpenwopError('not_found', 'Member not found.', 404, { memberId: req.params.memberId });
       }
+      // ≥1-owner invariant is enforced inside `deleteMember` (atomic post-write
+      // re-check): removing a workspace's last owner is rejected with `conflict`
+      // (409) — it would orphan the workspace. ADR 0015.
       await deleteMember(req.params.memberId);
       res.status(204).end();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Transfer / grant ownership — the escape hatch for the last-owner guard
+  // (ADR 0015). Grants the built-in `owner` role to another member of the
+  // workspace (idempotent); with `{ stepDown: true }` the caller ALSO relinquishes
+  // their own `owner` role in the same operation — now safe, because the target is
+  // already an owner, so the ≥1-owner invariant still holds. Owner-level
+  // (`host:org:manage`). This is the in-app path to demote/remove a sole owner:
+  // hand ownership over first, then the guard no longer blocks stepping down.
+  app.post('/v1/host/sample/orgs/:orgId/members/:memberId/transfer-ownership', async (req, res, next) => {
+    try {
+      await loadOrgOwned(req, req.params.orgId);
+      await requireScope(req, 'host:org:manage');
+      const target = await getMember(req.params.memberId);
+      if (!target || target.tenantId !== tenantOf(req) || target.orgId !== req.params.orgId) {
+        throw new OpenwopError('not_found', 'Member not found.', 404, { memberId: req.params.memberId });
+      }
+      const body = (req.body ?? {}) as { stepDown?: unknown };
+      const stepDown = body.stepDown === true;
+
+      // Grant owner to the target (idempotent — a no-op if already an owner).
+      if (!target.roles.includes('owner')) {
+        await updateMember(target.memberId, { roles: [...target.roles, 'owner'] });
+      }
+
+      // Optionally step the caller down from owner in this workspace. Find the
+      // caller's OWN member record (by subject) — never the target — and strip
+      // `owner`. The target is now an owner, so the invariant is preserved.
+      let steppedDown: string | undefined;
+      if (stepDown) {
+        const subject = callerSubject(req);
+        const self = (await listMembers(tenantOf(req), req.params.orgId)).find(
+          (m) => m.subject === subject && m.memberId !== target.memberId && m.roles.includes('owner'),
+        );
+        if (self) {
+          await updateMember(self.memberId, { roles: self.roles.filter((r) => r !== 'owner') });
+          steppedDown = self.memberId;
+        }
+      }
+      res.json({ transferredTo: target.memberId, ...(steppedDown ? { steppedDown } : {}) });
     } catch (err) {
       next(err);
     }

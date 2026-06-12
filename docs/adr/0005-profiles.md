@@ -1,6 +1,6 @@
 # ADR 0005 — User Profiles
 
-**Status:** Accepted (Phases 1–5 sequenced)
+**Status:** implemented (Phases 1–5 shipped — `src/features/profiles/`, `test/profiles-route.test.ts`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0002 (Users), ADR 0003 (Canonical identity), ADR 0004 (Org
 invitations — email ownership), ADR 0006 (RBAC — read/write authority)

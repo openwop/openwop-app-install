@@ -1,0 +1,30 @@
+{
+  "name": "feature.forms.nodes",
+  "version": "1.0.0",
+  "description": "Forms feature node pack (ADR 0014) — read nodes over the ctx.features.forms surface shipped by the Forms feature package. list-forms reads an org's forms; list-submissions reads a form's captured submissions.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "forms", "submissions", "lead-capture"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.forms.nodes.list-forms",
+      "version": "1.0.0",
+      "label": "Forms: List Forms",
+      "description": "Lists an org's forms over ctx.features.forms. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.forms.nodes.list-submissions",
+      "version": "1.0.0",
+      "label": "Forms: List Submissions",
+      "description": "Lists a form's captured submissions over ctx.features.forms. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

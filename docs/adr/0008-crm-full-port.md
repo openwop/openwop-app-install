@@ -1,6 +1,6 @@
 # ADR 0008 — CRM (full port)
 
-**Status:** Accepted (Phases 1–4 sequenced)
+**Status:** implemented (Phases 1–4 shipped — `src/features/crm/crmEntitiesService.ts` incl. custom fields + CSV import, `test/crm-feature.test.ts`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0004 (Organizations), ADR 0006 (RBAC scopes)
 **Extends:** the existing `crm` feature (contacts + triage + A/B variants) — does

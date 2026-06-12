@@ -1,11 +1,18 @@
 # ADR 0009 — CMS + Page Builder
 
-**Status:** Accepted (Phases 1–4 sequenced)
+**Status:** implemented (Phases 1–4 shipped — `src/features/cms/`, `test/cms-route.test.ts`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0004 (Organizations), ADR 0006 (RBAC scopes), ADR 0007
 (Media Library — section assets)
 **Owner of CMS data:** a NEW feature-package `src/features/cms/`.
 **Surface:** `/v1/host/sample/cms/*` (host-extension, NON-NORMATIVE — no RFC).
+
+> **Correction (2026-06-11, ADR 0027):** CMS is now **always-on** — its
+> `toggleDefault` is removed and it no longer appears in the feature-toggle
+> catalog (like Notifications, ADR 0010 § Correction). Routes keep their
+> org-scoped RBAC (`requireOrgScope`); only the toggle gate is gone. Its nav moved
+> from the workspace Sidebar to the admin-tier **Content** group. The original
+> `cms`-toggle rationale below is preserved for the reasoning trail.
 
 ---
 

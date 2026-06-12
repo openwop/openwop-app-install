@@ -1,6 +1,6 @@
 # ADR 0014 — Feature ↔ Workflow integration (the FeatureModule architecture)
 
-**Status:** Accepted (Phases 0–4 implemented)
+**Status:** implemented (Phases 0–4 — `FeatureModule` surface/agent/capability faces across CRM/CMS/KB/Media)
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), and composes every
 shipped feature (0002–0013). **Closes:** the ADR-0011 open question "back

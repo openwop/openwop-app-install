@@ -13,11 +13,27 @@ import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useNotificationStore } from './notificationStore.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Notice } from '../ui/Notice.js';
+import { IconButton } from '../ui/IconButton.js';
+import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
+import {
+  AlertIcon,
+  CheckSquareIcon,
+  ScaleIcon,
+  MegaphoneIcon,
+  InfoIcon,
+  InboxIcon,
+  TrashIcon,
+  CheckIcon,
+  RotateCwIcon,
+} from '../ui/icons/index.js';
 import { listOpenInterrupts, type OpenInterrupt } from '../client/interruptsClient.js';
 import { RenderInterrupt } from '../interrupts/RenderInterrupt.js';
-import { ApprovalsInbox } from './ApprovalsInbox.js';
-import type { Notification } from './types.js';
-import { isActionNeeded } from './types.js';
+import { NeedsYouInbox } from './NeedsYouInbox.js';
+import { relativeTime } from '../agents/agentViewModel.js';
+import type { Notification, NotificationType, NotificationPriority } from './types.js';
+import { isActionNeeded, TYPE_LABELS } from './types.js';
 
 type Tab = 'action-needed' | 'all' | 'archived';
 
@@ -26,6 +42,44 @@ const TAB_LABELS: Record<Tab, string> = {
   'all':           'All',
   'archived':      'Archived',
 };
+
+/** Map a notification type to its scanning glyph. Unknown (open-wire) types
+ *  fall through to the neutral InfoIcon so new BE types render forward-compat. */
+function typeIcon(type: NotificationType, size = 16): JSX.Element {
+  switch (type) {
+    case 'workflow.approval_needed':
+    case 'workflow.input_needed':
+      return <ScaleIcon size={size} />;
+    case 'workflow.failed':
+      return <AlertIcon size={size} />;
+    case 'workflow.completed':
+      return <CheckSquareIcon size={size} />;
+    case 'system.alert':
+      return <MegaphoneIcon size={size} />;
+    default:
+      return <InfoIcon size={size} />;
+  }
+}
+
+/** Human label for a (possibly open-wire) notification type. */
+function typeLabel(type: NotificationType): string {
+  return TYPE_LABELS[type] ?? type;
+}
+
+/** Priority → labeled chip tone (DESIGN §5.3 severity reuse). `normal` is the
+ *  baseline and renders no chip; only the off-baseline bands earn a pill. */
+function priorityChip(priority: NotificationPriority): JSX.Element | null {
+  switch (priority) {
+    case 'urgent':
+      return <span className="chip chip--danger">Urgent</span>;
+    case 'high':
+      return <span className="chip chip--warning">High</span>;
+    case 'low':
+      return <span className="chip chip--muted">Low</span>;
+    default:
+      return null;
+  }
+}
 
 export function NotificationsPage(): JSX.Element {
   const notifications = useNotificationStore((s) => s.notifications);
@@ -48,86 +102,113 @@ export function NotificationsPage(): JSX.Element {
     return nonArchived;
   }, [notifications, tab]);
 
-  const actionNeededCount = useMemo(
-    () => notifications.filter((n) => n.status !== 'archived' && isActionNeeded(n)).length,
-    [notifications],
-  );
+  const counts = useMemo(() => {
+    const nonArchived = notifications.filter((n) => n.status !== 'archived');
+    return {
+      'action-needed': nonArchived.filter(isActionNeeded).length,
+      'all':           nonArchived.length,
+      'archived':      notifications.filter((n) => n.status === 'archived').length,
+    } satisfies Record<Tab, number>;
+  }, [notifications]);
+
+  const actionNeededCount = counts['action-needed'];
+
+  // The tab strip IS the key-figure band: each count both reports and filters
+  // the queue below it (DESIGN §4.5 "stats are filters"). Action-needed reads
+  // amber when there's anything waiting on the human.
+  const figures: KeyFigureItem[] = (['action-needed', 'all', 'archived'] as const).map((key) => ({
+    key,
+    label: TAB_LABELS[key],
+    value: counts[key],
+    ...(key === 'action-needed' && actionNeededCount > 0 ? { tone: 'attention' as const } : {}),
+    glyph:
+      key === 'action-needed' ? <ScaleIcon size={13} />
+      : key === 'archived'    ? <InboxIcon size={13} />
+      :                          <CheckSquareIcon size={13} />,
+  }));
 
   return (
-    <section>
+    <section className="page-stack">
       <PageHeader
         eyebrow="Inbox"
         title="Inbox"
-        lede="Everything that needs your attention. Approval requests from suspended workflows render their resume form inline so you can resolve without leaving the page."
+        lede="Your agents' communication portal — everything that needs you in one place: proposals to approve, drafted actions, board blockers, and workflow interrupts (resolved inline)."
         actions={
           <>
-            <button type="button" className="secondary" onClick={() => void markAllRead()} disabled={unreadCount === 0}>Mark all read</button>
-            <button type="button" className="secondary" onClick={() => void refresh()}>Refresh</button>
+            <button type="button" className="secondary" onClick={() => void markAllRead()} disabled={unreadCount === 0}>
+              <CheckIcon size={13} /> Mark all read
+            </button>
+            <button type="button" className="secondary" onClick={() => void refresh()}>
+              <RotateCwIcon size={13} /> Refresh
+            </button>
           </>
         }
       />
-      {error && <div className="alert error">{error}</div>}
+      {error && <Notice variant="error">{error}</Notice>}
 
-      <ApprovalsInbox onResolved={() => void refresh()} />
+      <NeedsYouInbox onResolved={() => void refresh()} />
 
-      <div
-        className="card u-flex u-gap-1 u-p-0 u-overflow-hidden"
-      >
-        {(['action-needed', 'all', 'archived'] as const).map((key) => (
-          <button
-            key={key}
-            type="button"
-            onClick={() => setTab(key)}
-            aria-pressed={tab === key}
-            className="notifpage-tab"
-            style={{
-              background: tab === key ? 'var(--color-surface-2)' : 'transparent',
-              borderBottom: tab === key
-                ? '2px solid var(--color-accent)'
-                : '2px solid transparent',
-              fontWeight: tab === key ? 600 : 400,
-              color: tab === key ? 'var(--color-accent)' : 'inherit',
-            }}
-          >
-            {TAB_LABELS[key]}
-            {key === 'action-needed' && actionNeededCount > 0 && (
-              <span className="notifpage-tab-badge">
-                {actionNeededCount}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
+      <KeyFigureBand
+        figures={figures}
+        activeKey={tab}
+        onToggle={(key) => setTab(key as Tab)}
+        ariaLabel="Filter inbox by queue"
+      />
 
       {loading && filtered.length === 0 && (
-        <div className="card muted">Loading inbox…</div>
+        <StateCard loading icon={<InboxIcon size={28} />} title="Loading inbox…" />
       )}
       {!loading && filtered.length === 0 && (
-        <div className="card muted">
-          {tab === 'archived'
-            ? 'Nothing archived yet.'
-            : tab === 'action-needed'
-              ? 'No pending approvals or input requests. Workflows suspended on a HITL interrupt show up here.'
-              : 'No notifications yet.'}
-        </div>
+        tab === 'archived' ? (
+          <StateCard
+            icon={<InboxIcon size={28} />}
+            title="Nothing archived yet"
+            body="Notifications you dismiss with Archive land here — nothing's been archived so far."
+            action={
+              <button type="button" className="secondary" onClick={() => setTab('action-needed')}>
+                Back to Action needed
+              </button>
+            }
+          />
+        ) : tab === 'action-needed' ? (
+          <StateCard
+            icon={<CheckSquareIcon size={28} />}
+            title="No approvals or input requests"
+            body="You're all clear. Workflows suspended on a human-in-the-loop interrupt show up here when they need you."
+            action={
+              <Link to="/runs" className="inline-link">View runs →</Link>
+            }
+          />
+        ) : (
+          <StateCard
+            icon={<InboxIcon size={28} />}
+            title="No notifications yet"
+            body="Run a workflow and its events will surface here as they happen."
+            action={
+              <Link to="/workflows" className="inline-link">Browse workflows →</Link>
+            }
+          />
+        )
       )}
 
-      {filtered.map((n) => (
-        <NotificationCard
-          key={n.notificationId}
-          notification={n}
-          onArchive={() => void archive(n.notificationId)}
-          onDelete={() => { if (window.confirm("Delete this notification? This can't be undone — use Archive to dismiss without deleting.")) void deleteN(n.notificationId); }}
-          onResolved={() => {
-            // After an interrupt is resolved, archive the notification
-            // and re-fetch — the BE may have emitted a follow-up event
-            // (e.g., next interrupt opens) we'd otherwise miss until
-            // the next SSE frame.
-            void archive(n.notificationId);
-            void refresh();
-          }}
-        />
-      ))}
+      <div className="page-enter u-grid u-gap-3">
+        {filtered.map((n) => (
+          <NotificationCard
+            key={n.notificationId}
+            notification={n}
+            onArchive={() => void archive(n.notificationId)}
+            onDelete={() => { if (window.confirm("Delete this notification? This can't be undone — use Archive to dismiss without deleting.")) void deleteN(n.notificationId); }}
+            onResolved={() => {
+              // After an interrupt is resolved, archive the notification
+              // and re-fetch — the BE may have emitted a follow-up event
+              // (e.g., next interrupt opens) we'd otherwise miss until
+              // the next SSE frame.
+              void archive(n.notificationId);
+              void refresh();
+            }}
+          />
+        ))}
+      </div>
     </section>
   );
 }
@@ -146,26 +227,23 @@ function NotificationCard({
   onResolved,
 }: NotificationCardProps): JSX.Element {
   const isUnread = notification.status === 'unread';
+  const when = relativeTime(notification.createdAt);
   return (
-    <div
-      className="card"
-      style={{
-        borderLeft: isUnread ? '3px solid var(--color-accent)' : undefined,
-      }}
-    >
-      <div className="u-flex u-items-baseline u-gap-2 u-mb-2">
+    <div className="surface-card">
+      <div className="u-flex u-items-center u-gap-2 u-mb-2">
+        <span className="muted u-iflex" aria-hidden="true">{typeIcon(notification.type)}</span>
         <strong>{notification.title}</strong>
-        <span className="muted u-fs-12">
-          {notification.type}
-        </span>
-        <span className="muted u-ml-auto u-fs-12">
-          {new Date(notification.createdAt).toLocaleString()}
+        <span className="chip chip--muted">{typeLabel(notification.type)}</span>
+        {priorityChip(notification.priority)}
+        {isUnread && <span className="chip chip--accent">Unread</span>}
+        <span className="muted u-ml-auto u-fs-12" title={new Date(notification.createdAt).toLocaleString()}>
+          {when ?? new Date(notification.createdAt).toLocaleString()}
         </span>
       </div>
       <p className="notifpage-card-message">{notification.message}</p>
       {notification.runId && (
         <div className="u-mb-2">
-          <Link to={`/runs/${notification.runId}`} className="u-fs-12">
+          <Link to={`/runs/${notification.runId}`} className="inline-link u-fs-12">
             run {notification.runId.slice(0, 12)} →
           </Link>
         </div>
@@ -179,19 +257,11 @@ function NotificationCard({
         />
       )}
 
-      <div className="u-flex u-gap-2 u-mt-3">
+      <div className="action-bar u-justify-end u-mt-3">
         {notification.status !== 'archived' && (
-          <button type="button" className="secondary" onClick={onArchive}>
-            Archive
-          </button>
+          <IconButton label="Archive" icon={<InboxIcon size={15} />} onClick={onArchive} />
         )}
-        <button
-          type="button"
-          className="secondary u-text-danger"
-          onClick={onDelete}
-        >
-          Delete
-        </button>
+        <IconButton label="Delete" icon={<TrashIcon size={15} />} className="icon-button u-text-danger" onClick={onDelete} />
       </div>
     </div>
   );
@@ -227,7 +297,7 @@ function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverPro
     return () => { cancelled = true; };
   }, [runId, interruptId]);
 
-  if (error) return <div className="alert error">{error}</div>;
+  if (error) return <Notice variant="error">{error}</Notice>;
   if (!open) {
     return (
       <div className="muted u-fs-12">

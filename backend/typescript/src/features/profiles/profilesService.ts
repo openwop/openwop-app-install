@@ -61,6 +61,14 @@ export interface Profile {
   equipment: string[];
   availability?: ProfileAvailability;
   interests: string[];
+  /** ADR 0025 — the user's assigned-workflow portfolio (the set the human or
+   *  their assistant runs), mirroring `RosterEntry.workflows[]` for an agent.
+   *  Workflow ids; descriptive only — confers no authority. */
+  workflows: string[];
+  /** Roster member ids the user has PINNED to the sidebar (an indented
+   *  sub-menu under "Agents"). A pure per-user UI preference — confers no
+   *  authority; an unresolvable id is simply skipped when the sidebar renders. */
+  pinnedAgentIds: string[];
   createdAt: string;
   updatedAt: string;
   updatedBy?: string;
@@ -100,6 +108,8 @@ function emptyProfile(tenantId: string, userId: string): Profile {
     skills: [],
     equipment: [],
     interests: [],
+    workflows: [],
+    pinnedAgentIds: [],
     createdAt: ts,
     updatedAt: ts,
   };
@@ -127,6 +137,9 @@ export function computeCompleteness(p: Profile): number {
 export function viewProfile(p: Profile, opts: { emailVerified?: boolean; displayName?: string } = {}): ProfileView {
   return {
     ...p,
+    // Back-compat: rows stored before ADR 0025 lack `workflows` — normalize to [].
+    workflows: p.workflows ?? [],
+    pinnedAgentIds: p.pinnedAgentIds ?? [],
     completeness: computeCompleteness(p),
     ...(opts.emailVerified !== undefined ? { emailVerified: opts.emailVerified } : {}),
     ...(opts.displayName !== undefined ? { displayName: opts.displayName } : {}),
@@ -146,6 +159,59 @@ export async function getOrCreateProfile(tenantId: string, userId: string): Prom
   const fresh = emptyProfile(tenantId, userId);
   await store.put(fresh);
   return fresh;
+}
+
+/** Pin / unpin a roster member to the caller's sidebar (ADR 0023 — pinned
+ *  agents render as an indented sub-menu under "Agents"). Idempotent; preserves
+ *  insertion order (newest pin last). A pure UI preference — no authority, and
+ *  the caller can only pin agents that exist in their tenant (checked at the
+ *  route). Capped to keep the sub-menu sane. */
+const MAX_PINNED = 12;
+export async function setAgentPinned(
+  tenantId: string,
+  userId: string,
+  rosterId: string,
+  pinned: boolean,
+): Promise<Profile> {
+  const current = await getOrCreateProfile(tenantId, userId);
+  const have = new Set(current.pinnedAgentIds ?? []);
+  if (pinned) {
+    if (!have.has(rosterId)) {
+      const next = [...(current.pinnedAgentIds ?? []), rosterId].slice(-MAX_PINNED);
+      const updated: Profile = { ...current, pinnedAgentIds: next, updatedAt: nowIso(), updatedBy: userId };
+      await store.put(updated);
+      return updated;
+    }
+    return current;
+  }
+  if (have.has(rosterId)) {
+    const updated: Profile = {
+      ...current,
+      pinnedAgentIds: (current.pinnedAgentIds ?? []).filter((id) => id !== rosterId),
+      updatedAt: nowIso(),
+      updatedBy: userId,
+    };
+    await store.put(updated);
+    return updated;
+  }
+  return current;
+}
+
+/** Remove one or more agents from EVERY profile's pinned list in this tenant —
+ *  the cascade for agent deletion (e.g. "Clear demo data"). Without it a pin
+ *  outlives its agent: the sidebar filters the dead id, but it lingers in the
+ *  stored profile and would resurface if the same rosterId were re-seeded.
+ *  Idempotent; only rewrites profiles that actually held one of the ids. */
+export async function unpinAgentsForTenant(tenantId: string, rosterIds: string[]): Promise<void> {
+  if (rosterIds.length === 0) return;
+  const drop = new Set(rosterIds);
+  for (const p of await listProfiles(tenantId)) {
+    const pinned = p.pinnedAgentIds ?? [];
+    const next = pinned.filter((id) => !drop.has(id));
+    if (next.length !== pinned.length) {
+      await store.put({ ...p, pinnedAgentIds: next, updatedAt: nowIso(), updatedBy: 'system' });
+    }
+  }
 }
 
 /** Read a specific user's profile, tenant-scoped (IDOR guard — returns null for a
@@ -310,6 +376,34 @@ export async function setOwnSkills(
     byName.set(name.toLowerCase(), { name, proficiency, endorsements: priorEndorsements.get(name.toLowerCase()) ?? [] });
   }
   const next: Profile = { ...current, skills: [...byName.values()], updatedAt: nowIso(), updatedBy: userId };
+  await store.put(next);
+  return next;
+}
+
+// ── ADR 0025: assigned-workflow portfolio (self) ────────────────────────────
+
+const MAX_WORKFLOWS = 50;
+
+/** Replace the caller's assigned-workflow portfolio (ADR 0025). Workflow ids are
+ *  trimmed, bounded, and de-duplicated (order preserved, first occurrence wins).
+ *  Descriptive only — assigning a workflow confers no authority; it just curates
+ *  the set the human (or their assistant) runs, exactly as `RosterEntry.workflows`
+ *  does for an agent. The route validates the ids are non-empty strings. */
+export async function setOwnWorkflows(
+  tenantId: string,
+  userId: string,
+  workflowIds: string[],
+): Promise<Profile> {
+  const current = await getOrCreateProfile(tenantId, userId);
+  const seen = new Set<string>();
+  const workflows: string[] = [];
+  for (const raw of workflowIds.slice(0, MAX_WORKFLOWS)) {
+    const id = String(raw ?? '').trim().slice(0, MAX.item);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    workflows.push(id);
+  }
+  const next: Profile = { ...current, workflows, updatedAt: nowIso(), updatedBy: userId };
   await store.put(next);
   return next;
 }

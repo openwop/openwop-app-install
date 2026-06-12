@@ -41,3 +41,14 @@ export function isOwnPersonalWorkspace(req: Request): boolean {
   const personal = personalTenantOf(req);
   return personal !== undefined && tenantOf(req) === personal;
 }
+
+/** True iff the caller is a DURABLE signed-in account (a `user:`-prefixed
+ *  personal tenant), not an ephemeral `anon:<sid>` sandbox session. ADR 0015 /
+ *  ADR 0025 auto-provisioning — the personal workspace AND the personal board —
+ *  is durable-only: anon sessions are throwaway and must never persist records
+ *  (don't flood the store with abandoned anon orgs/boards). Single home for the
+ *  rule so the workspace + board choke points can't drift. */
+export function isDurableCaller(req: Request): boolean {
+  const personal = personalTenantOf(req);
+  return (personal?.startsWith('user:') ?? false) || typeof (req as { userId?: string }).userId === 'string';
+}

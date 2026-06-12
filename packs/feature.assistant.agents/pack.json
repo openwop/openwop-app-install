@@ -1,0 +1,64 @@
+{
+  "name": "feature.assistant.agents",
+  "version": "1.0.0",
+  "description": "Executive-Assistant agent pack (ADR 0023 / 0014). The chief-of-staff orchestrator + the extractor + the drafter. Tool-allowlisted to the assistant graph nodes, the kb RAG nodes, and the existing core I/O nodes (MCP/HTTP/integration) so the agent reaches connected apps WITHOUT any new I/O surface. Draft-only: outbound actions are enqueued for approval, never auto-sent.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "assistant", "chief-of-staff", "agent", "orchestration"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.assistant.agents.chief-of-staff",
+      "persona": "SUPERVISOR",
+      "label": "Chief of Staff",
+      "description": "Orchestrates the assistant's scheduled perception/action loops over the memory graph: reads connected sources (via core MCP/HTTP nodes), routes extraction + board population + briefings, and surfaces only what needs the principal's judgment. Delegates to extractor/drafter and may hand off via core.openwop.a2a. Draft-only — never sends without approval.",
+      "modelClass": "reasoning",
+      "systemPromptRef": "prompts/chief-of-staff.md",
+      "toolAllowlist": [
+        "openwop:feature.assistant.nodes.upsert-commitment",
+        "openwop:feature.assistant.nodes.populate-board",
+        "openwop:feature.assistant.nodes.prioritize",
+        "openwop:feature.assistant.nodes.compose-briefing",
+        "openwop:feature.assistant.nodes.enqueue-action",
+        "openwop:feature.kb.nodes.rag",
+        "openwop:core.openwop.mcp.read-resource",
+        "openwop:core.openwop.mcp.invoke-tool",
+        "openwop:core.openwop.http.openapi-call"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": true, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    },
+    {
+      "agentId": "feature.assistant.agents.extractor",
+      "persona": "RESEARCH",
+      "label": "Commitment Extractor",
+      "description": "Reads a source (email/doc/transcript via ctx.features.kb.rag) and extracts commitments + decisions with owner, due date, and a confidence, then upserts them into the memory graph. Read + graph-write only; no outbound I/O.",
+      "modelClass": "extraction",
+      "systemPromptRef": "prompts/extractor.md",
+      "toolAllowlist": [
+        "openwop:feature.kb.nodes.rag",
+        "openwop:feature.assistant.nodes.upsert-commitment"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.65 }
+    },
+    {
+      "agentId": "feature.assistant.agents.drafter",
+      "persona": "WRITER",
+      "label": "Reply Drafter",
+      "description": "Drafts outbound replies in the principal's voice and enqueues them as pending actions for one-tap approval (never sends). Tool-allowlisted to enqueue-action only — the send path is gated behind the principal's approval + the Connections write scopes.",
+      "modelClass": "writing",
+      "systemPromptRef": "prompts/drafter.md",
+      "toolAllowlist": [
+        "openwop:feature.assistant.nodes.enqueue-action"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

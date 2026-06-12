@@ -10,7 +10,10 @@
  *
  * Lifecycle:
  *   - `connect()` runs once at app mount: hydrate via REST, then attach
- *     SSE for live deltas. Reconnect on visibilitychange.
+ *     the SSE feed for live deltas. The fetch-stream client reconnects
+ *     internally with capped backoff and REST-backfills each reconnect
+ *     gap (`onOpen` → `refresh()`), so the feed self-heals without a
+ *     page reload.
  *   - `disconnect()` clears the SSE subscription.
  *   - Status mutations (read / archive / delete) update local state
  *     optimistically AND fire-and-forget the REST call; on failure,
@@ -47,9 +50,9 @@ import type { Notification, NotificationPreferences, NotificationStatus } from '
 
 /**
  * Live SSE connection status, surfaced to the UI so the bell / panel
- * can show a "reconnecting" chip when the stream drops. EventSource
- * auto-reconnects in browsers, so `error` is transient — a fresh
- * `notification` event flips us back to `connected`.
+ * can show a "reconnecting" chip when the stream drops. The fetch-stream
+ * client reconnects with capped backoff, so `error` is transient — the
+ * next successful (re)connect (`onOpen`) flips us back to `connected`.
  */
 export type NotificationConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -259,19 +262,27 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       // Phase 2). Fire-and-forget so a slow/anon prefs fetch never blocks the
       // live feed — it recounts unread when it lands.
       void get().hydratePreferences();
-      // Attach SSE after hydrate. EventSource auto-reconnects on
-      // network blips, so a transient `error` flip doesn't mean the
-      // feed is dead — fresh frames will roll the status back to
-      // `connected` via _ingest.
-      const cleanup = subscribeToNotifications(
-        (n) => {
+      // Attach SSE after hydrate. The fetch-stream client reconnects with
+      // capped backoff, so a transient `error` flip doesn't mean the feed
+      // is dead — `onOpen` flips back to `connected` on the next connect.
+      // `primed` skips the redundant backfill on the FIRST open (the
+      // `listNotifications` above just hydrated); every reconnect after
+      // that REST-backfills the gap, since this BE stream has no replay.
+      let primed = false;
+      const cleanup = subscribeToNotifications({
+        onNotification: (n) => {
           get()._ingest(n);
           if (get().connectionStatus !== 'connected') {
             set({ connectionStatus: 'connected' });
           }
         },
-        () => set({ connectionStatus: 'error' }),
-      );
+        onOpen: () => {
+          set({ connectionStatus: 'connected' });
+          if (primed) void get().refresh();
+          primed = true;
+        },
+        onError: () => set({ connectionStatus: 'error' }),
+      });
       set({ _sseCleanup: cleanup });
     } catch (err) {
       set({

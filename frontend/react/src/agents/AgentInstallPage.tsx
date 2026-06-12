@@ -20,7 +20,6 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
-import { EmptyBlock } from './agentUi.js';
 import { Link } from 'react-router-dom';
 import {
   listAvailableAgentPacks,
@@ -28,6 +27,10 @@ import {
   type AgentPackSummary,
 } from '../client/agentsClient.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Notice } from '../ui/Notice.js';
+import { SkeletonRows } from '../ui/Skeleton.js';
+import { PackageIcon } from '../ui/icons/index.js';
 
 interface State {
   packs: readonly AgentPackSummary[];
@@ -84,25 +87,30 @@ export function AgentInstallPage(): JSX.Element {
       />
 
       {state.isLoading && (
-        <EmptyBlock>Loading available packs…</EmptyBlock>
+        <SkeletonRows rows={4} columns={['40%', '12%', '60%']} />
       )}
       {state.error && (
-        <EmptyBlock tone="error">Couldn't load pack list: {state.error}</EmptyBlock>
+        <Notice variant="error">Couldn&apos;t load pack list: {state.error}</Notice>
       )}
       {installError && (
-        <div
-          role="alert"
-          className="agentinstall-error"
-        >
-          Install failed: {installError}
-        </div>
+        <Notice variant="error">Install failed: {installError}</Notice>
       )}
       {!state.isLoading && !state.error && state.packs.length === 0 && (
-        <EmptyBlock>
-          No agent packs in the local registry. Configure
-          {' '}<code>OPENWOP_REGISTRY_URL</code> + restart the host to fetch
-          from the public registry.
-        </EmptyBlock>
+        <StateCard
+          icon={<PackageIcon size={28} />}
+          title="No agent packs in the local registry"
+          body={
+            <>
+              Configure <code>OPENWOP_REGISTRY_URL</code> + restart the host to
+              fetch from the public registry.
+            </>
+          }
+          action={
+            <Link to="/agents" className="primary">
+              Back to all agents
+            </Link>
+          }
+        />
       )}
 
       {state.packs.length > 0 && (

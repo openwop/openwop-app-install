@@ -42,6 +42,27 @@ import { egressExtraJson, applyEgressExtra } from '../../messaging/types.js';
 import type { Storage } from '../storage.js';
 import { applyMigrations } from './schema.js';
 
+/** Every table with a `tenant_id` column, read from the live schema (memoized
+ *  per Database). The single source of truth for tenant-scoped bulk ops
+ *  (ADR 0003 Phase 4c) — see `../tenantMigration.ts`. Introspection means a new
+ *  tenant table is covered automatically; nothing to register, nothing to forget. */
+const tenantTablesCache = new WeakMap<Database.Database, string[]>();
+function tenantScopedTables(db: Database.Database): string[] {
+  const cached = tenantTablesCache.get(db);
+  if (cached) return cached;
+  const rows = db
+    .prepare(
+      `SELECT m.name AS name FROM sqlite_master m
+       WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+         AND EXISTS (SELECT 1 FROM pragma_table_info(m.name) p WHERE p.name = 'tenant_id')
+       ORDER BY m.name`,
+    )
+    .all() as Array<{ name: string }>;
+  const names = rows.map((r) => r.name);
+  tenantTablesCache.set(db, names);
+  return names;
+}
+
 export function openSqliteStorage(dbPath: string): Storage {
   const resolvedPath = dbPath === ':memory:' ? ':memory:' : resolve(dbPath);
   if (resolvedPath !== ':memory:') {
@@ -129,9 +150,9 @@ export function openSqliteStorage(dbPath: string): Storage {
 
   const insertInterruptStmt = db.prepare(`
     INSERT INTO interrupts (
-      interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at
+      interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at, expires_at
     ) VALUES (
-      @interruptId, @runId, @nodeId, @kind, @token, @data, @resumeSchema, @createdAt
+      @interruptId, @runId, @nodeId, @kind, @token, @data, @resumeSchema, @createdAt, @expiresAt
     )
   `);
 
@@ -145,13 +166,16 @@ export function openSqliteStorage(dbPath: string): Storage {
   const resolveInterruptStmt = db.prepare(`
     UPDATE interrupts SET resolved_at = ?, resolved_value = ? WHERE interrupt_id = ?
   `);
+  const listOpenInterruptsAllStmt = db.prepare(`
+    SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at ASC LIMIT ?
+  `);
   const listOpenInterruptsStmt = db.prepare(`
     SELECT * FROM interrupts WHERE run_id = ? AND resolved_at IS NULL
   `);
 
   const insertWebhookStmt = db.prepare(`
-    INSERT INTO webhooks (subscription_id, url, events, tags, secret, created_at)
-    VALUES (@subscriptionId, @url, @events, @tags, @secret, @createdAt)
+    INSERT INTO webhooks (subscription_id, tenant_id, url, events, tags, secret, created_at)
+    VALUES (@subscriptionId, @tenantId, @url, @events, @tags, @secret, @createdAt)
   `);
   const getWebhookStmt = db.prepare(`SELECT * FROM webhooks WHERE subscription_id = ?`);
   const deleteWebhookStmt = db.prepare(`DELETE FROM webhooks WHERE subscription_id = ?`);
@@ -471,6 +495,7 @@ export function openSqliteStorage(dbPath: string): Storage {
       data: row.data ? JSON.parse(row.data) : null,
       resumeSchema: row.resume_schema ? JSON.parse(row.resume_schema) : undefined,
       createdAt: row.created_at,
+      expiresAt: row.expires_at ?? undefined,
       resolvedAt: row.resolved_at ?? undefined,
       resolvedValue: row.resolved_value ? JSON.parse(row.resolved_value) : undefined,
     };
@@ -479,6 +504,8 @@ export function openSqliteStorage(dbPath: string): Storage {
   function rowToWebhook(row: any): WebhookSubscriptionRecord {
     return {
       subscriptionId: row.subscription_id,
+      // Pre-migration rows carry NULL; they belong to the default tenant.
+      tenantId: row.tenant_id ?? 'default',
       url: row.url,
       events: row.events ? JSON.parse(row.events) : [],
       tags: row.tags ? JSON.parse(row.tags) : undefined,
@@ -562,35 +589,53 @@ export function openSqliteStorage(dbPath: string): Storage {
       const existing = await this.getRun(runId);
       if (!existing) return;
       const merged: RunRecord = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-      const updateStmt = db.prepare(`
-        UPDATE runs SET
-          status = @status,
-          inputs = @inputs,
-          metadata = @metadata,
-          configurable = @configurable,
-          callback_url = @callbackUrl,
-          updated_at = @updatedAt,
-          completed_at = @completedAt,
-          error_code = @errorCode,
-          error_message = @errorMessage,
-          current_node_id = @currentNodeId,
-          scheduler_snapshot = @schedulerSnapshot
-        WHERE run_id = @runId
-      `);
-      updateStmt.run({
-        runId,
-        status: merged.status,
-        inputs: JSON.stringify(merged.inputs ?? null),
-        metadata: JSON.stringify(merged.metadata ?? {}),
-        configurable: JSON.stringify(merged.configurable ?? {}),
-        callbackUrl: merged.callbackUrl ?? null,
-        updatedAt: merged.updatedAt,
-        completedAt: merged.completedAt ?? null,
-        errorCode: merged.error?.code ?? null,
-        errorMessage: merged.error?.message ?? null,
-        currentNodeId: merged.currentNodeId ?? null,
-        schedulerSnapshot: merged.schedulerSnapshot ?? null,
-      });
+      // COLUMN-SCOPED write: only the fields present in `patch` (plus
+      // updated_at) are SET. The previous full-row rewrite meant two
+      // concurrent updateRun callers clobbered each other's DISJOINT fields —
+      // e.g. a parallel node's `{currentNodeId}` write racing the ADR 0024
+      // Phase D `metadata.connectionUse[]` stamp silently reverted the
+      // metadata it had read before the stamp landed.
+      const has = (k: keyof RunRecord): boolean => Object.prototype.hasOwnProperty.call(patch, k);
+      const sets: string[] = ['updated_at = @updatedAt'];
+      const params: Record<string, unknown> = { runId, updatedAt: merged.updatedAt };
+      if (has('status')) {
+        sets.push('status = @status');
+        params.status = merged.status;
+      }
+      if (has('inputs')) {
+        sets.push('inputs = @inputs');
+        params.inputs = JSON.stringify(merged.inputs ?? null);
+      }
+      if (has('metadata')) {
+        sets.push('metadata = @metadata');
+        params.metadata = JSON.stringify(merged.metadata ?? {});
+      }
+      if (has('configurable')) {
+        sets.push('configurable = @configurable');
+        params.configurable = JSON.stringify(merged.configurable ?? {});
+      }
+      if (has('callbackUrl')) {
+        sets.push('callback_url = @callbackUrl');
+        params.callbackUrl = merged.callbackUrl ?? null;
+      }
+      if (has('completedAt')) {
+        sets.push('completed_at = @completedAt');
+        params.completedAt = merged.completedAt ?? null;
+      }
+      if (has('error')) {
+        sets.push('error_code = @errorCode', 'error_message = @errorMessage');
+        params.errorCode = merged.error?.code ?? null;
+        params.errorMessage = merged.error?.message ?? null;
+      }
+      if (has('currentNodeId')) {
+        sets.push('current_node_id = @currentNodeId');
+        params.currentNodeId = merged.currentNodeId ?? null;
+      }
+      if (has('schedulerSnapshot')) {
+        sets.push('scheduler_snapshot = @schedulerSnapshot');
+        params.schedulerSnapshot = merged.schedulerSnapshot ?? null;
+      }
+      db.prepare(`UPDATE runs SET ${sets.join(', ')} WHERE run_id = @runId`).run(params);
     },
 
     async listRuns({ tenantId, status, limit = 100 }) {
@@ -643,6 +688,7 @@ export function openSqliteStorage(dbPath: string): Storage {
         ...record,
         data: JSON.stringify(record.data ?? null),
         resumeSchema: record.resumeSchema ? JSON.stringify(record.resumeSchema) : null,
+        expiresAt: record.expiresAt ?? null,
       });
     },
 
@@ -670,9 +716,15 @@ export function openSqliteStorage(dbPath: string): Storage {
       return rows.map(rowToInterrupt);
     },
 
+    async listOpenInterruptsAll(limit) {
+      const rows = listOpenInterruptsAllStmt.all(limit);
+      return rows.map(rowToInterrupt);
+    },
+
     async insertWebhook(record) {
       insertWebhookStmt.run({
         subscriptionId: record.subscriptionId,
+        tenantId: record.tenantId,
         url: record.url,
         events: JSON.stringify(record.events),
         tags: record.tags ? JSON.stringify(record.tags) : null,
@@ -690,9 +742,12 @@ export function openSqliteStorage(dbPath: string): Storage {
       deleteWebhookStmt.run(subscriptionId);
     },
 
-    async listWebhooks({ eventType, tags }) {
+    async listWebhooks({ eventType, tags, tenantId }) {
       const rows = listWebhooksStmt.all().map(rowToWebhook);
       return rows.filter((sub) => {
+        // RFC 0093 §A.3 — tenant scope is exact-match; cross-tenant
+        // subscriptions never match regardless of filter breadth.
+        if (tenantId !== undefined && sub.tenantId !== tenantId) return false;
         if (eventType && !sub.events.includes(eventType) && !sub.events.includes('*')) {
           return false;
         }
@@ -775,6 +830,40 @@ export function openSqliteStorage(dbPath: string): Storage {
         outcome: input.outcome ?? null,
         payload: input.payload != null ? JSON.stringify(input.payload) : null,
       });
+    },
+
+    async listAudit(filter) {
+      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 500);
+      const rows = db
+        .prepare(
+          `SELECT audit_id, timestamp, principal_id, action, resource, outcome, payload
+             FROM audit_log
+            WHERE action LIKE ? ESCAPE '\\' AND timestamp >= ?
+            ORDER BY timestamp DESC
+            LIMIT ?`,
+        )
+        .all(
+          `${(filter?.actionPrefix ?? '').replace(/[%_\\]/g, '\\$&')}%`,
+          filter?.sinceIso ?? '',
+          limit,
+        ) as Array<{
+        audit_id: string;
+        timestamp: string;
+        principal_id: string | null;
+        action: string;
+        resource: string | null;
+        outcome: string | null;
+        payload: string | null;
+      }>;
+      return rows.map((r) => ({
+        auditId: r.audit_id,
+        timestamp: r.timestamp,
+        action: r.action,
+        ...(r.principal_id !== null ? { principalId: r.principal_id } : {}),
+        ...(r.resource !== null ? { resource: r.resource } : {}),
+        ...(r.outcome !== null ? { outcome: r.outcome } : {}),
+        ...(r.payload !== null ? { payload: JSON.parse(r.payload) as unknown } : {}),
+      }));
     },
 
     async getInvocation({ runId, nodeId, attempt, providerKey }) {
@@ -908,10 +997,54 @@ export function openSqliteStorage(dbPath: string): Storage {
     },
 
     async reassignTenant(fromTenant, toTenant) {
+      // ADR 0003 Phase 4c — adopt-migration. Re-key the ENTIRE source tenant's
+      // content into the destination in ONE transaction (atomic; a partial
+      // failure rolls back, never splitting data across two tenants). Idempotent:
+      // a re-run finds nothing under `from`. Two layers:
+      //  (1) every SQL table with a `tenant_id` column — discovered by schema
+      //      INTROSPECTION, not a hand-kept list, so a future tenant table is
+      //      covered automatically (no silent orphan). Cascade children keyed by
+      //      run_id/session_id (events, interrupts, chat_messages, run_budget…)
+      //      follow their parent row and need no re-key.
+      //  (2) host-ext KV content rows — a read-modify-write of any row whose JSON
+      //      carries `tenantId`/`orgId === from`. EXCLUDES the access-control
+      //      scaffolding (the personal-workspace org `orgId == tenant` and the
+      //      deterministic owner member `mbr-<hash(tenant,subject)>`), whose KEYS
+      //      encode the tenant — the destination re-seeds canonical scaffolding
+      //      via ensurePersonalWorkspace, so migrating them would collide.
+      const tables = tenantScopedTables(db);
       const reassignTxn = db.transaction((from: string, to: string) => {
-        const r1 = db.prepare(`UPDATE runs SET tenant_id = ? WHERE tenant_id = ?`).run(to, from);
-        const r2 = db.prepare(`UPDATE workflows SET tenant_id = ? WHERE tenant_id = ?`).run(to, from);
-        return { runs: Number(r1.changes ?? 0), workflows: Number(r2.changes ?? 0) };
+        const counts: Record<string, number> = {};
+        for (const t of tables) {
+          const r = db.prepare(`UPDATE "${t}" SET tenant_id = ? WHERE tenant_id = ?`).run(to, from);
+          counts[t] = Number(r.changes ?? 0);
+        }
+        // host-ext KV content (parse → re-key tenantId/orgId → write).
+        const now = new Date().toISOString();
+        const rows = db
+          .prepare(
+            `SELECT k, v FROM host_ext_kv
+             WHERE k NOT LIKE 'hostext:access-orgs:%' AND k NOT LIKE 'hostext:access-members:%'`,
+          )
+          .all() as Array<{ k: string; v: string }>;
+        const upd = db.prepare(`UPDATE host_ext_kv SET v = ?, updated_at = ? WHERE k = ?`);
+        let hostExt = 0;
+        for (const row of rows) {
+          let obj: Record<string, unknown>;
+          try { obj = JSON.parse(row.v) as Record<string, unknown>; } catch { continue; }
+          let changed = false;
+          if (obj.tenantId === from) { obj.tenantId = to; changed = true; }
+          if (obj.orgId === from) { obj.orgId = to; changed = true; }
+          if (changed) { upd.run(JSON.stringify(obj), now, row.k); hostExt++; }
+        }
+        return {
+          tables: counts,
+          hostExt,
+          runs: counts.runs ?? 0,
+          workflows: counts.workflows ?? 0,
+          notifications: counts.notifications ?? 0,
+          pushSubscriptions: counts.push_subscriptions ?? 0,
+        };
       });
       return reassignTxn(fromTenant, toTenant);
     },

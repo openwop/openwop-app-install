@@ -1,77 +1,36 @@
 /**
- * `/agents` — the AI coworkers dashboard (PRD §8). The product-facing home for
- * named agents: who works here and what they're doing. Replaces the old
- * manifest-inventory list (now at `/agents/templates`) and folds in what used
- * to live under `/roster` and `/boards`.
+ * `/agents` — the agent MANAGEMENT page (IA refresh 2026-06). "Who works here":
+ * browse the workforce as profile tiles (or a dense list toggle for a big
+ * fleet), filter by status/role, open/configure each agent, and hire new ones.
+ *
+ * DECISIONS LIVE IN THE INBOX now. The former "Needs you" hero (approvals +
+ * board blockers) moved to /inbox — the single action portal — and the run
+ * ledger moved to Mission Control (/mission), which owns the live fleet view.
+ * This page is decision-free management.
  *
  * First visit seeds the built-in demo agents automatically (idempotent); the
  * roster/board/schedule data all come from the host-extension surfaces.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import {
-  checkAgent, getFleetActivity, getOrgChart, seedDemoAgents,
-  type AgentActivityItem, type OrgChart,
-} from './rosterClient.js';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { checkAgent, seedDemoAgents } from './rosterClient.js';
 import { listApprovals, type PendingApproval } from './approvalsClient.js';
 import { getCapabilities } from '../client/runsClient.js';
-import { loadAgentViews, relativeTime, type AgentView, type AgentStatus } from './agentViewModel.js';
-import { roleKeyForAgent, roleThemeForKey, workflowName } from './roleTemplates.js';
+import { loadAgentViews, type AgentView, type AgentStatus } from './agentViewModel.js';
+import { roleKeyForAgent, roleThemeForKey } from './roleTemplates.js';
 import { RosterRow } from './RosterRow.js';
-import { NeedsYouQueue } from './NeedsYouQueue.js';
+import { AgentTile } from './AgentTile.js';
 import { AgentDrawer, type DrawerTab } from './AgentDrawer.js';
 import { HireAgentModal } from './HireAgentModal.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
-import { Skeleton } from '../ui/Skeleton.js';
+import { KeyFigureBand } from '../ui/KeyFigure.js';
 import { PageHeader } from '../ui/PageHeader.js';
-import { BotIcon, ZapIcon, ClockIcon, ColumnsIcon, InboxIcon, PlayIcon, BuildingIcon, AlertIcon } from '../ui/icons/index.js';
+import { BotIcon, AlertIcon, BoxesIcon, ListIcon } from '../ui/icons/index.js';
 
 type SortKey = 'attention' | 'name';
-
-// ── Run-ledger helpers (folded in from the former /workforce page) ─────────
-const SOURCE_GLYPH: Record<AgentActivityItem['source'], { Icon: typeof ZapIcon; label: string }> = {
-  heartbeat: { Icon: ZapIcon, label: 'Heartbeat pick' },
-  schedule: { Icon: ClockIcon, label: 'Scheduled run' },
-  kanban: { Icon: ColumnsIcon, label: 'Board card' },
-  approval: { Icon: InboxIcon, label: 'Approved proposal' },
-};
-
-interface LedgerGroup {
-  first: AgentActivityItem;
-  runs: number;
-}
-
-/** Collapse CONSECUTIVE feed items with the same agent + workflow + status
- *  into one row ("xN runs") — six identical "Lead routing · completed" rows
- *  carry one fact, not six rows of whitespace. Non-consecutive repeats stay
- *  separate so ordering remains honest. */
-function groupLedger(items: AgentActivityItem[]): LedgerGroup[] {
-  const out: LedgerGroup[] = [];
-  for (const item of items) {
-    const last = out[out.length - 1];
-    if (
-      last
-      && last.first.persona === item.persona
-      && last.first.workflowId === item.workflowId
-      && last.first.status === item.status
-      && last.first.source === item.source
-    ) {
-      last.runs += 1;
-      continue;
-    }
-    out.push({ first: item, runs: 1 });
-  }
-  return out;
-}
-
-function runChip(status: string): string {
-  if (status === 'completed') return 'chip chip--success';
-  if (status === 'failed') return 'chip chip--danger';
-  if (status === 'running' || status === 'pending') return 'chip chip--accent';
-  return 'chip chip--muted';
-}
+type ViewMode = 'tiles' | 'list';
 
 // How much each agent wants the operator's eyes (highest first). "Waiting on a
 // human" outranks everything; an idle agent with a full To Do queue outranks an
@@ -111,11 +70,12 @@ function ConceptStrip(): JSX.Element {
 export function AgentDashboardPage(): JSX.Element {
   const navigate = useNavigate();
   const [views, setViews] = useState<AgentView[]>([]);
-  const [chart, setChart] = useState<OrgChart | null>(null);
+  // Per-agent approvals power the quick-look drawer's "waiting on you" peek
+  // (the GLOBAL queue lives in the Inbox; here it's agent-scoped context).
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [hiring, setHiring] = useState(false);
   // Quick-look drawer state rides the URL (?agent=<rosterId>&tab=) so a
-  // drawer view is shareable/refreshable (redesign PR 2, prototype contract).
+  // drawer view is shareable/refreshable.
   const [searchParams, setSearchParams] = useSearchParams();
   const drawerId = searchParams.get('agent');
   const drawerTabParam = searchParams.get('tab');
@@ -137,7 +97,6 @@ export function AgentDashboardPage(): JSX.Element {
       return p;
     });
   }, [setSearchParams]);
-  const [feed, setFeed] = useState<AgentActivityItem[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -147,10 +106,11 @@ export function AgentDashboardPage(): JSX.Element {
   const [statusFilter, setStatusFilter] = useState<'all' | AgentStatus>('all');
   const [roleFilter, setRoleFilter] = useState('all');
   const [sortKey, setSortKey] = useState<SortKey>('attention');
+  const [viewMode, setViewMode] = useState<ViewMode>('tiles');
 
   // Role families present in the current roster (for the role filter dropdown).
   const roleOptions = useMemo(() => {
-    const keys = new Set(views.map((v) => roleKeyForAgent(v.entry.agentRef?.agentId, v.entry.workflows)));
+    const keys = new Set(views.map((v) => roleKeyForAgent(v.entry.agentRef?.agentId, v.entry.workflows, v.entry.roleKey)));
     return [...keys].map((k) => ({ key: k, label: roleThemeForKey(k).label })).sort((a, b) => a.label.localeCompare(b.label));
   }, [views]);
 
@@ -158,7 +118,7 @@ export function AgentDashboardPage(): JSX.Element {
     const q = query.trim().toLowerCase();
     const filtered = views.filter((v) => {
       if (statusFilter !== 'all' && v.status !== statusFilter) return false;
-      if (roleFilter !== 'all' && roleKeyForAgent(v.entry.agentRef?.agentId, v.entry.workflows) !== roleFilter) return false;
+      if (roleFilter !== 'all' && roleKeyForAgent(v.entry.agentRef?.agentId, v.entry.workflows, v.entry.roleKey) !== roleFilter) return false;
       if (q) {
         const hay = `${v.entry.persona} ${v.entry.label ?? ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
@@ -174,18 +134,11 @@ export function AgentDashboardPage(): JSX.Element {
 
   const refresh = useCallback(async () => {
     try {
-      // Views + the editorial frame (org-chart filing, run ledger) in one
-      // fan-in. Chart + ledger are progressive: their failure never blocks
-      // the cards.
-      const [v, c, f, ap] = await Promise.all([
+      const [v, ap] = await Promise.all([
         loadAgentViews(),
-        getOrgChart().catch(() => null),
-        getFleetActivity({ limit: 12 }).catch(() => ({ items: [], truncated: false })),
         listApprovals('pending').catch(() => []),
       ]);
       setViews(v);
-      setChart(c);
-      setFeed(f.items);
       setApprovals(ap);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -211,12 +164,8 @@ export function AgentDashboardPage(): JSX.Element {
         }
         if (!cancelled) {
           setViews(loaded);
-          const [c, f, ap] = await Promise.all([
-            getOrgChart().catch(() => null),
-            getFleetActivity({ limit: 12 }).catch(() => ({ items: [], truncated: false })),
-            listApprovals('pending').catch(() => []),
-          ]);
-          if (!cancelled) { setChart(c); setFeed(f.items); setApprovals(ap); }
+          const ap = await listApprovals('pending').catch(() => []);
+          if (!cancelled) setApprovals(ap);
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -268,25 +217,52 @@ export function AgentDashboardPage(): JSX.Element {
     }
   };
 
+  const ViewToggle = (
+    <div className="action-bar u-ml-auto" role="group" aria-label="View mode">
+      <button
+        type="button"
+        className={viewMode === 'tiles' ? 'primary btn-sm' : 'secondary btn-sm'}
+        aria-pressed={viewMode === 'tiles'}
+        title="Tiles"
+        onClick={() => setViewMode('tiles')}
+      >
+        <BoxesIcon size={14} aria-hidden /> Tiles
+      </button>
+      <button
+        type="button"
+        className={viewMode === 'list' ? 'primary btn-sm' : 'secondary btn-sm'}
+        aria-pressed={viewMode === 'list'}
+        title="List"
+        onClick={() => setViewMode('list')}
+      >
+        <ListIcon size={14} aria-hidden /> List
+      </button>
+    </div>
+  );
+
+  const onOpenRow = (view: AgentView) => (tab?: string) => {
+    if (tab === 'workflows') {
+      // Editing flow — the full workspace, not the quick look.
+      navigate(`/agents/${encodeURIComponent(view.entry.rosterId)}?tab=workflows`);
+      return;
+    }
+    openDrawer(view.entry.rosterId, tab);
+  };
+  const onChatRow = (view: AgentView) => () => {
+    const agentId = view.entry.agentRef?.agentId;
+    navigate(agentId ? `/?agent=${encodeURIComponent(agentId)}` : '/');
+  };
+
   return (
     <section>
       <PageHeader
         eyebrow="Agents"
         title="Digital workforce"
-        lede="The named agents on staff — digital twins for company roles, each with workflows, a schedule, and a task board. What they own, how autonomous they are, and what they have been doing."
+        lede="The named agents on staff — digital twins for company roles, each with workflows, a schedule, and a task board. Manage who's on staff and what they own; anything that needs your decision waits in the Inbox."
         actions={
           <button type="button" className="btn-accent-solid" onClick={() => setHiring(true)}>+ Hire an agent</button>
         }
       />
-
-      {!loading && views.length > 0 ? (
-        <NeedsYouQueue
-          views={views}
-          approvals={approvals}
-          onOpen={(rosterId, tab) => openDrawer(rosterId, tab)}
-          onResolved={() => void refresh()}
-        />
-      ) : null}
 
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success">{notice}</Notice> : null}
@@ -312,44 +288,29 @@ export function AgentDashboardPage(): JSX.Element {
         </>
       ) : (
         <>
-          {/* The two-column split opens at the TILES (layout parity with the
-              prototype): tiles + toolbar + roster on the left, the ledger
-              top-aligned with the tiles on the right. */}
-          <div className="wf-body">
-            <div>
-            {/* Key figures double as the status FILTER: a tile both reports
-                the count and narrows the roster to it. The old status select
-                is gone — the tiles own status; long-tail states (failed /
-                needs setup / paused) still bubble up via the attention sort. */}
-            <div className="wf-figures" role="group" aria-label="Workforce key figures — click to filter">
-              {([
-                ['all', 'On staff', figures.staff, false],
-                ['working', 'Working now', figures.working, false],
-                ['waiting', 'Waiting on you', figures.waiting, true],
-                ['active', 'Idle & ready', figures.ready, false],
-              ] as const).map(([key, label, n, attn]) => (
-                <button
-                  type="button"
-                  className={
-                    'wf-figure wf-figure--tile'
-                    + (statusFilter === key ? ' is-active' : '')
-                    + (attn && n > 0 ? ' is-attn' : '')
-                  }
-                  key={key}
-                  aria-pressed={statusFilter === key}
-                  onClick={() => setStatusFilter(key as 'all' | AgentStatus)}
-                >
-                  <span className="wf-figure-n">{n}</span>
-                  <span className="wf-figure-l">
-                    {attn && n > 0 ? <AlertIcon size={11} aria-hidden /> : null}
-                    {label}
-                  </span>
-                </button>
-              ))}
-            </div>
+          {/* Key figures double as the status FILTER: a tile both reports the
+              count and narrows the roster to it (the shared <KeyFigureBand>,
+              DESIGN.md §4.5). */}
+          <KeyFigureBand
+            ariaLabel="Workforce key figures — click to filter"
+            activeKey={statusFilter}
+            onToggle={(key) => setStatusFilter(key as 'all' | AgentStatus)}
+            figures={[
+              { key: 'all', label: 'On staff', value: figures.staff },
+              { key: 'working', label: 'Working now', value: figures.working },
+              {
+                key: 'waiting',
+                label: 'Waiting on you',
+                value: figures.waiting,
+                ...(figures.waiting > 0 ? { tone: 'attention' as const, glyph: <AlertIcon size={11} aria-hidden /> } : {}),
+              },
+              { key: 'active', label: 'Idle & ready', value: figures.ready },
+            ]}
+          />
 
+          <div className="filterbar" role="group" aria-label="Filter, sort, and view agents">
             {views.length > 3 ? (
-              <div className="filterbar" role="group" aria-label="Filter and sort agents">
+              <>
                 <input
                   type="search"
                   className="ui-input filterbar-search"
@@ -370,96 +331,45 @@ export function AgentDashboardPage(): JSX.Element {
                   <option value="attention">Sort: Needs attention</option>
                   <option value="name">Sort: Name</option>
                 </select>
-              </div>
+              </>
             ) : null}
-
-            {visible.length === 0 ? (
-              <StateCard
-                icon={<BotIcon size={26} />}
-                title="No agents match"
-                body="Try clearing the search or filters."
-                action={<button type="button" className="secondary" onClick={() => { setQuery(''); setStatusFilter('all'); setRoleFilter('all'); }}>Clear filters</button>}
-              />
-            ) : (
-              <div className="surface-card roster-list">
-                {visible.map((view) => (
-                  <RosterRow
-                    key={view.entry.rosterId}
-                    view={view}
-                    busy={busyAgent === view.entry.rosterId}
-                    onOpen={(tab) => {
-                      if (tab === 'workflows') {
-                        // Editing flow — the full workspace, not the quick look.
-                        navigate(`/agents/${encodeURIComponent(view.entry.rosterId)}?tab=workflows`);
-                        return;
-                      }
-                      openDrawer(view.entry.rosterId, tab);
-                    }}
-                    onCheckNow={() => void onCheckNow(view.entry.rosterId, view.entry.persona)}
-                    onChat={() => {
-                      const agentId = view.entry.agentRef?.agentId;
-                      navigate(agentId ? `/?agent=${encodeURIComponent(agentId)}` : '/');
-                    }}
-                  />
-                ))}
-              </div>
-            )}
-
-            </div>
-
-            {/* The run ledger — fleet activity with run links, plus the
-                department roll-up (folded in from the former /workforce). */}
-            <aside className="wf-ledger surface-card" aria-label="Recent runs">
-              <div className="wf-ledger-head">
-                <span className="wf-ledger-title">The ledger</span>
-                <Link to="/mission" className="wf-ledger-more">Mission control →</Link>
-              </div>
-              {feed === null ? (
-                <div className="wf-ledger-rows">{[0, 1, 2, 3].map((i) => <Skeleton key={i} width="100%" height={30} />)}</div>
-              ) : feed.length === 0 ? (
-                <p className="wf-ledger-empty">
-                  No agent-attributed runs yet. Check an agent now, or drop a card on its board.
-                </p>
-              ) : (
-                <ol className="wf-ledger-rows">
-                  {groupLedger(feed).map((group) => {
-                    const item = group.first;
-                    const glyph = SOURCE_GLYPH[item.source] ?? { Icon: PlayIcon, label: item.source };
-                    const Icon = glyph.Icon;
-                    return (
-                      <li className="wf-ledger-row" key={item.runId}>
-                        <span className="wf-ledger-src" title={glyph.label} aria-hidden><Icon size={13} /></span>
-                        <span className="wf-ledger-who">
-                          <span>
-                            <em>{item.persona ?? 'Agent'}</em>
-                            <span className="wf-ledger-what"> · {workflowName(item.workflowId)}</span>
-                          </span>
-                          <Link to={`/runs/${encodeURIComponent(item.runId)}`} className="wf-ledger-when">
-                            {group.runs > 1 ? `${group.runs} runs · ` : ''}{relativeTime(item.timestamp) ?? '—'}
-                          </Link>
-                        </span>
-                        <span className={runChip(item.status)}>{item.status}</span>
-                      </li>
-                    );
-                  })}
-                </ol>
-              )}
-              {chart && chart.departments.length > 0 ? (
-                <div className="wf-ledger-foot">
-                  <span className="wf-ledger-title">Departments</span>
-                  <ul className="wf-depts">
-                    {chart.departments.map((d) => (
-                      <li key={d.departmentId}>
-                        <BuildingIcon size={12} aria-hidden /> {d.name}
-                        <span className="wf-dept-count">{chart.members.filter((m) => m.departmentId === d.departmentId).length}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  <Link to="/roster" className="wf-ledger-more">Org chart →</Link>
-                </div>
-              ) : null}
-            </aside>
+            {ViewToggle}
           </div>
+
+          {visible.length === 0 ? (
+            <StateCard
+              icon={<BotIcon size={26} />}
+              title="No agents match"
+              body="Try clearing the search or filters."
+              action={<button type="button" className="secondary" onClick={() => { setQuery(''); setStatusFilter('all'); setRoleFilter('all'); }}>Clear filters</button>}
+            />
+          ) : viewMode === 'tiles' ? (
+            <div className="card-grid">
+              {visible.map((view) => (
+                <AgentTile
+                  key={view.entry.rosterId}
+                  view={view}
+                  busy={busyAgent === view.entry.rosterId}
+                  onOpen={onOpenRow(view)}
+                  onCheckNow={() => void onCheckNow(view.entry.rosterId, view.entry.persona)}
+                  onChat={onChatRow(view)}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="surface-card roster-list">
+              {visible.map((view) => (
+                <RosterRow
+                  key={view.entry.rosterId}
+                  view={view}
+                  busy={busyAgent === view.entry.rosterId}
+                  onOpen={onOpenRow(view)}
+                  onCheckNow={() => void onCheckNow(view.entry.rosterId, view.entry.persona)}
+                  onChat={onChatRow(view)}
+                />
+              ))}
+            </div>
+          )}
         </>
       )}
 

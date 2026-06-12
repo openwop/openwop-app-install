@@ -26,6 +26,7 @@
 
 import { streamEvents, type RunEventDoc, type StreamMode } from '@openwop/openwop';
 import { config } from './config.js';
+import { readSseFrames } from './sseFrames.js';
 
 export interface SubscribeOptions {
   modes?: readonly StreamMode[];
@@ -245,49 +246,23 @@ async function* streamEventsCredentialed(
   if (!res.ok || res.body === null) {
     throw new Error(`SSE subscribe failed: HTTP ${res.status}`);
   }
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder('utf-8');
-  let buffer = '';
-  let pendingEvent = 'message';
-  let pendingData: string[] = [];
-
-  const flush = (): RunEventDoc[] => {
-    if (pendingData.length === 0) { pendingEvent = 'message'; return []; }
-    const dataStr = pendingData.join('\n');
-    const eventType = pendingEvent;
-    pendingEvent = 'message';
-    pendingData = [];
-    try {
-      const parsed = JSON.parse(dataStr) as RunEventDoc | RunEventDoc[];
-      if (eventType === 'batch' && Array.isArray(parsed)) return parsed;
-      return [parsed as RunEventDoc];
-    } catch {
-      return []; // keep-alive / non-JSON vendor lines
-    }
-  };
 
   try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let nlIdx: number;
-      while ((nlIdx = buffer.indexOf('\n')) !== -1) {
-        const rawLine = buffer.slice(0, nlIdx).replace(/\r$/, '');
-        buffer = buffer.slice(nlIdx + 1);
-        if (rawLine === '') { yield* flush(); continue; }
-        if (rawLine.startsWith(':')) continue; // keep-alive comment
-        const colon = rawLine.indexOf(':');
-        const field = colon === -1 ? rawLine : rawLine.slice(0, colon);
-        const valueRaw = colon === -1 ? '' : rawLine.slice(colon + 1);
-        const fieldValue = valueRaw.startsWith(' ') ? valueRaw.slice(1) : valueRaw;
-        if (field === 'event') pendingEvent = fieldValue;
-        else if (field === 'data') pendingData.push(fieldValue);
+    // Shared SSE line parser (`sseFrames.ts`) handles CRLF, cross-chunk
+    // buffering, and `: heartbeat` comments. This consumer keeps the
+    // RunEventDoc-specific concerns: the `event: batch` array envelope (S3)
+    // and skipping non-JSON keep-alive/vendor lines.
+    for await (const frame of readSseFrames(res.body, internalAbort.signal)) {
+      let parsed: RunEventDoc | RunEventDoc[];
+      try {
+        parsed = JSON.parse(frame.data) as RunEventDoc | RunEventDoc[];
+      } catch {
+        continue; // keep-alive / non-JSON vendor lines
       }
+      if (frame.event === 'batch' && Array.isArray(parsed)) yield* parsed;
+      else yield parsed as RunEventDoc;
     }
-    yield* flush();
   } finally {
     internalAbort.abort();
-    reader.releaseLock();
   }
 }

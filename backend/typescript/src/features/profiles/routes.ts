@@ -19,10 +19,11 @@
 import type { Request, Response, NextFunction } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireFeatureEnabled } from '../featureRoute.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
+import { callerSubject, personalTenantOf, isDurableCaller } from '../../host/requestSubject.js';
+import { projectAgentActivity } from '../../host/agentActivity.js';
 import { getUser, listUsers, type User } from '../users/usersService.js';
-import { isEmailVerified } from '../users/credentialsService.js';
+import { getRosterEntry } from '../../host/rosterService.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import {
   addPortfolioToken,
@@ -34,6 +35,8 @@ import {
   setAvatarToken,
   setEndorsement,
   setOwnSkills,
+  setOwnWorkflows,
+  setAgentPinned,
   updateOwnProfile,
   viewProfile,
   type AvailabilityStatus,
@@ -42,8 +45,9 @@ import {
   type ProfilePatch,
 } from './profilesService.js';
 
-const TOGGLE_ID = 'profiles';
-const requireEnabled = (req: Request): Promise<unknown> => requireFeatureEnabled(req, TOGGLE_ID, 'Profiles');
+// Graduated to always-on (feature.ts § Correction 2026-06-12) — the routes
+// serve unconditionally; identity + tenant scoping still gate every handler
+// (resolveCallerUser fails closed for anonymous callers).
 
 // ── Patch parsing (null = clear, undefined = leave) ─────────────────────────
 
@@ -120,25 +124,48 @@ function parseContact(body: Record<string, unknown>): ProfileContact | null | un
 
 /**
  * Surface (NOT own) the email-ownership status (ADR 0005 Phase 4, closing the
- * ADR 0004:167 deferral). The auth layer owns the truth:
- *   - password / manual → the `credentialsService` `emailVerified` flag;
- *   - saml / scim / oidc → the IdP asserted this email, so it is verified by
- *     an authoritative third party (no separate proof needed).
- * Returns undefined when the user has no email at all (no status to show).
+ * ADR 0004:167 deferral). A federated identity's email is verified by an
+ * authoritative third party (the IdP). Since the host owns no password store
+ * anymore (ADR 0026), every real account is federated (Firebase OIDC / SAML /
+ * SCIM) — a non-federated `manual` account (admin-seeded) has no proof, so it is
+ * reported unverified. Returns undefined when the user has no email at all.
  */
-async function resolveEmailVerified(user: User): Promise<boolean | undefined> {
+function resolveEmailVerified(user: User): boolean | undefined {
   if (!user.email) return undefined;
-  if (user.source === 'saml' || user.source === 'scim' || user.source === 'oidc') return true;
-  return isEmailVerified(user.tenantId, user.email);
+  return user.source === 'saml' || user.source === 'scim' || user.source === 'oidc';
 }
 
 export function registerProfilesRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
+  // GET /me/activity — the caller's own run-activity feed (ADR 0025), the
+  // user-side mirror of the agent `/roster/:id/activity` feed. Surfaces runs the
+  // user's personal board / schedule fired on their behalf. Scans the caller's
+  // PERSONAL-tenant runs and projects those attributed to them (`ownerUserId`).
+  // The personal tenant is single-principal + low-volume, so a scan is cheap;
+  // the indexed path (agent_run_activity) is the future optimization if personal
+  // tenants ever grow (agentActivity.ts). Durable-only.
+  app.get('/v1/host/sample/profiles/me/activity', async (req, res, next) => {
+    try {
+      const subject = callerSubject(req);
+      const personal = personalTenantOf(req);
+      if (!subject || !personal || !isDurableCaller(req)) {
+        throw new OpenwopError('unauthenticated', 'A durable signed-in account is required.', 401, {});
+      }
+      const limit = Math.min(50, Math.max(1, Number.parseInt(String(req.query.limit ?? '25'), 10) || 25));
+      const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+      const SCAN = 200; // bound the projection scan; flag truncation honestly
+      const runs = await deps.storage.listRuns({ tenantId: personal, ...(status ? { status } : {}), limit: SCAN });
+      const items = projectAgentActivity(runs, { userId: subject }).slice(0, limit);
+      res.status(200).json({ items, truncated: runs.length >= SCAN });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // GET /me — the caller's own profile (lazily materialized).
   app.get('/v1/host/sample/profiles/me', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const profile = await getOrCreateProfile(user.tenantId, user.userId);
       res.json(viewProfile(profile, { emailVerified: await resolveEmailVerified(user), ...(user.displayName ? { displayName: user.displayName } : {}) }));
@@ -151,7 +178,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // profile keyed on THEIR OWN resolved userId.
   app.patch('/v1/host/sample/profiles/me', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const patch: ProfilePatch = {
@@ -177,7 +203,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // source of truth — same `user.tenantId` the write paths key on).
   app.get('/v1/host/sample/profiles', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const [profiles, users] = await Promise.all([listProfiles(user.tenantId), listUsers(user.tenantId)]);
       const names = new Map(users.map((u) => [u.userId, u.displayName]));
@@ -216,7 +241,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   app.put('/v1/host/sample/profiles/me/avatar', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
       res.json(viewProfile(await setAvatarToken(user.tenantId, user.userId, token)));
@@ -227,7 +251,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   app.delete('/v1/host/sample/profiles/me/avatar', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       res.json(viewProfile(await clearAvatar(user.tenantId, user.userId)));
     } catch (err) {
@@ -237,7 +260,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   app.post('/v1/host/sample/profiles/me/portfolio', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
       res.status(201).json(viewProfile(await addPortfolioToken(user.tenantId, user.userId, token)));
@@ -248,7 +270,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   app.delete('/v1/host/sample/profiles/me/portfolio/:token', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const updated = await removePortfolioToken(user.tenantId, user.userId, req.params.token);
       if (!updated) throw new OpenwopError('not_found', 'Portfolio asset not found.', 404, { token: req.params.token });
@@ -263,7 +284,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // skill names are preserved by the service.
   app.put('/v1/host/sample/profiles/me/skills', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const raw = (req.body as { skills?: unknown })?.skills;
       if (!Array.isArray(raw)) {
@@ -288,12 +308,50 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
+  // PUT /me/workflows — replace the caller's assigned-workflow portfolio (ADR
+  // 0025). Self-only authority (keyed on the caller's resolved userId).
+  app.put('/v1/host/sample/profiles/me/workflows', async (req, res, next) => {
+    try {
+      const user = await resolveCallerUser(req);
+      const raw = (req.body as { workflows?: unknown })?.workflows;
+      if (!Array.isArray(raw) || raw.some((w) => typeof w !== 'string')) {
+        throw new OpenwopError('validation_error', 'Field `workflows` must be an array of workflow ids (strings).', 400, { field: 'workflows' });
+      }
+      res.json(viewProfile(await setOwnWorkflows(user.tenantId, user.userId, raw as string[])));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // PUT/DELETE /me/pinned-agents/:rosterId — pin/unpin an agent to the sidebar
+  // (ADR 0023 — pinned agents render as an indented sub-menu under "Agents").
+  const pin = (pinned: boolean) => async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const user = await resolveCallerUser(req);
+      const rosterId = req.params.rosterId ?? '';
+      // PINNING is fail-closed: the agent MUST exist in the caller's tenant
+      // (IDOR guard). UN-pinning never is — removing a (possibly already-deleted)
+      // id from your OWN list is always safe, and is exactly how the sidebar
+      // self-heals a stale pin after its agent was deleted.
+      if (pinned) {
+        const entry = await getRosterEntry(rosterId);
+        if (!entry || entry.tenantId !== user.tenantId) {
+          throw new OpenwopError('not_found', 'Agent not found.', 404, { rosterId });
+        }
+      }
+      res.json(viewProfile(await setAgentPinned(user.tenantId, user.userId, rosterId, pinned)));
+    } catch (err) {
+      next(err);
+    }
+  };
+  app.put('/v1/host/sample/profiles/me/pinned-agents/:rosterId', pin(true));
+  app.delete('/v1/host/sample/profiles/me/pinned-agents/:rosterId', pin(false));
+
   // POST/DELETE /:userId/skills/:skill/endorse — endorse a PEER's skill.
   // Fail-closed: not your own profile; the target + skill must exist in your
   // tenant; one endorsement per endorser (idempotent).
   const endorse = (add: boolean) => async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      await requireEnabled(req);
       const user = await resolveCallerUser(req);
       const targetUserId = req.params.userId;
       const skillName = decodeURIComponent(req.params.skill ?? '');
@@ -316,7 +374,6 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // GET /:userId — one user's profile (team-visible, tenant-scoped to the caller).
   app.get('/v1/host/sample/profiles/:userId', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const caller = await resolveCallerUser(req);
       const profile = await getProfile(caller.tenantId, req.params.userId);
       if (!profile) throw new OpenwopError('not_found', 'Profile not found.', 404, { userId: req.params.userId });

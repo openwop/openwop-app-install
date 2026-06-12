@@ -22,9 +22,12 @@
  */
 
 import { createHmac } from 'node:crypto';
+import { fetch as undiciFetch } from 'undici';
 import type { Storage } from '../storage/storage.js';
 import type { WebhookDeliveryRecord } from '../types.js';
 import { createLogger } from '../observability/logger.js';
+import { webhookEgressDispatcher } from './webhookEgressGuard.js';
+import { sweepExpiredApprovalGates } from '../executor/approvalGateTimeout.js';
 
 const log = createLogger('webhookDeliveryWorker');
 
@@ -57,12 +60,22 @@ export function webhookBackoffMs(attempts: number): number {
 /** Sign + POST one delivery. Returns true on a 2xx response. The signature
  *  timestamp is computed at SEND time (not the batch-claim time) so a slow batch
  *  doesn't ship later items with a stale `t=` — receivers verify it against the
- *  spec's ±5min freshness window (webhooks.md §"Signature recipe"). */
+ *  spec's ±5min freshness window (webhooks.md §"Signature recipe").
+ *
+ *  RFC 0093 §A.1-A.2 delivery-time egress hardening:
+ *   - `dispatcher: webhookEgressDispatcher()` re-validates every resolved
+ *     address against the registration-time denied ranges inside the
+ *     connection's own `lookup` (pinned resolution — no TOCTOU window). A
+ *     denied resolution surfaces as a fetch error → delivery failure →
+ *     existing retry policy.
+ *   - `redirect: 'error'` — webhook delivery MUST NOT follow redirects; a
+ *     `3xx` is a fetch error here, i.e. a delivery failure, retried per the
+ *     existing backoff policy. */
 async function sendDelivery(rec: WebhookDeliveryRecord): Promise<{ ok: boolean; detail: string }> {
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const signature = createHmac('sha256', rec.secret).update(`${timestamp}.${rec.payload}`).digest('hex');
   try {
-    const res = await fetch(rec.url, {
+    const res = await undiciFetch(rec.url, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',
@@ -71,12 +84,17 @@ async function sendDelivery(rec: WebhookDeliveryRecord): Promise<{ ok: boolean; 
         'openwop-subscription-id': rec.subscriptionId,
       },
       body: rec.payload,
+      redirect: 'error',
+      dispatcher: webhookEgressDispatcher(),
       signal: AbortSignal.timeout(DELIVERY_TIMEOUT_MS),
     });
     if (res.ok) return { ok: true, detail: `${res.status}` };
+    // Body is irrelevant to the queue; cancel so the connection can be reused.
+    await res.body?.cancel().catch(() => undefined);
     return { ok: false, detail: `HTTP ${res.status}` };
   } catch (err) {
-    return { ok: false, detail: err instanceof Error ? err.message : String(err) };
+    const cause = err instanceof Error && err.cause instanceof Error ? ` (${err.cause.message})` : '';
+    return { ok: false, detail: err instanceof Error ? `${err.message}${cause}` : String(err) };
   }
 }
 
@@ -134,6 +152,12 @@ export function startWebhookDeliveryWorker(storage: Storage, workerId: string): 
       do {
         processed = await processDueWebhookDeliveries(storage, workerId);
       } while (processed >= CLAIM_BATCH);
+      // RFC 0093 §D — piggyback the approval-gate timeout sweep on this
+      // worker's cadence so a timed-out gate auto-rejects (fail closed)
+      // even when no caller ever touches its interrupt again. The lazy
+      // checks in routes/interrupts.ts cover the with-traffic case; this
+      // covers the quiescent one.
+      await sweepExpiredApprovalGates(storage);
     } catch (err) {
       log.warn('webhook delivery worker tick error', { error: err instanceof Error ? err.message : String(err) });
     } finally {

@@ -6,6 +6,7 @@
  * multi-instance-safe.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { fetch as undiciFetch, Response as UndiciResponse } from 'undici';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { WebhookDeliveryRecord } from '../src/types.js';
@@ -14,6 +15,15 @@ import {
   webhookBackoffMs,
   WEBHOOK_MAX_ATTEMPTS,
 } from '../src/host/webhookDeliveryWorker.js';
+
+// The worker delivers through undici's fetch (NOT globalThis.fetch) so it can
+// pin resolution via the egress-guard dispatcher (RFC 0093 §A.1) — mock the
+// module export. `importOriginal` keeps Agent/Response real.
+vi.mock('undici', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('undici')>();
+  return { ...actual, fetch: vi.fn() };
+});
+const fetchMock = vi.mocked(undiciFetch);
 
 const T0 = 1_700_000_000_000; // fixed epoch ms
 
@@ -45,11 +55,12 @@ describe('durable webhook delivery queue', () => {
     storage = await openStorage('memory://');
   });
   afterEach(() => {
+    fetchMock.mockReset();
     vi.restoreAllMocks();
   });
 
   it('delivers a signed POST once and marks the row terminal', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    const fetchSpy = fetchMock.mockResolvedValue(new UndiciResponse(null, { status: 200 }));
     await storage.enqueueWebhookDelivery(makeDelivery({ deliveryId: 'ok' }));
 
     const processed = await processDueWebhookDeliveries(storage, 'worker-a', T0);
@@ -62,13 +73,17 @@ describe('durable webhook delivery queue', () => {
     const headers = (init!.headers ?? {}) as Record<string, string>;
     expect(headers['openwop-event-type']).toBe('run.completed');
     expect(headers['openwop-signature']).toMatch(/^t=\d+,v1=[0-9a-f]{64}$/);
+    // RFC 0093 §A.1-A.2 — every delivery refuses redirects and rides the
+    // egress-guard dispatcher (pinned-resolution re-validation).
+    expect(init!.redirect).toBe('error');
+    expect(init!.dispatcher).toBeDefined();
 
     // Terminal: nothing more is due, even far in the future.
     expect(await processDueWebhookDeliveries(storage, 'worker-a', T0 + 3_600_000)).toBe(0);
   });
 
   it('retries with exponential backoff and dead-letters after maxAttempts', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 500 }));
+    const fetchSpy = fetchMock.mockResolvedValue(new UndiciResponse(null, { status: 500 }));
     await storage.enqueueWebhookDelivery(makeDelivery({ deliveryId: 'fail' }));
 
     let now = T0;
@@ -87,7 +102,7 @@ describe('durable webhook delivery queue', () => {
   });
 
   it('is not due before its backoff elapses', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 503 }));
+    fetchMock.mockResolvedValue(new UndiciResponse(null, { status: 503 }));
     await storage.enqueueWebhookDelivery(makeDelivery({ deliveryId: 'wait' }));
 
     expect(await processDueWebhookDeliveries(storage, 'worker-a', T0)).toBe(1); // first attempt fails

@@ -71,6 +71,9 @@ export const TYPE_LABELS: Record<string, string> = {
   'workflow.failed':          'Workflow failed',
   'workflow.completed':       'Workflow completed',
   'system.alert':             'System alert',
+  // Comments feature (ADR 0021) — additive, fallback-protected; no core-union edit.
+  'comment.added':            'New comment',
+  'comment.reply':            'New reply',
 };
 
 /** Per-type preference row. Each known type carries its own switch

@@ -5,18 +5,19 @@ import type { FrontendFeature } from '../registry.js';
 
 const CmsPage = lazy(() => import('./CmsPage.js').then((m) => ({ default: m.CmsPage })));
 
+// ADR 0027: CMS is always-on (no `featureId`) and lives in the admin-tier
+// 'Content' group (back-office content tooling), not the main workspace rail.
 const routes: FeatureRoute[] = [
   {
     path: '/cms',
     element: <CmsPage />,
-    tier: 'workspace',
+    tier: 'admin',
     nav: {
-      group: 'Workspace',
+      group: 'Content',
       label: 'CMS',
       icon: FileTextIcon,
       hint: 'Pages + page builder',
-      order: 50,
-      featureId: 'cms',
+      order: 20,
     },
   },
 ];

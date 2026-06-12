@@ -1,6 +1,6 @@
 # ADR 0007 — Media Library
 
-**Status:** Accepted (Phases 1–3 sequenced)
+**Status:** implemented (Phases 1–3 shipped — `src/features/media/`, `test/media-route.test.ts` + 4 more)
 **Date:** 2026-06-09
 **Depends on:** ADR 0004 (Organizations — the org an asset belongs to),
 ADR 0006 (RBAC — read/write authority via accessControl scopes)
@@ -8,6 +8,13 @@ ADR 0006 (RBAC — read/write authority via accessControl scopes)
 (`feature.ts` + `routes.ts` + `mediaService.ts` + `mediaStorage.ts`).
 **Surface:** `/v1/host/sample/media/*` (host-extension, NON-NORMATIVE — no RFC;
 bytes ride the existing RFC 0055 media-asset surface).
+
+> **Correction (2026-06-11, ADR 0027):** Media is now **always-on** — its
+> `toggleDefault` is removed (it no longer appears in the toggle catalog). Routes
+> keep their org-scoped RBAC (`requireOrgScope`); only the toggle gate is gone.
+> Its nav moved from the workspace Sidebar to the admin-tier **Content** group.
+> Media declares no `ctx` workflow surface, so this touches no capability
+> advertisement. The original `media`-toggle rationale below is preserved.
 
 ---
 

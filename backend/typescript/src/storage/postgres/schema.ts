@@ -32,7 +32,7 @@ export interface Queryable {
   ): Promise<{ rows: R[] }>;
 }
 
-export const LATEST_SCHEMA_VERSION = 20;
+export const LATEST_SCHEMA_VERSION = 22;
 
 const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
   1: async (client) => {
@@ -602,6 +602,30 @@ const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
       );
       CREATE INDEX IF NOT EXISTS idx_annotations_run
         ON annotations (run_id, created_at);
+    `);
+  },
+  21: async (client) => {
+    // RFC 0093 §A.3 — webhook subscriptions are tenant-scoped end-to-end.
+    // `tenant_id` is the tenant established at registration (the membership
+    // gate in routes/webhooks.ts); list/delete and the delivery fanout all
+    // filter on it. Pre-existing rows migrate to the 'default' tenant — the
+    // tenant every pre-RFC registration actually ran under (tenantOf()
+    // fallback). Mirrors sqlite mig 24.
+    await client.query(`
+      ALTER TABLE webhooks ADD COLUMN tenant_id TEXT;
+      UPDATE webhooks SET tenant_id = 'default' WHERE tenant_id IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_webhooks_tenant ON webhooks (tenant_id);
+    `);
+  },
+  22: async (client) => {
+    // RFC 0093 §B.1 — interrupt signed-token expiry. Minted at creation by
+    // the suspend manager (default 30 min via OPENWOP_INTERRUPT_TOKEN_TTL_SEC,
+    // capped at the interrupt's own timeoutMs deadline when one exists); the
+    // signed-token endpoints refuse an expired token with 410
+    // interrupt_expired. Pre-existing rows keep NULL (non-expiring) — see
+    // sqlite mig 25 for the rationale.
+    await client.query(`
+      ALTER TABLE interrupts ADD COLUMN expires_at TIMESTAMPTZ;
     `);
   },
 };

@@ -14,6 +14,7 @@ import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Skeleton } from '../ui/Skeleton.js';
 import { Notice } from '../ui/Notice.js';
+import { KeyFigureBand } from '../ui/KeyFigure.js';
 import { BoxesIcon, AlertIcon } from '../ui/icons/index.js';
 import { IllustrativeBadge } from '../ui/IllustrativeBadge.js';
 import { AutonomyTrack } from './AutonomyTrack.js';
@@ -130,28 +131,25 @@ export function WorkforcesGalleryPage(): JSX.Element {
       ) : (
         <>
           {/* Key figures double as the filter for what needs a human (§4.5 r2). */}
-          <div className="wf-figures" role="group" aria-label="What needs you — click to filter">
-            {([
+          <KeyFigureBand
+            ariaLabel="What needs you — click to filter"
+            activeKey={filter}
+            onToggle={(key) => setFilter(key as FilterKey)}
+            figures={([
               ['all', 'Workforces', figures.all, false],
               ['approvals', 'Awaiting approval', figures.approvals, true],
               ['eligible', 'Ready for more autonomy', figures.eligible, false],
               ['violations', 'Policy issues', figures.violations, true],
-            ] as const).map(([key, label, n, attn]) => (
-              <button
-                type="button"
-                key={key}
-                className={'wf-figure wf-figure--tile' + (filter === key ? ' is-active' : '') + (attn && n > 0 ? ' is-attn' : '')}
-                aria-pressed={filter === key}
-                onClick={() => setFilter(key)}
-              >
-                <span className="wf-figure-n">{n}</span>
-                <span className="wf-figure-l">
-                  {attn && n > 0 ? <AlertIcon size={11} aria-hidden /> : null}
-                  {label}
-                </span>
-              </button>
-            ))}
-          </div>
+            ] as const).map(([key, label, n, attn]) => {
+              const attentive = attn && n > 0;
+              return {
+                key,
+                label,
+                value: n,
+                ...(attentive ? { tone: 'attention' as const, glyph: <AlertIcon size={11} aria-hidden /> } : {}),
+              };
+            })}
+          />
 
           {filter === 'all' && nothingNeedsYou ? (
             <Notice variant="success">Every workforce is within policy — nothing needs your attention right now.</Notice>

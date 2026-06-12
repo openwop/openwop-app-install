@@ -19,6 +19,8 @@ export interface ScheduledJob {
   lastFiredTick: number | null;
   workflowId?: string;
   rosterId?: string;
+  /** ADR 0025 — a human user that owns this schedule (profile "Schedules" tab). */
+  ownerUserId?: string;
   agentId?: string;
   enabled: boolean;
   metadata?: Record<string, unknown>;
@@ -45,6 +47,8 @@ export async function createJob(input: {
   cronExpr: string;
   workflowId?: string;
   rosterId?: string;
+  /** ADR 0025 — `'me'` creates a user-owned schedule (server derives the owner). */
+  owner?: 'me';
   agentId?: string;
   enabled?: boolean;
   metadata?: Record<string, unknown>;
@@ -60,6 +64,13 @@ export async function createJob(input: {
     throw new Error(`createJob failed: ${detail}`);
   }
   return (await res.json()) as ScheduledJob;
+}
+
+/** ADR 0025 — list the caller's OWN user-owned schedules (profile tab). */
+export async function listMyJobs(): Promise<ScheduledJob[]> {
+  const res = await fetch(`${base}?owner=me`, fetchOpts({ headers: authedHeaders() }));
+  if (!res.ok) throw new Error(`listMyJobs returned ${res.status}`);
+  return ((await res.json()) as { jobs: ScheduledJob[] }).jobs;
 }
 
 /** Patch an editable subset of a schedule (cadence, workflow, label, timezone,

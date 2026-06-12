@@ -9,7 +9,8 @@ import { ThemeToggle } from '../ui/ThemeToggle.js';
 import { WORKSPACE_NAV, navItemIsActive } from './features.js';
 import { IconButton } from '../ui/IconButton.js';
 import { isAdminPath } from './features.js';
-import { useFeatureAccess, useFeatureVisible, useFeatureBadge } from '../featureToggles/FeatureAccessContext.js';
+import { useFeatureVisible, useFeatureBadge } from '../featureToggles/FeatureAccessContext.js';
+import { PinnedAgentsNav } from './PinnedAgentsNav.js';
 
 const COLLAPSE_KEY = 'openwop.sidebar.collapsed';
 
@@ -20,14 +21,9 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
   // empty out after filtering are dropped. Same predicate the ⌘K palette uses.
   const isVisible = useFeatureVisible();
   const badgeFor = useFeatureBadge();
-  // The header bell gates on the `notifications` toggle, but it's a default-ON
-  // core surface — show it OPTIMISTICALLY while feature access is still
-  // resolving (byId starts empty ⇒ `enabled` is false until the toggles
-  // endpoint responds). Hiding-then-showing would flicker the bell on every
-  // load; we only hide once we KNOW the toggle is off. (Nav items differ —
-  // they're default-OFF, so starting hidden is correct for them.)
-  const notifications = useFeatureAccess('notifications');
-  const showBell = notifications.enabled || notifications.loading;
+  // Notifications is CORE platform infrastructure (the toggle was removed
+  // 2026-06-11 — docs/adr/0010-notifications.md § Correction), so the header
+  // bell always shows; per-user preferences are the control.
   const navGroups = WORKSPACE_NAV
     .map((g) => ({ ...g, items: g.items.filter((item) => isVisible(item.featureId)) }))
     .filter((g) => g.items.length > 0);
@@ -111,6 +107,9 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
                         <span className="app-nav-label">{item.label}</span>
                         {badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
                       </NavLink>
+                      {/* ADR 0023 — pinned agents render as an indented
+                          sub-menu directly under the "Agents" item. */}
+                      {item.to === '/agents' ? <PinnedAgentsNav /> : null}
                     </li>
                   );
                 })}
@@ -150,7 +149,7 @@ export function Sidebar({ netOpen, onToggleNet }: { netOpen: boolean; onToggleNe
           </button>
           <ThemeToggle />
           <div className="app-sidebar-account-row">
-            {showBell && <NotificationBell />}
+            <NotificationBell />
             <SignInButton />
           </div>
         </div>

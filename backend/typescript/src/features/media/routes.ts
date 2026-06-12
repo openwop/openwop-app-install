@@ -24,7 +24,7 @@
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireString, optionalString as optString } from '../featureRoute.js';
+import { requireOrgScope, requireString, optionalString as optString } from '../featureRoute.js';
 import type { Scope } from '../../host/accessControlService.js';
 import { isAllowedUploadMime, allowedUploadMimeList } from '../../host/allowedUploadMime.js';
 import * as mediaStorage from './mediaStorage.js';
@@ -42,7 +42,6 @@ import {
   viewAsset,
 } from './mediaService.js';
 
-const TOGGLE_ID = 'media';
 const MAX_DECODED_BYTES = 8 * 1024 * 1024; // 8 MiB of actual asset content
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
@@ -64,9 +63,10 @@ function validateUpload(contentBase64: string, contentType: string): number {
   return decodedBytes;
 }
 
-/** Toggle + org-scoped RBAC gate (the shared `authorizeOrgScope`). */
-const authorize = (req: Request, scope: Scope): ReturnType<typeof authorizeOrgScope> =>
-  authorizeOrgScope(req, { toggleId: TOGGLE_ID, label: 'Media library' }, scope);
+/** Org-scoped RBAC gate (the shared `requireOrgScope`). ADR 0027: Media is
+ *  always-on, so there is no toggle gate — only the org-scoped RBAC. */
+const authorize = (req: Request, scope: Scope): ReturnType<typeof requireOrgScope> =>
+  requireOrgScope(req, scope);
 
 export function registerMediaRoutes(deps: RouteDeps): void {
   const { app } = deps;

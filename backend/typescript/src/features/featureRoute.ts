@@ -72,15 +72,16 @@ export function publicBaseUrl(req: Request): string {
 }
 
 /**
- * The org-scoped RBAC gate shared by org-native features (media, crm, …). Gates
- * on the feature toggle + the caller's RFC 0049 `scope` IN THE PATH org
- * (`req.params.orgId`): resolves the caller, verifies the org is in their
- * tenant (404 / IDOR guard), and requires `scope` (403, fail-closed). Returns
- * the caller + orgId for the handler. One definition so the cross-tenant guard
- * can't drift between features (ADR 0006/0007/0008).
+ * The org-scoped RBAC core (NO toggle gate) shared by org-native features. Gates
+ * on the caller's RFC 0049 `scope` IN THE PATH org (`req.params.orgId`): resolves
+ * the caller, verifies the org is in their tenant (404 / IDOR guard), and
+ * requires `scope` (403, fail-closed). Returns the caller + orgId for the handler.
+ * One definition so the cross-tenant guard can't drift between features
+ * (ADR 0006/0007/0008). Always-on features (cms/media/publishing — ADR 0027) call
+ * this directly; toggle-gated features go through `authorizeOrgScope` (below),
+ * which is this guard preceded by the toggle check.
  */
-export async function authorizeOrgScope(req: Request, feature: { toggleId: string; label: string }, scope: Scope): Promise<{ user: User; orgId: string }> {
-  await requireFeatureEnabled(req, feature.toggleId, feature.label);
+export async function requireOrgScope(req: Request, scope: Scope): Promise<{ user: User; orgId: string }> {
   const user = await resolveCallerUser(req);
   const orgId = req.params.orgId;
   const org = await getOrg(orgId);
@@ -92,4 +93,14 @@ export async function authorizeOrgScope(req: Request, feature: { toggleId: strin
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
   }
   return { user, orgId };
+}
+
+/**
+ * The toggle-gated org-scoped RBAC gate (the common case): assert the feature
+ * toggle is on for the caller, THEN apply `requireOrgScope`. Composed from the
+ * two halves so the cross-tenant guard lives in exactly one place.
+ */
+export async function authorizeOrgScope(req: Request, feature: { toggleId: string; label: string }, scope: Scope): Promise<{ user: User; orgId: string }> {
+  await requireFeatureEnabled(req, feature.toggleId, feature.label);
+  return requireOrgScope(req, scope);
 }

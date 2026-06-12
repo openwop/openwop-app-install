@@ -248,6 +248,63 @@ export async function signInWithGithub(): Promise<void> {
   await authMod.signInWithRedirect(a, new authMod.GithubAuthProvider());
 }
 
+// ─── Email/password (ADR 0026 — Firebase owns credentials, not the host) ──────
+// These resolve IN-PAGE (no redirect), so `onIdTokenChanged` fires immediately
+// and the caller (AuthCard) runs `finalizeFirebaseSession()` itself rather than
+// relying on the boot-time `processRedirectResult()` path the OAuth flows use.
+
+/** Create a Firebase email/password account; set the display name + send the
+ *  verification email (Firebase handles the token + delivery). */
+export async function signUpWithEmail(email: string, password: string, displayName?: string): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod) throw new Error('Firebase Auth not configured');
+  const cred = await authMod.createUserWithEmailAndPassword(a, email, password);
+  if (displayName && cred.user) {
+    try { await authMod.updateProfile(cred.user, { displayName }); } catch { /* non-fatal */ }
+  }
+  try { await authMod.sendEmailVerification(cred.user); } catch { /* non-fatal — user can resend */ }
+}
+
+/** Sign in with a Firebase email/password account. */
+export async function signInWithEmail(email: string, password: string): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod) throw new Error('Firebase Auth not configured');
+  await authMod.signInWithEmailAndPassword(a, email, password);
+}
+
+/** Send a Firebase password-reset email (Firebase mints + delivers the link). */
+export async function sendPasswordReset(email: string): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod) throw new Error('Firebase Auth not configured');
+  await authMod.sendPasswordResetEmail(a, email);
+}
+
+/** (Re)send the email-verification link to the currently signed-in user. */
+export async function sendVerifyEmail(): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod || !a.currentUser) throw new Error('Not signed in.');
+  await authMod.sendEmailVerification(a.currentUser);
+}
+
+/** Map a Firebase Auth error code to a friendly, non-enumerating message. */
+export function describeAuthError(err: unknown): string {
+  const code = (err as { code?: string })?.code ?? '';
+  switch (code) {
+    case 'auth/email-already-in-use': return 'An account with that email already exists. Try signing in.';
+    case 'auth/invalid-email': return 'That email address looks invalid.';
+    case 'auth/weak-password': return 'Password is too weak — use at least 6 characters.';
+    case 'auth/missing-password': return 'Enter a password.';
+    // Don't distinguish unknown-email from wrong-password (no account enumeration).
+    case 'auth/invalid-credential':
+    case 'auth/wrong-password':
+    case 'auth/user-not-found': return 'Invalid email or password.';
+    case 'auth/too-many-requests': return 'Too many attempts — try again in a few minutes.';
+    case 'auth/operation-not-allowed': return 'Email/password sign-in isn\'t enabled for this deployment. The maintainer needs to turn it on in the Firebase Console.';
+    case 'auth/network-request-failed': return 'Network error — check your connection and retry.';
+    default: return err instanceof Error && err.message ? err.message : 'Something went wrong.';
+  }
+}
+
 /**
  * What the redirect-back handler decided about the just-completed
  * sign-in attempt. The SignInButton subscribes to this state.

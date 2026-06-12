@@ -106,6 +106,29 @@ function requireConfigured(): { storage: Storage; masterKey: Buffer } {
 }
 
 /**
+ * Seal / open a HOST-GLOBAL secret with the BYOK master key (AES-256-GCM).
+ *
+ * Unlike `setSecret`/`resolveSecret` (which are TENANT-scoped, keyed by
+ * credentialRef + SecretScope), these are for operator/host-level config that
+ * has no tenant — e.g. a provider's OAuth *client* secret (ADR 0024 § host-managed
+ * OAuth client config). The caller persists the returned `EncryptedRecord`
+ * itself (e.g. in a DurableCollection row); the plaintext never lands in storage.
+ * This keeps the BYOK envelope the single owner of encrypt-at-rest — callers
+ * compose it rather than re-deriving the master key.
+ */
+export function sealHostSecret(plaintext: string): EncryptedRecord {
+  const { masterKey } = requireConfigured();
+  return encrypt(plaintext, masterKey);
+}
+
+/** Reverse `sealHostSecret`. Throws on tamper / wrong key — callers that must
+ *  fail closed (resolve to "unconfigured") should catch and treat as absent. */
+export function openHostSecret(record: EncryptedRecord): string {
+  const { masterKey } = requireConfigured();
+  return decrypt(record, masterKey);
+}
+
+/**
  * Bulk-load secrets from OPENWOP_SAMPLE_SECRETS at boot. Reads a JSON
  * object `{credentialRef: value}` and upserts each into storage. Useful
  * for conformance / scripted test environments that want a known set

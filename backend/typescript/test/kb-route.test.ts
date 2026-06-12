@@ -7,6 +7,7 @@
  */
 
 import http from 'node:http';
+import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -19,6 +20,7 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(PORT, res); });
@@ -35,7 +37,7 @@ function client(initialCookie = ''): Client {
   let cookie = initialCookie;
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    const sc = typeof (res.headers as any).getSetCookie === 'function' ? (res.headers as any).getSetCookie() : [];
+    const sc = getSetCookies(res.headers);
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
     return { status: res.status, body: out };
@@ -45,20 +47,23 @@ function client(initialCookie = ''): Client {
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-async function signup(c: Client): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email: uniqEmail('kb'), password: 'password123' });
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
+async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
+  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('kb'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 const enableKb = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('kb'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; orgId: string }> {
-  const seed = client();
-  await signup(seed);
-  const ownerCookie = seed.snapshot();
-  const memberUser = await signup(seed);
-  const member = client(seed.snapshot());
-  const owner = client(ownerCookie);
+  // Co-tenant owner + member: mint each into one shared explicit tenantId, each
+  // in its own client (org-RBAC requires org.tenantId === caller.user.tenantId).
+  const tenantId = `org:test-${Date.now()}-${n++}`;
+  const owner = client();
+  await signup(owner, { tenantId });
+  const member = client();
+  const memberUser = await signup(member, { tenantId });
   const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;

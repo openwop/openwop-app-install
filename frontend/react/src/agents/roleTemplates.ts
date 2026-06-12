@@ -14,6 +14,7 @@ import {
   BotIcon,
   BriefcaseIcon,
   LifeBuoyIcon,
+  SparklesIcon,
   MegaphoneIcon,
   ScaleIcon,
   WrenchIcon,
@@ -144,6 +145,9 @@ const ROLE_THEMES: Record<string, RoleTheme> = {
   'finance-ops': { key: 'finance-ops', label: 'Finance', Icon: ScaleIcon },
   'engineering-ops': { key: 'engineering-ops', label: 'Engineering', Icon: WrenchIcon },
   'marketing-ops': { key: 'marketing-ops', label: 'Marketing', Icon: MegaphoneIcon },
+  // ADR 0023 (corrected) — the Chief of Staff is a real roster agent; its
+  // theme glyph is the sparkles mark the assistant has always carried.
+  'chief-of-staff': { key: 'chief-of-staff', label: 'Chief of Staff', Icon: SparklesIcon },
 };
 
 const CUSTOM_THEME: RoleTheme = { key: 'custom', label: 'Custom', Icon: BotIcon };
@@ -156,7 +160,13 @@ export function roleThemeForKey(key: string | undefined): RoleTheme {
 /** Derive the role-template key for a roster member: prefer the seeded
  *  `host:demo-<key>` agentRef, else infer from the workflow portfolio, else
  *  fall back to the custom theme. Mirrors host/demoSeed.ts agentRef ids. */
-export function roleKeyForAgent(agentId: string | undefined, workflows: ReadonlyArray<string>): string {
+export function roleKeyForAgent(
+  agentId: string | undefined,
+  workflows: ReadonlyArray<string>,
+  explicitRoleKey?: string,
+): string {
+  // The persisted seed roleKey (RosterEntry.roleKey) wins — exact, not inferred.
+  if (explicitRoleKey && ROLE_THEMES[explicitRoleKey]) return explicitRoleKey;
   if (agentId) {
     const m = /^host:demo-(.+)$/.exec(agentId);
     const key = m?.[1];
@@ -173,6 +183,10 @@ export function roleKeyForAgent(agentId: string | undefined, workflows: Readonly
 }
 
 /** Convenience: theme for a roster member. */
-export function roleThemeForAgent(agentId: string | undefined, workflows: ReadonlyArray<string>): RoleTheme {
-  return roleThemeForKey(roleKeyForAgent(agentId, workflows));
+export function roleThemeForAgent(
+  agentId: string | undefined,
+  workflows: ReadonlyArray<string>,
+  explicitRoleKey?: string,
+): RoleTheme {
+  return roleThemeForKey(roleKeyForAgent(agentId, workflows, explicitRoleKey));
 }

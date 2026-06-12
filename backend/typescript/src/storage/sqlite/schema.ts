@@ -8,7 +8,7 @@
 
 import type { Database } from 'better-sqlite3';
 
-export const LATEST_SCHEMA_VERSION = 23;
+export const LATEST_SCHEMA_VERSION = 25;
 
 const MIGRATIONS: Record<number, (db: Database) => void> = {
   1: (db) => {
@@ -654,7 +654,57 @@ const MIGRATIONS: Record<number, (db: Database) => void> = {
         ON annotations (run_id, created_at);
     `);
   },
+  24: (db) => {
+    // RFC 0093 §A.3 — webhook subscriptions are tenant-scoped end-to-end.
+    // `tenant_id` is the tenant established at registration (the membership
+    // gate in routes/webhooks.ts); list/delete and the delivery fanout all
+    // filter on it. Pre-existing rows (registered before this migration)
+    // migrate to the 'default' tenant — the tenant every pre-RFC registration
+    // actually ran under (tenantOf() fallback). Mirrors postgres mig 21.
+    //
+    // Defensive ADD COLUMN (mig-23 forward-fix convention): a DB whose
+    // __schema_version was pinned forward synthetically (the migration unit
+    // tests) may lack the v1 tables entirely, and sqlite's ALTER on a missing
+    // table aborts the whole forward run. Real long-lived DBs always have the
+    // table (declared in v1).
+    if (addColumnIfTableExists(db, 'webhooks', 'tenant_id', 'TEXT')) {
+      db.exec(`
+        UPDATE webhooks SET tenant_id = 'default' WHERE tenant_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_webhooks_tenant ON webhooks (tenant_id);
+      `);
+    }
+  },
+  25: (db) => {
+    // RFC 0093 §B.1 — interrupt signed-token expiry. Minted at creation by
+    // the suspend manager (default 30 min via OPENWOP_INTERRUPT_TOKEN_TTL_SEC,
+    // capped at the interrupt's own timeoutMs deadline when one exists); the
+    // signed-token endpoints refuse an expired token with 410
+    // interrupt_expired. Pre-existing rows keep NULL (treated as
+    // non-expiring — their 30-minute recommended window predates the
+    // migration and retroactively expiring them would orphan live demo
+    // suspensions). Mirrors postgres mig 22.
+    addColumnIfTableExists(db, 'interrupts', 'expires_at', 'TEXT');
+  },
 };
+
+/** Defensive ALTER for forward migrations (mig 24/25): adds `column` to
+ *  `table` when the table exists and the column doesn't. Returns true when
+ *  the table exists (so dependent backfill DDL can run). Synthetic
+ *  forward-pinned DBs in the migration unit tests lack the v1 tables; real
+ *  long-lived DBs always have them. */
+function addColumnIfTableExists(db: Database, table: string, column: string, type: string): boolean {
+  const tableExists = db
+    .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`)
+    .get(table);
+  if (!tableExists) return false;
+  const hasColumn = db
+    .prepare(`SELECT 1 AS present FROM pragma_table_info(?) WHERE name = ?`)
+    .get(table, column);
+  if (!hasColumn) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type};`);
+  }
+  return true;
+}
 
 export function applyMigrations(db: Database): void {
   db.exec(`

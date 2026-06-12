@@ -64,9 +64,17 @@ import { createAiProvidersAdapter, AiProviderError, type AiProviderErrorCode } f
 import { classifyDispatchError } from '../observability/errorRecovery.js';
 import { buildHostSurfaceBundle, writeMemoryEntry, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
 import { getInstanceId } from '../host/instanceId.js';
+import { makeConnectionSafeFetch } from '../host/connectionInjection.js';
+import { makeSlackAdapter } from '../host/slackAdapter.js';
+import { makeEmailAdapter } from '../host/emailAdapter.js';
+import { makeSmsAdapter } from '../host/smsAdapter.js';
+import { makeNotificationAdapter } from '../host/notificationAdapter.js';
+import { makeMcpClient, McpError } from '../host/mcpClient.js';
 import { notifyRunTerminal } from './runLifecycle.js';
 import { emitRunFailureNotification } from '../notifications/notify.js';
 import { snapshotRunVariables, setRunVariable } from '../host/variablesRuntime.js';
+import { setRunAgent } from '../host/runAgentRuntime.js';
+import { enforceManifestHandoffContract } from './handoffGate.js';
 import { SuspendSignal, makeSuspendFn } from './suspendSignal.js';
 import {
   buildGraph,
@@ -399,6 +407,22 @@ async function runOneNode(input: {
       ? mergedInputsByPort.input
       : mergedInputsByPort;
 
+  // ADR 0024 §4 — the run's acting human + the providers it consented to use.
+  const runMeta = (run.metadata ?? {}) as Record<string, unknown>;
+  const actingUserId = typeof runMeta.actingUserId === 'string' ? runMeta.actingUserId : undefined;
+  const runCfg = (run.configurable ?? {}) as Record<string, unknown>;
+  const connectionProviders: string[] = Array.isArray(runCfg.connections)
+    ? (runCfg.connections as unknown[]).filter((p): p is string => typeof p === 'string')
+    : [];
+
+  // Multi-Agent Shift Phase 1 — rotate `RunSnapshot.agent` to the active
+  // worker: a node carrying an authoring-time `agent` pin stamps its
+  // AgentRef (verbatim, provenance fields included) onto the run-level
+  // projection that `GET /v1/runs/{runId}` serves.
+  if (nodeRef.agent && typeof nodeRef.agent.agentId === 'string' && nodeRef.agent.agentId.length > 0) {
+    setRunAgent(run.runId, nodeRef.agent);
+  }
+
   const ctx: NodeContext = {
     runId: run.runId,
     nodeId: nodeRef.nodeId,
@@ -429,12 +453,15 @@ async function runOneNode(input: {
         ? 'untrusted'
         : 'trusted',
     secrets: secretsForCtx,
-    async emit(type, payload) {
+    async emit(type, payload, opts) {
       const record = await eventLog.append({
         runId: run.runId,
         nodeId: nodeRef.nodeId,
         type,
         payload: stripSecretsFromPersisted(payload),
+        // Envelope-level causation chain (RFC 0002 §B) — e.g.,
+        // agent.toolReturned.causationId === paired agent.toolCalled.eventId.
+        ...(opts?.causationId ? { causationId: opts.causationId } : {}),
       });
       // Surface eventId + sequence so nodes can build causationId chains
       // (RFC 0002 §B). Pre-existing void-returning callers ignore.
@@ -463,6 +490,61 @@ async function runOneNode(input: {
     // run-scoped variable bag. The sample host maps the principal to the run
     // tenant; the bag is backed by the variables runtime (replay-safe snapshot).
     userId: run.tenantId,
+    // ADR 0024 §4/D2 — the durable human the run acts as (stamped on
+    // run.metadata at creation, re-stamped to the forking caller on :fork).
+    // Distinct from userId above (tenant, for launch-studio); the Connections
+    // broker keys per-user credentials + connections:use on THIS. Absent ⇒
+    // system run ⇒ org/user connections fail closed (correct).
+    ...(actingUserId ? { actingUserId } : {}),
+    // ADR 0024 §4 / Option C — host-mediated egress + credential injection,
+    // provided ONLY when the run opted into Connections (so other runs keep the
+    // pack's own egress fallback). safeFetch injects the acting user's token for
+    // an allow-listed, host-matched provider, after the pack's header sanitize.
+    ...(connectionProviders.length > 0
+      ? {
+          http: {
+            safeFetch: makeConnectionSafeFetch({
+              storage,
+              tenantId: run.tenantId,
+              runId: run.runId,
+              allowedProviders: connectionProviders,
+              ...(actingUserId ? { actingUserId } : {}),
+              orgId: run.tenantId, // workspace-root org (orgId === tenantId)
+            }),
+          },
+        }
+      : {}),
+    // ADR 0024 §4 Phase 3 — integration egress adapters (Slack + email). Always
+    // provided (the nodes are explicit); each resolves the acting human's
+    // Connection per call and gracefully no-ops when absent.
+    slack: makeSlackAdapter({
+      storage,
+      tenantId: run.tenantId,
+      runId: run.runId,
+      ...(actingUserId ? { actingUserId } : {}),
+      orgId: run.tenantId,
+    }),
+    email: makeEmailAdapter({
+      storage,
+      tenantId: run.tenantId,
+      runId: run.runId,
+      ...(actingUserId ? { actingUserId } : {}),
+      orgId: run.tenantId,
+    }),
+    messaging: makeSmsAdapter({
+      storage,
+      tenantId: run.tenantId,
+      runId: run.runId,
+      ...(actingUserId ? { actingUserId } : {}),
+      orgId: run.tenantId,
+    }),
+    notification: makeNotificationAdapter({
+      storage,
+      tenantId: run.tenantId,
+      runId: run.runId,
+      ...(actingUserId ? { actingUserId } : {}),
+      orgId: run.tenantId,
+    }),
     variables: {
       get: (name: string): unknown => snapshotRunVariables(run.runId)?.[name],
       set: (name: string, value: unknown): void => setRunVariable(run.runId, name, value),
@@ -476,6 +558,15 @@ async function runOneNode(input: {
       expose: async (args) => ({
         handle: `mcp:${run.runId}:${nodeRef.nodeId}`,
         kind: typeof args.kind === 'string' ? args.kind : 'tool',
+      }),
+      // ADR 0030 — the OUTBOUND client (invokeTool / readResource / listTools /
+      // serverStatus), per-user-authed via the Connections broker.
+      ...makeMcpClient({
+        storage,
+        tenantId: run.tenantId,
+        runId: run.runId,
+        ...(actingUserId ? { actingUserId } : {}),
+        orgId: run.tenantId,
       }),
     },
     // `core.openwop.triggers` webhook-respond node. The sample executor runs
@@ -531,7 +622,12 @@ async function runOneNode(input: {
     } else {
       const message = err instanceof Error ? err.message : String(err);
       span.setStatus({ code: SpanStatusCode.ERROR, message });
-      const code = err instanceof AiProviderError ? err.code : 'internal_error';
+      // Surface a KNOWN host error's stable `.code` (AiProviderError, McpError) so
+      // a typed fail-closed reason — e.g. `connector_not_allowed`,
+      // `mcp_not_connected` — reaches the node-failure event instead of a generic
+      // `internal_error`. Deliberately NOT generalized to any `.code` (that would
+      // leak arbitrary internal codes like Node's ENOENT to the wire).
+      const code = err instanceof AiProviderError || err instanceof McpError ? err.code : 'internal_error';
       outcome = { status: 'failure', error: { code, message } };
     }
   } finally {
@@ -923,6 +1019,27 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
       await emitTerminalFailure({ storage, runId: run.runId, error: { code, message } });
       return { status: 'failed' };
     }
+
+    // RFC 0003 §D — handoff-schema enforcement at dispatch. When the
+    // workflow binds a manifest agent (`metadata.requiresAgentId`), the
+    // bound agent's task/return handoff contract is validated against the
+    // run inputs BEFORE any node executes: an off-contract task payload
+    // (or a simulated off-schema return) fails the run with a structured
+    // `handoff_*_schema_violation` error rather than silently dispatching
+    // or persisting off-contract data. See `executor/handoffGate.ts`.
+    const handoff = await enforceManifestHandoffContract({
+      definition,
+      runInputs: run.inputs,
+    });
+    if (!handoff.ok) {
+      await emitTerminalFailure({
+        storage,
+        runId: run.runId,
+        ...(handoff.nodeId !== undefined ? { nodeId: handoff.nodeId } : {}),
+        error: handoff.error,
+      });
+      return { status: 'failed' };
+    }
   }
 
   const maxConcurrency = maxConcurrentNodes();
@@ -1131,15 +1248,15 @@ async function finalizeRun(input: {
         terminals.map((id) => [id, unwrapSingleOutput(snapshot.nodeOutputs.get(id))]),
       );
     }
-    await eventLog.append({
-      runId: run.runId,
-      type: 'run.completed',
-      payload: stripSecretsFromPersisted({ output }),
-    });
-    await storage.updateRun(run.runId, { status: 'completed', completedAt: new Date().toISOString() });
     // RFC 0004 demo: the host writes a run-summary to the tenant's memory on
     // completion (the "session-end write" the spec sanctions). Best-effort —
     // a memory write must never fail the run.
+    //
+    // Ordering: this MUST happen BEFORE the `run.completed` append.
+    // observability.md §"Terminal events" requires the terminal event to be
+    // the LAST event in the stream (pinned by eventOrdering.test.ts and the
+    // streamReconnect post-terminal reconnect probe) — appending
+    // `memory.written` after `run.completed` violates that contract.
     //
     // RFC 0057 §D (replay determinism): skip this on a `replay`-mode fork.
     // Re-executing a recorded run MUST NOT mint a new `memoryId` or re-emit
@@ -1169,6 +1286,12 @@ async function finalizeRun(input: {
       /* memory is a demo surface; never block run completion */
     }
     }
+    await eventLog.append({
+      runId: run.runId,
+      type: 'run.completed',
+      payload: stripSecretsFromPersisted({ output }),
+    });
+    await storage.updateRun(run.runId, { status: 'completed', completedAt: new Date().toISOString() });
     clearRunSecrets(run.runId);
     notifyRunTerminal(run.runId);
     return { status: 'completed' };

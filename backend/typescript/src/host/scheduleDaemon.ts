@@ -101,11 +101,29 @@ export async function processDueSchedules(
       const runId = await startWorkflowRun(deps, {
         tenantId: job.tenantId,
         workflowId: job.workflowId!,
+        ...(job.configurable !== undefined ? { configurable: job.configurable } : {}),
+        // `ScheduledJob.metadata` documents itself as "free-form attribution
+        // carried onto a schedule-fired run's metadata" — honor that (it was
+        // previously dropped). The assistant loops (ADR 0023 §12 T2) rely on
+        // it to carry `actingUserId`, which the Connections resolver keys
+        // per-user credentials off (ADR 0024 Phase D).
+        //
+        // SECURITY (defense in depth): the scheduler ROUTE already strips the
+        // attribution keys from client-supplied metadata and stamps
+        // `actingUserId` from the authenticated principal; this spread
+        // additionally refuses to forward the run-attribution blocks
+        // (`heartbeat`/`kanban`/`approval` would outrank the `schedule` block
+        // in recordRunAttribution) so a job row seeded by any other path can
+        // never falsify attribution. The schedule block spreads LAST.
         metadata: {
+          ...Object.fromEntries(
+            Object.entries(job.metadata ?? {}).filter(([k]) => k !== 'heartbeat' && k !== 'kanban' && k !== 'approval' && k !== 'schedule'),
+          ),
           schedule: {
             jobId: job.jobId,
             source: 'schedule',
             ...(job.rosterId !== undefined ? { rosterId: job.rosterId } : {}),
+            ...(job.ownerUserId !== undefined ? { ownerUserId: job.ownerUserId } : {}),
             ...(job.agentId !== undefined ? { agentId: job.agentId } : {}),
           },
         },

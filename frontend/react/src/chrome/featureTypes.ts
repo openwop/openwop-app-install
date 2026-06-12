@@ -8,8 +8,11 @@ import type { ComponentType, ReactElement } from 'react';
 export type IconCmp = ComponentType<{ size?: number; strokeWidth?: number }>;
 
 /** Which shell the route renders in. `workspace` = the primary product rail;
- *  `admin` = inside <AdminLayout>'s embedded collapsible rail. */
-export type FeatureTier = 'workspace' | 'admin';
+ *  `admin` = inside <AdminLayout>'s embedded collapsible rail; `public` = a bare
+ *  <PublicShell> rendered ABOVE <AppGate> with no auth + no nav (ADR 0027 — the
+ *  CMS-driven front page). A `public` route carries no `nav` (it is not a menu
+ *  item) and is matched directly by App.tsx's pre-AppGate branch. */
+export type FeatureTier = 'workspace' | 'admin' | 'public';
 
 /** Width/scroll treatment the shell gives the route's <main>. Shell-owned. */
 export type FeatureChrome = 'default' | 'narrow' | 'fullbleed' | 'chat';

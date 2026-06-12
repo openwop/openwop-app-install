@@ -60,6 +60,31 @@ const identityNode: NodeModule = {
   version: '1.0.0',
   async execute(ctx) {
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object') ? (ctx.inputs as Record<string, unknown>) : {};
+    // `channels-and-reducers.md §message` idempotency probe (the
+    // `conformance-message-reducer` fixture): emit a small conversation
+    // into the workflow-declared `messages` channel, intentionally
+    // re-emitting one `messageId`. The `message` reducer
+    // (`host/channelsRuntime.ts`) folds the duplicate to a single
+    // entry — `RunSnapshot.channels.messages` MUST contain each
+    // messageId exactly once.
+    if ((ctx.config ?? {})['emitDuplicateMessageId'] === true) {
+      const { appendChannelMessage } = await import('../host/channelsRuntime.js');
+      const agentId = ctx.nodeAgent?.agentId;
+      const ts = new Date().toISOString();
+      const emit = (messageId: string, content: string): void => {
+        appendChannelMessage(ctx.runId, 'messages', {
+          messageId,
+          role: 'assistant',
+          content,
+          timestamp: ts,
+          ...(agentId !== undefined ? { agentId } : {}),
+        });
+      };
+      emit(`${ctx.runId}-msg-1`, 'first message');
+      emit(`${ctx.runId}-msg-2`, 'second message');
+      // Intentional duplicate emission of msg-2 — MUST fold to one entry.
+      emit(`${ctx.runId}-msg-2`, 'second message (duplicate emission)');
+    }
     return { status: 'success', outputs: { ...inputs } };
   },
 };

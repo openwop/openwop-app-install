@@ -63,6 +63,16 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 | 0011 | Knowledge Base / RAG        | `kb`       | 0004, 0006, 0007  | `feature.kb.*`           | 🟢 Done (Phases 1–3) | Knowledge Base (RAG) |
 | 0012 | Publishing & SEO            | `publishing` | 0004, 0006, 0007, 0009 | `feature.publishing.*` | 🟢 Done (Phases 1–3) | Publishing & SEO |
 | 0013 | Sharing (public links)      | `sharing`  | 0004, 0006, 0009, 0011 | `feature.sharing.*`      | 🟢 Done (Phases 1–3) | Sharing |
+| 0017 | Forms (public builder → CRM contact) | `forms` | 0006, 0008, 0012 | `feature.forms.*` | 🟢 Done (Phases 1–3) | Forms |
+| 0018 | Analytics (public-surface measurement) | `analytics` | 0006, 0012, 0020 | `feature.analytics.*` | 🟢 Done (Phase 1 + FE) | Analytics |
+| 0019 | Email Marketing (campaigns over CRM) | `email` | 0006, 0008, 0020 | `feature.email.*` | 🟢 Done (Phases 1–2 + FE) | Email Marketing |
+| 0020 | Consent & Compliance (enforcement gate) | `consent` | 0006 | `feature.consent.*` | 🟢 Done (Phases 1–3) | Consent & Compliance |
+| 0021 | Collaboration / Comments    | `comments` | 0006, 0009, 0010, 0011 | `feature.comments.*` | 🟢 Done (Phases 1–3 + extension surface) | Collaboration & Presence |
+| 0022 | Marketplace (browse + install packs) | `marketplace` | 0001, 0006 | `feature.marketplace.*` (composes signed registry) | 🔵 Planned (ADR Proposed) | Marketplace |
+| 0024 | Connections — generic per-user/org credential broker (Google/Slack/ServiceNow/Zoom) for the existing MCP/HTTP/integration nodes | `connections` (graduated always-on, §Correction) | 0002, 0003, 0006, 0015 | — (composes core node packs; reuses BYOK + RFC 0076/0079) | 🟢 Done (Phases A–D + §4 integration adapters: HTTP injection · Slack · email · SMS · push · MCP) | (host capability — net-new) |
+| 0025 | User/Agent orchestration symmetry — auto-provisioned personal boards + polymorphic board owner; approvals via heartbeat/Notifications | (folds under `profiles`) | 0005, 0015, RFC 0086/0052 | — (generalizes `host.kanban`) | 🟡 In Progress (Phase 1 done — board owner + auto-provision) | (foundational — net-new) |
+| 0023 | Executive Assistant / Chief-of-Staff — memory graph + scheduled perception/action loops + prioritization, **RAG via `kb`** | `assistant` | 0024, 0025, 0014, 0001, 0015, 0006 | `feature.assistant.{nodes,agents}` (thin — graph/logic only) | 🟡 In Progress (graph + packs + prioritization + FE done; loops deploy-gated) | (new product — not a MyndHyve port) |
+| 0030 | Outbound MCP client — per-user-authed external MCP tool calls (`ctx.mcp.{invokeTool,readResource,listTools}`); the consuming half of RFC 0020 | — (host capability) | 0024, 0027, 0028 | — (composes `core.openwop.mcp`; reuses RFC 0093/0079) | 🟢 Done (Phase 1 + 2a SSE/Streamable-HTTP; Phase 2b `subscribe-resource` deferred) | (host capability — net-new) |
 
 > **ADR-0003 (Canonical identity & session binding) was inserted** as a
 > foundational refinement of ADR-0002 — it makes `User.userId` the one subject
@@ -85,6 +95,25 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 > toggle-gated) and **upgrades** it (durable preferences) — it does not rewrite the
 > working surface/storage/UI. A migration, not a greenfield build.
 
+> 🟢 **CMS / Media / Publishing went always-on (ADR 0027, 2026-06-11).** The three
+> content features (0007 / 0009 / 0012) dropped their toggles (retired from the
+> catalog like Notifications) and moved from the workspace Sidebar to the admin-tier
+> **Content** group. They now power a **public CMS-driven front page** at `/` for
+> anonymous visitors (rendered above `AppGate`). Publishing's per-tenant "site
+> online" toggle is gone — the CMS editorial `published` status is the sole public
+> gate (Sharing covers private/draft). Toggle ids in the Overview table above are
+> retained for historical reference.
+>
+> 🟢 **Super-admin-editable homepage (ADR 0027, 2026-06-12).** The homepage is the
+> host-level **system site** — a normal CMS page in a RESERVED org `host-site`
+> under a reserved tenant `host:site` (a `host:` prefix no real principal can hold),
+> seeded + served at `/` and **ON by default** (`OPENWOP_FRONTPAGE_DEFAULT_ENABLED=false`
+> to opt a fork out). A super admin edits it at **Admin → Content → "Front page"**
+> via the `requireSuperadmin`-gated `/v1/host/sample/site-page` — host authority, so
+> it's editable regardless of any tenant, without touching `requireOrgScope`.
+> Mirrors MyndHyve's global admin-owned `cms_pages/home`. See
+> `docs/adr/0027-cms-front-page-and-always-on-content.md`.
+
 ## Build sequence
 
 ```
@@ -104,6 +133,7 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 | 4 — Shared services     | 0007 | needs 0004 + 0006 |
 | 5 — Product surfaces    | 0008, 0009 | 0008 (CRM) ∥ 0009 (CMS); 0009 also needs 0007 |
 | 6 — Post-core extensions | 0010, 0011, 0012, 0013 | 0010 (Notifications, migrate existing) ∥ 0011 (KB/RAG); 0011 needs 0007 (Media); 0012 (Publishing & SEO) needs 0009 (CMS) + 0007 (Media OG images); 0013 (Sharing) needs 0009 (CMS) + 0011 (KB) — the resources it links to |
+| 7 — Growth & platform depth | 0017, 0018, 0019, 0020, 0021, 0022 | 0017 (Forms) ∥ 0018 (Analytics) — need only shipped surfaces; 0019 (Email) needs 0008 (CRM); 0020 (Consent) is authored alongside but **gates** 0018 + 0019; 0021 (Comments) ∥ 0022 (Marketplace) — independent depth tracks, each composing already-shipped infra. Detail in `docs/adr/0017`–`0022`. |
 
 ### Why this order (from MyndHyve's dependency graph)
 
@@ -207,16 +237,15 @@ This unblocks RBAC (0006) — roles bind to the canonical subject. See
 
 ### ADR-0005 — User Profiles
 **Toggle:** `profiles` · **Depends on:** ADR-0002 · **Pack:** `packs.openwop.dev/feature.profiles`
-**Status:** 🔵 Planned · **MyndHyve §:** Production Intelligence (Team Profiles)
+**Status:** 🟢 Done (Phases 1–5 shipped) · **MyndHyve §:** Production Intelligence (Team Profiles)
 
 Self-service per-user profile data. Parallelizable with Orgs — only needs Users.
 
 **Scope (port from MyndHyve "Team Profiles" / "My Profile")**
-- [ ] Profile CRUD — display name, avatar, contact, bio
-- [ ] Self-service rule — a user edits their own profile; admins get read views
-- [ ] Profile completeness scoring (weighted by field importance)
-- [ ] (Defer) capability/skills/portfolio fields (MyndHyve Production Intelligence)
-      until there's a consumer for them
+- [x] Profile CRUD — display name, avatar, contact, bio
+- [x] Self-service rule — a user edits their own profile; admins get read views
+- [x] Profile completeness scoring (weighted by field importance)
+- [x] Avatar + portfolio via Media-asset tokens (Phase 2); skills + peer endorsements (Phase 3)
 
 **Notes / decisions for the ADR**
 - MyndHyve enforces self-service via Firestore rules; here it's a backend-authority
@@ -226,7 +255,7 @@ Self-service per-user profile data. Parallelizable with Orgs — only needs User
 
 ### ADR-0006 — Roles & Permissions (RBAC) — extends `accessControl`
 **Owner:** `accessControlService` (RFC 0049 roles→scopes) · **Depends on:** ADR-0003, ADR-0004
-**Status:** 🟡 Phases 1–2 done · See `docs/adr/0006-rbac.md`
+**Status:** 🟢 Done (Phases 1–3 implemented) · See `docs/adr/0006-rbac.md`
 
 > **Not a new feature.** A boundaries audit found `accessControl` already owns
 > orgs / members / **roles** (RFC 0049 scopes, fail-closed). ADR-0006 **completes**
@@ -242,23 +271,28 @@ composes with ADR-0004's userId-bound invited members). Additive + back-compat.
 non-member gets zero scopes); two users in one tenant get distinct authority.
 Create-org bootstraps on `requireAuthenticated`.
 
-**Phase 3 (deferred, wire)** — enforce RFC-0049 scopes on the protocol
-runs/artifacts surface + the `authorization/decide` seam, then advertise
+**Phase 3 (done, wire)** — enforces RFC-0049 scopes on the protocol
+runs/artifacts surface + the `authorization/decide` seam, advertising
 `capabilities.authorization` ONLY when conformance passes (no false oracle).
+Gated on the deploy-time flag `OPENWOP_AUTHORIZATION_ENFORCEMENT` (default **off**);
+turn it on where every caller is provisioned as an `accessControl` member. ADR
+0015 added the wildcard-bearer escape hatch that makes enabling it safe alongside
+operator-key / conformance callers — so flipping the demo on is a config decision,
+not further implementation (see TODO § "enforcement posture").
 
 ---
 
 ### ADR-0007 — Media Library
 **Toggle:** `media` · **Depends on:** ADR-0004, ADR-0006 · **Pack:** `packs.openwop.dev/feature.media`
-**Status:** 🔵 Planned · **MyndHyve §:** Page Builder (Media) + Feature Architecture
+**Status:** 🟢 Done (Phases 1–3 shipped) · **MyndHyve §:** Page Builder (Media) + Feature Architecture
 
 Org-scoped asset store. Pulled out of CMS because it's the one hard upstream
 dependency CMS/Page Builder need, and is reusable on its own.
 
 **Scope (port from MyndHyve "Media Library")**
-- [ ] Asset upload / organize / search, org-scoped collections
-- [ ] Usage tracking; storage adapter (start with the demo-grade in-memory/blob
-      surface `ctx.storage.blob`, with the real-backend swap as a one-file change)
+- [x] Asset upload / organize / search, org-scoped collections (+ per-org capacity caps, IDOR-guarded)
+- [x] Usage tracking; storage adapter (demo-grade in-memory/blob `ctx.storage.blob`;
+      real-backend swap is a one-file change)
 - [ ] (Defer) image optimization (srcset/WebP/AVIF), Knowledge-Base indexing co-dep
 
 **Notes / decisions for the ADR**
@@ -293,21 +327,21 @@ surface, now sitting on formal Orgs + RBAC instead of bare tenant scoping.
 
 ### ADR-0009 — CMS + Page Builder
 **Toggle:** `cms` · **Depends on:** ADR-0004, ADR-0006, ADR-0007 · **Pack:** `packs.openwop.dev/feature.cms`
-**Status:** 🔵 Planned · **MyndHyve §:** CMS System + Page Builder
+**Status:** 🟢 Done (Phases 1–4 shipped) · **MyndHyve §:** CMS System + Page Builder
 
 The content surface. MyndHyve treats CMS and Page Builder as an intended
 co-dependent pair that ships together, so they're one ADR here. Needs Media for
 assets and RBAC for editorial access.
 
 **Scope (port from MyndHyve "CMS System" + "Page Builder", phased)**
-- [ ] Page model + section-based editor (start with a core section set, not all 28)
-- [ ] Page Builder — section CRUD, schema-driven forms, responsive preview
-- [ ] Media integration (consumes ADR-0007)
-- [ ] Content versioning + editorial workflow (approval gate — reuse `core.hitl.approval-request`)
-- [ ] RBAC-gated CMS access (consumes ADR-0006)
-- [ ] Routing — slug generation, redirects
-- [ ] (Defer) localization, personalization/A-B, search providers, publishing/SEO,
-      comment moderation → follow-on ADRs
+- [x] Page model + section-based editor (5 core section types: hero, richText, image, cta, columns)
+- [x] Page Builder — section CRUD, schema-driven forms, preview
+- [x] Media integration (consumes ADR-0007)
+- [x] Content versioning + editorial workflow (draft → in_review → published; version snapshots)
+- [x] RBAC-gated CMS access (consumes ADR-0006)
+- [x] Routing — slug generation, redirects
+- [ ] (Defer) localization, personalization/A-B, search providers, comment moderation → follow-on ADRs
+      (publishing/SEO shipped separately as ADR-0012)
 
 **Notes / decisions for the ADR**
 - MyndHyve's CMS workflow gate is unconditional (publish blocked unless stage is
@@ -471,12 +505,18 @@ To keep the port honest, these MyndHyve capabilities are **deliberately not**
 sequenced here. They're noted so a future ADR can pick them up, not silently dropped:
 
 - **Billing / Subscriptions, E-Commerce** — CRM is decoupled from commerce on purpose.
-- **Email Marketing, Analytics, Connectors, Messaging Gateway** — product surfaces
-  beyond the requested core. (Notifications was promoted to **ADR-0010**; Knowledge
-  Base / RAG to **ADR-0011** — both are now sequenced above, not cut.)
-- **Collaboration & Presence, Accessibility audit infra** — MyndHyve lists these as
-  CMS deps, but they're cut to a minimal CMS v1; revisit if CMS needs them.
+- **Connectors & Integrations, Messaging Gateway** — product surfaces beyond the
+  current core; candidates for a Batch 3, not cut permanently.
+- **Accessibility audit infra** — MyndHyve lists it as a CMS dep, but it's cut to a
+  minimal CMS v1; revisit if CMS needs it.
+- **Production Intelligence completion** (Vendor Directory + `ProductionPlanService`)
+  — ADR 0005 ported only Team Profiles; the rest is a future ADR.
 - **Anything under MyndHyve § "Sunset / Do-Not-Use"** — never ported.
+
+> **Promoted out of the cuts (now sequenced — Tier 7 / ADRs 0017–0022):**
+> Notifications → **0010**, Knowledge Base/RAG → **0011**, Forms → **0017**,
+> **Analytics → 0018**, **Email Marketing → 0019**, **Consent & Compliance → 0020**,
+> **Collaboration/Comments → 0021**, Marketplace → **0022**.
 
 ## Maintenance
 

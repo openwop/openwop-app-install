@@ -62,6 +62,38 @@ export async function deleteAccount(accountId: string): Promise<boolean> {
   return store.delete(accountId);
 }
 
+/**
+ * Tenant-guarded read for the workflow surface + nodes (ADR 0014). Unlike
+ * `getAccount` (by id, NO tenant check — route-only, the routes guard it), this is
+ * safe to expose to `ctx.features.csm`: a cross-tenant accountId reads as not-found
+ * (CTI-1), so a node cannot probe another workspace's accounts.
+ */
+export async function getAccountForTenant(tenantId: string, accountId: string): Promise<Account | null> {
+  const a = await store.get(accountId);
+  return a && a.tenantId === tenantId ? a : null;
+}
+
+/**
+ * Tenant-guarded health/name set for the workflow surface + nodes. **Idempotent by
+ * accountId** (same inputs → same result), so a fork/replay never duplicates.
+ * Updates an EXISTING account only — node-driven create is intentionally not
+ * offered (a caller-supplied id would be non-deterministic). Returns null if the
+ * account is absent or belongs to another tenant.
+ */
+export async function setAccountHealthForTenant(
+  tenantId: string,
+  accountId: string,
+  patch: { name?: string; healthScore?: number },
+): Promise<Account | null> {
+  const existing = await store.get(accountId);
+  if (!existing || existing.tenantId !== tenantId) return null;
+  const next: Account = { ...existing, updatedAt: new Date().toISOString() };
+  if (patch.name !== undefined) next.name = patch.name;
+  if (patch.healthScore !== undefined) next.healthScore = clampScore(patch.healthScore);
+  await store.put(next);
+  return next;
+}
+
 /** Test-only: clear all accounts. */
 export async function __resetCsmStore(): Promise<void> {
   await store.__clear();

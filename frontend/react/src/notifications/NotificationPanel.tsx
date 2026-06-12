@@ -18,7 +18,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useNotificationStore } from './notificationStore.js';
 import { NotificationPreferencesPanel } from './NotificationPreferencesPanel.js';
-import { AlertIcon, CheckIcon, SettingsIcon, XIcon } from '../ui/icons/index.js';
+import { AlertIcon, CheckIcon, MessageSquareIcon, SettingsIcon, XIcon } from '../ui/icons/index.js';
 import type { Notification, NotificationType } from './types.js';
 
 type Tab = 'all' | 'unread' | 'archived';
@@ -29,6 +29,9 @@ const TYPE_ICON: Record<string, React.ReactNode> = {
   'workflow.failed':          '!',
   'workflow.completed':       <CheckIcon size={14} />,
   'system.alert':             'i',
+  // Comments feature (ADR 0021) — additive, fallback-protected; no core-union edit.
+  'comment.added':            <MessageSquareIcon size={14} />,
+  'comment.reply':            <MessageSquareIcon size={14} />,
 };
 
 const TYPE_COLOR: Record<string, string> = {

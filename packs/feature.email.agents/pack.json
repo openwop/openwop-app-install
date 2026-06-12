@@ -1,0 +1,30 @@
+{
+  "name": "feature.email.agents",
+  "version": "1.0.0",
+  "description": "Email feature agent pack (ADR 0014) — a copywriter agent that drafts/optimizes campaign subject + body (the baseline's email.generate / email.optimize). Tool-allowlisted to feature.email.nodes only; it writes copy, it does not send. Mirrors feature.kb.agents.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "email", "agent", "copywriter", "marketing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.email.agents.copywriter",
+      "persona": "GENERAL",
+      "label": "Email Copywriter",
+      "description": "Drafts and optimizes marketing campaign copy (subject line + body, with {{contact.*}} merge fields). May read existing templates for style via feature.email.nodes.list-templates. Writes copy only — it does NOT send (no send tool in its allowlist, by design).",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/email-copywriter.md",
+      "toolAllowlist": [
+        "openwop:feature.email.nodes.list-templates",
+        "openwop:feature.email.nodes.render"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

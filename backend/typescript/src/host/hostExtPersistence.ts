@@ -44,11 +44,25 @@ export function __resetHostExtPersistence(): void {
   storageRef = null;
 }
 
+/** Test-only: the bound storage handle, so route tests can assert persisted
+ *  rows (e.g. server-side run.metadata stamps) the wire snapshot rightly omits. */
+export function __hostExtStorage(): Storage | null {
+  return storageRef;
+}
+
 function requireStorage(): Storage {
   if (!storageRef) {
     throw new Error('host-ext persistence not initialized — call initHostExtPersistence() at boot');
   }
   return storageRef;
+}
+
+/** The bound host-ext storage, or throw if boot hasn't wired it. Public
+ *  accessor for host-side services that need `Storage` but aren't handed it
+ *  through a route's deps (e.g. the assistant ensuring its seeded agent via
+ *  the demo seeder). */
+export function hostExtStorage(): Storage {
+  return requireStorage();
 }
 
 /**
@@ -96,6 +110,27 @@ export class DurableCollection<T> {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * Read the entities whose ID starts with `idPrefix` — a storage-level prefix
+   * scan scoped BELOW the collection (ADR 0029's secondary-index read
+   * primitive). An index collection whose ids embed the dimensions
+   * (`${tenantId}:${status}:${entityId}`) turns hot-path queries into bounded
+   * scans of just the matching slice, instead of `list()`'s full-collection
+   * scan + in-memory filter.
+   */
+  async listByPrefix(idPrefix: string): Promise<T[]> {
+    const rows = await requireStorage().kvList(this.prefix() + idPrefix);
+    const out: T[] = [];
+    for (const row of rows) {
+      try {
+        out.push(JSON.parse(row.value) as T);
+      } catch {
+        /* skip a corrupt row rather than fail the whole list */
+      }
+    }
+    return out;
   }
 
   /** Read every entity in the collection (prefix scan, read-through). */

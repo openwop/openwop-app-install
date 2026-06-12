@@ -60,7 +60,7 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
 }): JSX.Element {
   const { entry } = view;
   const sm = statusMeta(view.status);
-  const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows);
+  const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows, entry.roleKey);
   const [resolving, setResolving] = useState<string | null>(null);
   const dialogRef = useRef<HTMLElement>(null);
 
@@ -76,7 +76,9 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
     setResolving(a.approvalId);
     try {
       const { runId } = await claimApproval(a.approvalId);
-      toast.success(`${a.persona} approved — run ${runId.slice(0, 8)}… started.`);
+      // Polymorphic: a run-proposal yields a runId; an assistant-action decides
+      // a drafted action in place (no run to cite).
+      toast.success(runId ? `${a.persona} approved — run ${runId.slice(0, 8)}… started.` : `${a.persona} approved — carrying it out.`);
       onResolved();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Could not claim the proposal.');

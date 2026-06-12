@@ -39,6 +39,8 @@ export interface RosterEntry {
    *  `review` queues a proposal for human sign-off (the approval inbox).
    *  Absent ⇒ `auto`. */
   autonomyLevel?: 'auto' | 'guided' | 'review';
+  /** Seed role template (e.g. 'chief-of-staff') — exact theme + role identity. */
+  roleKey?: string;
   createdAt: string;
   updatedAt: string;
 }

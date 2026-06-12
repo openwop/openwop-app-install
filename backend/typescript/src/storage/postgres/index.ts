@@ -112,6 +112,7 @@ function rowToInterrupt(r: Row): InterruptRecord {
     data: r.data ?? null,
     resumeSchema: (r.resume_schema as Record<string, unknown> | null) ?? undefined,
     createdAt: (r.created_at as Date).toISOString(),
+    expiresAt: r.expires_at ? (r.expires_at as Date).toISOString() : undefined,
     resolvedAt: r.resolved_at ? (r.resolved_at as Date).toISOString() : undefined,
     resolvedValue: r.resolved_value ?? undefined,
   };
@@ -180,6 +181,8 @@ function rowToUserAgent(r: Row): UserAgentRecord {
 function rowToWebhook(r: Row): WebhookSubscriptionRecord {
   return {
     subscriptionId: r.subscription_id as string,
+    // Pre-migration rows carry NULL; they belong to the default tenant.
+    tenantId: (r.tenant_id as string | null) ?? 'default',
     url: r.url as string,
     events: (r.events as string[] | null) ?? [],
     tags: (r.tags as string[] | null) ?? undefined,
@@ -212,6 +215,24 @@ function rowToWebhookDelivery(r: Row): WebhookDeliveryRecord {
 
 export interface PostgresStorageOptions extends PoolConfig {
   connectionString: string;
+}
+
+/** Every public table with a `tenant_id` column, from the live catalog (memoized
+ *  per Pool). The single source of truth for tenant-scoped bulk ops (ADR 0003
+ *  Phase 4c, mirrors the sqlite adapter) — introspection, so a new tenant table
+ *  is covered automatically. */
+const tenantTablesPgCache = new WeakMap<Pool, string[]>();
+async function tenantScopedTablesPg(pool: Pool): Promise<string[]> {
+  const cached = tenantTablesPgCache.get(pool);
+  if (cached) return cached;
+  const { rows } = await pool.query<{ table_name: string }>(
+    `SELECT table_name FROM information_schema.columns
+     WHERE table_schema = 'public' AND column_name = 'tenant_id'
+     ORDER BY table_name`,
+  );
+  const names = rows.map((r) => r.table_name);
+  tenantTablesPgCache.set(pool, names);
+  return names;
 }
 
 export async function openPostgresStorage(options: PostgresStorageOptions | string): Promise<Storage> {
@@ -314,35 +335,31 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       const existing = await impl.getRun(runId);
       if (!existing) return;
       const merged: RunRecord = { ...existing, ...patch, updatedAt: new Date().toISOString() };
-      await pool.query(
-        `UPDATE runs SET
-          status = $1,
-          inputs = $2,
-          metadata = $3,
-          configurable = $4,
-          callback_url = $5,
-          updated_at = $6,
-          completed_at = $7,
-          error_code = $8,
-          error_message = $9,
-          current_node_id = $10,
-          scheduler_snapshot = $11
-        WHERE run_id = $12`,
-        [
-          merged.status,
-          merged.inputs ?? null,
-          merged.metadata ?? {},
-          merged.configurable ?? {},
-          merged.callbackUrl ?? null,
-          merged.updatedAt,
-          merged.completedAt ?? null,
-          merged.error?.code ?? null,
-          merged.error?.message ?? null,
-          merged.currentNodeId ?? null,
-          merged.schedulerSnapshot ?? null,
-          runId,
-        ],
-      );
+      // COLUMN-SCOPED write: only the fields present in `patch` (plus
+      // updated_at) are SET — see the sqlite adapter for the race this closes
+      // (concurrent disjoint-field writers clobbering each other's columns).
+      const has = (k: keyof RunRecord): boolean => Object.prototype.hasOwnProperty.call(patch, k);
+      const sets: string[] = [];
+      const values: unknown[] = [];
+      const add = (column: string, value: unknown): void => {
+        values.push(value);
+        sets.push(`${column} = $${values.length}`);
+      };
+      add('updated_at', merged.updatedAt);
+      if (has('status')) add('status', merged.status);
+      if (has('inputs')) add('inputs', merged.inputs ?? null);
+      if (has('metadata')) add('metadata', merged.metadata ?? {});
+      if (has('configurable')) add('configurable', merged.configurable ?? {});
+      if (has('callbackUrl')) add('callback_url', merged.callbackUrl ?? null);
+      if (has('completedAt')) add('completed_at', merged.completedAt ?? null);
+      if (has('error')) {
+        add('error_code', merged.error?.code ?? null);
+        add('error_message', merged.error?.message ?? null);
+      }
+      if (has('currentNodeId')) add('current_node_id', merged.currentNodeId ?? null);
+      if (has('schedulerSnapshot')) add('scheduler_snapshot', merged.schedulerSnapshot ?? null);
+      values.push(runId);
+      await pool.query(`UPDATE runs SET ${sets.join(', ')} WHERE run_id = $${values.length}`, values);
     },
 
     async listRuns({ tenantId, status, limit = 100 }) {
@@ -469,11 +486,12 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
 
     async insertInterrupt(record) {
       await pool.query(
-        `INSERT INTO interrupts (interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        `INSERT INTO interrupts (interrupt_id, run_id, node_id, kind, token, data, resume_schema, created_at, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
         [
           record.interruptId, record.runId, record.nodeId, record.kind, record.token,
           record.data ?? null, record.resumeSchema ?? null, record.createdAt,
+          record.expiresAt ?? null,
         ],
       );
     },
@@ -513,12 +531,20 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rows.map(rowToInterrupt);
     },
 
+    async listOpenInterruptsAll(limit) {
+      const { rows } = await pool.query<Row>(
+        `SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at ASC LIMIT $1`,
+        [limit],
+      );
+      return rows.map(rowToInterrupt);
+    },
+
     async insertWebhook(record) {
       await pool.query(
-        `INSERT INTO webhooks (subscription_id, url, events, tags, secret, created_at)
-         VALUES ($1,$2,$3,$4,$5,$6)`,
+        `INSERT INTO webhooks (subscription_id, tenant_id, url, events, tags, secret, created_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
         [
-          record.subscriptionId, record.url,
+          record.subscriptionId, record.tenantId, record.url,
           record.events, record.tags ?? null,
           record.secret, record.createdAt,
         ],
@@ -534,10 +560,13 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       await pool.query(`DELETE FROM webhooks WHERE subscription_id = $1`, [subscriptionId]);
     },
 
-    async listWebhooks({ eventType, tags }) {
+    async listWebhooks({ eventType, tags, tenantId }) {
       const { rows } = await pool.query<Row>(`SELECT * FROM webhooks`);
       const all = rows.map(rowToWebhook);
       return all.filter((sub) => {
+        // RFC 0093 §A.3 — tenant scope is exact-match; cross-tenant
+        // subscriptions never match regardless of filter breadth.
+        if (tenantId !== undefined && sub.tenantId !== tenantId) return false;
         if (eventType && !sub.events.includes(eventType) && !sub.events.includes('*')) return false;
         const subTags = sub.tags;
         if (tags && tags.length > 0 && subTags && subTags.length > 0) {
@@ -674,6 +703,35 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
           input.payload ?? null,
         ],
       );
+    },
+
+    async listAudit(filter) {
+      const limit = Math.min(Math.max(filter?.limit ?? 100, 1), 500);
+      const { rows } = await pool.query<{
+        audit_id: string;
+        timestamp: string;
+        principal_id: string | null;
+        action: string;
+        resource: string | null;
+        outcome: string | null;
+        payload: unknown;
+      }>(
+        `SELECT audit_id, timestamp, principal_id, action, resource, outcome, payload
+           FROM audit_log
+          WHERE action LIKE $1 AND timestamp >= $2
+          ORDER BY timestamp DESC
+          LIMIT $3`,
+        [`${(filter?.actionPrefix ?? '').replace(/[%_\\]/g, '\\$&')}%`, filter?.sinceIso ?? '', limit],
+      );
+      return rows.map((r) => ({
+        auditId: r.audit_id,
+        timestamp: r.timestamp,
+        action: r.action,
+        ...(r.principal_id !== null ? { principalId: r.principal_id } : {}),
+        ...(r.resource !== null ? { resource: r.resource } : {}),
+        ...(r.outcome !== null ? { outcome: r.outcome } : {}),
+        ...(r.payload !== null && r.payload !== undefined ? { payload: r.payload } : {}),
+      }));
     },
 
     async getInvocation({ runId, nodeId, attempt, providerKey }) {
@@ -894,21 +952,55 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
     },
 
     async reassignTenant(fromTenant, toTenant) {
-      // Wrap both UPDATEs in a single transaction so partial failure
-      // doesn't leave the data split across two tenants.
+      // ADR 0003 Phase 4c — adopt-migration (see sqlite/index.ts + tenantMigration.ts
+      // for the full contract). ONE transaction: every `tenant_id` SQL table
+      // (discovered by introspection — complete by construction) + a read-modify-
+      // write of host-ext KV content rows (re-key tenantId/orgId === from),
+      // EXCLUDING the tenant-key-encoding access-control scaffolding. Atomic +
+      // idempotent (a re-run finds nothing under `from`).
+      const tables = await tenantScopedTablesPg(pool);
       const client = await pool.connect();
       try {
         await client.query('BEGIN');
-        const r1 = await client.query(
-          `UPDATE runs SET tenant_id = $1 WHERE tenant_id = $2`,
-          [toTenant, fromTenant],
+        const counts: Record<string, number> = {};
+        for (const t of tables) {
+          // `t` comes from information_schema (trusted catalog), quoted defensively.
+          const r = await client.query(
+            `UPDATE "${t.replace(/"/g, '""')}" SET tenant_id = $1 WHERE tenant_id = $2`,
+            [toTenant, fromTenant],
+          );
+          counts[t] = r.rowCount ?? 0;
+        }
+        // host-ext KV content (parse → re-key tenantId/orgId → write), excluding
+        // access-control scaffolding whose row key encodes the tenant.
+        const now = new Date().toISOString();
+        const kv = await client.query<{ k: string; v: string }>(
+          `SELECT k, v FROM host_ext_kv
+           WHERE k NOT LIKE 'hostext:access-orgs:%' AND k NOT LIKE 'hostext:access-members:%'`,
         );
-        const r2 = await client.query(
-          `UPDATE workflows SET tenant_id = $1 WHERE tenant_id = $2`,
-          [toTenant, fromTenant],
-        );
+        let hostExt = 0;
+        for (const row of kv.rows) {
+          let obj: Record<string, unknown>;
+          try { obj = JSON.parse(row.v) as Record<string, unknown>; } catch { continue; }
+          let changed = false;
+          if (obj.tenantId === fromTenant) { obj.tenantId = toTenant; changed = true; }
+          if (obj.orgId === fromTenant) { obj.orgId = toTenant; changed = true; }
+          if (changed) {
+            await client.query(`UPDATE host_ext_kv SET v = $1, updated_at = $2 WHERE k = $3`, [
+              JSON.stringify(obj), now, row.k,
+            ]);
+            hostExt++;
+          }
+        }
         await client.query('COMMIT');
-        return { runs: r1.rowCount ?? 0, workflows: r2.rowCount ?? 0 };
+        return {
+          tables: counts,
+          hostExt,
+          runs: counts.runs ?? 0,
+          workflows: counts.workflows ?? 0,
+          notifications: counts.notifications ?? 0,
+          pushSubscriptions: counts.push_subscriptions ?? 0,
+        };
       } catch (err) {
         await client.query('ROLLBACK').catch(() => {});
         throw err;

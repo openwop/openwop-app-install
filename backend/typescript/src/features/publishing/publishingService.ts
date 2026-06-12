@@ -12,13 +12,11 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { optionalCleanString, safeUrl, escapeXml } from '../../host/boundedStrings.js';
 import { getOrg } from '../../host/accessControlService.js';
-import { resolveOne } from '../../host/featureToggles/service.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { createLogger } from '../../observability/logger.js';
 import { getPage, getPublishedBySlug, listPages, type Page, type Section } from '../cms/cmsService.js';
 
 const log = createLogger('features.publishing');
-const TOGGLE_ID = 'publishing';
 
 const MAX = {
   metaTitle: 200,
@@ -98,15 +96,14 @@ export async function putSeo(
 
 // ─── public surface (unauthed — org→tenant from URL, toggle-gated) ────────────
 
-/** Resolve the org's tenant + assert `publishing` is on for it; else 404 (the
- *  public site does not exist for an org whose tenant disabled publishing). */
+/** Resolve the org's tenant for the public surface. ADR 0027: Publishing is
+ *  always-on, so there is NO per-tenant toggle gate here — the CMS editorial
+ *  `published` status is the sole public gate (`getPublishedBySlug` is
+ *  published-only; Sharing covers private/draft access). 404 only for an
+ *  unknown org. */
 async function resolvePublicOrg(orgId: string): Promise<string> {
   const org = await getOrg(orgId);
   if (!org) throw new OpenwopError('not_found', 'Site not found.', 404, { orgId });
-  const assignment = await resolveOne(TOGGLE_ID, { tenantId: org.tenantId });
-  if (!assignment || !assignment.enabled) {
-    throw new OpenwopError('not_found', 'Site not found.', 404, { orgId });
-  }
   return org.tenantId;
 }
 

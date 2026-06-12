@@ -26,11 +26,10 @@
  * deeper auth-path integration is a documented follow-on within Phase 1.
  */
 
-import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { createLogger } from '../../observability/logger.js';
-import { tenantOf, requireFeatureEnabled } from '../featureRoute.js';
+import { tenantOf } from '../featureRoute.js';
 import { requireSignedIn, resolveCallerUser } from './usersGuards.js';
 import {
   USER_SOURCES,
@@ -46,11 +45,11 @@ import {
 const log = createLogger('features.users');
 
 /** The Users toggle id — matches the feature id + the future `feature.users.*` packs. */
-const TOGGLE_ID = 'users';
 
 /** Resolve the caller's Users assignment; 404 when not enabled for them
  *  (backend authority — a disabled feature has no surface). */
-const requireEnabled = (req: Request): ReturnType<typeof requireFeatureEnabled> => requireFeatureEnabled(req, TOGGLE_ID, 'Users');
+// Graduated off the feature toggle (2026-06-11, feature.ts § Correction) —
+// every route serves unconditionally; identity is platform plumbing.
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim().length === 0) {
@@ -93,7 +92,6 @@ export function registerUsersRoutes(deps: RouteDeps): void {
   // Fail-closed — a disabled user is denied (finding H5).
   app.get('/v1/host/sample/users/me', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       // ADR 0003: resolve the ONE canonical durable user. A bound session
       // (`req.userId`, after login) resolves by id; an anon session is refused
       // (no durable identity — review finding #8); an OIDC bearer falls back to
@@ -108,9 +106,27 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
+  // Self-serve: update the CALLER's own mutable identity (display name). Distinct
+  // from the admin PATCH /users/:id — this resolves the caller and edits only
+  // their own record, so a user can set their name from their profile page.
+  app.patch('/v1/host/sample/users/me', async (req, res, next) => {
+    try {
+      const user = await resolveCallerUser(req);
+      if (user.status !== 'active') {
+        throw new OpenwopError('forbidden', 'This account is disabled.', 403, { userId: user.userId });
+      }
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const updated = await updateUser(user.userId, {
+        displayName: patchString(body.displayName, 'displayName'),
+      });
+      res.json(updated ?? user);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get('/v1/host/sample/users/users', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       res.json({ users: await listUsers(tenantOf(req)) });
     } catch (err) {
       next(err);
@@ -119,7 +135,6 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   app.post('/v1/host/sample/users/users', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       requireSignedIn(req); // anon sessions can't create durable users / grant groups (finding #4)
       const body = (req.body ?? {}) as Record<string, unknown>;
       const user = await createUser({
@@ -138,7 +153,6 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   app.get('/v1/host/sample/users/users/:id', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       const user = await getUser(req.params.id);
       if (!user || user.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'User not found.', 404, { userId: req.params.id });
@@ -151,7 +165,6 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   app.patch('/v1/host/sample/users/users/:id', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       requireSignedIn(req);
       const existing = await getUser(req.params.id);
       if (!existing || existing.tenantId !== tenantOf(req)) {
@@ -173,8 +186,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
   for (const [verb, status] of [['disable', 'disabled'], ['enable', 'active']] as const) {
     app.post(`/v1/host/sample/users/users/:id/${verb}`, async (req, res, next) => {
       try {
-        await requireEnabled(req);
-        requireSignedIn(req);
+          requireSignedIn(req);
         const existing = await getUser(req.params.id);
         if (!existing || existing.tenantId !== tenantOf(req)) {
           throw new OpenwopError('not_found', 'User not found.', 404, { userId: req.params.id });
@@ -190,7 +202,6 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   app.delete('/v1/host/sample/users/users/:id', async (req, res, next) => {
     try {
-      await requireEnabled(req);
       requireSignedIn(req);
       const existing = await getUser(req.params.id);
       if (!existing || existing.tenantId !== tenantOf(req)) {

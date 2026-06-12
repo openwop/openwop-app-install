@@ -35,7 +35,8 @@
  *                                   sql-parametric-only, fs-path-traversal
  */
 
-import type { Express } from 'express';
+import { randomBytes, randomUUID } from 'node:crypto';
+import type { Express, Response } from 'express';
 import { buildHostSurfaceBundle, resolvePresignToken } from '../host/inMemorySurfaces.js';
 import type { HostSurfaceBundle, SurfaceArgs, SurfaceFn } from '../host/inMemorySurfaces.js';
 import { acceptEnvelope, type AcceptOptions } from '../host/envelopeAcceptor.js';
@@ -60,6 +61,7 @@ import { singleTick, missedWindow } from '../host/schedulingService.js';
 import { runAgentLoop, type AgentLoopRequest } from '../host/agentLoop.js';
 import { execInSandboxVm } from '../host/sandbox.js';
 import { OpenwopError } from '../types.js';
+import { assertReachableUrl } from './webhooks.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('routes.testSeam');
@@ -104,6 +106,91 @@ function lookupMethod(surface: object, op: string): SurfaceFn | undefined {
   return typeof candidate === 'function' ? (candidate as SurfaceFn) : undefined;
 }
 
+/**
+ * RFC 0093 §A.3 — seam-side webhook subscription registry ops backing the
+ * two-tenant half of `webhook-tenant-isolation.test.ts`:
+ *
+ *   register   { url, events[] }  → 200 { webhookId }
+ *   list       {}                 → 200 { webhooks: [{ webhookId, url, events, createdAt }] }
+ *   unregister { webhookId }      → 200 { ok: true } (404 when not in tenant)
+ *
+ * Tenant-scoped exactly like the bundle surfaces: every op acts only on
+ * subscriptions whose `tenantId` equals the seam call's `tenantId`. Secrets
+ * are never returned (matching GET /v1/webhooks).
+ */
+async function handleWebhookSeam(storage: Storage, body: SeamBody, res: Response): Promise<void> {
+  const tenantId = body.tenantId as string; // validated non-empty by the caller
+  const args = (body.args && typeof body.args === 'object' ? body.args : {}) as Record<string, unknown>;
+  try {
+    switch (body.op) {
+      case 'register': {
+        if (typeof args.url !== 'string' || args.url.length === 0) {
+          res.status(400).json({ error: 'invalid_argument', message: 'args.url required' });
+          return;
+        }
+        assertReachableUrl(args.url);
+        const events = Array.isArray(args.events)
+          ? (args.events as unknown[]).filter((e): e is string => typeof e === 'string')
+          : [];
+        if (events.length === 0) {
+          res.status(400).json({ error: 'invalid_argument', message: 'args.events MUST be a non-empty string array' });
+          return;
+        }
+        const webhookId = randomUUID();
+        await storage.insertWebhook({
+          subscriptionId: webhookId,
+          tenantId,
+          url: args.url,
+          events,
+          secret: randomBytes(32).toString('base64url'),
+          createdAt: new Date().toISOString(),
+        });
+        res.status(200).json({ webhookId, subscriptionId: webhookId });
+        return;
+      }
+      case 'list': {
+        const subs = await storage.listWebhooks({ tenantId });
+        res.status(200).json({
+          webhooks: subs.map((s) => ({
+            webhookId: s.subscriptionId,
+            url: s.url,
+            events: s.events,
+            createdAt: s.createdAt,
+          })),
+        });
+        return;
+      }
+      case 'unregister': {
+        if (typeof args.webhookId !== 'string' || args.webhookId.length === 0) {
+          res.status(400).json({ error: 'invalid_argument', message: 'args.webhookId required' });
+          return;
+        }
+        const sub = await storage.getWebhook(args.webhookId);
+        if (!sub || sub.tenantId !== tenantId) {
+          res.status(404).json({ error: 'subscription_not_found', message: 'no such subscription in this tenant' });
+          return;
+        }
+        await storage.deleteWebhook(args.webhookId);
+        res.status(200).json({ ok: true });
+        return;
+      }
+      default:
+        res.status(400).json({
+          error: 'invalid_argument',
+          message: `op '${String(body.op)}' not implemented on surface 'webhooks' (register | list | unregister)`,
+        });
+        return;
+    }
+  } catch (err) {
+    if (err instanceof OpenwopError) {
+      res.status(err.httpStatus ?? 400).json({ error: err.code, message: err.message });
+      return;
+    }
+    const message = err instanceof Error ? err.message : String(err);
+    res.status(400).json({ error: { code: 'internal_error', message } });
+  }
+}
+
 export function registerTestSeamRoutes(app: Express, deps: { storage: Storage }): void {
   if (process.env.OPENWOP_TEST_SEAM_ENABLED !== 'true') {
     log.info('test seam disabled (set OPENWOP_TEST_SEAM_ENABLED=true to enable)');
@@ -117,10 +204,18 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       res.status(400).json({ error: 'invalid_argument', message: 'tenantId required' });
       return;
     }
+    // RFC 0093 §A.3 — `surface: "webhooks"` drives the two-tenant
+    // subscription-registry proof in webhook-tenant-isolation.test.ts. Backed
+    // by the REAL storage `webhooks` table (the same registry the routes +
+    // delivery fanout read), tenant-scoped exactly like the bundle surfaces.
+    if (body.surface === 'webhooks') {
+      await handleWebhookSeam(deps.storage, body, res);
+      return;
+    }
     if (typeof body.surface !== 'string' || !isSurfaceName(body.surface)) {
       res.status(400).json({
         error: 'invalid_argument',
-        message: `surface must be one of {${SURFACES.join(', ')}}`,
+        message: `surface must be one of {${SURFACES.join(', ')}, webhooks}`,
       });
       return;
     }

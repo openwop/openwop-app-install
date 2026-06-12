@@ -1,16 +1,20 @@
 /**
  * Publishing & SEO routes (ADR 0012). Two surfaces:
  *   - AUTHED  /v1/host/sample/publishing/orgs/:orgId/pages/:pageId/seo
- *       (authorizeOrgScope — GET workspace:read, PUT workspace:write)
+ *       (requireOrgScope — GET workspace:read, PUT workspace:write)
  *   - PUBLIC  /v1/host/sample/public/:orgId/*  (NO auth — org→tenant from URL,
- *       gated on the org-tenant's `publishing` toggle, published-only). The
- *       `/v1/host/sample/public` prefix is on PUBLIC_PATH_PREFIXES (auth.ts).
+ *       published-only). The `/v1/host/sample/public` prefix is on
+ *       PUBLIC_PATH_PREFIXES (auth.ts).
  *
- * @see docs/adr/0012-publishing-seo.md
+ * ADR 0027: Publishing is always-on — no toggle gate. The authed SEO routes keep
+ * their org-scoped RBAC; the public surface is gated only by the CMS `published`
+ * status (the per-tenant toggle is gone — Sharing covers private/draft access).
+ *
+ * @see docs/adr/0012-publishing-seo.md · docs/adr/0027-cms-front-page-and-always-on-content.md
  */
 
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, publicBaseUrl } from '../featureRoute.js';
+import { requireOrgScope, publicBaseUrl } from '../featureRoute.js';
 import {
   feedRss,
   getSeo,
@@ -20,8 +24,6 @@ import {
   sitemapXml,
 } from './publishingService.js';
 
-const FEATURE = { toggleId: 'publishing', label: 'Publishing' };
-
 export function registerPublishingRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
@@ -30,14 +32,14 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
 
   app.get(SEO, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      const { user, orgId } = await requireOrgScope(req, 'workspace:read');
       res.json({ seo: await getSeo(user.tenantId, orgId, req.params.pageId) });
     } catch (err) { next(err); }
   });
 
   app.put(SEO, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const { user, orgId } = await requireOrgScope(req, 'workspace:write');
       const body = (req.body ?? {}) as Record<string, unknown>;
       res.json({ seo: await putSeo(user.tenantId, orgId, req.params.pageId, user.userId, body) });
     } catch (err) { next(err); }

@@ -1,11 +1,30 @@
 /**
  * Shared identity guards for the users feature (review finding #10 — these were
- * duplicated across routes.ts and mfaRoutes.ts).
+ * duplicated across the feature's route modules).
  */
 
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
-import { getUser, upsertFromPrincipal, type User } from './usersService.js';
+import { getUser, upsertFromPrincipal, resolveCanonicalUserForTenant, type User, type UserSource } from './usersService.js';
+
+/** Principal shapes that represent a DURABLE identity and may be reconciled into
+ *  a `User`. A transient `session:<sid>` (or any unknown shape) MUST NOT — that is
+ *  the identity fragmentation ADR 0003 eliminates (it is how a stray
+ *  `session:<sid>` "manual" user gets minted). Maps each prefix to its source. */
+const DURABLE_PRINCIPALS: ReadonlyArray<readonly [string, UserSource]> = [
+  ['oidc:', 'oidc'],
+  ['user:', 'oidc'], // already-canonical subject (re-resolved by id above, normally)
+  ['password:', 'password'],
+  ['saml:', 'saml'],
+  ['scim:', 'scim'],
+];
+
+/** The `UserSource` to reconcile a principal under, or `null` if its shape is NOT
+ *  a durable identity (e.g. a transient `session:<sid>`) and must be refused. Pure
+ *  + exported so the guard is unit-testable without an Express `Request`. */
+export function reconcilableSource(principalId: string): UserSource | null {
+  return DURABLE_PRINCIPALS.find(([prefix]) => principalId.startsWith(prefix))?.[1] ?? null;
+}
 
 /** An anonymous demo session — no durable identity (review finding #8). A session
  *  BOUND to a durable user (`req.userId`, ADR 0003) is never anonymous, even if
@@ -37,22 +56,53 @@ export function principalOf(req: Request): string {
 }
 
 /**
- * Resolve the caller's ONE canonical durable user (ADR 0003). A session bound to
- * a durable account (`req.userId`, set after password login) resolves directly
- * by id — the single keying that makes `/me`, MFA, and the `/login` gate agree.
- * A signed-in caller without a bound userId (e.g. OIDC bearer, `oidc:<sub>`)
- * falls back to principal-keyed reconciliation. Anonymous callers are refused.
+ * Resolve the caller's ONE canonical durable user (ADR 0003). Anonymous callers
+ * are refused.
+ *
+ * PERSONAL-TENANT MODEL (Firebase/OIDC — the prod config): the caller's home
+ * tenant (`req.personalTenant`, a single-human `user:<hash(issuer:uid)>` that is
+ * STABLE across the bearer / bound-cookie / session channels) keys ONE canonical
+ * durable user. This is the fix for identity fragmentation (2026-06-12): the
+ * prior principal-keyed resolution minted a SEPARATE user per channel
+ * (`oidc:<sub>` bearer vs a bound `user:<userId>` cookie), so per-user data —
+ * profile, pinned agents, notification prefs — split across them and a pin
+ * written on one identity was invisible to reads on the other. Canonicalizing on
+ * the home tenant collapses the channels and self-reconciles existing splits
+ * (resolveCanonicalUserForTenant adopts the federated `oidc` record).
+ *
+ * SHARED / NON-PERSONAL TENANTS: many humans share one tenantId, so identity
+ * MUST stay principal-keyed — a bound `req.userId` resolves directly (the keying
+ * that makes `/me`, MFA, and the `/login` gate agree); an unbound durable
+ * principal reconciles by `(tenantId, principalId)`. Never collapse these onto a
+ * tenant key.
  */
 export async function resolveCallerUser(req: Request): Promise<User> {
   requireSignedIn(req);
+  // Single-human personal tenant → canonicalize across the caller's auth
+  // channels onto one durable user (keyed by the stable home tenant, not the
+  // volatile principal). Gated on the `user:` prefix so a shared/org tenant
+  // never routes here (that would merge distinct humans).
+  const homeTenant = req.personalTenant;
+  if (homeTenant && homeTenant.startsWith('user:')) {
+    const principalId = req.principal?.principalId ?? homeTenant;
+    const source: UserSource =
+      principalId.startsWith('oidc:') || principalId.startsWith('user:')
+        ? 'oidc'
+        : reconcilableSource(principalId) ?? 'oidc';
+    return resolveCanonicalUserForTenant({ homeTenant, principalId, source });
+  }
   if (req.userId) {
     const user = await getUser(req.userId);
     if (!user) throw new OpenwopError('sign_in_required', 'Session identity not found.', 401, {});
     return user;
   }
-  return upsertFromPrincipal({
-    tenantId: req.tenantId ?? 'default',
-    principalId: principalOf(req),
-    source: req.principal?.principalId?.startsWith('oidc:') ? 'oidc' : 'manual',
-  });
+  const principalId = principalOf(req);
+  // Reconcile ONLY a durable principal shape. `requireSignedIn` keys on the
+  // tenant prefix (`anon:`) and can miss a transient `session:<sid>` carried on a
+  // non-anon tenant — refuse it here by SHAPE so it never becomes a durable User.
+  const source = reconcilableSource(principalId);
+  if (!source) {
+    throw new OpenwopError('sign_in_required', 'Sign in to access your account.', 401, {});
+  }
+  return upsertFromPrincipal({ tenantId: req.tenantId ?? 'default', principalId, source });
 }

@@ -94,6 +94,15 @@ export async function getBoard(boardId: string): Promise<{ board: KanbanBoard; c
   return (await res.json()) as { board: KanbanBoard; cards: KanbanCard[] };
 }
 
+/** ADR 0025 — the caller's personal "My Board", ensured server-side (idempotent).
+ *  Surfaces the human as a board-owning orchestration principal, mirroring the
+ *  agent profile's board. Returns the board + its cards in one round trip. */
+export async function getPersonalBoard(): Promise<{ board: KanbanBoard; cards: KanbanCard[] }> {
+  const res = await fetch(`${base}/boards/personal`, fetchOpts({ headers: authedHeaders() }));
+  if (!res.ok) throw new Error(`getPersonalBoard returned ${res.status}`);
+  return (await res.json()) as { board: KanbanBoard; cards: KanbanCard[] };
+}
+
 /** Rename a board — `name` is the only mutable field (owner/columns are
  *  deliberately immutable via PATCH; see the route's architect note). */
 export async function patchBoard(boardId: string, input: { name: string }): Promise<KanbanBoard> {

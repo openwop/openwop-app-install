@@ -88,6 +88,7 @@ function mkInterrupt(runId: string, nodeId: string): InterruptRecord {
 function mkWebhook(id: string): WebhookSubscriptionRecord {
   return {
     subscriptionId: `sub-${id}`,
+    tenantId: 'default',
     url: `https://example.test/webhook/${id}`,
     events: ['run.completed', 'run.failed'],
     secret: 'whsec_test',
@@ -412,6 +413,105 @@ describe('Storage parity: tenant reassign (anon → user migration)', () => {
     expect(counts.runs).toBe(2);
     expect((await s.listRuns({ tenantId: fromT })).length).toBe(0);
     expect((await s.listRuns({ tenantId: toT })).length).toBe(2);
+  });
+
+  // ADR 0003 Phase 4c: reassignTenant must move EVERY tenant-scoped column store
+  // (not just runs+workflows), else an anon→user signup strands notifications +
+  // push subscriptions in the dead anon tenant.
+  it.each(backendNames)('%s: reassignTenant also moves notifications + push subscriptions', async (name) => {
+    const s = S(name);
+    const now = new Date().toISOString();
+    const fromT = `anon-${name}-${Math.random().toString(36).slice(2)}`;
+    const toT = `user-${name}-${Math.random().toString(36).slice(2)}`;
+
+    await s.insertNotification({ notificationId: `n-${name}`, tenantId: fromT, type: 'system', priority: 'normal', status: 'unread', title: 't', message: 'm', createdAt: now });
+    await s.insertPushSubscription({ subscriptionId: `ps-${name}`, tenantId: fromT, endpoint: `https://push.example/${name}`, p256dhKey: 'k', authKey: 'a', createdAt: now });
+
+    const counts = await s.reassignTenant(fromT, toT);
+    expect(counts.notifications).toBe(1);
+    expect(counts.pushSubscriptions).toBe(1);
+
+    // Source tenant fully drained; destination has them all.
+    expect((await s.listNotifications({ tenantId: fromT })).length).toBe(0);
+    expect((await s.listNotifications({ tenantId: toT })).length).toBe(1);
+    expect((await s.listPushSubscriptions(fromT)).length).toBe(0);
+    expect((await s.listPushSubscriptions(toT)).length).toBe(1);
+  });
+
+  // ADR 0003 Phase 4c: reassignTenant must ALSO re-key host-ext content rows
+  // (CRM/kanban/KB… in host_ext_kv) by their JSON tenantId/orgId — but MUST NOT
+  // touch the access-control scaffolding (personal-workspace org + deterministic
+  // owner member) whose ROW KEY encodes the tenant (the destination re-seeds it).
+  it.each(backendNames)('%s: reassignTenant re-keys host-ext content (tenantId+orgId) but skips access scaffolding', async (name) => {
+    const s = S(name);
+    const fromT = `anon-${name}-${Math.random().toString(36).slice(2)}`;
+    const toT = `user-${name}-${Math.random().toString(36).slice(2)}`;
+
+    // Content: a kanban board scoped to the personal workspace (orgId == tenant).
+    await s.kvSet(`hostext:kanban:board:b-${name}`, JSON.stringify({ boardId: `b-${name}`, tenantId: fromT, orgId: fromT, title: 'My board' }));
+    // Content with NO orgId (only tenantId) — must still move.
+    await s.kvSet(`hostext:roster:r-${name}`, JSON.stringify({ rosterId: `r-${name}`, tenantId: fromT, name: 'Agent' }));
+    // Content scoped to a DIFFERENT org (a shared workspace) — orgId must be left alone.
+    await s.kvSet(`hostext:kanban:board:shared-${name}`, JSON.stringify({ boardId: `shared-${name}`, tenantId: fromT, orgId: `ws-other-${name}`, title: 'Shared' }));
+    // Access-control scaffolding — EXCLUDED (key encodes the tenant).
+    await s.kvSet(`hostext:access-orgs:${fromT}`, JSON.stringify({ orgId: fromT, tenantId: fromT, name: 'Personal workspace' }));
+    await s.kvSet(`hostext:access-members:mbr-${name}`, JSON.stringify({ memberId: `mbr-${name}`, tenantId: fromT, orgId: fromT, subject: `session:${name}`, roles: ['owner'] }));
+
+    const counts = await s.reassignTenant(fromT, toT);
+    expect(counts.hostExt).toBe(3); // board + roster + shared-board (all carry tenantId === from)
+
+    const board = JSON.parse((await s.kvGet(`hostext:kanban:board:b-${name}`))!) as { tenantId: string; orgId: string };
+    expect(board.tenantId).toBe(toT);
+    expect(board.orgId).toBe(toT); // orgId == tenant → re-keyed
+
+    const roster = JSON.parse((await s.kvGet(`hostext:roster:r-${name}`))!) as { tenantId: string };
+    expect(roster.tenantId).toBe(toT);
+
+    const shared = JSON.parse((await s.kvGet(`hostext:kanban:board:shared-${name}`))!) as { tenantId: string; orgId: string };
+    expect(shared.tenantId).toBe(toT); // tenant moves
+    expect(shared.orgId).toBe(`ws-other-${name}`); // foreign org left untouched
+
+    // Scaffolding untouched — the destination re-seeds its own canonical workspace.
+    const org = JSON.parse((await s.kvGet(`hostext:access-orgs:${fromT}`))!) as { tenantId: string };
+    expect(org.tenantId).toBe(fromT);
+    const member = JSON.parse((await s.kvGet(`hostext:access-members:mbr-${name}`))!) as { tenantId: string };
+    expect(member.tenantId).toBe(fromT);
+  });
+
+  // ADR 0003 Phase 4c: introspection genuinely broadened coverage — a chat_session
+  // (a table the OLD explicit reassign did NOT touch) now migrates, proving the
+  // schema-introspected table set closed the silent-strand gap.
+  it.each(backendNames)('%s: reassignTenant covers tables beyond the old hardcoded set (chat_sessions)', async (name) => {
+    const s = S(name);
+    const now = new Date().toISOString();
+    const fromT = `anon-chat-${name}-${Math.random().toString(36).slice(2)}`;
+    const toT = `user-chat-${name}-${Math.random().toString(36).slice(2)}`;
+    await s.createChatSession({ sessionId: `cs-${name}`, tenantId: fromT, title: 'Anon chat', createdAt: now, updatedAt: now, messageCount: 0 });
+
+    const counts = await s.reassignTenant(fromT, toT);
+    expect(counts.tables.chat_sessions).toBe(1);
+    expect((await s.listChatSessions(fromT)).length).toBe(0);
+    expect((await s.listChatSessions(toT)).length).toBe(1);
+  });
+
+  // ADR 0003 Phase 4c: the whole re-key is ONE transaction → idempotent. A second
+  // run finds nothing under the source and is a clean no-op (signup/bind retries).
+  it.each(backendNames)('%s: reassignTenant is idempotent on re-run', async (name) => {
+    const s = S(name);
+    const fromT = `anon-idem-${name}-${Math.random().toString(36).slice(2)}`;
+    const toT = `user-idem-${name}-${Math.random().toString(36).slice(2)}`;
+    await s.insertRun(mkRun(`idem-${name}`, { tenantId: fromT }));
+    await s.kvSet(`hostext:kanban:board:idem-${name}`, JSON.stringify({ boardId: `idem-${name}`, tenantId: fromT }));
+
+    const first = await s.reassignTenant(fromT, toT);
+    expect(first.runs).toBe(1);
+    expect(first.hostExt).toBe(1);
+
+    const second = await s.reassignTenant(fromT, toT);
+    expect(second.runs).toBe(0);
+    expect(second.hostExt).toBe(0);
+    // Destination still has exactly the migrated data (not duplicated).
+    expect((await s.listRuns({ tenantId: toT })).length).toBe(1);
   });
 });
 

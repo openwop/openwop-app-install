@@ -28,6 +28,9 @@ export interface AgentActivityItem {
   status: string;
   source: AgentActivitySource;
   rosterId?: string;
+  /** ADR 0025 — a human user principal, when the run was attributed to a person
+   *  (their personal board / schedule) rather than a roster agent. */
+  ownerUserId?: string;
   agentId?: string;
   persona?: string;
   cardId?: string;
@@ -47,6 +50,9 @@ export interface AgentActivityItem {
 export interface ActivityFilter {
   /** Keep only runs attributed to this roster member. */
   rosterId?: string;
+  /** ADR 0025 — keep only runs attributed to this human user (their personal
+   *  board / schedule). The user-side mirror of `rosterId`. */
+  userId?: string;
   /** Keep only runs in this terminal/active status (e.g. 'failed'). */
   status?: string;
 }
@@ -75,6 +81,7 @@ export function projectAgentActivity(runs: readonly RunRecord[], filter: Activit
     }
     if (!chosen) continue;
     if (filter.rosterId && chosen.block.rosterId !== filter.rosterId) continue;
+    if (filter.userId && chosen.block.ownerUserId !== filter.userId) continue;
     const durationMs = run.completedAt
       ? Math.max(0, new Date(run.completedAt).getTime() - new Date(run.createdAt).getTime())
       : undefined;
@@ -84,6 +91,7 @@ export function projectAgentActivity(runs: readonly RunRecord[], filter: Activit
       status: run.status,
       source: chosen.source,
       rosterId: str(chosen.block.rosterId),
+      ownerUserId: str(chosen.block.ownerUserId),
       agentId: str(chosen.block.agentId),
       persona: str(chosen.block.persona),
       cardId: str(chosen.block.cardId),

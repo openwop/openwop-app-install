@@ -4,10 +4,13 @@ import type { RunEventDoc } from '@openwop/openwop';
 import { cancelRun, deleteRun, listMyRuns, pollEvents, type RunListItem } from '../client/runsClient.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { StatusBadge } from '../ui/StatusBadge.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Notice } from '../ui/Notice.js';
+import { Skeleton } from '../ui/Skeleton.js';
 import { subscribeToRun } from '../client/streamsClient.js';
 import { RunAgentTrace } from './RunAgentTrace.js';
 import { RunHandoffMap } from './RunHandoffMap.js';
-import { AlertIcon } from '../ui/icons/index.js';
+import { AlertIcon, ActivityIcon, TrashIcon } from '../ui/icons/index.js';
 
 // "Mission Control" — RFC 0055/0056 NOT required. This page is a pure
 // composition of surfaces the protocol + app already expose: it polls
@@ -72,6 +75,14 @@ export function CommandCenterPage() {
 
   const selectedListItem = runs.find((r) => r.runId === selectedRunId) ?? null;
 
+  // Float runs that need a human to the top of the rail so the eye is pulled
+  // to what's blocked — mission-control triage, not a flat list. Stable within
+  // each group (the poll already returns newest-first).
+  const sortedRuns = [...runs].sort(
+    (a, b) => Number(needsAttention(b.status)) - Number(needsAttention(a.status)),
+  );
+  const attentionCount = runs.filter((r) => needsAttention(r.status)).length;
+
   // Per-run kill (cancel) / delete. Both drop the run from the active view;
   // selection clears if the acted-on run was selected. The 5s poll reconciles.
   const [busyRunId, setBusyRunId] = useState<string | null>(null);
@@ -105,27 +116,40 @@ export function CommandCenterPage() {
         lede="Live view of every in-flight run for this session. Select a run to watch its agent handoffs and reasoning stream in real time."
         actions={
           <span className="muted u-fs-12" aria-live="polite">
-            {runs.length} active{runs.some((r) => needsAttention(r.status)) ? ` · ${runs.filter((r) => needsAttention(r.status)).length} need attention` : ''}
+            {runs.length} active{attentionCount > 0 ? ` · ${attentionCount} need attention` : ''}
           </span>
         }
       />
-      {listError && <div className="alert error">{listError}</div>}
-      {actionError && <div className="alert error">{actionError}</div>}
+      {listError && <Notice variant="error">{listError}</Notice>}
+      {actionError && <Notice variant="error">{actionError}</Notice>}
 
       <div className="command-center">
         <aside className="command-center-rail" aria-label="Active runs">
-          {loadedOnce && runs.length === 0 ? (
-            <div className="card">
-              <p className="muted u-m-0">
-                No active runs. Start one from <Link to="/builder">Workflows</Link> or <Link to="/">Chat</Link>.
-              </p>
-            </div>
+          {!loadedOnce ? (
+            // First-fetch placeholder so the rail reads as loading-on-purpose,
+            // not a blank gate, while listMyRuns resolves.
+            Array.from({ length: 3 }, (_, i) => (
+              <div key={i} className="surface-card u-grid u-gap-2" aria-hidden="true">
+                <div className="u-flex u-items-center u-gap-2">
+                  <Skeleton width={72} />
+                  <Skeleton width={56} height={16} radius={999} />
+                </div>
+                <Skeleton width="80%" />
+              </div>
+            ))
+          ) : runs.length === 0 ? (
+            <StateCard
+              icon={<ActivityIcon size={20} />}
+              title="No active runs"
+              body="In-flight runs appear here automatically as you start them."
+              action={<Link className="primary" to="/builder">New workflow run</Link>}
+            />
           ) : (
-            runs.map((r) => {
+            sortedRuns.map((r) => {
               const isSel = r.runId === selectedRunId;
               const busy = busyRunId === r.runId;
               return (
-                <div key={r.runId} className={`cc-run${isSel ? ' cc-run--selected' : ''}`}>
+                <div key={r.runId} className={`surface-card cc-run${isSel ? ' cc-run--selected' : ''}`}>
                   <button
                     type="button"
                     className="cc-run-select"
@@ -138,15 +162,25 @@ export function CommandCenterPage() {
                     </span>
                     <span className="cc-run-wf" title={r.workflowId}>{r.workflowId}</span>
                     {needsAttention(r.status) && (
-                      <span className="cc-attention"><span aria-hidden="true"><AlertIcon size={12} /> </span>awaiting human input</span>
+                      <span className="chip chip--warning chip--pulse">
+                        <span aria-hidden="true"><AlertIcon size={12} /></span>
+                        Awaiting human input
+                      </span>
                     )}
                   </button>
-                  <div className="cc-run-actions">
-                    <button type="button" className="secondary cc-run-action" disabled={busy} onClick={() => onCancel(r.runId)} title="Cancel (kill) this run">
+                  <div className="action-bar">
+                    <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => onCancel(r.runId)} title="Cancel (kill) this run">
                       {busy ? '…' : 'Cancel'}
                     </button>
-                    <button type="button" className="secondary cc-run-action" disabled={busy} onClick={() => onDelete(r.runId)} title="Delete this run permanently">
-                      Delete
+                    <button
+                      type="button"
+                      className="secondary btn-sm"
+                      disabled={busy}
+                      onClick={() => onDelete(r.runId)}
+                      title="Delete this run permanently"
+                      aria-label="Delete run permanently"
+                    >
+                      <span aria-hidden="true"><TrashIcon size={14} /></span>
                     </button>
                   </div>
                 </div>
@@ -163,10 +197,12 @@ export function CommandCenterPage() {
               fallbackStatus={selectedListItem?.status}
             />
           ) : (
-            loadedOnce && (
-              <div className="card">
-                <p className="muted u-m-0">Select a run from the left to watch it live.</p>
-              </div>
+            loadedOnce && runs.length > 0 && (
+              <StateCard
+                icon={<ActivityIcon size={20} />}
+                title="Select a run to watch it live"
+                body="Pick a run from the left to stream its agent handoffs and reasoning in real time."
+              />
             )
           )}
         </div>
@@ -223,16 +259,21 @@ function RunWatch({ runId, fallbackStatus }: { runId: string; fallbackStatus?: s
 
   return (
     <>
-      <div className="card">
+      <div className="surface-card">
         <div className="u-flex u-items-center u-gap-2 u-wrap">
-          {live && <span className="cc-live-dot" aria-hidden="true" />}
           <h2 className="u-m-0 u-flex-1">
             Run <code>{runId.slice(0, 8)}…</code>
             <StatusBadge status={status} className="u-ml-2" />
           </h2>
+          {live && (
+            <span className="chip chip--accent chip--pulse" title="Streaming live">
+              <span aria-hidden="true"><ActivityIcon size={12} /></span>
+              Live
+            </span>
+          )}
           <Link to={`/runs/${runId}`}>Open full detail →</Link>
         </div>
-        {streamError && <div className="alert error">{streamError}</div>}
+        {streamError && <div className="u-mt-2"><Notice variant="error">{streamError}</Notice></div>}
       </div>
 
       {hasActivity ? (
@@ -241,11 +282,16 @@ function RunWatch({ runId, fallbackStatus }: { runId: string; fallbackStatus?: s
           <RunAgentTrace events={events} />
         </>
       ) : (
-        <div className="card">
-          <p className="muted u-m-0">
-            {live ? 'Waiting for agent activity…' : 'This run produced no agent handoffs or reasoning events.'}
-          </p>
-        </div>
+        <StateCard
+          loading={live}
+          icon={<ActivityIcon size={20} />}
+          title={live ? 'Waiting for agent activity' : 'No agent activity'}
+          body={
+            live
+              ? 'This run is live — handoffs and reasoning will stream in as soon as the engine emits them.'
+              : 'This run produced no agent handoffs or reasoning events.'
+          }
+        />
       )}
     </>
   );

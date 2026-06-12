@@ -1,0 +1,29 @@
+{
+  "name": "feature.analytics.agents",
+  "version": "1.0.0",
+  "description": "Analytics feature agent pack (ADR 0014) — a manifest agent whose tools are feature.analytics.nodes over the ctx.features.analytics surface. Summarizes a period's metrics into insights; tool-allowlisted to the Analytics feature surface only, and READ-ONLY (it reports, it does not mutate). Mirrors feature.kb.agents.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "analytics", "agent", "insights", "metrics"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.analytics.agents.insights",
+      "persona": "RESEARCH",
+      "label": "Analytics Insights",
+      "description": "Summarizes an org's analytics — traffic, top paths, UTM sources, conversion volume — into a concise insight report, grounded via feature.analytics.nodes.query over ctx.features.analytics. Read-only: it reports, it never mutates.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/analytics-insights.md",
+      "toolAllowlist": [
+        "openwop:feature.analytics.nodes.query"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

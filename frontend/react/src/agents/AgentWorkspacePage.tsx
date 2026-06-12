@@ -9,7 +9,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { checkAgent, updateRosterEntry } from './rosterClient.js';
 import { loadAgentView, statusMeta, relativeTime, type AgentView } from './agentViewModel.js';
 import { workflowName, roleThemeForAgent } from './roleTemplates.js';
-import { PlayIcon } from '../ui/icons/index.js';
+import { PlayIcon, ColumnsIcon, AlertIcon, PinIcon } from '../ui/icons/index.js';
 import type { KanbanCard, KanbanColumn } from '../kanban/kanbanClient.js';
 import { AgentBoardPanel } from './AgentBoardPanel.js';
 import { AgentWorkflowPortfolioPanel } from './AgentWorkflowPortfolioPanel.js';
@@ -17,9 +17,13 @@ import { AgentSchedulesPanel } from './AgentSchedulesPanel.js';
 import { AgentInstructionsPanel } from './AgentInstructionsPanel.js';
 import { AgentIntegrationsPanel } from './AgentIntegrationsPanel.js';
 import { AgentActivityTab } from './AgentActivityTab.js';
+import { RecurringTasksPanel } from './RecurringTasksPanel.js';
+import { AgentHealthPanel } from './AgentHealthPanel.js';
 import { AgentAvatar } from './AgentAvatar.js';
+import { getMyProfile, setAgentPinned } from '../features/profiles/profilesClient.js';
 import { AvatarEditor } from './AvatarEditor.js';
 import { Notice } from '../ui/Notice.js';
+import { StateCard } from '../ui/StateCard.js';
 import { Markdown } from '../ui/Markdown.js';
 
 /** Human label for an autonomous-heartbeat cadence (ms). 0/absent ⇒ manual. */
@@ -36,7 +40,7 @@ const TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'workflows', label: 'Workflows' },
   { key: 'board', label: 'Board' },
-  { key: 'schedules', label: 'Schedules' },
+  { key: 'schedules', label: 'Recurring tasks' },
   { key: 'instructions', label: 'Instructions' },
   { key: 'integrations', label: 'Integrations' },
   { key: 'activity', label: 'Activity' },
@@ -75,6 +79,12 @@ export function AgentWorkspacePage(): JSX.Element {
     }
   }, [rosterId]);
 
+  // Pin state (ADR 0023 — pin an agent to the sidebar). Loaded from the
+  // caller's own profile; the Sidebar reads the same source, so a pin here
+  // shows up there after the profile refetch a pin triggers there.
+  const [pinned, setPinned] = useState(false);
+  const [pinBusy, setPinBusy] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -89,6 +99,30 @@ export function AgentWorkspacePage(): JSX.Element {
     })();
     return () => { cancelled = true; };
   }, [rosterId]);
+
+  useEffect(() => {
+    if (!rosterId) return undefined;
+    let cancelled = false;
+    void getMyProfile()
+      .then((p) => { if (!cancelled) setPinned((p.pinnedAgentIds ?? []).includes(rosterId)); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [rosterId]);
+
+  const onTogglePin = useCallback(async () => {
+    if (!rosterId) return;
+    setPinBusy(true);
+    try {
+      await setAgentPinned(rosterId, !pinned);
+      setPinned((v) => !v);
+      // Tell the Sidebar to re-read its pinned list.
+      window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not update pin.');
+    } finally {
+      setPinBusy(false);
+    }
+  }, [rosterId, pinned]);
 
   const onCheckNow = async () => {
     if (!view) return;
@@ -135,18 +169,23 @@ export function AgentWorkspacePage(): JSX.Element {
     }
   };
 
-  if (loading) return <section className="u-p-4"><p className="muted">Loading agent…</p></section>;
+  if (loading) return <section className="u-p-4"><StateCard title="Loading agent…" loading /></section>;
   if (!view) {
     return (
       <section className="u-p-4">
-        <p>Agent not found. <Link to="/agents">Back to agents</Link></p>
+        <StateCard
+          icon={<AlertIcon size={20} />}
+          title="Agent not found"
+          body="This coworker may have been removed or the link is out of date."
+          action={<Link to="/agents" className="secondary btn-sm">Back to agents</Link>}
+        />
       </section>
     );
   }
 
   const { entry } = view;
   const sm = statusMeta(view.status);
-  const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows);
+  const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows, entry.roleKey);
 
   return (
     <section>
@@ -160,6 +199,17 @@ export function AgentWorkspacePage(): JSX.Element {
           <div className="muted">{entry.label ?? 'Agent'}</div>
         </div>
         <div className="action-bar">
+          <button
+            type="button"
+            className={pinned ? 'btn-accent' : 'secondary'}
+            disabled={pinBusy}
+            aria-pressed={pinned}
+            onClick={() => void onTogglePin()}
+            title={pinned ? 'Unpin from the sidebar' : 'Pin to the sidebar for quick access'}
+          >
+            <PinIcon size={14} style={{ verticalAlign: '-2px', marginInlineEnd: '4px' }} />
+            {pinned ? 'Pinned' : 'Pin'}
+          </button>
           <span className={`chip ${sm.chip}`} title={sm.help}>{sm.label}</span>
           <span
             className="chip chip--muted"
@@ -201,22 +251,17 @@ export function AgentWorkspacePage(): JSX.Element {
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success">{notice}</Notice> : null}
 
-      {/* Tabs */}
-      <div role="tablist" className="u-flex u-gap-1 u-border-b u-mb-4 u-wrap">
+      {/* Tabs — the canonical editorial tab strip (DESIGN.md §5 `.tabs`/`.tab`),
+          symmetric with the user profile's tabs (ADR 0025). */}
+      <div className="tabs u-mb-4 u-wrap" role="tablist">
         {TABS.map((t) => (
           <button
             key={t.key}
+            type="button"
             role="tab"
             aria-selected={tab === t.key}
-            type="button"
+            className="tab"
             onClick={() => setTab(t.key)}
-            className="agentws-tab"
-            style={{
-              background: tab === t.key ? 'var(--color-surface-2)' : 'transparent',
-              fontWeight: tab === t.key ? 700 : 400,
-              color: tab === t.key ? 'var(--color-text)' : 'var(--color-text-muted)',
-              borderBottom: tab === t.key ? '2px solid var(--color-accent)' : '2px solid transparent',
-            }}
           >
             {t.label}
           </button>
@@ -230,6 +275,17 @@ export function AgentWorkspacePage(): JSX.Element {
       {tab === 'instructions' ? <AgentInstructionsPanel entry={entry} onChanged={() => void refresh()} /> : null}
       {tab === 'integrations' ? <AgentIntegrationsPanel boardId={view.board?.id ?? null} persona={entry.persona} onChanged={() => void refresh()} /> : null}
       {tab === 'activity' ? <AgentActivityTab rosterId={entry.rosterId} persona={entry.persona} refreshSignal={boardRefresh} /> : null}
+
+      {/* ADR 0023 — the Chief of Staff's recurring tasks (perception loops) +
+          operating-health metrics, shown at the bottom of its workspace. Only
+          this agent owns loops/health; the health panel self-hides for
+          non-admins (the endpoint is superadmin-gated). */}
+      {entry.roleKey === 'chief-of-staff' ? (
+        <div className="u-mt-4 u-grid u-gap-4">
+          <RecurringTasksPanel />
+          <AgentHealthPanel />
+        </div>
+      ) : null}
 
       <details className="u-mt-5">
         <summary className="muted u-fs-12 u-cursor-pointer">Advanced protocol details</summary>
@@ -252,7 +308,13 @@ export function AgentWorkspacePage(): JSX.Element {
 }
 
 function NoBoard({ persona }: { persona: string }): JSX.Element {
-  return <p className="muted">{persona} has no task board yet.</p>;
+  return (
+    <StateCard
+      icon={<ColumnsIcon size={20} />}
+      title="No task board yet"
+      body={`${persona} has no task board yet.`}
+    />
+  );
 }
 
 const PRIORITY_RANK: Record<string, number> = { high: 0, normal: 1, low: 2 };

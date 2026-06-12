@@ -25,7 +25,7 @@
  * @see src/host/schedulingService.ts — the process-local host-ext precedent
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, publishHostExtEvent, subscribeHostExtEvent } from './hostExtPersistence.js';
 
 /** A column on a board. When `triggerWorkflowId` is set, any card moved
@@ -106,8 +106,22 @@ export interface KanbanBoard {
   /** Optional RFCS/0086 roster member that OWNS this board. When set, a
    *  card→run trigger attributes the run to this named agent (persona). */
   rosterId?: string;
+  /** ADR 0025 — a human USER that owns this board (the user/agent symmetry).
+   *  Mutually exclusive with `rosterId`; a board owned by a person attributes
+   *  card→run triggers to that user, not an agent. */
+  ownerUserId?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** ADR 0025 — the polymorphic board owner: an agent (roster) OR a human user.
+ *  Reads the legacy `rosterId` as `{kind:'agent'}` for back-compat. */
+export type BoardOwner = { kind: 'agent'; rosterId: string } | { kind: 'user'; userId: string } | null;
+
+export function boardOwner(board: KanbanBoard): BoardOwner {
+  if (board.rosterId) return { kind: 'agent', rosterId: board.rosterId };
+  if (board.ownerUserId) return { kind: 'user', userId: board.ownerUserId };
+  return null;
 }
 
 /** Returned by `moveCard` when the destination column resolves a workflow
@@ -144,8 +158,12 @@ export async function createBoard(input: {
   triggerWorkflowId?: string;
   /** Optional RFCS/0086 roster member that owns this board (attribution). */
   rosterId?: string;
+  /** ADR 0025 — a human user that owns this board (mutually exclusive with rosterId). */
+  ownerUserId?: string;
+  /** ADR 0025 — override the random id for deterministic, idempotent provisioning. */
+  id?: string;
 }): Promise<KanbanBoard> {
-  const id = `board-${randomUUID()}`;
+  const id = input.id ?? `board-${randomUUID()}`;
   const now = nowIso();
   const columns: KanbanColumn[] = input.columns
     ? input.columns.map((c) => ({ ...c }))
@@ -159,12 +177,38 @@ export async function createBoard(input: {
     tenantId: input.tenantId,
     name: input.name,
     columns,
-    rosterId: input.rosterId,
+    ...(input.rosterId ? { rosterId: input.rosterId } : {}),
+    ...(input.ownerUserId ? { ownerUserId: input.ownerUserId } : {}),
     createdAt: now,
     updatedAt: now,
   };
   await boards.put(board);
   return board;
+}
+
+/** ADR 0025 — the deterministic id for a user's ONE personal board in a
+ *  workspace. Stable so auto-provisioning is idempotent across concurrent
+ *  first-access (no duplicate boards). */
+export function personalBoardId(tenantId: string, ownerUserId: string): string {
+  const key = createHash('sha256').update(`${tenantId}:${ownerUserId}`).digest('hex').slice(0, 24);
+  return `board-personal-${key}`;
+}
+
+/** The user's personal board in this workspace, or null. */
+export async function getPersonalBoard(tenantId: string, ownerUserId: string): Promise<KanbanBoard | null> {
+  const b = await boards.get(personalBoardId(tenantId, ownerUserId));
+  return b && b.tenantId === tenantId ? b : null;
+}
+
+/** ADR 0025 — auto-provision a user's personal board (idempotent). Mirrors how a
+ *  seeded roster agent gets a board, but owned by a human. Safe under concurrent
+ *  first-access: the deterministic id makes a racing create last-writer-wins on
+ *  identical content rather than minting duplicates. */
+export async function ensurePersonalBoard(tenantId: string, ownerUserId: string, name?: string): Promise<KanbanBoard> {
+  const id = personalBoardId(tenantId, ownerUserId);
+  const existing = await boards.get(id);
+  if (existing && existing.tenantId === tenantId) return existing;
+  return createBoard({ id, tenantId, name: name ?? 'My Board', ownerUserId });
 }
 
 export async function listBoards(tenantId: string): Promise<KanbanBoard[]> {

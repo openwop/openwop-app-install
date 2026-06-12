@@ -12,17 +12,19 @@
  */
 
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Modal } from '../ui/Modal.js';
+import { BuildingIcon, UserIcon } from '../ui/icons/index.js';
 import { useAuth } from './useAuth.js';
-import { migrateAnonToUser } from './migrateTenant.js';
+import { finalizeFirebaseSession } from './finalizeSession.js';
+import { getMe, logout, type User as DurableUser } from '../features/users/usersClient.js';
+import { AuthCard } from './AuthCard.js';
 import {
   ExistingProviderSignInError,
-  getCurrentIdToken,
   getRedirectState,
   signInWithGithub,
   signInWithGoogle,
 } from './firebase.js';
-import { setCurrentIdToken } from '../client/config.js';
 import { deleteAccount, RequiresRecentLoginError } from './deleteAccount.js';
 
 function describeSignInError(err: unknown): string {
@@ -128,6 +130,13 @@ function LinkAccountBody(props: {
 
 export function SignInButton() {
   const { user, loading, isConfigured, signOut } = useAuth();
+  // profiles is always-on (graduated — see backend/features/profiles/feature.ts §Correction);
+  // The backend session is the canonical signed-in truth (ADR 0003): OIDC, a
+  // bound durable User, or an email/password session all resolve through `/me`.
+  // Firebase `user` is one INPUT (the OIDC mechanism); a password session has no
+  // Firebase user, so we track the durable record separately and treat EITHER as
+  // signed in.
+  const [backendUser, setBackendUser] = useState<DurableUser | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -161,10 +170,9 @@ export function SignInButton() {
         });
         setModalOpen(true);
       } else if (state.kind === 'success') {
-        const token = await getCurrentIdToken();
-        if (token) setCurrentIdToken(token);
-        const result = await migrateAnonToUser();
-        if (result?.migrated) console.warn('openwop: anon → user migration', result);
+        // Same backend handshake as the email/password path (ADR 0026):
+        // token → /migrate-tenant → /oidc/bind → /me. Best-effort.
+        setBackendUser(await finalizeFirebaseSession());
         setModalOpen(false);
         setPendingLink(null);
       } else if (state.kind === 'error') {
@@ -175,7 +183,30 @@ export function SignInButton() {
     return () => { cancelled = true; };
   }, []);
 
+  // Detect an EXISTING backend session on load — a returning email/password user
+  // (no Firebase user) or an already-bound OIDC user. `/me` is the canonical
+  // signed-in check; best-effort (401/404 when there's no session / users off).
+  useEffect(() => {
+    let cancelled = false;
+    void getMe().then((u) => { if (!cancelled) setBackendUser(u); }).catch(() => { /* no session */ });
+    return () => { cancelled = true; };
+  }, []);
+
   if (!isConfigured || loading) return null;
+
+  /** The unified signed-in identity: Firebase user (OIDC) OR the durable backend
+   *  User (password / bound session). EITHER means signed in. */
+  const account = user
+    ? { name: user.displayName ?? user.email ?? 'Account', email: user.email ?? user.uid, photoURL: user.photoURL ?? null, isFirebase: true }
+    : backendUser
+    ? { name: backendUser.displayName ?? backendUser.email ?? 'Account', email: backendUser.email ?? backendUser.userId, photoURL: null, isFirebase: false }
+    : null;
+
+  /** Reconcile the SPA session after a backend (password) auth + close the modal. */
+  async function onAuthed(): Promise<void> {
+    setBackendUser(await getMe().catch(() => null));
+    setModalOpen(false);
+  }
 
   /**
    * Kick off a redirect-based sign-in. The page navigates away to
@@ -199,7 +230,18 @@ export function SignInButton() {
     }
   }
 
-  if (!user) {
+  const oidcButtons = (
+    <div className="u-grid u-gap-1">
+      <button className="signin-provider signin-google" disabled={busy} type="button" onClick={() => { void attemptSignIn('google'); }}>
+        Continue with Google
+      </button>
+      <button className="signin-provider signin-github" disabled={busy} type="button" onClick={() => { void attemptSignIn('github'); }}>
+        Continue with GitHub
+      </button>
+    </div>
+  );
+
+  if (!account) {
     return (
       <>
         <button
@@ -226,28 +268,17 @@ export function SignInButton() {
               />
             ) : (
               <>
-                <h3 className="signin-modal-title">Sign in to save your work</h3>
+                <h3 className="signin-modal-title">Sign in to <em>save your work</em></h3>
                 <p className="signin-modal-lede muted">
                   Workflows + BYOK keys you add after signing in persist across
                   sessions. Anonymous demo state is wiped every 24h.
                 </p>
                 {error ? <div className="alert error" role="alert">{error}</div> : null}
-                <button
-                  className="signin-provider signin-google"
-                  disabled={busy}
-                  type="button"
-                  onClick={() => { void attemptSignIn('google'); }}
-                >
-                  Continue with Google
-                </button>
-                <button
-                  className="signin-provider signin-github"
-                  disabled={busy}
-                  type="button"
-                  onClick={() => { void attemptSignIn('github'); }}
-                >
-                  Continue with GitHub
-                </button>
+                <AuthCard
+                  oidc={oidcButtons}
+                  passwordEnabled={true}
+                  onAuthed={onAuthed}
+                />
                 <button
                   className="signin-modal-cancel"
                   type="button"
@@ -263,8 +294,8 @@ export function SignInButton() {
     );
   }
 
-  // Signed-in: avatar + dropdown
-  const initials = (user.displayName ?? user.email ?? user.uid)
+  // Signed-in: avatar + dropdown (account = Firebase OIDC user OR durable backend User)
+  const initials = account.name
     .split(/\s+/).map((s) => s[0]).join('').slice(0, 2).toUpperCase();
   return (
     <div className="account-menu">
@@ -275,44 +306,70 @@ export function SignInButton() {
         aria-expanded={menuOpen}
         type="button"
       >
-        {user.photoURL ? (
-          <img src={user.photoURL} alt="" className="account-menu-avatar" />
+        {account.photoURL ? (
+          <img src={account.photoURL} alt="" className="account-menu-avatar" />
         ) : (
           <span className="account-menu-initials">{initials}</span>
         )}
-        <span className="account-menu-name">
-          {user.displayName ?? user.email ?? 'Account'}
-        </span>
+        <span className="account-menu-name">{account.name}</span>
       </button>
       {menuOpen ? (
         <div className="account-menu-popover" role="menu">
           <div className="account-menu-header">
-            <div className="account-menu-displayname">{user.displayName ?? '—'}</div>
-            <div className="account-menu-email muted">{user.email ?? user.uid}</div>
+            <div className="account-menu-displayname">{account.name}</div>
+            <div className="account-menu-email muted">{account.email}</div>
           </div>
+          {account ? (
+            <>
+              <Link
+                to="/profile"
+                className="account-menu-item"
+                role="menuitem"
+                onClick={() => setMenuOpen(false)}
+              >
+                <span className="account-menu-item-icon" aria-hidden><UserIcon size={16} /></span>
+                My Profile
+              </Link>
+              <Link
+                to="/team"
+                className="account-menu-item"
+                role="menuitem"
+                onClick={() => setMenuOpen(false)}
+              >
+                <span className="account-menu-item-icon" aria-hidden><BuildingIcon size={16} /></span>
+                Team
+              </Link>
+            </>
+          ) : null}
           <button
             className="account-menu-item"
             role="menuitem"
             onClick={async () => {
-              await signOut();
+              // Clear BOTH sessions: Firebase (OIDC) + the backend cookie (password
+              // or OIDC-bound). Either may be present.
+              await signOut().catch(() => {});
+              await logout();
+              setBackendUser(null);
               setMenuOpen(false);
             }}
             type="button"
           >
             Sign out
           </button>
-          <button
-            className="account-menu-item account-menu-danger"
-            role="menuitem"
-            onClick={() => {
-              setMenuOpen(false);
-              setConfirmingDelete(true);
-              setDeleteError(null);
-            }}
-            type="button"
-          >
-            Delete account…
-          </button>
+          {account.isFirebase ? (
+            <button
+              className="account-menu-item account-menu-danger"
+              role="menuitem"
+              onClick={() => {
+                setMenuOpen(false);
+                setConfirmingDelete(true);
+                setDeleteError(null);
+              }}
+              type="button"
+            >
+              Delete account…
+            </button>
+          ) : null}
         </div>
       ) : null}
       {confirmingDelete ? (
@@ -326,7 +383,7 @@ export function SignInButton() {
             <p>
               This permanently removes every workflow, run, event,
               interrupt, and BYOK credential you've stored under{' '}
-              <strong>{user.email ?? user.displayName ?? user.uid}</strong>.
+              <strong>{account.email}</strong>.
               Your Firebase identity record is revoked too. There is
               no undo.
             </p>

@@ -32,6 +32,7 @@ import { seedWorkforceEntities, seedWorkforceHistory } from './workforceService.
 import { demoWorkflowsForRole, type DemoRoleKey } from './demoWorkflows.js';
 import { createLogger } from '../observability/logger.js';
 import { ensureUserAgentRegistered } from '../routes/userAgents.js';
+import { unpinAgentsForTenant } from '../features/profiles/profilesService.js';
 import type { Storage } from '../storage/storage.js';
 import type { UserAgentRecord } from '../types.js';
 import demoAgentSeed from './seed-data/demoAgents.json';
@@ -155,6 +156,125 @@ export interface SeedOptions {
  * of a populated tenant happens only via the explicit "Load demo agents"
  * action (which restoring a deleted demo agent is the expected outcome of).
  */
+// ── Single seed-creation path (shared by the bulk seed loop, heal, and the
+//    feature-driven `ensureSeededAgentByRole`). One implementation, sourced
+//    from `demoAgents.json`, so no caller hand-rolls agent creation. ──
+
+/** Create one persona's board + sample cards (idempotent only by caller). */
+async function seedAgentBoard(
+  tenantId: string,
+  spec: SeedAgent,
+  workflowIds: string[],
+  rosterId: string,
+): Promise<void> {
+  const board = await createBoard({ tenantId, name: `${spec.persona}'s board`, rosterId, columns: demoColumns(workflowIds[0]) });
+  for (const card of spec.cards) {
+    await createCard({
+      boardId: board.id,
+      columnId: card.columnId ?? 'todo',
+      title: card.title,
+      ...(card.description !== undefined ? { description: card.description } : {}),
+      source: card.source,
+      ...(card.sourceLabel !== undefined ? { sourceLabel: card.sourceLabel } : {}),
+      ...(card.priority !== undefined ? { priority: card.priority } : {}),
+      ...(card.createdBy !== undefined ? { createdBy: card.createdBy } : {}),
+      ...(card.assignmentReason !== undefined ? { assignmentReason: card.assignmentReason } : {}),
+      ...(card.blockerNote !== undefined ? { blockerNote: card.blockerNote } : {}),
+    });
+  }
+}
+
+/** Register one of a persona's standing schedules (skips an out-of-range index). */
+async function seedAgentSchedule(
+  tenantId: string,
+  workflowIds: string[],
+  rosterId: string,
+  agentId: string,
+  sched: SeedSchedule,
+): Promise<void> {
+  const workflowId = workflowIds[sched.workflowIndex];
+  if (!workflowId) return;
+  await registerJob({ jobId: `${rosterId}:${sched.slug}`, tenantId, cronExpr: sched.cronExpr, workflowId, rosterId, agentId, metadata: { label: sched.label } });
+}
+
+/** The ONE roster-member creation path: chat-agent record + roster entry
+ *  (carrying `roleKey` for exact theming + system-role lookup) + board + cards
+ *  + schedules, all sourced from a `demoAgents.json` spec. */
+async function createSeededRosterMember(tenantId: string, storage: Storage, spec: SeedAgent): Promise<RosterEntry> {
+  const workflowIds = demoWorkflowsForRole(spec.roleKey).map((w) => w.workflowId);
+  const chatAgentId = `user.${tenantId}.${personaSlug(spec.persona)}`;
+  await ensureUserAgentRegistered(storage, {
+    agentId: chatAgentId,
+    tenantId,
+    persona: spec.persona,
+    label: spec.role,
+    description: spec.description,
+    modelClass: spec.modelClass ?? 'chat',
+    systemPrompt: spec.systemPrompt,
+    toolAllowlist: [],
+    memoryShape: { scratchpad: true, conversation: true, longTerm: false },
+    createdAt: new Date().toISOString(),
+  });
+  const entry = await createRosterEntry({
+    tenantId,
+    persona: spec.persona,
+    agentRef: { agentId: chatAgentId, version: '1.0.0' },
+    workflows: workflowIds,
+    label: spec.role,
+    description: spec.description,
+    autonomyLevel: spec.autonomyLevel,
+    roleKey: spec.roleKey,
+  });
+  await seedAgentBoard(tenantId, spec, workflowIds, entry.rosterId);
+  for (const sched of spec.schedules) {
+    await seedAgentSchedule(tenantId, workflowIds, entry.rosterId, entry.agentRef.agentId, sched);
+  }
+  return entry;
+}
+
+/**
+ * Ensure the single seeded agent for `roleKey` exists, creating it through the
+ * one seed path if absent — idempotent. The assistant's Chief of Staff uses
+ * this instead of hand-rolling a roster entry, so its creation is owned by the
+ * seeder and sourced from `demoAgents.json` (the "use the seeding method" rule).
+ * Identity is the persisted `roleKey`, robust to a user-renamed persona/label.
+ * Returns null when no spec declares that role (a misconfiguration).
+ */
+const ensuringByRole = new Map<string, Promise<RosterEntry | null>>();
+export async function ensureSeededAgentByRole(
+  tenantId: string,
+  storage: Storage,
+  roleKey: DemoRoleKey,
+): Promise<RosterEntry | null> {
+  const existing = (await listRoster(tenantId)).find((e) => e.roleKey === roleKey);
+  if (existing) return existing;
+  const spec = SEED_AGENTS.find((s) => s.roleKey === roleKey);
+  if (!spec) return null;
+  const key = `${tenantId}:${roleKey}`;
+  const inflight = ensuringByRole.get(key);
+  if (inflight) return inflight;
+  const create = (async () => {
+    // Re-check under the in-process lock (a concurrent caller may have won) —
+    // the roster store has no unique index.
+    const again = (await listRoster(tenantId)).find((e) => e.roleKey === roleKey);
+    if (again) return again;
+    const entry = await createSeededRosterMember(tenantId, storage, spec);
+    log.info('seeded agent ensured on demand', { tenantId, roleKey, rosterId: entry.rosterId });
+    return entry;
+  })();
+  ensuringByRole.set(key, create);
+  try {
+    return await create;
+  } finally {
+    ensuringByRole.delete(key);
+  }
+}
+
+/** Read-only lookup of the seeded agent for a role (no creation). */
+export async function findSeededAgentByRole(tenantId: string, roleKey: DemoRoleKey): Promise<RosterEntry | null> {
+  return (await listRoster(tenantId)).find((e) => e.roleKey === roleKey) ?? null;
+}
+
 export async function seedDemoAgents(
   tenantId: string,
   storage: Storage,
@@ -212,71 +332,21 @@ export async function seedDemoAgents(
     };
     await ensureUserAgentRegistered(storage, userAgentRecord);
 
-    // Board + sample cards for one persona — used by the fresh-create path
-    // AND by heal mode when an existing persona's board went missing (the
-    // live "boards disappeared and re-seed didn't restore them" failure:
-    // rows that predate the read-through-durability hardening kept their
-    // roster entry but lost the board, and the old create-only seed could
-    // never bring it back).
-    const createBoardWithCards = async (rosterId: string): Promise<void> => {
-      const board = await createBoard({
-        tenantId,
-        name: `${spec.persona}'s board`,
-        rosterId,
-        columns: demoColumns(workflowIds[0]),
-      });
-      for (const card of spec.cards) {
-        await createCard({
-          boardId: board.id,
-          columnId: card.columnId ?? 'todo',
-          title: card.title,
-          ...(card.description !== undefined ? { description: card.description } : {}),
-          source: card.source,
-          ...(card.sourceLabel !== undefined ? { sourceLabel: card.sourceLabel } : {}),
-          ...(card.priority !== undefined ? { priority: card.priority } : {}),
-          ...(card.createdBy !== undefined ? { createdBy: card.createdBy } : {}),
-          ...(card.assignmentReason !== undefined ? { assignmentReason: card.assignmentReason } : {}),
-          ...(card.blockerNote !== undefined ? { blockerNote: card.blockerNote } : {}),
-        });
-      }
-    };
-
-    const registerSchedule = async (rosterId: string, agentId: string, sched: SeedSchedule): Promise<void> => {
-      const workflowId = workflowIds[sched.workflowIndex];
-      if (!workflowId) return;
-      await registerJob({
-        jobId: `${rosterId}:${sched.slug}`,
-        tenantId,
-        cronExpr: sched.cronExpr,
-        workflowId,
-        rosterId,
-        agentId,
-        metadata: { label: sched.label },
-      });
-    };
+    // Board + schedule creation hoisted to module scope (`seedAgentBoard` /
+    // `seedAgentSchedule`) so the fresh-create path, heal mode, AND the
+    // single-agent `ensureSeededAgentByRole` ensure path all share ONE creation
+    // implementation — no parallel orchestration.
+    const createBoardWithCards = (rosterId: string): Promise<void> =>
+      seedAgentBoard(tenantId, spec, workflowIds, rosterId);
 
     let entry = byPersona.get(spec.persona.toLowerCase());
     if (!entry) {
-      // Create the roster entry, its board (4 demo lanes; To Do triggers the
-      // first workflow), its sample cards, and its schedules. The AgentRef
+      // The roster entry + board + cards + schedules for one persona, created
+      // through the single seed path (`createSeededRosterMember`). The AgentRef
       // points at the persona's chat-callable inventory agent (above), linking
-      // the two projections of one persona — the roster portfolio owner and the
-      // conversable agent. Runs still dispatch by workflowId, not this id.
-      entry = await createRosterEntry({
-        tenantId,
-        persona: spec.persona,
-        agentRef: { agentId: chatAgentId, version: '1.0.0' },
-        workflows: workflowIds,
-        label: spec.role,
-        description: spec.description,
-        autonomyLevel: spec.autonomyLevel,
-      });
+      // the two projections of one persona. Runs still dispatch by workflowId.
+      entry = await createSeededRosterMember(tenantId, storage, spec);
       created += 1;
-
-      await createBoardWithCards(entry.rosterId);
-      for (const sched of spec.schedules) {
-        await registerSchedule(entry.rosterId, entry.agentRef.agentId, sched);
-      }
     } else if (opts.heal) {
       // HEAL: restore what is structurally MISSING; never touch what exists.
       // A present-but-emptied board stays untouched (clearing cards is normal
@@ -287,7 +357,7 @@ export async function seedDemoAgents(
       }
       for (const sched of spec.schedules) {
         if (await getJob(`${entry.rosterId}:${sched.slug}`)) continue;
-        await registerSchedule(entry.rosterId, entry.agentRef.agentId, sched);
+        await seedAgentSchedule(tenantId, workflowIds, entry.rosterId, entry.agentRef.agentId, sched);
         healedSchedules += 1;
       }
     }
@@ -379,15 +449,19 @@ export async function clearDemoAgents(tenantId: string, storage: Storage): Promi
   const roster = await listRoster(tenantId);
   const boards = await listBoards(tenantId);
   const jobs = await listJobs(tenantId);
-  let cleared = 0;
+  const clearedRosterIds: string[] = [];
   for (const entry of roster) {
     if (!demo.has(entry.persona.toLowerCase())) continue;
     for (const b of boards.filter((b) => b.rosterId === entry.rosterId)) await deleteBoard(b.id);
     for (const j of jobs.filter((j) => j.rosterId === entry.rosterId)) await deleteJob(j.jobId);
     await storage.deleteUserAgent(`user.${tenantId}.${personaSlug(entry.persona)}`);
     await deleteRosterEntry(entry.rosterId);
-    cleared += 1;
+    clearedRosterIds.push(entry.rosterId);
   }
-  if (cleared > 0) await deleteChart(tenantId);
-  return { cleared };
+  if (clearedRosterIds.length > 0) {
+    await deleteChart(tenantId);
+    // Cascade: a deleted agent must not linger in anyone's sidebar pins (ADR 0023).
+    await unpinAgentsForTenant(tenantId, clearedRosterIds);
+  }
+  return { cleared: clearedRosterIds.length };
 }

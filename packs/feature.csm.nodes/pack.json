@@ -1,0 +1,30 @@
+{
+  "name": "feature.csm.nodes",
+  "version": "1.0.0",
+  "description": "CSM feature node pack (ADR 0014) — read/health nodes over the ctx.features.csm surface shipped by the CSM feature package. health-read lists at-risk accounts; health-set updates an existing account's score (idempotent, replay-safe).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "csm", "customer-success", "health"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.csm.nodes.health-read",
+      "version": "1.0.0",
+      "label": "CSM Health Read",
+      "description": "Reads customer-success accounts (lowest health first) or one by id, over ctx.features.csm. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.csm.nodes.health-set",
+      "version": "1.0.0",
+      "label": "CSM Health Set",
+      "description": "Sets healthScore/name on an EXISTING account by id, over ctx.features.csm. Tenant-guarded + idempotent (update-only — replay/fork safe).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

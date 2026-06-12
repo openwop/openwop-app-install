@@ -11,6 +11,7 @@
  */
 
 import http from 'node:http';
+import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -23,6 +24,7 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
@@ -51,7 +53,7 @@ function client(initialCookie = ''): Client {
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const sc = typeof (res.headers as any).getSetCookie === 'function' ? (res.headers as any).getSetCookie() : [];
+    const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) {
       const m = /(__session=[^;]+)/.exec(c);
       if (m) cookie = m[1];
@@ -70,8 +72,10 @@ function client(initialCookie = ''): Client {
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-async function signup(c: Client): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email: uniqEmail('crm'), password: 'password123' });
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
+async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
+  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('crm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -80,14 +84,14 @@ const enableCrm = async (status: 'on' | 'off'): Promise<void> => {
   if (def) await saveConfig({ ...def, status }, 'test');
 };
 
-/** Owner + a same-tenant member with `role`, plus an org owned by the owner. */
+/** Owner + a same-tenant member with `role`, plus an org owned by the owner.
+ *  Mint each into one shared explicit tenantId, each in its own client. */
 async function ownerWithMember(role: string): Promise<{ owner: Client; member: Client; memberId: string; orgId: string }> {
-  const seed = client();
-  await signup(seed);
-  const ownerCookie = seed.snapshot();
-  const memberUser = await signup(seed);
-  const member = client(seed.snapshot());
-  const owner = client(ownerCookie);
+  const tenantId = `org:test-${Date.now()}-${n++}`;
+  const owner = client();
+  await signup(owner, { tenantId });
+  const member = client();
+  const memberUser = await signup(member, { tenantId });
   const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
@@ -177,12 +181,11 @@ describe('crm org surface — RBAC', () => {
     expect((await stranger.get(c(vw.orgId, '/companies'))).status).toBe(404);
 
     // Cross-org SAME tenant: editor of org A is not a member of org B → 403.
-    const seed = client();
-    await signup(seed);
-    const ownerCookie = seed.snapshot();
-    const bobUser = await signup(seed);
-    const bob = client(seed.snapshot());
-    const ownerC = client(ownerCookie);
+    const tenantId = `org:test-${Date.now()}-${n++}`;
+    const ownerC = client();
+    await signup(ownerC, { tenantId });
+    const bob = client();
+    const bobUser = await signup(bob, { tenantId });
     const orgA = (await ownerC.post('/v1/host/sample/orgs', { name: 'A' })).body.orgId;
     const orgB = (await ownerC.post('/v1/host/sample/orgs', { name: 'B' })).body.orgId;
     await ownerC.post(`/v1/host/sample/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });

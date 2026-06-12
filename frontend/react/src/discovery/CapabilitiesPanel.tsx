@@ -4,8 +4,12 @@ import { authedHeaders, config, fetchOpts } from '../client/config.js';
 import { McpToolsPanel } from '../mcp/McpToolsPanel.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { DataTable } from '../ui/DataTable.js';
+import { KeyFigureBand } from '../ui/KeyFigure.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Notice } from '../ui/Notice.js';
+import { SkeletonRows } from '../ui/Skeleton.js';
 import { A2APeerPanel } from '../peers/A2APeerPanel.js';
-import { CheckIcon, CircleIcon } from '../ui/icons/index.js';
+import { CheckIcon, CircleIcon, BoxesIcon, ZapIcon, ImageIcon, ShieldIcon } from '../ui/icons/index.js';
 
 /** Render an advertised boolean as a tri-state glyph. `undefined` means the
  *  host hasn't declared the field; that's distinct from `false` (declared off). */
@@ -110,6 +114,9 @@ export function CapabilitiesPanel() {
   const [caps, setCaps] = useState<Caps | null>(null);
   const [catalog, setCatalog] = useState<CatalogResp | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The hero coverage figures double as a filter (DESIGN §4.5): toggling
+  // "blocked" scopes the surface table below to only the blocked surfaces.
+  const [coverageFilter, setCoverageFilter] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -145,41 +152,79 @@ export function CapabilitiesPanel() {
     blockedBySurface.set(key, (blockedBySurface.get(key) ?? 0) + 1);
   }
 
+  const blockedRows = [...blockedBySurface.entries()].map(([surface, count]) => ({ surface, nodes: count }));
+
   return (
-    <section>
+    <section className="page-stack">
       <PageHeader
         eyebrow="Discovery"
         title="Host capabilities"
         lede={<>What this host can actually run from the installed packs. Coverage is (runnable / total) where "runnable" means every required host surface is advertised. The remainder will return <code>HOST_CAPABILITY_MISSING</code> if executed here — the workflow still serializes and ships, so deploying to a fuller host stays cheap.</>}
       />
-      <div className="card">
-        {error && <div className="alert error">{error}</div>}
+
+      {error && <Notice variant="error">{error}</Notice>}
+
+      {/* ── Host identity & coverage tier ─────────────────────────────────
+          The page's headline question — "can this host run my workflow,
+          and what's missing?" — leads, with identity above the fold. */}
+      <ConformanceProfilesCard caps={caps} />
+
+      <div className="surface-card">
+        <h2>Pack coverage</h2>
+        <p className="muted u-mb-3">
+          The single number that answers "can this host run my workflow?" — runnable nodes over the
+          full installed catalog. Toggle <strong>Blocked</strong> to scope the table to only the
+          surfaces that are gating execution.
+        </p>
         {catalog ? (
           <>
-            <p>
-              <strong>{runnable.length}</strong> runnable
-              {' / '}<strong>{nodes.length}</strong> total
-              {blocked > 0 ? <> · <strong>{blocked}</strong> blocked</> : null}
-            </p>
-            {blockedBySurface.size > 0 ? (
-              <DataTable
-                caption="Nodes blocked by surface"
-                rows={[...blockedBySurface.entries()].map(([surface, nodes]) => ({ surface, nodes }))}
-                rowKey={(r) => r.surface}
-                initialSort={{ key: 'nodes', dir: 'desc' }}
-                columns={[
-                  { key: 'surface', header: 'Blocked by surface', render: (r) => <code>{r.surface}</code>, sortValue: (r) => r.surface },
-                  { key: 'nodes', header: 'Nodes', align: 'right', render: (r) => r.nodes, sortValue: (r) => r.nodes },
-                ]}
-              />
-            ) : null}
+            <KeyFigureBand
+              ariaLabel="Pack coverage"
+              {...(blocked > 0 ? { activeKey: coverageFilter, onToggle: (k: string) => setCoverageFilter((p) => (p === k ? null : k)) } : {})}
+              figures={[
+                { key: 'runnable', label: 'Runnable', value: runnable.length, glyph: <CheckIcon size={13} /> },
+                { key: 'total', label: 'Total nodes', value: nodes.length, glyph: <BoxesIcon size={13} /> },
+                { key: 'blocked', label: 'Blocked', value: blocked, tone: blocked > 0 ? 'attention' : 'default', glyph: <ZapIcon size={13} /> },
+              ]}
+            />
+            {blockedRows.length > 0 ? (
+              // The "Blocked" figure is the drill-down toggle (DESIGN §4.5):
+              // pressing it scopes the band to the gaps; the breakdown table
+              // shows when no filter is active OR when "blocked" is selected.
+              (coverageFilter === null || coverageFilter === 'blocked') ? (
+                <div className="u-mt-4">
+                  <DataTable
+                    caption="Nodes blocked by surface"
+                    density="compact"
+                    rows={blockedRows}
+                    rowKey={(r) => r.surface}
+                    initialSort={{ key: 'nodes', dir: 'desc' }}
+                    columns={[
+                      { key: 'surface', header: 'Blocked by surface', render: (r) => <code>{r.surface}</code>, sortValue: (r) => r.surface },
+                      { key: 'nodes', header: 'Nodes', align: 'right', render: (r) => <span className="chip chip--warning">{r.nodes}</span>, sortValue: (r) => r.nodes },
+                    ]}
+                  />
+                </div>
+              ) : (
+                <p className="muted u-mt-3 u-fs-13">All {runnable.length} runnable nodes clear every required surface. Select <strong>Blocked</strong> to see the {blocked} that don't.</p>
+              )
+            ) : (
+              <div className="u-mt-4">
+                <StateCard
+                  icon={<CheckIcon size={20} />}
+                  title="Every installed node is runnable here"
+                  body="No node in the catalog is missing a host surface — this host can execute the full pack set."
+                />
+              </div>
+            )}
           </>
         ) : (
-          !error && <div className="muted">Loading…</div>
+          !error && <SkeletonRows rows={3} columns={['60%', '20%']} />
         )}
       </div>
 
-      <div className="card">
+      {/* ── Surfaces & envelopes tier ─────────────────────────────────── */}
+      <div className="surface-card">
         <h2>Host surfaces</h2>
         <p className="muted">
           Live render of <code>capabilities.hostSurfaces</code>. The
@@ -188,28 +233,27 @@ export function CapabilitiesPanel() {
           mean the surface is demo-grade. Phase 6 swaps these with real-backend
           adapters from <code>examples/hosts/postgres</code>.
         </p>
-        {surfaces.length > 0 ? (
-          <table className="cap-table">
-            <thead>
-              <tr><th>Surface</th><th>Supported</th><th>Implementation</th><th>Note</th></tr>
-            </thead>
-            <tbody>
-              {surfaces.map((s) => (
-                <tr key={s.name}>
-                  <td><code>{s.name}</code></td>
-                  <td>{s.supported ? <CheckIcon size={14} /> : <CircleIcon size={14} />}</td>
-                  <td>{s.implementation ? <code>{s.implementation}</code> : <span className="muted">—</span>}</td>
-                  <td className="muted">{s.note ?? ''}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        {caps ? (
+          <DataTable
+            caption="Host surfaces"
+            density="compact"
+            rows={surfaces}
+            rowKey={(s) => s.name}
+            initialSort={{ key: 'supported', dir: 'asc' }}
+            empty={<StateCard icon={<BoxesIcon size={20} />} title="No host surfaces advertised" body={<>This host's <code>capabilities.hostSurfaces</code> is empty.</>} />}
+            columns={[
+              { key: 'name', header: 'Surface', render: (s) => <code>{s.name}</code>, sortValue: (s) => s.name },
+              { key: 'supported', header: 'Supported', align: 'center', render: (s) => (s.supported ? <span className="u-text-success"><CheckIcon size={14} /></span> : <span className="u-ink-3"><CircleIcon size={14} /></span>), sortValue: (s) => (s.supported ? 0 : 1) },
+              { key: 'implementation', header: 'Implementation', render: (s) => (s.implementation ? <code>{s.implementation}</code> : <span className="muted">—</span>), sortValue: (s) => s.implementation ?? '' },
+              { key: 'note', header: 'Note', render: (s) => <span className="muted">{s.note ?? ''}</span>, cellClassName: 'muted' },
+            ]}
+          />
         ) : (
-          !error && <div className="muted">Loading…</div>
+          !error && <SkeletonRows rows={4} columns={['28%', '12%', '24%', '30%']} />
         )}
       </div>
 
-      <div className="card">
+      <div className="surface-card">
         <h2>Envelope discipline</h2>
         <p className="muted">
           What this host promises about LLM-emission envelopes — the inbound
@@ -225,62 +269,23 @@ export function CapabilitiesPanel() {
           substitutions, prose-to-JSON coercions, partial-payload recoveries).
         </p>
         {caps ? (
-          <table className="cap-table">
-            <thead>
-              <tr><th>Surface</th><th>Value</th><th>Note</th></tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><code>envelopes.reasoning.supported</code></td>
-                <td>{boolGlyph(caps.capabilities?.envelopes?.reasoning?.supported)}</td>
-                <td className="muted">RFC 0030 §A — optional <code>reasoning</code> string on envelope payloads</td>
-              </tr>
-              <tr>
-                <td><code>envelopes.reasoning.promptDirective</code></td>
-                <td>{caps.capabilities?.envelopes?.reasoning?.promptDirective
-                  ? <code>{caps.capabilities.envelopes.reasoning.promptDirective}</code>
-                  : <span className="muted">—</span>}</td>
-                <td className="muted">how aggressively the host prompts the model to populate it</td>
-              </tr>
-              <tr>
-                <td><code>envelopes.tierOneSubsetCompliance</code></td>
-                <td>{caps.capabilities?.envelopes?.tierOneSubsetCompliance
-                  ? <code>{caps.capabilities.envelopes.tierOneSubsetCompliance}</code>
-                  : <span className="muted">—</span>}</td>
-                <td className="muted">RFC 0030 §B — host's posture on the OpenAI ∩ Anthropic ∩ Gemini schema subset</td>
-              </tr>
-              <tr>
-                <td><code>envelopes.reliability.supported</code></td>
-                <td>{boolGlyph(caps.capabilities?.envelopes?.reliability?.supported)}</td>
-                <td className="muted">RFC 0032 — host emits retry / refusal / truncation events</td>
-              </tr>
-              <tr>
-                <td><code>envelopes.reliability.events</code></td>
-                <td>{caps.capabilities?.envelopes?.reliability?.events?.length
-                  ? <span className="u-mono u-fs-11">{caps.capabilities.envelopes.reliability.events.join(', ')}</span>
-                  : <span className="muted">—</span>}</td>
-                <td className="muted">which reliability event types this host actually emits</td>
-              </tr>
-              <tr>
-                <td><code>envelopes.reliability.completion.distinguishesTruncation</code></td>
-                <td>{boolGlyph(caps.capabilities?.envelopes?.reliability?.completion?.distinguishesTruncation)}</td>
-                <td className="muted">RFC 0033 — host branches retry strategy on truncation vs schema-violation</td>
-              </tr>
-              <tr>
-                <td><code>envelopes.reliability.completion.truncationBudgetMultiplier</code></td>
-                <td>{typeof caps.capabilities?.envelopes?.reliability?.completion?.truncationBudgetMultiplier === 'number'
-                  ? <code>×{caps.capabilities.envelopes.reliability.completion.truncationBudgetMultiplier}</code>
-                  : <span className="muted">—</span>}</td>
-                <td className="muted">how much extra output budget the host gives on a truncation retry</td>
-              </tr>
-            </tbody>
-          </table>
+          <DataTable
+            caption="Envelope discipline"
+            density="compact"
+            rows={envelopeRows(caps)}
+            rowKey={(r) => r.key}
+            columns={[
+              { key: 'key', header: 'Surface', render: (r) => <code>{r.key}</code> },
+              { key: 'value', header: 'Value', render: (r) => r.value },
+              { key: 'note', header: 'Note', render: (r) => <span className="muted">{r.note}</span>, cellClassName: 'muted' },
+            ]}
+          />
         ) : (
-          !error && <div className="muted">Loading…</div>
+          !error && <SkeletonRows rows={6} columns={['40%', '12%', '40%']} />
         )}
       </div>
 
-      <div className="card">
+      <div className="surface-card">
         <h2>Model capabilities</h2>
         <p className="muted">
           Per <a href="https://github.com/openwop/openwop/blob/main/RFCS/0031-envelope-variants-and-model-capabilities.md">RFC 0031</a> — what each
@@ -288,44 +293,68 @@ export function CapabilitiesPanel() {
           this host will silently substitute a fallback model when the workflow asks for a capability
           the configured model lacks. Substitution is observable via the <code>model.capability.substituted</code> event.
         </p>
-        {caps?.capabilities?.modelCapabilities ? (
-          <>
-            <p>
-              <strong>{caps.capabilities.modelCapabilities.supported ? 'Advertised' : 'Not advertised'}</strong>
-              {' · '}substitution {caps.capabilities.modelCapabilities.substitutionSupported ? 'on' : 'off'}
-              {' · '}{caps.capabilities.modelCapabilities.advertised?.length ?? 0} capabilities declared
-            </p>
-            {caps.capabilities.modelCapabilities.advertised?.length ? (
-              <p className="u-mono u-fs-12">
-                {caps.capabilities.modelCapabilities.advertised.map((c) => <code key={c} className="u-mr-2">{c}</code>)}
-              </p>
-            ) : null}
-          </>
+        {caps ? (
+          caps.capabilities?.modelCapabilities ? (
+            <>
+              <div className="u-flex u-gap-2 u-items-center cap-chip-list u-mb-3">
+                <span className={`chip ${caps.capabilities.modelCapabilities.supported ? 'chip--success' : 'chip--muted'}`}>
+                  {caps.capabilities.modelCapabilities.supported ? 'Advertised' : 'Not advertised'}
+                </span>
+                <span className={`chip ${caps.capabilities.modelCapabilities.substitutionSupported ? 'chip--accent' : 'chip--muted'}`}>
+                  Substitution {caps.capabilities.modelCapabilities.substitutionSupported ? 'on' : 'off'}
+                </span>
+                <span className="chip chip--muted">{caps.capabilities.modelCapabilities.advertised?.length ?? 0} declared</span>
+              </div>
+              {caps.capabilities.modelCapabilities.advertised?.length ? (
+                <div className="cap-chip-list">
+                  {caps.capabilities.modelCapabilities.advertised.map((c) => (
+                    <span key={c} className="chip chip--success">{c}</span>
+                  ))}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <StateCard
+              icon={<ZapIcon size={20} />}
+              title="Model capabilities not advertised"
+              body={<>This host doesn't declare <code>modelCapabilities</code> yet, so capability-substitution behavior is unknown. See <a href="https://github.com/openwop/openwop/blob/main/RFCS/0031-envelope-variants-and-model-capabilities.md">RFC 0031</a>.</>}
+            />
+          )
         ) : (
-          !error && <div className="muted">Host doesn't advertise <code>modelCapabilities</code> yet.</div>
+          !error && <SkeletonRows rows={1} columns={['50%']} />
         )}
       </div>
 
-      <div className="card">
+      <div className="surface-card">
         <h2>Input modalities</h2>
         <p className="muted">
           Per <a href="https://github.com/openwop/openwop/blob/main/RFCS/0091-multimodal-perception-input.md">RFC 0091</a> — the
           perception modalities this host accepts as <code>callAI</code> ContentParts. <code>text</code> is always valid; a
           non-text modality is only accepted when advertised here, else the call is rejected with <code>unsupported_modality</code>.
         </p>
-        {caps?.capabilities?.aiProviders?.input?.modalities?.length ? (
-          <p className="u-mono u-fs-12">
-            {caps.capabilities.aiProviders.input.modalities.map((m) => <code key={m} className="u-mr-2">{m}</code>)}
-          </p>
+        {caps ? (
+          caps.capabilities?.aiProviders?.input?.modalities?.length ? (
+            <div className="cap-chip-list">
+              {caps.capabilities.aiProviders.input.modalities.map((m) => (
+                <span key={m} className="chip chip--success">{m}</span>
+              ))}
+            </div>
+          ) : (
+            <StateCard
+              icon={<ImageIcon size={20} />}
+              title="No non-text modalities advertised"
+              body={<>This host doesn't declare <code>aiProviders.input.modalities</code> yet — only <code>text</code> ContentParts are accepted. See <a href="https://github.com/openwop/openwop/blob/main/RFCS/0091-multimodal-perception-input.md">RFC 0091</a>.</>}
+            />
+          )
         ) : (
-          !error && <div className="muted">Host doesn't advertise <code>aiProviders.input.modalities</code> yet.</div>
+          !error && <SkeletonRows rows={1} columns={['40%']} />
         )}
       </div>
 
       <McpToolsPanel />
       <A2APeerPanel />
 
-      <div className="card">
+      <div className="surface-card">
         <h2>Raw advertisement</h2>
         <p className="muted">
           Full <code>GET /.well-known/openwop</code> payload.
@@ -334,13 +363,62 @@ export function CapabilitiesPanel() {
           // tabIndex=0 so the scrollable JSON is keyboard-reachable.
           <pre tabIndex={0} aria-label="Raw capabilities JSON">{JSON.stringify(caps, null, 2)}</pre>
         ) : (
-          !error && <div className="muted">Loading…</div>
+          !error && <SkeletonRows rows={5} columns={['80%', '60%', '70%', '50%', '65%']} />
         )}
       </div>
-
-      <ConformanceProfilesCard caps={caps} />
     </section>
   );
+}
+
+interface EnvelopeRow { key: string; value: JSX.Element; note: JSX.Element }
+
+/** Flatten the envelope-discipline advertisement into table rows so it renders
+ *  through the shared <DataTable> register (was a bespoke cap-table). */
+function envelopeRows(caps: Caps): EnvelopeRow[] {
+  const env = caps.capabilities?.envelopes;
+  return [
+    {
+      key: 'envelopes.reasoning.supported',
+      value: boolGlyph(env?.reasoning?.supported),
+      note: <>RFC 0030 §A — optional <code>reasoning</code> string on envelope payloads</>,
+    },
+    {
+      key: 'envelopes.reasoning.promptDirective',
+      value: env?.reasoning?.promptDirective ? <code>{env.reasoning.promptDirective}</code> : <span className="muted">—</span>,
+      note: <>how aggressively the host prompts the model to populate it</>,
+    },
+    {
+      key: 'envelopes.tierOneSubsetCompliance',
+      value: env?.tierOneSubsetCompliance ? <code>{env.tierOneSubsetCompliance}</code> : <span className="muted">—</span>,
+      note: <>RFC 0030 §B — host's posture on the OpenAI ∩ Anthropic ∩ Gemini schema subset</>,
+    },
+    {
+      key: 'envelopes.reliability.supported',
+      value: boolGlyph(env?.reliability?.supported),
+      note: <>RFC 0032 — host emits retry / refusal / truncation events</>,
+    },
+    {
+      key: 'envelopes.reliability.events',
+      value: env?.reliability?.events?.length ? (
+        <span className="cap-chip-list">
+          {env.reliability.events.map((e) => <span key={e} className="chip chip--muted">{e}</span>)}
+        </span>
+      ) : <span className="muted">—</span>,
+      note: <>which reliability event types this host actually emits</>,
+    },
+    {
+      key: 'envelopes.reliability.completion.distinguishesTruncation',
+      value: boolGlyph(env?.reliability?.completion?.distinguishesTruncation),
+      note: <>RFC 0033 — host branches retry strategy on truncation vs schema-violation</>,
+    },
+    {
+      key: 'envelopes.reliability.completion.truncationBudgetMultiplier',
+      value: typeof env?.reliability?.completion?.truncationBudgetMultiplier === 'number'
+        ? <code>×{env.reliability.completion.truncationBudgetMultiplier}</code>
+        : <span className="muted">—</span>,
+      note: <>how much extra output budget the host gives on a truncation retry</>,
+    },
+  ];
 }
 
 /** Per `plans/app-buildable-now-on-existing-protocol.md` §21 — render the
@@ -349,7 +427,7 @@ export function CapabilitiesPanel() {
  *  name matches a published reference-host badge (openwop.dev/badge/*.svg);
  *  out-of-tree hosts get a leaderboard link instead. Always shows the
  *  Implementation row so an operator can copy the exact `{name, version, vendor}`
- *  for a bug report. */
+ *  for a bug report. Leads the page as the host-identity surface. */
 function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
   const impl = caps?.implementation ?? {};
   const interruptProfiles = caps?.capabilities?.profiles ?? [];
@@ -357,8 +435,8 @@ function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
   const allProfiles = [...new Set([...interruptProfiles, ...authProfiles])].sort();
   const badge = matchBadgeFor(impl.name);
   return (
-    <div className="card">
-      <h2>Conformance &amp; profiles</h2>
+    <div className="surface-card">
+      <h2 className="u-flex u-gap-2 u-items-center"><span className="u-ink-3" aria-hidden="true"><ShieldIcon size={18} /></span> Conformance &amp; profiles</h2>
       <p className="muted">
         The connected host's identity + every profile it advertises through{' '}
         <code>capabilities.profiles[]</code> and <code>capabilities.auth.profiles[]</code>{' '}
@@ -373,9 +451,13 @@ function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
           <tr>
             <th className="cap-table-label">Implementation</th>
             <td>
-              {impl.name ? <code>{impl.name}</code> : <span className="muted">—</span>}
-              {impl.version ? <> <span className="muted">v{impl.version}</span></> : null}
-              {impl.vendor ? <> <span className="muted">· {impl.vendor}</span></> : null}
+              {caps ? (
+                <>
+                  {impl.name ? <code>{impl.name}</code> : <span className="muted">—</span>}
+                  {impl.version ? <> <span className="muted">v{impl.version}</span></> : null}
+                  {impl.vendor ? <> <span className="muted">· {impl.vendor}</span></> : null}
+                </>
+              ) : <span className="muted">—</span>}
             </td>
           </tr>
           <tr>
@@ -386,7 +468,7 @@ function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
               ) : (
                 <div className="cap-chip-list">
                   {allProfiles.map((p) => (
-                    <code key={p}>{p}</code>
+                    <span key={p} className="chip chip--accent">{p}</span>
                   ))}
                 </div>
               )}

@@ -110,6 +110,9 @@ export function DemoDataPage(): JSX.Element {
     try {
       const r = await clearDemoData(ids.length ? { steps: ids } : {});
       setResult(r);
+      // Clearing agents deletes roster members that may be pinned — tell the
+      // sidebar to re-read so a now-dead pin drops out immediately (ADR 0023).
+      window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

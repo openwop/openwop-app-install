@@ -10,7 +10,7 @@
  * at dispatch time or returned from `:render` at preview time).
  */
 
-import type { Express } from 'express';
+import type { Express, Request } from 'express';
 import {
   createUserTemplate,
   deleteUserTemplate,
@@ -22,6 +22,8 @@ import {
   type PromptTemplate,
 } from '../host/promptStore.js';
 import { composePromptTemplate } from '../host/promptCompose.js';
+import { callerSubject } from '../host/requestSubject.js';
+import { isWorkspaceMember } from '../host/accessControlService.js';
 
 function sendError(res: import('express').Response, status: number, code: string, message: string): void {
   // Canonical ErrorEnvelope shape per schemas/error-envelope.schema.json:
@@ -55,15 +57,57 @@ interface PromptsCapabilityFlags {
   mutableLibrary: boolean;
 }
 
+/**
+ * RFC 0048 §D / `prompts.md` §"Workspace membership on workspace-scoped
+ * reads and writes": when a `/v1/prompts*` request carries an explicit
+ * `workspaceId` (body or query string), the host MUST verify the
+ * authenticated principal's membership of that workspace BEFORE honoring
+ * the request — the caller-supplied id is NEVER authorization on its own.
+ * Non-members are refused fail-closed with the canonical
+ * `403 { error: "workspace_membership_required" }` envelope
+ * (`rest-endpoints.md` §"Common error codes") before any persistence
+ * (writes) or content return (reads).
+ *
+ * Membership resolves through the same `accessControlService` store the
+ * workspace-tenancy routes use (ADR 0015) — the application-tier check the
+ * spec mandates, independent of any storage-layer rules.
+ *
+ * Returns `true` when the request was refused (caller returns immediately);
+ * `false` when no explicit workspaceId was supplied or membership verified.
+ */
+async function refusedNonMemberWorkspace(req: Request, res: import('express').Response): Promise<boolean> {
+  const fromBody = (req.body as { workspaceId?: unknown } | undefined)?.workspaceId;
+  const fromQuery = req.query.workspaceId;
+  const workspaceId =
+    typeof fromBody === 'string' && fromBody.length > 0
+      ? fromBody
+      : typeof fromQuery === 'string' && fromQuery.length > 0
+        ? fromQuery
+        : undefined;
+  if (workspaceId === undefined) return false;
+  const subject = callerSubject(req);
+  if (subject !== undefined && (await isWorkspaceMember(subject, workspaceId))) {
+    return false;
+  }
+  sendError(
+    res,
+    403,
+    'workspace_membership_required',
+    `The authenticated principal is not a member of workspace '${workspaceId}'.`,
+  );
+  return true;
+}
+
 export function registerPromptRoutes(app: Express, deps: { capability: PromptsCapabilityFlags }): void {
   const { capability } = deps;
 
   // ── GET /v1/prompts ───────────────────────────────────────────
-  app.get('/v1/prompts', (req, res) => {
+  app.get('/v1/prompts', async (req, res) => {
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
     }
+    if (await refusedNonMemberWorkspace(req, res)) return;
     const q = req.query;
     const filter: ListFilter = {};
     if (typeof q.kind === 'string' && isPromptKind(q.kind)) filter.kind = q.kind;
@@ -84,7 +128,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── POST /v1/prompts ──────────────────────────────────────────
-  app.post('/v1/prompts', (req, res) => {
+  app.post('/v1/prompts', async (req, res) => {
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -93,6 +137,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.mutableLibrary is false');
       return;
     }
+    if (await refusedNonMemberWorkspace(req, res)) return;
     const body = (req.body ?? {}) as PromptTemplate;
     if (typeof body.templateId !== 'string' || typeof body.version !== 'string' || !isPromptKind(body.kind) || typeof body.text !== 'string') {
       sendError(res, 400, 'validation_error', 'PromptTemplate body must include templateId, version, kind, text');
@@ -110,11 +155,12 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── GET /v1/prompts/{templateId} ──────────────────────────────
-  app.get('/v1/prompts/:templateId', (req, res) => {
+  app.get('/v1/prompts/:templateId', async (req, res) => {
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
     }
+    if (await refusedNonMemberWorkspace(req, res)) return;
     const templateId = req.params.templateId;
     const version = typeof req.query.version === 'string' ? req.query.version : undefined;
     const libraryId = typeof req.query.libraryId === 'string' ? req.query.libraryId : undefined;
@@ -148,7 +194,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── PUT /v1/prompts/{templateId} ──────────────────────────────
-  app.put('/v1/prompts/:templateId', (req, res) => {
+  app.put('/v1/prompts/:templateId', async (req, res) => {
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -157,6 +203,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.mutableLibrary is false');
       return;
     }
+    if (await refusedNonMemberWorkspace(req, res)) return;
     const body = (req.body ?? {}) as PromptTemplate;
     const result = updateUserTemplate(req.params.templateId, body);
     if (!result.ok) {
@@ -169,7 +216,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── DELETE /v1/prompts/{templateId} ───────────────────────────
-  app.delete('/v1/prompts/:templateId', (req, res) => {
+  app.delete('/v1/prompts/:templateId', async (req, res) => {
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -178,6 +225,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.mutableLibrary is false');
       return;
     }
+    if (await refusedNonMemberWorkspace(req, res)) return;
     const result = deleteUserTemplate(req.params.templateId);
     if (!result.ok) {
       const status = result.code === 'forbidden' ? 403 : 404;
@@ -195,6 +243,7 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
     }
+    if (await refusedNonMemberWorkspace(req, res)) return;
     const body = (req.body ?? {}) as {
       ref?: unknown;
       variables?: Record<string, unknown>;

@@ -21,12 +21,25 @@ import { deleteKey, listStoredRefs, storeKey } from './lib/byokClient.js';
 import { PROVIDERS, type ProviderConfig } from './lib/providers.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { TextField } from '../ui/Field.js';
+import {
+  DataTable,
+  IconButton,
+  Modal,
+  Notice,
+  SkeletonRows,
+  StateCard,
+  type DataColumn,
+} from '../ui/index.js';
+import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
+import { KeyIcon, PlusIcon, RotateCwIcon, TrashIcon } from '../ui/icons/index.js';
 
 interface CredentialEntry {
   ref: string;
   providerId: string | null;
   /** Trailing label after `<providerId>:` if present (e.g., "prod"). */
   label: string | null;
+  /** Most-recently-stored masked rendering, if added this session. */
+  masked?: string;
 }
 
 /** Split a credentialRef like `anthropic:prod` into provider+label.
@@ -41,10 +54,17 @@ function parseRef(ref: string): CredentialEntry {
   };
 }
 
+const LEGACY = '__legacy__';
+
 export function KeysPage(): JSX.Element {
   const [refs, setRefs] = useState<readonly string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
+  // Which provider tile is acting as the active filter (null = show all).
+  const [filter, setFilter] = useState<string | null>(null);
+  // Pending destructive-confirm target (credentialRef) for the <Modal>.
+  const [pendingDelete, setPendingDelete] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
   // Most-recently-stored masked view, keyed by credentialRef. The BE's
   // POST /v1/host/sample/byok/secrets returns `{ credentialRef, masked }`
   // but the LIST endpoint only returns refs. Persisting the masked
@@ -66,14 +86,18 @@ export function KeysPage(): JSX.Element {
   useEffect(() => { void refresh(); }, [refresh]);
 
   const entries = useMemo<CredentialEntry[]>(() => {
-    return (refs ?? []).map(parseRef);
-  }, [refs]);
+    return (refs ?? []).map((ref) => {
+      const parsed = parseRef(ref);
+      const masked = maskedByRef[ref];
+      return masked ? { ...parsed, masked } : parsed;
+    });
+  }, [refs, maskedByRef]);
 
   // Group by provider for a clean per-provider section layout.
   const grouped = useMemo(() => {
     const byProvider = new Map<string, CredentialEntry[]>();
     for (const e of entries) {
-      const key = e.providerId ?? '__legacy__';
+      const key = e.providerId ?? LEGACY;
       const arr = byProvider.get(key) ?? [];
       arr.push(e);
       byProvider.set(key, arr);
@@ -83,7 +107,99 @@ export function KeysPage(): JSX.Element {
 
   // BYOK-only providers (the managed Try-it-free entry doesn't take
   // a user-supplied key; MiniMax is hidden — its key is server-side).
-  const byokProviders = PROVIDERS.filter((p) => !p.managed && !p.hidden);
+  const byokProviders = useMemo(
+    () => PROVIDERS.filter((p) => !p.managed && !p.hidden),
+    [],
+  );
+
+  const legacy = refs !== null ? grouped.get(LEGACY) ?? [] : [];
+  const totalKeys = entries.length;
+  const loading = refs === null;
+
+  // "Stats are filters": a tile per provider that has ≥1 key (plus a
+  // Total tile), and clicking a tile narrows the sections below to that
+  // provider. Total acts as the "clear filter" tile.
+  const figures = useMemo<KeyFigureItem[]>(() => {
+    const tiles: KeyFigureItem[] = [
+      { key: '__all__', label: 'Total keys', value: totalKeys, glyph: <KeyIcon size={13} /> },
+    ];
+    for (const p of byokProviders) {
+      const count = grouped.get(p.id)?.length ?? 0;
+      if (count > 0) tiles.push({ key: p.id, label: p.label, value: count });
+    }
+    if (legacy.length > 0) {
+      tiles.push({ key: LEGACY, label: 'Unscoped', value: legacy.length, tone: 'attention' });
+    }
+    return tiles;
+  }, [byokProviders, grouped, totalKeys, legacy.length]);
+
+  const onToggleFigure = useCallback((key: string) => {
+    setFilter((prev) => (key === '__all__' || prev === key ? null : key));
+  }, []);
+
+  // Apply the active provider filter to which sections render.
+  const visibleProviders = filter
+    ? byokProviders.filter((p) => p.id === filter)
+    : byokProviders;
+  const showLegacy = legacy.length > 0 && (!filter || filter === LEGACY);
+
+  function requestDelete(ref: string): void {
+    setPendingDelete(ref);
+  }
+
+  async function confirmDelete(): Promise<void> {
+    const ref = pendingDelete;
+    if (!ref) return;
+    setDeleting(true);
+    try {
+      await deleteKey(ref);
+      setMaskedByRef((prev) => {
+        const next = { ...prev };
+        delete next[ref];
+        return next;
+      });
+      setPendingDelete(null);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setPendingDelete(null);
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  const keyColumns: DataColumn<CredentialEntry>[] = [
+    {
+      key: 'ref',
+      header: 'Reference',
+      sortValue: (e) => e.ref,
+      render: (e) => <code className="keys-list-item-ref">{e.ref}</code>,
+    },
+    {
+      key: 'masked',
+      header: 'Masked value',
+      cellClassName: 'muted',
+      render: (e) =>
+        e.masked ? (
+          <span title="Masked rendering returned by the BE on store">{e.masked}</span>
+        ) : (
+          <span className="muted">—</span>
+        ),
+    },
+    {
+      key: 'actions',
+      header: '',
+      align: 'right',
+      width: '64px',
+      render: (e) => (
+        <IconButton
+          label={`Delete ${e.ref}`}
+          icon={<TrashIcon size={15} />}
+          onClick={() => requestDelete(e.ref)}
+        />
+      ),
+    },
+  ];
 
   return (
     <section>
@@ -91,29 +207,67 @@ export function KeysPage(): JSX.Element {
         eyebrow="Settings"
         title="API keys"
         lede="Manage the API keys your workflows use. Each key is stored server-side (encrypted at rest); the chat and workflow-node dispatchers reference a key by its label. Add multiple keys per provider (e.g., separate prod/test keys) and pick which one a specific workflow node uses from the builder."
-        actions={<button className="secondary" onClick={() => { void refresh(); }}>Refresh</button>}
       />
-      <div className="card">
 
-        {error && <div className="alert error">{error}</div>}
+      <div className="action-bar u-justify-end">
+        <button className="secondary" onClick={() => { void refresh(); }}>
+          <span className="u-iflex u-gap-1"><RotateCwIcon size={14} aria-hidden /> Refresh</span>
+        </button>
+      </div>
 
-        {refs === null && <p className="muted">Loading…</p>}
+      {error && <Notice variant="error">{error}</Notice>}
 
-        {refs !== null && byokProviders.map((p) => {
+      {!loading && totalKeys > 0 && (
+        <KeyFigureBand
+          figures={figures}
+          activeKey={filter ?? '__all__'}
+          onToggle={onToggleFigure}
+          ariaLabel="Stored keys by provider"
+        />
+      )}
+
+      <div className="page-stack">
+        {loading && (
+          <div className="surface-card">
+            <SkeletonRows rows={3} columns={['40%', '30%', '15%']} />
+          </div>
+        )}
+
+        {/* Whole-page zero-key state — a fresh tenant lands on one CTA. */}
+        {!loading && totalKeys === 0 && (
+          <div className="surface-card">
+            <StateCard
+              icon={<KeyIcon size={28} />}
+              title="No API keys yet"
+              body="Add a key to let chat and workflow nodes call a provider on your behalf. Keys are encrypted at rest; nodes reference them by label."
+              action={
+                <button onClick={() => setAdding(byokProviders[0]?.id ?? null)}>
+                  <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> Add your first key</span>
+                </button>
+              }
+            />
+          </div>
+        )}
+
+        {!loading && totalKeys > 0 && visibleProviders.map((p) => {
           const list = grouped.get(p.id) ?? [];
           const isAdding = adding === p.id;
           return (
-            <div key={p.id} className="keys-provider-section">
-              <div className="keys-provider-head">
-                <div className="keys-provider-name">
-                  <span className="keys-provider-badge" style={{ background: p.badgeColor }} aria-hidden="true">
-                    {p.label.charAt(0)}
+            <div key={p.id} className="surface-card">
+              <div className="keys-provider-head action-bar u-justify-between">
+                <div className="keys-provider-name u-iflex u-gap-2">
+                  <span className="chip chip--accent">
+                    <KeyIcon size={13} aria-hidden /> {p.label}
                   </span>
-                  <strong>{p.label}</strong>
-                  <span className="muted">· {list.length} key{list.length === 1 ? '' : 's'}</span>
+                  <span className="muted">{list.length} key{list.length === 1 ? '' : 's'}</span>
                 </div>
                 {!isAdding && (
-                  <button className="secondary" onClick={() => setAdding(p.id)}>+ Add key</button>
+                  <IconButton
+                    label={`Add ${p.label} key`}
+                    className="secondary"
+                    icon={<span className="u-iflex u-gap-1"><PlusIcon size={14} aria-hidden /> Add key</span>}
+                    onClick={() => setAdding(p.id)}
+                  />
                 )}
               </div>
 
@@ -130,90 +284,74 @@ export function KeysPage(): JSX.Element {
                 />
               )}
 
-              {list.length === 0 ? (
-                <p className="muted keys-empty">No keys stored for {p.label} yet.</p>
-              ) : (
-                <ul className="keys-list">
-                  {list.map((e) => (
-                    <li key={e.ref} className="keys-list-item">
-                      <div className="keys-list-item-main">
-                        <code className="keys-list-item-ref">{e.ref}</code>
-                        {maskedByRef[e.ref] && (
-                          <span className="keys-list-item-masked" title="Masked rendering returned by the BE on store">
-                            {maskedByRef[e.ref]}
-                          </span>
-                        )}
-                      </div>
-                      <button
-                        className="secondary keys-list-item-delete"
-                        onClick={async () => {
-                          if (!window.confirm(`Delete key "${e.ref}"? Nodes referencing it will fail until you re-add it.`)) return;
-                          try {
-                            await deleteKey(e.ref);
-                            setMaskedByRef((prev) => {
-                              const next = { ...prev };
-                              delete next[e.ref];
-                              return next;
-                            });
-                            await refresh();
-                          } catch (err) {
-                            setError(err instanceof Error ? err.message : String(err));
-                          }
-                        }}
-                      >
-                        Delete
+              <DataTable
+                columns={keyColumns}
+                rows={list}
+                rowKey={(e) => e.ref}
+                density="compact"
+                caption={`Stored ${p.label} keys`}
+                initialSort={{ key: 'ref', dir: 'asc' }}
+                empty={
+                  <StateCard
+                    icon={<KeyIcon size={24} />}
+                    title={`No ${p.label} keys yet`}
+                    body="Add a key to let chat and workflow nodes call this provider."
+                    {...(isAdding ? {} : { action: (
+                      <button onClick={() => setAdding(p.id)}>
+                        <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> Add a key</span>
                       </button>
-                    </li>
-                  ))}
-                </ul>
-              )}
+                    ) })}
+                  />
+                }
+              />
             </div>
           );
         })}
 
         {/* Legacy refs (no `<provider>:` prefix) — surfaced separately
             so the user can clean them up. */}
-        {(() => {
-          const legacy = refs !== null ? grouped.get('__legacy__') : undefined;
-          if (!legacy || legacy.length === 0) return null;
-          return (
-            <div className="keys-provider-section">
-              <div className="keys-provider-head">
-                <div className="keys-provider-name">
-                  <strong>Unscoped keys</strong>
-                  <span className="muted">· {legacy.length}</span>
-                </div>
+        {showLegacy && (
+          <div className="surface-card">
+            <div className="keys-provider-head action-bar u-justify-between">
+              <div className="keys-provider-name u-iflex u-gap-2">
+                <span className="chip chip--muted"><KeyIcon size={13} aria-hidden /> Unscoped keys</span>
+                <span className="muted">{legacy.length}</span>
               </div>
-              <p className="muted">
-                These credentials don&apos;t carry a <code>provider:</code>{' '}
-                prefix. They still work, but the per-node picker can&apos;t
-                filter them by provider. Delete and re-add to scope them.
-              </p>
-              <ul className="keys-list">
-                {legacy.map((e) => (
-                  <li key={e.ref} className="keys-list-item">
-                    <code className="keys-list-item-ref">{e.ref}</code>
-                    <button
-                      className="secondary keys-list-item-delete"
-                      onClick={async () => {
-                        if (!window.confirm(`Delete key "${e.ref}"?`)) return;
-                        try {
-                          await deleteKey(e.ref);
-                          await refresh();
-                        } catch (err) {
-                          setError(err instanceof Error ? err.message : String(err));
-                        }
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </li>
-                ))}
-              </ul>
             </div>
-          );
-        })()}
+            <Notice variant="warning">
+              These credentials don&apos;t carry a <code>provider:</code>{' '}
+              prefix. They still work, but the per-node picker can&apos;t
+              filter them by provider. Delete and re-add to scope them.
+            </Notice>
+            <DataTable
+              columns={keyColumns}
+              rows={legacy}
+              rowKey={(e) => e.ref}
+              density="compact"
+              caption="Unscoped keys"
+              initialSort={{ key: 'ref', dir: 'asc' }}
+            />
+          </div>
+        )}
       </div>
+
+      {pendingDelete && (
+        <Modal label="Delete key" onClose={() => { if (!deleting) setPendingDelete(null); }}>
+          <h2 className="u-mt-0">Delete this key?</h2>
+          <p>
+            Nodes referencing <code>{pendingDelete}</code> will fail until you
+            re-add a key with the same label. This can&apos;t be undone.
+          </p>
+          <div className="action-bar u-justify-end">
+            <button className="secondary" onClick={() => setPendingDelete(null)} disabled={deleting}>
+              Cancel
+            </button>
+            <button className="btn-danger" onClick={() => { void confirmDelete(); }} disabled={deleting}>
+              {deleting ? 'Deleting…' : 'Delete key'}
+            </button>
+          </div>
+        </Modal>
+      )}
     </section>
   );
 }
@@ -284,7 +422,7 @@ function AddKeyForm({
 
   return (
     <div className="keys-add-form">
-      {err && <div className="alert error">{err}</div>}
+      {err && <Notice variant="error">{err}</Notice>}
       <TextField
         label={<>Label <span className="muted">(used to identify the key in workflow nodes)</span></>}
         value={label}
@@ -304,9 +442,7 @@ function AddKeyForm({
           {...(provider.apiKeyHelpText ? { help: provider.apiKeyHelpText } : {})}
         />
         {prefixWarning && (
-          <div className="alert warning u-mt-1-5 u-fs-12 u-pad-6x10">
-            {prefixWarning}
-          </div>
+          <Notice variant="warning">{prefixWarning}</Notice>
         )}
         {provider.apiKeyConsoleUrl && (
           <div className="muted builder-inspector-help">

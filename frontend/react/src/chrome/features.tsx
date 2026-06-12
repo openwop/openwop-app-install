@@ -32,7 +32,7 @@ import {
   MessageSquareIcon, BotIcon, WorkflowIcon, PlayIcon, ColumnsIcon, UserIcon,
   ActivityIcon, DatabaseIcon, FileTextIcon, PackageIcon,
   BuildingIcon, BoxesIcon, KeyIcon, ShieldIcon, TerminalIcon, SettingsIcon,
-  FlagIcon,
+  FlagIcon, GlobeIcon,
 } from '../ui/icons/index.js';
 // ChatTab is the home route (`/`) — keep it eager so first paint has no lazy
 // flash. Every other route component is lazy so it stays out of the entry
@@ -68,6 +68,7 @@ const DemoDataPage = lazy(() => import('../settings/DemoDataPage.js').then((m) =
 const AdminOverviewPage = lazy(() => import('../settings/AdminOverviewPage.js').then((m) => ({ default: m.AdminOverviewPage })));
 const OrgsPage = lazy(() => import('../orgs/OrgsPage.js').then((m) => ({ default: m.OrgsPage })));
 const FeatureTogglePanel = lazy(() => import('../featureToggles/FeatureTogglePanel.js').then((m) => ({ default: m.FeatureTogglePanel })));
+const FrontPageSettingsPanel = lazy(() => import('../site/FrontPageSettingsPanel.js').then((m) => ({ default: m.FrontPageSettingsPanel })));
 
 // The feature manifest types now live in ./featureTypes (extracted so feature
 // packages can import them without a cycle). Re-exported here for back-compat.
@@ -83,9 +84,11 @@ const CORE_FEATURES: FeatureRoute[] = [
     path: '/', element: <ChatTab />, tier: 'workspace', chrome: 'chat',
     nav: { group: 'Workspace', label: 'Chat', icon: MessageSquareIcon, hint: 'Conversational entry point', end: true, order: 10 },
   },
-  // The nav label says "Chat" but the route stays "/" so existing bookmarks
-  // don't break; /chat redirects for users who type the nav label as a URL.
-  { path: '/chat', element: <Navigate to="/" replace />, tier: 'workspace' },
+  // /chat is the chat surface's own stable URL (the same ChatTab as "/"). It
+  // renders DIRECTLY — not a redirect to "/" — because "/" is the public marketing
+  // front page for anonymous visitors (ADR 0027); redirecting "/chat" → "/" would
+  // bounce an "open the app" link onto the marketing page.
+  { path: '/chat', element: <ChatTab />, tier: 'workspace', chrome: 'chat' },
   {
     path: '/agents', element: <AgentDashboardPage />, tier: 'workspace',
     nav: { group: 'Workspace', label: 'Agents', icon: BotIcon, hint: 'Your digital workforce — named AI coworkers', notUnder: ['/agents/templates'], order: 20 },
@@ -187,6 +190,13 @@ const CORE_FEATURES: FeatureRoute[] = [
     path: '/feature-toggles', element: <FeatureTogglePanel />, tier: 'admin',
     nav: { group: 'Platform', label: 'Feature toggles', icon: FlagIcon, hint: 'On / off / beta + multivariant traffic-splitting' },
   },
+  // ADR 0027 — the runtime, superadmin-managed public front-page pointer (the
+  // CMS/Media/Publishing nav also lands in this 'Content' group, from their
+  // feature packages).
+  {
+    path: '/front-page', element: <FrontPageSettingsPanel />, tier: 'admin', chrome: 'narrow',
+    nav: { group: 'Content', label: 'Front page', icon: GlobeIcon, hint: 'The public landing page at / (which org + page)', order: 50 },
+  },
   {
     path: '/demo-data', element: <DemoDataPage />, tier: 'admin', chrome: 'narrow',
     nav: { group: 'Access & data', label: 'Demo data', icon: DatabaseIcon, hint: 'Re-seed the built-in demo roster' },
@@ -211,8 +221,8 @@ export interface NavGroup { label: string; items: NavItem[] }
 export const GROUP_ORDER: string[] = [
   // workspace tier
   'Workspace', 'Author',
-  // admin tier
-  'Admin', 'Operations', 'Workforces', 'Platform', 'Access & data',
+  // admin tier ('Content' = CMS / Media / Publishing / Sharing — ADR 0027)
+  'Admin', 'Operations', 'Workforces', 'Content', 'Platform', 'Access & data',
 ];
 
 const groupRank = (label: string): number => {

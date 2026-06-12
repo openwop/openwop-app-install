@@ -40,6 +40,7 @@ import {
   createCard,
   deleteBoard,
   deleteCard,
+  ensurePersonalBoard,
   getBoard,
   getCard,
   listBoards,
@@ -52,10 +53,12 @@ import {
   subscribeBoardChanges,
   updateCardFields,
   KANBAN_CARD_SOURCES,
+  type KanbanBoard,
   type KanbanCardSource,
   type KanbanTriggerDirective,
 } from '../host/kanbanService.js';
 import { getRosterEntry } from '../host/rosterService.js';
+import { callerSubject, personalTenantOf, isDurableCaller } from '../host/requestSubject.js';
 import { deliver, makeDedupKey, registerSubscription } from '../host/triggerBridgeService.js';
 
 const log = createLogger('routes.kanban');
@@ -80,6 +83,24 @@ function parseCardSource(input: unknown): KanbanCardSource | undefined {
 
 function parseCardPriority(input: unknown): 'low' | 'normal' | 'high' | undefined {
   return input === 'low' || input === 'normal' || input === 'high' ? input : undefined;
+}
+
+/** Resolve a board AND authorize the caller for it — the single source of truth
+ *  for board access (replaces the copy-pasted `board.tenantId !== tenantOf(req)`
+ *  guard so the rule can't drift across handlers). A caller reaches a board when:
+ *   - it belongs to the active workspace (the shared/standard case), OR
+ *   - the caller is the board's personal OWNER (ADR 0025): a human's personal
+ *     board is reachable from ANY active workspace, exactly as an agent surfaces
+ *     its board on the agent profile regardless of the viewer's active tenant.
+ *  Returns null (→ uniform 404, no existence leak) when the board is missing or
+ *  the caller is neither a tenant member nor the owner. Fail-closed. */
+async function authorizeBoard(req: Request, boardId: string): Promise<KanbanBoard | null> {
+  const board = await getBoard(boardId);
+  if (!board) return null;
+  if (board.tenantId === tenantOf(req)) return board;
+  const subject = callerSubject(req);
+  if (board.ownerUserId && subject && board.ownerUserId === subject) return board;
+  return null;
 }
 
 /** Resolve the trigger's workflow, create + dispatch a run, and emit the
@@ -129,6 +150,11 @@ async function startKanbanRun(
     attribution.rosterId = roster.rosterId;
     attribution.persona = roster.persona;
     attribution.agentId = roster.agentRef.agentId;
+  } else if (board?.ownerUserId) {
+    // ADR 0025 — a personal (human-owned) board attributes its card→run fires to
+    // the user, so they appear in the profile Activity feed (the user-side mirror
+    // of an agent's attributed activity).
+    attribution.ownerUserId = board.ownerUserId;
   }
 
   // RFC 0083: the card→run firing goes through a durable trigger subscription
@@ -202,8 +228,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // client refetches GET /boards/:id (no card bodies on the wire here).
   app.get('/v1/host/sample/kanban/boards/:boardId/events', async (req, res, next) => {
     try {
-      const board = await getBoard(req.params.boardId);
-      if (!board || board.tenantId !== tenantOf(req)) {
+      const board = await authorizeBoard(req, req.params.boardId);
+      if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
       res.writeHead(200, {
@@ -305,10 +331,35 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
+  // ADR 0025 — the caller's personal "My Board", ensured idempotently. MUST be
+  // registered before `/boards/:boardId` (Express first-match) or `personal`
+  // would be parsed as a boardId. The board lives in the caller's PERSONAL
+  // tenant — the same idempotent choke point that provisions it on workspace
+  // listing (`routes/workspaces.ts`) — and is owned by the caller's subject, so
+  // it is the human's own board regardless of which workspace is active. This
+  // makes a human a board-owning orchestration principal, mirroring how an agent
+  // board is surfaced on the agent profile.
+  app.get('/v1/host/sample/kanban/boards/personal', async (req, res, next) => {
+    try {
+      const subject = callerSubject(req);
+      const personal = personalTenantOf(req);
+      // Durable accounts only (ADR 0025 / ADR 0015): a personal board is never
+      // auto-provisioned for an ephemeral `anon:<sid>` sandbox session — the
+      // same rule the workspace choke point enforces.
+      if (!subject || !personal || !isDurableCaller(req)) {
+        throw new OpenwopError('unauthenticated', 'A durable signed-in account is required for a personal board.', 401, {});
+      }
+      const board = await ensurePersonalBoard(personal, subject);
+      res.json({ board, cards: await listCards(board.id) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get('/v1/host/sample/kanban/boards/:boardId', async (req, res, next) => {
     try {
-      const board = await getBoard(req.params.boardId);
-      if (!board || board.tenantId !== tenantOf(req)) {
+      const board = await authorizeBoard(req, req.params.boardId);
+      if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
       res.json({ board, cards: await listCards(board.id) });
@@ -322,8 +373,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // (RFC 0086 §C) and column changes alter trigger semantics.
   app.patch('/v1/host/sample/kanban/boards/:boardId', async (req, res, next) => {
     try {
-      const board = await getBoard(req.params.boardId);
-      if (!board || board.tenantId !== tenantOf(req)) {
+      const board = await authorizeBoard(req, req.params.boardId);
+      if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
       const body = (req.body ?? {}) as { name?: unknown } & Record<string, unknown>;
@@ -346,8 +397,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
 
   app.delete('/v1/host/sample/kanban/boards/:boardId', async (req, res, next) => {
     try {
-      const board = await getBoard(req.params.boardId);
-      if (!board || board.tenantId !== tenantOf(req)) {
+      const board = await authorizeBoard(req, req.params.boardId);
+      if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
       await deleteBoard(board.id);
@@ -361,8 +412,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
 
   app.post('/v1/host/sample/kanban/boards/:boardId/cards', async (req, res, next) => {
     try {
-      const board = await getBoard(req.params.boardId);
-      if (!board || board.tenantId !== tenantOf(req)) {
+      const board = await authorizeBoard(req, req.params.boardId);
+      if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
       const body = (req.body ?? {}) as {
@@ -417,8 +468,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       if (!existing) {
         throw new OpenwopError('not_found', 'Card not found.', 404, { cardId });
       }
-      const board = await getBoard(existing.boardId);
-      if (!board || board.tenantId !== tenantOf(req)) {
+      const board = await authorizeBoard(req, existing.boardId);
+      if (!board) {
         throw new OpenwopError('not_found', 'Card not found.', 404, { cardId });
       }
       const body = (req.body ?? {}) as {
@@ -461,7 +512,10 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         }
         const moved = await moveCard(cardId, body.columnId);
         if (moved?.trigger) {
-          const started = await startKanbanRun(deps, tenantOf(req), moved.trigger);
+          // Attribute the run to the BOARD's tenant, not the caller's active
+          // workspace — so a personal board's card→run fires into the owner's
+          // personal tenant even when accessed from another workspace.
+          const started = await startKanbanRun(deps, board.tenantId, moved.trigger);
           if (started) {
             triggeredRunId = started.runId;
             attribution = started.attribution;
@@ -484,8 +538,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       if (!card) {
         throw new OpenwopError('not_found', 'Card not found.', 404, { cardId: req.params.cardId });
       }
-      const board = await getBoard(card.boardId);
-      if (!board || board.tenantId !== tenantOf(req)) {
+      const board = await authorizeBoard(req, card.boardId);
+      if (!board) {
         throw new OpenwopError('not_found', 'Card not found.', 404, { cardId: req.params.cardId });
       }
       await deleteCard(card.id);

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { DataTable, DensityToggle, type DataColumn } from '../ui/DataTable.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
@@ -14,7 +14,10 @@ import { serializeWorkflow, SerializeError } from '../builder/schema/serialize.j
 import { registerWorkflow } from '../builder/persistence/registerClient.js';
 import { useAuth } from '../auth/useAuth.js';
 import { PageHeader } from '../ui/PageHeader.js';
-import { FlagIcon } from '../ui/icons/index.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Notice } from '../ui/Notice.js';
+import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
+import { FlagIcon, PlayIcon, RotateCwIcon, PlusIcon, SearchIcon } from '../ui/icons/index.js';
 import { SelectField, TextareaField } from '../ui/Field.js';
 import { demoModeCached, loadDemoMode } from '../client/demoMode.js';
 
@@ -22,6 +25,17 @@ const SAMPLE_WORKFLOWS = [
   { id: 'sample.demo.uppercase', label: 'sample.demo.uppercase — single-node uppercase' },
   { id: 'sample.demo.approval-gate', label: 'sample.demo.approval-gate — uppercase gated by an approval interrupt' },
 ];
+
+// Outcome buckets shared by the figure band (which doubles as a status filter)
+// and the table predicate, so a tile and the rows it filters always agree.
+type RunStatusBucket = 'completed' | 'failed' | 'cancelled' | 'awaiting';
+function statusBucket(status: string): RunStatusBucket | null {
+  if (status === 'completed') return 'completed';
+  if (status === 'failed') return 'failed';
+  if (status === 'cancelled') return 'cancelled';
+  if (status.startsWith('waiting') || status === 'suspended' || status === 'paused') return 'awaiting';
+  return null;
+}
 
 export function RunsIndexPage() {
   const nav = useNavigate();
@@ -54,6 +68,9 @@ export function RunsIndexPage() {
   const runIds = useMemo(() => runs.map((r) => r.runId), [runs]);
   const { byRun, feedbackOn } = useRunAnnotations(runIds);
   const [reviewOnly, setReviewOnly] = useState(false);
+  // §4.5 "stats are filters" — the figure tiles below double as a status
+  // filter on the table. null = no status filter (the "Total" tile, or none).
+  const [statusFilter, setStatusFilter] = useState<RunStatusBucket | null>(null);
   const isFlagged = useCallback(
     (runId: string) => needsReview(reviewOf(byRun.get(runId) ?? [])),
     [byRun],
@@ -62,7 +79,20 @@ export function RunsIndexPage() {
     () => runs.filter((r) => isFlagged(r.runId)).length,
     [runs, isFlagged],
   );
-  const reviewFiltered = reviewOnly ? runs.filter((r) => isFlagged(r.runId)) : runs;
+  const reviewFiltered = useMemo(() => {
+    let base = reviewOnly ? runs.filter((r) => isFlagged(r.runId)) : runs;
+    if (statusFilter) base = base.filter((r) => statusBucket(r.status) === statusFilter);
+    return base;
+  }, [runs, reviewOnly, isFlagged, statusFilter]);
+  // Scroll the create-run form into view + focus it (the PageHeader / empty-state
+  // "Create a run" CTAs point here rather than at prose "above").
+  const createFormRef = useRef<HTMLFormElement | null>(null);
+  const focusCreateForm = useCallback(() => {
+    const form = createFormRef.current;
+    if (!form) return;
+    form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    form.querySelector<HTMLElement>('select, textarea, button')?.focus();
+  }, []);
   // Free-text filter, persisted in the URL (?q=) so a filtered view is
   // shareable + survives reload (gap analysis #4). Matches run id or workflow.
   const [searchParams, setSearchParams] = useSearchParams();
@@ -156,7 +186,7 @@ export function RunsIndexPage() {
           <Link to={`/runs/${r.runId}`} onClick={(e) => e.stopPropagation()}><code>{r.runId.slice(0, 8)}…</code></Link>
           {isFlagged(r.runId) && (
             <span
-              className="status-badge status-error runs-review-flag"
+              className="chip chip--danger runs-review-flag"
               title={`Flagged for review: ${reviewReason(reviewOf(byRun.get(r.runId) ?? []))}`}
             >
               <FlagIcon size={10} /> review
@@ -177,18 +207,117 @@ export function RunsIndexPage() {
   ], [isFlagged, byRun]);
 
   return (
-    <section>
+    <section className="page-enter">
       <PageHeader
         eyebrow="Runs"
         title="Runs"
-        lede="Submit a workflow on the live sample host, then watch it stream — status, events, and outputs land in real time."
+        lede="Every workflow execution for this tenant — status, duration, and quality at a glance."
+        actions={
+          <>
+            <button type="button" className="secondary" onClick={() => void refreshRuns()} disabled={runsLoading}>
+              <RotateCwIcon size={14} /> {runsLoading ? 'Loading…' : 'Refresh'}
+            </button>
+            <button type="button" className="btn-accent-solid" onClick={focusCreateForm}>
+              <PlusIcon size={14} /> Create a run
+            </button>
+          </>
+        }
       />
-      <div className="card">
+
+      <RunsSummary
+        runs={runs}
+        annotationsByRun={byRun}
+        activeStatus={statusFilter}
+        onToggleStatus={(b) => setStatusFilter((cur) => (cur === b ? null : b))}
+      />
+
+      <div className="surface-card">
+        <div className="u-flex u-items-baseline u-justify-between u-gap-2 u-wrap">
+          <h2 className="u-m-0">{reviewOnly ? 'Flagged for review' : 'Recent runs'}</h2>
+        </div>
+        <div className="filterbar">
+          {/* §C3 — flagged review queue. Only offered when the host advertises
+              feedback; mirrors the inbox tab pattern. */}
+          {feedbackOn && (
+            <div className="segmented" role="group" aria-label="Filter runs">
+              <button type="button" aria-pressed={!reviewOnly} onClick={() => setReviewOnly(false)}>
+                All
+              </button>
+              <button type="button" aria-pressed={reviewOnly} onClick={() => setReviewOnly(true)} title="Runs flagged, low-rated, or corrected">
+                <FlagIcon size={13} /> Flagged{flaggedCount > 0 ? ` (${flaggedCount})` : ''}
+              </button>
+            </div>
+          )}
+          <input
+            type="search"
+            className="ui-input filterbar-search"
+            placeholder="Filter by run id or workflow…"
+            aria-label="Filter runs"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+          <DensityToggle value={density} onChange={setDensity} />
+        </div>
+        {runsError ? <Notice variant="error">{runsError}</Notice> : null}
+        <DataTable
+          rows={visibleRuns}
+          rowKey={(r) => r.runId}
+          onRowClick={(r) => nav(`/runs/${r.runId}`)}
+          density={density}
+          caption="Recent runs"
+          initialSort={{ key: 'started', dir: 'desc' }}
+          columns={runColumns}
+          empty={
+            runsLoading ? (
+              <SkeletonRows rows={4} columns={[90, 180, 80, 150]} />
+            ) : runs.length === 0 ? (
+              <StateCard
+                icon={<PlayIcon size={22} />}
+                title="No runs yet"
+                body="Submit a workflow on the live sample host and watch it stream — status, events, and outputs land in real time."
+                action={
+                  <button type="button" className="btn-accent-solid" onClick={focusCreateForm}>
+                    <PlusIcon size={14} /> Create a run
+                  </button>
+                }
+              />
+            ) : reviewOnly ? (
+              <StateCard
+                icon={<FlagIcon size={22} />}
+                title="Nothing flagged for review"
+                body="Thumbs-down, flag, or correct a run to add it to this queue."
+                action={
+                  <button type="button" className="secondary" onClick={() => setReviewOnly(false)}>
+                    Show all runs
+                  </button>
+                }
+              />
+            ) : (
+              <StateCard
+                icon={<SearchIcon size={22} />}
+                title="No runs match this filter"
+                body="Try a different run id or workflow, or clear the status filter."
+                action={
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => { setQuery(''); setStatusFilter(null); }}
+                  >
+                    Clear filter
+                  </button>
+                }
+              />
+            )
+          }
+        />
+      </div>
+
+      <div className="surface-card">
         <h2>Create a run</h2>
         <p className="muted u-mt-0">
           {tenantScope}
         </p>
-        <form onSubmit={onSubmit}>
+        <form ref={createFormRef} onSubmit={onSubmit}>
           <SelectField label="Workflow" value={workflowId} onChange={(e) => setWorkflowId(e.target.value)}>
             {allOptions.map((w) => (
               <option key={w.id} value={w.id}>{w.label}</option>
@@ -201,73 +330,16 @@ export function RunsIndexPage() {
             onChange={(e) => setInputsRaw(e.target.value)}
             spellCheck={false}
           />
-          {error && <div className="alert error">{error}</div>}
+          {error && <Notice variant="error">{error}</Notice>}
           <div className="button-row">
-            <button type="submit" disabled={submitting}>
-              {submitting ? 'Creating…' : 'Create run'}
+            <button type="submit" className="btn-accent-solid" disabled={submitting}>
+              {submitting ? 'Creating…' : <><PlusIcon size={14} /> Create run</>}
             </button>
           </div>
         </form>
       </div>
 
-      <RunsSummary runs={runs} annotationsByRun={byRun} />
-
-      <div className="card">
-        <div className="u-flex u-items-baseline u-justify-between u-gap-2 u-wrap">
-          <h2 className="u-m-0">{reviewOnly ? 'Flagged for review' : 'Recent runs'}</h2>
-          <div className="u-flex u-items-center u-gap-2">
-            {/* §C3 — flagged review queue. Only offered when the host advertises
-                feedback; mirrors the inbox tab pattern. */}
-            {feedbackOn && (
-              <div className="segmented" role="group" aria-label="Filter runs">
-                <button type="button" aria-pressed={!reviewOnly} onClick={() => setReviewOnly(false)}>
-                  All
-                </button>
-                <button type="button" aria-pressed={reviewOnly} onClick={() => setReviewOnly(true)} title="Runs flagged, low-rated, or corrected">
-                  <FlagIcon size={13} /> Flagged{flaggedCount > 0 ? ` (${flaggedCount})` : ''}
-                </button>
-              </div>
-            )}
-            <input
-              type="search"
-              className="ui-input runs-filter"
-              placeholder="Filter by run id or workflow…"
-              aria-label="Filter runs"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <DensityToggle value={density} onChange={setDensity} />
-            <button type="button" className="secondary" onClick={() => void refreshRuns()} disabled={runsLoading}>
-              {runsLoading ? 'Loading…' : 'Refresh'}
-            </button>
-          </div>
-        </div>
-        {runsError ? <div className="alert error">{runsError}</div> : null}
-        <DataTable
-          rows={visibleRuns}
-          rowKey={(r) => r.runId}
-          onRowClick={(r) => nav(`/runs/${r.runId}`)}
-          density={density}
-          caption="Recent runs"
-          initialSort={{ key: 'started', dir: 'desc' }}
-          columns={runColumns}
-          empty={
-            runsLoading ? (
-              <SkeletonRows rows={4} columns={[90, 180, 80, 150]} />
-            ) : (
-              <p className="muted">
-                {runs.length === 0
-                  ? 'No runs yet. Create one above to get started.'
-                  : reviewOnly
-                    ? 'No runs flagged for review. Thumbs-down, flag, or correct a run to add it here.'
-                    : 'No runs match this filter.'}
-              </p>
-            )
-          }
-        />
-      </div>
-
-      <div className="card">
+      <div className="surface-card">
         <h2>About this sample</h2>
         <p className="muted">
           The two seeded workflows are defined in the backend's <code>workflowCatalog</code>
@@ -297,9 +369,15 @@ interface QualityRollup {
 function RunsSummary({
   runs,
   annotationsByRun,
+  activeStatus,
+  onToggleStatus,
 }: {
   runs: RunListItem[];
   annotationsByRun: Map<string, readonly Annotation[]>;
+  /** Currently-active status filter (null = none); drives the figure-tile pressed state. */
+  activeStatus: RunStatusBucket | null;
+  /** Toggling a figure tile filters the table below it (§4.5 stats-are-filters). */
+  onToggleStatus: (bucket: RunStatusBucket) => void;
 }) {
   // §C2 — quality rollup derived from the shared annotation map.
   const quality = useMemo<QualityRollup | null>(() => {
@@ -360,31 +438,30 @@ function RunsSummary({
   }, [runs]);
 
   if (!s) return null;
-  const pct = (count: number) => `${Math.round((count / s.total) * 100)}%`;
   const pctFrac = (frac: number) => `${Math.round(frac * 100)}%`;
 
+  // Outcome distribution as the signature figure band — each numeral tile also
+  // FILTERS the table below (§4.5). "Mean duration" is reportorial only, so it
+  // sits in a trailing non-interactive sub-figure row.
+  const outcomeFigures: KeyFigureItem[] = [
+    { key: 'completed', label: 'Completed', value: s.completed },
+    { key: 'failed', label: 'Failed', value: s.failed, ...(s.failed > 0 ? { tone: 'attention' as const } : {}) },
+    { key: 'cancelled', label: 'Cancelled', value: s.cancelled },
+    { key: 'awaiting', label: 'Awaiting input', value: s.awaiting, ...(s.awaiting > 0 ? { tone: 'attention' as const } : {}) },
+  ];
+
   return (
-    <div className="card">
+    <div className="surface-card">
       <h2 className="u-mt-0">
         Summary <span className="muted u-fs-12 u-fw-400">· last {s.total} runs</span>
       </h2>
+      <KeyFigureBand
+        figures={outcomeFigures}
+        activeKey={activeStatus}
+        onToggle={(k) => onToggleStatus(k as RunStatusBucket)}
+        ariaLabel="Run outcomes — select to filter the table below"
+      />
       <dl className="run-stats">
-        <div className="run-stat">
-          <dt className="run-stat-label">Completed</dt>
-          <dd className="run-stat-value">{pct(s.completed)}</dd>
-        </div>
-        <div className={`run-stat${s.failed > 0 ? ' run-stat--danger' : ''}`}>
-          <dt className="run-stat-label">Failed</dt>
-          <dd className="run-stat-value">{s.failed}</dd>
-        </div>
-        <div className="run-stat">
-          <dt className="run-stat-label">Cancelled</dt>
-          <dd className="run-stat-value">{s.cancelled}</dd>
-        </div>
-        <div className={`run-stat${s.awaiting > 0 ? ' run-stat--warn' : ''}`}>
-          <dt className="run-stat-label">Awaiting input</dt>
-          <dd className="run-stat-value">{s.awaiting}</dd>
-        </div>
         <div className="run-stat">
           <dt className="run-stat-label">Mean duration</dt>
           <dd className="run-stat-value">{s.meanMs == null ? '—' : formatDuration(s.meanMs)}</dd>

@@ -21,6 +21,7 @@ import {
   __clearToggleStore,
   getEffectiveConfig,
   listEffectiveConfigs,
+  pruneOrphanedConfigs,
   resolveConfig,
   resolveOne,
   saveConfig,
@@ -172,6 +173,27 @@ describe('durable store + effective config', () => {
 
   it('resolveOne returns null for an unknown toggle', async () => {
     expect(await resolveOne('nope', { tenantId: 't1' })).toBeNull();
+  });
+
+  it('a GRADUATED feature (no default) hides + prunes its orphaned saved row', async () => {
+    // A feature had a toggle, an admin saved a config, then it graduated
+    // (toggleDefault removed) — like assistant/profiles. The stored row must NOT
+    // resurface as a live toggle.
+    registerToggleDefault({ ...AB, id: 'live.feature', status: 'on' });
+    await saveConfig({ ...AB, id: 'live.feature', status: 'on' }, 'admin');
+    await saveConfig({ ...AB, id: 'graduated.feature', status: 'on' }, 'admin'); // no default registered
+    // Hidden from admin + not resolvable.
+    const ids = (await listEffectiveConfigs()).map((c) => c.id);
+    expect(ids).toContain('live.feature');
+    expect(ids).not.toContain('graduated.feature');
+    expect(await getEffectiveConfig('graduated.feature')).toBeNull();
+    expect(await resolveOne('graduated.feature', { tenantId: 't1' })).toBeNull();
+    // Pruned from the store.
+    const pruned = await pruneOrphanedConfigs();
+    expect(pruned).toBe(1);
+    expect(await pruneOrphanedConfigs()).toBe(0); // idempotent
+    // The live one survives the prune.
+    expect((await listEffectiveConfigs()).map((c) => c.id)).toContain('live.feature');
   });
 });
 

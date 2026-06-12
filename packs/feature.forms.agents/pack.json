@@ -1,0 +1,30 @@
+{
+  "name": "feature.forms.agents",
+  "version": "1.0.0",
+  "description": "Forms feature agent pack (ADR 0014) — a manifest agent whose tools are feature.forms.nodes over the ctx.features.forms surface. Summarizes captured submissions into lead insights; tool-allowlisted to the Forms feature surface only, and READ-ONLY (it reports, it does not mutate forms or contacts). Mirrors feature.kb.agents.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "forms", "agent", "leads", "submissions"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.forms.agents.lead-insights",
+      "persona": "RESEARCH",
+      "label": "Forms Lead Insights",
+      "description": "Summarizes a form's captured submissions into lead insights — volume, common answers, and follow-up suggestions — grounded via feature.forms.nodes.list-submissions over ctx.features.forms. Read-only: it reports, it never edits forms or contacts.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/forms-lead-insights.md",
+      "toolAllowlist": [
+        "openwop:feature.forms.nodes.list-forms",
+        "openwop:feature.forms.nodes.list-submissions"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

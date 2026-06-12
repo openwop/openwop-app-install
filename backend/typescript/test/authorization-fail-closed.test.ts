@@ -32,6 +32,7 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   delete process.env.OPENWOP_AUTHORIZATION_ENFORCEMENT;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
@@ -77,8 +78,10 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam.
 async function signup(c: ReturnType<typeof client>): Promise<{ userId: string; email: string }> {
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email: uniqEmail('u'), password: 'password123' });
+  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('u') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }

@@ -17,6 +17,7 @@
 import type { Express } from 'express';
 import type { Storage } from '../storage/storage.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
+import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { OpenwopError } from '../types.js';
 
 interface Deps {
@@ -27,6 +28,43 @@ interface Deps {
 const PACK_NAME_RE = /^(core|vendor|community|private|local|sample)\.[a-z][a-z0-9_-]*(\.[a-z][a-zA-Z0-9_-]*)+$/;
 /** SemVer 2.0.0 — major.minor.patch with optional pre-release / build metadata. */
 const SEMVER_RE = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[\w.-]+)?(?:\+[\w.-]+)?$/;
+
+/** AgentManifest wire projection for the pack-registry surfaces, per
+ *  `schemas/agent-manifest.schema.json` (required: agentId / persona /
+ *  modelClass). Deliberately content-trimmed relative to the runtime
+ *  `ResolvedAgentManifest`: pre-compiled validators + parsed schemas stay
+ *  host-internal; the schema REFS round-trip so a re-install can resolve
+ *  them per RFC 0003 §C/§D. */
+function projectAgentManifest(a: ResolvedAgentManifest): Record<string, unknown> {
+  return {
+    agentId: a.agentId,
+    persona: a.persona,
+    modelClass: a.modelClass,
+    systemPrompt: a.systemPrompt,
+    ...(a.toolAllowlist !== undefined ? { toolAllowlist: a.toolAllowlist } : {}),
+    ...(a.requiresCapabilities !== undefined ? { requiresCapabilities: a.requiresCapabilities } : {}),
+    ...(a.memoryShape !== undefined ? { memoryShape: a.memoryShape } : {}),
+    ...(a.confidence !== undefined ? { confidence: a.confidence } : {}),
+    ...(a.handoff
+      ? {
+          handoff: {
+            ...(a.handoff.taskSchemaRef !== undefined ? { taskSchemaRef: a.handoff.taskSchemaRef } : {}),
+            ...(a.handoff.returnSchemaRef !== undefined ? { returnSchemaRef: a.handoff.returnSchemaRef } : {}),
+          },
+        }
+      : {}),
+    ...(a.label !== undefined ? { label: a.label } : {}),
+    ...(a.description !== undefined ? { description: a.description } : {}),
+  };
+}
+
+/** The pack-installed (tenant-agnostic) slice of the agent registry.
+ *  User-authored agents (`ownerTenant` set) are tenant-owned IP and MUST
+ *  NOT surface on the public pack-registry routes (agent-memory.md
+ *  CTI-1 / agentRegistry.ts §ownerTenant). */
+function listPackInstalledAgents(): readonly ResolvedAgentManifest[] {
+  return getAgentRegistry().list().filter((a) => a.ownerTenant === undefined);
+}
 
 export function registerPackRoutes(app: Express, _deps: Deps): void {
   // ── search (more-specific routes registered first so they win over
@@ -102,17 +140,54 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
     }
   });
 
+  // ── agent-manifest export ──
+  // RFC 0003 round-trip surface: project the installed (tenant-agnostic)
+  // agent registry into the canonical AgentManifest shape so a manifest
+  // set exported here re-installs cleanly elsewhere. `sourceManifestId`
+  // carries install provenance per `agent-ref.schema.json` — for a
+  // pack-installed agent the export originated from its own manifest id.
+  // Registered BEFORE the `/v1/packs/:name` wildcard so "export" is never
+  // parsed as a (malformed) pack name.
+  app.get('/v1/packs/export', (_req, res) => {
+    const manifests = listPackInstalledAgents().map((a) => ({
+      ...projectAgentManifest(a),
+      sourceManifestId: a.agentId,
+      packName: a.packName,
+      packVersion: a.packVersion,
+    }));
+    res.json({ manifests, total: manifests.length });
+  });
+
   // ── catalog list (root) ──
   app.get('/v1/packs', (_req, res) => {
     const registry = getNodeRegistry();
     const typeIds = registry.listTypeIds();
-    const packs = new Map<string, { name: string; nodes: string[] }>();
+    const packs = new Map<
+      string,
+      { name: string; version?: string; nodes: string[]; agents?: Array<Record<string, unknown>> }
+    >();
     for (const typeId of typeIds) {
       const segments = typeId.split('.');
       const packName = segments.slice(0, -1).join('.') || typeId;
       const existing = packs.get(packName) ?? { name: packName, nodes: [] };
       existing.nodes.push(typeId);
       packs.set(packName, existing);
+    }
+    // RFC 0003: a pack's `agents[]` entries surface as AgentManifest rows
+    // on the registry listing (keyed by the pack they were installed
+    // from). Agent-only packs (nodes: []) appear here too — without this
+    // they'd be invisible on the catalog despite being dispatchable. The
+    // installed manifest carries the pack's pinned version, so the entry
+    // gains `version` (the agentPackCatalog scenarios assert it; the
+    // node-only grouping above has no version source — in-process node
+    // registrations are versioned per-node, not per-pack).
+    for (const agent of listPackInstalledAgents()) {
+      const existing = packs.get(agent.packName) ?? { name: agent.packName, nodes: [] };
+      if (existing.version === undefined) existing.version = agent.packVersion;
+      const agents = existing.agents ?? [];
+      agents.push(projectAgentManifest(agent));
+      existing.agents = agents;
+      packs.set(agent.packName, existing);
     }
     res.json({
       packs: Array.from(packs.values()),

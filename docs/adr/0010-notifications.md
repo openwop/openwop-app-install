@@ -1,11 +1,35 @@
 # ADR 0010 — Notifications (migrate to feature architecture + upgrade)
 
-**Status:** Accepted (Phases 1–3 sequenced)
-**Date:** 2026-06-09
+**Status:** implemented (Phases 1–3 shipped — `src/features/notifications/`; PR #74). **Corrected 2026-06-11: the toggle was REMOVED — notifications is core platform infrastructure, not a per-tenant toggle (see § Correction).**
+**Date:** 2026-06-09 (corrected 2026-06-11)
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0002 (Users),
 ADR 0004 (Orgs), ADR 0006 (RBAC)
 **Owner of the notification surface:** a NEW feature-package
 `src/features/notifications/` wrapping the EXISTING subsystem.
+
+---
+
+## Correction (2026-06-11) — the toggle was removed; notifications is core
+
+The original migration gave notifications a **default-ON `notifications` toggle**
+that gated only the **read surface** (inbox / bell / SSE / preferences 404 when
+off). But the **emit path was never gated** — run-failure (`executor.ts`) and
+interrupt (`suspendManager.ts`) notifications are inserted into the store and
+pushed via Web-Push **unconditionally**, regardless of the toggle. ADR 0010 §"Open
+questions" flagged closing that gap as deferred work.
+
+A review (2026-06-11) concluded the toggle was the wrong primitive: **run-lifecycle
+notifications are platform infrastructure** (how the host tells you a run failed or
+needs approval), not an optional, A/B-able product surface — and a half-gated state
+(UI off, side effects on) is dishonest. **Decision: remove the `notifications`
+toggle and make the surface always-on**, matching what the emit path already does.
+The real, honest control is the **per-user preferences** (mute categories / quiet
+hours / Web-Push opt-in), which the feature already owns (Phase 2). `notifications`
+remains a `BackendFeature` for code organization but carries no `toggleDefault` and
+no gate middleware; the header bell + `/inbox` nav always render. A stored
+per-tenant `notifications` override from before this change is inert (the registry
+no longer defines the toggle). This supersedes the "Emit gating when the toggle is
+OFF" open question — there is no toggle to gate against.
 
 ---
 

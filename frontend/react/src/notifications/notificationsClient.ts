@@ -15,6 +15,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
+import { readSseFrames } from '../client/sseFrames.js';
 import { defaultPreferences } from './types.js';
 import { sanitizeQuietHours, sanitizeTypePrefs } from './preferences.js';
 import type { Notification, NotificationPreferences, NotificationPriority, NotificationStatus } from './types.js';
@@ -157,52 +158,115 @@ function normalizeServerPreferences(raw: unknown): NotificationPreferences {
   };
 }
 
+/** Handlers for the live notification SSE subscription. */
+export interface NotificationStreamHandlers {
+  /** A live `notification` frame arrived and passed shape validation. */
+  onNotification: (n: Notification) => void;
+  /** Fired on every successful (re)connect. The store backfills via REST
+   *  here: the BE notification stream has NO Last-Event-ID replay (unlike
+   *  the run-event stream), so any rows emitted while we were disconnected
+   *  would otherwise be lost — a refresh on (re)open closes that gap. */
+  onOpen?: () => void;
+  /** Fired when the live connection drops (network blip, 5xx, proxy
+   *  hangup, or a terminal non-2xx like a Cloud-Run 410 on a recycled
+   *  instance). The reader keeps retrying with capped backoff, so this is
+   *  a transient "stale, reconnecting" signal — NOT a terminal failure. */
+  onError?: () => void;
+}
+
+/** Backoff bounds for the persistent reconnect loop. */
+const RECONNECT_BASE_MS = 1_000;
+const RECONNECT_CAP_MS = 30_000;
+/** A connection that survives at least this long is treated as "healthy":
+ *  its drop resets the backoff escalation. A connection that dies sooner
+ *  (e.g. immediate 410, or accept-then-FIN) escalates toward the cap so a
+ *  persistently-broken endpoint isn't hammered. */
+const HEALTHY_UPTIME_MS = 10_000;
+
 /**
  * Subscribe to live notification events via SSE. Returns a cleanup.
  *
- * `onError` fires on EventSource error events (network drop, BE 5xx,
- * proxy hangup) — the store uses this to surface a "stale feed" state
- * so the UI can show a reconnect chip rather than silently going dark.
- * EventSource auto-reconnects, so onError doubles as a "we're trying"
- * signal rather than a terminal failure.
+ * Fetch + ReadableStream (the same transport as the run-event stream),
+ * NOT native `EventSource`. `EventSource` is terminal on any non-200
+ * response per the WHATWG spec — a Cloud-Run `410 Gone` on a recycled
+ * instance would silently kill the feed with no reconnect — and it can't
+ * carry an `Authorization` header (so bearer/dev mode got no live feed).
+ * This reader:
+ *   - reconnects forever with capped-exponential backoff + jitter (the
+ *     feed is session-long, so it must NOT give up after N like the
+ *     run-event stream, whose run terminates),
+ *   - fires `onOpen` on every (re)connect so the store can REST-backfill
+ *     the gap (no Last-Event-ID replay on this endpoint),
+ *   - carries auth the same way the run-event stream does — bearer mode
+ *     sends `Authorization`, cookie mode rides `credentials: 'include'`
+ *     (so prod's cross-origin Cloud-Run request stays a simple cookie
+ *     request with no `Authorization` preflight).
  */
-export function subscribeToNotifications(
-  onNotification: (n: Notification) => void,
-  onError?: () => void,
-): () => void {
-  // Use the dedicated SSE base URL when set — same rationale as the
-  // run-event stream: the Firebase Hosting proxy on the prod deploy
-  // buffers SSE responses, so we hit Cloud Run directly.
+export function subscribeToNotifications(handlers: NotificationStreamHandlers): () => void {
+  // Dedicated SSE base URL — same rationale as the run-event stream: the
+  // Firebase Hosting proxy on prod buffers SSE, so we hit Cloud Run direct.
   const url = `${config.sseBaseUrl}/v1/host/sample/notifications/stream`;
-  // EventSource doesn't carry custom headers in browsers, so this
-  // works for cookie-auth mode out of the box. Bearer-auth mode (local
-  // dev + the conformance harness) falls back to polling — the panel
-  // already does a refresh on focus + every 60s.
-  let es: EventSource | null = null;
-  try {
-    es = new EventSource(url, { withCredentials: config.authMode === 'cookie' });
-  } catch {
-    return () => { /* never connected */ };
-  }
-  const messageHandler = (e: MessageEvent) => {
-    try {
-      const data: unknown = JSON.parse(e.data);
-      if (isNotification(data)) onNotification(data);
-      // Silently drop malformed frames — a forward-compat row the FE
-      // doesn't recognize shouldn't crash the SSE consumer.
-    } catch {
-      /* skip malformed frame */
+  const isBearer = config.authMode === 'bearer';
+  const abort = new AbortController();
+  let closed = false;
+  let attempt = 0;
+
+  // Abortable sleep — resolves early on cleanup so unsubscribe is prompt.
+  const sleep = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      const t = setTimeout(resolve, ms);
+      abort.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true });
+    });
+
+  void (async () => {
+    while (!closed) {
+      let connectedAt: number | null = null;
+      try {
+        const res = await fetch(url, {
+          method: 'GET',
+          headers: {
+            Accept: 'text/event-stream',
+            'Cache-Control': 'no-cache',
+            ...(isBearer ? authedHeaders() : {}),
+          },
+          // Cookie mode (prod, cross-origin Cloud Run) authenticates via the
+          // `openwop.session` cookie — same path the run-event stream proved.
+          credentials: isBearer ? 'same-origin' : 'include',
+          signal: abort.signal,
+        });
+        if (!res.ok || res.body === null) {
+          throw new Error(`notifications stream → HTTP ${res.status}`);
+        }
+        connectedAt = Date.now();
+        handlers.onOpen?.();
+        for await (const frame of readSseFrames(res.body, abort.signal)) {
+          if (frame.event !== 'notification') continue; // skip heartbeat/unknown
+          try {
+            const data: unknown = JSON.parse(frame.data);
+            // Drop malformed/forward-compat frames rather than crash the feed.
+            if (isNotification(data)) handlers.onNotification(data);
+          } catch {
+            /* skip malformed frame */
+          }
+        }
+        // Body ended without throwing (server closed / instance recycled).
+      } catch {
+        // Network drop, non-2xx, or proxy hangup — fall through to reconnect.
+      }
+      if (closed) return;
+      handlers.onError?.();
+      // Escalate backoff only when the connection was short-lived; a healthy
+      // session that merely dropped reconnects fast (attempt → 1).
+      const healthy = connectedAt !== null && Date.now() - connectedAt >= HEALTHY_UPTIME_MS;
+      attempt = healthy ? 1 : attempt + 1;
+      const ceil = Math.min(RECONNECT_CAP_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempt - 1, 10));
+      // Full jitter over [ceil/2, ceil] — de-syncs reconnect stampedes.
+      await sleep(ceil / 2 + Math.random() * (ceil / 2));
     }
-  };
-  const errorHandler = () => {
-    if (onError) onError();
-  };
-  es.addEventListener('notification', messageHandler);
-  es.addEventListener('error', errorHandler);
+  })();
+
   return () => {
-    if (!es) return;
-    es.removeEventListener('notification', messageHandler);
-    es.removeEventListener('error', errorHandler);
-    es.close();
+    closed = true;
+    abort.abort();
   };
 }

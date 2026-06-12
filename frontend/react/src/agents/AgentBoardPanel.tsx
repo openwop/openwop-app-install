@@ -21,7 +21,7 @@ import { Notice } from '../ui/Notice.js';
 import { AgentAvatar } from './AgentAvatar.js';
 import type { RoleTheme } from './roleTemplates.js';
 
-export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workflows, refreshSignal, onChanged }: { boardId: string; persona: string; avatarUrl?: string | undefined; roleTheme?: RoleTheme | undefined; workflows?: string[] | undefined; refreshSignal?: number | undefined; onChanged?: (() => void) | undefined }): JSX.Element {
+export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workflows, refreshSignal, onChanged, intro }: { boardId: string; persona: string; avatarUrl?: string | undefined; roleTheme?: RoleTheme | undefined; workflows?: string[] | undefined; refreshSignal?: number | undefined; onChanged?: (() => void) | undefined; intro?: JSX.Element | undefined }): JSX.Element {
   const [board, setBoard] = useState<KanbanBoard | null>(null);
   const [cards, setCards] = useState<KanbanCard[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -119,10 +119,12 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
         {roleTheme ? (
           <AgentAvatar persona={persona} avatarUrl={avatarUrl} roleTheme={roleTheme} size={28} showBadge={false} alt={`${persona}'s photo`} />
         ) : null}
-        <p className="muted u-fs-12 u-m-0">
-          <strong>{persona}'s board.</strong> New work arrives in <strong>To Do</strong>. <strong>Drag a card</strong> between
-          lanes (or run the heartbeat from the header) to let {persona} pick up the next task.
-        </p>
+        {intro ?? (
+          <p className="muted u-fs-12 u-m-0">
+            <strong>{persona}'s board.</strong> New work arrives in <strong>To Do</strong>. <strong>Drag a card</strong> between
+            lanes (or run the heartbeat from the header) to let {persona} pick up the next task.
+          </p>
+        )}
       </div>
       <KanbanBoardView
         board={board}

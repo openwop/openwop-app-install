@@ -24,7 +24,7 @@ function deriveActivity(views: AgentView[]): ActivityItem[] {
   const items: ActivityItem[] = [];
   for (const view of views) {
     const persona = view.entry.persona;
-    const roleTheme = roleThemeForAgent(view.entry.agentRef?.agentId, view.entry.workflows);
+    const roleTheme = roleThemeForAgent(view.entry.agentRef?.agentId, view.entry.workflows, view.entry.roleKey);
     const who = { persona, avatarUrl: view.entry.avatarUrl, roleTheme };
     // In-progress + waiting work (with run links where present).
     for (const card of view.cards) {

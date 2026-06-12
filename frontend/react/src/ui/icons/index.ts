@@ -26,6 +26,7 @@ export { CodeIcon } from './CodeIcon.js';
 export { CodeBlockIcon } from './CodeBlockIcon.js';
 export { ColumnsIcon } from './ColumnsIcon.js';
 export { FlagIcon } from './FlagIcon.js';
+export { PinIcon } from './PinIcon.js';
 export { GlobeIcon } from './GlobeIcon.js';
 export { GripVerticalIcon } from './GripVerticalIcon.js';
 export { HeadingIcon } from './HeadingIcon.js';

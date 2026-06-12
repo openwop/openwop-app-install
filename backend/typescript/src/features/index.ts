@@ -14,6 +14,7 @@
 
 import { createLogger } from '../observability/logger.js';
 import { registerToggleDefault } from '../host/featureToggles/registry.js';
+import { retireToggleOverrides } from '../host/featureToggles/service.js';
 import { registerFeatureSurface } from '../host/featureSurfaces.js';
 import type { RouteDeps } from '../routes/registerAllRoutes.js';
 import type { BackendFeature, PackRef } from './types.js';
@@ -29,11 +30,28 @@ import { notificationsFeature } from './notifications/feature.js';
 import { kbFeature } from './kb/feature.js';
 import { publishingFeature } from './publishing/feature.js';
 import { sharingFeature } from './sharing/feature.js';
+import { formsFeature } from './forms/feature.js';
+import { consentFeature } from './consent/feature.js';
+import { analyticsFeature } from './analytics/feature.js';
+import { assistantFeature } from './assistant/feature.js';
+import { connectionsFeature } from './connections/feature.js';
+import { emailFeature } from './email/feature.js';
+import { commentsFeature } from './comments/feature.js';
 
 const log = createLogger('features');
 
+/**
+ * Toggle ids RETIRED when their feature became always-on (ADR 0027 — cms/media/
+ * publishing; ADR 0024 § Correction — connections; ADR 0002 § Correction —
+ * users). `registerBackendFeatures` deletes any lingering durable override for
+ * these at boot so they don't resurrect as ghost toggles (the store wins over the
+ * now-absent default). Keep entries here even after the override is gone — the
+ * reconcile is idempotent and documents the retirement.
+ */
+const RETIRED_TOGGLE_IDS = ['cms', 'media', 'publishing', 'connections', 'users', 'profiles'] as const;
+
 /** Every backend feature the app composes. Append a new feature here. */
-export const BACKEND_FEATURES: BackendFeature[] = [widgetsFeature, crmFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature];
+export const BACKEND_FEATURES: BackendFeature[] = [widgetsFeature, crmFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature];
 
 /** Declare toggle defaults + mount routes + register workflow surfaces for every
  *  backend feature (ADR 0014 — the composer wires all faces in one pass). */
@@ -45,6 +63,12 @@ export function registerBackendFeatures(deps: RouteDeps): void {
     if (feature.surface) registerFeatureSurface(feature.surface.id, feature.surface.build);
     log.debug('feature_registered', { id: feature.id, packs: feature.requiredPacks?.length ?? 0, surface: feature.surface?.id ?? null });
   }
+  // ADR 0027: retire durable overrides for features that became always-on, so a
+  // previously-saved per-tenant override doesn't linger as a ghost toggle.
+  // Fire-and-forget — boot must not block on storage; logged on completion.
+  void retireToggleOverrides(RETIRED_TOGGLE_IDS)
+    .then((removed) => { if (removed.length) log.info('retired_toggle_overrides', { ids: removed }); })
+    .catch((err) => log.warn('retire_toggle_overrides_failed', { error: String(err) }));
 }
 
 /** The union of all features' required packs (Phase 3/4: boot install set). */

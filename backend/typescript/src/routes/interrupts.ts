@@ -8,13 +8,15 @@
  * the suspended node's index + the resolved value as input.
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import type { Express } from 'express';
 import type { ResolveInterruptRequest } from '@openwop/openwop';
 import type { Storage } from '../storage/storage.js';
-import { OpenwopError } from '../types.js';
+import { OpenwopError, type InterruptRecord } from '../types.js';
 import { getSuspendManager } from '../executor/suspendManager.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { executeRun } from '../executor/executor.js';
+import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
 import { createLogger } from '../observability/logger.js';
 import { createHostAdapterSuite, type HostAdapterSuite } from '../host/index.js';
 
@@ -23,6 +25,76 @@ const log = createLogger('routes.interrupts');
 interface Deps {
   storage: Storage;
   hostSuite?: HostAdapterSuite;
+}
+
+/** Constant-time token re-comparison (RFC 0093 §B.3). The lookup itself is a
+ *  DB unique-index probe; this re-check makes the in-process comparison that
+ *  gates the response explicitly timing-safe. */
+function tokenMatches(presented: string, stored: string): boolean {
+  const a = Buffer.from(presented, 'utf8');
+  const b = Buffer.from(stored, 'utf8');
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** RFC 0093 §B.1 — a token past its `expiresAt` is refused with the canonical
+ *  410 `interrupt_expired` envelope. Pre-migration rows (no expiresAt) never
+ *  expire. */
+function interruptTokenExpired(interrupt: InterruptRecord, now: number = Date.now()): boolean {
+  if (!interrupt.expiresAt) return false;
+  const expires = Date.parse(interrupt.expiresAt);
+  return Number.isFinite(expires) && now > expires;
+}
+
+/** Run statuses that invalidate an unresolved interrupt's token
+ *  (RFC 0093 §B.2 — resolved, or the owning run cancelled or completed). */
+const TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
+
+/**
+ * Shared signed-token gate for GET + POST /v1/interrupts/{token}
+ * (RFC 0093 §B.1-B.3). Looks the token up, lazily times out an overdue
+ * approval gate, then enforces the lifecycle refusals in spec order:
+ *   404 invalid_interrupt_token  — unknown token
+ *   409 interrupt_already_resolved — resolved (incl. a gate this call just
+ *       timed out), or the owning run is terminal while unresolved
+ *   410 interrupt_expired — past expiresAt while unresolved
+ * Returns the interrupt for the happy path. When `allowResolved` is true
+ * (inspect), a resolved interrupt is returned instead of refused so the
+ * inspect view can report `resolved: true`.
+ */
+async function loadInterruptByTokenChecked(
+  storage: Storage,
+  token: string,
+  opts: { allowResolved: boolean },
+): Promise<InterruptRecord> {
+  const interrupt = await storage.getInterruptByToken(token);
+  if (!interrupt || !tokenMatches(token, interrupt.token)) {
+    throw new OpenwopError('invalid_interrupt_token', 'unknown interrupt token', 404);
+  }
+  // Lazy half of the RFC 0093 §D timeout enforcement — an overdue approval
+  // gate auto-rejects before this access can act on it.
+  if (await timeoutApprovalGateIfDue(storage, interrupt)) {
+    throw new OpenwopError('interrupt_already_resolved', 'approval gate timed out (auto-rejected; reason: timeout)', 409);
+  }
+  if (interrupt.resolvedAt) {
+    if (opts.allowResolved) return interrupt;
+    throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
+  }
+  if (interruptTokenExpired(interrupt)) {
+    throw new OpenwopError('interrupt_expired', 'interrupt token past its expiry', 410, {
+      expiresAt: interrupt.expiresAt,
+    });
+  }
+  // Unresolved token on a terminal run: invalidated per RFC 0093 §B.2.
+  const run = await storage.getRun(interrupt.runId);
+  if (run && TERMINAL_RUN_STATUSES.has(run.status)) {
+    throw new OpenwopError(
+      'interrupt_already_resolved',
+      `interrupt token invalidated — owning run is ${run.status}`,
+      409,
+      { runStatus: run.status },
+    );
+  }
+  return interrupt;
 }
 
 export function registerInterruptRoutes(app: Express, deps: Deps): void {
@@ -47,6 +119,11 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       if (currentRun && currentRun.status === 'cancelled') {
         throw new OpenwopError('interrupt_gone', 'interrupt invalidated — run was cancelled', 410);
       }
+      // RFC 0093 §D — lazy gate-timeout check: an overdue approval gate
+      // auto-rejects (fail closed) before this vote/resolve can land.
+      if (await timeoutApprovalGateIfDue(storage, interrupt)) {
+        throw new OpenwopError('interrupt_already_resolved', 'approval gate timed out (auto-rejected; reason: timeout)', 409);
+      }
       if (interrupt.resolvedAt) throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
       const body = req.body as ResolveInterruptRequest;
       validateResumeValue(interrupt, body?.resumeValue);
@@ -61,9 +138,9 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
   app.post('/v1/interrupts/:token', async (req, res, next) => {
     try {
       const { token } = req.params;
-      const interrupt = await storage.getInterruptByToken(token);
-      if (!interrupt) throw new OpenwopError('invalid_interrupt_token', 'unknown interrupt token', 404);
-      if (interrupt.resolvedAt) throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
+      // RFC 0093 §B lifecycle gate: 404 unknown / 409 resolved-or-run-terminal
+      // / 410 expired — see loadInterruptByTokenChecked.
+      const interrupt = await loadInterruptByTokenChecked(storage, token, { allowResolved: false });
       const body = req.body as { resumeValue?: unknown };
       // External-event interrupts validate correlation per
       // `interrupt-profiles.md §openwop-interrupt-external-event`:
@@ -102,9 +179,15 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       const run = await storage.getRun(req.params.runId);
       if (!run) throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
       const open = await storage.listOpenInterrupts(run.runId);
+      // RFC 0093 §D lazy enforcement on the read path: an overdue approval
+      // gate auto-rejects here and drops out of the "open" listing.
+      const stillOpen: typeof open[number][] = [];
+      for (const it of open) {
+        if (!(await timeoutApprovalGateIfDue(storage, it))) stillOpen.push(it);
+      }
       res.json({
         runId: run.runId,
-        interrupts: open.map((it) => ({
+        interrupts: stillOpen.map((it) => ({
           interruptId: it.interruptId,
           nodeId: it.nodeId,
           kind: it.kind,
@@ -112,6 +195,7 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
           data: it.data,
           resumeSchema: it.resumeSchema,
           createdAt: it.createdAt,
+          ...(it.expiresAt ? { expiresAt: it.expiresAt } : {}),
         })),
       });
     } catch (err) {
@@ -121,13 +205,18 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
 
   app.get('/v1/interrupts/:token', async (req, res, next) => {
     try {
-      const interrupt = await storage.getInterruptByToken(req.params.token);
-      if (!interrupt) throw new OpenwopError('invalid_interrupt_token', 'unknown interrupt token', 404);
+      // RFC 0093 §B.4 — a resolve-intent token authorizes inspect too, so the
+      // same lifecycle gate applies (410 expired / 409 run-terminal). A
+      // RESOLVED interrupt stays inspectable (`resolved: true`) — the
+      // already-resolved 409 belongs to the resolve surface.
+      const interrupt = await loadInterruptByTokenChecked(storage, req.params.token, { allowResolved: true });
       res.json({
         kind: interrupt.kind,
         key: interrupt.interruptId,
         resumeSchema: interrupt.resumeSchema,
         data: interrupt.data,
+        // RFC 0093 §B.4 — inspect reports the token's expiry.
+        ...(interrupt.expiresAt ? { expiresAt: interrupt.expiresAt } : {}),
         resolved: interrupt.resolvedAt != null,
       });
     } catch (err) {
@@ -214,35 +303,96 @@ const quorumVotes = new Map<string, { accepts: string[]; rejects: string[] }>();
  *  fresh anyway. */
 const runResumeChains = new Map<string, Promise<void>>();
 
+/** Result of feeding one vote into a quorum gate. `override` is set when the
+ *  vote took the gate's override path (RFC 0093 §D.2) — the caller MUST then
+ *  emit `approval.overridden { principal, reason }` + an audit entry per
+ *  `interrupt-profiles.md` §"Approval gate". */
+interface QuorumVoteResult {
+  outcome: 'accept-quorum-met' | 'reject-majority' | 'pending' | 'accept-override';
+  override?: { principal: string; reason: string };
+}
+
 /** Accumulate a quorum vote. Returns:
- *   - 'accept-quorum-met' → run can resume with accepted outcome
- *   - 'reject-majority' → gate fails with rejection
- *   - 'pending' → record vote, return 200 to client, DON'T resume
+ *   - outcome 'accept-quorum-met' → run can resume with accepted outcome
+ *   - outcome 'accept-override' → an override principal bypassed quorum
+ *     (only when the gate config sets `overrideBypassesQuorum: true` —
+ *     RFC 0093 §D.2; default false ⇒ the override counts as ONE vote)
+ *   - outcome 'reject-majority' → gate fails with rejection
+ *   - outcome 'pending' → record vote, return 200 to client, DON'T resume
  *   - null → not a quorum gate; caller proceeds with normal resume */
 function recordQuorumVote(
   interruptId: string,
   interruptData: unknown,
   resumeValue: unknown,
-): 'accept-quorum-met' | 'reject-majority' | 'pending' | null {
-  const data = (interruptData ?? {}) as { requiredApprovals?: number; rejectionPolicy?: string };
+): QuorumVoteResult | null {
+  const data = (interruptData ?? {}) as {
+    requiredApprovals?: number;
+    rejectionPolicy?: string;
+    override?: unknown;
+    overrideBypassesQuorum?: unknown;
+  };
   const requiredApprovals = typeof data.requiredApprovals === 'number' && data.requiredApprovals > 1
     ? data.requiredApprovals
     : 0;
   if (requiredApprovals === 0) return null; // not a quorum gate
-  const rv = (resumeValue ?? {}) as { action?: string; voter?: string };
+  const rv = (resumeValue ?? {}) as { action?: string; voter?: string; override?: unknown; reason?: unknown };
+
+  // Override path (RFC 0093 §D.2 + interrupt-profiles.md §"Approval gate").
+  // A vote takes the override path when it says so (`action: 'override'` or
+  // `override: true` alongside an accept) AND the gate's config actually
+  // declares an `override` block — a gate without one has no override path
+  // to take (fail closed: the flag alone grants nothing).
+  const isOverrideAttempt = rv.action === 'override' || (rv.action === 'accept' && rv.override === true);
+  const gateHasOverridePath = !!data.override && typeof data.override === 'object';
+  if (isOverrideAttempt && gateHasOverridePath) {
+    // `reason` is REQUIRED on the override path (spec: approval.overridden
+    // carries { principal, reason } with reason REQUIRED).
+    if (typeof rv.reason !== 'string' || rv.reason.length === 0) {
+      throw new OpenwopError(
+        'validation_error',
+        'The approval-gate override path requires a non-empty `reason` (interrupt-profiles.md §"Approval gate").',
+        400,
+        { field: 'reason' },
+      );
+    }
+    const principal = typeof rv.voter === 'string' ? rv.voter : 'unknown';
+    const override = { principal, reason: rv.reason };
+    if (data.overrideBypassesQuorum === true) {
+      // Opt-in bypass: a single override accept resolves the gate.
+      return { outcome: 'accept-override', override };
+    }
+    // Default (false/absent): the override principal's grant counts as ONE
+    // quorum vote — fall through to the ordinary accept bookkeeping below,
+    // still carrying the override marker for the event + audit trail.
+    const tally = tallyVote(interruptId, requiredApprovals, data.rejectionPolicy, 'accept', principal);
+    return { outcome: tally, override };
+  }
+
   if (rv.action !== 'accept' && rv.action !== 'reject') return null;
   const voter = typeof rv.voter === 'string' ? rv.voter : `anon-${(quorumVotes.get(interruptId)?.accepts.length ?? 0) + (quorumVotes.get(interruptId)?.rejects.length ?? 0) + 1}`;
+  return { outcome: tallyVote(interruptId, requiredApprovals, data.rejectionPolicy, rv.action, voter) };
+}
+
+/** Ledger bookkeeping shared by the ordinary-vote and override-as-one-vote
+ *  paths. Returns the gate's post-vote disposition. */
+function tallyVote(
+  interruptId: string,
+  requiredApprovals: number,
+  rejectionPolicy: string | undefined,
+  action: 'accept' | 'reject',
+  voter: string,
+): 'accept-quorum-met' | 'reject-majority' | 'pending' {
   let ledger = quorumVotes.get(interruptId);
   if (!ledger) {
     ledger = { accepts: [], rejects: [] };
     quorumVotes.set(interruptId, ledger);
   }
-  if (rv.action === 'accept') ledger.accepts.push(voter);
+  if (action === 'accept') ledger.accepts.push(voter);
   else ledger.rejects.push(voter);
 
   // Resolution checks.
   if (ledger.accepts.length >= requiredApprovals) return 'accept-quorum-met';
-  if (data.rejectionPolicy === 'majority') {
+  if (rejectionPolicy === 'majority') {
     // Majority rejection = more than half of requiredApprovals
     // rejected. For requiredApprovals=3, majority-reject = 2 rejects.
     const majorityThreshold = Math.floor(requiredApprovals / 2) + 1;
@@ -293,7 +443,36 @@ async function resolveAndResume(
 
   // Quorum-gate handling: accumulate votes until threshold met.
   // Returns null when not a quorum gate (fall-through to normal resume).
-  const quorumOutcome = recordQuorumVote(interruptId, interrupt.data, resumeValue);
+  const quorumResult = recordQuorumVote(interruptId, interrupt.data, resumeValue);
+  const quorumOutcome = quorumResult?.outcome ?? null;
+  // RFC 0093 §D.2 — the override path (whether it bypassed quorum or counted
+  // as one vote) MUST emit `approval.overridden { principal, reason }` AND
+  // write an audit-log entry.
+  if (quorumResult?.override) {
+    await getEventLog().append({
+      runId: interrupt.runId,
+      nodeId: interrupt.nodeId,
+      type: 'approval.overridden',
+      payload: {
+        interruptId,
+        principal: quorumResult.override.principal,
+        reason: quorumResult.override.reason,
+        bypassedQuorum: quorumOutcome === 'accept-override',
+      },
+    });
+    hostSuite.auditSink.record({
+      principalId: quorumResult.override.principal,
+      action: 'approval.override',
+      resource: `interrupt:${interruptId}`,
+      outcome: 'success',
+      payload: {
+        runId: interrupt.runId,
+        nodeId: interrupt.nodeId,
+        reason: quorumResult.override.reason,
+        bypassedQuorum: quorumOutcome === 'accept-override',
+      },
+    });
+  }
   if (quorumOutcome === 'pending') {
     // Vote recorded but quorum not met. Emit a partial-vote event so
     // callers polling the event log can see the progress. The
@@ -326,7 +505,7 @@ async function resolveAndResume(
     });
     return;
   }
-  if (quorumOutcome === 'accept-quorum-met') {
+  if (quorumOutcome === 'accept-quorum-met' || quorumOutcome === 'accept-override') {
     clearQuorumVotes(interruptId);
     // Fall through to the normal resume path below.
   }

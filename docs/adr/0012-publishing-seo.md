@@ -1,11 +1,20 @@
 # ADR 0012 — Publishing & SEO
 
-**Status:** Accepted (Phases 1–3 sequenced)
+**Status:** implemented (Phases 1–3 shipped — `src/features/publishing/` incl. public `/v1/host/sample/public/:orgId/*`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC), ADR 0007 (Media — OG images), ADR 0009 (CMS — the pages it publishes)
-**Toggle:** `publishing` · **Surfaces:** authed `/v1/host/sample/publishing/*`
-+ **public (unauthed)** `/v1/host/sample/public/:orgId/*` (host-extension, non-normative)
+**Toggle:** ~~`publishing`~~ **none — always-on (ADR 0027)** · **Surfaces:** authed
+`/v1/host/sample/publishing/*` + **public (unauthed)**
+`/v1/host/sample/public/:orgId/*` (host-extension, non-normative)
+
+> **Correction (2026-06-11, ADR 0027):** Publishing is now **always-on** — its
+> `toggleDefault` is removed. The per-tenant `publishing` toggle that gated the
+> public surface is gone; the CMS editorial **`published` status is now the sole
+> public gate** (`getPublishedBySlug` is published-only; Sharing, ADR 0013, covers
+> private/draft access). This **overturns Alternative 4 below** (see its inline
+> note). Authed SEO routes keep their org-scoped RBAC. Nav moved to the admin-tier
+> **Content** group. The feature powers the public CMS-driven front page (ADR 0027).
 
 ---
 
@@ -134,6 +143,12 @@ OG image from the Media Library, canonical, noindex) writing the Phase-1 API.
 4. **Make the public surface always-on (ungated).** Rejected — gating on the
    org-tenant's `publishing` toggle is what makes "unpublish the site" possible
    and keeps an off-by-default feature actually off.
+   > **Overturned (2026-06-11, ADR 0027):** Publishing is now always-on and the
+   > public surface is ungated by a toggle. "Unpublish the site" is achieved at
+   > the **per-page** grain instead — unpublishing/archiving a page removes it
+   > from the public surface (`getPublishedBySlug` is published-only) — so the
+   > per-tenant master toggle was redundant with the editorial `published` status.
+   > Sharing (ADR 0013) covers private/draft access.
 
 ## Open questions
 

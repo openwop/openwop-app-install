@@ -25,7 +25,7 @@
 
 import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
-import { callerSubject, tenantOf, personalTenantOf } from '../host/requestSubject.js';
+import { callerSubject, tenantOf, personalTenantOf, isDurableCaller } from '../host/requestSubject.js';
 import { issueSubjectSession, issueUserSession } from '../middleware/auth.js';
 import {
   createWorkspace,
@@ -34,6 +34,10 @@ import {
   isWorkspaceMember,
   getWorkspace,
 } from '../host/accessControlService.js';
+import { ensurePersonalBoard } from '../host/kanbanService.js';
+import { createLogger } from '../observability/logger.js';
+
+const wsLog = createLogger('routes.workspaces');
 
 /** The caller's stable subject, or throw 401. */
 function requireSubject(req: Request): string {
@@ -42,14 +46,6 @@ function requireSubject(req: Request): string {
     throw new OpenwopError('unauthenticated', 'Authentication is required.', 401, {});
   }
   return subject;
-}
-
-/** Signed-in (durable) callers have a `user:`-prefixed personal tenant; anon
- *  sessions (`anon:<sid>`) are ephemeral and may NOT persist workspace records
- *  (ADR 0015 §Phase 2 — don't flood the store with throwaway anon orgs). */
-function isDurableCaller(req: Request): boolean {
-  const personal = personalTenantOf(req);
-  return (personal?.startsWith('user:') ?? false) || typeof (req as { userId?: string }).userId === 'string';
 }
 
 interface WorkspaceSummary {
@@ -76,6 +72,13 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
       if (personal) {
         if (isDurableCaller(req)) {
           const ws = await ensurePersonalWorkspace({ tenantId: personal, ownerSubject: subject });
+          // ADR 0025 — give every durable user their own kanban board at the same
+          // idempotent choke point, so a human is a board-owning orchestration
+          // principal exactly like a seeded roster agent. Best-effort: a board
+          // hiccup must never block listing the workspace.
+          await ensurePersonalBoard(personal, subject).catch((err) =>
+            wsLog.warn('personal_board_provision_failed', { tenantId: personal, error: err instanceof Error ? err.message : String(err) }),
+          );
           out.push({
             workspaceId: ws.orgId, name: ws.name, slug: ws.slug,
             roles: ['owner'], kind: 'personal', active: active === personal,

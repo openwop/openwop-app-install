@@ -99,6 +99,12 @@ export interface InterruptRecord {
   data: unknown;
   resumeSchema?: Record<string, unknown>;
   createdAt: string;
+  /** Token expiry (RFC 0093 §B.1) — minted at creation; default 30 min
+   *  (`OPENWOP_INTERRUPT_TOKEN_TTL_SEC`), capped at the interrupt's own
+   *  `timeoutMs` deadline when one exists. Past this instant the signed-token
+   *  endpoints refuse with `410 interrupt_expired`. Optional only for
+   *  pre-migration rows (treated as non-expiring). */
+  expiresAt?: string;
   /** Set when resolved. */
   resolvedAt?: string;
   resolvedValue?: unknown;
@@ -107,6 +113,10 @@ export interface InterruptRecord {
 /** Persisted webhook subscription. */
 export interface WebhookSubscriptionRecord {
   subscriptionId: string;
+  /** Owning tenant (RFC 0093 §A.3) — established by the registration-time
+   *  membership gate; scopes list/delete AND delivery fanout. Pre-RFC rows
+   *  are migrated to `'default'`. */
+  tenantId: string;
   url: string;
   events: readonly string[];
   tags?: readonly string[];
@@ -313,6 +323,8 @@ export type OpenwopErrorCode =
   | 'interrupt_not_found'
   | 'interrupt_already_resolved'
   | 'interrupt_gone'
+  // RFC 0093 §B.1 — signed-token surface only: token past `expiresAt` (410).
+  | 'interrupt_expired'
   | 'invalid_interrupt_token'
   | 'idempotency_key_conflict'
   | 'idempotency_key_replay_mismatch'
@@ -328,6 +340,10 @@ export type OpenwopErrorCode =
   | 'sign_in_required'
   | 'fork_invalid_seq'
   | 'fork_unsupported_mode'
+  // Honest-split refusal for `mode: 'replay'` with `fromSeq > 0` (501):
+  // this sample supports deterministic replay only as a full re-execution
+  // from sequence 0 (see routes/runs.ts :fork + discovery `replay.modes`).
+  | 'fork_from_seq_unsupported'
   | 'rate_limited'
   | 'unsupported_stream_mode'
   | 'internal_error'
@@ -362,7 +378,11 @@ export type OpenwopErrorCode =
   | 'unpublish_window_expired'
   // Webhook codes per spec/v1/webhooks.md
   | 'webhook_url_rejected'
-  | 'subscription_not_found';
+  | 'subscription_not_found'
+  // Connection-pack codes per spec/v1/connection-packs.md (RFC 0095)
+  | 'connection_pack_credential_material'
+  | 'connection_provider_unresolved'
+  | 'connection_provider_conflict';
 
 export class OpenwopError extends Error {
   constructor(

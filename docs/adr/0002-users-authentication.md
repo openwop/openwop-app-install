@@ -1,6 +1,17 @@
 # ADR 0002 — Users & Authentication (with enterprise SSO)
 
-**Status:** implemented (Phases 1–5 shipped — see "Implementation record" below)
+**Status:** implemented (Phases 1–5 shipped) — **§ Phase 2 (host email/password) + § Phase 5 (host TOTP MFA) SUPERSEDED by ADR 0026 (2026-06-11):** the host's own credential store + TOTP were removed; email/password is now Firebase Authentication and the backend holds no password. The durable-User model, OIDC bind, and enterprise SSO (SAML/SCIM) parts of this ADR are unchanged. See "Implementation record" below.
+
+> **§ Correction (2026-06-11) — graduated off the feature toggle.** Users &
+> Authentication shipped behind the `users` toggle (default OFF, per-tenant).
+> That was wrong for an identity foundation: the `SignInButton`'s `/me`
+> signed-in check, ADR 0003's OIDC bind, and every feature keying on durable
+> `User.userId` need it unconditionally — in a toggle-OFF deploy every sign-in
+> hit a 404 on `/v1/host/sample/users/me`. Graduated to a permanent, always-on
+> **admin** surface (nav under "Access & data", alongside Connections),
+> mirroring the Connections (ADR 0024 § Correction) and Notifications
+> (ADR 0010 § Correction) graduations: no `toggleDefault`, no `requireEnabled`
+> gates, the page renders unconditionally.
 **Date:** 2026-06-08
 **Feature toggle:** `users`
 **Pack(s):** `feature.users.*` → `packs.openwop.dev`

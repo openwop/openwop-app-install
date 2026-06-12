@@ -25,6 +25,7 @@ import {
   getUserByPrincipal,
   isActiveUser,
   listUsers,
+  resolveCanonicalUserForTenant,
   setUserStatus,
   updateUser,
   upsertFromPrincipal,
@@ -58,6 +59,32 @@ describe('users service: identity reconciliation', () => {
     expect(await listUsers('acme')).toHaveLength(1); // exactly one record
   });
 
+  it('canonicalizes a personal tenant onto ONE user across auth channels (2026-06-12 identity-split fix)', async () => {
+    const home = 'user:abc123'; // a single-human personal tenant
+    const viaOidc = await resolveCanonicalUserForTenant({ homeTenant: home, principalId: 'oidc:sub-x', source: 'oidc' });
+    // A bound user-tier cookie presents `user:<userId>` — a DIFFERENT principal
+    // for the SAME human. It MUST resolve to the same durable user.
+    const viaCookie = await resolveCanonicalUserForTenant({ homeTenant: home, principalId: `user:${viaOidc.userId}`, source: 'oidc' });
+    expect(viaCookie.userId).toBe(viaOidc.userId);
+    expect(await listUsers(home)).toHaveLength(1); // exactly one record, not one-per-channel
+  });
+
+  it('reconciles a pre-existing split: two rows in a personal tenant converge on the oidc record', async () => {
+    const home = 'user:split1';
+    // The prod artifact: a legacy session/manual user AND the real oidc user,
+    // both already in the personal tenant (the bug that hid the pin).
+    const manual = await createUser({ tenantId: home, principalId: 'session:sid-legacy', source: 'manual' });
+    const oidc = await createUser({ tenantId: home, principalId: 'oidc:sub-real', source: 'oidc' });
+    expect(await listUsers(home)).toHaveLength(2);
+    // Canonical resolution adopts the FEDERATED (oidc) record — the one that holds
+    // the user's profile/pins — regardless of which channel asks.
+    const a = await resolveCanonicalUserForTenant({ homeTenant: home, principalId: 'oidc:sub-real', source: 'oidc' });
+    const b = await resolveCanonicalUserForTenant({ homeTenant: home, principalId: `user:${manual.userId}`, source: 'oidc' });
+    expect(a.userId).toBe(oidc.userId);
+    expect(b.userId).toBe(oidc.userId); // both channels → the oidc record
+    expect(a.userId).not.toBe(manual.userId);
+  });
+
   it('captures raw IdP groups verbatim and assigns no role (boundary H6)', async () => {
     const u = await upsertFromPrincipal({ tenantId: 't', principalId: 'saml:nameid-9', groups: ['Finance', 'Approvers'], source: 'saml' });
     expect(u.groups).toEqual(['Finance', 'Approvers']);
@@ -72,6 +99,35 @@ describe('users service: identity reconciliation', () => {
     const b = await createUser({ tenantId: 't', principalId: 'p1' });
     expect(b.userId).toBe(a.userId);
     expect(await listUsers('t')).toHaveLength(1);
+  });
+
+  // Concurrency: the unindexed get-then-put would race to two random ids. With a
+  // DETERMINISTIC userId, parallel first-access converges to one row.
+  it('createUser converges to ONE row under concurrent first-access (deterministic id)', async () => {
+    const results = await Promise.all([
+      createUser({ tenantId: 't', principalId: 'oidc:race' }),
+      createUser({ tenantId: 't', principalId: 'oidc:race' }),
+      createUser({ tenantId: 't', principalId: 'oidc:race' }),
+    ]);
+    expect(new Set(results.map((u) => u.userId)).size).toBe(1); // all the same id
+    expect(await listUsers('t')).toHaveLength(1); // exactly one stored row
+  });
+});
+
+describe('users service: reconcilable-principal guard (no transient minting)', () => {
+  it('refuses non-durable shapes; maps durable shapes to their source', async () => {
+    const { reconcilableSource } = await import('../src/features/users/usersGuards.js');
+    // Transient / unknown → null (resolveCallerUser turns this into a 401, so a
+    // `session:<sid>` principal never becomes a durable User).
+    expect(reconcilableSource('session:abc')).toBeNull();
+    expect(reconcilableSource('bearer:xyz')).toBeNull();
+    expect(reconcilableSource('anon:sid')).toBeNull();
+    // Durable shapes → their source.
+    expect(reconcilableSource('oidc:sub')).toBe('oidc');
+    expect(reconcilableSource('password:a@b.test')).toBe('password');
+    expect(reconcilableSource('saml:nameid')).toBe('saml');
+    expect(reconcilableSource('scim:user')).toBe('scim');
+    expect(reconcilableSource('user:uuid')).toBe('oidc');
   });
 });
 

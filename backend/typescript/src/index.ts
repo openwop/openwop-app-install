@@ -30,6 +30,7 @@ import { ensureRegistryPacksInstalled } from './bootstrap/installRegistryPacks.j
 import { featurePackRefs } from './features/index.js';
 import { ensureLocalPacksMounted } from './bootstrap/mountLocalPacks.js';
 import { loadPromptPacks, defaultPromptPackRoots } from './host/promptPackLoader.js';
+import { loadConnectionPacks, defaultConnectionPackRoots } from './features/connections/connectionPackLoader.js';
 import { seedDefaultHostSurfaces } from './bootstrap/hostSurfaceRegistry.js';
 import { seedShowcaseWorkforces } from './host/workforceService.js';
 import { demoMode } from './host/demoMode.js';
@@ -46,6 +47,9 @@ import { createHostAdapterSuite, type HostAdapterSuite } from './host/index.js';
 import { startWebhookDeliveryWorker } from './host/webhookDeliveryWorker.js';
 import { startRunDispatchSweeper } from './host/runDispatchSweeper.js';
 import { startScheduleDaemon } from './host/scheduleDaemon.js';
+import { backfillApprovalIndexes } from './host/approvalService.js';
+import { pruneOrphanedConfigs } from './host/featureToggles/service.js';
+import { startConnectionsRefreshDaemon } from './features/connections/refreshDaemon.js';
 import { startHeartbeatDaemon } from './host/heartbeatService.js';
 import { listRosterTenants } from './host/rosterService.js';
 import { getInstanceId } from './host/instanceId.js';
@@ -316,6 +320,25 @@ export async function createApp(config: AppConfig): Promise<Express> {
     });
   }
 
+  // RFC 0095 §B.6 connection-pack boot-time loader. Scans for `kind:"connection"`
+  // packs and registers each pack's provider into the ADR 0024 registry, so a
+  // connector's `auth.provider` resolves against installed packs. No-op when no
+  // pack roots exist (the built-in providers remain the catalog).
+  const connectionPackResults = loadConnectionPacks({ roots: defaultConnectionPackRoots() });
+  if (connectionPackResults.installed.length > 0) {
+    log.info('connection_packs_loaded', {
+      count: connectionPackResults.installed.length,
+      packs: connectionPackResults.installed.map((r) => ({ name: r.pack, provider: r.providerId, version: r.version, overrodeBuiltin: r.overrodeBuiltin })),
+    });
+  }
+  if (connectionPackResults.errors.length > 0) {
+    // A rejected pack is skipped, not fatal — surface it so the operator notices.
+    log.error('connection_packs_rejected', {
+      count: connectionPackResults.errors.length,
+      packs: connectionPackResults.errors.map((e) => ({ name: e.pack, code: e.code })),
+    });
+  }
+
   const app = express();
 
   // Firebase Hosting → Cloud Run rewrite preserves the `/api` source
@@ -343,6 +366,16 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // global 1mb parser; body-parser is a no-op once req._body is set, so
   // registration order is precedence order.
   app.use('/v1/host/sample/media', express.json({ limit: '12mb' }));
+  // Inbound provider webhooks (ADR 0024 §6) need the EXACT raw bytes to verify a
+  // provider HMAC, so this scoped parser stashes them on `req.rawBody` before the
+  // global parser consumes the stream. Registered first; body-parser no-ops once
+  // req._body is set, so this wins for the inbound prefix.
+  app.use('/v1/host/sample/connections-inbound', express.json({
+    limit: '256kb',
+    verify: (req, _res, buf) => {
+      (req as import('express').Request).rawBody = Buffer.from(buf);
+    },
+  }));
   app.use(express.json({ limit: '1mb' }));
 
   // CORS — MUST come before auth so OPTIONS preflight succeeds without
@@ -446,6 +479,19 @@ async function main(): Promise<void> {
 
   const webhookWorker = startWebhookDeliveryWorker(storage, `webhook-${getInstanceId()}`);
   const runSweeper = startRunDispatchSweeper({ storage, hostSuite });
+  // ADR 0029 (T8) — index approval rows written before the (tenant,status)
+  // index existed, so pre-upgrade pending approvals stay visible. Fire-and-
+  // forget: a failure degrades stale rows to invisible-until-touched, never
+  // blocks boot.
+  void backfillApprovalIndexes().catch((err) =>
+    log.warn('approval index backfill failed', { error: err instanceof Error ? err.message : String(err) }),
+  );
+  // Drop stored toggle configs for features that GRADUATED off their toggle
+  // (users/connections/assistant/profiles) — without this their admin-saved row
+  // lingers in the store and reappears as a live toggle. Fire-and-forget.
+  void pruneOrphanedConfigs()
+    .then((n) => { if (n > 0) log.info('pruned orphaned feature-toggle configs', { count: n }); })
+    .catch((err) => log.warn('toggle-config prune failed', { error: err instanceof Error ? err.message : String(err) }));
   // Wall-clock scheduler: fires durable scheduled jobs on their cadence. Each
   // instance polls; per-fire claimIdempotency makes it fire-once across the
   // fleet (see scheduleDaemon.ts).
@@ -453,12 +499,17 @@ async function main(): Promise<void> {
   // Autonomous agent heartbeat: members that opted into a cadence get their
   // "Check now" run automatically (fire-once across the fleet).
   const heartbeatDaemon = startHeartbeatDaemon({ storage, hostSuite }, listRosterTenants);
+  // Connections warm-refresh (ADR 0024 Phase B): proactively refresh oauth2
+  // tokens before expiry so a run never pays the mint latency and a broken
+  // connection surfaces as `needs-reconsent` ahead of use (fire-once per slot).
+  const connectionsRefreshDaemon = startConnectionsRefreshDaemon(storage);
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     process.once(sig, () => {
       webhookWorker.stop();
       runSweeper.stop();
       scheduleDaemon.stop();
       heartbeatDaemon.stop();
+      connectionsRefreshDaemon.stop();
     });
   }
 

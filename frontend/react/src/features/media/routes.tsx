@@ -5,17 +5,19 @@ import type { FrontendFeature } from '../registry.js';
 
 const MediaLibraryPage = lazy(() => import('./MediaLibraryPage.js').then((m) => ({ default: m.MediaLibraryPage })));
 
+// ADR 0027: Media is always-on (no `featureId`) and lives in the admin-tier
+// 'Content' group alongside CMS / Publishing.
 const routes: FeatureRoute[] = [
   {
     path: '/media',
     element: <MediaLibraryPage />,
-    tier: 'workspace',
+    tier: 'admin',
     nav: {
-      group: 'Workspace',
+      group: 'Content',
       label: 'Media',
       icon: ImageIcon,
       hint: 'Org asset library',
-      featureId: 'media',
+      order: 10,
     },
   },
 ];

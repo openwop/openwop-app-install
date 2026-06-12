@@ -24,6 +24,9 @@ import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import { OpenwopError, type RunRecord } from '../types.js';
 import { seedRunVariables, snapshotRunVariables } from '../host/variablesRuntime.js';
+import { snapshotRunChannels } from '../host/channelsRuntime.js';
+import { getRunAgent } from '../host/runAgentRuntime.js';
+import type { AgentRef } from '../executor/types.js';
 import { getChildParentNodeId } from '../executor/subWorkflowDispatcher.js';
 import { snapshotCostRollup } from '../observability/costEmitter.js';
 import { executeRun } from '../executor/executor.js';
@@ -255,6 +258,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
 
       const runId = randomUUID();
       const now = new Date().toISOString();
+      // ADR 0024 §4/D2 — stamp the AUTHENTICATED human onto the run so node
+      // execution can resolve per-user credentials + `connections:use` as the
+      // run owner. Host-authoritative: derived from the principal, overriding any
+      // client-supplied metadata.actingUserId (a caller MUST NOT name another user).
+      const actingUserId = req.userId ?? principal.principalId;
       const run: RunRecord = {
         runId,
         workflowId: body.workflowId,
@@ -262,7 +270,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         scopeId: body.scopeId,
         status: 'pending',
         inputs: body.inputs ?? null,
-        metadata: (body.metadata as Record<string, unknown>) ?? {},
+        metadata: { ...((body.metadata as Record<string, unknown>) ?? {}), actingUserId },
         configurable: (body.configurable as Record<string, unknown>) ?? {},
         callbackUrl: body.callbackUrl,
         idempotencyKey,
@@ -802,31 +810,83 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       await requireProtocolScope(req, 'runs:create');
       const sourceRun = await storage.getRun(runId);
       if (!sourceRun) throw new OpenwopError('run_not_found', `run ${runId} not found`, 404);
-      const body = req.body as ForkRunRequest;
-      if (typeof body?.fromSeq !== 'number' || body.fromSeq < 0) {
-        throw new OpenwopError('fork_invalid_seq', 'fromSeq must be a non-negative integer', 400);
-      }
+      // Partial on the wire: `fromSeq` is omittable for replay mode (see
+      // the replay-mode default below), so don't pretend the inbound body
+      // already satisfies the full ForkRunRequest shape.
+      const body = (req.body ?? {}) as Partial<ForkRunRequest>;
       if (body.mode !== 'replay' && body.mode !== 'branch') {
         throw new OpenwopError('fork_unsupported_mode', `mode must be one of replay|branch`, 400);
       }
+      // `replay.md §"Replay-mode defaults"`: fromSeq is OPTIONAL for
+      // `replay` (defaults to 0 — full re-execution); REQUIRED for
+      // `branch` (a branch point has no natural default).
+      if (body.fromSeq === undefined && body.mode === 'replay') {
+        body.fromSeq = 0;
+      }
+      if (typeof body.fromSeq !== 'number' || body.fromSeq < 0) {
+        throw new OpenwopError('fork_invalid_seq', 'fromSeq must be a non-negative integer', 400);
+      }
+      const fromSeq: number = body.fromSeq;
+      // `rest-endpoints.md POST /v1/runs/{runId}:fork`: a fromSeq past the
+      // end of the source event log is semantically unprocessable (422),
+      // distinct from a malformed fromSeq (400 above).
       const maxSeq = await storage.getMaxSequence(sourceRun.runId);
-      if (body.fromSeq > maxSeq) {
-        throw new OpenwopError('fork_invalid_seq', `fromSeq ${body.fromSeq} > maxSeq ${maxSeq}`, 400);
+      if (fromSeq > maxSeq) {
+        throw new OpenwopError('fork_invalid_seq', `fromSeq ${fromSeq} > maxSeq ${maxSeq}`, 422);
+      }
+      // `replay.md` §Endpoint: `runOptionsOverlay` MUST be omitted or empty
+      // for `replay` — replay is deterministic re-execution and an overlay
+      // would break that. Overlays are a `branch`-only feature.
+      if (
+        body.mode === 'replay' &&
+        body.runOptionsOverlay !== undefined &&
+        Object.keys(body.runOptionsOverlay).length > 0
+      ) {
+        throw new OpenwopError(
+          'fork_unsupported_mode',
+          'runOptionsOverlay MUST be omitted or empty for mode=replay (overlay is branch-only; replay must be deterministic)',
+          400,
+          { mode: body.mode },
+        );
+      }
+      // Honest capability split (mirrors discovery `replay.modes:
+      // ['replay']` + `fork: false`): deterministic `replay` is supported
+      // only as a FULL re-execution from sequence 0. A mid-sequence replay
+      // would require reconstructing the executor's resume position from
+      // the event log — without that, the sample re-executes the whole
+      // workflow and double-emits the inherited prefix, which violates the
+      // `replay.md §"Replay determinism"` per-event guarantee past the
+      // fork point. Refuse with 501 (the conformance suite treats 501 as
+      // "advertised but not implemented for this range" — skip-equivalent)
+      // rather than serving a silently non-deterministic replay.
+      if (body.mode === 'replay' && fromSeq > 0) {
+        throw new OpenwopError(
+          'fork_from_seq_unsupported',
+          `mode=replay supports only fromSeq=0 on this host (full deterministic re-execution); got fromSeq=${fromSeq}`,
+          501,
+          { mode: body.mode, fromSeq },
+        );
       }
 
       const newRunId = randomUUID();
       const now = new Date().toISOString();
+      // ADR 0024 §4/D2 confused-deputy guard: a fork acts as the FORKING caller,
+      // never the source run's owner. `...sourceRun` copies `metadata.actingUserId`
+      // verbatim, so re-stamp it to this principal — otherwise user B forking user
+      // A's run would inherit A's identity and resolve A's per-user credentials.
+      const forkingUserId = req.userId ?? req.principal?.principalId;
       const forkedRun: RunRecord = {
         ...sourceRun,
         runId: newRunId,
         parentRunId: sourceRun.runId,
-        parentSeq: body.fromSeq,
+        parentSeq: fromSeq,
         forkMode: body.mode,
         status: 'pending',
         createdAt: now,
         updatedAt: now,
         completedAt: undefined,
         error: undefined,
+        metadata: { ...((sourceRun.metadata as Record<string, unknown> | undefined) ?? {}), actingUserId: forkingUserId },
         configurable: { ...sourceRun.configurable, ...(body.runOptionsOverlay ?? {}) },
         idempotencyKey: undefined,
       };
@@ -836,7 +896,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // Sample-grade: copies events as-is. Real impls re-execute pure
       // nodes deterministically (the `replay` mode) vs. branching from
       // a checkpoint (the `branch` mode).
-      const sourceEvents = await storage.listEvents(sourceRun.runId, { fromSeq: 0, limit: body.fromSeq });
+      const sourceEvents = await storage.listEvents(sourceRun.runId, { fromSeq: 0, limit: fromSeq });
       for (const ev of sourceEvents) {
         await getEventLog().append({
           runId: newRunId,
@@ -860,7 +920,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       const response: ForkRunResponse = {
         runId: newRunId,
         sourceRunId: sourceRun.runId,
-        fromSeq: body.fromSeq,
+        fromSeq,
         mode: body.mode,
         status: 'pending',
         eventsUrl: `${req.protocol}://${req.get('host')}/v1/runs/${newRunId}/events`,
@@ -882,7 +942,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
                 getEventLog(),
                 sourceRun.runId,
                 newRunId,
-                body.fromSeq,
+                fromSeq,
               );
               if (div.diverged) {
                 log.info('replay diverged', { runId: newRunId, divergencePoint: div.index });
@@ -958,8 +1018,11 @@ function projectRunSnapshot(run: RunRecord): RunSnapshot & {
   parentSeq?: number;
   forkMode?: 'replay' | 'branch';
   metrics?: { openwopCost?: Record<string, unknown> };
+  agent?: AgentRef;
 } {
   const variables = snapshotRunVariables(run.runId);
+  const channels = snapshotRunChannels(run.runId);
+  const agent = getRunAgent(run.runId);
   const parentNodeId = getChildParentNodeId(run.runId);
   return {
     runId: run.runId,
@@ -984,6 +1047,16 @@ function projectRunSnapshot(run: RunRecord): RunSnapshot & {
     // `variables[]` declaration). The omission is meaningful — JSON
     // serialization drops `undefined` keys.
     ...(variables !== null ? { variables } : {}),
+    // `run-snapshot.schema.json §channels`: typed-state channel
+    // projections (the `message` reducer, channels-and-reducers.md).
+    // Absent when the run produced no channel state.
+    ...(channels !== null ? { channels } : {}),
+    // Multi-Agent Shift Phase 1 — `run-snapshot.schema.json §agent`:
+    // the active worker's AgentRef, stamped by the executor when an
+    // agent-pinned node launches (`host/runAgentRuntime.ts`). Carries
+    // RFC 0003 `sourceManifestId` provenance verbatim. Absent for runs
+    // with no agent provenance.
+    ...(agent !== null ? { agent } : {}),
     // `run-snapshot.schema.json §metrics.openwopCost`: aggregate cost
     // rollup populated as nodes call recordCost (or, in the conformance
     // tier, the `conformance.cost.emit` typeId). Absent when nothing

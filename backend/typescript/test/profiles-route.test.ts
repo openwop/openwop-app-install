@@ -12,6 +12,7 @@
  */
 
 import http from 'node:http';
+import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -24,12 +25,13 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
     server = app.listen(PORT, res);
   });
-  // `users` must be on (signup); `profiles` we toggle within the tests.
+  // `users` must be on (signup). `profiles` graduated to always-on (no toggle).
   const u = getToggleDefault('users');
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
 });
@@ -55,9 +57,7 @@ function client(initialCookie = ''): Client {
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const setCookies = typeof (res.headers as any).getSetCookie === 'function'
-      ? (res.headers as any).getSetCookie()
-      : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : []);
+    const setCookies = getSetCookies(res.headers);
     for (const sc of setCookies as string[]) {
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
@@ -77,34 +77,131 @@ function client(initialCookie = ''): Client {
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-async function signup(c: ReturnType<typeof client>): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email: uniqEmail('p'), password: 'password123' });
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
+async function signup(c: ReturnType<typeof client>, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
+  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('p'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
+// No-op since profiles graduated to always-on (the toggle is gone, so
+// getToggleDefault('profiles') is undefined). Retained so the existing call
+// sites compile; the surface now serves unconditionally.
 const enableProfiles = async (status: 'on' | 'off'): Promise<void> => {
   const def = getToggleDefault('profiles');
   if (def) await saveConfig({ ...def, status }, 'test');
 };
 
-/** Two users in the SAME tenant: the second signup, made on the first user's
- *  now-bound session, inherits its tenant. Each user's session cookie is
- *  snapshotted into its own client so they can act independently. */
+/** Two users in the SAME tenant (the SSO/SCIM shared-tenant shape the profiles
+ *  directory + org-RBAC target): mint each into one explicit `tenantId`, each in
+ *  its own client so they act independently.
+ *
+ *  The shared tenant is `org:`-prefixed, NOT `user:` — a `user:<hash>` tenant is
+ *  the single-human PERSONAL-tenant derivation (one OIDC subject → one human),
+ *  which resolveCallerUser canonicalizes onto ONE durable user; a shared SSO/SCIM
+ *  tenant has many humans and stays principal-keyed. (Co-tenant peers under a
+ *  `user:` tenant was a fixture inaccuracy that the canonicalization collapsed.) */
 async function sameTenantPair(): Promise<{ alice: Client; aliceId: string; bob: Client; bobId: string }> {
-  const seed = client();
-  const a = await signup(seed);
-  const aliceCookie = seed.snapshot();
-  const b = await signup(seed); // inherits alice's bound tenant
-  const bobCookie = seed.snapshot();
-  return { alice: client(aliceCookie), aliceId: a.userId, bob: client(bobCookie), bobId: b.userId };
+  const tenantId = `org:test-${Date.now()}-${n++}`;
+  const alice = client();
+  const a = await signup(alice, { tenantId });
+  const bob = client();
+  const b = await signup(bob, { tenantId });
+  return { alice, aliceId: a.userId, bob, bobId: b.userId };
 }
 
-describe('profiles Phase 1 — toggle gating', () => {
-  it('404s when the profiles toggle is off', async () => {
+describe('profiles Phase 1 — always-on (graduated off its toggle)', () => {
+  it('serves /me unconditionally — no 404-while-off (§ Correction 2026-06-12)', async () => {
+    // Profiles graduated to always-on: agent pinning + per-user surfaces ride on
+    // it, so it is foundational substrate, not an A/B feature. `enableProfiles`
+    // is now a no-op (the toggle is gone); the surface serves to any signed-in
+    // caller and lazily materializes the profile.
     await enableProfiles('off');
     const c = client();
     await signup(c);
     const r = await c.get('/v1/host/sample/profiles/me');
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+  });
+
+  it('self-serve display name: PATCH /users/me sets it; the profile surfaces it', async () => {
+    const c = client();
+    await signup(c);
+    const set = await c.patch('/v1/host/sample/users/me', { displayName: 'Jordan Rivera' });
+    expect(set.status, JSON.stringify(set.body)).toBe(200);
+    expect(set.body.displayName).toBe('Jordan Rivera');
+    // The profile view surfaces the user's display name (read from identity).
+    const prof = await c.get('/v1/host/sample/profiles/me');
+    expect(prof.body.displayName).toBe('Jordan Rivera');
+  });
+});
+
+describe('profiles — agent pinning (ADR 0023)', () => {
+  it('pins/unpins a tenant agent; 404s a foreign/unknown agent; idempotent', async () => {
+    await enableProfiles('on');
+    const c = client();
+    await signup(c);
+    // Seed the tenant's roster so there's a real agent to pin.
+    const seeded = await c.post('/v1/host/sample/demo/seed', {});
+    expect(seeded.status).toBe(200);
+    const roster = await c.get('/v1/host/sample/roster');
+    const agent = (roster.body.roster as Array<{ rosterId: string }>)[0]!;
+    expect(agent?.rosterId).toBeTruthy();
+
+    // Pin → appears in pinnedAgentIds; idempotent.
+    const p1 = await c.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    expect(p1.status, JSON.stringify(p1.body)).toBe(200);
+    expect(p1.body.pinnedAgentIds).toContain(agent.rosterId);
+    const p2 = await c.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    expect(p2.body.pinnedAgentIds.filter((id: string) => id === agent.rosterId)).toHaveLength(1);
+
+    // Unknown agent → 404 (fail-closed, no phantom pins).
+    const bad = await c.put('/v1/host/sample/profiles/me/pinned-agents/host:does-not-exist');
+    expect(bad.status).toBe(404);
+
+    // Unpin → removed.
+    const u = await c.del(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    expect(u.status).toBe(200);
+    expect(u.body.pinnedAgentIds).not.toContain(agent.rosterId);
+  });
+
+  it('UN-pinning a deleted/unknown agent succeeds (self-heal — DELETE never 404s)', async () => {
+    await enableProfiles('on');
+    const c = client();
+    await signup(c);
+    // Pinning an unknown agent 404s; UN-pinning one is always safe (you're
+    // removing an id from your OWN list) — this is how the sidebar self-heals.
+    const unpin = await c.del('/v1/host/sample/profiles/me/pinned-agents/host:never-existed');
+    expect(unpin.status, JSON.stringify(unpin.body)).toBe(200);
+  });
+
+  it('clearing demo data unpins the deleted agents (cascade)', async () => {
+    await enableProfiles('on');
+    const c = client();
+    await signup(c);
+    await c.post('/v1/host/sample/demo/seed', {});
+    const roster = await c.get('/v1/host/sample/roster');
+    const agent = (roster.body.roster as Array<{ rosterId: string }>)[0]!;
+    await c.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    expect((await c.get('/v1/host/sample/profiles/me')).body.pinnedAgentIds).toContain(agent.rosterId);
+
+    // Clearing the agents step deletes the roster members AND cascades the unpin.
+    const cleared = await c.post('/v1/host/sample/demo/clear', { steps: ['agents'] });
+    expect(cleared.status).toBe(200);
+    const me = await c.get('/v1/host/sample/profiles/me');
+    expect(me.body.pinnedAgentIds).not.toContain(agent.rosterId);
+  });
+
+  it("a foreign-tenant agent cannot be pinned (IDOR guard)", async () => {
+    await enableProfiles('on');
+    const { alice, bob } = await sameTenantPair();
+    // Give bob's DIFFERENT tenant an agent; alice must not be able to pin it.
+    const other = client();
+    await signup(other, { tenantId: `user:other-${Date.now()}` });
+    await other.post('/v1/host/sample/demo/seed', {});
+    const otherRoster = await other.get('/v1/host/sample/roster');
+    const foreign = (otherRoster.body.roster as Array<{ rosterId: string }>)[0]!;
+    void bob;
+    const r = await alice.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(foreign.rosterId)}`);
     expect(r.status).toBe(404);
   });
 });
@@ -338,24 +435,84 @@ describe('profiles Phase 3 — skills + endorsements', () => {
   });
 });
 
-describe('profiles Phase 4 — email-verification surfacing', () => {
-  it('GET /me reflects emailVerified, flipping false → true after the user verifies', async () => {
+describe('ADR 0025 — personal activity feed', () => {
+  it('GET /me/activity is empty for a fresh user and surfaces a user-attributed run (always-on)', async () => {
     await enableProfiles('on');
     const c = client();
-    const email = uniqEmail('verify');
-    const su = await c.post('/v1/host/sample/users/auth/signup', { email, password: 'password123' });
-    expect(su.status, JSON.stringify(su.body)).toBe(201);
-    const token = su.body.verifyToken;
-    expect(token, 'verifyToken should be exposed in test env').toBeTruthy();
+    await signup(c);
 
-    const before = await c.get('/v1/host/sample/profiles/me');
-    expect(before.body.emailVerified).toBe(false);
+    // Empty for a fresh user (no orchestrated runs yet).
+    const empty = await c.get('/v1/host/sample/profiles/me/activity');
+    expect(empty.status, JSON.stringify(empty.body)).toBe(200);
+    expect(empty.body.items).toEqual([]);
+    expect(empty.body.truncated).toBe(false);
 
-    const v = await c.post('/v1/host/sample/users/auth/email/verify', { email, token });
-    expect(v.status).toBe(204);
+    // Register a workflow, schedule it for me, and fire it.
+    const wfId = 'wf.activity-e2e';
+    const reg = await c.post('/v1/host/sample/workflows', { workflowId: wfId, nodes: [{ nodeId: 'op', typeId: 'test.passthrough', config: {} }], edges: [] });
+    expect(reg.status, JSON.stringify(reg.body)).toBe(201);
+    const job = await c.post('/v1/host/sample/scheduler/jobs', { owner: 'me', cronExpr: '0 9 * * *', workflowId: wfId });
+    expect(job.status, JSON.stringify(job.body)).toBe(201);
+    const trig = await c.post(`/v1/host/sample/scheduler/jobs/${encodeURIComponent(job.body.jobId)}/trigger`, {});
+    expect(trig.status, JSON.stringify(trig.body)).toBe(200);
+    expect(trig.body.runId).toBeTruthy();
 
+    // The fired run is attributed to the user → appears in /me/activity.
+    const act = await c.get('/v1/host/sample/profiles/me/activity');
+    expect(act.status).toBe(200);
+    const item = act.body.items.find((i: any) => i.runId === trig.body.runId);
+    expect(item, JSON.stringify(act.body.items)).toBeTruthy();
+    expect(item.source).toBe('schedule');
+    expect(item.ownerUserId).toBeTruthy();
+    expect(item.workflowId).toBe(wfId);
+
+    // Graduated to always-on — still serves with the toggle "off" (a no-op now).
+    await enableProfiles('off');
+    const stillServes = await c.get('/v1/host/sample/profiles/me/activity');
+    expect(stillServes.status).toBe(200);
+  });
+});
+
+describe('ADR 0025 — assigned-workflow portfolio', () => {
+  it('PUT /me/workflows replaces the portfolio (deduped, bounded); empty by default; bad payload 400', async () => {
+    await enableProfiles('on');
+    const c = client();
+    await signup(c);
+
+    // Empty by default.
+    const fresh = await c.get('/v1/host/sample/profiles/me');
+    expect(fresh.body.workflows).toEqual([]);
+
+    // Set a portfolio — duplicates collapse, order preserved.
+    const set = await c.put('/v1/host/sample/profiles/me/workflows', { workflows: ['wf.a', 'wf.b', 'wf.a'] });
+    expect(set.status, JSON.stringify(set.body)).toBe(200);
+    expect(set.body.workflows).toEqual(['wf.a', 'wf.b']);
+
+    // Persists across reads.
     const after = await c.get('/v1/host/sample/profiles/me');
-    expect(after.body.emailVerified).toBe(true);
+    expect(after.body.workflows).toEqual(['wf.a', 'wf.b']);
+
+    // Replace (not merge).
+    const replaced = await c.put('/v1/host/sample/profiles/me/workflows', { workflows: ['wf.c'] });
+    expect(replaced.body.workflows).toEqual(['wf.c']);
+
+    // Malformed payload → 400.
+    const bad = await c.put('/v1/host/sample/profiles/me/workflows', { workflows: [1, 2] });
+    expect(bad.status).toBe(400);
+  });
+});
+
+describe('profiles Phase 4 — email-verification surfacing', () => {
+  it('GET /me surfaces emailVerified=true for a federated (OIDC) identity', async () => {
+    // ADR 0026: there is no host password store / verify-token flow anymore — a
+    // real account is federated (Firebase OIDC / SAML / SCIM), whose email is
+    // verified by the IdP, so the profile surfaces it as verified.
+    await enableProfiles('on');
+    const c = client();
+    await signup(c);
+    const me = await c.get('/v1/host/sample/profiles/me');
+    expect(me.status, JSON.stringify(me.body)).toBe(200);
+    expect(me.body.emailVerified).toBe(true);
   });
 });
 
@@ -415,7 +572,9 @@ describe('profiles followup — review hardening', () => {
     const read = await bob.get(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}`);
     expect(read.status, JSON.stringify(read.body)).toBe(200);
     expect(read.body.userId).toBe(aliceId);
-    expect(read.body.emailVerified).toBe(false); // alice signed up but never verified
+    // A federated (OIDC/SAML/SCIM) identity's email is IdP-verified (ADR 0026 —
+    // there is no host password store with an unverified state anymore).
+    expect(read.body.emailVerified).toBe(true);
   });
 
   it('directory omits orphan profiles whose owning user was deleted', async () => {

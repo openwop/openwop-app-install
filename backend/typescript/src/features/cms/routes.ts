@@ -1,6 +1,7 @@
 /**
  * CMS routes (ADR 0009) — host-extension, sample-grade. Org-scoped under
- * /v1/host/sample/cms/orgs/:orgId, gated by the shared `authorizeOrgScope`:
+ * /v1/host/sample/cms/orgs/:orgId, gated by the shared `requireOrgScope` (ADR
+ * 0027: CMS is always-on, so no toggle gate — the org-scoped RBAC remains):
  *   read (list/get/versions/by-slug)        → workspace:read
  *   content edits (create/patch/delete) + submit → workspace:write
  *   editorial approve/reject/publish/archive/restore → host:members:manage
@@ -12,7 +13,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { authorizeOrgScope, requireString, optionalString } from '../featureRoute.js';
+import { requireOrgScope, requireString, optionalString } from '../featureRoute.js';
 import {
   createPage,
   deletePage,
@@ -26,9 +27,6 @@ import {
   type WorkflowAction,
 } from './cmsService.js';
 
-const TOGGLE_ID = 'cms';
-const FEATURE = { toggleId: TOGGLE_ID, label: 'CMS' };
-
 export function registerCmsRoutes(deps: RouteDeps): void {
   const { app } = deps;
   const BASE = '/v1/host/sample/cms/orgs/:orgId';
@@ -36,7 +34,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   // ── Reads ──
   app.get(`${BASE}/pages`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      const { user, orgId } = await requireOrgScope(req,'workspace:read');
       res.json({ pages: await listPages(user.tenantId, orgId) });
     } catch (err) {
       next(err);
@@ -46,7 +44,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   // by-slug MUST precede /pages/:pageId (else 'by-slug' is captured as :pageId).
   app.get(`${BASE}/pages/by-slug/:slug`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      const { user, orgId } = await requireOrgScope(req,'workspace:read');
       const hit = await getPublishedBySlug(user.tenantId, orgId, req.params.slug);
       if (!hit) throw new OpenwopError('not_found', 'No published page at that slug.', 404, { slug: req.params.slug });
       res.json(hit);
@@ -57,7 +55,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
 
   app.get(`${BASE}/pages/:pageId/versions`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      const { user, orgId } = await requireOrgScope(req,'workspace:read');
       res.json({ versions: await listVersions(user.tenantId, orgId, req.params.pageId) });
     } catch (err) {
       next(err);
@@ -66,7 +64,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
 
   app.get(`${BASE}/pages/:pageId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
+      const { user, orgId } = await requireOrgScope(req,'workspace:read');
       const page = await getPage(user.tenantId, orgId, req.params.pageId);
       if (!page) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       res.json(page);
@@ -78,7 +76,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   // ── Content edits (workspace:write) ──
   app.post(`${BASE}/pages`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const { user, orgId } = await requireOrgScope(req,'workspace:write');
       const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown };
       const page = await createPage({
         tenantId: user.tenantId,
@@ -96,14 +94,14 @@ export function registerCmsRoutes(deps: RouteDeps): void {
 
   app.patch(`${BASE}/pages/:pageId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const { user, orgId } = await requireOrgScope(req,'workspace:write');
       // Editorial gate (code-review #1): editors may only edit DRAFTS. Editing a
       // page that is live/under-review/archived changes content outside the
       // review flow, so it requires the admin tier — editors must `unpublish`
       // (→ draft) first. Re-authorize for the admin scope when not a draft.
       const current = await getPage(user.tenantId, orgId, req.params.pageId);
       if (!current) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
-      if (current.status !== 'draft') await authorizeOrgScope(req, FEATURE, 'host:members:manage');
+      if (current.status !== 'draft') await requireOrgScope(req,'host:members:manage');
       const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown };
       const patch: { title?: string; slug?: string; sections?: unknown } = {};
       if (typeof body.title === 'string') patch.title = body.title;
@@ -119,7 +117,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/pages/:pageId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'workspace:write');
+      const { user, orgId } = await requireOrgScope(req,'workspace:write');
       const ok = await deletePage(user.tenantId, orgId, req.params.pageId);
       if (!ok) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       res.status(204).end();
@@ -135,7 +133,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   const transition = (action: WorkflowAction, scope: 'workspace:write' | 'host:members:manage') =>
     async (req: Request, res: Response, next: NextFunction): Promise<void> => {
       try {
-        const { user, orgId } = await authorizeOrgScope(req, FEATURE, scope);
+        const { user, orgId } = await requireOrgScope(req,scope);
         const updated = await transitionPage(user.tenantId, orgId, req.params.pageId, action, user.userId);
         if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
         res.json(updated);
@@ -153,7 +151,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
   // Restore a past version into the draft (admin/owner).
   app.post(`${BASE}/pages/:pageId/restore/:versionId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorizeOrgScope(req, FEATURE, 'host:members:manage');
+      const { user, orgId } = await requireOrgScope(req,'host:members:manage');
       const restored = await restoreVersion(user.tenantId, orgId, req.params.pageId, req.params.versionId, user.userId);
       if (!restored) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       res.json(restored);

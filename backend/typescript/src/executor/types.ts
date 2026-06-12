@@ -17,6 +17,12 @@ import type { CanvasSurface } from '../host/canvasSurface.js';
 import type { WebResearchSurface } from '../host/webResearchSurface.js';
 import type { LaunchStudioSurface } from '../host/launchStudioSurface.js';
 import type { FeatureSurface } from '../host/featureSurfaces.js';
+import type { fetch as undiciFetch } from 'undici';
+
+/** Host-mediated egress fn (ctx.http.safeFetch). Mirrors the undici `fetch`
+ *  signature exactly so the host injection layer + the pack agree on the shape
+ *  (RFC 0076 §B). Type-only import — erased at build, no runtime coupling. */
+export type HostSafeFetch = (url: string, init?: Parameters<typeof undiciFetch>[1]) => ReturnType<typeof undiciFetch>;
 
 /**
  * Single message in a chat-style AI request. Field shapes mirror
@@ -114,6 +120,21 @@ export interface AiToolCallResult extends AiCallResult {
   toolCalls?: ReadonlyArray<AiToolUseBlock>;
 }
 
+/** Runtime agent reference per `agent-ref.schema.json` (Multi-Agent
+ *  Shift Phase 1). `agentId` is required; everything else is optional
+ *  metadata. `sourceManifestId` is the RFC 0003 provenance pointer back
+ *  to the `AgentManifest.agentId` this ref was projected from (absent
+ *  for host-internal `host:<id>` agents). */
+export interface AgentRef {
+  agentId: string;
+  name?: string;
+  modelClass?: string;
+  memoryRef?: string;
+  version?: string;
+  channel?: string;
+  sourceManifestId?: string;
+}
+
 export interface NodeContext {
   runId: string;
   nodeId: string;
@@ -125,7 +146,7 @@ export interface NodeContext {
    *  (`node.agent`, an `agent-ref.schema.json`), surfaced so node modules
    *  can honor `nodes[].agent.agentId`. Undefined when the node carries no
    *  pin. Distinct from `config`, which the schema models as a sibling. */
-  nodeAgent?: { agentId: string };
+  nodeAgent?: AgentRef;
   /** Run-level configurable overlay from RunOptions.configurable. */
   configurable: Record<string, unknown>;
   /** ctx.triggerData — the run-scoped trigger payload the `core.openwop.triggers`
@@ -158,8 +179,17 @@ export interface NodeContext {
    * `agent.toolReturned.causationId MUST equal agent.toolCalled.eventId`).
    * Callers that don't need the return value can ignore it — additive
    * relative to the prior `Promise<void>` signature.
+   *
+   * `opts.causationId` stamps the persisted event ENVELOPE's
+   * `causationId` (run-event.schema.json §causationId) — distinct from
+   * any payload-level mirror. RFC 0002 §B's toolCalled→toolReturned
+   * chain is asserted by the conformance suite at the envelope level.
    */
-  emit(type: string, payload: unknown): Promise<{ eventId: string; sequence: number }>;
+  emit(
+    type: string,
+    payload: unknown,
+    opts?: { causationId?: string },
+  ): Promise<{ eventId: string; sequence: number }>;
   /**
    * Spec-defined AI provider entry point per
    * `spec/v1/host-capabilities.md §host.aiProviders`. Present when
@@ -226,15 +256,94 @@ export interface NodeContext {
   /** ctx.userId — opaque principal id for vendor surfaces that key context on
    *  a user (e.g. launch-studio). The sample host sets it to the run tenant. */
   userId?: string;
+  /** ctx.actingUserId — the DURABLE human the run was created for (ADR 0024 §4 /
+   *  D2). Distinct from `userId` (which the sample maps to the tenant for
+   *  launch-studio keying): this is the run owner's stable user id, the principal
+   *  the Connections broker resolves per-user credentials + `connections:use`
+   *  against. Absent for system runs (schedule / inbound webhook — no human),
+   *  which is the correct fail-closed signal. Stamped on `run.metadata.actingUserId`
+   *  at run creation and re-stamped to the FORKING caller on `:fork`. */
+  actingUserId?: string;
+  /** ctx.http — host-mediated egress (RFC 0076 §B). When present, the
+   *  `core.openwop.http` pack routes ALL outbound calls through `safeFetch`
+   *  (delegating SSRF defense to the host) instead of its in-pack fallback. The
+   *  sample provides this ONLY for runs that opted into Connections
+   *  (`configurable.connections` non-empty), where `safeFetch` also injects the
+   *  acting user's credential for an allow-listed, host-matched provider
+   *  (ADR 0024 §4 / Option C). */
+  http?: { safeFetch: HostSafeFetch };
+  /** ctx.slack — Slack egress for `core.openwop.integration.slack-message`
+   *  (ADR 0024 §4 Phase 3). The host resolves the run's acting human's Slack
+   *  Connection and calls `chat.postMessage` with the token. No connection ⇒ a
+   *  graceful `{ ok:false }`, never a throw. Type kept inline to avoid an import
+   *  cycle (the adapter pulls in the broker + undici). */
+  slack?: {
+    postMessage(args: {
+      channel: string;
+      text: string;
+      blocks?: unknown;
+      threadTs?: string;
+      broadcast?: boolean;
+      workspace?: string;
+      asUser?: boolean;
+      idempotencyKey?: string;
+    }): Promise<{ ok: boolean; ts?: string; channel?: string; error?: string }>;
+  };
+  /** ctx.email — email egress for `core.openwop.integration.email-send`
+   *  (ADR 0024 §4 Phase 3). Resolves the acting human's email-provider Connection
+   *  (api_key) for the node's `provider` and sends via its REST API. No connection
+   *  ⇒ graceful `{ sent:false }`, never a throw. Inline to avoid an import cycle. */
+  email?: {
+    send(args: {
+      from: string;
+      to: string | string[];
+      cc?: string | string[];
+      bcc?: string | string[];
+      subject: string;
+      text?: string;
+      html?: string;
+      replyTo?: string;
+      provider?: string;
+      fallbackOnFailure?: boolean;
+      idempotencyKey?: string;
+    }): Promise<{ sent: boolean; messageId?: string; provider: string; error?: string }>;
+  };
+  /** ctx.messaging — host messaging surface. `sendSms` (ADR 0024 §4 Phase 3)
+   *  resolves the acting human's SMS-provider Connection (v1: Twilio, basic auth)
+   *  for `core.openwop.integration.sms-send`. (`dispatchEgressEnvelope` for the
+   *  chat node stays unimplemented — its own surface.) No connection ⇒ graceful
+   *  `{ sent:false }`, never a throw. */
+  messaging?: {
+    sendSms(args: { provider?: string; to: string; from: string; text: string }): Promise<{ sent: boolean; sid?: string; provider: string; error?: string }>;
+  };
+  /** ctx.notification — push egress for `core.openwop.integration.notification-push`
+   *  (ADR 0024 §4 Phase 3). Resolves the acting human's push-provider Connection
+   *  (v1: Expo) for the node's `provider`. No connection ⇒ graceful `{ sent:false }`. */
+  notification?: {
+    push(args: { provider?: string; deviceToken: string; title: string; body: string; data?: Record<string, unknown> }): Promise<{ sent: boolean; id?: string; provider: string; error?: string }>;
+  };
   /** ctx.variables — run-scoped mutable variable bag (get/set), backed by the
    *  variables runtime. Used by launch-studio to thread step context. */
   variables?: { get(name: string): unknown; set(name: string, value: unknown): void };
-  /** ctx.mcp — RFC 0020 host-side MCP server. The `expose` method is a
-   *  no-op for hosts that build their MCP registry declaratively (by
-   *  scanning workflow definitions). Pack delegates from
-   *  core.openwop.mcp.expose-* call this and expect a `{handle}` result. */
+  /** ctx.mcp — host-side MCP. `expose` (RFC 0020) registers the host AS a server;
+   *  `invokeTool`/`readResource`/`listTools`/`serverStatus` (ADR 0030) are the
+   *  OUTBOUND client — `serverId` is a `reach:'mcp'` Connections provider, called
+   *  with the acting human's per-user token (ADR 0024), governance-gated (ADR
+   *  0028); tool/resource output is `untrustedContent` (ADR 0027). */
   mcp?: {
     expose: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    invokeTool?(serverId: string, toolName: string, args: unknown, opts?: { timeoutMs?: number }): Promise<{ result: unknown; isError: boolean; untrustedContent: true }>;
+    readResource?(serverId: string, uri: string, opts?: { timeoutMs?: number }): Promise<{ content: unknown; mimeType: string; untrustedContent: true }>;
+    listTools?(serverId: string): Promise<{ tools: unknown[] }>;
+    serverStatus?(serverId: string, opts?: { timeoutMs?: number }): Promise<{ available: boolean; name?: string; version?: string }>;
+    /** ADR 0030 Phase 2b — bounded in-band change detection: poll the resource for
+     *  a window, firing `onEvent` (untrusted content) on each detected change. No
+     *  persistent connection / daemon; the node blocks for the window. */
+    subscribeResource?(
+      spec: { serverId: string; uri: string },
+      onEvent: (event: { uri: string; content: unknown; mimeType: string; untrustedContent: true }) => void | Promise<void>,
+      opts?: { durationMs?: number; pollIntervalMs?: number; maxEvents?: number },
+    ): Promise<void>;
   };
   /** ctx.respondToWebhook — the `core.openwop.triggers` webhook-respond node's
    *  reply channel. The host durably records the intended HTTP reply; absent
@@ -368,8 +477,10 @@ export interface WorkflowDefinition {
      *  authoring-time pin of which agent executes this node. Surfaced on
      *  `NodeContext.nodeAgent` so node modules (e.g. the conformance mock
      *  agent) can resolve the pinned `agentId`; the engine MAY override it
-     *  at runtime via dispatch/orchestrator per the schema description. */
-    agent?: { agentId: string };
+     *  at runtime via dispatch/orchestrator per the schema description.
+     *  Also projected onto `RunSnapshot.agent` (the active-worker rotation
+     *  per run-snapshot.schema.json) via `host/runAgentRuntime.ts`. */
+    agent?: AgentRef;
   }>;
   /** DAG edges. When absent or empty, the executor builds an implicit linear
    *  chain from `nodes` (back-compat path for callers that pre-date the
@@ -390,4 +501,11 @@ export interface WorkflowDefinition {
     required?: boolean;
     defaultValue?: unknown;
   }>;
+  /** Authoring-time workflow metadata (tags, fixture annotations, …).
+   *  Pass-through for the executor except for the conformance-relevant
+   *  `requiresAgentId` key: when present, the run's dispatch surface
+   *  is bound to that manifest agent and the executor enforces the
+   *  agent's RFC 0003 §D handoff contract on run inputs before any
+   *  node executes (see `executor/handoffGate.ts`). */
+  metadata?: Record<string, unknown>;
 }

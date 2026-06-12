@@ -41,6 +41,7 @@ import type {
   MessagingTurnRecord,
   RelayDeviceRecord,
 } from '../messaging/types.js';
+import type { ReassignTenantResult } from './tenantMigration.js';
 
 /** One row of the append-only agent-attributed-run index (RFC 0086). */
 export interface AgentRunAttributionRow {
@@ -114,12 +115,19 @@ export interface Storage {
   getInterruptByNode(runId: string, nodeId: string): Promise<InterruptRecord | null>;
   resolveInterrupt(interruptId: string, resolvedValue: unknown, resolvedAt: string): Promise<void>;
   listOpenInterrupts(runId: string): Promise<readonly InterruptRecord[]>;
+  /** All UNRESOLVED interrupts across runs (oldest first, up to `limit`).
+   *  Backs the RFC 0093 §D approval-gate timeout sweep
+   *  (`executor/approvalGateTimeout.ts`). */
+  listOpenInterruptsAll(limit: number): Promise<readonly InterruptRecord[]>;
 
   // ── webhooks ──
   insertWebhook(record: WebhookSubscriptionRecord): Promise<void>;
   getWebhook(subscriptionId: string): Promise<WebhookSubscriptionRecord | null>;
   deleteWebhook(subscriptionId: string): Promise<void>;
-  listWebhooks(filter: { eventType?: string; tags?: readonly string[] }): Promise<readonly WebhookSubscriptionRecord[]>;
+  /** `tenantId` filter is exact-match on the owning tenant (RFC 0093 §A.3) —
+   *  the delivery fanout and the tenant-scoped list/seam surfaces pass it so
+   *  cross-tenant subscriptions never match. */
+  listWebhooks(filter: { eventType?: string; tags?: readonly string[]; tenantId?: string }): Promise<readonly WebhookSubscriptionRecord[]>;
 
   // ── webhook deliveries (durable retry queue) ──
   /** Enqueue a delivery for the background worker (`webhookWorker.ts`) to attempt. */
@@ -187,6 +195,20 @@ export interface Storage {
     payload?: unknown;
   }): Promise<void>;
 
+  /** Read-side of the audit log (ADR 0028 — the governance audit VIEW
+   *  composes over this; no second audit store exists). Newest first. */
+  listAudit(filter?: { actionPrefix?: string; sinceIso?: string; limit?: number }): Promise<
+    Array<{
+      auditId: string;
+      timestamp: string;
+      principalId?: string;
+      action: string;
+      resource?: string;
+      outcome?: string;
+      payload?: unknown;
+    }>
+  >;
+
   // ── invocation log (engine-side idempotency) ──
   /**
    * Returns the cached result for (runId, nodeId, attempt, providerKey)
@@ -253,9 +275,20 @@ export interface Storage {
    *
    * Idempotent: re-calling with no remaining rows returns zeros. Does
    * NOT touch BYOK secrets (handled out-of-band by the resolver —
-   * anon secrets are ephemeral-only).
+   * anon secrets are ephemeral-only). Events/interrupts move implicitly
+   * via their `run_id` foreign key (their rows carry no `tenant_id`).
+   *
+   * Covers every tenant-scoped store the source can hold in ONE transaction
+   * (ADR 0003 Phase 4c): every SQL table with a `tenant_id` column (discovered
+   * by schema introspection — complete by construction) PLUS host-extension
+   * content rows inside `host_ext_kv` (a read-modify-write re-keying any JSON
+   * `tenantId`/`orgId === from`). The access-control scaffolding (the personal-
+   * workspace org + deterministic owner member, whose ROW KEYS encode the
+   * tenant) is intentionally excluded — the destination re-seeds it. See
+   * `tenantMigration.ts`. The four named counts are retained for callers + the
+   * audit log; `tables` is the full per-table breakdown, `hostExt` the KV rows.
    */
-  reassignTenant(fromTenant: string, toTenant: string): Promise<{ runs: number; workflows: number }>;
+  reassignTenant(fromTenant: string, toTenant: string): Promise<ReassignTenantResult>;
 
   // ── managed-provider per-day usage ──
   /**

@@ -116,22 +116,86 @@ bearer key); `OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true` opens it for local dev only
 
 | Feature | Toggle id | Default | Bucket unit | Variants | Packs | Surface |
 |---|---|---|---|---|---|---|
-| **CRM** — contacts + contact triage | `crm` | OFF | `tenant` | `basic` / `enriched` (50/50), bound to the triage nodes | `feature.crm.nodes` | `/crm` (workspace) + `/v1/host/sample/crm/*` |
-| **CSM** — customer-success accounts + health | `csm` | OFF | `tenant` | — (plain on/off) | — | `/csm` (workspace) + `/v1/host/sample/csm/*` |
-| **Users & Authentication** — durable accounts, lifecycle, email/password + enterprise SSO (SAML/SCIM) | `users` | OFF | `tenant` | — (plain on/off) | — (SSO packs land with later ADR 0002 phases) | `/users` (workspace) + `/v1/host/sample/users/*` · identity foundation (ADR 0002/0003) |
+| **CRM** (full port) — contacts, companies, deals, tasks, activities + pipelines/stages; contact-triage nodes | `crm` | OFF | `tenant` | `basic` / `enriched` (50/50), bound to the triage nodes | `feature.crm.nodes` | `/crm` (workspace) + `/v1/host/sample/crm/contacts/*` + org-scoped `/crm/orgs/:orgId/*` (ADR 0008) |
+| **CSM** — customer-success accounts + health score | `csm` | OFF | `tenant` | — (plain on/off) | — | `/csm` (workspace) + `/v1/host/sample/csm/accounts/*` (ADR 0016) |
+| **Users & Authentication** — durable accounts, lifecycle, email/password, MFA (TOTP), enterprise SSO (SAML 2.0 ACS + SCIM provisioning) | — (graduated off its toggle 2026-06-11, § Correction in `features/users/feature.ts` — permanent admin surface, always on) | ALWAYS ON | — | — | — | `/users` (admin · Access & data) + `/v1/host/sample/users/*` (incl. `/users/mfa/*`) + SSO seam `/v1/host/sample/auth/{saml/validate,scim/provision}` · identity foundation (ADR 0002/0003) |
 | **Org invitations** — email-token invites to join an org as a member (orgs/members/roles owned by the `accessControl` surface, RFC 0049) | `orgs` | OFF | `tenant` | — (plain on/off) | — | `/v1/host/sample/orgs/:id/invites` + `/orgs/invitations/accept` (ADR 0004, reconciled) |
-| **Widgets** — reference host-extension vertical slice | `widgets` | OFF | `user` | — | — | `/v1/host/sample/widgets` (env-gated; example only) |
-| **Notifications** — in-app inbox + bell, SSE live feed, Web-Push (VAPID), durable per-(tenant,user) preferences | `notifications` | **ON** | `tenant` | — (plain on/off) | — | `/inbox` + header bell (workspace) + `/v1/host/sample/notifications/*` · migrated into the feature architecture (ADR 0010) |
+| **User Profiles** — self-service per-user profile (avatar/portfolio via Media tokens, skills + peer endorsements, weighted completeness) + agent **pinning** (ADR 0023) + the per-user board/activity surfaces | — (graduated off its toggle 2026-06-12, § Correction in `features/profiles/feature.ts` — permanent substrate, always on: pinning + per-user surfaces ride on it) | ALWAYS ON | — | — | — | `/profile` + `/team` (workspace) + `/v1/host/sample/profiles/*` (ADR 0005) |
 | **Knowledge Base / RAG** — org-scoped document collections, ingest (pasted text or Media token) → chunk + embed, semantic search with citations | `kb` | OFF | `tenant` | — (plain on/off) | — (composes `core.openwop.rag` + host `db.vector`) | `/kb` (workspace) + `/v1/host/sample/kb/orgs/:orgId/*` · reuses the host vector store + deterministic embedder (ADR 0011) |
-| **Publishing & SEO** — publish CMS pages to a public site with per-page SEO (meta + Open Graph), sitemap.xml, robots.txt, RSS | `publishing` | OFF | `tenant` | — (plain on/off) | — (composes CMS + Media) | authed `/v1/host/sample/publishing/*` + **public** `/v1/host/sample/public/:orgId/*` (unauthed, org-addressed, toggle-gated) · `/publishing` (workspace) (ADR 0012) |
-| **Sharing** — unguessable public share links to a specific resource (CMS page incl. drafts, KB collection) + social-card metadata | `sharing` | OFF | `tenant` | — (plain on/off) | — (composes CMS + KB via a resolver registry) | authed `/v1/host/sample/sharing/orgs/:orgId/links` + **public** `/v1/host/sample/shared/:token` (unauthed, token-credential, toggle-gated) · `/sharing` (workspace) (ADR 0013) |
+| **Sharing** — unguessable public share links to a specific resource (CMS page incl. drafts, KB collection) + social-card metadata | `sharing` | OFF | `tenant` | — (plain on/off) | — (composes CMS + KB via a resolver registry) | authed `/v1/host/sample/sharing/orgs/:orgId/links` + **public** `/v1/host/sample/shared/:token` (unauthed, token-credential, toggle-gated) · admin **Content** group `/sharing` (ADR 0013) |
+| **Forms** — org-scoped form builder; public submit → CRM contact (through `crmService`); `ctx.features.forms` + node/agent packs | `forms` | OFF | `tenant` | — (plain on/off) | `feature.forms.*` | authed `/v1/host/sample/forms/orgs/:orgId/forms` + **public** `/v1/host/sample/public-forms/:formId` (unauthed, published-only, toggle-gated) · `/forms` (workspace) (ADR 0017) |
+| **Consent & Compliance** — region-aware consent policy + the centralized `isAllowed` gate (Analytics/Email call it) + data-subject GDPR erasure (cascades to feature data) | `consent` | OFF | `tenant` | — (plain on/off) | `feature.consent.*` | authed `/v1/host/sample/consent/orgs/:orgId/*` + **public** `/v1/host/sample/public-consent/:orgId` (unauthed, toggle-gated) · `/consent` (workspace) (ADR 0020) |
+| **Analytics** — public-surface measurement (page/event/conversion) via a consent-gated beacon + authed reporting (counts, sessions, top paths, UTM); `ctx.features.analytics` + node/agent packs | `analytics` | OFF | `tenant` | — (plain on/off) | `feature.analytics.*` | authed `/v1/host/sample/analytics/orgs/:orgId/{summary,events}` + **public beacon** `/v1/host/sample/public-analytics/:orgId/collect` (unauthed, toggle+consent-gated) · `/analytics` (workspace) (ADR 0018) |
+| **Email Marketing** — templates + campaigns over CRM contacts (audience resolved live), marketing-consent-gated sends through a stub provider, per-campaign stats + send log; `ctx.features.email` + node/agent packs | `email` | OFF | `tenant` | — (plain on/off) | `feature.email.*` | authed `/v1/host/sample/email/orgs/:orgId/{templates,campaigns}` (incl. `/campaigns/:id/send`) · `/email` (workspace) (ADR 0019) |
+| **Executive Assistant / Chief of Staff** — a REAL roster agent ("Iris", seeded; ADR 0023 § Correction): structured memory graph + perception/action loops as its recurring tasks + approvals on the single loop. Its UI IS the agent-workspace page (the standalone /assistant page is removed) | — (graduated off its toggle 2026-06-11 — always-on substrate, like Connections/Users) | ALWAYS ON | — | — | `feature.assistant.{nodes,agents}` | `/agents/<chief-of-staff>` + `/v1/host/sample/assistant/*` (graph/loops/briefing data routes; loops deploy-gated on Google OAuth) |
+| **Collaboration / Comments** — threaded comments on CMS pages + KB collections (resolver registry — a new commentable type is one entry); add/reply notify over the existing tenant inbox (namespaced string types, no core-union edit); `ctx.features.comments` + node/agent packs (content-reviewer) | `comments` | OFF | `tenant` | — (plain on/off) | `feature.comments.*` | `/comments` (workspace) + authed `/v1/host/sample/comments/orgs/:orgId/comments` (ADR 0021 — Phases 1–3 + extension surface; presence/cursors deferred) |
 
 > Defaults are OFF — a superadmin turns a feature on (or to BETA, or on with a
-> traffic split) per tenant from the admin screen. The one exception is
-> **`notifications`, default ON**: it is a pre-existing surface migrated into the
-> feature architecture (ADR 0010 §6 / ADR 0001 §6 — "seed pre-existing surfaces
-> as on"), so no deployment loses the bell on upgrade. A superadmin can still
-> turn it OFF per tenant, which 404s the whole surface and hides the bell + nav.
+> traffic split) per tenant from the admin screen.
+>
+> **Surfaces intentionally NOT in this toggle catalog** (always-on; no
+> `toggleDefault`):
+> - **Notifications** (removed 2026-06-11) — **core platform infrastructure**:
+>   run-failure/interrupt notifications emit unconditionally, so a toggle only hid
+>   the UI while side effects flowed; the honest control is the per-user
+>   **preferences** (mute / quiet-hours / Web-Push opt-in). See
+>   `docs/adr/0010-notifications.md` § Correction.
+> - **CMS + Page Builder** (`/cms`), **Media Library** (`/media`), **Publishing &
+>   SEO** (authed `/v1/host/sample/publishing/*` + **public**
+>   `/v1/host/sample/public/:orgId/*`) — made always-on 2026-06-11 (**ADR 0027**):
+>   core content tooling that powers the **public CMS-driven front page** at `/`.
+>   Their routes keep org-scoped RBAC (`requireOrgScope`); only the toggle gate is
+>   gone. Their nav moved from the main Sidebar to the admin-tier **Content** group.
+>   For Publishing, the per-tenant "site online" toggle is gone: the CMS editorial
+>   **`published` status is now the sole public gate** (Sharing covers
+>   private/draft access). A previously-saved per-tenant override for these ids is
+>   retired at boot (`RETIRED_TOGGLE_IDS`).
+> - **Connections** (removed 2026-06-11) graduated off its toggle to a **permanent
+>   admin surface** — the generic per-user/per-org credential broker (Google/Slack/
+>   ServiceNow/Zoom: provider-manifest registry + api_key/bearer + OAuth2 consent +
+>   most-specific resolver, secrets via the BYOK KMS envelope, injected into the
+>   existing MCP/HTTP/integration nodes) now lives in **Admin → Access & data** and
+>   serves unconditionally. See `docs/adr/0024-connections-credential-broker.md`
+>   § Correction.
+> - **Widgets** is the env-gated reference *example*
+>   (`OPENWOP_EXAMPLE_WIDGETS_ENABLED`), not a product feature.
+>
+> All remain `BackendFeature`s for code organization; none registers a
+> `toggleDefault`.
+>
+> **The public front page** (ADR 0027): **ON by default**, and **editable by the
+> super admin** regardless of any org. The homepage is the host-level **system
+> site** page — a normal CMS page in a RESERVED org `host-site` under a reserved
+> tenant `host:site` (a `host:` prefix no real principal can hold), seeded with a
+> default marketing page and served at `/` to anonymous visitors via the public
+> Publishing API. A super admin edits it at **Admin → Content → "Front page"**
+> (`/front-page`) — enable/disable + the shared section editor (`SectionsEditor`) —
+> through the `requireSuperadmin`-gated `GET/PUT /v1/host/sample/site-page`, which
+> drives `cmsService` on the reserved org by HOST authority (it bypasses
+> `requireOrgScope` for that one org only; every real tenant's isolation is
+> untouched). The anonymous SPA reads `GET /v1/host/sample/public-site-config`
+> (unauthed; `{ enabled, orgId:'host-site', slug:'home' }`) and renders the
+> published page via the shared `SectionRenderer`. Signed-in visitors still get the
+> app (Chat) at `/`. A fork that wants `/` to be the app by default sets
+> `OPENWOP_FRONTPAGE_DEFAULT_ENABLED=false`. Superadmin gate fails closed
+> (`OPENWOP_SUPERADMIN_TENANTS`). Mirrors MyndHyve's global admin-owned homepage.
+
+**Two architecture notes (recent work):**
+
+- **`tenant` = workspace (ADR 0015).** A `tenant`-bucketed toggle now scopes to the
+  caller's **active workspace** — a personal workspace for a solo/anon user, or a
+  shared B2B workspace many members join (with `owner`/`admin`/`editor`/`viewer`
+  roles). Bucketing + per-scope overrides are unchanged; only the noun moved
+  (tenant → workspace). See `docs/adr/0015-workspace-as-tenant-b2b.md`.
+- **Some product features also expose a workflow surface (ADR 0014).** CRM and KB
+  (among others — assistant/comments/forms/consent/csm/email/analytics) are
+  `FeatureModule`s: beyond their REST + UI faces they register a typed
+  `ctx.<feature>` workflow surface (sharing the *same* toggle + RBAC guards),
+  advertised at `/.well-known/openwop`, so workflow nodes can read/write feature
+  data. The toggle gates all faces at once. (Corrected 2026-06-11 per ADR 0027:
+  **CMS and Media declare no `ctx` surface** — they are plain `BackendFeature`s,
+  so making them always-on does not touch any capability advertisement.) See
+  `docs/adr/0014-feature-workflow-surfaces.md`.
 
 ### Env-gated operational flags (not feature-toggles)
 
@@ -158,6 +222,21 @@ toggle system:
 A new feature is wired by **appending** to the registries — no edits to core
 route/nav code (see ADR 0001 §2.2, §4 for the worked CRM example).
 
+> **Every feature MUST have a related ADR.** Before (or with) the code, author an
+> Architecture Decision Record under [`docs/adr/`](docs/adr/) named
+> `NNNN-<kebab-slug>.md` (zero-padded, sequential — the set runs `0001`–`0016`
+> today), opening with a `Status:` line (`Proposed` → `Accepted` → `implemented`).
+> The ADR is the recorded decision behind the toggle: the **Current features** table
+> above cites each feature's ADR, and [`ROADMAP.md`](ROADMAP.md) tracks the
+> per-feature ADR plan. A feature-package with no ADR is the exact drift this repo
+> guards against (it's why CSM later needed the retroactive ADR 0016). See
+> `CLAUDE.md` § "Tracking architectural changes" for what goes in one — and note a
+> change that touches the **wire** additionally needs an RFC in `openwop`, not just
+> an ADR here.
+
+0. **ADR** — add `docs/adr/NNNN-<slug>.md` (Status `Proposed`/`Accepted`); mark it
+   `implemented` once the phases below ship. Author auth/RBAC/wire-touching ADRs
+   with the `/architect` skill.
 1. **Backend** — create `backend/typescript/src/features/<id>/`:
    - `<id>Service.ts` — domain logic (durable store, tenant-scoped).
    - `routes.ts` — routes under `/v1/host/sample/<id>/*`, each gated by
@@ -180,7 +259,8 @@ route/nav code (see ADR 0001 §2.2, §4 for the worked CRM example).
      derive from this — render code owns no menu data.
    - Append it to `FRONTEND_FEATURES` in `src/features/registry.ts`.
 4. **Verify** — `npm run build` (frontend, runs the token/CSS gates) +
-   `npm test` (backend). Add the feature to the **Current features** table above.
+   `npm test` (backend). Add the feature to the **Current features** table above
+   (cite its ADR), and mark the ADR `implemented` (phase ledger).
 5. **Replay-safety** — if a variant affects a run, stamp it into
    `run.metadata.featureVariant` at creation (see CRM's triage handler).
 
@@ -205,8 +285,94 @@ once shipped. Keep the toggle id stable across the move.
 
 | Feature | Proposed toggle id | Notes |
 |---|---|---|
-| _(none yet)_ | | Add a row when a feature is proposed. |
+| **Marketplace** — browse + install signed feature packs (node/agent packs) + reviews/ratings | `marketplace` | OFF; bucketUnit `tenant`; ADR 0022. Composes the signed pack registry (Ed25519 + SRI); reviews are the only new store. |
+
+> Each batch feature also ships a **node pack + agent pack** and a `ctx.<feature>`
+> **workflow surface** (ADR 0014) behind the same toggle — see each ADR's
+> "Core-app extension surface" section. ADRs 0017–0022 are authored (Status:
+> Proposed); they move to **Current features** as their phases land.
 
 <!-- Template row:
 | **<Name>** — <one-line> | `<id>` | OFF by default; bucketUnit `<user|tenant>`; variants `<…>`; packs `<feature.<id>.*|—>`. |
 -->
+
+### How this roadmap is populated — porting MyndHyve
+
+This app's feature roadmap is being **populated by porting the MyndHyve product
+catalog** (`/Users/david/dev/myndhyve/FEATURES.md`) into openwop-app, sequenced in
+[`ROADMAP.md`](ROADMAP.md). The identity → authorization → content → CRM stack
+(ADRs 0002–0016) is the first wave. **Every ported feature uses the MyndHyve
+implementation as a _baseline reference_ — never a copy.** MyndHyve is a Firebase
+monolith (Firestore stores, Cloud Functions, canvas-type machinery); here each
+feature is rebuilt as a self-contained, toggle-gated **host-extension
+feature-package** per [ADR 0001](docs/adr/0001-feature-first-package-architecture.md):
+backend `src/features/<id>/` (routes under `/v1/host/sample/<id>/*`, gated by
+`resolveOne('<id>', subject).enabled`) + frontend `src/features/<id>/`, appended to
+`BACKEND_FEATURES` / `FRONTEND_FEATURES`, a `tenant`-bucketed toggle that scopes to
+the active workspace (ADR 0015), and — where workflow nodes need feature data — a
+typed `ctx.<feature>` workflow surface behind the *same* toggle + RBAC guards
+(ADR 0014). **It is a port, not a clone:** where MyndHyve's implementation has a
+known wart (it lists several under § "Surprising / risky" dependencies), we take the
+*capability* as the baseline and correct the *shape* to our architecture.
+
+#### Next high-value batch — the Growth & Engagement loop (ADRs 0017–0020)
+
+With the public surface now live (Publishing 0012, Sharing 0013) on top of CRM (0008)
+and CMS (0009), the highest-value next batch closes the **capture → measure → engage →
+govern** loop on that surface. All four already exist as discrete `src/features/`
+modules in MyndHyve (clean baselines), all compose surfaces we just shipped, and none
+require MyndHyve's canvas-type / workflow-engine machinery (deliberately out of scope).
+
+- **Forms** (`forms`, ADR 0017) — _MyndHyve §"Forms"._
+  **Baseline:** the live submission API `functions/src/formApi.ts` (rate-limited,
+  honeypot, flat submissions) + the (orphaned in MyndHyve) builder under
+  `src/canvas-types/campaign-studio/forms` (`FormStepManager` / `EnhancedFormBuilder`,
+  `ConditionalLogicEngine`, `ValidationEngine`) + `src/core/entities/components/forms`.
+  **Our architecture:** a `forms` feature-package owning form definitions + submissions
+  (tenant/workspace-scoped), a **public** submit endpoint (same unauthed,
+  toggle-gated pattern as Publishing/Sharing), and form→contact creation that routes
+  **through the `crmService` API** — *not* the direct contacts-collection write
+  MyndHyve flags as a risky coupling. Multi-step + conditional logic ported as the
+  builder matures; v1 ships single-step + validation.
+
+- **Analytics** (`analytics`, ADR 0018) — _MyndHyve §"Analytics"._
+  **Baseline:** `src/features/analytics/{AnalyticsService,ABTestingService,WebVitalsService}.ts`
+  + `src/features/tracking/clickIdCapture.ts` (fbclid/gclid/ttclid/li_fat_id) +
+  `functions/src/conversions-api/` (server-side Meta / TikTok / Google Offline).
+  **Our architecture:** an `analytics` feature ingesting page/event hits from the
+  **public published-page surface** (composes Publishing 0012) with UTM + click-id
+  capture and conversion events. **Reuse, don't rebuild, A/B:** experiment splitting is
+  already the host's sticky-bucketing variant engine — Analytics only *reports* on it
+  rather than re-porting `ABTestingService`. Conversions API runs behind the host's
+  egress/SSRF policy with BYOK provider tokens.
+
+- **Email Marketing** (`email`, ADR 0019) — _MyndHyve §"Email Marketing"._
+  **Baseline:** `src/features/email-marketing/` — `MultiProviderCoordinator`, the 7
+  client `adapters/`, `envelope/` + `services/` + `stores/`.
+  **Our architecture:** an `email` feature owning campaigns + templates targeting CRM
+  contacts (composes CRM 0008), with a **provider-adapter seam** behind an honest
+  capability gate — ship a console/stub adapter first (mirroring Notifications' existing
+  email-webhook stub) and advertise a provider only when its credentials are configured.
+  No Cloud Functions; the CRM↔email event bridge is deferred (MyndHyve marks it Partial).
+
+- **Consent & Compliance** (`consent`, ADR 0020) — _MyndHyve §"Consent & Compliance"._
+  **Baseline:** `src/features/consent/{ConsentManager,ConsentEnforcer}.ts` (region-aware,
+  3 categories: necessary / analytics / marketing).
+  **Our architecture:** a `consent` feature whose enforcement **gates** the Analytics
+  tracking + marketing-email surfaces above — the legal companion that becomes necessary
+  the moment Forms and Analytics touch public visitors. Composes the other three rather
+  than standing alone; webhook-signature / unsubscribe primitives already exist host-side.
+
+> **Sequencing:** 0017 (Forms) ∥ 0018 (Analytics) — both only need shipped surfaces
+> (CRM / Publishing). 0019 (Email) needs CRM. 0020 (Consent) is authored alongside but
+> lands last, since it gates 0018 + 0019. Author each ADR with `/architect` (every one
+> touches the public surface, RBAC, or egress) **before** the implementation, then add
+> the row to **Current features** and mark the ADR `implemented` per the lifecycle above.
+
+> **Beyond this batch** (noted, not sequenced): **Collaboration & Presence** (comments
+> on CMS pages / KB collections — higher-infra, was a deliberate CMS-v1 cut),
+> **Connectors & Integrations**, **Messaging Gateway**, **Marketplace**, and the
+> **Production Intelligence** completion (Vendor Directory + ProductionPlanService — ADR
+> 0005 ported only Team Profiles). **Billing / E-Commerce** stay explicitly cut
+> ([ROADMAP.md](ROADMAP.md) § "Out of scope"). Update ROADMAP.md's Overview table when
+> this batch is accepted so the two docs stay in lockstep.

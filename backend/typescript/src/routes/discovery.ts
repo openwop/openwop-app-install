@@ -17,6 +17,7 @@ import { universalEnvelopeKinds } from '../host/envelopeAcceptor.js';
 import { evalSuiteEnabled } from '../host/workforceEval.js';
 import { MAX_INLINE_MEDIA_BYTES } from './mediaAssets.js';
 import { getFsSandboxRoot } from '../host/inMemorySurfaces.js';
+import { samlConfigured } from '../host/auth/samlSso.js';
 import { listLoadedConformanceFixtures } from '../host/index.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { getEnvelopeReasoningConfig } from '../host/envelopeReasoningConfig.js';
@@ -37,7 +38,9 @@ import { registeredFeatureSurfaceIds } from '../host/featureSurfaces.js';
  */
 function advertisedAuthProfiles(): string[] {
   const profiles: string[] = [];
-  if (process.env.OPENWOP_TEST_SAML_IDP_URL) profiles.push('openwop-auth-saml');
+  // `openwop-auth-saml` is honored by either the conformance test seam OR a real
+  // SAML SP wired to a production IdP (Okta/Azure…) via the OPENWOP_SAML_* env.
+  if (process.env.OPENWOP_TEST_SAML_IDP_URL || samlConfigured()) profiles.push('openwop-auth-saml');
   if (process.env.OPENWOP_SCIM_BEARER || process.env.OPENWOP_TEST_SCIM_URL) profiles.push('openwop-auth-scim');
   return profiles;
 }
@@ -282,6 +285,13 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       // executeRun path does not count orchestrator turns, so claiming this
       // unconditionally would over-advertise an unenforced bound.
       ...(phase5 ? { maxLoopIterations: 100 } : {}),
+      // RFC 0094 §H — maximum REST request body size the host accepts.
+      // MUST equal the express.json default limit in src/index.ts
+      // (`express.json({ limit: '1mb' })` ⇒ 1 MiB; advertise/enforce must
+      // agree). The /v1/packs (50mb) and sample media (12mb) mounts are
+      // larger vendor-scoped carve-outs; the canonical surface enforces this
+      // value.
+      maxRequestBodyBytes: 1_048_576,
     },
     // RFC 0064 — per-tool authorization + rate-limit + content-free audit.
     // This host demonstrates the contract through the
@@ -391,6 +401,15 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
         scopes: ['tenant', 'user', 'run'],
         resolution: 'host-managed',
       },
+      // RFC 0095 §C — connection-pack support. `packsSupported` advertises that
+      // the host installs `kind:"connection"` packs and resolves an RFC 0045/0047
+      // `provider` string against installed `provider.id` values (the boot-time
+      // connectionPackLoader). The built-in ADR 0024 provider registry is the
+      // fallback catalog. The OAuth client secret stays host-side (ADR 0024 §7).
+      connections: {
+        supported: true,
+        packsSupported: true,
+      },
       // Spec-shaped per `spec/v1/capabilities.md:126-163` + `host-capabilities.md §host.aiProviders`.
       // Sample host wires three providers via raw fetch (see
       // `providers/dispatch.ts`); each requires BYOK. Tool-calling is
@@ -455,10 +474,17 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       // supported: the engine re-executes the workflow and the host compares
       // the observable run/node sequence against the source, emitting
       // `replay.diverged` on a mismatch (replay.md §"Failure surfaces").
-      // `fork` (branch from an arbitrary `fromSeq` > 0) is NOT supported —
-      // the sample doesn't reconstruct the executor's resume position, so a
-      // partial-checkpoint branch would double-emit the prefix. Honest split.
-      replay: { supported: true, fork: false },
+      // `modes` is REQUIRED alongside `supported: true` (profiles.md
+      // §`openwop-replay-fork`; pinned by replayDeterminism.test.ts) and
+      // lists only `replay` — `branch` (re-execution from an arbitrary
+      // `fromSeq` checkpoint with an overlay) is NOT advertised because the
+      // sample doesn't reconstruct the executor's resume position, so a
+      // partial-checkpoint branch would double-emit the prefix. The same
+      // limit applies to mid-sequence replay: `POST :fork {mode:'replay'}`
+      // refuses `fromSeq > 0` with 501 (routes/runs.ts). Honest split;
+      // `fork: false` is the legacy spelling of that limitation, kept for
+      // existing consumers.
+      replay: { supported: true, modes: ['replay'], fork: false },
       // RFC 0056 — run feedback / annotations. The sample persists annotations
       // in a per-run side-store and serves POST/GET /v1/runs/{runId}/annotations
       // with secret-pattern + SR-1 redaction of correction/note.
@@ -669,7 +695,12 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
             },
           }
         : {}),
-      webhooks: { supported: true, signed: true, durable: false },
+      // capabilities.schema.json §webhooks: full register/deliver surface —
+      // HMAC-signed deliveries (scheme `v1` per webhooks.md §"Signature
+      // algorithm versioning"), durable retry queue NOT advertised as the
+      // RFC 0083 trigger-bridge `durable` mode (the host's internal retry
+      // queue is best-effort-plus, not the four-state subscription model).
+      webhooks: { supported: true, signed: true, signatureAlgorithms: ['v1'], durable: false },
       observability: {
         otel: { namespace: 'openwop' },
         // RFC 0034 — OTel collector test seam advertisement. The two test

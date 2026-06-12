@@ -44,6 +44,12 @@ export async function getMe(): Promise<User> {
   return asJson<User>(res, 'getMe');
 }
 
+/** Self-serve: set the caller's own display name (PATCH /users/me). */
+export async function updateMyDisplayName(displayName: string): Promise<User> {
+  const res = await fetch(`${base}/me`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ displayName }) }));
+  return asJson<User>(res, 'updateMyDisplayName');
+}
+
 export async function listUsers(): Promise<User[]> {
   const res = await fetch(`${base}/users`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ users: User[] }>(res, 'listUsers')).users;
@@ -65,9 +71,19 @@ export async function deleteUser(userId: string): Promise<void> {
   if (!res.ok && res.status !== 204) throw new Error(`deleteUser returned ${res.status}`);
 }
 
-/** Phase 2 — create a local (email/password) account. Returns the new user (the
- *  one-time verifyToken is surfaced only outside production by the backend). */
-export async function signupLocal(input: { email: string; password: string; displayName?: string }): Promise<{ user: User; verifyToken?: string }> {
-  const res = await fetch(`${base}/auth/signup`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
-  return asJson<{ user: User; verifyToken?: string }>(res, 'signupLocal');
+/** ADR 0003 Phase 4a — bind the current Firebase OIDC identity to a durable User.
+ *  Called once after OIDC sign-in so subsequent requests resolve the canonical
+ *  `user:<userId>` subject (the backend re-keys any `oidc:<sub>` memberships and
+ *  issues a bound cookie). Idempotent + best-effort: a 404 (the `users` toggle is
+ *  off) is a benign no-op and MUST NOT fail sign-in. Returns the bound user, or
+ *  null when unavailable. */
+export async function bindOidc(): Promise<{ user: User; rekeyed: number } | null> {
+  const res = await fetch(`${base}/auth/oidc/bind`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: '{}' }));
+  if (!res.ok) return null; // 404 (feature off) / transient — best-effort, never blocks sign-in.
+  return (await res.json()) as { user: User; rekeyed: number };
+}
+
+/** Sign out — expire the backend session cookie. Best-effort (never throws). */
+export async function logout(): Promise<void> {
+  await fetch(`${base}/auth/logout`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: '{}' })).catch(() => {});
 }

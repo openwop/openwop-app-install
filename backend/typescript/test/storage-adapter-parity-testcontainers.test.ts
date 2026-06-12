@@ -84,6 +84,7 @@ function mkInterrupt(runId: string, nodeId: string): InterruptRecord {
 function mkWebhook(id: string): WebhookSubscriptionRecord {
   return {
     subscriptionId: `sub-${id}`,
+    tenantId: 'default',
     url: `https://example.test/webhook/${id}`,
     events: ['run.completed', 'run.failed'],
     secret: 'whsec_test',

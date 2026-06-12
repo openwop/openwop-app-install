@@ -17,10 +17,12 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { deleteMemoryEntry, listMemory, type MemoryEntry } from './lib/memoryClient.js';
-import { LockIcon, TrashIcon } from '../ui/icons/index.js';
+import { DatabaseIcon, LockIcon, TrashIcon } from '../ui/icons/index.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { DataTable, DensityToggle, type DataColumn } from '../ui/DataTable.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
+import { Notice } from '../ui/Notice.js';
+import { StateCard } from '../ui/StateCard.js';
 import { TextField } from '../ui/Field.js';
 import { toast } from '../ui/toast.js';
 
@@ -161,7 +163,7 @@ export function MemoryInspectorPage(): JSX.Element {
           />
         </div>
 
-        {error && <div className="alert error">{error}</div>}
+        {error && <Notice variant="error">{error}</Notice>}
 
         {entries === null && <SkeletonRows rows={5} columns={[24, '60%', 120, 140, 60]} />}
 
@@ -189,7 +191,17 @@ export function MemoryInspectorPage(): JSX.Element {
                   <TrashIcon size={13} /> Delete selected
                 </button>
               )}
-              empty={<p className="muted">No memory entries.</p>}
+              empty={
+                <StateCard
+                  icon={<DatabaseIcon size={28} />}
+                  title={search || tag ? 'No matching memory entries' : 'No memory entries yet'}
+                  body={
+                    search || tag
+                      ? 'No entries match the current search or tag filter. Clear the filters to see the full ledger.'
+                      : 'Entries are written host-internally — the executor writes a run-summary on completion. Run a workflow to populate the ledger.'
+                  }
+                />
+              }
             />
           </>
         )}

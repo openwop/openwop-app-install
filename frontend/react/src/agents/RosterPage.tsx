@@ -10,9 +10,20 @@
  * Tenant scoping is server-side; the page never sends a tenantId.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Notice } from '../ui/Notice.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { StateCard } from '../ui/StateCard.js';
+import { StatusBadge } from '../ui/StatusBadge.js';
+import { DataTable, DensityToggle, type DataColumn } from '../ui/DataTable.js';
+import { Skeleton, SkeletonRows } from '../ui/Skeleton.js';
+import { KeyFigureBand } from '../ui/KeyFigure.js';
+import { Field, TextField } from '../ui/Field.js';
+import { Modal } from '../ui/Modal.js';
+import { IconButton } from '../ui/IconButton.js';
+import {
+  PlusIcon, TrashIcon, BotIcon, BuildingIcon, ZapIcon, UserIcon, XIcon,
+} from '../ui/icons/index.js';
 import {
   createRosterEntry,
   deleteRosterEntry,
@@ -22,19 +33,41 @@ import {
   putOrgChart,
   updateRosterEntry,
   type OrgChart,
+  type OrgDepartment,
   type ResponsibilityView,
   type RosterEntry,
 } from './rosterClient.js';
 import { toast } from '../ui/toast.js';
+
+/** Autonomy → a labelled StatusBadge tone (status semantics come from the badge,
+ *  never an inline color). `review` is a held/needs-sign-off posture → amber;
+ *  `auto` runs immediately → completed/green. */
+function autonomyBadge(level: RosterEntry['autonomyLevel']): JSX.Element {
+  if (level === 'review') return <StatusBadge status="waiting-approval" label="review — proposes" />;
+  if (level === 'guided') return <StatusBadge status="paused" label="guided" />;
+  return <StatusBadge status="completed" label="auto — runs" />;
+}
 
 export function RosterPage(): JSX.Element {
   const [roster, setRoster] = useState<RosterEntry[]>([]);
   const [chart, setChart] = useState<OrgChart | null>(null);
   const [rollups, setRollups] = useState<Record<string, ResponsibilityView>>({});
   const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
   const [persona, setPersona] = useState('');
   const [agentId, setAgentId] = useState('core.openwop.agents.brief-writer');
   const [workflows, setWorkflows] = useState('');
+  const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
+  // Key-figure filter: which autonomy bucket the figures band has pinned (null = all).
+  const [autonomyFilter, setAutonomyFilter] = useState<string | null>(null);
+  // The roster entry awaiting destructive-delete confirmation (cohesion <Modal>).
+  const [pendingDelete, setPendingDelete] = useState<RosterEntry | null>(null);
+  const personaInputRef = useRef<HTMLInputElement>(null);
+
+  const focusAddAgent = useCallback(() => {
+    personaInputRef.current?.focus();
+    personaInputRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
@@ -53,6 +86,8 @@ export function RosterPage(): JSX.Element {
       setRollups(views);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -75,11 +110,12 @@ export function RosterPage(): JSX.Element {
     }
   };
 
-  const onDelete = async (rosterId: string) => {
-    const name = roster.find((r) => r.rosterId === rosterId)?.persona ?? 'this agent';
-    if (!window.confirm(`Delete the agent “${name}”? This removes it and its board/schedules and can't be undone.`)) return;
+  const onConfirmDelete = async () => {
+    const target = pendingDelete;
+    if (!target) return;
+    setPendingDelete(null);
     try {
-      await deleteRosterEntry(rosterId);
+      await deleteRosterEntry(target.rosterId);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -120,52 +156,213 @@ export function RosterPage(): JSX.Element {
 
   const personaOf = (rosterId: string): string => roster.find((r) => r.rosterId === rosterId)?.persona ?? rosterId;
 
+  const autonomyOf = (r: RosterEntry): 'auto' | 'guided' | 'review' => r.autonomyLevel ?? 'auto';
+
+  // The figures band: count agents and the two posture buckets. Tiles double as
+  // filters over the roster table (DESIGN.md §4.5 "stats are filters").
+  const figures = useMemo(() => {
+    const autoCount = roster.filter((r) => autonomyOf(r) !== 'review').length;
+    const reviewCount = roster.filter((r) => autonomyOf(r) === 'review').length;
+    return [
+      { key: 'all', label: 'Agents', value: roster.length },
+      { key: 'auto', label: 'Run automatically', value: autoCount },
+      { key: 'review', label: 'Need sign-off', value: reviewCount, tone: 'attention' as const },
+    ];
+  }, [roster]);
+
+  const visibleRoster = useMemo(() => {
+    if (!autonomyFilter || autonomyFilter === 'all') return roster;
+    if (autonomyFilter === 'review') return roster.filter((r) => autonomyOf(r) === 'review');
+    if (autonomyFilter === 'auto') return roster.filter((r) => autonomyOf(r) !== 'review');
+    return roster;
+  }, [roster, autonomyFilter]);
+
+  const columns: DataColumn<RosterEntry>[] = [
+    {
+      key: 'persona',
+      header: 'Persona',
+      sortValue: (r) => r.persona.toLowerCase(),
+      render: (r) => (
+        <div className="u-flex u-flex-col">
+          <strong>{r.persona}</strong>
+          <span className="muted u-fs-12">{r.rosterId}{r.enabled ? '' : ' · disabled'}</span>
+        </div>
+      ),
+    },
+    {
+      key: 'agent',
+      header: 'Agent',
+      sortValue: (r) => r.agentRef.agentId,
+      cellClassName: 'muted',
+      render: (r) => <code className="roster-wf-code">{r.agentRef.agentId}</code>,
+    },
+    {
+      key: 'autonomy',
+      header: 'Autonomy',
+      sortValue: (r) => autonomyOf(r),
+      render: (r) => (
+        <div className="u-flex u-items-center u-gap-2 u-wrap">
+          {autonomyBadge(r.autonomyLevel)}
+          <button
+            type="button"
+            className="secondary u-fs-12"
+            onClick={() => void onToggleAutonomy(r)}
+            title={autonomyOf(r) === 'review'
+              ? 'Switch to auto: heartbeat picks run immediately'
+              : 'Switch to review: heartbeat picks need human sign-off (Inbox)'}
+          >
+            {autonomyOf(r) === 'review' ? 'Set auto' : 'Set review'}
+          </button>
+        </div>
+      ),
+    },
+    {
+      key: 'portfolio',
+      header: 'Portfolio',
+      render: (r) => (
+        r.workflows.length > 0 ? (
+          <div className="u-flex u-gap-2 u-wrap">
+            {r.workflows.map((w) => <span key={w} className="chip chip--muted">{w}</span>)}
+          </div>
+        ) : <span className="muted u-fs-13">no workflows assigned</span>
+      ),
+    },
+    {
+      key: 'actions',
+      header: '',
+      align: 'right',
+      width: '52px',
+      render: (r) => (
+        <IconButton
+          label={`Delete ${r.persona}`}
+          icon={<TrashIcon size={15} />}
+          onClick={() => setPendingDelete(r)}
+        />
+      ),
+    },
+  ];
+
+  // Departments indented by parentDepartmentId so the chart reads as a tree.
+  const depth = useCallback((d: OrgDepartment): number => {
+    let n = 0;
+    let cur: OrgDepartment | undefined = d;
+    const seen = new Set<string>();
+    while (cur?.parentDepartmentId && !seen.has(cur.departmentId)) {
+      seen.add(cur.departmentId);
+      const parent: OrgDepartment | undefined = chart?.departments.find((x) => x.departmentId === cur!.parentDepartmentId);
+      if (!parent) break;
+      cur = parent;
+      n += 1;
+    }
+    return n;
+  }, [chart]);
+
   return (
-    <section>
+    <section className="page-stack">
       <PageHeader
         eyebrow="Roster"
         title="Roster & Org-Chart"
         lede={<>Named "digital-twin employee" agents that own a workflow portfolio (RFC 0086), grouped into a descriptive org-chart (RFC 0087). Bind a roster member to a board on the <strong>Boards</strong> page to make its To&nbsp;Do column fire that agent's workflow.</>}
+        actions={
+          <button type="button" className="btn-accent-solid u-flex u-items-center u-gap-2" onClick={focusAddAgent}>
+            <PlusIcon size={14} aria-hidden /> Add agent
+          </button>
+        }
       />
       {error ? <Notice variant="error">{error}</Notice> : null}
 
       <h2 className="u-fs-16">Roster</h2>
-      <form onSubmit={onCreate} className="u-flex u-gap-2 u-wrap u-mb-3">
-        <input value={persona} onChange={(e) => setPersona(e.target.value)} placeholder="Persona (e.g. Sally)" />
-        <input value={agentId} onChange={(e) => setAgentId(e.target.value)} placeholder="agentId" className="u-minw-240" />
-        <input value={workflows} onChange={(e) => setWorkflows(e.target.value)} placeholder="workflows (comma-separated)" className="u-minw-240" />
-        <button type="submit" className="primary">Add agent</button>
-      </form>
-      {roster.length === 0 ? (
-        <p className="muted">No named agents yet. Add one above.</p>
-      ) : (
-        roster.map((r) => (
-          <div key={r.rosterId} className="roster-card">
-            <div className="u-flex u-justify-between u-items-baseline">
-              <strong>{r.persona}</strong>
-              <button type="button" className="secondary u-fs-12" onClick={() => void onDelete(r.rosterId)}>Delete</button>
-            </div>
-            <div className="muted u-fs-13">{r.rosterId} · runs <code>{r.agentRef.agentId}</code>{r.enabled ? '' : ' · disabled'}</div>
-            <div className="u-flex u-items-center u-gap-2 u-mt-1-5">
-              <span className={`chip ${r.autonomyLevel === 'review' ? 'chip--accent' : 'chip--muted'}`}>
-                {r.autonomyLevel === 'review' ? 'review — proposes' : 'auto — runs'}
-              </span>
-              <button
-                type="button"
-                className="secondary u-fs-12"
-                onClick={() => void onToggleAutonomy(r)}
-                title={r.autonomyLevel === 'review'
-                  ? 'Switch to auto: heartbeat picks run immediately'
-                  : 'Switch to review: heartbeat picks need human sign-off (Inbox)'}
-              >
-                {r.autonomyLevel === 'review' ? 'Set auto' : 'Set review'}
-              </button>
-            </div>
-            {r.workflows.length > 0 ? (
-              <div className="u-fs-13 u-mt-1">portfolio: {r.workflows.map((w) => <code key={w} className="roster-wf-code">{w}</code>)}</div>
-            ) : <div className="muted u-fs-13 u-mt-1">no workflows assigned</div>}
+
+      {loading ? (
+        <>
+          <div className="figure-band" aria-hidden>
+            {[0, 1, 2].map((i) => (
+              <div className="figure-tile" key={i}>
+                <Skeleton width={48} height={34} />
+                <Skeleton width={96} height={11} />
+              </div>
+            ))}
           </div>
-        ))
+          <div className="surface-card">
+            <SkeletonRows rows={4} columns={['28%', '24%', '20%', '20%']} />
+          </div>
+        </>
+      ) : (
+        <>
+          <KeyFigureBand
+            figures={figures}
+            activeKey={autonomyFilter}
+            onToggle={(k) => setAutonomyFilter((cur) => (cur === k ? null : k))}
+            ariaLabel="Roster by autonomy"
+          />
+
+          <form onSubmit={onCreate} className="action-bar u-wrap u-items-center">
+            <TextField
+              ref={personaInputRef}
+              label="Persona"
+              value={persona}
+              onChange={(e) => setPersona(e.target.value)}
+              placeholder="e.g. Sally"
+            />
+            <TextField
+              label="Agent id"
+              value={agentId}
+              onChange={(e) => setAgentId(e.target.value)}
+              className="u-minw-240"
+            />
+            <Field label="Portfolio" help="comma-separated workflow ids">
+              {(w) => (
+                <input
+                  {...w}
+                  value={workflows}
+                  onChange={(e) => setWorkflows(e.target.value)}
+                  placeholder="workflows (comma-separated)"
+                  className="u-minw-240"
+                />
+              )}
+            </Field>
+            <button type="submit" className="btn-accent-solid u-flex u-items-center u-gap-2">
+              <PlusIcon size={14} aria-hidden /> Add agent
+            </button>
+          </form>
+
+          {roster.length === 0 ? (
+            <StateCard
+              icon={<BotIcon size={28} />}
+              title="No named agents yet"
+              body="Add a digital-twin employee — a persona that owns a workflow portfolio — using the form above."
+              action={
+                <button type="button" className="btn-accent-solid u-flex u-items-center u-gap-2" onClick={focusAddAgent}>
+                  <PlusIcon size={14} aria-hidden /> Add your first agent
+                </button>
+              }
+            />
+          ) : (
+            <>
+              <div className="filterbar u-flex u-justify-between u-items-center u-wrap">
+                <span className="muted u-fs-13">
+                  {visibleRoster.length}{autonomyFilter && autonomyFilter !== 'all' ? ` of ${roster.length}` : ''} agent{visibleRoster.length === 1 ? '' : 's'}
+                </span>
+                <DensityToggle value={density} onChange={setDensity} />
+              </div>
+              <DataTable
+                columns={columns}
+                rows={visibleRoster}
+                rowKey={(r) => r.rosterId}
+                density={density}
+                caption="Standing agent roster"
+                initialSort={{ key: 'persona', dir: 'asc' }}
+                empty={
+                  <StateCard
+                    icon={<BotIcon size={28} />}
+                    title="No agents in this view"
+                    body="No agents match the selected autonomy filter."
+                  />
+                }
+              />
+            </>
+          )}
+        </>
       )}
 
       <h2 className="u-fs-16 u-mt-5">Org-chart</h2>
@@ -173,36 +370,104 @@ export function RosterPage(): JSX.Element {
         Departments + roles + reporting lines over roster members. An org edge is metadata only — it grants no authority
         (RFC 0087 §B). The responsibility roll-up is the union of a department's members' portfolios.
       </p>
-      <button type="button" className="secondary roster-flatchart-btn" onClick={() => void buildFlatChart()} disabled={roster.length === 0}>
-        Generate flat chart from roster
-      </button>
-      {!chart || chart.departments.length === 0 ? (
-        <p className="muted">No org-chart yet. Use the button above to build a flat one from the roster (or PUT a structured chart via the API).</p>
-      ) : (
-        chart.departments.map((d) => {
-          const view = rollups[d.departmentId];
-          const members = chart.members.filter((m) => m.departmentId === d.departmentId);
-          return (
-            <div key={d.departmentId} className="roster-card">
-              <strong>{d.name}</strong>
-              {d.parentDepartmentId ? <span className="muted u-fs-12"> · under {chart.departments.find((x) => x.departmentId === d.parentDepartmentId)?.name ?? d.parentDepartmentId}</span> : null}
-              <ul className="roster-member-list">
-                {members.map((m) => (
-                  <li key={m.rosterId} className="u-fs-14">
-                    {personaOf(m.rosterId)} <span className="muted">({d.roles.find((r) => r.roleId === m.roleId)?.name ?? m.roleId}{m.reportsTo ? ` → reports to ${personaOf(m.reportsTo)}` : ''})</span>
-                  </li>
-                ))}
-              </ul>
-              {view ? (
-                <div className="u-fs-13">
-                  <span className="muted">responsible for: </span>
-                  {view.responsibilities.length > 0 ? view.responsibilities.map((w) => <code key={w} className="roster-wf-code">{w}</code>) : <span className="muted">nothing yet</span>}
-                </div>
-              ) : null}
+
+      {loading ? (
+        <div className="page-stack">
+          {[0, 1].map((i) => (
+            <div className="surface-card" key={i}>
+              <Skeleton width={160} height={18} />
+              <div className="u-mt-3"><Skeleton width="70%" /></div>
+              <div className="u-mt-1"><Skeleton width="55%" /></div>
             </div>
-          );
-        })
+          ))}
+        </div>
+      ) : !chart || chart.departments.length === 0 ? (
+        <StateCard
+          icon={<BuildingIcon size={28} />}
+          title="No org-chart yet"
+          body="Build a flat chart from your roster to see departments and the responsibility roll-up (or PUT a structured chart via the API)."
+          action={
+            <button type="button" className="btn-accent-solid u-flex u-items-center u-gap-2" onClick={() => void buildFlatChart()} disabled={roster.length === 0}>
+              <ZapIcon size={14} aria-hidden /> Generate flat chart from roster
+            </button>
+          }
+        />
+      ) : (
+        <>
+          <div className="action-bar">
+            <button type="button" className="secondary u-flex u-items-center u-gap-2" onClick={() => void buildFlatChart()} disabled={roster.length === 0}>
+              <ZapIcon size={14} aria-hidden /> Rebuild flat chart from roster
+            </button>
+          </div>
+          <div className="page-stack">
+            {chart.departments.map((d) => {
+              const view = rollups[d.departmentId];
+              const members = chart.members.filter((m) => m.departmentId === d.departmentId);
+              const indent = depth(d);
+              const parent = d.parentDepartmentId
+                ? chart.departments.find((x) => x.departmentId === d.parentDepartmentId)?.name ?? d.parentDepartmentId
+                : null;
+              return (
+                <div
+                  key={d.departmentId}
+                  className="surface-card"
+                  style={indent > 0 ? { marginInlineStart: `calc(var(--space-4) * ${indent})` } : undefined}
+                >
+                  <div className="u-flex u-items-center u-gap-2 u-wrap">
+                    <BuildingIcon size={16} aria-hidden />
+                    <strong>{d.name}</strong>
+                    {parent ? <span className="chip chip--muted">under {parent}</span> : null}
+                    <span className="chip chip--muted">{members.length} member{members.length === 1 ? '' : 's'}</span>
+                  </div>
+
+                  {members.length > 0 ? (
+                    <ul className="roster-member-list">
+                      {members.map((m) => (
+                        <li key={m.rosterId} className="u-flex u-items-center u-gap-2 u-fs-14">
+                          <UserIcon size={13} aria-hidden />
+                          <span>{personaOf(m.rosterId)}</span>
+                          <span className="chip chip--muted">{d.roles.find((r) => r.roleId === m.roleId)?.name ?? m.roleId}</span>
+                          {m.reportsTo ? <span className="muted u-fs-12">reports to {personaOf(m.reportsTo)}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : <div className="muted u-fs-13 u-mt-1">no members</div>}
+
+                  {view ? (
+                    <div className="u-flex u-items-center u-gap-2 u-wrap u-fs-13 u-mt-1">
+                      <span className="muted">responsible for:</span>
+                      {view.responsibilities.length > 0
+                        ? view.responsibilities.map((w) => <span key={w} className="chip chip--accent">{w}</span>)
+                        : <span className="muted">nothing yet</span>}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </>
       )}
+
+      {pendingDelete ? (
+        <Modal onClose={() => setPendingDelete(null)} label={`Delete ${pendingDelete.persona}`}>
+          <div className="hire-head">
+            <div>
+              <div className="hire-eyebrow">Delete agent</div>
+              <h2 className="hire-title">Delete “{pendingDelete.persona}”?</h2>
+              <p className="hire-lede">
+                This removes the agent and its board/schedules. It can&apos;t be undone.
+              </p>
+            </div>
+            <IconButton label="Close" icon={<XIcon size={16} />} onClick={() => setPendingDelete(null)} />
+          </div>
+          <div className="hire-foot action-bar">
+            <button type="button" className="secondary btn-sm" onClick={() => setPendingDelete(null)}>Cancel</button>
+            <button type="button" className="btn-accent-solid btn-sm u-flex u-items-center u-gap-2" onClick={() => void onConfirmDelete()}>
+              <TrashIcon size={14} aria-hidden /> Delete agent
+            </button>
+          </div>
+        </Modal>
+      ) : null}
     </section>
   );
 }

@@ -1,0 +1,39 @@
+{
+  "name": "feature.comments.nodes",
+  "version": "1.0.0",
+  "description": "Comments feature node pack (ADR 0014/0021) — read/post/resolve nodes over the ctx.features.comments surface. list reads a resource thread; post adds an (agent-authored) comment to a commentable resource; resolve marks a comment resolved. Tenant-guarded; the post emits a tenant-scoped notification through the existing seam.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "comments", "collaboration", "threads"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.comments.nodes.list",
+      "version": "1.0.0",
+      "label": "Comments: List Thread",
+      "description": "Lists a resource's comment thread over ctx.features.comments. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.comments.nodes.post",
+      "version": "1.0.0",
+      "label": "Comments: Post",
+      "description": "Posts a comment (or reply, via parentId) on a commentable resource (cms_page | kb_collection) over ctx.features.comments. The resource is validated in-org.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.comments.nodes.resolve",
+      "version": "1.0.0",
+      "label": "Comments: Resolve",
+      "description": "Marks a comment resolved over ctx.features.comments. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

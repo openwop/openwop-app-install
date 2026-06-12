@@ -1,3 +1,5 @@
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `d01cd9b`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+
 # openwop-app — OpenWOP Application
 
 > **The live reference deployment of an OpenWOP host** — and a white-label starting point you can fork and rebrand. Consumes the protocol via the published [`@openwop/openwop`](https://www.npmjs.com/package/@openwop/openwop) SDK; the protocol spec itself lives in [`openwop/openwop`](https://github.com/openwop/openwop). Carved from that monorepo (`apps/workflow-engine`) with full history.
@@ -28,6 +30,8 @@ A deployable reference application demonstrating the full vertical slice of an O
 - **OTel under `openwop.*`** with W3C `traceparent` propagation
 - **Cloud Run shape** — single container, `$PORT`, `/health` + `/readiness`, multi-stage Dockerfile with esbuild bundle
 - **Conformance harness** — `npm run test:conformance` runs `@openwop/openwop-conformance` against the local service
+- **Multi-member B2B workspace tenancy + RBAC (ADR 0015)** — the tenant *is* the workspace. A signed-in user gets a personal workspace, can create **shared workspaces**, **invite members** with RFC 0049 roles (`owner` / `admin` / `editor` / `viewer`), and **switch** the active workspace — membership-gated and fail-closed, so one session only ever holds one active workspace (RFC 0048 §D cross-workspace isolation). A **≥1-owner invariant** is enforced atomically on member demote/remove (`updateMember` / `deleteMember`, post-write re-check) with an **ownership-transfer** escape hatch (`POST /v1/host/sample/orgs/:orgId/members/:memberId/transfer-ownership`); **account deletion cascades** the user out of their shared workspaces and *refuses* — rather than orphaning — any workspace they solely own. Intra-workspace role-scoping on the *protocol* surface is gated on `OPENWOP_AUTHORIZATION_ENFORCEMENT` (advertised via `capabilities.authorization` only when honored). See [`docs/adr/0015-workspace-as-tenant-b2b.md`](docs/adr/0015-workspace-as-tenant-b2b.md).
+- **Real enterprise auth — OIDC, password, MFA (TOTP), SAML 2.0 SSO + SCIM 2.0 provisioning (ADR 0002 / RFC 0050)** — sign in with a federated OIDC issuer, an email/password local account (with optional TOTP MFA), or **enterprise SSO** against a real IdP (Okta / Azure AD / Ping) via a production SAML Service Provider (real XML-DSig); **SCIM 2.0** endpoints sync joiner/mover/leaver lifecycle out-of-band (fail-closed deactivation). Both are env-gated OFF until configured and advertised honestly (`openwop-auth-saml` / `openwop-auth-scim` appear in `/.well-known/openwop` only when the host can back them). Every method resolves to one durable `User` with a stable `user:<id>` subject (ADR 0003). See [**Enterprise SSO (SAML 2.0)**](#enterprise-sso-saml-20--okta--azure-ad--ping) below to configure it.
 - **DAG executor with concurrent paths** — workflows are no longer limited to a single linear chain. The scheduler (`src/executor/scheduler.ts`) drains a topological ready-queue with bounded concurrency (`OPENWOP_MAX_CONCURRENT_NODES`, default 8) and honors the five canonical `WorkflowEdge.triggerRule` values from `spec/v1/workflow-definition.schema.json` (`all_success` / `any_success` / `all_complete` / `none_failed` / `any_failed`). Edge `condition` predicates filter per-edge input contributions. Per-node outputs land in a port-keyed map (`{ output: ... }`); downstream nodes read by `targetInput` from any incoming edge. Suspended branches keep the run alive while other branches drain; on resume, the resolved node flips to `completed` and the scheduler re-enters. Cycles reject at run-start with `cycle_detected`. Linear workflows are a degenerate case of the same scheduler — back-compat preserved bit-for-bit.
 
 ### Frontend (`frontend/react/`)
@@ -46,6 +50,7 @@ A deployable reference application demonstrating the full vertical slice of an O
 - **Not normative.** It is sample/template code, not part of the v1.1 spec corpus.
 - **Not coupled to one cloud.** The single container image runs on any platform, and [`deploy/`](./deploy/README.md) ships ready-made packs for **Docker Compose** (the cloud-free default), **Fly.io**, **Render/Railway**, **AWS**, **Azure**, and **Google Cloud**. Storage, BYOK key-wrapping (KMS), identity (OIDC), and object storage are env-selected behind interfaces; the cloud SDKs are *optional* dependencies loaded only when chosen. Real KMS backends exist for **AWS KMS**, **Azure Key Vault**, and **Google Cloud KMS** (`OPENWOP_BYOK_KMS_KEY=aws-kms:… / azure-keyvault:… / projects/…`), plus a portable local-AES fallback.
 - **Not a fork of the production-grade postgres host.** It deliberately omits the audit-log integrity profile, durable webhook queue, multi-region partition handling, and other production concerns to stay at "starter-template" scope.
+- **Tenancy invariants are demo-grade.** The workspace ≥1-owner guard (and other read-then-write invariants) are enforced over the in-memory / portable `DurableCollection` with a **post-write re-check + compensating restore** — correct (it never leaves a workspace ownerless, even across instances under read-committed reads), but a concurrent collision returns a *retryable* `409` rather than serializing, and a reader can transiently observe the mid-operation state. A production multi-region host should back these with a real DB transaction or a `CHECK`/uniqueness constraint. The public demo also runs with `OPENWOP_AUTHORIZATION_ENFORCEMENT=off` — role-scoping is *previewed*, not enforced, on the protocol surface (flip it on for enforced B2B; see the ADR 0015 "Deployment postures" table and [`ARCHITECTURE.md §"Path to real backends"`](ARCHITECTURE.md)).
 
 ### `aiProviders` known limits
 
@@ -140,6 +145,168 @@ The Dockerfile is pre-wired for `--source` deploys. For real production:
 - Replace the stub identity resolver (`src/host/identityResolver.ts`) with Firebase Auth / OIDC / your IdP.
 - Wire the OTel SDK to your collector (replace the console exporter in `src/observability/tracer.ts`).
 - Add the Cloud Tasks dispatch surface (mirror `services/workflow-runtime/src/runDispatch/` from the MyndHyve reference).
+
+## Enterprise SSO (SAML 2.0 — Okta / Azure AD / Ping)
+
+The backend ships a **production SAML 2.0 Service Provider** (`src/host/auth/samlSso.ts`,
+real XML-DSig via `@node-saml/node-saml`) so a company can turn on real enterprise
+SSO alongside OIDC + password (ADR 0002, riding the accepted RFC 0050
+`openwop-auth-saml`). It is **OFF until configured** — honest gating: when the four
+required `OPENWOP_SAML_*` vars are unset, the host does **not** advertise
+`openwop-auth-saml` in `/.well-known/openwop`, the "Sign in with SSO" button is
+hidden, and every SP route `404`s. Setting them flips all three on at once.
+
+On a validated assertion the ACS provisions a durable `User` keyed `saml:<NameID>`
+(the stable, opaque RBAC subject — ADR 0003) and issues a session cookie; IdP
+groups are captured verbatim for host-side group→role mapping (ADR 0006).
+
+**SP routes** (pre-auth — the assertion signature is the credential):
+
+| Route | Purpose |
+|---|---|
+| `GET  /v1/host/sample/auth/saml/sso/login[?returnTo=/]` | SP-initiated redirect to the IdP |
+| `POST /v1/host/sample/auth/saml/sso/acs` | IdP POSTs the `SAMLResponse` → validate → session |
+| `GET  /v1/host/sample/auth/saml/sso/metadata` | SP metadata XML (upload to the IdP) |
+
+### Configure (two sides — IdP + this host)
+
+**1. In your IdP (Okta example) — create a "SAML 2.0" app:**
+
+- **Single sign-on URL (ACS):** `https://<your-host>/api/v1/host/sample/auth/saml/sso/acs`
+- **Audience URI (SP Entity ID):** a stable value, e.g. `https://<your-host>/saml`
+  (use the **same** value as `OPENWOP_SAML_SP_ENTITY_ID` below)
+- **Name ID format:** `EmailAddress` (recommended); add a `groups` attribute if you
+  want IdP groups captured.
+- *(Optional)* instead of typing the above, import this SP's metadata URL:
+  `https://<your-host>/api/v1/host/sample/auth/saml/sso/metadata`
+
+Then, from the app's **Sign On** tab, copy the **Identity Provider Single Sign-On
+URL** and the **X.509 Signing Certificate**.
+
+**2. On this host — set five env vars** (the first four are required; the fifth
+defaults to `default`). Locally, drop them in `backend/typescript/.env`:
+
+```bash
+OPENWOP_SAML_IDP_SSO_URL=https://<your-org>.okta.com/app/<app-id>/sso/saml
+OPENWOP_SAML_IDP_CERT=<X.509 signing cert — full PEM, or one-line base64 body>
+OPENWOP_SAML_SP_ENTITY_ID=https://<your-host>/saml
+OPENWOP_SAML_ACS_URL=https://<your-host>/api/v1/host/sample/auth/saml/sso/acs
+OPENWOP_SAML_TENANT=<workspace SAML users land in; default `default`>
+```
+
+**On Cloud Run**, add them **incrementally** so the rest of the live config (the
+7-secret + env binding) is preserved — use `--update-*`, never `--set-*`, and keep
+the certificate in Secret Manager rather than a plaintext env var:
+
+```bash
+gcloud run services update openwop-app-backend \
+  --region us-central1 --project openwop-dev \
+  --update-env-vars OPENWOP_SAML_IDP_SSO_URL=https://<org>.okta.com/app/<id>/sso/saml,OPENWOP_SAML_SP_ENTITY_ID=https://app.openwop.dev/saml,OPENWOP_SAML_ACS_URL=https://app.openwop.dev/api/v1/host/sample/auth/saml/sso/acs,OPENWOP_SAML_TENANT=<tenant> \
+  --update-secrets OPENWOP_SAML_IDP_CERT=<secret-name>:latest
+```
+
+**Verify:** `curl https://<your-host>/api/.well-known/openwop` lists
+`openwop-auth-saml` under `auth.profiles`, the SSO button appears on the sign-in
+card, and a full IdP-initiated login lands you in the `OPENWOP_SAML_TENANT`
+workspace. The complete knob inventory + Okta walkthrough also lives in
+[`backend/typescript/.env.example`](backend/typescript/.env.example).
+
+### SCIM 2.0 provisioning (joiner / mover / leaver)
+
+SSO authenticates a *login*; **SCIM** provisions and de-provisions the *account*
+out-of-band, so when someone joins, changes teams, or leaves in the IdP, the host
+reflects it without anyone signing in. The backend exposes bearer-authed SCIM 2.0
+endpoints (`src/routes/authScim.ts`) — also **OFF until configured** and advertised
+honestly (`openwop-auth-scim` appears only when `OPENWOP_SCIM_BEARER` is set).
+
+| Route (IdP base `https://<host>/api/scim/v2`) | Purpose |
+|---|---|
+| `POST   /scim/v2/Users` | create/upsert a principal (`scim:<userName>`) |
+| `PATCH  /scim/v2/Users/{id}` `{ active }` | reactivate / deactivate |
+| `DELETE /scim/v2/Users/{id}` | deactivate (leaver) — **fail-closed**: a disabled user stops resolving |
+| `POST   /scim/v2/Groups` | group-membership sync (→ host-side roles, ADR 0006) |
+
+Each request must present the IdP's SCIM bearer (constant-time compared against
+`OPENWOP_SCIM_BEARER`); the routes self-authenticate and bypass the session layer,
+so they work even under the hardened bearer-required posture
+(`OPENWOP_AUTH_ENFORCE_BEARER=true`) a real provisioning client runs.
+
+**Configure (Okta example):** on the SAML app's **Provisioning** tab, enable API
+integration with **SCIM Base URL** `https://<your-host>/api/scim/v2` and
+**Authentication → HTTP Header → Bearer** = your `OPENWOP_SCIM_BEARER`; enable
+Create / Update / Deactivate Users and Push Groups. Then set the host vars (keep
+the bearer in Secret Manager):
+
+```bash
+gcloud run services update openwop-app-backend \
+  --region us-central1 --project openwop-dev \
+  --update-secrets OPENWOP_SCIM_BEARER=<secret-name>:latest \
+  --update-env-vars OPENWOP_SCIM_TENANT=<tenant>
+```
+
+`OPENWOP_SCIM_TENANT` defaults to a dedicated `scim` namespace (so a SCIM bearer
+can never address password/OIDC accounts it didn't provision); set it to your
+`OPENWOP_SAML_TENANT` if SCIM-provisioned and SSO users should share one workspace.
+Full setup in [`backend/typescript/.env.example`](backend/typescript/.env.example).
+
+## Connections (third-party app integrations)
+
+**Connections** (ADR 0024) is a per-user / per-org credential broker for external
+apps — Google Workspace, Slack, ServiceNow, Zoom — that feeds the existing
+MCP/HTTP/integration nodes. It lives at **Admin → Access & data → Connections**
+(`/connections`). Two kinds of provider:
+
+- **Token providers** (ServiceNow `api_key`, Zoom `bearer`) — **no host setup**. A
+  user just pastes their API key / token on the Connections page; it's stored
+  KMS-enveloped and scoped to them.
+- **OAuth providers** (Google Workspace, Slack) — need a **one-time host OAuth app
+  registration**. Until that's done the "Connect" button is greyed out (honest
+  gating: `oauthConfigured: false`). You register an OAuth app with the provider,
+  then give this host its **client id + secret** — either through the in-app
+  operator panel (below) or env vars.
+
+### Configure an OAuth provider (two sides — provider + this host)
+
+**1. Register an OAuth app with the provider.** Register this **redirect URI**
+(exact — the host builds the same path):
+
+```
+https://<your-host>/api/v1/host/sample/connections/<provider>/callback
+```
+
+| Provider | Where | Scopes (read defaults · write re-consent) | Notes |
+|---|---|---|---|
+| **Google Workspace** (`google`) | [Cloud Console](https://console.cloud.google.com) → enable Drive/Calendar/Gmail APIs → *Credentials* → **OAuth client ID → Web application** | `drive.readonly`, `calendar.readonly`, `gmail.readonly` · `gmail.send`, `calendar.events` | Gmail/Drive are *restricted* scopes — set the OAuth consent screen to **Testing** + add yourself as a test user (full Google verification is only needed for public external users). |
+| **Slack** (`slack`) | [api.slack.com/apps](https://api.slack.com/apps) → *Create New App* → **OAuth & Permissions** | `channels:read`, `channels:history` · `chat:write` | Client ID + Secret are on the app's **Basic Information** page. |
+
+**2a. Give this host the credentials — the operator panel (recommended).** On the
+**Connections** page, a superadmin sees an **"OAuth client setup (operator)"**
+panel. It shows each provider's exact redirect URI to copy, takes the **Client ID**
+and **Client Secret**, and the button goes live on save — **no env vars, no
+redeploy**. The secret is sealed server-side (the BYOK envelope) and never shown
+again. Superadmin = a tenant in `OPENWOP_SUPERADMIN_TENANTS` (or the admin bearer).
+
+**2b. …or env vars (the fallback).** The host also reads
+`OPENWOP_OAUTH_<PROVIDER>_CLIENT_ID` / `…_CLIENT_SECRET` (provider upper-cased), so
+a deploy can bind creds without the UI. Locally, drop them in
+`backend/typescript/.env`; on Cloud Run, bind **incrementally** (`--update-*`, never
+`--set-*`; keep the secret in Secret Manager) and set the two base URLs so the
+redirect URI the host builds matches the one you registered:
+
+```bash
+gcloud run services update openwop-app-backend \
+  --region us-central1 --project openwop-dev \
+  --update-env-vars OPENWOP_PUBLIC_BASE_URL=https://app.openwop.dev,OPENWOP_OAUTH_CALLBACK_BASE_URL=https://app.openwop.dev/api,OPENWOP_OAUTH_GOOGLE_CLIENT_ID=<id>,OPENWOP_OAUTH_SLACK_CLIENT_ID=<id> \
+  --update-secrets OPENWOP_OAUTH_GOOGLE_CLIENT_SECRET=<secret-name>:latest,OPENWOP_OAUTH_SLACK_CLIENT_SECRET=<secret-name>:latest
+```
+
+The UI-managed store takes precedence over env vars when both are set.
+
+**Verify:** `curl https://<your-host>/api/v1/host/sample/providers` shows
+`"oauthConfigured": true` for the provider, its **Connect** button enables, and the
+consent round-trip returns you to `/connections` with the app connected. The token
+is stored KMS-enveloped, scoped to the connecting user (or shared to an org for an
+admin-managed connection); write access (e.g. Gmail send) is a separate re-consent.
 
 ## Architecture
 

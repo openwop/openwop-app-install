@@ -11,10 +11,17 @@
  * (multi-instance-safe) + exponential-backoff retry + dead-lettering, so a
  * process crash or a transient receiver failure no longer drops the delivery.
  * (The signing itself lives in the worker, next to the POST.)
+ *
+ * Tenant scope (RFC 0093 §A.3): every subscription is owned by the tenant
+ * established at registration time (the membership gate below). List, delete,
+ * the test fire, AND the delivery fanout are all scoped to that tenant — a
+ * subscription receives only events from runs within its tenant, regardless
+ * of how broad its `events` filter is. See SECURITY/invariants.yaml
+ * `webhook-cross-tenant-isolation`.
  */
 
-import { randomBytes, randomUUID } from 'node:crypto';
-import type { Express } from 'express';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import type { Express, Request } from 'express';
 // `RegisterWebhookRequest` / `Response` aren't exported by @openwop/openwop@1.1.1
 // even though the in-tree source declares them — define minimal local shapes.
 interface RegisterWebhookRequest {
@@ -22,23 +29,46 @@ interface RegisterWebhookRequest {
   events: readonly string[];
   secret?: string;
   tags?: readonly string[];
-}
-interface RegisterWebhookResponse {
-  subscriptionId: string;
-  url: string;
-  events: readonly string[];
-  secret?: string;
+  tenantId?: string;
 }
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError, type EventRecord, type WebhookDeliveryRecord } from '../types.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
 import { WEBHOOK_MAX_ATTEMPTS } from '../host/webhookDeliveryWorker.js';
+import { isDeniedWebhookHost, webhookPrivateEgressAllowed } from '../host/webhookEgressGuard.js';
+import { callerSubject, personalTenantOf, tenantOf } from '../host/requestSubject.js';
+import { isWorkspaceMember } from '../host/accessControlService.js';
 
 const log = createLogger('routes.webhooks');
 
 interface Deps {
   storage: Storage;
+}
+
+/**
+ * Resolve the tenant a webhook operation acts under, enforcing the
+ * registration-time membership gate (webhooks.md §Endpoints: "the caller MUST
+ * be a member of the tenant the subscription will live under").
+ *
+ * No explicit tenant ⇒ the caller's ACTIVE tenant (auth-derived; `'default'`
+ * for bearer/demo callers). An explicit tenant is honored only when it IS the
+ * caller's active/personal tenant or a shared workspace the caller is a
+ * member of — anything else is refused 403 (fail closed; a wildcard bearer
+ * key does NOT grant membership in arbitrary tenants on this surface).
+ */
+async function resolveWebhookTenant(req: Request, explicit: string | undefined): Promise<string> {
+  const active = tenantOf(req);
+  if (explicit === undefined || explicit.length === 0 || explicit === active) return active;
+  if (explicit === personalTenantOf(req)) return explicit;
+  const subject = callerSubject(req);
+  if (subject && (await isWorkspaceMember(subject, explicit))) return explicit;
+  throw new OpenwopError(
+    'forbidden_tenant',
+    'Caller is not a member of the requested tenant.',
+    403,
+    { tenantId: explicit },
+  );
 }
 
 export function registerWebhookRoutes(app: Express, deps: Deps): void {
@@ -52,14 +82,20 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
     });
   });
 
-  // List subscriptions. Secret is NEVER returned — only refs + metadata, so a
-  // leaked list response can't be replayed to forge a signed delivery.
-  app.get('/v1/webhooks', async (_req, res, next) => {
+  // List subscriptions — tenant-scoped (RFC 0093 §A.3). Secret is NEVER
+  // returned — only refs + metadata, so a leaked list response can't be
+  // replayed to forge a signed delivery.
+  app.get('/v1/webhooks', async (req, res, next) => {
     try {
-      const subs = await storage.listWebhooks({});
+      const tenantId = await resolveWebhookTenant(
+        req,
+        typeof req.query.tenantId === 'string' ? req.query.tenantId : undefined,
+      );
+      const subs = await storage.listWebhooks({ tenantId });
       res.status(200).json({
         subscriptions: subs.map((s) => ({
           subscriptionId: s.subscriptionId,
+          webhookId: s.subscriptionId,
           url: s.url,
           events: s.events,
           ...(s.tags ? { tags: s.tags } : {}),
@@ -92,23 +128,36 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
           field: 'events',
         });
       }
+      // Registration-time membership gate (webhooks.md §Endpoints + RFC 0093
+      // §A.3): the tenant resolved here owns the subscription and scopes its
+      // delivery for its whole lifetime.
+      const tenantId = await resolveWebhookTenant(
+        req,
+        typeof body.tenantId === 'string' ? body.tenantId : undefined,
+      );
       const subscriptionId = randomUUID();
       const secret = body.secret ?? randomBytes(32).toString('base64url');
       await storage.insertWebhook({
         subscriptionId,
+        tenantId,
         url: body.url,
         events: body.events,
         tags: body.tags,
         secret,
         createdAt: new Date().toISOString(),
       });
-      const response: RegisterWebhookResponse = {
+      res.status(201).json({
         subscriptionId,
+        // Spec field name (webhooks.md §Register response); `subscriptionId`
+        // is kept as the host's historical alias.
+        webhookId: subscriptionId,
         url: body.url,
         events: body.events,
         ...(body.secret ? {} : { secret }),
-      } as RegisterWebhookResponse;
-      res.status(201).json(response);
+        // First 8 hex of sha256(secret) — log-safe cross-reference handle
+        // per webhooks.md §Register / §Logging discipline.
+        secretFingerprint: createHash('sha256').update(secret).digest('hex').slice(0, 8),
+      });
     } catch (err) {
       next(err);
     }
@@ -116,8 +165,16 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
 
   app.delete('/v1/webhooks/:subscriptionId', async (req, res, next) => {
     try {
+      // Tenant scope per webhooks.md §Unregister: 403 when the caller is not
+      // a member of the requested tenant; 404 when the subscription doesn't
+      // exist IN THAT TENANT (a foreign tenant's subscription is invisible —
+      // existence is not leaked across tenants).
+      const tenantId = await resolveWebhookTenant(
+        req,
+        typeof req.query.tenantId === 'string' ? req.query.tenantId : undefined,
+      );
       const sub = await storage.getWebhook(req.params.subscriptionId);
-      if (!sub) {
+      if (!sub || sub.tenantId !== tenantId) {
         throw new OpenwopError(
           'subscription_not_found',
           `Webhook subscription ${req.params.subscriptionId} not found.`,
@@ -138,8 +195,12 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
   // acknowledged" — the worker delivers (and retries) it asynchronously.
   app.post('/v1/webhooks/:subscriptionId/test', async (req, res, next) => {
     try {
+      const tenantId = await resolveWebhookTenant(
+        req,
+        typeof req.query.tenantId === 'string' ? req.query.tenantId : undefined,
+      );
       const sub = await storage.getWebhook(req.params.subscriptionId);
-      if (!sub) {
+      if (!sub || sub.tenantId !== tenantId) {
         throw new OpenwopError(
           'subscription_not_found',
           `Webhook subscription ${req.params.subscriptionId} not found.`,
@@ -168,12 +229,26 @@ export function registerWebhookRoutes(app: Express, deps: Deps): void {
   });
 }
 
+/**
+ * Fan one emitted event out to matching subscriptions — tenant-scoped per
+ * RFC 0093 §A.3: only subscriptions whose `tenantId` equals the originating
+ * RUN's tenant match. An event whose run can't be resolved (synthetic /
+ * pre-run events) is attributed to the `'default'` tenant — never broadcast
+ * across tenants.
+ */
 async function deliverToSubscribers(storage: Storage, event: EventRecord): Promise<void> {
-  const subscribers = await storage.listWebhooks({ eventType: event.type });
+  const run = await storage.getRun(event.runId);
+  const tenantId = run?.tenantId ?? 'default';
+  const subscribers = await storage.listWebhooks({ eventType: event.type, tenantId });
   for (const sub of subscribers) {
     await enqueueDelivery(storage, sub, event);
   }
 }
+
+/** Test-only seam: exports the fanout so the RFC 0093 §A.3 cross-tenant
+ *  delivery-negative regression can drive it directly. Production callers go
+ *  through the event-log subscription registered above. */
+export const __deliverToSubscribersForTests = deliverToSubscribers;
 
 /**
  * Enqueue one durable delivery row. The `secret` is captured here (the
@@ -207,7 +282,7 @@ async function enqueueDelivery(
   await storage.enqueueWebhookDelivery(record);
 }
 
-function assertReachableUrl(url: string): void {
+export function assertReachableUrl(url: string): void {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -221,12 +296,14 @@ function assertReachableUrl(url: string): void {
     });
   }
   // SSRF guard — always on per spec/v1/webhooks.md §"SSRF guard".
-  // Refuses obvious loopback / link-local / RFC 1918 hostnames + IPs.
-  // Operators can override via OPENWOP_WEBHOOK_ALLOW_PRIVATE=true for
-  // local development / testing only.
-  if (process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE === 'true') return;
+  // Refuses obvious loopback / link-local / RFC 1918 hostnames + IPs via the
+  // SAME denied-range predicate the delivery worker re-validates resolved
+  // addresses against (host/webhookEgressGuard.ts — one predicate, no drift;
+  // RFC 0093 §A.1). Operators can override via OPENWOP_WEBHOOK_ALLOW_PRIVATE=true
+  // for local development / testing only — honored at BOTH layers.
+  if (webhookPrivateEgressAllowed()) return;
   const hostname = parsed.hostname.toLowerCase();
-  if (isPrivateOrLoopback(hostname)) {
+  if (isDeniedWebhookHost(hostname)) {
     throw new OpenwopError(
       'webhook_url_rejected',
       `Webhook url host "${hostname}" is denied (loopback / link-local / private-IP).`,
@@ -234,22 +311,4 @@ function assertReachableUrl(url: string): void {
       { reason: 'ssrf_guard', host: hostname },
     );
   }
-}
-
-function isPrivateOrLoopback(host: string): boolean {
-  if (['localhost', '0.0.0.0', '::1', '::'].includes(host)) return true;
-  // IPv4 dotted-quad
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
-    if (a === 127) return true;            // 127.0.0.0/8 loopback
-    if (a === 10) return true;             // 10.0.0.0/8 RFC 1918
-    if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12
-    if (a === 192 && b === 168) return true;          // 192.168.0.0/16
-    if (a === 169 && b === 254) return true;          // 169.254.0.0/16 link-local + GCP/AWS metadata
-    if (a === 0) return true;                          // 0.0.0.0/8
-  }
-  // IPv6 link-local + ULA
-  if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true;
-  return false;
 }

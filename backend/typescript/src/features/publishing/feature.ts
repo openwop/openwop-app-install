@@ -2,8 +2,13 @@
  * Publishing & SEO (ADR 0012). COMPOSES the CMS (ADR 0009): owns per-page SEO
  * metadata + a PUBLIC distribution surface (published-page read, sitemap.xml,
  * robots.txt, feed.rss) without modifying CMS data. The public surface is
- * unauthenticated (org→tenant from the URL) and gated on the org-tenant's
- * `publishing` toggle. A `publishing` toggle, off by default.
+ * unauthenticated (org→tenant from the URL).
+ *
+ * ALWAYS-ON (ADR 0027): no `toggleDefault` — retired from the toggle catalog
+ * (the front page rides on its public surface). The per-tenant "site online"
+ * switch is gone; the CMS editorial `published` status is now the sole public
+ * gate (Sharing, ADR 0013, covers private/draft access). This overturns ADR 0012
+ * Alternative 4. Authed SEO routes keep their org-scoped RBAC gate.
  */
 
 import type { BackendFeature } from '../types.js';
@@ -12,13 +17,4 @@ import { registerPublishingRoutes } from './routes.js';
 export const publishingFeature: BackendFeature = {
   id: 'publishing',
   registerRoutes: (deps) => registerPublishingRoutes(deps),
-  toggleDefault: {
-    id: 'publishing',
-    label: 'Publishing & SEO',
-    description: 'Publish CMS pages to a public web surface with per-page SEO metadata (meta + Open Graph), sitemap.xml, robots.txt, and an RSS feed. Composes the CMS (ADR 0009) + Media (OG images); the public surface is org-addressed and served only while this toggle is on (turning it off takes the site offline).',
-    category: 'Platform',
-    status: 'off',
-    bucketUnit: 'tenant',
-    salt: 'publishing',
-  },
 };

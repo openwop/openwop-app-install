@@ -5,17 +5,19 @@ import type { FrontendFeature } from '../registry.js';
 
 const PublishingPage = lazy(() => import('./PublishingPage.js').then((m) => ({ default: m.PublishingPage })));
 
+// ADR 0027: Publishing is always-on (no `featureId`) and lives in the admin-tier
+// 'Content' group.
 const routes: FeatureRoute[] = [
   {
     path: '/publishing',
     element: <PublishingPage />,
-    tier: 'workspace',
+    tier: 'admin',
     nav: {
-      group: 'Workspace',
+      group: 'Content',
       label: 'Publishing',
       icon: GlobeIcon,
       hint: 'Public site + SEO for CMS pages',
-      featureId: 'publishing',
+      order: 30,
     },
   },
 ];

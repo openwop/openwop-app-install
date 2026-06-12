@@ -14,8 +14,9 @@ import { AutonomyMeter } from './AutonomyMeter.js';
  * card title, the next schedule's label, or the status's own explanation.
  */
 
-/** The single most useful next action, given the agent's state. */
-function primaryAction(view: AgentView): { label: string; tab?: string; Icon: typeof ColumnsIcon } {
+/** The single most useful next action, given the agent's state. Shared with the
+ *  tile view so list + tiles offer the same primary affordance. */
+export function primaryAction(view: AgentView): { label: string; tab?: string; Icon: typeof ColumnsIcon } {
   switch (view.status) {
     case 'waiting': return { label: 'Review', Icon: AlertIcon };
     case 'error': return { label: 'View activity', tab: 'activity', Icon: ActivityIcon };
@@ -24,7 +25,9 @@ function primaryAction(view: AgentView): { label: string; tab?: string; Icon: ty
   }
 }
 
-function subLine(view: AgentView): string {
+/** A contextual one-liner from REAL fields (working/waiting card, next schedule,
+ *  or the status's explanation). Shared with the tile view. */
+export function subLine(view: AgentView): string {
   const { status, cards, nextSchedule, entry } = view;
   if (status === 'working') {
     const card = cards.find((c) => c.columnId === 'working');
@@ -54,7 +57,7 @@ export function RosterRow({ view, busy, onOpen, onCheckNow, onChat }: {
 }): JSX.Element {
   const { entry, laneCounts, status } = view;
   const sm = statusMeta(status);
-  const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows);
+  const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows, entry.roleKey);
   const action = primaryAction(view);
   const ActionIcon = action.Icon;
   const checked = entry.lastHeartbeatAt ? relativeTime(entry.lastHeartbeatAt) : null;

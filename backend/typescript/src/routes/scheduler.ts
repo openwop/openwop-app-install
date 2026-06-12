@@ -39,15 +39,19 @@ import {
   registerJob,
   listJobs,
   listJobsByRoster,
+  listJobsByUser,
+  personalScheduleId,
   getJob,
   deleteJob,
   updateJob,
   markJobFired,
   singleTick,
   currentTick,
+  type ScheduledJob,
 } from '../host/schedulingService.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { startWorkflowRun } from '../host/runStarter.js';
+import { callerSubject, personalTenantOf, isDurableCaller } from '../host/requestSubject.js';
 
 interface Deps {
   storage: Storage;
@@ -58,9 +62,33 @@ function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
 }
 
+/** ADR 0025 — a caller reaches a job when it belongs to the active workspace OR
+ *  the caller is its personal owner (so a user's personal-tenant schedule is
+ *  reachable/mutable from any active workspace, mirroring `authorizeBoard`).
+ *  Fail-closed: a job the caller neither tenant-owns nor personally owns is a
+ *  uniform 404 to the handler. */
+function jobAccessible(req: Request, job: ScheduledJob): boolean {
+  if (job.tenantId === tenantOf(req)) return true;
+  const subject = callerSubject(req);
+  return !!job.ownerUserId && !!subject && job.ownerUserId === subject;
+}
+
 export function registerSchedulerRoutes(app: Express, deps: Deps): void {
   app.get('/v1/host/sample/scheduler/jobs', async (req, res, next) => {
     try {
+      // ADR 0025 — `?owner=me` lists the caller's OWN user-owned schedules from
+      // their personal tenant (the profile "Schedules" tab), independent of the
+      // active workspace. A non-durable (anon) caller simply has none.
+      if (req.query.owner === 'me') {
+        const subject = callerSubject(req);
+        const personal = personalTenantOf(req);
+        if (!subject || !personal || !isDurableCaller(req)) {
+          res.json({ jobs: [] });
+          return;
+        }
+        res.json({ jobs: await listJobsByUser(personal, subject) });
+        return;
+      }
       const tenantId = tenantOf(req);
       const rosterId = typeof req.query.rosterId === 'string' ? req.query.rosterId : undefined;
       const jobs = rosterId ? await listJobsByRoster(tenantId, rosterId) : await listJobs(tenantId);
@@ -72,18 +100,35 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
 
   app.post('/v1/host/sample/scheduler/jobs', async (req, res, next) => {
     try {
-      const tenantId = tenantOf(req);
       const body = (req.body ?? {}) as {
         jobId?: unknown;
         cronExpr?: unknown;
         workflowId?: unknown;
         firstFireAtMs?: unknown;
+        owner?: unknown;
         rosterId?: unknown;
         agentId?: unknown;
         enabled?: unknown;
         metadata?: unknown;
         timezone?: unknown;
       };
+      // ADR 0025 — `owner: 'me'` creates a USER-owned schedule in the caller's
+      // personal tenant (the profile "Schedules" tab). Durable-only; the owner is
+      // derived from the caller's subject server-side (never client-supplied), so
+      // a caller can only ever own its own schedules. Mutually exclusive with a
+      // roster binding.
+      const ownerMe = body.owner === 'me';
+      let tenantId = tenantOf(req);
+      let ownerUserId: string | undefined;
+      if (ownerMe) {
+        const subject = callerSubject(req);
+        const personal = personalTenantOf(req);
+        if (!subject || !personal || !isDurableCaller(req)) {
+          throw new OpenwopError('unauthenticated', 'A durable signed-in account is required for a personal schedule.', 401, {});
+        }
+        tenantId = personal;
+        ownerUserId = subject;
+      }
       if (typeof body.cronExpr !== 'string' || body.cronExpr.length === 0) {
         throw new OpenwopError(
           'validation_error',
@@ -92,8 +137,26 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
           { field: 'cronExpr' },
         );
       }
-      const jobId =
-        typeof body.jobId === 'string' && body.jobId.length > 0 ? body.jobId : randomUUID();
+      // ADR 0025 — a user-owned schedule with no explicit jobId gets a
+      // DETERMINISTIC id keyed on its content, so a double-submit from the
+      // profile "Schedules" tab is idempotent (the scheduler POST has no
+      // `Idempotency-Key`). If a job with that id already exists for this owner,
+      // return it verbatim (200) — don't re-register, which would reset its
+      // fire history. A genuinely different schedule hashes to a different id.
+      const explicitJobId = typeof body.jobId === 'string' && body.jobId.length > 0;
+      const workflowId = typeof body.workflowId === 'string' ? body.workflowId : undefined;
+      const jobId = explicitJobId
+        ? (body.jobId as string)
+        : ownerMe && ownerUserId
+          ? personalScheduleId(tenantId, ownerUserId, workflowId, body.cronExpr)
+          : randomUUID();
+      if (ownerMe && ownerUserId && !explicitJobId) {
+        const existing = await getJob(jobId);
+        if (existing && existing.ownerUserId === ownerUserId) {
+          res.status(200).json(existing);
+          return;
+        }
+      }
 
       // Optional RFCS/0086 roster binding — scope the schedule to a named
       // agent. The member must live in the caller's tenant (404→400 like the
@@ -101,7 +164,10 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       // for attribution unless the caller passes one explicitly.
       let rosterId: string | undefined;
       let agentId = typeof body.agentId === 'string' ? body.agentId : undefined;
-      if (body.rosterId !== undefined) {
+      if (ownerMe && body.rosterId !== undefined) {
+        throw new OpenwopError('validation_error', 'A personal schedule (`owner: "me"`) cannot also bind a `rosterId`.', 400, { field: 'rosterId' });
+      }
+      if (!ownerMe && body.rosterId !== undefined) {
         if (typeof body.rosterId !== 'string') {
           throw new OpenwopError('validation_error', 'Field `rosterId` MUST be a string when present.', 400, {
             field: 'rosterId',
@@ -122,13 +188,29 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
         tenantId,
         cronExpr: body.cronExpr,
       };
-      if (typeof body.workflowId === 'string') input.workflowId = body.workflowId;
+      if (workflowId !== undefined) input.workflowId = workflowId;
       if (typeof body.firstFireAtMs === 'number') input.firstFireAtMs = body.firstFireAtMs;
       if (rosterId !== undefined) input.rosterId = rosterId;
+      if (ownerUserId !== undefined) input.ownerUserId = ownerUserId;
       if (agentId !== undefined) input.agentId = agentId;
       if (typeof body.enabled === 'boolean') input.enabled = body.enabled;
       if (body.metadata && typeof body.metadata === 'object') {
-        input.metadata = body.metadata as Record<string, unknown>;
+        // SECURITY (ADR 0024 D2) — job metadata is carried verbatim onto every
+        // schedule-fired run, where `actingUserId` keys per-user CREDENTIAL
+        // resolution and the attribution blocks feed the activity index. Both
+        // are server-stamped trust surfaces (POST /v1/runs overrides them the
+        // same way): strip the reserved keys from the client body, then stamp
+        // the acting user from the AUTHENTICATED principal below. Without
+        // this, any tenant member could schedule a run that acts with a
+        // colleague's connections (confused deputy).
+        const RESERVED_JOB_METADATA_KEYS = new Set(['actingUserId', 'heartbeat', 'schedule', 'kanban', 'approval', 'assistantLoop']);
+        input.metadata = Object.fromEntries(
+          Object.entries(body.metadata as Record<string, unknown>).filter(([k]) => !RESERVED_JOB_METADATA_KEYS.has(k)),
+        );
+      }
+      const actingUserId = req.userId ?? req.principal?.principalId;
+      if (actingUserId !== undefined) {
+        input.metadata = { ...(input.metadata ?? {}), actingUserId };
       }
       if (typeof body.timezone === 'string') input.timezone = body.timezone;
 
@@ -153,7 +235,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
   app.patch('/v1/host/sample/scheduler/jobs/:jobId', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
-      if (!job || job.tenantId !== tenantOf(req)) {
+      if (!job || !jobAccessible(req, job)) {
         throw new OpenwopError('not_found', `Scheduled job ${req.params.jobId} not found.`, 404, {
           jobId: req.params.jobId,
         });
@@ -209,7 +291,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
   app.delete('/v1/host/sample/scheduler/jobs/:jobId', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
-      if (!job || job.tenantId !== tenantOf(req)) {
+      if (!job || !jobAccessible(req, job)) {
         throw new OpenwopError(
           'not_found',
           `Scheduled job ${req.params.jobId} not found.`,
@@ -229,7 +311,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
   app.post('/v1/host/sample/scheduler/jobs/:jobId/trigger', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
-      if (!job || job.tenantId !== tenantOf(req)) {
+      if (!job || !jobAccessible(req, job)) {
         throw new OpenwopError(
           'not_found',
           `Scheduled job ${req.params.jobId} not found.`,
@@ -247,8 +329,12 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
         const schedule: Record<string, unknown> = { jobId: job.jobId, source: 'schedule' };
         if (job.rosterId) schedule.rosterId = job.rosterId;
         if (job.agentId) schedule.agentId = job.agentId;
+        if (job.ownerUserId) schedule.ownerUserId = job.ownerUserId;
         runId = await startWorkflowRun(deps, {
-          tenantId: tenantOf(req),
+          // Attribute the run to the JOB's tenant, not the caller's active
+          // workspace — so a personal schedule fires into the owner's personal
+          // tenant even when triggered from another workspace (ADR 0025).
+          tenantId: job.tenantId,
           workflowId: job.workflowId,
           metadata: { schedule },
         });

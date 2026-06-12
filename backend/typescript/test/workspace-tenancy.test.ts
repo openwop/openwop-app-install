@@ -27,6 +27,7 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => { server = app.listen(PORT, res); });
@@ -38,7 +39,7 @@ afterAll(async () => {
 });
 
 interface Res<T = any> { status: number; body: T }
-function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> } {
+function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> } {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
     const res = await fetch(`${BASE}${path}`, {
@@ -56,12 +57,14 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
+  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
 let n = 0;
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam.
 async function signup(c: ReturnType<typeof client>): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email: `ws-${Date.now()}-${n++}@acme.test`, password: 'password123' });
+  const r = await c.post('/v1/host/sample/test/login', { email: `ws-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -177,6 +180,54 @@ describe('ADR 0015 — workspace-as-tenant', () => {
     const after = await member.get('/v1/host/sample/me/workspaces');
     expect(after.body.active).not.toBe(ws);
     expect(after.body.active).toBe(after.body.personal);
+  });
+
+  // ADR 0015 ≥1-owner invariant: the last owner of a shared workspace cannot be
+  // removed or demoted — the workspace would become unadministrable.
+  it('refuses to remove or demote the last owner of a shared workspace (409)', async () => {
+    const owner = client();
+    await signup(owner);
+    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'SoloOwnerCo' })).body.workspaceId;
+    await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+
+    // The owner's own member record (the only owner).
+    const members = (await owner.get(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`)).body.members as Array<{ memberId: string; roles: string[] }>;
+    const ownerMember = members.find((m) => m.roles.includes('owner'))!;
+
+    // Demoting the last owner to editor is blocked.
+    const patch = await owner.patch(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(ownerMember.memberId)}`, { roles: ['editor'] });
+    expect(patch.status, JSON.stringify(patch.body)).toBe(409);
+    expect(patch.body.error).toBe('conflict');
+
+    // Deleting the last owner is blocked too.
+    const del = await owner.del(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(ownerMember.memberId)}`);
+    expect(del.status, JSON.stringify(del.body)).toBe(409);
+  });
+
+  // The escape hatch: transfer ownership to another member, THEN the original
+  // owner can step down (or be removed) without tripping the last-owner guard.
+  it('transfer-ownership grants owner to a member and unblocks the original stepping down', async () => {
+    const owner = client();
+    await signup(owner);
+    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'HandoffCo' })).body.workspaceId;
+    await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+
+    // Add member B (editor).
+    const memberB = client();
+    const b = await signup(memberB);
+    const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'B', subject: b.userId, roles: ['editor'] });
+    const bMemberId = add.body.memberId as string;
+
+    // Transfer ownership to B with stepDown — owner relinquishes in the same call.
+    const transfer = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(bMemberId)}/transfer-ownership`, { stepDown: true });
+    expect(transfer.status, JSON.stringify(transfer.body)).toBe(200);
+    expect(transfer.body.transferredTo).toBe(bMemberId);
+    expect(transfer.body.steppedDown).toBeTruthy();
+
+    // B is now an owner; there is exactly one owner (the original stepped down).
+    const after = (await owner.get(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`)).body.members as Array<{ memberId: string; roles: string[] }>;
+    expect(after.find((m) => m.memberId === bMemberId)!.roles).toContain('owner');
+    expect(after.filter((m) => m.roles.includes('owner')).length).toBe(1);
   });
 
   // Review fix #3 — concurrent first-access converges to exactly ONE personal

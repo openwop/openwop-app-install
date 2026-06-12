@@ -6,6 +6,9 @@
 
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 import { blobToBase64 } from '../../chat/hooks/useAudioRecorder.js';
+import type { AgentActivityItem } from '../../agents/rosterClient.js';
+
+export type { AgentActivityItem };
 
 export type AvailabilityStatus = 'available' | 'busy' | 'away';
 
@@ -40,6 +43,10 @@ export interface Profile {
   equipment: string[];
   availability?: ProfileAvailability;
   interests: string[];
+  /** ADR 0025 — the user's assigned-workflow portfolio (workflow ids). */
+  workflows: string[];
+  /** Roster member ids pinned to the sidebar (ADR 0023). */
+  pinnedAgentIds: string[];
   completeness: number;
   emailVerified?: boolean;
   displayName?: string;
@@ -103,6 +110,27 @@ export async function getProfile(userId: string): Promise<Profile> {
 export async function setMySkills(skills: { name: string; proficiency: number }[]): Promise<Profile> {
   const res = await fetch(`${base}/me/skills`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ skills }) }));
   return asJson<Profile>(res, 'setMySkills');
+}
+
+/** Replace the caller's assigned-workflow portfolio (ADR 0025). */
+/** Pin or unpin an agent to the caller's sidebar (ADR 0023). */
+export async function setAgentPinned(rosterId: string, pinned: boolean): Promise<Profile> {
+  const res = await fetch(`${base}/me/pinned-agents/${encodeURIComponent(rosterId)}`, fetchOpts({ method: pinned ? 'PUT' : 'DELETE', headers: authedHeaders() }));
+  return asJson<Profile>(res, 'setAgentPinned');
+}
+
+export async function setMyWorkflows(workflows: string[]): Promise<Profile> {
+  const res = await fetch(`${base}/me/workflows`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ workflows }) }));
+  return asJson<Profile>(res, 'setMyWorkflows');
+}
+
+/** The caller's own run-activity feed (ADR 0025) — runs their personal board /
+ *  schedule fired on their behalf, newest first. The user-side mirror of an
+ *  agent's activity feed. `truncated` ⇒ the scan window was hit. */
+export async function getMyActivity(): Promise<{ items: AgentActivityItem[]; truncated: boolean }> {
+  const res = await fetch(`${base}/me/activity`, fetchOpts({ headers: authedHeaders() }));
+  const body = await asJson<{ items: AgentActivityItem[]; truncated?: boolean }>(res, 'getMyActivity');
+  return { items: body.items, truncated: body.truncated ?? false };
 }
 
 export async function setAvatar(token: string): Promise<Profile> {

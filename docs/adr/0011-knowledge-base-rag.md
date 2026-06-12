@@ -1,6 +1,6 @@
 # ADR 0011 — Knowledge Base / RAG
 
-**Status:** Accepted (Phases 1–3 sequenced)
+**Status:** implemented (Phases 1–3 shipped — `src/features/kb/`, `test/kb-agent.test.ts`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC), ADR 0007 (Media Library — source documents)

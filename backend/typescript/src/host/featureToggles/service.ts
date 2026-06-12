@@ -21,22 +21,49 @@ import type { ResolvedAssignment, ToggleConfig, ToggleSubject } from './types.js
 /** Durable store of admin-saved toggle configs, keyed by toggle id. */
 const store = new DurableCollection<ToggleConfig>('feature-toggle', (c) => c.id);
 
-/** The effective config for one toggle: stored override, else feature default. */
+/** The effective config for one toggle: stored override layered over the
+ *  feature-declared default. A stored override only applies while the feature
+ *  STILL declares a default — once a feature GRADUATES (its `toggleDefault` is
+ *  removed: users/connections/assistant/profiles became always-on substrate), a
+ *  lingering stored row is ORPHANED and must not resurface as a live toggle
+ *  (it would show in admin and still resolve). Returns null then. */
 export async function getEffectiveConfig(id: string): Promise<ToggleConfig | null> {
-  const stored = await store.get(id);
-  if (stored) return stored;
-  return getToggleDefault(id);
+  const def = getToggleDefault(id);
+  if (!def) return null; // graduated / removed feature — ignore any orphaned override
+  return (await store.get(id)) ?? def;
 }
 
 /**
- * Every effective config: the union of declared defaults and stored overrides,
- * with stored winning per id. Sorted by id for a stable admin-screen order.
+ * Every effective config: the declared defaults, with a stored override winning
+ * per id. A stored row whose feature has GRADUATED (no declared default) is
+ * orphaned and excluded — `pruneOrphanedConfigs()` deletes those at boot, but the
+ * filter is the safety net so a graduated feature can never reappear in admin.
+ * Sorted by id for a stable admin-screen order.
  */
 export async function listEffectiveConfigs(): Promise<ToggleConfig[]> {
   const byId = new Map<string, ToggleConfig>();
   for (const d of listToggleDefaults()) byId.set(d.id, d);
-  for (const s of await store.list()) byId.set(s.id, s);
+  for (const s of await store.list()) if (byId.has(s.id)) byId.set(s.id, s);
   return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
+}
+
+/**
+ * Delete stored toggle configs whose feature no longer declares a default (it
+ * GRADUATED to always-on, or was removed). Called at boot — without it, the
+ * admin-saved row for a since-graduated feature lingers in the store forever
+ * (e.g. the `assistant`/`profiles` rows after their toggles were removed).
+ * Idempotent; returns the number pruned. */
+export async function pruneOrphanedConfigs(): Promise<number> {
+  const known = new Set(listToggleDefaults().map((d) => d.id));
+  const stored = await store.list();
+  let pruned = 0;
+  for (const s of stored) {
+    if (!known.has(s.id)) {
+      await store.delete(s.id);
+      pruned += 1;
+    }
+  }
+  return pruned;
 }
 
 /** Persist an admin-saved config (upsert). Caller validates first. */
@@ -44,6 +71,22 @@ export async function saveConfig(config: ToggleConfig, savedBy: string): Promise
   const next: ToggleConfig = { ...config, updatedAt: new Date().toISOString(), updatedBy: savedBy };
   await store.put(next);
   return next;
+}
+
+/**
+ * ADR 0027: delete any durable override for a toggle id that has been RETIRED
+ * (a feature that became always-on and dropped its `toggleDefault`). Without
+ * this, `getEffectiveConfig` would keep returning the stored override (store
+ * wins over default) — leaving `resolveOne` returning stale state and a ghost
+ * row in the admin panel (`listEffectiveConfigs` unions store over defaults).
+ * Idempotent; returns the ids whose lingering override was removed.
+ */
+export async function retireToggleOverrides(ids: readonly string[]): Promise<string[]> {
+  const removed: string[] = [];
+  for (const id of ids) {
+    if (await store.delete(id)) removed.push(id);
+  }
+  return removed;
 }
 
 /** The unit id a toggle buckets on for this subject (ADR §3.3). */

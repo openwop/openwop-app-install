@@ -75,6 +75,10 @@ declare module 'express-serve-static-core' {
      *  personal tenant (a single-principal scope by construction), while shared
      *  workspaces are strictly membership-derived. */
     personalTenant?: string;
+    /** Raw request body bytes, captured by a scoped `express.json({ verify })`
+     *  for surfaces that must verify a provider HMAC over the exact payload
+     *  (ADR 0024 inbound webhooks). Undefined everywhere else. */
+    rawBody?: Buffer;
   }
 }
 
@@ -85,6 +89,23 @@ const PUBLIC_PATH_PREFIXES = [
   '/v1/openapi.json',
   '/v1/packs',
   '/v1/interrupts',
+  // Production SAML SSO (ADR 0002 / RFC 0050): the SP-initiated redirect, the IdP's
+  // browser-driven ACS form-POST, and the SP metadata are all PRE-AUTH (the user
+  // has no session yet — the ACS is what MINTS it). The assertion's XML signature
+  // is the credential, validated by `host/auth/samlSso`. 404s when SAML is unconfigured.
+  '/v1/host/sample/auth/saml/sso',
+  // SCIM 2.0 provisioning (RFC 0050 §B): the IdP's SCIM client (Okta / Azure AD)
+  // POSTs to /scim/v2/{Users,Groups} with the IdP SCIM bearer — NOT a session
+  // cookie or an OPENWOP_API_KEY. Each route does its OWN constant-time bearer
+  // check against OPENWOP_SCIM_BEARER (and 404s when unset), so it is the sole
+  // gate — like the SAML ACS + /v1/interrupts/{token}, the credential in the
+  // request IS the auth. It MUST bypass the global layer: a hardened host
+  // (OPENWOP_AUTH_ENFORCE_BEARER / _DISABLE_COOKIES) would otherwise 401 the
+  // unrecognized SCIM bearer before the route runs, making SCIM unreachable for
+  // exactly the production postures that use it. The conformance seam
+  // (/v1/host/sample/auth/scim/provision) is NOT here — it runs under the
+  // caller's auth context, so it stays globally gated.
+  '/scim/v2',
   // RFC 0055 §C media-asset serving: GET /v1/host/sample/assets/{token} is
   // token-authed (the 32-byte capability token is the credential, like
   // /v1/interrupts/{token}), so embeddable <img src> URLs work without a
@@ -112,6 +133,10 @@ const PUBLIC_PATH_PREFIXES = [
   // SEO-write surface lives under /v1/host/sample/publishing/* and stays
   // authorizeOrgScope-gated, NOT under this prefix.
   '/v1/host/sample/public',
+  // ADR 0027 Site config: the PUBLIC front-page pointer the anonymous SPA reads
+  // at '/' (GET /v1/host/sample/public-site-config → { enabled, orgId, slug }).
+  // Exposes only already-public ids; the superadmin WRITE is /v1/host/sample/site-config.
+  '/v1/host/sample/public-site-config',
   // ADR 0013 Sharing: the PUBLIC share-link resolve surface
   // (GET /v1/host/sample/shared/{token}[/card]). Unauthenticated by design — the
   // 32-byte base64url token IS the credential (like /v1/interrupts/{token} and
@@ -121,6 +146,37 @@ const PUBLIC_PATH_PREFIXES = [
   // authorizeOrgScope-gated — note `shared` ≠ `sharing`, so this prefix does NOT
   // match it.
   '/v1/host/sample/shared',
+  // Forms (ADR 0017) — the PUBLIC render + submit surface
+  // (GET /v1/host/sample/public-forms/{formId}, POST …/submit). Unauthenticated
+  // by design — a published form is public-by-intent. Tenant comes from the form,
+  // the surface is gated on the form-tenant's `forms` toggle, and unpublished /
+  // missing forms 404. The management surface lives under /v1/host/sample/forms/*
+  // and stays authorizeOrgScope-gated — `public-forms` ≠ `forms`, so this prefix
+  // does NOT match it.
+  '/v1/host/sample/public-forms',
+  // Consent (ADR 0020) — the PUBLIC record/read surface
+  // (POST /v1/host/sample/public-consent/{orgId}, GET …/{orgId}/{subjectKey}).
+  // Unauthenticated by design — a visitor records consent before any auth. Tenant
+  // comes from the org, gated on the org-tenant's `consent` toggle. The management
+  // surface lives under /v1/host/sample/consent/* and stays authorizeOrgScope-gated
+  // — `public-consent` ≠ `consent`, so this prefix does NOT match it.
+  '/v1/host/sample/public-consent',
+  // Analytics (ADR 0018) — the PUBLIC beacon
+  // (POST /v1/host/sample/public-analytics/{orgId}/collect). Unauthenticated by
+  // design — a visitor's page/event hit. Tenant comes from the org, gated on the
+  // org-tenant's `analytics` toggle AND consent (ADR 0020). The reporting surface
+  // lives under /v1/host/sample/analytics/* and stays authorizeOrgScope-gated —
+  // `public-analytics` ≠ `analytics`, so this prefix does NOT match it.
+  '/v1/host/sample/public-analytics',
+  // Connections inbound webhooks (ADR 0024 §6) — the PUBLIC provider-push ingest
+  // (POST /v1/host/sample/connections-inbound/{connectionId}). Unauthenticated by
+  // design — the provider HMAC signature IS the credential (verified against the
+  // connection's stored signing secret); tenant comes from the inbound config.
+  // The authoring surface lives under /v1/host/sample/connections/* and stays
+  // auth + admin-gated (org-shared connections need `host:connections:manage`;
+  // it is no longer feature-toggle-gated — ADR 0024 § Correction) —
+  // `connections-inbound` ≠ `connections`, so this prefix does NOT match it.
+  '/v1/host/sample/connections-inbound',
 ];
 
 // Firebase Hosting strips every cookie except `__session` from
@@ -252,7 +308,7 @@ function mintAnonSession(): SessionPayload {
  */
 export function issueUserSession(
   res: import('express').Response,
-  opts: { userId: string; tenantId: string; personalTenant?: string },
+  opts: { userId: string; tenantId: string; personalTenant?: string; subject?: string },
 ): void {
   const now = Math.floor(Date.now() / 1000);
   const session: SessionPayload = {
@@ -260,6 +316,10 @@ export function issueUserSession(
     tenantId: opts.tenantId,
     tier: 'user',
     userId: opts.userId,
+    // OIDC bind (ADR 0003 Phase 4a) carries the `oidc:<sub>` so a follow-up bearer
+    // request matches this cookie and resolves the bound `user:<userId>`. Absent
+    // for password login (no bearer to match against).
+    ...(opts.subject ? { subject: opts.subject } : {}),
     // The caller's intrinsic tenant — defaults to the active tenant at login
     // (their personal workspace), preserved verbatim across a later switch.
     personalTenant: opts.personalTenant ?? opts.tenantId,
@@ -497,6 +557,21 @@ export function authMiddleware(): RequestHandler {
           // stable, opaque RBAC subject (RFC 0048: non-PII — a Firebase UID).
           const personalTenant = tenantIdFromOidc(claims);
           const subject = `oidc:${claims.sub}`;
+          // ADR 0003 Phase 4a: if a prior OIDC bind issued a user-tier cookie
+          // carrying the durable `userId` for THIS caller, the canonical RBAC
+          // subject is `user:<userId>` (not the transient `oidc:<sub>`). Read it
+          // from the cookie only — no store touch on the hot path (ADR 0015 §0).
+          // Match on `personalTenant` (deterministic from the bearer, set by
+          // EVERY user-tier issuer) — NOT `subject`, which a workspace switch's
+          // `issueUserSession` drops, which would otherwise silently un-bind the
+          // caller after a switch and bounce them out of shared workspaces.
+          const boundUserId =
+            cookieSession?.tier === 'user'
+            && cookieSession.personalTenant === personalTenant
+            && typeof cookieSession.userId === 'string'
+              ? cookieSession.userId
+              : undefined;
+          const effectiveSubject = boundUserId ?? subject;
           // The ACTIVE workspace defaults to the personal tenant, but honors a
           // previously-switched workspace recorded on a matching user-tier cookie.
           // Defense-in-depth (ADR 0015): when that workspace is SHARED (≠ the
@@ -508,19 +583,24 @@ export function authMiddleware(): RequestHandler {
           // closed, so this is belt-and-suspenders.
           const requested =
             cookieSession?.tier === 'user'
-            && cookieSession.subject === subject
+            && cookieSession.personalTenant === personalTenant
             && typeof cookieSession.tenantId === 'string'
               ? cookieSession.tenantId
               : undefined;
           let active = personalTenant;
           if (requested && requested !== personalTenant) {
-            if (await isWorkspaceMember(subject, requested)) active = requested;
+            // Membership keys on the CANONICAL subject — after an OIDC bind the
+            // member rows were re-keyed `oidc:<sub>` → `user:<userId>`.
+            if (await isWorkspaceMember(effectiveSubject, requested)) active = requested;
           } else if (requested) {
             active = requested;
           }
           req.personalTenant = personalTenant;
           req.tenantId = active;
-          req.principal = { principalId: subject, tenants: [active], token: bearerToken };
+          // Bound (post-bind) callers present the stable `user:<userId>` principal;
+          // unbound OIDC callers stay `oidc:<sub>` (backward-compatible).
+          if (boundUserId) req.userId = boundUserId;
+          req.principal = { principalId: effectiveSubject, tenants: [active], token: bearerToken };
           noteTenantActivity(active);
           // Promote / refresh the cookie when it doesn't already encode this
           // (subject, active-workspace) at user-tier. Without this, a request
@@ -531,12 +611,16 @@ export function authMiddleware(): RequestHandler {
             && (!cookieSession
               || cookieSession.tier !== 'user'
               || cookieSession.subject !== subject
-              || cookieSession.tenantId !== active)
+              || cookieSession.tenantId !== active
+              || cookieSession.userId !== boundUserId)
           ) {
             const sid = base64urlEncode(randomBytes(18));
             const now = Math.floor(Date.now() / 1000);
             const upgraded: SessionPayload = {
               sid, tenantId: active, tier: 'user', subject, personalTenant,
+              // Preserve the bound durable userId across re-mints (e.g. a switch),
+              // else the canonical subject would silently revert to oidc:<sub>.
+              ...(boundUserId ? { userId: boundUserId } : {}),
               iat: now, exp: now + COOKIE_TTL_SECONDS,
             };
             setSessionCookie(res, signSession(upgraded));

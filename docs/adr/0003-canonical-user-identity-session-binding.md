@@ -1,6 +1,6 @@
 # ADR 0003 — Canonical user identity & session binding
 
-**Status:** Accepted (Phases 1–3 implemented; 4 sequenced with ADR 0006/RBAC)
+**Status:** Accepted (Phases 1–3 implemented; **Phase 4a** OIDC-bind + **Phase 4c** canonical personal tenant + anon-sandbox adopt-migration **implemented 2026-06-11** — fixes the password-stranding bug, closes ADR 0015's "anon→personal migration" open question; **Phases 4b** account-linking + **4d** one-shot subject re-key remain designed/pending. See "Phase 4 design" + the 4c implementation correction below.)
 **Date:** 2026-06-08
 **Refines:** ADR 0002 (Users & Authentication) — closes its deferred identity seam.
 **Unblocks / prerequisite of:** ADR 0006 (Roles & Permissions / RBAC) — RBAC keys
@@ -120,11 +120,117 @@ Each phase is additive and gated. The **bound-session path is new** (nothing set
   routes are removed (the session-based `/mfa/*` now work for password users).
   *Gate:* MFA enrolled via `/mfa/*` is honored by the `/login` gate; no
   PII-prefixed principal in the audit sink (invariant test).
-- **Phase 4 (with ADR 0006) — One subject everywhere.** OIDC bearer + all
-  product surfaces resolve the RBAC subject as `User.userId`; auth-method strings
-  become `User.linkedIds[]`. *Gate:* ADR 0006 opens with "subject = `User.userId`".
+- **Phase 4 — One subject AND one personal tenant everywhere (designed 2026-06-10;
+  detailed in "Phase 4 design" below).** OIDC bearer + every surface resolve the RBAC
+  subject as `User.userId`; auth-method strings become `User.linkedIds[]`; and each
+  `User` gets ONE canonical personal tenant `user:<userId>`. This closes the
+  password-stranding gap Phases 1–3 left (a password account is created in the ephemeral
+  `anon:<sid>` tenant and has no durable home — see the correction note) and subsumes
+  ADR 0015's "anon→personal migration" + "account linking" open questions and TODO
+  item 3's last two sub-items. *Gate:* the canonical subject + tenant round-trip for
+  password AND OIDC; the subject re-key leaves run ownership intact (verified: runs are
+  tenant-owned, no subject stamp).
 
-## Replay / fork + compatibility summary
+## Phase 4 design (2026-06-10) — canonical subject + personal tenant + account linking
+
+> **Correction note (not a rewrite of Phases 1–3).** Phases 1–3 canonicalized the
+> **subject** (`user:<userId>`) but said nothing about the **personal tenant**. A
+> `/plan` + `/architect` pass (2026-06-10) verifying the two ADR 0015 deferred items
+> found the gap: the personal tenant is **3-way fragmented** — `anon:<sid>` (anon),
+> `user:<sha256(iss:sub)>` (OIDC, `auth.ts:498`), and **the ephemeral anon tenant the
+> password user happened to sign up in** (`credentialsService.ts:132` — `User.tenantId =
+> input.tenantId = tenantOf(req)`). Verified consequence: a **password account has no
+> durable home** — `login` resolves it via `getUserByPrincipal(tenantId, …)` keyed on
+> the *current* tenant (`authRoutes.ts:111`), with no global email→user lookup, so once
+> the `anon:<sid>` session resets (24h / new device) the account is unreachable. In the
+> `enforceBearer` posture a no-session signup is `401`'d outright (`auth.ts:609`). So
+> Phase 4 must canonicalize the **tenant**, not just the subject.
+
+### Decision
+
+1. **Canonical subject = `user:<userId>` everywhere** (the original Phase 4). The OIDC
+   bearer path upserts a durable `User` and sets `req.userId`, so its subject stops being
+   the transient `oidc:<sub>`. Auth-method strings (`password:<email>`, `oidc:<sub>`,
+   `saml:<NameID>`, `scim:<userName>`) move to **`User.linkedIds[]`**.
+2. **Canonical personal tenant = `user:<userId>`** for BOTH auth methods (Option (ii)
+   from the architect review — *adopt*, don't *fork-into*). A password signup **adopts its
+   anon sandbox** by re-keying `anon:<sid> → user:<userId>`; an OIDC first-login re-keys
+   its `user:<sha256>` data to `user:<userId>` once. One human → one durable sandbox.
+3. **Account linking is explicit + verified-email-gated.** `POST …/users/me/link` binds a
+   second authenticated principal to the current `User` (adds to `linkedIds[]`) **only**
+   when the email is verified on both sides — auto-linking on an unverified email is an
+   account-takeover vector (rejected).
+
+### Sub-phases
+
+- **4a — Durable User on OIDC.** In `auth.ts`'s OIDC branch, upsert a `User` keyed by
+  `oidc:<sub>` (deterministic — no per-request store scan, mirroring the Phase 0 cost
+  rule) and set `req.userId` → subject becomes `user:<userId>`. *Gate:* an OIDC bearer
+  resolves a stable `user:<userId>` across requests; existing OIDC tests unaffected.
+- **4b — `linkedIds[]` + explicit linking.** Add `User.linkedIds: string[]`; resolve any
+  `linkedId → userId`; `POST …/users/me/link` (verified-email guard). *Gate:* password+OIDC
+  for one human collapse to one `userId`; an unverified link is rejected (`403`).
+- **4c — Canonical personal tenant + adopt-migration.** Re-key the personal tenant to
+  `user:<userId>` and migrate the source sandbox. **Completes `reassignTenant`** to cover
+  *every* tenant-scoped store the source can hold — not just `runs`+`workflows`
+  (`sqlite/index.ts:910`): `events`/`interrupts` (cascade), `byok_tenant_secrets`,
+  `notifications`, `push_subscriptions`, and the host-ext KV rows (accessControl
+  orgs/members, feature-toggle overrides, chat, messaging, `user_agents`). **Two adapters
+  (`sqlite` + `postgres`) must stay in lockstep** — there is no separate memory adapter.
+  **Deterministic-key hazard (architect Finding 3):** the personal-workspace owner member
+  uses `mbr-<hash(tenantId, subject)>` (`accessControlService.ts` `personalOwnerMemberId`),
+  so a naïve `UPDATE … SET tenant_id` collides with the destination's seeded owner — the
+  migration MUST recompute that id (delete-then-reinsert), not bulk-UPDATE. *Gate:* a
+  seeded source tenant moves **all** stores and leaves the source empty; the
+  personal-owner member is single (no duplicate).
+
+  > **Implementation correction (2026-06-11, PR #124 + Phase B).** The shipped 4c refined
+  > three points of the design above:
+  > 1. **Coverage is by schema INTROSPECTION, not a hand-kept list.** `reassignTenant`
+  >    discovers every `tenant_id` table from the live schema (sqlite `pragma_table_info` /
+  >    postgres `information_schema`), so a future tenant table is covered automatically and
+  >    the sqlite/postgres secrets-table divergence (`byok_tenant_secrets` vs `byok_secrets`)
+  >    resolves itself. See `src/storage/tenantMigration.ts`.
+  > 2. **The deterministic-key hazard is AVOIDED, not patched.** Rather than delete-then-
+  >    reinsert the personal-owner member, the migration does **not** move the access-control
+  >    scaffolding at all (the personal-workspace org `orgId == tenant` + owner member, whose
+  >    row keys encode the tenant); the destination re-seeds canonical scaffolding via
+  >    `ensurePersonalWorkspace`. Only *content* (runs, workflows, host-ext CRM/kanban/KB…,
+  >    re-keyed by JSON `tenantId`/`orgId`) migrates — in **one transaction** (atomic +
+  >    idempotent), not the two-phase the design implied.
+  > 3. **The password home tenant is EMAIL-derived, not `user:<userId>`.** `userId` is
+  >    `hash(tenantId:principalId)`, anon-derived for password and thus unstable; the stable
+  >    home is `personalTenantForPassword(email) = user:<hash(password:email)>` (mirrors
+  >    `tenantIdFromOidc`). `signup`/`login` both resolve it from the email, fixing the
+  >    stranding bug. Signup adopts the anon sandbox into it; a signup made while already in a
+  >    durable tenant (the SSO/SCIM in-tenant teammate-provisioning shape) lands in that
+  >    tenant so org collaborators stay co-tenant.
+  >
+  > **Superseded note (ADR 0026, 2026-06-11).** Point 3 is now moot: the host password
+  > system was removed in favor of Firebase email/password, so `personalTenantForPassword`
+  > and the password `signup`/`login` are gone. Email/password users are Firebase OIDC and
+  > land in the OIDC home (`tenantIdFromOidc`) like any social login — the stranding class
+  > no longer exists. The anon-sandbox adopt-migration (the rest of 4c) is unchanged and now
+  > runs for ALL Firebase logins via `/migrate-tenant`. Phase 4b (account linking) is
+  > likewise moot — Firebase links providers natively (ADR 0026).
+- **4d — One-shot subject re-key.** A transactional, maintenance-gated migration rewrites
+  every `OrgMember.subject` from a legacy `oidc:<sub>`/`password:<email>` to the canonical
+  `user:<userId>`. It re-keys **only the RBAC subject, never the run's owning tenant** —
+  runs are tenant-owned with no subject stamp, so this is replay/fork-safe (RFC 0048 §D).
+  The `user:<sha256>`→`user:<userId>` **tenant** re-key (4c) *is* run-bearing, but prod has
+  **zero durable `User` records today** (ADR 0015 Context), so the existing-data migration
+  is near-empty and the replay risk is theoretical — still, do 4c transactionally and
+  before any traffic depends on the new keying. *Gate:* `isWorkspaceMember(user:<id>)`
+  resolves post-rekey; a pre-existing run's stamped owner is unchanged.
+
+### Sequencing & risk
+
+4a → 4b → 4c → 4d. Independent of, but unblocks the premise of, ADR 0006 ("subject =
+`User.userId`"). No wire change, no RFC (host id-minting policy only — same governance
+basis as Phases 1–3). The one expensive mistake is 4c's tenant re-key on a populated host;
+gated by the near-empty-prod fact + the transactional/maintenance-window constraint.
+
+
 
 - **Compatibility class:** Additive / forward-compatible. The RFC 0048 owner
   *shape* is unchanged; only the host's principal-id *minting policy* changes, for
@@ -135,11 +241,15 @@ Each phase is additive and gated. The **bound-session path is new** (nothing set
 
 ## Open questions
 
-- [ ] **Linked-id model:** does `User` grow an explicit `linkedIds[]`, or do we
-  keep one principal per `User` and resolve by `userId` from the session? (Phase 4
-  / ADR 0006 — pick when a single user legitimately has two auth methods.)
-- [ ] **OIDC bearer remap timing:** Phase 4 vs. sooner if a non-SPA OIDC client
-  starts creating runs before RBAC lands.
+- [x] **Linked-id model:** RESOLVED (Phase 4 design) — `User` grows an explicit
+  `linkedIds[]`; linking is an explicit, verified-email-gated action, not auto-merge.
+- [x] **OIDC bearer remap timing:** RESOLVED — Phase 4 sub-phase 4a (durable User on the
+  OIDC bearer path). No longer waits on RBAC; it is the prerequisite ADR 0006 assumes.
+- [x] **Canonical personal tenant** (NEW, raised by the 2026-06-10 review): RESOLVED —
+  one `user:<userId>` personal tenant per `User`, adopting the source sandbox via the
+  completed `reassignTenant` (Phase 4 sub-phase 4c). Closes the password-stranding gap +
+  ADR 0015's "anon→personal migration" open question.
 - [ ] **`/me` / `/users` response PII:** the `User` object still exposes its
   stored `principalId` (`password:<email>`). Acceptable for self/admin views;
-  revisit if those responses cross a tenant boundary.
+  revisit if those responses cross a tenant boundary. *(Phase 4 moves these to
+  `linkedIds[]` — keep the same self/admin-only exposure rule.)*

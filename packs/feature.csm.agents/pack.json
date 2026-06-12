@@ -1,0 +1,29 @@
+{
+  "name": "feature.csm.agents",
+  "version": "1.0.0",
+  "description": "CSM feature agent pack (ADR 0014) — a manifest agent whose tools are feature.csm.nodes over the ctx.features.csm surface. Reads at-risk accounts and recommends save-plays; tool-allowlisted to the CSM feature surface only, and READ-ONLY (it does not auto-mutate health). Mirrors feature.kb.agents.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "csm", "customer-success", "agent", "health"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.csm.agents.health-insights",
+      "persona": "RESEARCH",
+      "label": "CSM Health Insights",
+      "description": "Surfaces at-risk customer-success accounts and recommends save-plays, grounded in the org's CSM accounts via feature.csm.nodes.health-read over ctx.features.csm. Read-only: it reports, it does not change health scores.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/csm-health.md",
+      "toolAllowlist": [
+        "openwop:feature.csm.nodes.health-read"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

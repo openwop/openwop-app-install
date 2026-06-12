@@ -40,9 +40,12 @@ import { registerAccountRoutes } from './account.js';
 import { registerMemoryRoutes } from './memory.js';
 import { registerMemoryCompactionSeamRoutes } from './memoryCompactionSeam.js';
 import { registerWorkspaceRoutes } from './workspace.js';
+import { registerConnectionPackSeamRoutes } from './connectionPackSeam.js';
 import { registerMediaAssetRoutes } from './mediaAssets.js';
 import { registerTestSeamRoutes } from './testSeam.js';
+import { registerAuthTestSeamRoutes } from './authTestSeam.js';
 import { registerSamlAuthRoutes } from './authSaml.js';
+import { registerSamlSsoRoutes } from './authSamlSso.js';
 import { registerScimAuthRoutes } from './authScim.js';
 import { registerMcpServerRoutes } from './mcp.js';
 import { registerAdminRoutes } from './admin.js';
@@ -62,12 +65,16 @@ import { registerWorkspaceTenancyRoutes } from './workspaces.js';
 import { registerKanbanRoutes } from './kanban.js';
 import { registerAgentOpsRoutes } from './agentOps.js';
 import { registerApprovalRoutes } from './approvals.js';
+import { registerGovernanceRoutes } from './governance.js';
 import { registerTriggerBridgeRoutes } from './triggerBridge.js';
 import { registerMessagingRoutes } from './messaging.js';
 import { createSelfHttpBridge } from '../messaging/bridge.js';
 import { resolveNotifyDelivererFromEnv } from '../messaging/notifyDeliverer.js';
 import { initHostExtPersistence } from '../host/hostExtPersistence.js';
 import { registerFeatureToggleRoutes } from './featureToggles.js';
+import { registerSiteConfigRoutes } from './siteConfig.js';
+import { registerSitePageRoutes } from './sitePage.js';
+import { ensureSystemSite } from '../host/systemSite.js';
 import { registerBackendFeatures } from '../features/index.js';
 
 const log = createLogger('routes.registerAll');
@@ -114,9 +121,12 @@ const ROUTE_MODULES: RouteModule[] = [
   { name: 'memory', register: ({ app }) => registerMemoryRoutes(app) },
   { name: 'memoryCompactionSeam', register: ({ app }) => registerMemoryCompactionSeamRoutes(app) },
   { name: 'workspace', register: ({ app }) => registerWorkspaceRoutes(app) },
+  { name: 'connectionPackSeam', register: ({ app }) => registerConnectionPackSeamRoutes(app) },
   { name: 'mediaAssets', register: ({ app }) => registerMediaAssetRoutes(app) },
   { name: 'testSeam', register: ({ app, storage }) => registerTestSeamRoutes(app, { storage }) },
+  { name: 'authTestSeam', register: ({ app }) => registerAuthTestSeamRoutes(app) },
   { name: 'authSaml', register: ({ app }) => registerSamlAuthRoutes(app) },
+  { name: 'authSamlSso', register: ({ app }) => registerSamlSsoRoutes(app) },
   { name: 'authScim', register: ({ app }) => registerScimAuthRoutes(app) },
   { name: 'mcp', register: ({ app, storage, hostSuite }) => registerMcpServerRoutes(app, { storage, hostSuite }) },
   { name: 'admin', register: ({ app }) => registerAdminRoutes(app) },
@@ -155,6 +165,11 @@ const ROUTE_MODULES: RouteModule[] = [
   // host-ext kv, so it must mount AFTER hostExt:persistence is wired.
   // See docs/adr/0001-feature-first-package-architecture.md §3.
   { name: 'featureToggles', register: ({ app }) => registerFeatureToggleRoutes(app) },
+  // Site config (ADR 0027) — runtime, superadmin-managed public front-page pointer.
+  { name: 'siteConfig', register: ({ app }) => registerSiteConfigRoutes(app) },
+  // System home page (ADR 0027) — host-level, superadmin-edited homepage over the
+  // reserved system site org (cross-tenant by host authority, not org RBAC).
+  { name: 'sitePage', register: ({ app }) => registerSitePageRoutes(app) },
   { name: 'scheduler', register: ({ app, storage, hostSuite }) => registerSchedulerRoutes(app, { storage, hostSuite }) },
   // Standing agent roster — RFCS/0086 reference impl (named agent instances +
   // workflow portfolios). Registered before Kanban so a board can bind to a
@@ -182,6 +197,10 @@ const ROUTE_MODULES: RouteModule[] = [
   // Approval inbox — the human side of "agents propose, humans dispose". After
   // agentOps since it resolves proposals agentOps creates.
   { name: 'approvals', register: ({ app, storage, hostSuite }) => registerApprovalRoutes(app, { storage, hostSuite }) },
+  // Governance administration (ADR 0028) — superadmin policy + the audit read
+  // view. The policy CONFIGURES existing seams (connections allowlist,
+  // assistant action policy); enforcement never lives here.
+  { name: 'governance', register: ({ app, storage }) => registerGovernanceRoutes(app, { storage }) },
   // RFC 0083 durable trigger bridge — the deferred reference durable-delivery
   // (subscription state machine + dedup/retry/dead-letter + the read surface).
   // The Kanban card→run firing routes through it.
@@ -231,4 +250,8 @@ export function registerAllRoutes(deps: RouteDeps): void {
     m.register(deps);
   }
   registerBackendFeatures(deps);
+  // ADR 0027 — seed the host-level system home page at boot (idempotent,
+  // fire-and-forget) so '/' serves a real editable page on first visit. Also
+  // lazily ensured by the public-site-config + site-page routes.
+  void ensureSystemSite().catch((err) => log.warn('system_site_seed_failed', { error: String(err) }));
 }

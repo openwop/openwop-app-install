@@ -1,10 +1,9 @@
 /**
- * Notifications frontend feature (ADR 0010 Phase 3). The `/inbox` route +
- * nav entry, migrated out of chrome/features.tsx's CORE_FEATURES into the
- * feature registry. Nav-gated on the `notifications` toggle, so an admin who
- * turns the feature off removes the Inbox nav item (the header bell is gated
- * separately in chrome/Sidebar.tsx). The page component itself stays under
- * `src/notifications/` — a faithful migration wraps it, it isn't moved.
+ * Notifications frontend feature (ADR 0010). The `/inbox` route + nav entry.
+ * Notifications is CORE platform infrastructure (the toggle was removed
+ * 2026-06-11 — see docs/adr/0010-notifications.md § Correction), so the Inbox
+ * nav carries **no `featureId`** and always shows; the per-user preferences are
+ * the control. The page component stays under `src/notifications/`.
  */
 import { lazy } from 'react';
 import { InboxIcon } from '../../ui/icons/index.js';
@@ -22,8 +21,10 @@ const routes: FeatureRoute[] = [
       group: 'Workspace',
       label: 'Inbox',
       icon: InboxIcon,
-      hint: 'Notifications + approvals',
-      featureId: 'notifications',
+      hint: 'What needs you — approvals, blockers, notifications',
+      // IA refresh: the action portal sits just under Chat (order 15) — "what
+      // needs me" is a daily return surface, ahead of Agents (management, 20).
+      order: 15,
     },
   },
 ];

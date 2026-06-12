@@ -80,4 +80,28 @@ describe('projectAgentActivity', () => {
     const items = projectAgentActivity(RUNS, { rosterId: 'host:priya', status: 'failed' });
     expect(items.map((i) => i.runId)).toEqual(['sched-priya']);
   });
+
+  // ADR 0025 — user-attributed runs (a human's personal board / schedule) project
+  // an `ownerUserId` and filter by `userId`, mirroring the roster path.
+  it('projects ownerUserId and filters by userId (the user-side mirror)', () => {
+    const userRuns: RunRecord[] = [
+      run({
+        runId: 'sched-dave',
+        completedAt: '2026-06-02T12:30:00.000Z',
+        metadata: { schedule: { jobId: 'j-dave', source: 'schedule', ownerUserId: 'user:dave' } },
+      }),
+      run({
+        runId: 'kanban-dave',
+        completedAt: '2026-06-02T12:45:00.000Z',
+        metadata: { kanban: { boardId: 'b-dave', cardId: 'c-1', ownerUserId: 'user:dave' } },
+      }),
+      ...RUNS, // roster-attributed + unattributed
+    ];
+    const mine = projectAgentActivity(userRuns, { userId: 'user:dave' });
+    expect(mine.map((i) => i.runId).sort()).toEqual(['kanban-dave', 'sched-dave']);
+    expect(mine.every((i) => i.ownerUserId === 'user:dave')).toBe(true);
+    expect(mine.find((i) => i.runId === 'sched-dave')!.source).toBe('schedule');
+    // The userId filter excludes roster-attributed runs (no cross-principal leak).
+    expect(mine.some((i) => i.rosterId)).toBe(false);
+  });
 });

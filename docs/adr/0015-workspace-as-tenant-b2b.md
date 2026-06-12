@@ -177,13 +177,25 @@ super-admin is a separate, out-of-band plane**, never tenant-reachable.
 
 ## Open questions
 
-- [ ] **Account linking:** when durable Users land (Phase 2), does one human with
-  both password + OIDC resolve to one `User` (linkedIds[]) — and is the RBAC subject
-  then `user:<userId>` (re-keying existing `oidc:<sub>`-bound members)?
-- [ ] **Workspace deletion / last-owner guard** and ownership transfer (deferred).
-- [ ] **Anon → personal-workspace promotion:** when an anon visitor signs in, do we
-  migrate their `anon:<sid>` sandbox data into the new personal workspace, or start
-  clean? (Affects the demo→signup UX.)
+- [x] **Account linking:** RESOLVED by design in **ADR 0003 Phase 4** (designed
+  2026-06-10) — one human with password + OIDC resolves to one `User` via explicit,
+  verified-email-gated `linkedIds[]`; the RBAC subject becomes `user:<userId>` with a
+  one-shot, replay-safe re-key of existing `oidc:<sub>`-bound members. *Implementation
+  pending.*
+- [x] **Last-owner guard + ownership transfer** (Phase 6 follow-up — see below).
+  The ≥1-owner invariant is now enforced: a workspace can never lose its last
+  `owner`. Workspace *deletion* already exists via `DELETE /orgs/:orgId` (`deleteOrg`
+  cascade). *Open sub-item: ownership transfer for the workspace-deletion path
+  itself is unchanged — deleting a workspace is owner-gated, not owner-count-gated.*
+- [x] **Account-delete cascade** (Phase 6 follow-up — see below). `DELETE /account`
+  now removes the caller from every shared workspace, and refuses (409) rather than
+  orphaning one it would leave ownerless.
+- [x] **Anon → personal-workspace promotion:** RESOLVED by design in **ADR 0003 Phase 4**
+  (designed 2026-06-10) — the personal tenant is canonicalized to `user:<userId>` and a
+  signup **adopts** its `anon:<sid>` sandbox via the completed `reassignTenant` (all
+  tenant-scoped stores, deterministic-member-key-safe). This also fixes the verified
+  password-account-stranding bug (a password signup today has no durable home tenant).
+  *Implementation pending.*
 
 ## Deployment postures — one build, demo vs. white-label
 
@@ -222,5 +234,6 @@ the demo, as a fast-follow.
 | 3 — Authority (implicit personal-owner; shared fail-closed) | ✅ implemented | `requireScope` + `requireProtocolScope` personal-owner short-circuit (`requestSubject.isOwnPersonalWorkspace`); `authorization-fail-closed.test.ts` rewritten to the shared-workspace + switch-boundary model. |
 | 4 — Frontend (switcher + client) | ✅ implemented | `client/workspaceClient.ts`, `chrome/WorkspaceSwitcher.tsx`, Sidebar wiring; `npm run build` green. Includes the **role-preview lens** — `useOrgsController.changeView` accepts `role:<id>` (client-side preview of a built-in role's scopes, no act-as / no grant) so a solo operator can experience every role in their own workspace without a second account. |
 | 5 — Demo / white-label config | ✅ implemented | `backend/typescript/.env.example` (`OPENWOP_DEMO_MODE=false` + `OPENWOP_AUTHORIZATION_ENFORCEMENT`); `WHITE-LABEL.md` "Onboard your team" walkthrough. |
+| 6 — ≥1-owner invariant + account-delete cascade (deferred-item follow-up) | ✅ implemented | Invariant centralized in the member mutators `updateMember`/`deleteMember` (`accessControlService.ts`) and enforced ATOMICALLY (post-write re-check + compensating restore — race-safe, the single chokepoint no caller can bypass; bulk org-delete uses `members.delete()` so it isn't gated). `countOwners`/`listOwners`/`sharedWorkspaceMembershipsForSubject` helpers; `POST /orgs/:orgId/members/:memberId/transfer-ownership` (the escape hatch). `routes/account.ts` cascade-removes shared memberships + 409 sole-owner block carrying workspace **names**. Tests: `workspace-tenancy.test.ts` (+2: last-owner guard, transfer-ownership); `account-delete.test.ts` (+3: cascade, sole-owner block, concurrent-removal atomicity). |
 
 **Verification:** backend `tsc --noEmit` clean; targeted auth/RBAC/workspace suites green; full backend suite = 1099 passed, only the 6 pre-existing pack-runtime failures (confirmed identical on base `8808121`). Frontend `npm run build` green.

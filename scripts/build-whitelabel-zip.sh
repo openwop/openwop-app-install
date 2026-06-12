@@ -24,7 +24,7 @@
 #     inventory adopters need (frontend/react/.env.production.example,
 #     backend/typescript/.env.example). Adopters copy them to real .env files
 #     per WHITE-LABEL.md.
-#   - `.claude/`, `.github/`, `MIGRATION-TODO.md` — steward-internal repo meta
+#   - `.claude/`, `.github/`, `MIGRATION-TODO.md`, `TODO.md` — steward-internal repo meta
 #     (agent skills, the steward's CI wired to openwop-dev, migration notes).
 #     These were never inside the old `apps/workflow-engine/` subtree, so the
 #     pre-split zip never carried them; keep that boundary.
@@ -77,7 +77,7 @@ fi
 # entry matches, which is fine; only a real failure should abort. (`*` spans
 # `/` in zip's delete globs, so these catch entries at any depth.)
 zip -q -d "$ZIP" \
-  "${PREFIX}.claude/*" "${PREFIX}.github/*" "${PREFIX}MIGRATION-TODO.md" \
+  "${PREFIX}.claude/*" "${PREFIX}.github/*" "${PREFIX}MIGRATION-TODO.md" "${PREFIX}TODO.md" \
   || [[ $? -eq 12 ]]
 
 # Fail loudly if any REAL (non-example) .env file survived — e.g. a future

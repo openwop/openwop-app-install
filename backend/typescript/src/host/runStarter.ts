@@ -44,6 +44,9 @@ export async function startWorkflowRun(
     workflowId: string;
     /** Attribution block stamped onto `run.metadata` (e.g. `{ schedule: {...} }`). */
     metadata?: Record<string, unknown>;
+    /** Run-level `configurable` (e.g. the ADR 0024 §4 / Option C
+     *  `connections: [...]` credential opt-in). */
+    configurable?: Record<string, unknown>;
     inputs?: Record<string, unknown> | null;
   },
 ): Promise<string | null> {
@@ -62,7 +65,7 @@ export async function startWorkflowRun(
     status: 'pending',
     inputs: input.inputs ?? null,
     metadata: input.metadata ?? {},
-    configurable: {},
+    configurable: input.configurable ?? {},
     createdAt: now,
     updatedAt: now,
   };

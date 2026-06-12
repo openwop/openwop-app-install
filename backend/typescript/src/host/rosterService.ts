@@ -77,6 +77,13 @@ export interface RosterEntry {
    *  human must affirmatively claim before the run starts. Host-extension only;
    *  the normative manifest inventory is unaffected. Absent ⇒ `auto`. */
   autonomyLevel?: 'auto' | 'guided' | 'review';
+  /** The seed role template this member was created from (e.g. `sales-ops`,
+   *  `chief-of-staff`). Set by the demo seed from `demoAgents.json`; absent for
+   *  hand-created agents. Persisting it makes role identity + theming EXACT
+   *  (the frontend no longer heuristically infers the theme from the workflow
+   *  portfolio), and lets a feature find its system agent by role regardless of
+   *  a user-renamed persona/label — e.g. the assistant's `chief-of-staff`. */
+  roleKey?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -120,6 +127,7 @@ export async function createRosterEntry(input: {
   avatarUrl?: string;
   heartbeatIntervalMs?: number;
   autonomyLevel?: 'auto' | 'guided' | 'review';
+  roleKey?: string;
 }): Promise<RosterEntry> {
   // `host:<slug>-<short>` keeps the id human-readable + collision-safe.
   const rosterId = `host:${slugify(input.persona)}-${randomUUID().slice(0, 8)}`;
@@ -138,6 +146,7 @@ export async function createRosterEntry(input: {
     // Persist non-default levels; `auto`/absent normalize to undefined (the
     // default) so stock entries stay shape-stable.
     autonomyLevel: input.autonomyLevel === 'review' || input.autonomyLevel === 'guided' ? input.autonomyLevel : undefined,
+    ...(input.roleKey !== undefined ? { roleKey: input.roleKey } : {}),
     createdAt: now,
     updatedAt: now,
   };

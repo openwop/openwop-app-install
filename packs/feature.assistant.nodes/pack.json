@@ -1,0 +1,102 @@
+{
+  "name": "feature.assistant.nodes",
+  "version": "1.2.0",
+  "description": "Executive-Assistant graph/logic node pack (ADR 0023 / 0014). THIN by design \u2014 only the memory-graph + prioritization nodes over ctx.features.assistant + ctx.kanban. ALL external I/O (Drive/Gmail/Calendar reads, mail sends) reuses the existing core node packs (core.openwop.{mcp,http,integration}); this pack authors no I/O node.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "assistant",
+    "chief-of-staff",
+    "memory",
+    "commitments",
+    "prioritization"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.assistant.nodes.upsert-commitment",
+      "version": "1.0.0",
+      "label": "Upsert Commitment",
+      "description": "Upserts a commitment into the memory graph from an extracted item (owner/description/source/dueAt), over ctx.features.assistant. Idempotent by (source hash + description) \u2014 replay/fork never duplicates.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.populate-board",
+      "version": "1.0.0",
+      "label": "Populate Board",
+      "description": "Projects a commitment onto the owner's kanban board as an agent-sourced card (ctx.features.assistant.projectToBoard). Idempotent by the commitment's card back-ref \u2014 no duplicate card across runs (Loop 3).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.prioritize",
+      "version": "1.0.0",
+      "label": "Prioritize",
+      "description": "Scores a surface item on the signal weights of the active prioritization profile and buckets it surface | handle | defer (ADR 0023 \u00a74). Pure + deterministic (replay-stable).",
+      "category": "transform",
+      "role": "pure",
+      "capabilities": [
+        "cacheable"
+      ]
+    },
+    {
+      "typeId": "feature.assistant.nodes.compose-briefing",
+      "version": "1.0.0",
+      "label": "Compose Briefing",
+      "description": "Reads the memory graph (open commitments, upcoming meetings, pending approvals) over ctx.features.assistant and composes a structured morning/weekly brief for delivery via Notifications.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.enqueue-action",
+      "version": "1.0.0",
+      "label": "Enqueue Pending Action",
+      "description": "Drafts an outbound action (email/invite/reschedule/nudge) onto the approval queue (ctx.features.assistant.enqueueAction). Draft-only \u2014 nothing sends until the principal approves via the heartbeat/Notifications loop (ADR 0025 \u00a74).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.ingest-commitments",
+      "version": "1.0.0",
+      "label": "Ingest Commitments",
+      "description": "Deterministic perception leg of Loops 1/6 (ADR 0023 \u00a712 T2): maps a fetched Calendar/Drive listing (core.openwop.http.fetch + ADR 0024 Phase D connection) into idempotent commitment upserts over ctx.features.assistant. SourceRefs stamped contentTrust:'untrusted' (ADR 0027); maxItemsPerTick caps a tick's writes.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.prepare-action-request",
+      "version": "1.0.0",
+      "label": "Prepare Action Request",
+      "description": "Pure transform (ADR 0023 \u00a712 T6): maps an approved PendingAction (kind/payload/draft) into the HTTP request body + URL variables the execution workflow's core.openwop.http.fetch node dispatches under the approving principal's write-scoped connection. Deterministic / replay-stable.",
+      "category": "transform",
+      "role": "pure",
+      "capabilities": [
+        "cacheable"
+      ]
+    },
+    {
+      "typeId": "feature.assistant.nodes.confirm-action-send",
+      "version": "1.0.0",
+      "label": "Confirm Action Send",
+      "description": "Execution verdict for assistant action workflows (ADR 0023 \u00a712 T6): fails the run unless the upstream provider call answered 2xx \u2014 core.openwop.http.fetch deliberately completes on any outcome (side-effect-once), so this gate is what keeps a refused send from being recorded as sent.",
+      "category": "transform",
+      "role": "pure",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

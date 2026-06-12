@@ -1,0 +1,30 @@
+{
+  "name": "feature.consent.nodes",
+  "version": "1.0.0",
+  "description": "Consent feature node pack (ADR 0014) — gate/record nodes over the ctx.features.consent surface. check evaluates a subject's consent for a category (fail-closed in regulated regions); record upserts consent from a run. The SAME enforcement helper Analytics/Email consume — one consent rule.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "consent", "compliance", "gdpr", "gate"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.consent.nodes.check",
+      "version": "1.0.0",
+      "label": "Consent: Check",
+      "description": "Evaluates whether a subject has consented to a category (necessary/analytics/marketing) over ctx.features.consent. Fail-closed in regulated regions.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.consent.nodes.record",
+      "version": "1.0.0",
+      "label": "Consent: Record",
+      "description": "Upserts a subject's consent choices over ctx.features.consent (latest-wins).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

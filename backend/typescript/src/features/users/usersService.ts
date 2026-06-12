@@ -20,7 +20,7 @@
  * disabled — historical replay must not break when identity changes.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 
 /** Account lifecycle state. `disabled` is FAIL-CLOSED (finding H5): a disabled
@@ -68,6 +68,16 @@ export async function getUserByPrincipal(tenantId: string, principalId: string):
 
 /** Manually create a user (admin path). For auth-driven creation use
  *  `upsertFromPrincipal`, which is idempotent across logins. */
+/** DETERMINISTIC durable id for a `(tenantId, principalId)` — so concurrent
+ *  first-access reconciliations converge on ONE row (same key, last-writer-wins)
+ *  instead of racing the unindexed get-then-put to two `randomUUID()` records.
+ *  Same hazard + fix as `personalOwnerMemberId` (ADR 0015 Phase 2). Fixed at
+ *  creation and never re-derived — account-linking adds `linkedIds`, it does not
+ *  re-key the `userId` — so coupling the id to the *primary* principal is safe. */
+function userIdFor(tenantId: string, principalId: string): string {
+  return `user:${createHash('sha256').update(`${tenantId}:${principalId}`).digest('hex').slice(0, 32)}`;
+}
+
 export async function createUser(input: {
   tenantId: string;
   principalId: string;
@@ -81,7 +91,7 @@ export async function createUser(input: {
   if (existing) return existing; // idempotent: never two records per principal
   const now = new Date().toISOString();
   const user: User = {
-    userId: `user:${randomUUID()}`,
+    userId: userIdFor(input.tenantId, input.principalId),
     tenantId: input.tenantId,
     principalId: input.principalId,
     groups: input.groups ?? [],
@@ -175,7 +185,68 @@ export async function isActiveUser(tenantId: string, principalId: string): Promi
   return user?.status === 'active';
 }
 
+// ── Canonical identity per personal tenant (one human → one durable user) ──
+//
+// In the personal-tenant model (Firebase/OIDC: every human owns a single
+// `user:<hash(issuer:uid)>` tenant), the SAME human reaches the host over more
+// than one auth channel — an `oidc:<sub>` bearer, a bound user-tier cookie
+// (`user:<userId>`), an unbound `session:<sid>`. `upsertFromPrincipal` keys the
+// durable user on the *principal*, so those channels mint/resolve DIFFERENT
+// users, and per-user data (profile, pinned agents, notification prefs) silently
+// fragments across them (caught 2026-06-12: a pinned agent written on the oidc
+// identity was invisible to reads on the bound-cookie identity).
+//
+// The fix: ONE canonical durable user per personal tenant, resolved by the
+// stable tenant key (not the volatile principal). A pointer row maps the home
+// tenant → the chosen userId. First resolution ADOPTS a pre-existing
+// principal-keyed record if one exists (legacy / pre-canonical logins),
+// preferring an `oidc` record (the federated identity) so two split rows
+// converge on the one that holds the user's data — no data migration needed.
+//
+// SAFETY: only valid for a SINGLE-HUMAN tenant (`user:` personal tenants, which
+// derive 1:1 from the OIDC subject). A shared/org tenant has many humans on one
+// tenantId — callers MUST NOT route it here (resolveCallerUser gates on the
+// `user:` prefix), or distinct humans would collapse onto one record.
+interface CanonicalUserRow {
+  homeTenant: string;
+  userId: string;
+}
+const canonicalByTenant = new DurableCollection<CanonicalUserRow>('users:canonical', (r) => r.homeTenant);
+
+export async function resolveCanonicalUserForTenant(input: {
+  homeTenant: string;
+  principalId: string;
+  source: UserSource;
+  email?: string;
+  displayName?: string;
+}): Promise<User> {
+  const ptr = await canonicalByTenant.get(input.homeTenant);
+  if (ptr) {
+    const u = await getUser(ptr.userId);
+    if (u) return u; // hot path: a point lookup, no scan
+    // Pointer dangling (the user was deleted) — fall through and re-pick.
+  }
+  // Adopt a pre-existing record for this human, if any (the legacy split rows).
+  // Prefer the federated `oidc` identity, then the oldest as a stable tiebreak.
+  const existing = (await listUsers(input.homeTenant)).slice().sort((a, b) => {
+    if ((a.source === 'oidc') !== (b.source === 'oidc')) return a.source === 'oidc' ? -1 : 1;
+    return a.createdAt.localeCompare(b.createdAt);
+  });
+  const chosen =
+    existing[0] ??
+    (await createUser({
+      tenantId: input.homeTenant,
+      principalId: input.principalId,
+      source: input.source,
+      ...(input.email !== undefined ? { email: input.email } : {}),
+      ...(input.displayName !== undefined ? { displayName: input.displayName } : {}),
+    }));
+  await canonicalByTenant.put({ homeTenant: input.homeTenant, userId: chosen.userId });
+  return chosen;
+}
+
 /** Test-only: clear all users. */
 export async function __resetUsersStore(): Promise<void> {
   await store.__clear();
+  await canonicalByTenant.__clear();
 }

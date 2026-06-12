@@ -1,0 +1,30 @@
+{
+  "name": "feature.email.nodes",
+  "version": "1.0.0",
+  "description": "Email feature node pack (ADR 0014) — read/render nodes over the ctx.features.email surface. list-templates reads an org's templates; render interpolates a template for a contact ({{contact.*}}). The campaign send (fan-out + provider dispatch) is a deliberate follow-on, not a workflow node.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "email", "marketing", "templates"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.email.nodes.list-templates",
+      "version": "1.0.0",
+      "label": "Email: List Templates",
+      "description": "Lists an org's email templates over ctx.features.email. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.email.nodes.render",
+      "version": "1.0.0",
+      "label": "Email: Render",
+      "description": "Renders a template's subject + body for a contact ({{contact.name|email|company}}) over ctx.features.email.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

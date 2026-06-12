@@ -37,6 +37,7 @@ import {
 } from '../host/featureToggles/service.js';
 import { validateToggleConfig } from '../host/featureToggles/validate.js';
 import type { ToggleSubject } from '../host/featureToggles/types.js';
+import { requireSuperadmin as requireSuperadminShared } from '../host/superadmin.js';
 
 const log = createLogger('routes.featureToggles');
 
@@ -47,36 +48,11 @@ function subjectOf(req: Request): ToggleSubject {
   return subject;
 }
 
-let warnedDevSuperadmin = false;
-
-function isSuperadmin(req: Request): boolean {
-  // Wildcard bearer (conformance harness / admin tooling / curl).
-  if (req.principal?.tenants?.includes('*')) return true;
-  const allow = (process.env.OPENWOP_SUPERADMIN_TENANTS ?? '')
-    .split(',')
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  if (req.tenantId && allow.includes(req.tenantId)) return true;
-  // EXPLICIT dev opt-in only — never inferred from NODE_ENV. Fails closed by
-  // default so a misconfigured non-prod deploy isn't world-writable.
-  if (process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN === 'true') {
-    if (!warnedDevSuperadmin) {
-      warnedDevSuperadmin = true;
-      log.warn('feature_toggle_admin_dev_open', {
-        detail: 'OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true — every authenticated caller can administer toggles. Unset it and use OPENWOP_SUPERADMIN_TENANTS for a hardened deploy.',
-      });
-    }
-    return true;
-  }
-  return false;
-}
-
+// Superadmin gate extracted to `host/superadmin.ts` (ADR 0028 — the
+// governance surface shares it; a copied gate drifts). Reused by
+// routes/siteConfig.ts (ADR 0027) too.
 function requireSuperadmin(req: Request): void {
-  if (!isSuperadmin(req)) {
-    throw new OpenwopError('forbidden', 'Feature-toggle administration requires a superadmin principal.', 403, {
-      hint: 'Add your tenant id to OPENWOP_SUPERADMIN_TENANTS, or call with the admin bearer key.',
-    });
-  }
+  requireSuperadminShared(req, 'Feature-toggle administration');
 }
 
 export function registerFeatureToggleRoutes(app: Express): void {

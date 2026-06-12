@@ -7,6 +7,7 @@
  */
 
 import http from 'node:http';
+import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -19,6 +20,7 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
@@ -50,7 +52,7 @@ function client(initialCookie = ''): Client {
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const sc = typeof (res.headers as any).getSetCookie === 'function' ? (res.headers as any).getSetCookie() : [];
+    const sc = getSetCookies(res.headers);
     for (const c of sc as string[]) {
       const m = /(__session=[^;]+)/.exec(c);
       if (m) cookie = m[1];
@@ -73,22 +75,23 @@ function client(initialCookie = ''): Client {
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
-async function signup(c: Client): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email: uniqEmail('m'), password: 'password123' });
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
+async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
+  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('m'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
 const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-/** An owner with an org, plus a second same-tenant user added as a viewer member. */
+/** An owner with an org, plus a second same-tenant user added as a viewer member.
+ *  Mint each into one shared explicit tenantId, each in its own client. */
 async function ownerWithViewer(): Promise<{ owner: Client; viewer: Client; viewerId: string; orgId: string }> {
-  const seed = client();
-  await signup(seed);
-  const ownerCookie = seed.snapshot();
-  const viewerUser = await signup(seed); // same tenant (inherits owner's bound tenant)
-  const viewerCookie = seed.snapshot();
-  const owner = client(ownerCookie);
-  const viewer = client(viewerCookie);
+  const tenantId = `org:test-${Date.now()}-${n++}`;
+  const owner = client();
+  await signup(owner, { tenantId });
+  const viewer = client();
+  const viewerUser = await signup(viewer, { tenantId });
   const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
@@ -98,14 +101,14 @@ async function ownerWithViewer(): Promise<{ owner: Client; viewer: Client; viewe
 }
 const m = (orgId: string, suffix = ''): string => `/v1/host/sample/media/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
-describe('media library — toggle gating', () => {
-  it('404s when the media toggle is off', async () => {
-    const def = getToggleDefault('media');
-    if (def) await saveConfig({ ...def, status: 'off' }, 'test');
+describe('media library — always-on (ADR 0027)', () => {
+  it('has no media toggle in the catalog and serves regardless', async () => {
+    // ADR 0027: Media is always-on — no `toggleDefault`, so it cannot be turned
+    // off. A member with workspace:read reads its surface unconditionally.
+    expect(getToggleDefault('media')).toBeNull();
     const { owner, orgId } = await ownerWithViewer();
     const r = await owner.get(m(orgId, '/collections'));
-    expect(r.status).toBe(404);
-    if (def) await saveConfig({ ...def, status: 'on' }, 'test'); // restore for the rest
+    expect(r.status).toBe(200);
   });
 });
 
@@ -208,12 +211,11 @@ describe('media library — followup hardening', () => {
 
   it('an EDITOR (non-owner) can write; a same-tenant member of ANOTHER org is denied (403)', async () => {
     // Owner with two orgs in one tenant; Bob is an EDITOR of orgA only.
-    const seed = client();
-    await signup(seed);
-    const ownerCookie = seed.snapshot();
-    const bobUser = await signup(seed);
-    const bob = client(seed.snapshot());
-    const owner = client(ownerCookie);
+    const tenantId = `org:test-${Date.now()}-${n++}`;
+    const owner = client();
+    await signup(owner, { tenantId });
+    const bob = client();
+    const bobUser = await signup(bob, { tenantId });
     const orgA = (await owner.post('/v1/host/sample/orgs', { name: 'A' })).body.orgId;
     const orgB = (await owner.post('/v1/host/sample/orgs', { name: 'B' })).body.orgId;
     const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });

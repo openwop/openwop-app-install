@@ -17,6 +17,9 @@ interface CapturedEvent {
   payload: unknown;
   eventId: string;
   sequence: number;
+  /** Envelope-level causation chain captured from `ctx.emit`'s opts
+   *  (RFC 0002 §B — distinct from any payload-level field). */
+  causationId?: string;
 }
 
 function makeCtx(overrides?: {
@@ -37,10 +40,16 @@ function makeCtx(overrides?: {
     configurable: overrides?.configurable ?? {},
     attempt: 1,
     secrets: {},
-    async emit(type, payload) {
+    async emit(type, payload, opts) {
       const eventId = `evt-${nextSeq.toString().padStart(8, '0')}`;
       const sequence = nextSeq++;
-      events.push({ type, payload, eventId, sequence });
+      events.push({
+        type,
+        payload,
+        eventId,
+        sequence,
+        ...(opts?.causationId !== undefined ? { causationId: opts.causationId } : {}),
+      });
       return { eventId, sequence };
     },
   };
@@ -168,11 +177,14 @@ describe('core.conformance.mock-agent', () => {
       });
       await mockAgentNode.execute(ctx);
       const calledEvent = events[0];
-      const returnedPayload = events[1].payload as { callId: string; causationId: string };
-      // Wire-level pairing: causationId === eventId of the corresponding toolCalled.
-      expect(returnedPayload.causationId).toBe(calledEvent.eventId);
+      const returnedEvent = events[1];
+      // Wire-level pairing: the persisted event ENVELOPE's causationId ===
+      // eventId of the corresponding toolCalled (RFC 0002 §B; asserted at
+      // the envelope level by the agentReasoningEvents conformance scenario).
+      expect(returnedEvent.causationId).toBe(calledEvent.eventId);
       // Application-level pairing: callId surfaces for UI/debug reconstruction.
       const calledPayload = calledEvent.payload as { callId: string };
+      const returnedPayload = returnedEvent.payload as { callId: string };
       expect(returnedPayload.callId).toBe(calledPayload.callId);
     });
 

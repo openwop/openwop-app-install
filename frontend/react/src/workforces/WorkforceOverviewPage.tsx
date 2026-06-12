@@ -14,6 +14,7 @@ import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Skeleton } from '../ui/Skeleton.js';
 import { Notice } from '../ui/Notice.js';
+import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
 import { AlertIcon, ArrowLeftIcon, BotIcon, BoxesIcon, ShieldIcon, UserIcon } from '../ui/icons/index.js';
 import { TraceSearchPanel } from './TraceSearchPanel.js';
 import { AutonomyTrack } from './AutonomyTrack.js';
@@ -62,16 +63,6 @@ function Outcome({ n, l }: { n: string; l: string }): JSX.Element {
     <div>
       <div className="wf-outcome-n">{n}</div>
       <div className="wf-outcome-l">{l}</div>
-    </div>
-  );
-}
-
-function Metric({ label, value, hint }: { label: string; value: string; hint?: string }): JSX.Element {
-  return (
-    <div className="surface-card u-minw-0">
-      <div className="chip chip--muted u-mb-1-5">{label}</div>
-      <div className="wforce-metric-val">{value}</div>
-      {hint ? <div className="muted u-fs-14">{hint}</div> : null}
     </div>
   );
 }
@@ -285,22 +276,25 @@ export function WorkforceOverviewPage(): JSX.Element {
             </ul>
           </div>
 
-          {/* Telemetry grid */}
-          {hasRuns && metrics ? (
-            <>
-              <h4 className="u-mbox-b04">Full telemetry</h4>
-              <div className="wforce-telemetry-grid">
-                <Metric label="RUNS" value={String(metrics.totalRuns)} hint={`${metrics.openApprovals} awaiting approval`} />
-                <Metric label="CYCLE TIME P50" value={duration(metrics.cycleTimeP50Ms)} />
-                <Metric label="COST / CLEARED" value={usd(metrics.costPerClearedUsd)} />
-                <Metric label="ESCALATION RATE" value={pct(metrics.escalationRate)} />
-                <Metric label="OVERRIDE RATE" value={pct(metrics.overrideRate)} hint="how often a human stepped in" />
-                <Metric label="FALSE-POSITIVE" value={pct(metrics.falsePositiveRate)} />
-                <Metric label="RECOVERY RATE" value={pct(metrics.recoveryRate)} />
-                <Metric label="POLICY VIOLATIONS" value={String(metrics.policyViolations)} />
-              </div>
-            </>
-          ) : null}
+          {/* Telemetry — the signature figure band (read-only; reportorial). */}
+          {hasRuns && metrics ? (() => {
+            const telemetry: KeyFigureItem[] = [
+              { key: 'runs', label: `Runs · ${metrics.openApprovals} awaiting approval`, value: String(metrics.totalRuns) },
+              { key: 'cycle', label: 'Cycle time P50', value: duration(metrics.cycleTimeP50Ms) },
+              { key: 'cost', label: 'Cost / cleared', value: usd(metrics.costPerClearedUsd) },
+              { key: 'escalation', label: 'Escalation rate', value: pct(metrics.escalationRate) },
+              { key: 'override', label: 'Override rate · human step-ins', value: pct(metrics.overrideRate) },
+              { key: 'fp', label: 'False-positive', value: pct(metrics.falsePositiveRate) },
+              { key: 'recovery', label: 'Recovery rate', value: pct(metrics.recoveryRate) },
+              { key: 'violations', label: 'Policy violations', value: String(metrics.policyViolations), ...(metrics.policyViolations > 0 ? { tone: 'attention' as const } : {}) },
+            ];
+            return (
+              <>
+                <h4 className="u-mbox-b04">Full telemetry</h4>
+                <KeyFigureBand figures={telemetry} ariaLabel="Workforce telemetry" />
+              </>
+            );
+          })() : null}
 
           {/* Graduation curve */}
           {metrics && metrics.weekly.length > 1 ? (

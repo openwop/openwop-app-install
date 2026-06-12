@@ -136,7 +136,7 @@ export function registerMigrateRoute(app: Express, deps: { storage: Storage }): 
         );
       }
 
-      const { runs, workflows } = await deps.storage.reassignTenant(
+      const { runs, workflows, notifications, pushSubscriptions, hostExt } = await deps.storage.reassignTenant(
         anonTenantId,
         userTenantId,
       );
@@ -162,13 +162,13 @@ export function registerMigrateRoute(app: Express, deps: { storage: Storage }): 
         action: 'tenant.migrate',
         resource: userTenantId,
         outcome: 'success',
-        payload: { from: anonTenantId, to: userTenantId, runs, workflows, secrets, secretsFailed },
+        payload: { from: anonTenantId, to: userTenantId, runs, workflows, notifications, pushSubscriptions, hostExt, secrets, secretsFailed },
       });
 
       // Expire the anon cookie so the next request carries only the
       // bearer. The bearer-only path skips cookie minting.
       res.append('Set-Cookie', `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
-      res.json({ migrated: true, runs, workflows, secrets, secretsFailed });
+      res.json({ migrated: true, runs, workflows, notifications, pushSubscriptions, hostExt, secrets, secretsFailed });
     } catch (err) {
       next(err);
     }

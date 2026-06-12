@@ -23,10 +23,15 @@ const MAX = {
   label: 120,
   alt: 200,
   token: 256,
+  eyebrow: 80,    // mono overline above a section heading (ADR 0027 front page)
+  caption: 240,
   sections: 50,
   columns: 12,
   perOrgPages: 2000,
 } as const;
+
+/** Section layout for `columns` — how the public renderer lays the items out. */
+const COLUMN_LAYOUTS = ['cards', 'steps', 'stats'] as const;
 
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export const PAGE_STATUSES: PageStatus[] = ['draft', 'in_review', 'published', 'archived'];
@@ -78,14 +83,36 @@ export function validateSection(raw: unknown): Section {
   const d = (typeof r.data === 'object' && r.data !== null ? r.data : {}) as Record<string, unknown>;
   const sectionId = typeof r.sectionId === 'string' && r.sectionId.startsWith('sec:') ? r.sectionId : `sec:${randomUUID()}`;
   let data: Record<string, unknown>;
+  // Optional `eyebrow` (mono overline) + `heading` shared by the marketing-block
+  // sections (ADR 0027). All optional + bounded; absent keys are simply dropped.
+  const opt = (k: 'eyebrow' | 'heading', max: number): Record<string, string> => {
+    const v = optionalCleanString(d[k], max);
+    return v ? { [k]: v } : {};
+  };
+  // A CTA target: an internal app path (`/agents`) — a single leading slash, NOT
+  // `//` or `/\` (both normalize to a protocol-relative EXTERNAL URL in a browser →
+  // open-redirect shape) — OR an EXPLICIT-scheme http(s)/mailto URL. `safeUrl`
+  // alone is too loose here: it accepts protocol-relative `//host`, so require an
+  // explicit scheme on the non-internal branch.
+  const safeLink = (v: unknown, max: number): string => {
+    const s = (optionalCleanString(v, max) ?? '').trim();
+    if (/^\/(?![/\\])/.test(s)) return s;
+    const u = safeUrl(v, max);
+    return /^(https?:|mailto:)/i.test(u) ? u : '';
+  };
   switch (type) {
     case 'hero': {
       const heading = cleanString(d.heading, MAX.heading);
       if (!heading) throw new OpenwopError('validation_error', 'hero.heading is required.', 400, {});
+      const cta1 = optionalCleanString(d.ctaLabel, MAX.label);
+      const cta2 = optionalCleanString(d.ctaLabel2, MAX.label);
       data = {
+        ...opt('eyebrow', MAX.eyebrow),
         heading,
         ...(optionalCleanString(d.subheading, MAX.text) ? { subheading: optionalCleanString(d.subheading, MAX.text) } : {}),
         ...(optionalCleanString(d.imageToken, MAX.token) ? { imageToken: optionalCleanString(d.imageToken, MAX.token) } : {}),
+        ...(cta1 ? { ctaLabel: cta1, ctaUrl: safeLink(d.ctaUrl, MAX.url) } : {}),
+        ...(cta2 ? { ctaLabel2: cta2, ctaUrl2: safeLink(d.ctaUrl2, MAX.url) } : {}),
       };
       break;
     }
@@ -93,24 +120,44 @@ export function validateSection(raw: unknown): Section {
       // Stored as PLAIN TEXT / markdown — NOT raw HTML. The renderer treats it as
       // text, so there is no stored-XSS surface to sanitize (the fragile regex
       // sanitizer is gone; code-review #2). Bounded + secret-scrubbed.
-      data = { text: cleanString(d.text, MAX.markdown) };
+      data = { ...opt('eyebrow', MAX.eyebrow), ...opt('heading', MAX.heading), text: cleanString(d.text, MAX.markdown) };
       break;
     }
     case 'image': {
       const token = cleanString(d.token, MAX.token);
       if (!token) throw new OpenwopError('validation_error', 'image.token is required.', 400, {});
-      data = { token, ...(optionalCleanString(d.alt, MAX.alt) ? { alt: optionalCleanString(d.alt, MAX.alt) } : {}) };
+      data = {
+        token,
+        ...(optionalCleanString(d.alt, MAX.alt) ? { alt: optionalCleanString(d.alt, MAX.alt) } : {}),
+        ...(optionalCleanString(d.caption, MAX.caption) ? { caption: optionalCleanString(d.caption, MAX.caption) } : {}),
+      };
       break;
     }
     case 'cta': {
       const label = cleanString(d.label, MAX.label);
       if (!label) throw new OpenwopError('validation_error', 'cta.label is required.', 400, {});
-      data = { label, url: safeUrl(d.url, MAX.url) };
+      data = {
+        ...opt('eyebrow', MAX.eyebrow),
+        ...opt('heading', MAX.heading),
+        ...(optionalCleanString(d.subheading, MAX.text) ? { subheading: optionalCleanString(d.subheading, MAX.text) } : {}),
+        label,
+        url: safeLink(d.url, MAX.url),
+      };
       break;
     }
     case 'columns': {
       const cols = Array.isArray(d.columns) ? d.columns : [];
-      data = { columns: cols.slice(0, MAX.columns).map((c) => ({ text: cleanString((c as { text?: unknown })?.text, MAX.text) })) };
+      const layout = COLUMN_LAYOUTS.includes(d.layout as typeof COLUMN_LAYOUTS[number]) ? (d.layout as string) : 'cards';
+      data = {
+        ...opt('eyebrow', MAX.eyebrow),
+        ...opt('heading', MAX.heading),
+        layout,
+        columns: cols.slice(0, MAX.columns).map((c) => {
+          const cc = c as { title?: unknown; text?: unknown };
+          const title = optionalCleanString(cc.title, MAX.label);
+          return { ...(title ? { title } : {}), text: cleanString(cc.text, MAX.text) };
+        }),
+      };
       break;
     }
     default:
@@ -119,7 +166,7 @@ export function validateSection(raw: unknown): Section {
   return { sectionId, type, data };
 }
 
-function validateSections(raw: unknown): Section[] {
+export function validateSections(raw: unknown): Section[] {
   if (raw === undefined) return [];
   if (!Array.isArray(raw)) throw new OpenwopError('validation_error', '`sections` must be an array.', 400, { field: 'sections' });
   return raw.slice(0, MAX.sections).map(validateSection);
@@ -141,7 +188,14 @@ async function slugSet(tenantId: string, orgId: string, exceptPageId?: string): 
   return new Set(all.filter((p) => p.pageId !== exceptPageId).map((p) => p.slug));
 }
 
-export async function createPage(input: { tenantId: string; orgId: string; title: string; slug?: string; sections?: unknown; createdBy: string }): Promise<Page> {
+export async function createPage(input: { tenantId: string; orgId: string; title: string; slug?: string; sections?: unknown; createdBy: string; pageId?: string }): Promise<Page> {
+  // A FIXED pageId (host-level seeds, ADR 0027) makes creation idempotent: if the
+  // row already exists, return it — so a concurrent cross-instance first-boot seed
+  // converges on ONE page instead of a `home` + `home-2` duplicate.
+  if (input.pageId) {
+    const prior = await getPage(input.tenantId, input.orgId, input.pageId);
+    if (prior) return prior;
+  }
   const existing = await listPages(input.tenantId, input.orgId);
   if (existing.length >= MAX.perOrgPages) {
     throw new OpenwopError('validation_error', `This org has the maximum ${MAX.perOrgPages} pages.`, 409, { max: MAX.perOrgPages });
@@ -151,7 +205,7 @@ export async function createPage(input: { tenantId: string; orgId: string; title
   const slug = uniqueSlug(input.slug ? slugify(input.slug) : title, taken, 'page');
   const ts = nowIso();
   const page: Page = {
-    pageId: `page:${randomUUID()}`,
+    pageId: input.pageId ?? `page:${randomUUID()}`,
     tenantId: input.tenantId,
     orgId: input.orgId,
     title,

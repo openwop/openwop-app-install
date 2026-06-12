@@ -67,8 +67,8 @@ export interface BrandConfig {
 
 export const BRAND_DEFAULTS: BrandConfig = {
   productName: 'OpenWOP',
-  brandMark: { pre: 'Open', emphasis: 'WOP', sub: 'workflow engine' },
-  tagline: 'workflow engine',
+  brandMark: { pre: 'Open', emphasis: 'WOP', sub: 'agent platform' },
+  tagline: 'agent platform',
   footerText: 'Sample / template code. Not production-hardened.',
   assistantName: 'OpenWOP',
   markSrc: '/OpenWOP.svg',
@@ -82,7 +82,7 @@ export const BRAND_DEFAULTS: BrandConfig = {
   documentTitle: 'workflow-engine — OpenWOP Reference UI',
   fontsHref:
     'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1' +
-    '&family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500&display=swap',
+    '&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap',
   primaryDomain: 'app.openwop.dev',
   instanceName: 'Demo host',
   homeUrl: 'https://openwop.dev/',

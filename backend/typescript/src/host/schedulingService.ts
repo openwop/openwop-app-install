@@ -31,6 +31,7 @@
  * @see spec/v1/host-capabilities.md §host.scheduling
  */
 
+import { createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 import { computeNextFire } from './cronSchedule.js';
 
@@ -52,6 +53,9 @@ export interface ScheduledJob {
   /** Optional RFCS/0086 roster member that owns this schedule (attribution +
    *  the agent-scoped "Schedules" tab filter). */
   rosterId?: string;
+  /** ADR 0025 — a human USER that owns this schedule (the user/agent symmetry).
+   *  Mutually exclusive with `rosterId`; powers the profile "Schedules" tab. */
+  ownerUserId?: string;
   /** The manifest agent the owning roster member instantiates (attribution). */
   agentId?: string;
   /** Whether the schedule is active. A disabled schedule keeps its row but its
@@ -59,6 +63,9 @@ export interface ScheduledJob {
   enabled: boolean;
   /** Free-form attribution carried onto a schedule-fired run's metadata. */
   metadata?: Record<string, unknown>;
+  /** Run-level `configurable` for fired runs — e.g. `connections: ['google']`,
+   *  the ADR 0024 §4 / Option C credential opt-in the assistant loops use. */
+  configurable?: Record<string, unknown>;
   /** runId of the most recent run this schedule fired. */
   lastRunId?: string;
   /** ISO-8601 wall-clock time of the most recent fire (set in markJobFired).
@@ -152,9 +159,11 @@ export async function registerJob(
     firstFireAtMs?: number;
     workflowId?: string;
     rosterId?: string;
+    ownerUserId?: string;
     agentId?: string;
     enabled?: boolean;
     metadata?: Record<string, unknown>;
+    configurable?: Record<string, unknown>;
     timezone?: string;
   },
   nowMs: number = Date.now(),
@@ -177,8 +186,10 @@ export async function registerJob(
     enabled: input.enabled ?? true,
     ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
     ...(input.rosterId !== undefined ? { rosterId: input.rosterId } : {}),
+    ...(input.ownerUserId !== undefined ? { ownerUserId: input.ownerUserId } : {}),
     ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+    ...(input.configurable !== undefined ? { configurable: input.configurable } : {}),
     ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
     ...(nextFireAt !== null ? { nextFireAt } : {}),
     createdAt: new Date(nowMs).toISOString(),
@@ -197,6 +208,23 @@ export async function listJobs(tenantId?: string): Promise<ScheduledJob[]> {
 /** List a single roster member's jobs within a tenant (agent "Schedules" tab). */
 export async function listJobsByRoster(tenantId: string, rosterId: string): Promise<ScheduledJob[]> {
   return (await listJobs(tenantId)).filter((j) => j.rosterId === rosterId);
+}
+
+/** ADR 0025 — list a single user's jobs within a tenant (profile "Schedules"
+ *  tab), the user-side mirror of `listJobsByRoster`. */
+export async function listJobsByUser(tenantId: string, ownerUserId: string): Promise<ScheduledJob[]> {
+  return (await listJobs(tenantId)).filter((j) => j.ownerUserId === ownerUserId);
+}
+
+/** ADR 0025 — the deterministic id for a user-owned schedule, keyed on its
+ *  defining content (tenant + owner + workflow + cadence). Lets the profile
+ *  "Schedules" create be idempotent: a double-submit collapses to ONE row rather
+ *  than minting a duplicate (the scheduler POST has no `Idempotency-Key`). Two
+ *  genuinely different schedules (different workflow or cadence) hash apart.
+ *  Mirrors the personal-board `personalBoardId` scheme. */
+export function personalScheduleId(tenantId: string, ownerUserId: string, workflowId: string | undefined, cronExpr: string): string {
+  const key = createHash('sha256').update(`${tenantId}:${ownerUserId}:${workflowId ?? ''}:${cronExpr}`).digest('hex').slice(0, 24);
+  return `job-personal-${key}`;
 }
 
 /** Fetch a single job by id, or null when none is registered. */

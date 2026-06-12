@@ -1,6 +1,6 @@
 # ADR 0013 — Sharing (public share links)
 
-**Status:** Accepted (Phases 1–3 sequenced)
+**Status:** implemented (Phases 1–3 shipped — `src/features/sharing/` incl. public `/v1/host/sample/shared/:token`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC), ADR 0009 (CMS — a shareable resource), ADR 0011 (KB — a shareable resource)

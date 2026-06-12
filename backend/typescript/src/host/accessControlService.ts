@@ -42,8 +42,14 @@
 import { randomUUID, createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
+import { OpenwopError } from '../types.js';
 
 const accessLog = createLogger('host.accessControl');
+
+/** Rejection message for the ≥1-owner invariant (ADR 0015) — a workspace MUST
+ *  always retain at least one `owner`. Shared by the member mutators below. */
+const LAST_OWNER_MSG =
+  'Cannot remove or demote the last owner of a workspace. Transfer ownership to another member first.';
 
 // ── Scope vocabularies ──────────────────────────────────────────────────────
 
@@ -65,6 +71,10 @@ export const PROTOCOL_SCOPES = [
   'packs:yank',
   'workspace:read',
   'workspace:write',
+  // ADR 0024 D2 — permission to USE an org-shared Connection's credential in a
+  // run. Default-deny (NOT in viewer/editor): a member gets it only by explicit
+  // grant (a custom role or admin), the confused-deputy guard for shared creds.
+  'connections:use',
 ] as const;
 
 /**
@@ -78,6 +88,10 @@ export const MANAGEMENT_SCOPES = [
   'host:members:manage',
   'host:groups:manage',
   'host:roles:manage',
+  // ADR 0024 D2 — admin-only management of org-shared Connections (create /
+  // rotate / revoke / test). Reserved to built-in admin/owner, never mintable
+  // onto a custom role (it administers shared credentials).
+  'host:connections:manage',
 ] as const;
 
 export type Scope = (typeof PROTOCOL_SCOPES)[number] | (typeof MANAGEMENT_SCOPES)[number];
@@ -117,6 +131,9 @@ const ADMIN_SCOPES: Scope[] = [
   'host:members:manage',
   'host:groups:manage',
   'host:roles:manage',
+  // ADR 0024 D2 — admin both manages org connections and may use them.
+  'host:connections:manage',
+  'connections:use',
 ];
 const OWNER_SCOPES: Scope[] = [...ADMIN_SCOPES, 'host:org:manage'];
 
@@ -248,6 +265,10 @@ export async function createOrg(input: {
   createdBy: string;
   name: string;
   description?: string;
+  /** A FIXED org id, for reserved host-level orgs that need a deterministic id
+   *  (ADR 0027 — the system site org `host-site`). Omit for normal orgs, which get
+   *  a random `org-<uuid>` id. */
+  orgId?: string;
   /** ADR 0006 (RBAC) Phase 1: when provided, seed an EXPLICIT owner member bound
    *  to this subject (the creating `User.userId`, ADR 0003) — so ownership is
    *  membership-derived and multi-principal-ready, not the "tenant == principal,
@@ -257,7 +278,7 @@ export async function createOrg(input: {
 }): Promise<Organization> {
   const now = nowIso();
   const org: Organization = {
-    orgId: `org-${randomUUID().slice(0, 8)}`,
+    orgId: input.orgId ?? `org-${randomUUID().slice(0, 8)}`,
     tenantId: input.tenantId,
     name: input.name,
     slug: slugify(input.name),
@@ -438,6 +459,7 @@ export async function updateMember(
 ): Promise<OrgMember | null> {
   const member = await members.get(memberId);
   if (!member) return null;
+  const prevRoles = [...member.roles];
   if (patch.displayName !== undefined) member.displayName = patch.displayName;
   if (patch.email !== undefined) {
     if (patch.email === null) delete member.email;
@@ -451,18 +473,39 @@ export async function updateMember(
   if (patch.teamIds !== undefined) member.teamIds = [...patch.teamIds];
   member.updatedAt = nowIso();
   await members.put(member);
+  // ≥1-owner invariant (ADR 0015), enforced ATOMICALLY at the mutator — the
+  // single chokepoint, so no caller can bypass it. A post-write re-check is
+  // race-safe where a pre-write count→put is not: if this demotion stripped the
+  // LAST owner, restore the prior roles and reject. (Concurrent demotions of two
+  // distinct owners can at worst both restore — never leave zero.)
+  if (prevRoles.includes('owner') && !member.roles.includes('owner')
+      && (await countOwners(member.tenantId, member.orgId)) === 0) {
+    member.roles = prevRoles;
+    member.updatedAt = nowIso();
+    await members.put(member);
+    throw new OpenwopError('conflict', LAST_OWNER_MSG, 409, { orgId: member.orgId, memberId });
+  }
   return member;
 }
 
-/** Delete a member and remove it from any group's `memberIds`. */
+/** Delete a member and remove it from any group's `memberIds`. Enforces the
+ *  ≥1-owner invariant atomically (post-write re-check + compensating restore);
+ *  removing a workspace's last owner is rejected with `conflict` (409). Bulk
+ *  org-deletion deletes member rows via `members.delete()` directly, so it is
+ *  not subject to this guard (a whole-workspace teardown, not a member removal). */
 export async function deleteMember(memberId: string): Promise<boolean> {
+  const member = await members.get(memberId);
+  if (!member) return false;
   const existed = await members.delete(memberId);
-  if (existed) {
-    for (const g of (await groups.list()).filter((g) => g.memberIds.includes(memberId))) {
-      g.memberIds = g.memberIds.filter((id) => id !== memberId);
-      g.updatedAt = nowIso();
-      await groups.put(g);
-    }
+  if (!existed) return false;
+  if (member.roles.includes('owner') && (await countOwners(member.tenantId, member.orgId)) === 0) {
+    await members.put(member); // compensating restore — never orphan a workspace
+    throw new OpenwopError('conflict', LAST_OWNER_MSG, 409, { orgId: member.orgId, memberId });
+  }
+  for (const g of (await groups.list()).filter((g) => g.memberIds.includes(memberId))) {
+    g.memberIds = g.memberIds.filter((id) => id !== memberId);
+    g.updatedAt = nowIso();
+    await groups.put(g);
   }
   return existed;
 }
@@ -613,6 +656,99 @@ export async function listWorkspacesForSubject(
     if (org) out.push({ ...org, roles: [...m.roles] });
   }
   return out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+// ── Owner invariant + account-delete cascade (ADR 0015 follow-ups) ──────────────
+//
+// A workspace MUST always retain at least one `owner` member — the ≥1-owner
+// invariant. Removing or demoting the last owner would leave the workspace
+// unadministrable, so the management routes guard against it and account-deletion
+// blocks (rather than orphaning a shared workspace) when the caller is the sole
+// owner. These primitives are the single source of truth for the owner count and
+// the cross-workspace membership scan; the HTTP shaping lives in the routes
+// (routes/accessControl.ts, routes/account.ts).
+
+/** Members holding the built-in `owner` role in a workspace org. */
+export async function listOwners(tenantId: string, orgId: string): Promise<OrgMember[]> {
+  return (await members.list()).filter(
+    (m) => m.tenantId === tenantId && m.orgId === orgId && m.roles.includes('owner'),
+  );
+}
+
+/** Count of `owner` members in a workspace org (the ≥1-owner invariant). */
+export async function countOwners(tenantId: string, orgId: string): Promise<number> {
+  return (await listOwners(tenantId, orgId)).length;
+}
+
+/** The workspace-root memberships `subject` holds in SHARED workspaces — every
+ *  membership whose org is a workspace root (`orgId === tenantId`) OTHER than the
+ *  caller's own personal tenant (`excludePersonalTenant`, which is wiped directly
+ *  on account delete). Drives the account-delete cascade + its sole-owner block. */
+export async function sharedWorkspaceMembershipsForSubject(
+  subject: string,
+  excludePersonalTenant?: string,
+): Promise<OrgMember[]> {
+  return (await members.list()).filter(
+    (m) => m.subject === subject && m.orgId === m.tenantId && m.tenantId !== excludePersonalTenant,
+  );
+}
+
+/** Replace `oldMemberId` with `newMemberId` in every group's `memberIds` (within
+ *  the tenant) — used when a member's id is re-derived during a subject re-key, so
+ *  group membership follows the member instead of dangling on the old id. */
+async function repointGroupMembers(tenantId: string, oldMemberId: string, newMemberId: string): Promise<void> {
+  for (const g of (await groups.list()).filter((g) => g.tenantId === tenantId && g.memberIds.includes(oldMemberId))) {
+    // map old→new, then de-dup in case the group already referenced newMemberId.
+    g.memberIds = [...new Set(g.memberIds.map((id) => (id === oldMemberId ? newMemberId : id)))];
+    g.updatedAt = nowIso();
+    await groups.put(g);
+  }
+}
+
+/**
+ * Re-key every membership held under `fromSubject` to `toSubject` — the
+ * subject-migration primitive behind ADR 0003 Phase 4 (canonical
+ * `user:<userId>` subject + account linking). Returns the count re-keyed.
+ *
+ * The hazard this exists to handle (architect Finding 3): a personal-workspace
+ * owner member uses the DETERMINISTIC id `mbr-<hash(tenantId, subject)>`
+ * (`personalOwnerMemberId`), so its key ENCODES the subject. A plain
+ * `updateMember(subject)` would leave the row addressable under the OLD derived
+ * id, colliding with / shadowing the destination's seeded owner. Those rows are
+ * therefore reinserted under the NEW derived id (PUT-before-DELETE, see below);
+ * random-id members (shared workspaces, `mbr-<uuid>`) are updated in place.
+ *
+ * Crash-safety: the deterministic-id move writes the NEW row BEFORE deleting the
+ * OLD one, so a crash between the two KV writes leaves BOTH (≥1 owner survives —
+ * fail-safe) rather than neither (which would strand the user with no owner of
+ * their own workspace). The stale old row carries `fromSubject`, which no longer
+ * resolves to anyone; a re-run cleans it up. Idempotent, bounded to one subject's
+ * memberships.
+ *
+ * Merge semantics: if an owner is already seeded at the destination id, this is
+ * **last-writer-wins-skip** — the existing destination row is kept and roles are
+ * NOT unioned (merging two personal workspaces is a deferred ADR 0015 question).
+ */
+export async function rekeyMemberSubject(fromSubject: string, toSubject: string): Promise<number> {
+  if (fromSubject === toSubject) return 0;
+  const mine = (await members.list()).filter((m) => m.subject === fromSubject);
+  let rekeyed = 0;
+  for (const m of mine) {
+    if (m.memberId === personalOwnerMemberId(m.tenantId, fromSubject)) {
+      // Deterministic personal-owner member: its id encodes the subject, so the
+      // id is re-derived. PUT-before-DELETE keeps ≥1 owner across a crash.
+      const newId = personalOwnerMemberId(m.tenantId, toSubject);
+      if (!(await members.get(newId))) {
+        await members.put({ ...m, memberId: newId, subject: toSubject, updatedAt: nowIso() });
+      }
+      await repointGroupMembers(m.tenantId, m.memberId, newId);
+      await members.delete(m.memberId);
+    } else {
+      await updateMember(m.memberId, { subject: toSubject });
+    }
+    rekeyed += 1;
+  }
+  return rekeyed;
 }
 
 // ── Groups (cross-cutting RBAC units) ──────────────────────────────────────────

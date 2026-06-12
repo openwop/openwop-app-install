@@ -203,14 +203,18 @@ export const mockAgentNode: NodeModule = {
         const returnedPayload: Record<string, unknown> = {
           agentId,
           callId,
-          // RFC 0002 §B: MUST equal corresponding agent.toolCalled.eventId.
-          causationId: calledRecord.eventId,
           toolName: call.toolId,
           ...(call.result !== undefined && { outcome: call.result }),
           ...(call.error !== undefined && { error: call.error }),
           ...(call.durationMs !== undefined && { durationMs: call.durationMs }),
         };
-        await ctx.emit('agent.toolReturned', returnedPayload);
+        // RFC 0002 §B: the persisted event ENVELOPE's causationId MUST
+        // equal the paired agent.toolCalled.eventId (asserted at the
+        // envelope level by agentReasoningEvents.test.ts — a payload-level
+        // mirror does not satisfy the chain).
+        await ctx.emit('agent.toolReturned', returnedPayload, {
+          causationId: calledRecord.eventId,
+        });
       }
     }
 

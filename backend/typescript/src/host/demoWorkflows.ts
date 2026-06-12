@@ -49,7 +49,12 @@ export type DemoRoleKey =
   | 'support-triage'
   | 'finance-ops'
   | 'engineering-ops'
-  | 'marketing-ops';
+  | 'marketing-ops'
+  // The Executive Assistant / Chief of Staff (ADR 0023) — a real seeded agent.
+  // Its standing portfolio is the perception loops (registered by the assistant
+  // feature, not here), so `demoWorkflowsForRole` returns none and its recurring
+  // tasks are the loops it owns.
+  | 'chief-of-staff';
 
 /** A single-node deterministic "summarize"-style workflow (mock AI, no BYOK). */
 function mockAiWorkflow(workflowId: string): WorkflowDefinition {

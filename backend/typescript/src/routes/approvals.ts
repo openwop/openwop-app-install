@@ -26,7 +26,15 @@ import type { Storage } from '../storage/storage.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { getBoard, moveCard, setCardLastRun, notifyBoardChanged } from '../host/kanbanService.js';
 import { startWorkflowRun } from '../host/runStarter.js';
-import { getApproval, listApprovals, resolveApproval, attachRunId, type ApprovalStatus } from '../host/approvalService.js';
+import {
+  getApproval,
+  listApprovals,
+  resolveApproval,
+  attachRunId,
+  getAssistantActionApprovalHandler,
+  getAssistantActionProjector,
+  type ApprovalStatus,
+} from '../host/approvalService.js';
 
 interface Deps {
   storage: Storage;
@@ -50,7 +58,19 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
       const status: ApprovalStatus | undefined =
         raw === 'pending' || raw === 'approved' || raw === 'rejected' ? raw : undefined;
       const items = await listApprovals(tenantOf(req), status);
-      res.status(200).json({ items });
+      // Enrich assistant-action rows with their typed PendingAction (risk tier,
+      // reason, citations, recipient diff, taint, draft) so the inbox renders
+      // the rich ActionCard. The projector is registered by the assistant
+      // feature; core stays feature-agnostic (the handler-hook discipline).
+      const projector = getAssistantActionProjector();
+      const enriched = projector
+        ? await Promise.all(
+            items.map(async (a) =>
+              a.actionId ? { ...a, action: await projector(tenantOf(req), a.actionId) } : a,
+            ),
+          )
+        : items;
+      res.status(200).json({ items: enriched });
     } catch (err) {
       next(err);
     }
@@ -66,6 +86,40 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
       }
       if (approval.status !== 'pending') {
         throw new OpenwopError('conflict', `Approval already ${approval.status}.`, 409, { status: approval.status });
+      }
+      // ADR 0023 §12 T4 — an assistant-action approval: the SAME claim is the
+      // decision, but it marks the typed PendingAction (via the handler the
+      // assistant feature registers at boot) instead of starting a run.
+      // Execution-on-approve lands in T6 behind the write-scope path.
+      if (approval.actionId) {
+        const handler = getAssistantActionApprovalHandler();
+        if (!handler) {
+          throw new OpenwopError('conflict', 'Assistant feature is not composed on this host.', 409, {});
+        }
+        const decided = await handler(tenantId, approval.approvalId, 'approved', {
+          ...(req.userId ?? req.principal?.principalId ? { decidedByUserId: req.userId ?? req.principal?.principalId } : {}),
+          ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}),
+        });
+        if (!decided) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
+        if (!decided.changed) {
+          throw new OpenwopError('conflict', `Approval already ${decided.approval.status}.`, 409, { status: decided.approval.status });
+        }
+        // Best-effort audit — the CAS-resolved approval row is the durable
+        // decision record; the audit log is the admin-facing trail (T7).
+        void deps.storage
+          .appendAudit({
+            timestamp: new Date().toISOString(),
+            principalId: req.userId ?? req.principal?.principalId ?? 'unknown',
+            action: 'assistant.action.approved',
+            resource: `assistant-action:${approval.actionId}`,
+            outcome: 'success',
+            // tenantId in the payload is what the governance audit VIEW
+            // tenant-filters on (audit_log has no tenant column).
+            payload: { approvalId: approval.approvalId, tenantId },
+          })
+          .catch(() => {});
+        res.status(200).json({ approvalId: approval.approvalId, status: 'approved', actionId: approval.actionId });
+        return;
       }
       // Confirm the proposing member still exists before acting.
       const entry = await getRosterEntry(approval.rosterId);
@@ -147,6 +201,38 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
       }
       if (approval.status !== 'pending') {
         throw new OpenwopError('conflict', `Approval already ${approval.status}.`, 409, { status: approval.status });
+      }
+      // ADR 0023 §12 T4 — assistant-action approvals share the handler path
+      // (no board card to park; the rejection marks the PendingAction).
+      if (approval.actionId) {
+        const handler = getAssistantActionApprovalHandler();
+        if (!handler) {
+          throw new OpenwopError('conflict', 'Assistant feature is not composed on this host.', 409, {});
+        }
+        const decided = await handler(tenantId, approval.approvalId, 'rejected', {
+          ...(req.userId ?? req.principal?.principalId ? { decidedByUserId: req.userId ?? req.principal?.principalId } : {}),
+          ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}),
+        });
+        if (!decided) throw new OpenwopError('not_found', 'Approval not found.', 404, { approvalId: approval.approvalId });
+        if (!decided.changed) {
+          throw new OpenwopError('conflict', `Approval already ${decided.approval.status}.`, 409, { status: decided.approval.status });
+        }
+        // Best-effort audit — the CAS-resolved approval row is the durable
+        // decision record; the audit log is the admin-facing trail (T7).
+        void deps.storage
+          .appendAudit({
+            timestamp: new Date().toISOString(),
+            principalId: req.userId ?? req.principal?.principalId ?? 'unknown',
+            action: 'assistant.action.rejected',
+            resource: `assistant-action:${approval.actionId}`,
+            outcome: 'success',
+            // tenantId in the payload is what the governance audit VIEW
+            // tenant-filters on (audit_log has no tenant column).
+            payload: { approvalId: approval.approvalId, tenantId },
+          })
+          .catch(() => {});
+        res.status(200).json({ approvalId: approval.approvalId, status: 'rejected', actionId: approval.actionId });
+        return;
       }
 
       // Park the card terminally (best-effort) so it leaves the To Do pick path.

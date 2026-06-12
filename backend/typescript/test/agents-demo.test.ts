@@ -59,18 +59,19 @@ interface RosterEntry {
   persona: string;
   workflows: string[];
   autonomyLevel?: 'auto' | 'review';
+  roleKey?: string;
 }
 
 describe('agents-demo backend foundations', () => {
-  it('seeds 5 demo agents and is idempotent', async () => {
+  it('seeds 6 demo agents (incl. the Chief of Staff) and is idempotent', async () => {
     const first = await api<{ seeded: boolean; agents: number; domains: string[] }>('/v1/host/sample/demo/seed', { method: 'POST', body: '{}' });
     expect(first.status).toBe(200);
     expect(first.body.seeded).toBe(true);
-    expect(first.body.agents).toBe(5);
+    expect(first.body.agents).toBe(6); // + Iris, the Chief of Staff (ADR 0023)
     expect(first.body.domains).toEqual(['user-agents', 'roster', 'boards', 'cards', 'schedules', 'org-chart']);
 
     const roster = await api<{ roster: RosterEntry[] }>('/v1/host/sample/roster');
-    expect(roster.body.roster.length).toBe(5);
+    expect(roster.body.roster.length).toBe(6);
     expect(roster.body.roster.map((r) => r.persona)).toContain('Sally');
 
     // Seedable autonomy (white-label): the stock seed ships Nora in `review`
@@ -79,13 +80,18 @@ describe('agents-demo backend foundations', () => {
     expect(nora.autonomyLevel).toBe('review');
     const sally = roster.body.roster.find((r) => r.persona === 'Sally')!;
     expect(sally.autonomyLevel).toBeUndefined();
+    // The Chief of Staff (Iris) is seeded review-mode + carries its roleKey
+    // (the persisted role identity the assistant + theming key off).
+    const iris = roster.body.roster.find((r) => r.persona === 'Iris')!;
+    expect(iris.autonomyLevel).toBe('review');
+    expect(iris.roleKey).toBe('chief-of-staff');
 
     // Re-seed is a no-op (does not clobber the existing roster).
     const second = await api<{ seeded: boolean; domains: string[] }>('/v1/host/sample/demo/seed', { method: 'POST', body: '{}' });
     expect(second.body.seeded).toBe(false);
     expect(second.body.domains).toEqual(['user-agents', 'roster', 'boards', 'cards', 'schedules', 'org-chart']);
     const rosterAgain = await api<{ roster: RosterEntry[] }>('/v1/host/sample/roster');
-    expect(rosterAgain.body.roster.length).toBe(5);
+    expect(rosterAgain.body.roster.length).toBe(6);
   });
 
   it('registers each seeded persona as a chat-callable inventory agent (so @Nora works in chat)', async () => {
@@ -100,7 +106,7 @@ describe('agents-demo backend foundations', () => {
     );
     expect(inv.status).toBe(200);
     const personas = inv.body.agents.map((a) => a.persona);
-    for (const name of ['Sally', 'Marcus', 'Priya', 'Devon', 'Nora']) {
+    for (const name of ['Sally', 'Marcus', 'Priya', 'Devon', 'Nora', 'Iris']) {
       expect(personas).toContain(name);
     }
     // The roster↔inventory link: the persona's inventory agentId is the
@@ -246,7 +252,7 @@ describe('agents-demo backend foundations', () => {
   it('skips demo seeding entirely when OPENWOP_DEMO_SEED_ENABLED=false (white-label)', async () => {
     // The toggle is read per-call, so a branded deployment can ship a clean
     // tenant with no demo personas. Early-return shape is `agents: 0`, distinct
-    // from the idempotent no-op (`seeded:false, agents:5`).
+    // from the idempotent no-op (`seeded:false, agents:6`).
     process.env.OPENWOP_DEMO_SEED_ENABLED = 'false';
     try {
       const res = await api<{ seeded: boolean; agents: number }>('/v1/host/sample/demo/seed', {

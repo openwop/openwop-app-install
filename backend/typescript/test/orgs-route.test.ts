@@ -12,6 +12,7 @@
  */
 
 import http from 'node:http';
+import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
@@ -24,6 +25,7 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
+  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
@@ -50,9 +52,7 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
       headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
       ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
     });
-    const setCookies = typeof (res.headers as any).getSetCookie === 'function'
-      ? (res.headers as any).getSetCookie()
-      : (res.headers.get('set-cookie') ? [res.headers.get('set-cookie')!] : []);
+    const setCookies = getSetCookies(res.headers);
     for (const sc of setCookies as string[]) {
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
@@ -65,8 +65,11 @@ function client(): { get: (p: string) => Promise<Res>; post: (p: string, b?: unk
 
 let n = 0;
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
+// ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
+// the env-gated auth test seam (the email becomes the federated identity's email,
+// which drives the invite email-ownership gate).
 async function signup(c: ReturnType<typeof client>, email: string): Promise<{ userId: string; email: string }> {
-  const r = await c.post('/v1/host/sample/users/auth/signup', { email, password: 'password123' });
+  const r = await c.post('/v1/host/sample/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
