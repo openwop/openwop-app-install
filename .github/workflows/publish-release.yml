@@ -1,8 +1,19 @@
 # Builds the white-label release zip from THIS public repo's tree and publishes
-# it to the rolling `whitelabel` release WITH a sigstore build-provenance
-# attestation (works because this repo is public). The tree itself is synced
-# here from the private openwop-app via scripts/publish-install-repo.sh, which
-# pushes to `main` and thereby triggers this workflow.
+# it WITH a sigstore build-provenance attestation (works because this repo is
+# public). The tree is synced here from the private openwop-app via
+# scripts/publish-install-repo.sh, which pushes to `main` and thereby triggers
+# this workflow.
+#
+# Per openwop-app ADR 0052 §D7 this publishes BOTH:
+#   - an IMMUTABLE `vX.Y.Z` release (version read from the synced `VERSION` file)
+#     — created once, never overwritten, marked the GitHub "Latest" release so a
+#     customer can pin/audit an exact version; and
+#   - the moving `whitelabel` alias — re-clobbered every sync so the long-standing
+#     /install/ download URL stays stable and always serves the newest stable.
+#
+# Transition guard: until the openwop-app sync first carries the `VERSION` file,
+# only the `whitelabel` alias is published (the pre-0052 behavior), so this change
+# is safe to land before the first versioned sync.
 name: Publish white-label release (attested)
 on:
   push:
@@ -10,7 +21,7 @@ on:
     paths-ignore: ['README.md']   # the sync banner alone shouldn't re-release
   workflow_dispatch:
 permissions:
-  contents: write       # create/upload the rolling release asset
+  contents: write       # create/upload release assets + tags
   id-token: write       # sigstore OIDC
   attestations: write   # record the provenance attestation
 concurrency:
@@ -21,18 +32,52 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - name: Resolve app version (ADR 0052 §D4 SSoT — the synced VERSION file)
+        id: ver
+        run: |
+          if [ -f VERSION ]; then
+            V="$(tr -d '[:space:]' < VERSION)"
+          else
+            V=""
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          if [ -n "$V" ]; then echo "::notice::app version v$V"; else echo "::notice::no VERSION file yet — publishing only the whitelabel alias"; fi
+
       - name: Build the white-label bundle
         run: bash scripts/build-whitelabel-zip.sh
+
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist-whitelabel/openwop-demo-app.zip
-      - name: Publish rolling release
+
+      - name: Publish immutable vX.Y.Z release (created once; never clobbered)
+        if: steps.ver.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          TAG="v$V"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # Immutable: the same version already shipped (a re-sync without a
+            # version bump). Do NOT overwrite its assets — the moving `whitelabel`
+            # alias below still picks up any new content.
+            echo "::notice::$TAG already published — immutable, not re-uploading."
+          else
+            gh release create "$TAG" \
+              --title "openwop-app $TAG" \
+              --notes "Immutable white-label install bundle for openwop-app $TAG. Verify with the .sha256 sidecar or \`gh attestation verify --repo openwop/openwop-app-install\`; deploy via frontend/react/WHITE-LABEL.md. For a stable download URL across versions use the \`whitelabel\` release." \
+              --latest \
+              dist-whitelabel/openwop-demo-app.zip dist-whitelabel/openwop-demo-app.zip.sha256
+          fi
+
+      - name: Refresh the moving `whitelabel` alias (stable /install/ URL → newest)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view whitelabel >/dev/null 2>&1 || \
-            gh release create whitelabel --title "White-label install bundle (rolling)" \
-              --notes "Rebuilt + attested on each sync from openwop-app. Verify with the .sha256 sidecar or \`gh attestation verify\`; deploy via frontend/react/WHITE-LABEL.md." --latest=false
+            gh release create whitelabel --title "White-label install bundle (latest)" \
+              --notes "Moving alias to the newest stable openwop-app release. Rebuilt + attested on each sync. For a pinned, auditable version use the \`vX.Y.Z\` release." --latest=false
           gh release upload whitelabel --clobber \
             dist-whitelabel/openwop-demo-app.zip dist-whitelabel/openwop-demo-app.zip.sha256
