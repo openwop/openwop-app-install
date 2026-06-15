@@ -1,7 +1,7 @@
 /**
  * Anon → user migration route tests (P3.5).
  *
- * Verifies POST /v1/host/sample/migrate-tenant:
+ * Verifies POST /v1/host/openwop-app/migrate-tenant:
  *   - Reassigns runs + workflows from anon tenant to user tenant
  *   - Migrates ephemeral BYOK secrets when KMS is configured
  *   - Expires the anon cookie after success
@@ -152,7 +152,7 @@ async function callMigrate(token: string, cookieValue?: string): Promise<Respons
     'content-type': 'application/json',
   };
   if (cookieValue) headers.cookie = `${COOKIE_NAME}=${cookieValue}`;
-  return fetch(`http://127.0.0.1:${appPort}/v1/host/sample/migrate-tenant`, {
+  return fetch(`http://127.0.0.1:${appPort}/v1/host/openwop-app/migrate-tenant`, {
     method: 'POST',
     headers,
     body: '{}',
@@ -161,7 +161,7 @@ async function callMigrate(token: string, cookieValue?: string): Promise<Respons
 
 describe('P3.5 anon → user migration', () => {
   it('refuses callers without an OIDC bearer', async () => {
-    const res = await fetch(`http://127.0.0.1:${appPort}/v1/host/sample/migrate-tenant`, {
+    const res = await fetch(`http://127.0.0.1:${appPort}/v1/host/openwop-app/migrate-tenant`, {
       method: 'POST',
       headers: { cookie: `${COOKIE_NAME}=${mintAnonCookie('test-sid-x')}`, 'content-type': 'application/json' },
       body: '{}',

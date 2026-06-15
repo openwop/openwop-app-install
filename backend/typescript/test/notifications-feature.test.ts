@@ -53,11 +53,11 @@ let n = 0;
 // the env-gated auth test seam.
 async function signedIn(): Promise<Client> {
   const c = client();
-  const r = await c.post('/v1/host/sample/test/login', { email: `notif-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: `notif-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return c;
 }
-const BASE_PATH = '/v1/host/sample/notifications';
+const BASE_PATH = '/v1/host/openwop-app/notifications';
 
 describe('notifications feature — core, always-on (no toggle)', () => {
   it('has NO `notifications` toggle (it is core platform infrastructure)', () => {

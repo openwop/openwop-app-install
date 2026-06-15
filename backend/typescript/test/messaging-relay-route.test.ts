@@ -1,5 +1,5 @@
 /**
- * Demo messaging relay-gateway (sample-extension, non-normative).
+ * Demo messaging relay-gateway (host-extension, non-normative).
  * Boots the real app and exercises the device lifecycle + outbound queue +
  * connector CRUD over HTTP, plus device-token auth and tenant scoping.
  */
@@ -8,7 +8,7 @@ import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
-const OP = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
+const OP = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 
 let server: http.Server;
 let BASE = '';
@@ -34,7 +34,7 @@ beforeEach(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => { server = app.listen(port, res); });
-  BASE = `http://127.0.0.1:${port}/v1/host/sample/messaging`;
+  BASE = `http://127.0.0.1:${port}/v1/host/openwop-app/messaging`;
 });
 
 afterEach(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -191,7 +191,7 @@ describe('messaging relay-gateway — inbound→run bridge', () => {
     }
     expect(reply, 'bridge should enqueue an outbound reply').toBeTruthy();
     expect(reply.conversationId).toBe('conv-bridge');
-    // sample.demo.uppercase uppercases the inbound text
+    // openwop-app.uppercase uppercases the inbound text
     expect(reply.text).toBe('HELLO BRIDGE');
     expect(reply.replyToMessageId).toBe('pm1');
     expect(relayId).toMatch(/^relay_/);
@@ -739,7 +739,7 @@ describe('messaging bridge — routing wiring (unit)', () => {
         runPost = JSON.parse(init.body as string);
         return new Response('{}', { status: 201, headers: { 'content-type': 'application/json' } });
       }
-      if (u.includes('/v1/host/sample/agents/') && u.endsWith('/dispatch') && init?.method === 'POST') {
+      if (u.includes('/v1/host/openwop-app/agents/') && u.endsWith('/dispatch') && init?.method === 'POST') {
         dispatchPost = { url: u, body: JSON.parse(init.body as string) };
         return new Response(JSON.stringify({ status: 'completed', result: { text: 'AGENT REPLY' } }), { status: 200, headers: { 'content-type': 'application/json' } });
       }

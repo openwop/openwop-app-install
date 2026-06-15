@@ -3,7 +3,7 @@
  *
  * Lifecycle of a turn:
  *   1. User submits → append a user Message + an in-flight assistant Message (isStreaming=true)
- *   2. POST /v1/runs with workflowId=sample.chat.turn + inputs.messages + configurable.credentialRefs
+ *   2. POST /v1/runs with workflowId=openwop-app.chat.turn + inputs.messages + configurable.credentialRefs
  *   3. Subscribe to SSE events; on each `node.message` event append the `delta` to the in-flight bubble
  *   4. On `run.completed`, flip `isStreaming=false` and capture final output / usage
  *   5. On `node.suspended`, surface an active interrupt for inline card rendering
@@ -33,6 +33,8 @@ import { registerWorkflow } from '../../builder/persistence/registerClient.js';
 import type { WorkflowMentionEntry } from '../lib/workflowMentions.js';
 import { loadSession, persistSession } from '../lib/chatPersistence.js';
 import { chatSessionReducer } from '../lib/chatSessionReducer.js';
+import { composeProviderMessages } from '../lib/composeProviderMessages.js';
+import { conversationChatEnabled, openConversationSession, sendConversationTurn, closeConversationSession, CONVERSATION_GATE_NODE_ID } from '../conversationTransport.js';
 import { planInterruptResolution } from '../lib/interruptResolution.js';
 
 // Phase 2D — types extracted to `../types.js` so this hook can focus
@@ -127,7 +129,7 @@ export interface UseChatSessionResult {
  *  a SavedWorkflow defaultInputs blob. Module-scoped (static data) so it has a
  *  stable identity and never needs to appear in a hook dependency array. */
 const SAMPLE_DEFAULT_INPUTS: Record<string, Record<string, unknown>> = {
-  'sample.demo.uppercase': { text: 'hello world' },
+  'openwop-app.uppercase': { text: 'hello world' },
 };
 
 export function useChatSession(): UseChatSessionResult {
@@ -146,6 +148,10 @@ export function useChatSession(): UseChatSessionResult {
   const inFlightRunIdRef = useRef<string | null>(null);
   /** Assistant message id of the in-flight bubble. Used by cancel(). */
   const inFlightAssistantIdRef = useRef<string | null>(null);
+  /** The long-lived conversation run for this session, when the (flag-gated)
+   *  RFC 0005 transport is active. Opened lazily on the first send; closed on
+   *  reset(). Null on the default per-turn path. */
+  const conversationRef = useRef<{ runId: string; nodeId: string } | null>(null);
   /** SSE subscriptions for live workflow_run messages, keyed by the
    *  workflow_run chat-message id. Bare-mention dispatches are
    *  long-lived and independent of the chat-turn lifecycle — they
@@ -376,9 +382,70 @@ export function useChatSession(): UseChatSessionResult {
     return () => { cancelled = true; };
   }, [session]);
 
+  // RFC 0005 conversation transport (flag-gated, OFF by default). One long-lived
+  // conversation run per session: open lazily, `exchange` per message, rebuild
+  // the thread from the wire. The whole branch is skipped unless the flag is on,
+  // so the per-turn path below is untouched in production.
+  const sendViaConversation = useCallback(async (text: string, config: BYOKActiveConfig, opts?: SendOptions): Promise<void> => {
+    const optimistic: ChatMessage = { id: crypto.randomUUID(), role: 'user', content: text, createdAt: new Date().toISOString() };
+    setSession((s) => ({ ...s, title: s.messages.length === 0 ? text.slice(0, 60) : s.title, messages: [...s.messages, optimistic] }));
+    try {
+      // Reuse this session's open conversation run across reloads (the suspended
+      // run survives restarts) so the agent keeps server-side context. Only open
+      // a NEW one when neither the in-memory ref nor the persisted id exists —
+      // opening with the SAME provider/model/credential the per-turn chat uses.
+      if (!conversationRef.current) {
+        const persistedRunId = sessionRef.current.conversationRunId;
+        if (persistedRunId) {
+          conversationRef.current = { runId: persistedRunId, nodeId: CONVERSATION_GATE_NODE_ID };
+        } else {
+          conversationRef.current = await openConversationSession({ provider: config.provider, model: config.model, credentialRef: config.credentialRef });
+          const openedRunId = conversationRef.current.runId;
+          setSession((s) => ({ ...s, conversationRunId: openedRunId }));
+        }
+      }
+      const { runId, nodeId } = conversationRef.current;
+      const bubbles = await sendConversationTurn(runId, nodeId, { content: text, ...(opts?.activeAgentId ? { to: opts.activeAgentId } : {}) });
+      // The transport returns the FULL thread rebuilt from conversation.exchanged
+      // events — replace the message list with it (wire is the source of truth).
+      const mapped: ChatMessage[] = bubbles.map((b) => ({
+        id: b.id, role: b.role, content: b.content, createdAt: new Date().toISOString(),
+        ...(b.agentPersona ? { agentId: b.agentPersona, agentPersona: b.agentPersona } : {}),
+      }));
+      setSession((s) => ({ ...s, messages: mapped }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message);
+      // Self-heal a dead/stale run (e.g. a persisted run that has since closed or
+      // timed out): drop the ref + persisted id so the NEXT send opens fresh.
+      // Transient errors (sign-in, rate-limit) keep the conversation intact.
+      if (/resolved|gone|not.?found|expired/i.test(message)) {
+        conversationRef.current = null;
+        setSession((s) => ({ ...s, conversationRunId: undefined }));
+      }
+      // Mirror the per-turn path's error UX: keep the user's message and append
+      // an assistant error bubble (ErrorCard classifies the message, e.g. a
+      // sign-in prompt), rather than leaving a dangling user turn with no reply.
+      const errBubble: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'assistant',
+        content: '',
+        createdAt: new Date().toISOString(),
+        meta: { error: { code: 'conversation_exchange_failed', message } },
+      };
+      setSession((s) => ({ ...s, messages: [...s.messages, errBubble] }));
+    }
+  }, []);
+
   const send = useCallback(async (text: string, config: BYOKActiveConfig, opts?: SendOptions) => {
     setIsSending(true);
     setError(null);
+
+    if (conversationChatEnabled()) {
+      await sendViaConversation(text, config, opts);
+      setIsSending(false);
+      return;
+    }
 
     const attachments = opts?.attachments ?? [];
     const userContent: string | readonly ContentPart[] = attachments.length === 0
@@ -395,30 +462,31 @@ export function useChatSession(): UseChatSessionResult {
       createdAt: new Date().toISOString(),
     };
     const assistantId = crypto.randomUUID();
+    // Stamp the producing agent so a LATER turn by a different agent can label
+    // this one `[Persona]: …` in the provider history (narrative casting).
+    const currentAgent = opts?.activeAgentId
+      ? session.activeAgents?.lineup.find((a) => a.agentId === opts.activeAgentId)
+      : undefined;
     const assistantMsg: ChatMessage = {
       id: assistantId,
       role: 'assistant',
       content: '',
       isStreaming: true,
       createdAt: new Date().toISOString(),
+      ...(opts?.activeAgentId ? { agentId: opts.activeAgentId } : {}),
+      ...(currentAgent?.persona ? { agentPersona: currentAgent.persona } : {}),
     };
 
     // Compose the provider message history from the existing thread +
     // the new user turn. Past messages with multi-modal content pass
     // their ContentPart[] through; text-only messages stay as strings.
     // (Dispatchers convert per-provider on the BE.)
-    const providerMessages = [
-      { role: 'system', content: SYSTEM_PROMPT },
-      ...session.messages
-        .filter((m) => m.role === 'user' || m.role === 'assistant')
-        .filter((m) => {
-          if (m.isStreaming) return false;
-          if (typeof m.content === 'string') return m.content.length > 0;
-          return m.content.length > 0;
-        })
-        .map((m) => ({ role: m.role, content: m.content })),
-      { role: 'user', content: userContent },
-    ];
+    const providerMessages = composeProviderMessages({
+      systemPrompt: SYSTEM_PROMPT,
+      history: session.messages,
+      newUserContent: userContent,
+      currentAgentId: opts?.activeAgentId,
+    });
 
     // Snapshot the next title before setSession so the BE-write-through
     // sees the same value the local state lands on. Avoids reading the
@@ -440,7 +508,7 @@ export function useChatSession(): UseChatSessionResult {
     try {
       const created = await createRun(
         {
-          workflowId: 'sample.chat.turn',
+          workflowId: 'openwop-app.chat.turn',
           // Omit body.tenantId so the BE infers from the authenticated
           // session/bearer (req.tenantId): `anon:<sid>` for cookie-anon
           // callers, `user:<hash>` for Firebase-signed-in callers. A
@@ -529,7 +597,7 @@ export function useChatSession(): UseChatSessionResult {
     // are intentionally omitted — their object identity churns each render and
     // adding them would needlessly recreate `send` (used widely downstream).
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.id, session.messages, session.title]);
+  }, [session.id, session.messages, session.title, sendViaConversation]);
 
   const cancel = useCallback(async () => {
     const runId = inFlightRunIdRef.current;
@@ -579,6 +647,11 @@ export function useChatSession(): UseChatSessionResult {
 
   const reset = useCallback(() => {
     subRef.current?.close();
+    // Close the (flag-gated) conversation run for the prior session, if any.
+    if (conversationRef.current) {
+      void closeConversationSession(conversationRef.current.runId, conversationRef.current.nodeId);
+      conversationRef.current = null;
+    }
     const fresh: ChatSession = {
       id: crypto.randomUUID(),
       title: 'New chat',

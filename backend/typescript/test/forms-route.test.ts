@@ -55,9 +55,9 @@ let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
   // ADR 0026: mint an authenticated user via the env-gated auth test seam.
   const owner = client();
-  const su = await owner.post('/v1/host/sample/test/login', { email: `forms-${Date.now()}-${n++}@acme.test` });
+  const su = await owner.post('/v1/host/openwop-app/test/login', { email: `forms-${Date.now()}-${n++}@acme.test` });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -87,15 +87,15 @@ describe('Forms: authed org-scoped builder (RBAC)', () => {
 
   it('owner creates a draft, lists, reads, and publishes', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const created = await owner.post(`/v1/host/sample/forms/orgs/${orgId}/forms`, CONTACT_FORM);
+    const created = await owner.post(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`, CONTACT_FORM);
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.status).toBe('draft');
     const formId = created.body.formId;
 
-    const list = await owner.get(`/v1/host/sample/forms/orgs/${orgId}/forms`);
+    const list = await owner.get(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`);
     expect(list.body.forms.some((f: any) => f.formId === formId)).toBe(true);
 
-    const pubd = await owner.patch(`/v1/host/sample/forms/orgs/${orgId}/forms/${formId}/status`, { status: 'published' });
+    const pubd = await owner.patch(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${formId}/status`, { status: 'published' });
     expect(pubd.status).toBe(200);
     expect(pubd.body.status).toBe('published');
   });
@@ -104,11 +104,11 @@ describe('Forms: authed org-scoped builder (RBAC)', () => {
 describe('Forms: public render + submit', () => {
   it('renders a published form publicly (no auth) but not a draft', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const draft = (await owner.post(`/v1/host/sample/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
+    const draft = (await owner.post(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
     // draft → public 404
-    expect((await pub.get(`/v1/host/sample/public-forms/${draft.formId}`)).status).toBe(404);
-    await owner.patch(`/v1/host/sample/forms/orgs/${orgId}/forms/${draft.formId}/status`, { status: 'published' });
-    const render = await pub.get(`/v1/host/sample/public-forms/${draft.formId}`);
+    expect((await pub.get(`/v1/host/openwop-app/public-forms/${draft.formId}`)).status).toBe(404);
+    await owner.patch(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${draft.formId}/status`, { status: 'published' });
+    const render = await pub.get(`/v1/host/openwop-app/public-forms/${draft.formId}`);
     expect(render.status).toBe(200);
     expect(render.body.fields).toHaveLength(2);
     expect(render.body.honeypotField).toBe('_hp_ref');
@@ -116,14 +116,14 @@ describe('Forms: public render + submit', () => {
 
   it('submit creates a CRM contact (contactId set via crmService)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const form = (await owner.post(`/v1/host/sample/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
-    await owner.patch(`/v1/host/sample/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
+    const form = (await owner.post(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
+    await owner.patch(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
 
-    const sub = await pub.post(`/v1/host/sample/public-forms/${form.formId}/submit`, { values: { name: 'Lead', email: 'lead@x.com' } });
+    const sub = await pub.post(`/v1/host/openwop-app/public-forms/${form.formId}/submit`, { values: { name: 'Lead', email: 'lead@x.com' } });
     expect(sub.status, JSON.stringify(sub.body)).toBe(201);
     expect(sub.body.ok).toBe(true);
 
-    const subs = await owner.get(`/v1/host/sample/forms/orgs/${orgId}/forms/${form.formId}/submissions`);
+    const subs = await owner.get(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/submissions`);
     expect(subs.body.submissions).toHaveLength(1);
     expect(subs.body.submissions[0].contactId).toMatch(/^crm:/); // routed through createContact
     expect(subs.body.submissions[0].values.email).toBe('lead@x.com');
@@ -131,15 +131,15 @@ describe('Forms: public render + submit', () => {
 
   it('drops a honeypot-filled submission (silent 200, no row) and rejects a missing required field', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const form = (await owner.post(`/v1/host/sample/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
-    await owner.patch(`/v1/host/sample/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
+    const form = (await owner.post(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
+    await owner.patch(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
 
-    const honeypot = await pub.post(`/v1/host/sample/public-forms/${form.formId}/submit`, { values: { name: 'Bot', email: 'b@x.com', _hp_ref: 'spam' } });
+    const honeypot = await pub.post(`/v1/host/openwop-app/public-forms/${form.formId}/submit`, { values: { name: 'Bot', email: 'b@x.com', _hp_ref: 'spam' } });
     expect(honeypot.status).toBe(200);
-    const missing = await pub.post(`/v1/host/sample/public-forms/${form.formId}/submit`, { values: { email: 'noname@x.com' } });
+    const missing = await pub.post(`/v1/host/openwop-app/public-forms/${form.formId}/submit`, { values: { email: 'noname@x.com' } });
     expect(missing.status).toBe(400);
 
-    const subs = await owner.get(`/v1/host/sample/forms/orgs/${orgId}/forms/${form.formId}/submissions`);
+    const subs = await owner.get(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/submissions`);
     expect(subs.body.submissions).toHaveLength(0); // neither was recorded
   });
 });
@@ -148,18 +148,18 @@ describe('Forms: isolation + gating', () => {
   it('cross-tenant access to another org 404s (IDOR)', async () => {
     const a = await ownerWithOrg();
     const b = await ownerWithOrg(); // different tenant
-    const r = await b.owner.get(`/v1/host/sample/forms/orgs/${a.orgId}/forms`);
+    const r = await b.owner.get(`/v1/host/openwop-app/forms/orgs/${a.orgId}/forms`);
     expect(r.status).toBe(404);
   });
 
   it('toggle off ⇒ authed + public both 404', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const form = (await owner.post(`/v1/host/sample/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
-    await owner.patch(`/v1/host/sample/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
+    const form = (await owner.post(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`, CONTACT_FORM)).body;
+    await owner.patch(`/v1/host/openwop-app/forms/orgs/${orgId}/forms/${form.formId}/status`, { status: 'published' });
     try {
       await enableForms('off');
-      expect((await owner.get(`/v1/host/sample/forms/orgs/${orgId}/forms`)).status).toBe(404);
-      expect((await pub.get(`/v1/host/sample/public-forms/${form.formId}`)).status).toBe(404);
+      expect((await owner.get(`/v1/host/openwop-app/forms/orgs/${orgId}/forms`)).status).toBe(404);
+      expect((await pub.get(`/v1/host/openwop-app/public-forms/${form.formId}`)).status).toBe(404);
     } finally {
       await enableForms('on');
     }

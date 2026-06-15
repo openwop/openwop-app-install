@@ -1,5 +1,5 @@
 /**
- * CMS API client (ADR 0009). Org-scoped under /v1/host/sample/cms/orgs/:orgId.
+ * CMS API client (ADR 0009). Org-scoped under /v1/host/openwop-app/cms/orgs/:orgId.
  * Section assets are Media-Library tokens (the editor offers the org's media
  * assets via `listMediaAssets`).
  */
@@ -24,7 +24,7 @@ export interface PageVersion { versionId: string; version: number; publishedAt: 
 export interface MediaAssetRef { assetId: string; name: string; serveUrl: string; serveToken?: string }
 export type WorkflowAction = 'submit' | 'approve' | 'reject' | 'publish' | 'archive' | 'unpublish';
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -90,5 +90,5 @@ export async function listMediaAssets(orgId: string): Promise<MediaAssetRef[]> {
 
 /** Absolute serve URL for an asset's token (for section image previews). */
 export function assetUrl(token: string): string {
-  return `${config.baseUrl}/v1/host/sample/assets/${encodeURIComponent(token)}`;
+  return `${config.baseUrl}/v1/host/openwop-app/assets/${encodeURIComponent(token)}`;
 }

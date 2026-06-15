@@ -1,6 +1,6 @@
 /**
  * Analytics API client (ADR 0018). Authed org-scoped reporting under
- * /v1/host/sample/analytics/orgs/:orgId — read-only summary + recent events.
+ * /v1/host/openwop-app/analytics/orgs/:orgId — read-only summary + recent events.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
@@ -27,7 +27,7 @@ export interface AnalyticsEvent {
   props?: Record<string, string | number | boolean>;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {

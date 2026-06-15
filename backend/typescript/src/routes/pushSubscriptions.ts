@@ -1,14 +1,14 @@
 /**
  * Web Push subscription routes (PR #174).
  *
- *   POST   /v1/host/sample/notifications/push/subscribe
+ *   POST   /v1/host/openwop-app/notifications/push/subscribe
  *     body: { endpoint, keys: { p256dh, auth }, userAgent? }
  *     → 201 { subscriptionId }
  *
- *   DELETE /v1/host/sample/notifications/push/subscriptions/:id
+ *   DELETE /v1/host/openwop-app/notifications/push/subscriptions/:id
  *     → 204; 404 when the id is unknown or not owned by the caller
  *
- *   GET    /v1/host/sample/notifications/push/subscriptions
+ *   GET    /v1/host/openwop-app/notifications/push/subscriptions
  *     → 200 { subscriptions: [{ subscriptionId, endpoint, createdAt, userAgent? }] }
  *     — the `keys` are never returned (treated like credentials).
  *
@@ -27,7 +27,7 @@ import type { Storage } from '../storage/storage.js';
 import { OpenwopError, type PushSubscriptionRecord } from '../types.js';
 import { getVapidPublicKey } from '../notifications/webPush.js';
 
-const BASE = '/v1/host/sample/notifications/push';
+const BASE = '/v1/host/openwop-app/notifications/push';
 
 interface Deps {
   storage: Storage;

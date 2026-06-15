@@ -14,7 +14,7 @@
  *   - WSR-1 (secret redaction): content is routed through the SR-1 harness on
  *     write so a stored file never persists secret-shaped plaintext.
  *
- * Process-local (sample-grade); a production host backs this with durable
+ * Process-local (best-effort); a production host backs this with durable
  * storage. Latest-version only (the host does not advertise `versioned`).
  *
  * @see RFCS/0059-agent-workspace.md (sections C/D/E)

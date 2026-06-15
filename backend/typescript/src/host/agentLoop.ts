@@ -13,7 +13,7 @@
  * conformanceMockAgent.ts`), which emits a whole plan in one node pass: this
  * is a real per-turn re-entry, so the iteration counter and the
  * `maxLoopIterations` bound are observable. It backs the
- * `POST /v1/host/sample/agentloop/run` seam.
+ * `POST /v1/host/openwop-app/agentloop/run` seam.
  *
  * @see RFCS/0061-agent-loop-lifecycle.md §B/§D/§E
  * @see RFCS/0058-run-execution-bounds.md §A (maxLoopIterations)

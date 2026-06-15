@@ -9,7 +9,7 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 import { toast } from '../../ui/toast.js';
 import { listProviders } from './connectionsClient.js';
 
-const base = `${config.baseUrl}/v1/host/sample/governance`;
+const base = `${config.baseUrl}/v1/host/openwop-app/governance`;
 
 type KindPolicy = 'disabled' | 'draft-only' | 'approval-required';
 

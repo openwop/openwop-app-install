@@ -12,7 +12,7 @@
  *   2. Bearer-token allow-list — for the conformance harness + curl
  *      smoke + signed-in users (Phase 3). Token values come from
  *      `OPENWOP_API_KEYS` (CSV) or `OPENWOP_API_KEY` (single). Default
- *      `sample-token` for local dev; production deployments MUST set
+ *      `dev-token` for local dev; production deployments MUST set
  *      either OPENWOP_API_KEYS (real keys) or rely on cookies only.
  *
  * Modes are NOT mutually exclusive — Bearer auth wins when present;
@@ -93,7 +93,7 @@ const PUBLIC_PATH_PREFIXES = [
   // browser-driven ACS form-POST, and the SP metadata are all PRE-AUTH (the user
   // has no session yet — the ACS is what MINTS it). The assertion's XML signature
   // is the credential, validated by `host/auth/samlSso`. 404s when SAML is unconfigured.
-  '/v1/host/sample/auth/saml/sso',
+  '/v1/host/openwop-app/auth/saml/sso',
   // SCIM 2.0 provisioning (RFC 0050 §B): the IdP's SCIM client (Okta / Azure AD)
   // POSTs to /scim/v2/{Users,Groups} with the IdP SCIM bearer — NOT a session
   // cookie or an OPENWOP_API_KEY. Each route does its OWN constant-time bearer
@@ -103,80 +103,80 @@ const PUBLIC_PATH_PREFIXES = [
   // (OPENWOP_AUTH_ENFORCE_BEARER / _DISABLE_COOKIES) would otherwise 401 the
   // unrecognized SCIM bearer before the route runs, making SCIM unreachable for
   // exactly the production postures that use it. The conformance seam
-  // (/v1/host/sample/auth/scim/provision) is NOT here — it runs under the
+  // (/v1/host/openwop-app/auth/scim/provision) is NOT here — it runs under the
   // caller's auth context, so it stays globally gated.
   '/scim/v2',
-  // RFC 0055 §C media-asset serving: GET /v1/host/sample/assets/{token} is
+  // RFC 0055 §C media-asset serving: GET /v1/host/openwop-app/assets/{token} is
   // token-authed (the 32-byte capability token is the credential, like
   // /v1/interrupts/{token}), so embeddable <img src> URLs work without a
-  // bearer/cookie. The store path (POST /v1/host/sample/media/put) is NOT
+  // bearer/cookie. The store path (POST /v1/host/openwop-app/media/put) is NOT
   // under this prefix and stays authenticated.
-  '/v1/host/sample/assets',
+  '/v1/host/openwop-app/assets',
   // Demo messaging relay device-loop (heartbeat/inbound/outbound/ack) is
   // authed by the per-device token in the `x-openwop-device-token` header
   // — the device token is the credential, like /v1/interrupts/{token}. The
   // operator endpoints (register/activate/revoke/enqueue, connectors,
   // sessions) are NOT under /device and stay bearer-authed.
-  '/v1/host/sample/messaging/device',
+  '/v1/host/openwop-app/messaging/device',
   // Admin endpoints do their own constant-time check against
   // OPENWOP_ADMIN_TOKEN (separate from OPENWOP_API_KEYS so the
   // session/bearer paths can't confuse the two). Bypassing the
   // session-cookie auth path here lets Cloud Scheduler hit the
   // cleanup cron with just the Bearer admin token.
-  '/v1/host/sample/admin',
+  '/v1/host/openwop-app/admin',
   // ADR 0012 Publishing & SEO: the PUBLIC published-site surface
-  // (GET /v1/host/sample/public/{orgId}/{pages/:slug,sitemap.xml,robots.txt,
+  // (GET /v1/host/openwop-app/public/{orgId}/{pages/:slug,sitemap.xml,robots.txt,
   // feed.rss}). Intentionally unauthenticated — published content is public by
   // definition. There is NO credential: the org is in the URL, its tenant comes
   // from `getOrg`, and the surface is gated on the org-tenant's `publishing`
   // toggle + served published-only (drafts never resolve). The authoring +
-  // SEO-write surface lives under /v1/host/sample/publishing/* and stays
+  // SEO-write surface lives under /v1/host/openwop-app/publishing/* and stays
   // authorizeOrgScope-gated, NOT under this prefix.
-  '/v1/host/sample/public',
+  '/v1/host/openwop-app/public',
   // ADR 0027 Site config: the PUBLIC front-page pointer the anonymous SPA reads
-  // at '/' (GET /v1/host/sample/public-site-config → { enabled, orgId, slug }).
-  // Exposes only already-public ids; the superadmin WRITE is /v1/host/sample/site-config.
-  '/v1/host/sample/public-site-config',
+  // at '/' (GET /v1/host/openwop-app/public-site-config → { enabled, orgId, slug }).
+  // Exposes only already-public ids; the superadmin WRITE is /v1/host/openwop-app/site-config.
+  '/v1/host/openwop-app/public-site-config',
   // ADR 0013 Sharing: the PUBLIC share-link resolve surface
-  // (GET /v1/host/sample/shared/{token}[/card]). Unauthenticated by design — the
+  // (GET /v1/host/openwop-app/shared/{token}[/card]). Unauthenticated by design — the
   // 32-byte base64url token IS the credential (like /v1/interrupts/{token} and
   // the media serve route). Tenant comes from the link, the surface is gated on
   // the link-tenant's `sharing` toggle, and revoked/expired links 404. The
-  // management surface lives under /v1/host/sample/sharing/* and stays
+  // management surface lives under /v1/host/openwop-app/sharing/* and stays
   // authorizeOrgScope-gated — note `shared` ≠ `sharing`, so this prefix does NOT
   // match it.
-  '/v1/host/sample/shared',
+  '/v1/host/openwop-app/shared',
   // Forms (ADR 0017) — the PUBLIC render + submit surface
-  // (GET /v1/host/sample/public-forms/{formId}, POST …/submit). Unauthenticated
+  // (GET /v1/host/openwop-app/public-forms/{formId}, POST …/submit). Unauthenticated
   // by design — a published form is public-by-intent. Tenant comes from the form,
   // the surface is gated on the form-tenant's `forms` toggle, and unpublished /
-  // missing forms 404. The management surface lives under /v1/host/sample/forms/*
+  // missing forms 404. The management surface lives under /v1/host/openwop-app/forms/*
   // and stays authorizeOrgScope-gated — `public-forms` ≠ `forms`, so this prefix
   // does NOT match it.
-  '/v1/host/sample/public-forms',
+  '/v1/host/openwop-app/public-forms',
   // Consent (ADR 0020) — the PUBLIC record/read surface
-  // (POST /v1/host/sample/public-consent/{orgId}, GET …/{orgId}/{subjectKey}).
+  // (POST /v1/host/openwop-app/public-consent/{orgId}, GET …/{orgId}/{subjectKey}).
   // Unauthenticated by design — a visitor records consent before any auth. Tenant
   // comes from the org, gated on the org-tenant's `consent` toggle. The management
-  // surface lives under /v1/host/sample/consent/* and stays authorizeOrgScope-gated
+  // surface lives under /v1/host/openwop-app/consent/* and stays authorizeOrgScope-gated
   // — `public-consent` ≠ `consent`, so this prefix does NOT match it.
-  '/v1/host/sample/public-consent',
+  '/v1/host/openwop-app/public-consent',
   // Analytics (ADR 0018) — the PUBLIC beacon
-  // (POST /v1/host/sample/public-analytics/{orgId}/collect). Unauthenticated by
+  // (POST /v1/host/openwop-app/public-analytics/{orgId}/collect). Unauthenticated by
   // design — a visitor's page/event hit. Tenant comes from the org, gated on the
   // org-tenant's `analytics` toggle AND consent (ADR 0020). The reporting surface
-  // lives under /v1/host/sample/analytics/* and stays authorizeOrgScope-gated —
+  // lives under /v1/host/openwop-app/analytics/* and stays authorizeOrgScope-gated —
   // `public-analytics` ≠ `analytics`, so this prefix does NOT match it.
-  '/v1/host/sample/public-analytics',
+  '/v1/host/openwop-app/public-analytics',
   // Connections inbound webhooks (ADR 0024 §6) — the PUBLIC provider-push ingest
-  // (POST /v1/host/sample/connections-inbound/{connectionId}). Unauthenticated by
+  // (POST /v1/host/openwop-app/connections-inbound/{connectionId}). Unauthenticated by
   // design — the provider HMAC signature IS the credential (verified against the
   // connection's stored signing secret); tenant comes from the inbound config.
-  // The authoring surface lives under /v1/host/sample/connections/* and stays
+  // The authoring surface lives under /v1/host/openwop-app/connections/* and stays
   // auth + admin-gated (org-shared connections need `host:connections:manage`;
   // it is no longer feature-toggle-gated — ADR 0024 § Correction) —
   // `connections-inbound` ≠ `connections`, so this prefix does NOT match it.
-  '/v1/host/sample/connections-inbound',
+  '/v1/host/openwop-app/connections-inbound',
 ];
 
 // Firebase Hosting strips every cookie except `__session` from
@@ -374,7 +374,7 @@ function setSessionCookie(res: import('express').Response, signed: string): void
 function readValidKeys(): ReadonlySet<string> {
   const multi = process.env.OPENWOP_API_KEYS;
   const single = process.env.OPENWOP_API_KEY;
-  const raw = multi ?? single ?? 'sample-token';
+  const raw = multi ?? single ?? 'dev-token';
   return new Set(raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0));
 }
 

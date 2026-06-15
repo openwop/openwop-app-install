@@ -1,7 +1,7 @@
 /**
  * Messaging relay-gateway routes (demo app only — NOT normative openwop v1).
  *
- * Vendor-prefixed under `/v1/host/sample/messaging` per `host-extensions.md`:
+ * Vendor-prefixed under `/v1/host/openwop-app/messaging` per `host-extensions.md`:
  * openwop is a channel-agnostic workflow protocol, so chat channels
  * (Signal / WhatsApp / iMessage) live entirely in a host-extension layer.
  * Other hosts MAY add their own under their own vendor prefix; nothing here
@@ -59,7 +59,7 @@ const GROUP_POLICIES: readonly GroupPolicy[] = ['allowlist', 'open', 'disabled']
 const NOTIFY_KINDS = ['email', 'sms'] as const;
 type NotifyKind = (typeof NOTIFY_KINDS)[number];
 
-const BASE = '/v1/host/sample/messaging';
+const BASE = '/v1/host/openwop-app/messaging';
 
 const DEVICE_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const ACTIVATION_TTL_MS = 10 * 60 * 1000; // 10 minutes

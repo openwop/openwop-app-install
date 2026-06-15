@@ -3,7 +3,7 @@
  *
  * Exercises the four resolution paths the responder advertises:
  *   1. exact typeId match
- *   2. trailing-segment match ("mock-ai" → "local.sample.demo.mock-ai")
+ *   2. trailing-segment match ("mock-ai" → "local.openwop-app.mock-ai")
  *   3. case-insensitive segment match ("MockAi", "mock_ai")
  *   4. notFound (no match)
  *
@@ -43,7 +43,7 @@ describe('schemaResponder.buildSchemaResponse', () => {
   });
 
   it('resolves case-insensitive variants of the trailing segment', () => {
-    // The sample registers `local.sample.demo.mock-ai`. The responder
+    // The sample registers `local.openwop-app.mock-ai`. The responder
     // strips `-`/`_` before comparing so `MockAi`, `mock_ai`, `MOCK-AI`
     // all hit the same entry.
     const variants = ['mock-ai', 'MockAi', 'mock_ai', 'MOCK-AI'];

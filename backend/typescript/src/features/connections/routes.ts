@@ -1,7 +1,7 @@
 /**
- * Connections feature routes (host-extension, sample-grade — ADR 0024).
+ * Connections feature routes (host-extension, best-effort — ADR 0024).
  *
- * Surface under /v1/host/sample/{connections,providers}. Always-on: Connections
+ * Surface under /v1/host/openwop-app/{connections,providers}. Always-on: Connections
  * graduated off its feature toggle to a permanent admin surface (ADR 0024
  * § Correction, 2026-06-11). Phase A: the provider registry + the
  * api_key/bearer create path + list/revoke + the resolver. Phase B (this commit):
@@ -108,7 +108,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     };
 
   // ── Provider registry (the catalog — adding an integration is a manifest) ──
-  app.get('/v1/host/sample/providers', wrap(async (_req, res) => {
+  app.get('/v1/host/openwop-app/providers', wrap(async (_req, res) => {
     // `oauthConfigured` is the honesty signal (ADR 0024 RFC-gate): an oauth2
     // provider is only offered for Connect when its host-side client creds exist.
     // `writeScopes` lets the UI offer a Phase C write re-consent (ADR 0024 §3).
@@ -122,7 +122,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
       ),
     });
   }));
-  app.get('/v1/host/sample/providers/:id', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/providers/:id', wrap(async (req, res) => {
     const m = getProvider(req.params.id);
     if (!m) throw new OpenwopError('not_found', 'Provider not found.', 404, { provider: req.params.id });
     res.json(m);
@@ -134,7 +134,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   // `connections-oauth-clients` (NOT nested under `/connections/:id`, which the
   // param routes own — same discipline as `connections-inbound`). The client
   // SECRET is sealed at rest and NEVER returned on any read.
-  app.get('/v1/host/sample/connections-oauth-clients', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/connections-oauth-clients', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'OAuth client configuration');
       res.json({ clients: await listHostOAuthClients() });
@@ -143,7 +143,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.put('/v1/host/sample/connections-oauth-clients/:provider', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/connections-oauth-clients/:provider', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'OAuth client configuration');
       const provider = req.params.provider;
@@ -165,7 +165,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/sample/connections-oauth-clients/:provider', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/connections-oauth-clients/:provider', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'OAuth client configuration');
       const existed = await deleteHostOAuthClient(req.params.provider);
@@ -179,11 +179,11 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   });
 
   // ── Connections ──
-  app.get('/v1/host/sample/connections', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/connections', wrap(async (req, res) => {
     res.json({ connections: await listConnections(tenantOf(req), actingUserOf(req)) });
   }));
 
-  app.post('/v1/host/sample/connections', wrap(async (req, res) => {
+  app.post('/v1/host/openwop-app/connections', wrap(async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const provider = requireString(body.provider, 'provider');
     const manifest = getProvider(provider);
@@ -229,7 +229,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
 
   // ── OAuth2 PKCE consent (ADR 0024 Phase B §3) ──
   // authorize: mint a consent URL bound to (tenant, user) with PKCE + state.
-  app.post('/v1/host/sample/connections/:provider/authorize', wrap(async (req, res) => {
+  app.post('/v1/host/openwop-app/connections/:provider/authorize', wrap(async (req, res) => {
     const provider = req.params.provider;
     const manifest = getProvider(provider);
     if (!manifest) throw new OpenwopError('connection_provider_unresolved', `No connection provider '${provider}' — install a connection pack whose provider.id is '${provider}', or none is built in (RFC 0095 §B.6).`, 404, { provider });
@@ -256,7 +256,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   // callback: the provider's browser redirect. Identity comes from the single-use
   // server-stored `state` (NOT the session) — so we drive it ourselves and bounce
   // the browser back to the SPA on both success and failure, never a JSON 4xx.
-  app.get('/v1/host/sample/connections/:provider/callback', async (req: Request, res: import('express').Response) => {
+  app.get('/v1/host/openwop-app/connections/:provider/callback', async (req: Request, res: import('express').Response) => {
     const provider = req.params.provider;
     const origin = reqOriginOf(req);
     const fail = (returnTo: string, reason: string): void => {
@@ -299,7 +299,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   });
 
   // test: health-probe a connection's credential (refreshes oauth2 on the way).
-  app.post('/v1/host/sample/connections/:id/test', wrap(async (req, res) => {
+  app.post('/v1/host/openwop-app/connections/:id/test', wrap(async (req, res) => {
     const existing = await getConnection(tenantOf(req), req.params.id);
     if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
     await authorizeManage(req, existing);
@@ -307,7 +307,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     res.json(result ?? { ok: false, status: 'revoked' });
   }));
 
-  app.delete('/v1/host/sample/connections/:id', wrap(async (req, res) => {
+  app.delete('/v1/host/openwop-app/connections/:id', wrap(async (req, res) => {
     const existing = await getConnection(tenantOf(req), req.params.id);
     if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
     await authorizeManage(req, existing);
@@ -322,7 +322,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   // Admin/owner-gated authoring of the per-connection inbound trigger. The
   // resulting PUBLIC ingest (below) carries no host credential — the provider
   // signature is the credential.
-  app.get('/v1/host/sample/connections/:id/inbound', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/connections/:id/inbound', wrap(async (req, res) => {
     const existing = await getConnection(tenantOf(req), req.params.id);
     if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
     await authorizeManage(req, existing);
@@ -330,7 +330,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     res.json({ config, ingestUrl: inboundIngestUrl(req.params.id, reqOriginOf(req)) }); // never the signing secret
   }));
 
-  app.put('/v1/host/sample/connections/:id/inbound', wrap(async (req, res) => {
+  app.put('/v1/host/openwop-app/connections/:id/inbound', wrap(async (req, res) => {
     const existing = await getConnection(tenantOf(req), req.params.id);
     if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
     await authorizeManage(req, existing);
@@ -348,7 +348,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     res.status(201).json({ config, ingestUrl: inboundIngestUrl(req.params.id, reqOriginOf(req)) });
   }));
 
-  app.delete('/v1/host/sample/connections/:id/inbound', wrap(async (req, res) => {
+  app.delete('/v1/host/openwop-app/connections/:id/inbound', wrap(async (req, res) => {
     const existing = await getConnection(tenantOf(req), req.params.id);
     if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
     await authorizeManage(req, existing);
@@ -361,7 +361,7 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   // verified against the stored signing secret IS the credential. Distinct
   // prefix `connections-inbound` (allow-listed in auth.ts), keyed by connectionId.
   const startDeps = { storage: deps.storage, hostSuite: deps.hostSuite };
-  app.post('/v1/host/sample/connections-inbound/:connectionId', async (req: Request, res: import('express').Response) => {
+  app.post('/v1/host/openwop-app/connections-inbound/:connectionId', async (req: Request, res: import('express').Response) => {
     try {
       // The scoped `express.json({ verify })` parser populates rawBody for every
       // application/json POST on this path. If it's absent the HMAC can't be

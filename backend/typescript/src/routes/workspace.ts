@@ -12,7 +12,7 @@
  * NEVER the body/query — the WCT-1 fail-closed contract. Cross-owner access
  * (a different `{tenant, workspace}`) simply finds nothing → 404, no leak.
  *
- * The `POST /v1/host/sample/workspace/op` seam lets a single-credential
+ * The `POST /v1/host/openwop-app/workspace/op` seam lets a single-credential
  * conformance harness drive DISTINCT owners (its `{tenant, workspace}` come
  * from the body) so it can prove cross-owner isolation (WCT-1).
  *
@@ -131,13 +131,13 @@ export function registerWorkspaceRoutes(app: Express): void {
   // exposed in production — it is gated on OPENWOP_TEST_SEAM_ENABLED (OFF by
   // default). The real CRUD endpoints above derive the owner from
   // req.tenantId and are always safe to expose. Vendor-namespaced under
-  // /v1/host/sample/* per host-extensions.md.
+  // /v1/host/openwop-app/* per host-extensions.md.
   if (process.env.OPENWOP_TEST_SEAM_ENABLED !== 'true') {
     log.info('workspace cross-owner seam disabled (set OPENWOP_TEST_SEAM_ENABLED=true to enable)');
     return;
   }
-  log.warn('workspace cross-owner seam ENABLED — /v1/host/sample/workspace/op accepts a body-supplied owner. NEVER enable in production.');
-  app.post('/v1/host/sample/workspace/op', (req, res) => {
+  log.warn('workspace cross-owner seam ENABLED — /v1/host/openwop-app/workspace/op accepts a body-supplied owner. NEVER enable in production.');
+  app.post('/v1/host/openwop-app/workspace/op', (req, res) => {
     const body = (req.body ?? {}) as {
       tenant?: unknown;
       workspace?: unknown;

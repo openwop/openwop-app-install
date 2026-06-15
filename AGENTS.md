@@ -91,7 +91,7 @@ dishonest wire claim (and `OPENWOP_REQUIRE_BEHAVIOR=true` will fail it). A featu
 that rides on an **already-Accepted** RFC needs no new RFC — e.g. ADR 0002's
 enterprise SSO implements `openwop-auth-saml` / `openwop-auth-scim` from the
 accepted **RFC 0050**, so it is host work. Host-extension routes under
-`/v1/host/sample/*` are non-normative and never touch the wire — they never need
+`/v1/host/openwop-app/*` are non-normative and never touch the wire — they never need
 an RFC. See `FEATURES.md` § "Adding a feature" for the same rule.
 
 ## Deploying the demo app (`app.openwop.dev`)

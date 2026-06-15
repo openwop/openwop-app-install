@@ -58,7 +58,7 @@ export async function dispatchSubRun(req: SubRunRequest): Promise<SubRunResult> 
   // a signed delegation) instead of hardcoding a literal token —
   // otherwise OIDC/Firebase identity resolvers will reject this call
   // with 401 the moment they're wired in.
-  const token = process.env.OPENWOP_INTERNAL_TOKEN ?? 'sample-token';
+  const token = process.env.OPENWOP_INTERNAL_TOKEN ?? 'dev-token';
 
   const createRes = await fetch(`${baseUrl}/v1/runs`, {
     method: 'POST',

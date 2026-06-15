@@ -1,0 +1,28 @@
+{
+  "name": "feature.agent-knowledge.nodes",
+  "version": "1.1.0",
+  "description": "Agent-knowledge feature node pack (ADR 0038 / ADR 0014 Phase 2) — workflow nodes over the `ctx.features.agentKnowledge` surface (ADR 0038). `retrieve` reads an agent's bound knowledge (cited KB chunks + private memory facts) for a query. `ingest` writes a cited document into a collection BOUND to the agent — the write path for ADR 0038 §B trigger→workflow auto-ingest (RFC 0099 webhook/email/form → workflow → this node). Both are `role:action` (side-effect recorded; replay/fork read the recorded result, so ingest never double-writes). READ-ONLY LINE (ADR 0038 §9, redrawn 2026-06-14): the agent's MEMORY/notes namespace (RFC 0004 `MemoryAdapter`) stays read-only on the wire — this pack NEVER writes `ctx.memory`; `ingest` writes only the KB-DOCUMENT side (a host-extension feature store, ADR 0011), which is a normal feature write and touches no normative wire contract (no RFC). This corrects the prior note that removed ADR §4's `ingestToAgent` node by over-extending the RFC-0004 memory rule to KB documents.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "agent-knowledge", "knowledge", "memory", "rag"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.agent-knowledge.nodes.retrieve",
+      "version": "1.0.0",
+      "label": "Agent Knowledge Retrieve",
+      "description": "Retrieve an agent's bound knowledge (cited KB chunks + private memory facts) via ctx.features.agentKnowledge.retrieve. Inputs: { agentId, query }. Output: { chunks, hasResults }. Read-only; replay-safe.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.agent-knowledge.nodes.ingest",
+      "version": "1.0.0",
+      "label": "Agent Knowledge Ingest",
+      "description": "Ingest a cited document into a collection BOUND to the agent via ctx.features.agentKnowledge.ingestDocument (ADR 0038 §B — trigger→workflow auto-ingest). Inputs: { agentId, collectionId, title, text }. Output: { documentId, chunkCount }. Writes the KB-document side only (never ctx.memory); role:action, recorded → replay-safe (no double-ingest). The collection must already be bound to the agent.",
+      "category": "integration",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

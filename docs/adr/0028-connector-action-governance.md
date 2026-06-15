@@ -1,6 +1,6 @@
 # ADR 0028 — Admin governance for connectors & assistant actions
 
-**Status:** Accepted — **implemented + tested** (`governance.test.ts`; ADR 0023 §12 T7): `host/governanceService.ts` policy store; allowlist enforced with one predicate at the connect routes AND the node-exec resolver; per-kind action policy at the assistant enqueue + dispatch seams; `storage.listAudit` read view + `/v1/host/sample/governance/*` routes (superadmin gate extracted to `host/superadmin.ts`, shared with feature-toggles); Connections-page admin panel. Group-access narrowing and the retention sweep remain follow-on (retention config is stored).
+**Status:** Accepted — **implemented + tested** (`governance.test.ts`; ADR 0023 §12 T7): `host/governanceService.ts` policy store; allowlist enforced with one predicate at the connect routes AND the node-exec resolver; per-kind action policy at the assistant enqueue + dispatch seams; `storage.listAudit` read view + `/v1/host/openwop-app/governance/*` routes (superadmin gate extracted to `host/superadmin.ts`, shared with feature-toggles); Connections-page admin panel. Group-access narrowing and the retention sweep remain follow-on (retention config is stored).
 
 > **Correction (2026-06-11, implementation).** The §"Decision" table sketched
 > `draft-only` defaults for the send/invite/reschedule kinds. Implemented
@@ -15,7 +15,7 @@
 **Rides (Accepted, no new RFC):** RFC 0064 (tool-invocation hooks — the
 enforcement point), RFC 0049 (scopes + `authorization-fail-closed`), RFC 0079
 (provenance), RFC 0009/0010 pattern via `storage.appendAudit`.
-**Surface:** `/v1/host/sample/governance/*` (admin-gated) — host-extension,
+**Surface:** `/v1/host/openwop-app/governance/*` (admin-gated) — host-extension,
 **NON-NORMATIVE — no RFC**.
 **Toggle:** rides the existing `connections` + `assistant` toggles; the policy
 store is host infrastructure, not a separately bucketed feature.
@@ -61,7 +61,7 @@ GovernancePolicy {
 
 ### Audit surface (read view, not a store)
 
-`GET /v1/host/sample/governance/audit` composes, tenant-scoped + admin-gated:
+`GET /v1/host/openwop-app/governance/audit` composes, tenant-scoped + admin-gated:
 `appendAudit` rows (`assistant.loop.*`, approval decisions, policy edits — every
 policy write itself audited), `agent.toolCalled/toolReturned` events (RFC 0064 —
 content-free: `argsHash` is SR-1-redacted-then-hashed), and
@@ -77,7 +77,7 @@ run). Pagination + time-window filters; no secret material by construction.
 | Audit persistence | **`storage.appendAudit`** — reused |
 | Policy document + admin UI + audit read-view | **NEW — `governance` (this ADR)** — the only new owner |
 
-Route check: no prior registrant on `/v1/host/sample/governance`.
+Route check: no prior registrant on `/v1/host/openwop-app/governance`.
 
 ## RFC gate
 

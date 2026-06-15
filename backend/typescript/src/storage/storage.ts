@@ -353,7 +353,7 @@ export interface Storage {
   // ── chat sessions (Phase 2C.1) ──
   /**
    * Sample-namespaced chat-session history backing the new
-   * `/v1/host/sample/chat/sessions/*` routes. Two tables: session
+   * `/v1/host/openwop-app/chat/sessions/*` routes. Two tables: session
    * headers (this method family) + per-session messages (below).
    * Sessions are tenant-scoped; the in-memory adapter holds them in
    * a Map keyed by tenantId; sqlite/postgres back them with the
@@ -444,7 +444,7 @@ export interface Storage {
 
   // ── user-authored agents (phase E1, 2026-05-28) ──
   // Pack-installed agents come through the AgentRegistry from RFC 0003
-  // pack manifests. These rows back `POST /v1/host/sample/agents` —
+  // pack manifests. These rows back `POST /v1/host/openwop-app/agents` —
   // the Agents-tab authoring form. On boot the app reads every row and
   // registers it with the AgentRegistry; the existing GET /v1/agents
   // surface then merges both sources without consumers distinguishing.
@@ -564,7 +564,7 @@ export interface Storage {
   deleteMessagingAllowlist(connectorId: string, channel: string, peerId: string): Promise<boolean>;
 
   // ── host-extension durability (generic key→JSON store) ──
-  // A single small table backing the sample host-extension stores (Kanban
+  // A single small table backing the reference app-extension stores (Kanban
   // boards, agent roster, org-chart) so they survive a restart on the file /
   // Postgres backends. Generic on purpose — a host-ext service serializes its
   // whole collection to one key, rather than the core Storage interface

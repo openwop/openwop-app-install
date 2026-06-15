@@ -1,6 +1,6 @@
 /**
  * Forms API client (ADR 0017). Authed org-scoped builder under
- * /v1/host/sample/forms/orgs/:orgId; surfaces the PUBLIC /public-forms/:formId URL
+ * /v1/host/openwop-app/forms/orgs/:orgId; surfaces the PUBLIC /public-forms/:formId URL
  * and a form's captured submissions.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -32,7 +32,7 @@ export interface Submission {
   createdAt: string;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

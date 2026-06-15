@@ -15,7 +15,7 @@
  *
  * The SERVER-side methods (publishAgentCard / emitStatus / emitArtifact /
  * pushSend) are for a workflow exposed AS an A2A agent. The sample host is not
- * a live A2A server, so they are honest demo stubs — they accept the call so
+ * a live A2A server, so they are honest stub — they accept the call so
  * the node runs, but a production A2A host would push to the connected client's
  * stream instead. The notes on `host.a2a` advertise this.
  */
@@ -160,7 +160,7 @@ export interface A2aSurface {
     list(args: PushConfigArgs): Promise<unknown>;
     delete(args: PushConfigArgs): Promise<unknown>;
   };
-  // Server-side (workflow IS an A2A agent) — honest demo stubs on the sample host.
+  // Server-side (workflow IS an A2A agent) — honest stub on the reference app.
   publishAgentCard(args: { card: unknown; signed?: boolean }): Promise<void>;
   emitStatus(event: unknown): Promise<void>;
   emitArtifact(event: unknown): Promise<void>;
@@ -179,7 +179,7 @@ interface PushConfigArgs {
 const _publishedCards = new Map<string, unknown>();
 
 /** A7 — read a tenant's published agent card (set via `publishAgentCard`). The
- *  live A2A server route (`POST /v1/host/sample/a2a`, RFC 0076) serves it on
+ *  live A2A server route (`POST /v1/host/openwop-app/a2a`, RFC 0076) serves it on
  *  `agent/getCard`, falling back to a registry-synthesized card when a tenant
  *  hasn't published one. Returns undefined when none is published for the scope. */
 export function getPublishedAgentCard(tenantId: string, scopeId = ''): unknown | undefined {
@@ -266,10 +266,10 @@ export function createA2aSurface(scope: BundleScope): A2aSurface {
     },
     async emitStatus() {
       // A production A2A server pushes this onto the connected client's stream;
-      // the sample host has no inbound A2A connection, so this is a no-op.
+      // the reference app has no inbound A2A connection, so this is a no-op.
     },
     async emitArtifact() {
-      // See emitStatus — no live A2A client stream on the sample host.
+      // See emitStatus — no live A2A client stream on the reference app.
     },
     async pushSend({ configId }) {
       return { ok: true, configId, delivered: false, note: 'demo: sample host has no live push-notification channel' };

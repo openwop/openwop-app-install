@@ -14,7 +14,7 @@
 > **What changed and why.** A `/code-review` route-test harness revealed that the
 > app **already had** a complete Organizations / teams / members / **roles**
 > surface — `src/host/accessControlService.ts` + `src/routes/accessControl.ts`,
-> always-on at `/v1/host/sample/orgs`, with roles mapped to the **RFC 0049 scope
+> always-on at `/v1/host/openwop-app/orgs`, with roles mapped to the **RFC 0049 scope
 > vocabulary** and fail-closed authority. The v1 decision below was authored
 > WITHOUT discovering it (the prior architect skill had no
 > boundaries/duplication check — now added). As shipped, v1 **collided** with
@@ -49,7 +49,7 @@
 > **ADR 0006 (RBAC)** now = wire accessControl's RFC-0049 scopes onto the
 > protocol surface + explicit multi-principal ownership keyed on `User.userId`.
 
-> **No new OpenWOP RFC.** Invitations are a non-normative `/v1/host/sample/*`
+> **No new OpenWOP RFC.** Invitations are a non-normative `/v1/host/openwop-app/*`
 > onboarding helper; orgs/roles ride accessControl's existing RFC-0049 model.
 
 ---

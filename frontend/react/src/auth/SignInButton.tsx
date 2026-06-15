@@ -14,7 +14,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Modal } from '../ui/Modal.js';
-import { BuildingIcon, UserIcon } from '../ui/icons/index.js';
+import { BuildingIcon, LogOutIcon, TrashIcon, UserIcon } from '../ui/icons/index.js';
 import { useAuth } from './useAuth.js';
 import { finalizeFirebaseSession } from './finalizeSession.js';
 import { getMe, logout, type User as DurableUser } from '../features/users/usersClient.js';
@@ -271,7 +271,7 @@ export function SignInButton() {
                 <h3 className="signin-modal-title">Sign in to <em>save your work</em></h3>
                 <p className="signin-modal-lede muted">
                   Workflows + BYOK keys you add after signing in persist across
-                  sessions. Anonymous demo state is wiped every 24h.
+                  sessions. Anonymous session state is wiped every 24h.
                 </p>
                 {error ? <div className="alert error" role="alert">{error}</div> : null}
                 <AuthCard
@@ -354,7 +354,8 @@ export function SignInButton() {
             }}
             type="button"
           >
-            Sign out
+            <span className="account-menu-item-icon" aria-hidden><LogOutIcon size={16} /></span>
+            Sign Out
           </button>
           {account.isFirebase ? (
             <button
@@ -367,7 +368,8 @@ export function SignInButton() {
               }}
               type="button"
             >
-              Delete account…
+              <span className="account-menu-item-icon" aria-hidden><TrashIcon size={16} /></span>
+              Delete Account
             </button>
           ) : null}
         </div>

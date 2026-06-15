@@ -23,7 +23,7 @@ import { findChiefOfStaff } from '../src/features/assistant/chiefOfStaff.js';
 
 const PORT = 18971;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 const TENANT = 'default'; // bearer-auth default tenant — routes resolve this
 
 let server: http.Server;
@@ -38,7 +38,7 @@ beforeAll(async () => {
   await new Promise<void>((res) => {
     server = app.listen(PORT, res);
   });
-  const on = await jf('/v1/host/sample/feature-toggles/admin/configs/assistant', {
+  const on = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/assistant', {
     method: 'PUT',
     body: JSON.stringify({ status: 'on', bucketUnit: 'tenant', salt: 'assistant' }),
   });
@@ -97,7 +97,7 @@ describe('enqueue → the single approval loop', () => {
     expect(getRosterEntry(approval!.rosterId)).resolves.not.toBeNull(); // resolves to a real entry
 
     // The "Waiting on me" surface sees it — same queue as run proposals.
-    const inbox = await jf<{ items: Array<{ approvalId: string; actionId?: string }> }>('/v1/host/sample/approvals?status=pending');
+    const inbox = await jf<{ items: Array<{ approvalId: string; actionId?: string }> }>('/v1/host/openwop-app/approvals?status=pending');
     expect(inbox.body.items.some((i) => i.approvalId === action.approvalId)).toBe(true);
   });
 
@@ -126,7 +126,7 @@ describe('enqueue → the single approval loop', () => {
           payload?: Record<string, unknown>;
         } | null;
       }>;
-    }>('/v1/host/sample/approvals?status=pending');
+    }>('/v1/host/openwop-app/approvals?status=pending');
     const row = inbox.body.items.find((i) => i.approvalId === action.approvalId);
     expect(row, 'the enqueued action is in the pending inbox').toBeTruthy();
     expect(row!.kind).toBe('assistant-action');
@@ -146,7 +146,7 @@ describe('enqueue → the single approval loop', () => {
 
   it('claim from the approvals inbox approves the action; a second decision 409s (CAS)', async () => {
     const action = await enqueueActionWithApproval(TENANT, draftEmail());
-    const claim = await jf<{ status: string; actionId: string }>(`/v1/host/sample/approvals/${action.approvalId}/claim`, {
+    const claim = await jf<{ status: string; actionId: string }>(`/v1/host/openwop-app/approvals/${action.approvalId}/claim`, {
       method: 'POST',
       body: '{}',
     });
@@ -162,13 +162,13 @@ describe('enqueue → the single approval loop', () => {
     expect(row?.approvedByUserId).toBeTruthy();
 
     // Loser path — both surfaces refuse a second decision.
-    expect((await jf(`/v1/host/sample/approvals/${action.approvalId}/claim`, { method: 'POST', body: '{}' })).status).toBe(409);
-    expect((await jf(`/v1/host/sample/assistant/pending-actions/${action.actionId}/reject`, { method: 'POST', body: '{}' })).status).toBe(409);
+    expect((await jf(`/v1/host/openwop-app/approvals/${action.approvalId}/claim`, { method: 'POST', body: '{}' })).status).toBe(409);
+    expect((await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/reject`, { method: 'POST', body: '{}' })).status).toBe(409);
   });
 
   it('rejecting from the assistant route resolves the shared approval row too', async () => {
     const action = await enqueueActionWithApproval(TENANT, draftEmail());
-    const rejected = await jf<{ status: string }>(`/v1/host/sample/assistant/pending-actions/${action.actionId}/reject`, {
+    const rejected = await jf<{ status: string }>(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/reject`, {
       method: 'POST',
       body: '{}',
     });
@@ -180,7 +180,7 @@ describe('enqueue → the single approval loop', () => {
   it('edit re-faces the approver while pending; decided actions refuse edits', async () => {
     const action = await enqueueActionWithApproval(TENANT, draftEmail());
     const edited = await jf<{ draft: string; editedAt?: string; derivedFromUntrusted?: boolean }>(
-      `/v1/host/sample/assistant/pending-actions/${action.actionId}`,
+      `/v1/host/openwop-app/assistant/pending-actions/${action.actionId}`,
       { method: 'PATCH', body: JSON.stringify({ draft: 'Hi Dana — revised wording.' }) },
     );
     expect(edited.status).toBe(200);
@@ -188,8 +188,8 @@ describe('enqueue → the single approval loop', () => {
     expect(edited.body.editedAt).toBeTruthy();
     expect(edited.body.derivedFromUntrusted).toBe(true); // taint never launders on edit
 
-    await jf(`/v1/host/sample/assistant/pending-actions/${action.actionId}/approve`, { method: 'POST', body: '{}' });
-    const postDecide = await jf(`/v1/host/sample/assistant/pending-actions/${action.actionId}`, {
+    await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, { method: 'POST', body: '{}' });
+    const postDecide = await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}`, {
       method: 'PATCH',
       body: JSON.stringify({ draft: 'too late' }),
     });

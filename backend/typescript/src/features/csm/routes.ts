@@ -1,7 +1,7 @@
 /**
- * CSM feature routes (host-extension, sample-grade — ADR 0001 §6 Phase 6).
+ * CSM feature routes (host-extension, best-effort — ADR 0001 §6 Phase 6).
  *
- * Surface under /v1/host/sample/csm. Toggle-gated on `csm` (backend authority —
+ * Surface under /v1/host/openwop-app/csm. Toggle-gated on `csm` (backend authority —
  * 404 when off). A plain on/off feature (no variants) — demonstrating the
  * contract works for the non-multivariant case too.
  *
@@ -55,7 +55,7 @@ function parseScore(value: unknown): number | undefined {
 export function registerCsmRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
-  app.get('/v1/host/sample/csm/accounts', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/csm/accounts', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ accounts: await listAccounts(tenantOf(req)) });
@@ -64,7 +64,7 @@ export function registerCsmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/sample/csm/accounts', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/csm/accounts', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const body = (req.body ?? {}) as { name?: unknown; healthScore?: unknown };
@@ -79,7 +79,7 @@ export function registerCsmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.patch('/v1/host/sample/csm/accounts/:id', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/csm/accounts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const existing = await getAccount(req.params.id);
@@ -97,7 +97,7 @@ export function registerCsmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/sample/csm/accounts/:id', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/csm/accounts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const existing = await getAccount(req.params.id);

@@ -187,7 +187,7 @@ export async function listMyRuns(opts: { status?: string; limit?: number; signal
   if (!res.ok) {
     throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, message: `listMyRuns failed: ${res.status} ${res.statusText}` });
   }
-  // Host-extension endpoint (`/v1/host/sample/*`) the SDK does not wrap —
+  // Host-extension endpoint (`/v1/host/openwop-app/*`) the SDK does not wrap —
   // validate the list shape before the cast (A-2 / E4).
   const body: unknown = await res.json();
   assertArrayField(body, 'runs', 'listMyRuns response');
@@ -204,7 +204,7 @@ export interface MemoryEntry {
 
 /**
  * List the authenticated tenant's memory entries (RFC 0004 read-side, via
- * the host-extension `GET /v1/host/sample/memory`). Tenant is derived from
+ * the host-extension `GET /v1/host/openwop-app/memory`). Tenant is derived from
  * the bearer / cookie server-side (CTI-1). `memoryRef` defaults to the
  * demo's per-tenant namespace when omitted.
  */
@@ -216,7 +216,7 @@ export async function listMemory(
   if (opts.tag) params.set('tag', opts.tag);
   if (opts.limit) params.set('limit', String(opts.limit));
   const query = params.toString();
-  const url = `${config.baseUrl}/v1/host/sample/memory${query ? `?${query}` : ''}`;
+  const url = `${config.baseUrl}/v1/host/openwop-app/memory${query ? `?${query}` : ''}`;
   const headers = authedHeaders({ accept: 'application/json' });
   const includeCreds = config.authMode === 'cookie' || Boolean(headers.authorization);
   const res = await fetch(url, {

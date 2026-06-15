@@ -1,4 +1,4 @@
-# White-labeling the demo app
+# White-labeling the app
 
 This reference app (the React SPA behind `app.openwop.dev`) is designed to
 be re-skinned and re-deployed under your own brand **without forking core
@@ -35,7 +35,7 @@ default in `src/brand/defaults.ts`.
 | `VITE_BRAND_MARK_EMPHASIS` | `WOP` | Wordmark — emphasized (italic) span; set empty to drop |
 | `VITE_BRAND_MARK_SUB` | `workflow engine` | Wordmark — muted sub-label |
 | `VITE_BRAND_TAGLINE` | `workflow engine` | Short descriptor |
-| `VITE_BRAND_FOOTER_TEXT` | `Sample / template code. Not production-hardened.` | Footer line |
+| `VITE_BRAND_FOOTER_TEXT` | *(blank)* | Footer line |
 | `VITE_BRAND_ASSISTANT_NAME` | `OpenWOP` | Name the in-app AI assistant refers to itself by |
 | `VITE_BRAND_MARK_SRC` | `/OpenWOP.svg` | Square icon mark for the sidebar header + PWA manifest (path under `public/` or a URL) |
 | `VITE_BRAND_LOCKUP_SRC` | *(blank)* | Optional full lockup asset for marketing/brand surfaces; not rendered by the default sidebar |
@@ -44,7 +44,7 @@ default in `src/brand/defaults.ts`.
 | `VITE_BRAND_DOCUMENT_TITLE` | `workflow-engine — OpenWOP Reference UI` | Browser tab `<title>` |
 | `VITE_BRAND_FONTS_HREF` | *(Google Fonts triple)* | Web-font stylesheet `<link href>` |
 | `VITE_BRAND_PRIMARY_DOMAIN` | `app.openwop.dev` | Domain shown in the privacy disclosure |
-| `VITE_BRAND_INSTANCE_NAME` | `Demo host` | Workspace / instance name shown in the sidebar chrome |
+| `VITE_BRAND_INSTANCE_NAME` | `OpenWOP` | Workspace / instance name shown in the sidebar chrome |
 | `VITE_BRAND_HOME_URL` | `https://openwop.dev/` | "Learn more" link (privacy footer) |
 | `VITE_BRAND_REPO_URL` | `https://github.com/openwop/openwop` | Source-repo link (privacy footer) |
 | `VITE_BRAND_THEME_COLOR` | `#1a1a17` | PWA manifest + mobile browser chrome color |
@@ -167,7 +167,7 @@ keep legible on your `--paper`); `--color-flag-*`, `--color-trace-*`
 | ✅ Clean seam | ⚠️ Needs manual review |
 |---|---|
 | Product name, wordmark, footer, assistant persona | The **privacy page** (`src/PrivacyPage.tsx`) — its domain/URLs are tokenized, but the cookie name, retention windows, Cloud Run specifics, and steward contact are deployment/legal content you should rewrite for your service |
-| Icon mark, optional lockup, favicon, document title, fonts, instance name, default theme | The **demo banner** (`src/builder/DemoHostBanner.tsx`) — "anonymous demo / resets after 24h" copy is tied to the public-demo deployment mode; review if you run a persistent backend |
+| Icon mark, optional lockup, favicon, document title, fonts, instance name, default theme | The **in-memory host banner** (`src/builder/InMemoryHostBanner.tsx`) — "anonymous / resets after 24h" copy is tied to the in-memory deployment mode; review if you run a persistent backend |
 | Accent + surface palette, typography, status/trace colors | Backend-set strings (e.g. the `openwop.session` cookie name) live in the server, not this SPA |
 | Privacy domain + home/repo links | `package.json` `name`/`description` — internal, not user-facing; rename if forking |
 
@@ -187,12 +187,12 @@ in data files, and the runtime fallbacks are brand-neutral. Configure via env
 
 | Env var | Default | Controls |
 |---|---|---|
-| `OPENWOP_SERVICE_NAME` | `openwop-workflow-engine-sample` | Service name in `/.well-known/openwop` + the OpenAPI `info.title` |
+| `OPENWOP_SERVICE_NAME` | `openwop-workflow-engine` | Service name in `/.well-known/openwop` + the OpenAPI `info.title` |
 | `OPENWOP_SERVICE_DESCRIPTION` | `An OpenWOP-compatible workflow and agent orchestration host.` | OpenAPI `info.description` (brand-neutral by default — no marketing URL) |
-| `OPENWOP_SERVICE_VENDOR` | `openwop-samples` | `service.vendor` in `/.well-known/openwop` — set this so your discovery doc doesn't advertise the reference-sample vendor tag |
+| `OPENWOP_SERVICE_VENDOR` | `openwop-app` | `service.vendor` in `/.well-known/openwop` — set this so your discovery doc doesn't advertise the reference-sample vendor tag |
 | `OPENWOP_MANAGED_SYSTEM_PROMPT` | *(brand-neutral generic assistant prompt)* | Grounding prompt for the managed "try it free" chat tier. **The code fallback is generic** — set this to your own grounding (the reference deploy supplies the OpenWOP blurb here) |
 | `OPENWOP_DEMO_MODE` | `false` | **Demo-deployment switch.** Off (the default) = production-grade clean: NO auto-seed, NO synthetic `__showcase__` data — a fresh install boots empty, every surface reads only the tenant's own real data. Set `true` only for a public showcase (e.g. app.openwop.dev), which boot-seeds the showcase tenant + lets dashboards fall back to it — that data is BADGED illustrative in the UI. |
-| `OPENWOP_DEMO_SEED_ENABLED` | `true` | Whether explicit, user-triggered seeding (the `/demo-data` dashboard + "Load demo data" actions) is available at all. Set `false` to remove the capability entirely. Independent of `OPENWOP_DEMO_MODE`. |
+| `OPENWOP_DEMO_SEED_ENABLED` | `true` | Whether explicit, user-triggered seeding (the `/example-data` dashboard + "Load example data" actions) is available at all. Set `false` to remove the capability entirely. Independent of `OPENWOP_DEMO_MODE`. |
 | `OPENWOP_DEPLOY_POSTURE` | `cookie-per-visitor` | Backend auth posture: `bearer-shared`, `cookie-per-visitor`, or `auth` |
 | `OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED` | *(derived)* | Optional override for the managed free-tier sign-in wall (`true`/`false`); demo postures allow anon by default, `auth` requires sign-in |
 | `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP` | *(unset = off)* | Operator spend backstop: total managed-tier tokens per day across ALL tenants. **Set this on any login-free public demo** — the per-tenant cap alone is evadable on cookie-per-visitor deploys (every fresh cookie jar is a fresh anon tenant) |
@@ -227,17 +227,17 @@ For a team deployment:
 Personal workspaces stay private (the owner is implicit); only shared workspaces
 are role-governed. See `docs/adr/0015-workspace-as-tenant-b2b.md`.
 
-### Demo seed content
+### Example data
 
-The demo seed runs through `seedEverything(tenant)` and currently covers the
+The example seed runs through `seedEverything(tenant)` and currently covers the
 registered stock domains: user-agent inventory, roster, boards, cards,
 schedules, and org chart. The persona content (Sally, Marcus, …), boards, cards,
 schedules, and org-chart positions live in
-**`backend/typescript/src/host/seed-data/demoAgents.json`** — the
-brand-authoring surface. Edit that JSON to ship your own demo content (it's
+**`backend/typescript/src/host/seed-data/exampleAgents.json`** — the
+brand-authoring surface. Edit that JSON to ship your own example content (it's
 type-checked at build time and bundled into the image), or leave it unseeded.
 **A clean install boots empty by default** (`OPENWOP_DEMO_MODE` off): nothing is
-auto-seeded, and demo data is loaded only on demand from `/demo-data`. The
+auto-seeded, and example data is loaded only on demand from `/example-data`. The
 silent auto-seed-on-page-load fires **only** when the host advertises
 `demoMode: true` (the public showcase), so a white-label deploy never seeds
 behind the user's back. Workforces follow the same data file —
@@ -253,7 +253,7 @@ host-extension ONLY — never serialize it onto the normative
 `/v1/agents/roster` response (`agent-roster-entry.schema.json` is
 `additionalProperties: false`; leaking it fails conformance). The stock seed
 ships **Nora** in
-`review` so the approval flow is demoable out of the box). See
+`review` so the approval flow is demonstrable out of the box). See
 [`seed-data/SEEDING.md`](../../backend/typescript/src/host/seed-data/SEEDING.md).
 
 > **Protocol identifiers are NOT branding** and must stay: `core.openwop.*`

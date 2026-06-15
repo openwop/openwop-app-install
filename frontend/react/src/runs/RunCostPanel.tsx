@@ -134,7 +134,7 @@ export function RunCostPanel({ events }: Props) {
         columns={COST_COLUMNS(maxCost)}
       />
       <p className="muted u-fs-11 u-mt-1-5">
-        Advisory estimates (RFC 0026) — not billing. <span title="Local rate table">*</span> = computed
+        Advisory estimates — not billing. <span title="Local rate table">*</span> = computed
         from providers.json rates where the host omitted an estimate.
       </p>
     </div>

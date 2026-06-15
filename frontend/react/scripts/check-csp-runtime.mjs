@@ -49,7 +49,7 @@ await new Promise((r) => server.listen(0, r));
 const port = server.address().port;
 const base = `http://localhost:${port}`;
 
-const ROUTES = ['/', '/agents', '/builder', '/boards', '/inbox', '/prompts', '/memory', '/keys', '/capabilities', '/cli', '/runs', '/mission', '/orgs', '/admin', '/roster', '/compare', '/workforces', '/demo-data', '/privacy'];
+const ROUTES = ['/', '/agents', '/builder', '/boards', '/inbox', '/prompts', '/memory', '/keys', '/capabilities', '/cli', '/runs', '/mission', '/orgs', '/admin', '/roster', '/compare', '/workforces', '/example-data', '/privacy'];
 
 const browser = await chromium.launch();
 const violations = [];

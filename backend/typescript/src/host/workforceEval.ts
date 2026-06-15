@@ -33,7 +33,7 @@ export function evalSuiteEnabled(): boolean {
 }
 
 const EVAL_AGENT_ID = 'host.priya';
-export const EVAL_SUITE_ID = 'sample.openwop.evals.invoice-exception';
+export const EVAL_SUITE_ID = 'openwop-app.evals.invoice-exception';
 const EVAL_SUITE_VERSION = '1.0.0';
 const EVAL_MODEL_CLASS = 'reasoning';
 const PASS_SCORE = 0.8;

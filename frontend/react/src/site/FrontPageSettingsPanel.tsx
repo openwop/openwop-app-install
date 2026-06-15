@@ -1,7 +1,7 @@
 /**
  * Front page (ADR 0027) — the superadmin surface to EDIT the public homepage and
  * toggle it on/off. The homepage is the host-level system page, edited via the
- * super-admin `/v1/host/sample/site-page` route (cross-tenant by host authority,
+ * super-admin `/v1/host/openwop-app/site-page` route (cross-tenant by host authority,
  * never via org-scoped CMS) — so a super admin can always edit it, whatever org.
  * Reuses the shared `SectionsEditor` (same controls as the org CMS) + the public
  * `SectionRenderer` for a live preview. Non-superadmins see a read-only notice.

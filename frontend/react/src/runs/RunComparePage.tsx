@@ -67,7 +67,7 @@ export function RunComparePage() {
           <button type="submit">Compare</button>
         </form>
         <p className="muted u-fs-12">
-          Side-by-side of two runs (e.g. a run and its fork). Structured semantic diff is future work (RFC 0054).
+          Side-by-side of two runs (e.g. a run and its fork). Structured semantic diff is future work.
         </p>
       </div>
 

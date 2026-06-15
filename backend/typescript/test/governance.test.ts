@@ -1,6 +1,6 @@
 /**
  * ADR 0028 — admin governance (ADR 0023 §12 T7):
- *   - policy CRUD on /v1/host/sample/governance/policy, superadmin-gated
+ *   - policy CRUD on /v1/host/openwop-app/governance/policy, superadmin-gated
  *     (shared host/superadmin.ts gate — a signed-in NON-admin is 403);
  *   - the provider allowlist enforced with ONE predicate at BOTH seams:
  *     connect routes (403) and resolveConnectionCredential — the choke point
@@ -24,7 +24,7 @@ import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 
 const PORT = 18995;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 const TENANT = 'default';
 
 let server: http.Server;
@@ -44,7 +44,7 @@ beforeAll(async () => {
   });
   // Connections is toggle-less (permanent admin surface, ADR 0024 § Correction);
   // only the assistant feature still gates on a toggle.
-  const on = await jf('/v1/host/sample/feature-toggles/admin/configs/assistant', {
+  const on = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/assistant', {
     method: 'PUT',
     body: JSON.stringify({ status: 'on', bucketUnit: 'tenant', salt: 'assistant' }),
   });
@@ -81,17 +81,17 @@ async function jf<T = unknown>(path: string, init: RequestInit = {}): Promise<{ 
 
 describe('policy administration', () => {
   it('superadmin can read defaults and upsert; validation rejects unknown kinds; a signed-in non-admin is 403', async () => {
-    const empty = await jf<{ policy: { tenantId: string }; defaults: Record<string, unknown> }>('/v1/host/sample/governance/policy');
+    const empty = await jf<{ policy: { tenantId: string }; defaults: Record<string, unknown> }>('/v1/host/openwop-app/governance/policy');
     expect(empty.status).toBe(200);
     expect(empty.body.defaults.actionPolicy).toBe('approval-required');
 
-    const bad = await jf('/v1/host/sample/governance/policy', {
+    const bad = await jf('/v1/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ actionPolicy: { 'rm.rf': 'disabled' } }),
     });
     expect(bad.status).toBe(400);
 
-    const put = await jf<{ policy: { providerAllowlist: string[] } }>('/v1/host/sample/governance/policy', {
+    const put = await jf<{ policy: { providerAllowlist: string[] } }>('/v1/host/openwop-app/governance/policy', {
       method: 'PUT',
       body: JSON.stringify({ providerAllowlist: ['google'], actionPolicy: { 'email.send': 'draft-only' } }),
     });
@@ -99,7 +99,7 @@ describe('policy administration', () => {
     expect(put.body.policy.providerAllowlist).toEqual(['google']);
 
     // A real signed-in user without superadmin standing: fail closed.
-    const login = await fetch(`${BASE}/v1/host/sample/test/login`, {
+    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email: 'gov-nonadmin@example.com' }),
@@ -107,7 +107,7 @@ describe('policy administration', () => {
     expect(login.status).toBe(201);
     const cookie = sessionCookieOf(login);
     expect(cookie).toBeTruthy();
-    const denied = await fetch(`${BASE}/v1/host/sample/governance/policy`, { headers: { cookie } });
+    const denied = await fetch(`${BASE}/v1/host/openwop-app/governance/policy`, { headers: { cookie } });
     expect(denied.status).toBe(403);
 
     await __resetGovernanceStore(); // leave no policy behind for later suites
@@ -117,7 +117,7 @@ describe('policy administration', () => {
 describe('provider allowlist — one predicate, both seams', () => {
   it('connect route 403s a non-allowlisted provider; the resolver withholds an EXISTING one (fail closed)', async () => {
     // Create a servicenow workspace connection while no policy restricts.
-    const created = await jf<{ connectionId: string }>('/v1/host/sample/connections', {
+    const created = await jf<{ connectionId: string }>('/v1/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'servicenow', kind: 'api_key', secret: 'sn-key-1234567', scope: 'workspace' }),
     });
@@ -126,7 +126,7 @@ describe('provider allowlist — one predicate, both seams', () => {
     await setGovernancePolicy(TENANT, { providerAllowlist: ['google'] }, 'test-admin');
 
     // Seam 1 — connect route refuses new non-allowlisted connections.
-    const refused = await jf('/v1/host/sample/connections', {
+    const refused = await jf('/v1/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'zoom', kind: 'bearer', secret: 'z-token-1234567', scope: 'workspace' }),
     });
@@ -171,7 +171,7 @@ describe('per-kind action policy at the assistant seams', () => {
   });
 
   it('the audit read view serves assistant rows to the admin', async () => {
-    const res = await jf<{ items: Array<{ action: string }> }>('/v1/host/sample/governance/audit?actionPrefix=assistant.');
+    const res = await jf<{ items: Array<{ action: string }> }>('/v1/host/openwop-app/governance/audit?actionPrefix=assistant.');
     expect(res.status).toBe(200);
     expect(Array.isArray(res.body.items)).toBe(true);
     expect(res.body.items.some((i) => i.action.startsWith('assistant.action.'))).toBe(true);
@@ -187,7 +187,7 @@ describe('per-kind action policy at the assistant seams', () => {
     });
 
     // Wildcard bearer admin: unfiltered.
-    const all = await jf<{ items: Array<{ payload?: { tenantId?: string } }> }>('/v1/host/sample/governance/audit?actionPrefix=assistant.');
+    const all = await jf<{ items: Array<{ payload?: { tenantId?: string } }> }>('/v1/host/openwop-app/governance/audit?actionPrefix=assistant.');
     expect(all.body.items.some((i) => i.payload?.tenantId === 'tenant-b')).toBe(true);
 
     // Tenant-scoped superadmin (OPENWOP_SUPERADMIN_TENANTS, the documented
@@ -202,7 +202,7 @@ describe('per-kind action policy at the assistant seams', () => {
     });
     process.env.OPENWOP_SUPERADMIN_TENANTS = ADMIN_TENANT;
     try {
-      const login = await fetch(`${BASE}/v1/host/sample/test/login`, {
+      const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ email: 'gov-tenant-admin@example.com', tenantId: ADMIN_TENANT }),
@@ -210,7 +210,7 @@ describe('per-kind action policy at the assistant seams', () => {
       expect(login.status).toBe(201);
       const cookie = sessionCookieOf(login);
       expect(cookie).toBeTruthy();
-      const scoped = await fetch(`${BASE}/v1/host/sample/governance/audit?actionPrefix=assistant.`, { headers: { cookie } });
+      const scoped = await fetch(`${BASE}/v1/host/openwop-app/governance/audit?actionPrefix=assistant.`, { headers: { cookie } });
       expect(scoped.status).toBe(200);
       const body = (await scoped.json()) as { items: Array<{ payload?: { tenantId?: string } }> };
       expect(body.items.length).toBeGreaterThan(0);
@@ -224,7 +224,7 @@ describe('per-kind action policy at the assistant seams', () => {
 describe('scheduler job metadata trust boundary (confused-deputy fix)', () => {
   it('strips spoofed actingUserId + attribution keys and stamps the authenticated principal', async () => {
     const created = await jf<{ job: { jobId: string; metadata?: Record<string, unknown> } } & { jobId?: string; metadata?: Record<string, unknown> }>(
-      '/v1/host/sample/scheduler/jobs',
+      '/v1/host/openwop-app/scheduler/jobs',
       {
         method: 'POST',
         body: JSON.stringify({

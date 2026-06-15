@@ -1,8 +1,8 @@
 /**
- * Agent org-chart — host-extension routes (sample-grade, non-normative).
+ * Agent org-chart — host-extension routes (non-normative).
  *
  * The reference implementation of RFCS/0087 §B/§D. Surface under
- * `/v1/host/sample/org-chart`:
+ * `/v1/host/openwop-app/org-chart`:
  *   GET    /                         the caller's full chart (tenant-scoped)
  *   PUT    /                         replace the chart (validate acyclic + same-tenant members)
  *   DELETE /                         remove the chart
@@ -35,7 +35,7 @@ function tenantOf(req: Request): string {
 }
 
 export function registerOrgChartRoutes(app: Express): void {
-  app.get('/v1/host/sample/org-chart', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/org-chart', async (req, res, next) => {
     try {
       const chart = await getChart(tenantOf(req));
       res.json(chart ?? { tenantId: tenantOf(req), departments: [], members: [], updatedAt: null });
@@ -44,7 +44,7 @@ export function registerOrgChartRoutes(app: Express): void {
     }
   });
 
-  app.put('/v1/host/sample/org-chart', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/org-chart', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { departments?: unknown; members?: unknown };
       if (!Array.isArray(body.departments) || !Array.isArray(body.members)) {
@@ -70,7 +70,7 @@ export function registerOrgChartRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/org-chart', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/org-chart', async (req, res, next) => {
     try {
       await deleteChart(tenantOf(req));
       res.status(204).end();
@@ -79,7 +79,7 @@ export function registerOrgChartRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/sample/org-chart/:departmentId', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/org-chart/:departmentId', async (req, res, next) => {
     try {
       const recursive = req.query.recursive !== 'false';
       const view = await responsibilityView(tenantOf(req), req.params.departmentId, recursive);

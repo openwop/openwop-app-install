@@ -1,6 +1,6 @@
 /**
  * Workspace routes (ADR 0015 — workspace-as-tenant, B2B tenancy). Host-extension,
- * non-normative (`/v1/host/sample/*`). A Workspace IS the tenant; these endpoints
+ * non-normative (`/v1/host/openwop-app/*`). A Workspace IS the tenant; these endpoints
  * let a user list the workspaces they can act in, create a shared one, and SWITCH
  * the active workspace (re-binding the session — the RFC 0048 §D "one active
  * workspace per session" model, membership-verified).
@@ -9,9 +9,9 @@
  * (a Workspace = the Organization whose `orgId === tenantId`). This module only
  * adds the user-facing workspace lifecycle on top.
  *
- *   GET  /v1/host/sample/me/workspaces            list the caller's workspaces
- *   POST /v1/host/sample/workspaces               create a shared workspace (owner = caller)
- *   POST /v1/host/sample/workspaces/:id/switch    re-bind the active workspace (member-gated)
+ *   GET  /v1/host/openwop-app/me/workspaces            list the caller's workspaces
+ *   POST /v1/host/openwop-app/workspaces               create a shared workspace (owner = caller)
+ *   POST /v1/host/openwop-app/workspaces/:id/switch    re-bind the active workspace (member-gated)
  *
  * GATING (deliberate): unlike the `orgs` invitation FEATURE (toggle-gated per
  * ADR 0001), these routes are ALWAYS-ON — they are core tenancy that builds
@@ -59,7 +59,7 @@ interface WorkspaceSummary {
 
 export function registerWorkspaceTenancyRoutes(app: Express): void {
   // ── List the caller's workspaces ──
-  app.get('/v1/host/sample/me/workspaces', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/me/workspaces', async (req, res, next) => {
     try {
       const subject = requireSubject(req);
       const personal = personalTenantOf(req);
@@ -107,7 +107,7 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
   });
 
   // ── Create a shared workspace (caller becomes its owner) ──
-  app.post('/v1/host/sample/workspaces', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/workspaces', async (req, res, next) => {
     try {
       const subject = requireSubject(req);
       if (!isDurableCaller(req)) {
@@ -131,7 +131,7 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
   });
 
   // ── Switch the active workspace (re-bind the session, member-gated) ──
-  app.post('/v1/host/sample/workspaces/:id/switch', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/workspaces/:id/switch', async (req, res, next) => {
     try {
       const subject = requireSubject(req);
       const personal = personalTenantOf(req);

@@ -29,7 +29,7 @@ export const kbFeature: BackendFeature = {
   toggleDefault: {
     id: 'kb',
     label: 'Knowledge Base',
-    description: 'Org-scoped document collections + semantic retrieval with citations (RAG). Sources are pasted text or Media-Library asset tokens (ADR 0007); ingest chunks + embeds into the host vector store (in-memory ↔ pgvector) via the deterministic local embedder. Grounded answers are produced by feeding the augmented context to a workflow agent (the provider is run-scoped). RBAC-gated via accessControl.',
+    description: 'Org-scoped document collections + semantic retrieval with citations (RAG). Sources are pasted text or Media-Library asset tokens; ingest chunks + embeds into the host vector store (in-memory ↔ pgvector) via the deterministic local embedder. Grounded answers are produced by feeding the augmented context to a workflow agent (the provider is run-scoped). RBAC-gated via accessControl.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

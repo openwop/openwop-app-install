@@ -3,9 +3,9 @@
  * OFF until the `OPENWOP_SAML_*` env vars are set (see `host/auth/samlSso.ts`);
  * every route 404s when unconfigured.
  *
- *   GET  /v1/host/sample/auth/saml/sso/login[?returnTo=/]  SP-initiated → redirect to IdP
- *   POST /v1/host/sample/auth/saml/sso/acs                 IdP POSTs SAMLResponse → session
- *   GET  /v1/host/sample/auth/saml/sso/metadata           SP metadata XML (upload to the IdP)
+ *   GET  /v1/host/openwop-app/auth/saml/sso/login[?returnTo=/]  SP-initiated → redirect to IdP
+ *   POST /v1/host/openwop-app/auth/saml/sso/acs                 IdP POSTs SAMLResponse → session
+ *   GET  /v1/host/openwop-app/auth/saml/sso/metadata           SP metadata XML (upload to the IdP)
  *
  * These are PRE-AUTH (the user has no session yet), so the prefix is on the auth
  * middleware's PUBLIC_PATH_PREFIXES allowlist. On a validated assertion the ACS
@@ -28,7 +28,7 @@ function safeReturnTo(v: unknown): string {
 
 export function registerSamlSsoRoutes(app: Express): void {
   // SP-initiated: bounce the browser to the IdP with a relay-stated AuthnRequest.
-  app.get('/v1/host/sample/auth/saml/sso/login', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/auth/saml/sso/login', async (req, res, next) => {
     try {
       const s = samlSettings();
       if (!s) throw new OpenwopError('not_found', 'SAML SSO is not configured on this host.', 404, {});
@@ -39,7 +39,7 @@ export function registerSamlSsoRoutes(app: Express): void {
 
   // Assertion Consumer Service — the IdP's browser-driven form POST lands here.
   app.post(
-    '/v1/host/sample/auth/saml/sso/acs',
+    '/v1/host/openwop-app/auth/saml/sso/acs',
     express.urlencoded({ extended: false, limit: '256kb' }),
     async (req, res, next) => {
       try {
@@ -77,7 +77,7 @@ export function registerSamlSsoRoutes(app: Express): void {
   );
 
   // SP metadata — the company uploads this (or its URL) when creating the IdP app.
-  app.get('/v1/host/sample/auth/saml/sso/metadata', (_req, res, next) => {
+  app.get('/v1/host/openwop-app/auth/saml/sso/metadata', (_req, res, next) => {
     try {
       const s = samlSettings();
       if (!s) throw new OpenwopError('not_found', 'SAML SSO is not configured on this host.', 404, {});

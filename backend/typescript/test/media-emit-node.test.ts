@@ -1,5 +1,5 @@
 /**
- * RFC 0055 §C demo producer — `local.sample.demo.image-emit`.
+ * RFC 0055 §C demo producer — `local.openwop-app.image-emit`.
  *
  * Runs a workflow whose single node emits a `media.image` event, then
  * verifies the run's debug bundle carries that event referenced BY URL
@@ -14,7 +14,7 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 const PORT = 18188;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -49,11 +49,11 @@ interface BundleBody { events?: { type?: string; payload?: MediaPayload }[] }
 describe('media-emit demo node (RFC 0055 §C producer)', () => {
   it('emits a media.image referenced by URL in the run debug bundle, and the URL resolves', async () => {
     // Register the image-emit node as a one-node workflow.
-    const reg = await jsonFetch('/v1/host/sample/workflows', {
+    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
-        workflowId: 'sample.demo.image',
-        nodes: [{ nodeId: 'img', typeId: 'local.sample.demo.image-emit' }],
+        workflowId: 'openwop-app.image',
+        nodes: [{ nodeId: 'img', typeId: 'local.openwop-app.image-emit' }],
         edges: [],
       }),
     });
@@ -61,7 +61,7 @@ describe('media-emit demo node (RFC 0055 §C producer)', () => {
 
     const create = await jsonFetch<{ runId: string }>('/v1/runs', {
       method: 'POST',
-      body: JSON.stringify({ workflowId: 'sample.demo.image', inputs: {} }),
+      body: JSON.stringify({ workflowId: 'openwop-app.image', inputs: {} }),
     });
     expect(create.status).toBe(201);
     const { runId } = create.body;
@@ -80,7 +80,7 @@ describe('media-emit demo node (RFC 0055 §C producer)', () => {
     // RFC 0055 §C rule 3: referenced by URL, never inlined.
     expect(typeof ev.payload?.url).toBe('string');
     expect(ev.payload?.base64, 'media.image MUST NOT inline the binary').toBeUndefined();
-    expect(ev.payload?.url).toMatch(/^\/v1\/host\/sample\/assets\//);
+    expect(ev.payload?.url).toMatch(/^\/v1\/host\/openwop-app\/assets\//);
 
     // The served URL resolves (public, token-authed).
     const served = await fetch(`${BASE}${ev.payload!.url}`);

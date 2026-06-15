@@ -274,7 +274,7 @@ function AudioAttachment({ mimeType, dataBase64, durationSeconds }: AudioProps):
  *  media-asset serve path — media content is LLM-influenced, and an
  *  unsanitized `javascript:` URL in the file-chip anchor would be a DOM-XSS
  *  vector (the app's other links are sanitized by react-markdown; this raw
- *  element is not). The relative host path (`/v1/host/sample/assets/<token>`,
+ *  element is not). The relative host path (`/v1/host/openwop-app/assets/<token>`,
  *  where the unguessable token IS the capability) is resolved against the API
  *  base so an `<img>`/`<a>` can fetch it cross-origin in the public deploy;
  *  any other relative or non-allowlisted scheme is rejected. Inline `data:`
@@ -286,7 +286,7 @@ function mediaSrc(mimeType: string, url?: string, dataBase64?: string): string |
     // Same-origin host media-asset path. Match the exact token shape (32 random
     // bytes, base64url — no `/` or `.`) so a crafted LLM-emitted `url` can't
     // smuggle a traversal segment past the prefix check.
-    if (/^\/v1\/host\/sample\/assets\/[A-Za-z0-9_-]+$/.test(u)) return `${config.baseUrl}${u}`;
+    if (/^\/v1\/host\/openwop-app\/assets\/[A-Za-z0-9_-]+$/.test(u)) return `${config.baseUrl}${u}`;
     return null;
   }
   if (dataBase64) return `data:${mimeType};base64,${dataBase64}`;

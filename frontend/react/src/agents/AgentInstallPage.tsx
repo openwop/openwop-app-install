@@ -1,14 +1,14 @@
 /**
  * Install-from-registry browser — `/agents/install` (phase E3).
  *
- * Fetches `GET /v1/host/sample/registry/agent-packs` (BE scans the
+ * Fetches `GET /v1/host/openwop-app/registry/agent-packs` (BE scans the
  * local packs/ directory for `core.openwop.agents.*`). Each row
  * shows the pack's name, version, description, the personas it
  * ships, and an "Install" button for packs that aren't yet
  * registered in the in-process AgentRegistry. Installed packs show
  * "Installed" with no action.
  *
- * Install posts to `POST /v1/host/sample/registry/agent-packs/install`,
+ * Install posts to `POST /v1/host/openwop-app/registry/agent-packs/install`,
  * which invokes the existing `installPackFromRegistry` machinery
  * (signature verification, etc.). On success, the page refreshes
  * the list so the newly-installed pack flips to "Installed".

@@ -26,7 +26,7 @@ reference the cloud packs are measured against.
 Every pack provides the same set of capabilities; only the platform primitives
 differ. A host is "OpenWOP-ready" when it can supply these:
 
-| Capability | Required? | Demo-grade default | Production option | Env knob |
+| Capability | Required? | Default (portable) | Production option | Env knob |
 |---|---|---|---|---|
 | Container runtime on `$PORT` | **yes** | — | any OCI runtime | `PORT` |
 | Relational store | for `auth`/persistence | sqlite file | any Postgres | `OPENWOP_STORAGE_DSN` |
@@ -46,7 +46,7 @@ managed upgrade.
 `OPENWOP_DEPLOY_POSTURE` selects the security envelope, independent of host:
 
 - **`cookie-per-visitor`** (default) — anonymous per-visitor tenants, in-memory
-  secrets. No DB or KMS required. Demo-grade.
+  secrets. No DB or KMS required. Non-durable; suitable for evaluation and demo deployments.
 - **`bearer-shared`** — a single shared API/admin token.
 - **`auth`** — signed-in (OIDC) tenants with persistent, KMS-wrapped secrets.
   Requires `OPENWOP_STORAGE_DSN` **and** a real `OPENWOP_BYOK_KMS_KEY`; the

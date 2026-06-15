@@ -47,8 +47,8 @@ const pub = client();
 let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
   const owner = client();
-  expect((await owner.post('/v1/host/sample/test/login', { email: `em-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  expect((await owner.post('/v1/host/openwop-app/test/login', { email: `em-${Date.now()}-${n++}@acme.test` })).status).toBe(201);
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -63,14 +63,14 @@ describe('Email: templates + campaigns CRUD (RBAC) + send route', () => {
 
   it('owner CRUDs a template + campaign and sends (empty audience ⇒ 0 stats)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    const tpl = await owner.post(`/v1/host/sample/email/orgs/${orgId}/templates`, { name: 'Welcome', subject: 'Hi {{contact.name}}', body: 'Hello!' });
+    const tpl = await owner.post(`/v1/host/openwop-app/email/orgs/${orgId}/templates`, { name: 'Welcome', subject: 'Hi {{contact.name}}', body: 'Hello!' });
     expect(tpl.status, JSON.stringify(tpl.body)).toBe(201);
-    const cmp = await owner.post(`/v1/host/sample/email/orgs/${orgId}/campaigns`, { templateId: tpl.body.templateId });
+    const cmp = await owner.post(`/v1/host/openwop-app/email/orgs/${orgId}/campaigns`, { templateId: tpl.body.templateId });
     expect(cmp.status, JSON.stringify(cmp.body)).toBe(201);
     expect(cmp.body.status).toBe('draft');
     // unknown templateId rejected
-    expect((await owner.post(`/v1/host/sample/email/orgs/${orgId}/campaigns`, { templateId: 'tpl:nope' })).status).toBe(400);
-    const sent = await owner.post(`/v1/host/sample/email/orgs/${orgId}/campaigns/${cmp.body.campaignId}/send`);
+    expect((await owner.post(`/v1/host/openwop-app/email/orgs/${orgId}/campaigns`, { templateId: 'tpl:nope' })).status).toBe(400);
+    const sent = await owner.post(`/v1/host/openwop-app/email/orgs/${orgId}/campaigns/${cmp.body.campaignId}/send`);
     expect(sent.body.status).toBe('sent');
     expect(sent.body.stats).toMatchObject({ sent: 0, failed: 0, skipped: 0 });
   });
@@ -78,7 +78,7 @@ describe('Email: templates + campaigns CRUD (RBAC) + send route', () => {
   it('cross-tenant access 404s (IDOR)', async () => {
     const a = await ownerWithOrg();
     const b = await ownerWithOrg();
-    expect((await b.owner.get(`/v1/host/sample/email/orgs/${a.orgId}/templates`)).status).toBe(404);
+    expect((await b.owner.get(`/v1/host/openwop-app/email/orgs/${a.orgId}/templates`)).status).toBe(404);
   });
 });
 

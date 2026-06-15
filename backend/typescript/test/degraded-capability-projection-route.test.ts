@@ -18,7 +18,7 @@ import { createApp } from '../src/index.js';
 
 const PORT = 18263;
 const BASE = `http://127.0.0.1:${PORT}`;
-const H = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
+const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 const DEGRADED_AGENT = 'core.openwop.demo.degraded';
 
 let server: http.Server;

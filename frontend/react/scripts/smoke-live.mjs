@@ -56,7 +56,7 @@ console.log(`Live smoke → ${BASE}\n`);
 
 // 4. BYOK secrets endpoint reachable for anon (byokClient.listStoredRefs contract)
 {
-  const res = await call('/v1/host/sample/byok/secrets');
+  const res = await call('/v1/host/openwop-app/byok/secrets');
   ok('byok/secrets → 200', res.status === 200, `got ${res.status}`);
   if (res.status === 200) {
     const body = await res.json().catch(() => ({}));
@@ -71,7 +71,7 @@ console.log(`Live smoke → ${BASE}\n`);
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
-      workflowId: 'sample.chat.turn',
+      workflowId: 'openwop-app.chat.turn',
       inputs: { provider: 'openai', model: 'gpt-4o-mini', credentialRef: 'managed:openai', messages: [{ role: 'user', content: 'hi' }] },
     }),
   });

@@ -6,7 +6,7 @@
  * the `@openwop/openwop` SDK — we do NOT fork them with a second schema layer.
  * These guards are only for surfaces the SDK does not own: the registry
  * (`packs.openwop.dev`, a different, untrusted origin) and the demo host's
- * `/v1/host/sample/*` extension endpoints, which are cast `as T` from raw
+ * `/v1/host/openwop-app/*` extension endpoints, which are cast `as T` from raw
  * fetch. A malformed payload here previously crashed three components deep
  * (e.g. `.map()` on a non-array); these turn it into one typed error the page
  * error states / app error boundary can render.

@@ -358,6 +358,15 @@ export interface ChatMessage {
    *  toolbar. Persisted to localStorage with the rest of the session; no
    *  backend wiring yet (signal-only). Absent = no rating given. */
   feedback?: 'positive' | 'negative';
+  /** For `role: 'assistant'` — the agent that produced this turn (the
+   *  `activeAgentId` routed at send time). Absent ⇒ the default OpenWOP
+   *  Assistant. Used to label CROSS-agent turns when composing the provider
+   *  history, so a later agent doesn't mistake a prior agent's turn for its own
+   *  (or the prior agent's name for the user's). Persisted with the message. */
+  agentId?: string;
+  /** Persona name of `agentId`, captured at send time so the cross-agent label
+   *  (`[Persona]: …`) renders even if the agent is later uninstalled. */
+  agentPersona?: string;
   createdAt: string;
 }
 
@@ -376,6 +385,11 @@ export interface ChatSession {
   title: string;
   messages: ChatMessage[];
   createdAt: string;
+  /** RFC 0005 conversation transport (flag-gated): the long-lived conversation
+   *  run backing this session. Persisted so a reload reuses the SAME run and the
+   *  agent keeps its server-side context (the suspended run survives restarts).
+   *  Absent on the per-turn path or a fresh session; cleared if the run dies. */
+  conversationRunId?: string | undefined;
   /** Active-agents lineup for this chat (RFC 0072 §A inventory ids).
    *  Set by phase D1's `ActiveAgentsPanel` + phase D3's `@`-mention
    *  activation. The chat dispatcher routes through `activeAgentId`

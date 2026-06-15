@@ -119,7 +119,7 @@ describe('useChatSession run lifecycle (integration)', () => {
 
   it('handles a real production COMPLETION stream (openwop-free/MiniMax, captured from app.openwop.dev)', async () => {
     // Exact RunEventDoc shapes a live "Try it free" (openwop-free → MiniMax M2)
-    // sample.chat.turn emitted on app.openwop.dev: reasoning deltas, then the
+    // openwop-app.chat.turn emitted on app.openwop.dev: reasoning deltas, then the
     // answer streamed as node.message deltas, then agent.reasoned, then
     // node.completed with the authoritative completion. Drives my EXTRACTED
     // chatTurnSubscription handler with real happy-path output.
@@ -127,7 +127,7 @@ describe('useChatSession run lifecycle (integration)', () => {
     await act(async () => { await result.current.send('hi', CONFIG); });
 
     await act(async () => {
-      await captured!.onEvent(evt('run.started', { workflowId: 'sample.chat.turn' }));
+      await captured!.onEvent(evt('run.started', { workflowId: 'openwop-app.chat.turn' }));
       await captured!.onEvent(evt('node.started', {}));
       // reasoning stream (M2 is a reasoning model)
       await captured!.onEvent(evt('agent.reasoning.delta', { delta: 'The', agentId: 'openwop-free-assistant', sequence: 0, verbosity: 'full' }));
@@ -153,14 +153,14 @@ describe('useChatSession run lifecycle (integration)', () => {
 
   it('handles a real production failure stream (captured from app.openwop.dev)', async () => {
     // These are the exact RunEventDoc envelope + payload shapes a live
-    // sample.chat.turn emitted on app.openwop.dev (Anthropic managed target
+    // openwop-app.chat.turn emitted on app.openwop.dev (Anthropic managed target
     // unprovisioned → managed_unknown). Drives my onEvent handler with REAL
     // backend output, not synthetic — verifies the failure branch end-to-end.
     const { result } = renderHook(() => useChatSession());
     await act(async () => { await result.current.send('hi', CONFIG); });
 
     await act(async () => {
-      await captured!.onEvent(evt('run.started', { workflowId: 'sample.chat.turn' }));
+      await captured!.onEvent(evt('run.started', { workflowId: 'openwop-app.chat.turn' }));
       await captured!.onEvent(evt('node.started', {}));
       await captured!.onEvent(evt('node.failed', { error: { code: 'managed_unknown', message: 'No managed target configured for provider "anthropic".' } }));
       await captured!.onEvent(evt('run.failed', {
@@ -194,7 +194,7 @@ describe('useChatSession run lifecycle (integration)', () => {
 
 const MENTION = {
   displayName: 'Uppercase', slug: 'uppercase', description: 'Uppercase the text',
-  toolName: 'uppercase', workflowId: 'sample.demo.uppercase',
+  toolName: 'uppercase', workflowId: 'openwop-app.uppercase',
 };
 
 describe('useChatSession workflow_run lifecycle (integration)', () => {

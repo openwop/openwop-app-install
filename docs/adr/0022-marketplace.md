@@ -1,9 +1,9 @@
 # ADR 0022 — Marketplace (browse + install feature packs over the signed registry)
 
-**Status:** Proposed
+**Status:** implemented
 **Date:** 2026-06-10
 **Depends on:** ADR 0001 (feature-package + the pack model), ADR 0006 (RBAC)
-**Toggle:** `marketplace` · **Surface:** authed `/v1/host/sample/marketplace/*`
+**Toggle:** `marketplace` · **Surface:** authed `/v1/host/openwop-app/marketplace/*`
 (host-extension, NON-NORMATIVE — the registry wire is already defined; no new RFC)
 **MyndHyve §:** Marketplace · **Baseline:** `functions/src/marketplace` (14
 functions: listings, reviews, install) + `src/core/marketplace`
@@ -25,14 +25,14 @@ browse-and-install surface over the pack pipeline that already exists.
   signing/verification would be a security-critical duplication (the worst kind of
   drift).
 - **A specialized install route already exists — `agentPackRegistry`.**
-  `routes/agentPackRegistry.ts` exposes `GET/POST /v1/host/sample/registry/
+  `routes/agentPackRegistry.ts` exposes `GET/POST /v1/host/openwop-app/registry/
   agent-packs[/install]`, **agent-pack-only**, backing the Agents-tab "Install from
   registry" flow. Marketplace is the **generic** surface; it must NOT duplicate that
   route. Decision: **coexist now, fold later** — `agentPackRegistry` is a thin slice
   over `registryInstaller`; Marketplace is the broad slice over the same service.
   A follow-on can re-express `agentPackRegistry` as a filtered Marketplace view.
 - **A read-only catalog already exists — `nodeCatalog`.** `routes/nodeCatalog.ts`
-  (`GET /v1/host/sample/node-catalog`) scans `~/.openwop-packs/*/pack.json`.
+  (`GET /v1/host/openwop-app/node-catalog`) scans `~/.openwop-packs/*/pack.json`.
   Marketplace's **browse** reuses that manifest-scan pattern (+ `featurePackRefs()`
   + install markers) rather than a new discovery mechanism.
 
@@ -62,21 +62,21 @@ Review  { reviewId, tenantId, orgId, packName, rating(1..5), body?,        // th
 
 ### Phase 1 — listings browse (read-only, composes the pipeline)
 
-`GET /v1/host/sample/marketplace/listings` (`workspace:read`) — projects available
+`GET /v1/host/openwop-app/marketplace/listings` (`workspace:read`) — projects available
 packs (registry manifest scan, the `nodeCatalog` pattern) annotated with install
 status (`.openwop-installed.json`) and which features require them (`featurePackRefs()`).
 Read-only; no new store.
 
 ### Phase 2 — install (delegates to registryInstaller, admin-gated)
 
-`POST /v1/host/sample/marketplace/install` `{ packName, version }` — **delegates to
+`POST /v1/host/openwop-app/marketplace/install` `{ packName, version }` — **delegates to
 `installPackFromRegistry`** (Ed25519 + SRI verified; signed-only). Gated on an
 **admin/`host:*` scope** (install is process-global, a privileged operation), not a
 plain org member; fail-closed. Returns the verified install result.
 
 ### Phase 3 — reviews / ratings (the new store)
 
-`GET/POST /v1/host/sample/marketplace/listings/:packName/reviews`
+`GET/POST /v1/host/openwop-app/marketplace/listings/:packName/reviews`
 (`authorizeOrgScope`: read=`workspace:read`, write=`workspace:write`) — one review
 per (org, pack) author; aggregate rating computed on read. Tenant+org IDOR-guarded.
 
@@ -149,3 +149,26 @@ browse/install routes **extend the existing registry surface** (`registryInstall
 - [ ] **Review moderation / aggregation depth** (MyndHyve's is not fully built).
 - [ ] **Workflow/feature listings beyond node/agent packs** — browsing installable
   *features*, not just packs.
+
+## Implementation (Status → implemented)
+
+Landed as the `marketplace` feature-package, wired purely additively (appended to
+`BACKEND_FEATURES` + `FRONTEND_FEATURES`; zero core edits), toggle OFF by default,
+`bucketUnit: tenant`.
+
+| Phase | What shipped | Where |
+|-------|--------------|-------|
+| 1 — listings browse | `GET /v1/host/openwop-app/marketplace/listings` (toggle + authed). A computed PROJECTION over the pack-dir scan + `.openwop-installed.json` markers + `featurePackRefs()` `requiredBy` — re-implements none of the pipeline. | `features/marketplace/listingService.ts`, `routes.ts` |
+| 2 — install | `POST .../install` — **delegates to `installPackFromRegistry`** (Ed25519 + SHA-256 SRI, signed-only). Gated `requireSuperadmin` (process-global mutation = `host:*`, fail-closed); toggle-gated first. | `features/marketplace/routes.ts` |
+| 3 — reviews/ratings | `GET/POST/DELETE .../orgs/:orgId/listings/:packName/reviews` (`workspace:read`/`write` via `authorizeOrgScope`). The ONLY new store: `DurableCollection<Review>('marketplace:review')`, one-per-(org,pack,author) upsert, aggregate computed on read, tenant+org IDOR-guarded, author/admin-only delete. | `features/marketplace/reviewService.ts`, `routes.ts` |
+| 4 — frontend | `/marketplace` page (nav-gated on `marketplace`): search → install (superadmin; a 403 surfaced as a clear message) → org-scoped reviews with star ratings. `marketplaceClient.ts`. | `frontend/react/src/features/marketplace/*` |
+| ADR 0014 surface | read-only `ctx.features.marketplace` (`listings`/`search`; install excluded by design), advertised at `/.well-known/openwop` via `registerFeatureSurface`. Pinned packs `feature.marketplace.nodes@1.0.0` (search node) + `feature.marketplace.agents@1.0.0` (recommender — read-only, never installs). | `features/marketplace/surface.ts`, `packs/feature.marketplace.*` |
+
+Tests: `backend/typescript/test/marketplace-route.test.ts` (18 — toggle gating,
+install RBAC + delegation via a mocked installer, review CRUD/upsert/aggregate,
+cross-tenant + cross-org IDOR, author/admin delete-guard, surface + node smoke,
+well-known advertisement). Frontend `npm run build` green (token/CSS gates pass).
+
+**Open-question decision recorded:** install authority resolved to **superadmin-only**
+(`requireSuperadmin`) for v1 — install is process-global, so a per-org admin scope
+would mis-model the authority; per-tenant pack enablement remains deferred (alt. 4).

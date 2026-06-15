@@ -1,7 +1,7 @@
 /**
  * Analytics feature routes (host-extension, ADR 0018).
- *   Public beacon (unauthed):  POST /v1/host/sample/public-analytics/:orgId/collect
- *   Authed (org-scoped, RBAC):  GET  /v1/host/sample/analytics/orgs/:orgId/{summary,events}
+ *   Public beacon (unauthed):  POST /v1/host/openwop-app/public-analytics/:orgId/collect
+ *   Authed (org-scoped, RBAC):  GET  /v1/host/openwop-app/analytics/orgs/:orgId/{summary,events}
  * The public prefix is on PUBLIC_PATH_PREFIXES (auth.ts). The beacon is
  * consent-gated through the ADR 0020 helper (one consent rule) and relies on the
  * global per-IP rate-limit middleware for abuse control.
@@ -17,8 +17,8 @@ import { isAllowed } from '../consent/consentService.js';
 import { recordEvent, listEvents, summarize } from './analyticsService.js';
 
 const FEATURE = { toggleId: 'analytics', label: 'Analytics' };
-const ORG = '/v1/host/sample/analytics/orgs/:orgId';
-const PUB = '/v1/host/sample/public-analytics';
+const ORG = '/v1/host/openwop-app/analytics/orgs/:orgId';
+const PUB = '/v1/host/openwop-app/public-analytics';
 
 export function registerAnalyticsRoutes(deps: RouteDeps): void {
   const { app } = deps;

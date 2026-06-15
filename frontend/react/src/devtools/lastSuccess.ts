@@ -18,7 +18,7 @@
  * comes back from a long break.
  */
 
-const LS_KEY = 'openwop.sample.lastSuccessAt';
+const LS_KEY = 'openwop-app.lastSuccessAt';
 /** Window (ms) inside which we trust the BE is still warm. */
 export const WARM_WINDOW_MS = 5 * 60 * 1000;
 

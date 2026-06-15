@@ -20,11 +20,13 @@ import type { Principal } from '../types.js';
 import { OpenwopError } from '../types.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import { getRegisteredWorkflow } from './workflowsRegistry.js';
-import { getDemoWorkflow } from './demoWorkflows.js';
+import { getExampleWorkflow } from './exampleWorkflows.js';
+import { getWorkflowTemplate } from './workflowTemplates.js';
+import { createConnectorInvoker } from './connectorInvoker.js';
 
 /**
  * Load conformance fixtures from the in-tree `conformance/fixtures/`
- * directory so the sample BE can stand in as a black-box conformance
+ * directory so the reference backend can stand in as a black-box conformance
  * target. Only fixtures whose typeIds are registered on this host
  * (chat-responder, demo-uppercase, mock-agent, core.*) are loadable;
  * everything else surfaces as "workflow not found" if a run requests it.
@@ -95,7 +97,7 @@ const conformanceFixtures = new Map<string, WorkflowDefinition>();
       }
     }
   } catch {
-    /* directory unreadable — sample BE just doesn't act as a conformance target */
+    /* directory unreadable — reference backend just doesn't act as a conformance target */
   }
 })();
 
@@ -260,25 +262,25 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
     // ── workflow catalog (sqlite-backed; falls back to a hard-coded sample workflow)
     workflowCatalog: {
       async getWorkflow(workflowId) {
-        if (workflowId === 'sample.demo.uppercase') {
+        if (workflowId === 'openwop-app.uppercase') {
           return {
             workflowId,
             definition: {
               workflowId,
               nodes: [
-                { nodeId: 'shout', typeId: 'local.sample.demo.uppercase' },
+                { nodeId: 'shout', typeId: 'local.openwop-app.uppercase' },
               ],
             },
           };
         }
-        if (workflowId === 'sample.demo.approval-gate') {
+        if (workflowId === 'openwop-app.approval-gate') {
           return {
             workflowId,
             definition: {
               workflowId,
               nodes: [
                 { nodeId: 'gate', typeId: 'core.approvalGate', config: { prompt: 'Approve this sample run?' } },
-                { nodeId: 'shout', typeId: 'local.sample.demo.uppercase' },
+                { nodeId: 'shout', typeId: 'local.openwop-app.uppercase' },
               ],
             },
           };
@@ -289,7 +291,7 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
         // deterministic mock summarizer. Demonstrates the search-tool
         // family on the PROTOCOL layer (node pack), not a host-side exec.
         // Runs end-to-end with no BYOK provider and replays deterministically.
-        if (workflowId === 'sample.web.research') {
+        if (workflowId === 'openwop-app.web.research') {
           return {
             workflowId,
             definition: {
@@ -320,13 +322,28 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
             },
           };
         }
-        if (workflowId === 'sample.chat.turn') {
+        if (workflowId === 'openwop-app.chat.turn') {
           return {
             workflowId,
             definition: {
               workflowId,
               nodes: [
-                { nodeId: 'respond', typeId: 'vendor.openwop-sample.chat-responder' },
+                { nodeId: 'respond', typeId: 'vendor.openwop-app.chat-responder' },
+              ],
+            },
+          };
+        }
+        // Wire-aligned multi-agent chat (RFC 0005). One long-lived conversation
+        // run per chat session: the gate opens + suspends, each user message is
+        // an `exchange`, "New chat" closes it. The per-turn `openwop-app.chat.turn`
+        // above stays the default transport until the frontend cutover lands.
+        if (workflowId === 'openwop-app.conversation') {
+          return {
+            workflowId,
+            definition: {
+              workflowId,
+              nodes: [
+                { nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'Conversation started.' } },
               ],
             },
           };
@@ -334,18 +351,26 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
         // Built-in demo role-workflows (the "AI coworkers" roster portfolios).
         // Resolved here in catalog source A — NOT the in-memory builder
         // registry — so a roster portfolio id is runnable on every instance
-        // and survives restart (host/demoWorkflows.ts explains why).
-        const demo = getDemoWorkflow(workflowId);
+        // and survives restart (host/exampleWorkflows.ts explains why).
+        const demo = getExampleWorkflow(workflowId);
         if (demo) return { workflowId, definition: demo };
+        // Shared work-twin template pack (ADR 0032 Phase 2.0) — a pinned
+        // module constant (host/workflowTemplates.ts), resolved here in catalog
+        // source A like the demo workflows so a twin portfolio that binds a
+        // `tmpl.*` id (directly or via `core.subWorkflow`) is runnable on every
+        // instance and survives restart/replay, NOT the in-memory builder
+        // registry below.
+        const template = getWorkflowTemplate(workflowId);
+        if (template) return { workflowId, definition: template };
         // Builder-registered workflows from the in-memory registry,
-        // populated via `POST /v1/host/sample/workflows`. Sample-grade
+        // populated via `POST /v1/host/openwop-app/workflows`. Sample-grade
         // (process-local). Real hosts read from storage's `workflows` table.
         const registered = getRegisteredWorkflow(workflowId);
         if (registered) {
           return { workflowId, definition: registered };
         }
         // Conformance fixtures loaded from in-tree `conformance/fixtures/`
-        // at boot. Lets the sample BE answer black-box conformance runs
+        // at boot. Lets the reference backend answer black-box conformance runs
         // targeted at `/v1/runs` with a fixture workflowId, gated by
         // whichever fixture-specific typeIds this host has registered.
         const fixture = conformanceFixtures.get(workflowId);
@@ -427,15 +452,22 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
     // ── throw-on-use stubs
     enterprisePolicyResolver: throwOnUse<EnterprisePolicyResolver>('host.enterprisePolicy'),
     environmentResolver: throwOnUse<EnvironmentResolver>('host.environment'),
-    connectorInvoker: throwOnUse<ConnectorInvoker>('host.connectors'),
 
-    // ── provider policy resolver (env-var driven; sample-grade global)
+    // ── connector invoker (ADR 0037): a real impl that delegates to the
+    //   Connections broker + brokered egress — resolves the connector's provider
+    //   Connection for the acting user, performs the audited egress call, fails
+    //   closed when unconfigured. A pack declaring peerDependencies:["host.connectors"]
+    //   now RESOLVES instead of host_capability_missing. `host.connectors` is
+    //   advertised `supported:true` in discovery (capability honesty).
+    connectorInvoker: createConnectorInvoker({ storage }),
+
+    // ── provider policy resolver (env-var driven; best-effort global)
     //   OPENWOP_AI_POLICY_<PROVIDER>=disabled|optional|required|restricted[:model1,model2,...]
     // Real hosts persist per-tenant + per-scope policy in their tenants
     // table; the sample applies one policy set to every (tenantId,
     // scopeId) tuple. The full four-mode predicate from
     // `spec/v1/capabilities.md:246-289` is implemented — only the
-    // *scoping* is sample-grade.
+    // *scoping* is best-effort.
     providerPolicyResolver: createEnvVarProviderPolicyResolver(),
   };
 }
@@ -484,15 +516,17 @@ function parseEnvPolicy(provider: string, raw: string): AiProviderPolicy | null 
 // ── In-memory secret resolver (sample-only impl) ──
 
 function createInMemorySecretResolver(): SecretResolver {
-  // Reads OPENWOP_SAMPLE_SECRETS env var as JSON: {"credRef": "value", ...}
+  // Reads OPENWOP_BOOT_SECRETS env var as JSON: {"credRef": "value", ...}
   // and serves matching credentialRef requests. Real deployers swap for KMS.
+  // (Legacy alias OPENWOP_SAMPLE_SECRETS still honored for existing deploys.)
   let secrets: Record<string, string> = {};
   try {
-    if (process.env.OPENWOP_SAMPLE_SECRETS) {
-      secrets = JSON.parse(process.env.OPENWOP_SAMPLE_SECRETS);
+    const rawSecrets = process.env.OPENWOP_BOOT_SECRETS ?? process.env.OPENWOP_SAMPLE_SECRETS;
+    if (rawSecrets) {
+      secrets = JSON.parse(rawSecrets);
     }
   } catch (err) {
-    log.warn('OPENWOP_SAMPLE_SECRETS parse failed; secrets disabled', {
+    log.warn('OPENWOP_BOOT_SECRETS parse failed; secrets disabled', {
       error: err instanceof Error ? err.message : String(err),
     });
   }

@@ -14,7 +14,7 @@ export const orgsFeature: BackendFeature = {
   toggleDefault: {
     id: 'orgs',
     label: 'Org invitations',
-    description: 'Email-token invitations to join an organization as a member. Orgs/members/roles are owned by the accessControl surface (RFC 0049); this delegates to it (ADR 0004, reconciled).',
+    description: 'Email-token invitations to join an organization as a member. Orgs/members/roles are owned by the accessControl surface (RFC 0049); this delegates to it.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

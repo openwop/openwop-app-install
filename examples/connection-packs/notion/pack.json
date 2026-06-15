@@ -1,0 +1,33 @@
+{
+  "name": "core.openwop.connections.notion",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Notion connection pack (RFC 0095) — OAuth2 provider for Notion pages + databases. ADR 0033 DEPLOY-GATED. Reach is `mcp` against Notion's official first-party hosted MCP server (https://mcp.notion.com/mcp, Streamable HTTP), which searches/reads/creates/updates workspace content under the connected user's permissions. Notion consent is a static developer-portal capability set rather than per-request OAuth scopes (scopeModel `capabilities`). Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "provider": {
+    "id": "notion",
+    "displayName": "Notion",
+    "category": "docs",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "capabilities",
+      "endpoints": {
+        "authorize": "https://api.notion.com/v1/oauth/authorize",
+        "token": "https://api.notion.com/v1/oauth/token"
+      },
+      "scopes": {
+        "read": [
+          { "key": "content.read", "label": "Read pages + databases", "scopes": [] }
+        ],
+        "write": [
+          { "key": "content.write", "label": "Create + update pages + databases", "scopes": [] }
+        ]
+      }
+    },
+    "reach": { "mcp": { "server": { "url": "https://mcp.notion.com/mcp", "transport": "http" } } },
+    "consumerNodes": ["core.openwop.mcp.invoke-tool", "core.openwop.mcp.read-resource"],
+    "docsUrl": "https://developers.notion.com/docs/authorization"
+  }
+}

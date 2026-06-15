@@ -9,8 +9,8 @@ ADR 0015 (workspace = tenant)
 each file's correction note), ADR 0012 Alternative 4 (overturned — see below)
 **Toggle:** none — `cms` / `media` / `publishing` are retired from the toggle
 catalog (always-on, like Notifications per ADR 0010 § Correction)
-**Surfaces:** existing authed `/v1/host/sample/{cms,media,publishing}/*` + the
-existing **public (unauthed)** `/v1/host/sample/public/:orgId/*` (ADR 0012) +
+**Surfaces:** existing authed `/v1/host/openwop-app/{cms,media,publishing}/*` + the
+existing **public (unauthed)** `/v1/host/openwop-app/public/:orgId/*` (ADR 0012) +
 a new **public SPA route tier** rendering `/` for anonymous visitors
 
 ---
@@ -31,9 +31,9 @@ deliberately built the public-distribution half:
 - **CMS (ADR 0009)** authors pages with typed sections + a draft→review→published
   workflow; `cmsService.getPublishedBySlug` reads a published page by slug.
 - **Media (ADR 0007)** stores assets behind public serve tokens
-  (`/v1/host/sample/assets/:token`, already on `PUBLIC_PATH_PREFIXES`).
+  (`/v1/host/openwop-app/assets/:token`, already on `PUBLIC_PATH_PREFIXES`).
 - **Publishing (ADR 0012)** already serves published CMS pages to anonymous
-  visitors at `GET /v1/host/sample/public/:orgId/pages/:slug` (sections + merged
+  visitors at `GET /v1/host/openwop-app/public/:orgId/pages/:slug` (sections + merged
   SEO + redirect-follow + content-safety), plus `sitemap.xml`, `robots.txt`,
   `feed.rss`.
 
@@ -101,7 +101,7 @@ editorial **`published` status is the real public gate** — unpublishing a *pag
 published-only), and **Sharing (ADR 0013)** is the mechanism for private /
 unguessable / draft access. The per-tenant master switch was redundant with the
 per-page status. Trade-off accepted: a tenant's **published** CMS pages are
-world-readable at `/v1/host/sample/public/:orgId/...` without a separate opt-in.
+world-readable at `/v1/host/openwop-app/public/:orgId/...` without a separate opt-in.
 White-label guidance (also added to FEATURES.md): *published CMS pages are public;
 use Sharing for private or draft access.*
 
@@ -136,12 +136,12 @@ deleting stored overrides for an explicit `RETIRED_TOGGLE_IDS =
   (404/IDOR), and requires its scope (403). Admin-menu placement is cosmetic IA,
   not an auth change (workspace members may still author content).
 - **No `ctx` surface affected:** `cms`/`media`/`publishing` declare **no** ADR 0014
-  workflow surface and advertise no `host.sample.<id>` capability, so
+  workflow surface and advertise no `host.openwop-app.<id>` capability, so
   `/.well-known/openwop` and `featureSurfaces` gating are untouched. (Corrects a
   stale FEATURES.md note that called CMS/Media FeatureModules.)
 - **Replay/fork safe:** these toggles carry no variants and stamp nothing on a
   run; `:fork` against historical checkpoints is unaffected.
-- **No wire surface → no RFC:** everything is under `/v1/host/sample/*` (+ the SPA)
+- **No wire surface → no RFC:** everything is under `/v1/host/openwop-app/*` (+ the SPA)
   — non-normative host-extension surface.
 
 ## Phases
@@ -188,10 +188,10 @@ for headless / IaC deploys).
 **New surface:**
 - A durable singleton `siteConfig` — `{ enabled, orgId, slug, updatedBy, updatedAt }`
   (`host/siteConfig/service.ts`), mirroring the feature-toggle store.
-- `GET /v1/host/sample/public-site-config` — **unauthed** (on `PUBLIC_PATH_PREFIXES`),
+- `GET /v1/host/openwop-app/public-site-config` — **unauthed** (on `PUBLIC_PATH_PREFIXES`),
   returns only `{ enabled, orgId, slug }` (all already public — they appear in the
   public page URL; no tenant data or secrets).
-- `GET` / `PUT /v1/host/sample/site-config` — **superadmin-gated**, reusing the
+- `GET` / `PUT /v1/host/openwop-app/site-config` — **superadmin-gated**, reusing the
   feature-toggle gate (`isSuperadmin`, exported from `routes/featureToggles.ts`).
   `PUT` validates that an *enabled* config points at a real org (404 otherwise).
 - Admin screen **Admin → Content → "Front page"** (`/front-page`,
@@ -241,7 +241,7 @@ the homepage is a normal `cmsService` page in a RESERVED system org `host-site`
 under a reserved tenant `host:site` — a `host:` prefix no auth path mints (users
 get `user:` / `anon:` / `ws:`), so the org is invisible to and uneditable by every
 real tenant. A super admin edits it via a dedicated, `requireSuperadmin`-gated
-route `GET/PUT /v1/host/sample/site-page` that drives `cmsService` on the reserved
+route `GET/PUT /v1/host/openwop-app/site-page` that drives `cmsService` on the reserved
 site — **bypassing `requireOrgScope` only for that one reserved org**, never as a
 broad cross-tenant override (`requireOrgScope` is untouched; every real tenant's
 isolation is intact). The reserved org + a published `home` page are seeded

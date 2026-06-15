@@ -1,9 +1,9 @@
 /**
  * Standing agent roster + org-chart client (RFCS/0086 + 0087 reference impl).
  *
- *   GET/POST/DELETE /v1/host/sample/roster[/{rosterId}]   — named agents + portfolios
- *   GET/PUT/DELETE  /v1/host/sample/org-chart              — departments/roles/reportsTo
- *   GET            /v1/host/sample/org-chart/{departmentId} — responsibility roll-up
+ *   GET/POST/DELETE /v1/host/openwop-app/roster[/{rosterId}]   — named agents + portfolios
+ *   GET/PUT/DELETE  /v1/host/openwop-app/org-chart              — departments/roles/reportsTo
+ *   GET            /v1/host/openwop-app/org-chart/{departmentId} — responsibility roll-up
  *
  * Tenant scoping is the backend's job (ownership from the caller's principal);
  * the client never sends a tenantId.
@@ -45,14 +45,101 @@ export interface RosterEntry {
   updatedAt: string;
 }
 
+/** The spec's four-level autonomy model (provenance/display). The enforced
+ *  roster `level` is derived from it server-side (ADR 0031 mapping table). */
+export type AgentSpecLevel = 'draft-only' | 'recommend' | 'execute-with-approval' | 'autonomous-within-policy';
+/** The enforced three-level roster autonomy. */
+export type AgentRosterLevel = 'auto' | 'guided' | 'review';
+
+/**
+ * Rich `agentProfile` host-extension (ADR 0031) — the full "enterprise digital
+ * work twin" property set attached to a standing agent. NON-NORMATIVE: this is
+ * host-local product config under `/v1/host/openwop-app/agents/:id/profile`, NOT a
+ * field on the RFC 0003 manifest. `:id` is the owning `rosterId`.
+ */
+export interface AgentProfile {
+  profileId: string;
+  tenantId: string;
+  roleKey: string;
+  department?: { departmentId: string; name: string; roleId?: string; roleName?: string };
+  /** Free-form per-twin config (thresholds, calendars, approval matrices). */
+  configParameters?: Record<string, unknown>;
+  /** Advisory access controls (day-1: metadata only). */
+  permissions?: { read: string[]; write: string[]; never: string[] };
+  /** Action types that always require human approval. */
+  hitl?: string[];
+  escalation?: { contacts: string[]; triggers: string[] };
+  channels?: { approval?: string; delivery?: string };
+  adminControls?: string[];
+  riskCompliance?: string[];
+  /** Connections provider ids that gate activation (ADR 0033). */
+  requiredConnections?: string[];
+  /** Success/analytics metric keys. */
+  metrics?: string[];
+  autonomy: {
+    /** Enforced roster level — derived from `specLevel` when not set explicitly. */
+    level: AgentRosterLevel;
+    specLevel: AgentSpecLevel;
+    /** Allowlisted actions when `level === 'auto'`. */
+    withinPolicyActions?: string[];
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** PUT body for an agent profile. `autonomy.level` is omitted — the backend
+ *  derives the enforced level from `specLevel`, so the UI only sends specLevel. */
+export interface AgentProfileInput {
+  roleKey: string;
+  department?: AgentProfile['department'];
+  configParameters?: Record<string, unknown>;
+  permissions?: { read: string[]; write: string[]; never: string[] };
+  hitl?: string[];
+  escalation?: { contacts: string[]; triggers: string[] };
+  channels?: { approval?: string; delivery?: string };
+  adminControls?: string[];
+  riskCompliance?: string[];
+  requiredConnections?: string[];
+  metrics?: string[];
+  autonomy: { specLevel: AgentSpecLevel; withinPolicyActions?: string[] };
+}
+
+const profileUrl = (rosterId: string): string =>
+  `${rosterBase}/${encodeURIComponent(rosterId)}/profile`;
+
+/** Read the rich agent profile. Returns `null` on 404 (no profile yet OR a
+ *  foreign/unknown agent — the route fails closed), so call sites render the
+ *  "no profile" empty state instead of an error. */
+export async function getAgentProfile(rosterId: string): Promise<AgentProfile | null> {
+  const res = await fetch(profileUrl(rosterId), fetchOpts({ headers: authedHeaders() }));
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`getAgentProfile returned ${res.status}`);
+  return (await res.json()) as AgentProfile;
+}
+
+/** Create-or-replace the agent profile (PUT is a full replace). Returns the
+ *  persisted profile, including the derived enforced `autonomy.level`. */
+export async function putAgentProfile(rosterId: string, input: AgentProfileInput): Promise<AgentProfile> {
+  const res = await fetch(profileUrl(rosterId), fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  if (!res.ok) {
+    let detail = `${res.status}`;
+    try {
+      const body = (await res.json()) as { message?: string };
+      if (body.message) detail = body.message;
+    } catch { /* ignore */ }
+    throw new Error(`putAgentProfile failed: ${detail}`);
+  }
+  return (await res.json()) as AgentProfile;
+}
+
 export interface OrgRole { roleId: string; name: string }
 export interface OrgDepartment { departmentId: string; name: string; parentDepartmentId: string | null; roles: OrgRole[] }
 export interface OrgMember { rosterId: string; departmentId: string; roleId: string; reportsTo: string | null }
 export interface OrgChart { tenantId: string; departments: OrgDepartment[]; members: OrgMember[]; updatedAt: string | null }
 export interface ResponsibilityView { department: OrgDepartment; members: OrgMember[]; responsibilities: string[] }
 
-const rosterBase = `${config.baseUrl}/v1/host/sample/roster`;
-const orgBase = `${config.baseUrl}/v1/host/sample/org-chart`;
+const rosterBase = `${config.baseUrl}/v1/host/openwop-app/roster`;
+const orgBase = `${config.baseUrl}/v1/host/openwop-app/org-chart`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 export async function listRoster(): Promise<RosterEntry[]> {
@@ -99,20 +186,20 @@ export async function deleteRosterEntry(rosterId: string): Promise<void> {
 
 /** "Load demo data" — idempotently seed the built-in demo domains for the
  *  caller's tenant. A no-op when the tenant already has those demo rows. */
-export async function seedDemoAgents(opts: { heal?: boolean } = {}): Promise<{
+export async function seedExampleAgents(opts: { heal?: boolean } = {}): Promise<{
   seeded: boolean;
   agents: number;
   domains?: string[];
   healed?: { boards: number; schedules: number; orgChart: boolean };
 }> {
-  const res = await fetch(`${config.baseUrl}/v1/host/sample/demo/seed`, fetchOpts({
+  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/example-data/seed`, fetchOpts({
     method: 'POST',
     headers: jsonHeaders(),
     // heal:true = explicit restore (the "Load demo data" buttons); the silent
     // auto-seed on page entry sends {} so it never resurrects deletions.
     body: JSON.stringify(opts.heal ? { heal: true } : {}),
   }));
-  if (!res.ok) throw new Error(`seedDemoAgents returned ${res.status}`);
+  if (!res.ok) throw new Error(`seedExampleAgents returned ${res.status}`);
   return (await res.json()) as {
     seeded: boolean; agents: number; domains?: string[];
     healed?: { boards: number; schedules: number; orgChart: boolean };
@@ -137,6 +224,41 @@ export async function checkAgent(rosterId: string): Promise<HeartbeatResult> {
   const res = await fetch(`${rosterBase}/${encodeURIComponent(rosterId)}/check`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: '{}' }));
   if (!res.ok) throw new Error(`checkAgent returned ${res.status}`);
   return (await res.json()) as HeartbeatResult;
+}
+
+/** Per-provider readiness for one `requiredConnections` entry (ADR 0033 §3.3). */
+export interface ConnectionReadinessEntry {
+  provider: string;
+  configured: boolean;
+  /** Present when a (possibly non-active) connection exists — lets the UI tell
+   *  "missing" apart from "needs-reconsent"/"expired". */
+  status?: 'active' | 'needs-reconsent' | 'expired' | 'revoked';
+}
+
+/** The agent's resolved connection readiness + the gated autonomy it produces. */
+export interface ConnectionReadiness {
+  agentId: string;
+  required: string[];
+  entries: ConnectionReadinessEntry[];
+  allConfigured: boolean;
+  missing: string[];
+  declaredAutonomy: 'auto' | 'guided' | 'review';
+  /** The autonomy AFTER the connection gate — forced to `review` when any
+   *  required connection is unconfigured (the heartbeat applies the same gate). */
+  gatedAutonomy: 'auto' | 'guided' | 'review';
+  effective: { acting: boolean };
+}
+
+/** Read an agent's `requiredConnections` activation readiness (ADR 0033 §3.3).
+ *  Honest "can this twin act?" view — which connections are configured vs
+ *  missing, and the effective autonomy after the fail-closed gate. */
+export async function getConnectionReadiness(rosterId: string): Promise<ConnectionReadiness> {
+  const res = await fetch(
+    `${config.baseUrl}/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/connection-readiness`,
+    fetchOpts({ headers: authedHeaders() }),
+  );
+  if (!res.ok) throw new Error(`getConnectionReadiness returned ${res.status}`);
+  return (await res.json()) as ConnectionReadiness;
 }
 
 /** One activity item — a run attributed to the agent, with its outcome + time. */
@@ -187,7 +309,7 @@ export async function getFleetActivity(
   if (opts.rosterId) qs.set('rosterId', opts.rosterId);
   if (opts.limit) qs.set('limit', String(opts.limit));
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
-  const res = await fetch(`${config.baseUrl}/v1/host/sample/fleet/activity${suffix}`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/fleet/activity${suffix}`, fetchOpts({ headers: authedHeaders() }));
   if (!res.ok) throw new Error(`getFleetActivity returned ${res.status}`);
   const body = (await res.json()) as { items: AgentActivityItem[]; truncated?: boolean };
   return { items: body.items, truncated: body.truncated ?? false };

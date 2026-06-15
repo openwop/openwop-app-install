@@ -61,7 +61,7 @@ Conventions that matter:
 - **`--json` everywhere.** Every read subcommand supports `--json` for machine output (via `writeJson`); the default is a `formatTable` human view.
 - **No new runtime deps.** The CLI bundles to a single file with `--packages=external` and ships zero deps. Use Node stdlib + the helpers above.
 - **Auth + base URL come from `Ctx`**, resolved by `onboard`/`config`. Don't read env or prompt for the base URL inside a command — take it from `ctx`.
-- **Host-extension vs normative paths.** Demo-app-only surfaces live under `/v1/host/sample/*`; protocol-normative surfaces under `/v1/*` (e.g. `/v1/agents`). Prefer the normative path when the host serves it; fall back to the sample path otherwise. State which one a command hits in its help text.
+- **Host-extension vs normative paths.** Demo-app-only surfaces live under `/v1/host/openwop-app/*`; protocol-normative surfaces under `/v1/*` (e.g. `/v1/agents`). Prefer the normative path when the host serves it; fall back to the sample path otherwise. State which one a command hits in its help text.
 
 ### Current command groups (dispatcher in `cli/src/cli.ts`)
 
@@ -174,7 +174,7 @@ Summarize:
 3. Update `<GROUP>_HELP`; add/extend a test; smoke it.
 
 ### A normative path superseded a host-sample path
-The demo app may start serving `/v1/<thing>` where the CLI used `/v1/host/sample/<thing>`. Prefer the normative path; keep the sample path as a fallback only if older hosts still need it. Note the switch in help text and the CHANGELOG.
+The demo app may start serving `/v1/<thing>` where the CLI used `/v1/host/openwop-app/<thing>`. Prefer the normative path; keep the sample path as a fallback only if older hosts still need it. Note the switch in help text and the CHANGELOG.
 
 ---
 

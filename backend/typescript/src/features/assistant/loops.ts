@@ -23,7 +23,7 @@
 import type { WorkflowDefinition } from '../../executor/types.js';
 import { registerWorkflow } from '../../host/workflowsRegistry.js';
 import { getJob, registerJob, setJobEnabled, type ScheduledJob } from '../../host/schedulingService.js';
-import { ensureChiefOfStaff } from './chiefOfStaff.js';
+import { ensureAssistantAgent } from './capability.js';
 
 export interface AssistantLoopDef {
   loopId: string;
@@ -154,19 +154,20 @@ export async function enableLoop(
     // Re-enable in place, preserving cadence + attribution.
     return setJobEnabled(existing.jobId, true);
   }
-  // ADR 0023 (corrected) — a loop is the Chief-of-Staff agent's recurring task,
-  // so the ScheduledJob carries its REAL rosterId/agentId. It now resolves to
-  // the agent and shows in its agent-workspace Schedules tab on the same rails
-  // as every other agent's scheduled work (no more tenant-only attribution).
-  const cos = await ensureChiefOfStaff(tenantId);
+  // A loop is the assistant-capability agent's recurring task, so the
+  // ScheduledJob carries its REAL rosterId/agentId — it shows in that agent's
+  // workspace Schedules tab on the same rails as every other agent's scheduled
+  // work. The acting agent is resolved by the `assistant` CAPABILITY (ADR 0023
+  // corrected 2026-06-13), never by a hardcoded `chief-of-staff` roleKey.
+  const agent = await ensureAssistantAgent(tenantId);
   const result = await registerJob({
     jobId: jobIdOf(tenantId, loopId),
     tenantId,
     cronExpr: opts.cronExpr ?? loop.defaultCron,
     workflowId: loop.workflowId,
     enabled: true,
-    rosterId: cos.rosterId,
-    agentId: cos.agentRef.agentId,
+    rosterId: agent.rosterId,
+    agentId: agent.agentRef.agentId,
     // ADR 0024 §4 / Option C — the run-level credential opt-in for the
     // perception reads; the briefing loop reads only the graph (no opt-in).
     ...(loop.loopId !== 'morning-briefing' ? { configurable: { connections: ['google'] } } : {}),

@@ -1,13 +1,13 @@
 /**
- * Agent-pack registry browser — sample-extension surface backing
+ * Agent-pack registry browser — host-extension surface backing
  * the Agents-tab "Install from registry" flow (phase E3, 2026-05-28).
  *
  * Endpoints:
- *   GET  /v1/host/sample/registry/agent-packs
+ *   GET  /v1/host/openwop-app/registry/agent-packs
  *     → list known agent packs + whether each is currently installed
  *       in this host's AgentRegistry (i.e. any of its agents are
  *       registered).
- *   POST /v1/host/sample/registry/agent-packs/install
+ *   POST /v1/host/openwop-app/registry/agent-packs/install
  *     → body: { name, version? } — fetch + verify + register via the
  *       existing `installPackFromRegistry` machinery. No-ops cleanly
  *       when the pack is already installed.
@@ -46,7 +46,7 @@ interface AgentPackSummary {
 }
 
 export function registerAgentPackRegistryRoutes(app: Express): void {
-  app.get('/v1/host/sample/registry/agent-packs', (_req, res, next) => {
+  app.get('/v1/host/openwop-app/registry/agent-packs', (_req, res, next) => {
     try {
       const packs = scanLocalAgentPacks();
       res.json({ packs, total: packs.length });
@@ -55,7 +55,7 @@ export function registerAgentPackRegistryRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/registry/agent-packs/install', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/registry/agent-packs/install', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { name?: unknown; version?: unknown };
       if (typeof body.name !== 'string' || body.name.length === 0) {

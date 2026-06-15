@@ -7,7 +7,7 @@ invitations — email ownership), ADR 0006 (RBAC — read/write authority)
 **Owner of profile data:** a NEW feature-package `src/features/profiles/`
 (`feature.ts` + `routes.ts` + `profilesService.ts`). NOT the `users` feature and
 NOT `accessControl`.
-**Surface:** `/v1/host/sample/profiles/*` (host-extension, NON-NORMATIVE — no new
+**Surface:** `/v1/host/openwop-app/profiles/*` (host-extension, NON-NORMATIVE — no new
 OpenWOP RFC; nothing touches the wire).
 
 > Numbering note: ADR 0005 was reserved in the ADR 0002 roadmap but never
@@ -38,8 +38,8 @@ Before adding anything, what already exists (so Profiles does NOT duplicate it):
   model — read/write/endorse authority composes with the `User.userId` subject
   and (where an admin view is needed) the RFC 0049 scopes.
 - **Media is the existing asset surface (RFC 0055).** Avatars and portfolio
-  images are stored as `/v1/host/sample/media/upload` tokens and served by
-  `/v1/host/sample/assets/{token}` — Profiles stores **references**, never bytes.
+  images are stored as `/v1/host/openwop-app/media/upload` tokens and served by
+  `/v1/host/openwop-app/assets/{token}` — Profiles stores **references**, never bytes.
 
 So Profiles is a genuinely new surface (none of MyndHyve's profile fields exist
 today) that **layers on** identity/RBAC/media rather than re-implementing them.
@@ -147,7 +147,7 @@ a per-skill endorse affordance. Registered in `FRONTEND_FEATURES`; the canonical
   permission.
 - **Tenant isolation (CTI-1):** every read/write is tenant-scoped; cross-tenant
   access fails closed with `not_found`.
-- **No wire surface → no RFC:** entirely under `/v1/host/sample/*`; nothing
+- **No wire surface → no RFC:** entirely under `/v1/host/openwop-app/*`; nothing
   advertised in discovery, no event types, no capability flip (per CLAUDE.md the
   host-extension rule — non-normative, never needs an RFC).
 - **Secret hygiene:** free-text fields (bio, links, skill names) are scrubbed for
@@ -162,7 +162,7 @@ a per-skill endorse affordance. Registered in `FRONTEND_FEATURES`; the canonical
    1:1 entity keyed on `userId` keeps identity lean.
 2. **A new `profile` RFC + `capabilities.profiles`.** Rejected — profiles are
    pure host-extension product surface with no cross-host/wire contract; the
-   CLAUDE.md rule is explicit that `/v1/host/sample/*` never needs an RFC.
+   CLAUDE.md rule is explicit that `/v1/host/openwop-app/*` never needs an RFC.
 3. **Own email verification in Profiles.** Rejected — verification is an auth
    concern (token minting, IdP assertions). Profiles *surfaces* the flag
    (Phase 4) but the auth layer owns it; otherwise two systems claim the truth.

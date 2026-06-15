@@ -68,7 +68,7 @@ const DEFAULT_SECTIONS: Section[] = [
     eyebrow: 'An open standard for AI agents & workflows',
     heading: 'AI coworkers that do real work — and stay yours.',
     subheading: 'Build AI agents and automated workflows that handle real tasks, then run them anywhere — because what you build is portable, not locked to one vendor.',
-    ctaLabel: 'Try the live demo', ctaUrl: '/chat',
+    ctaLabel: 'Launch the app', ctaUrl: '/chat',
     ctaLabel2: 'See the open standard', ctaUrl2: 'https://openwop.dev',
   } },
   { sectionId: 'd-cols', type: 'columns', data: { eyebrow: 'How it works', heading: 'Build it. Run it. Stay in control.', layout: 'steps', columns: [
@@ -80,7 +80,7 @@ const DEFAULT_SECTIONS: Section[] = [
     eyebrow: 'The open standard', heading: 'Build it once. Run it anywhere.',
     text: 'OpenWOP is an **open standard** — like email or the web — that any provider can support, so the agents and workflows you build aren’t locked to one vendor. Read the full standard at [openwop.dev](https://openwop.dev).',
   } },
-  { sectionId: 'd-cta', type: 'cta', data: { heading: 'See it for yourself.', label: 'Open the live demo →', url: '/chat' } },
+  { sectionId: 'd-cta', type: 'cta', data: { heading: 'See it for yourself.', label: 'Open the app →', url: '/chat' } },
 ];
 
 /** Title the document for the built-in default page (no CMS SEO to apply). */

@@ -1,7 +1,7 @@
 /**
- * Auth routes (host-extension, sample-grade).
+ * Auth routes (host-extension, best-effort).
  *
- * Surface under /v1/host/sample/users/auth:
+ * Surface under /v1/host/openwop-app/users/auth:
  *   POST /logout      drop the session cookie
  *   POST /oidc/bind   bind a Firebase OIDC identity to a durable User (Phase 4a)
  *
@@ -30,7 +30,7 @@ export function registerUsersAuthRoutes(deps: RouteDeps): void {
   // caller must always be able to drop their session, and the cookie is the only
   // server-side state for an OIDC-bound session. Firebase OIDC sign-out
   // additionally happens client-side (the SPA calls `auth.signOut()`).
-  app.post('/v1/host/sample/users/auth/logout', (_req, res) => {
+  app.post('/v1/host/openwop-app/users/auth/logout', (_req, res) => {
     res.append('Set-Cookie', `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
     res.json({ loggedOut: true });
   });
@@ -43,7 +43,7 @@ export function registerUsersAuthRoutes(deps: RouteDeps): void {
   // stable `user:<userId>` principal (the middleware reads it from the cookie — no
   // per-request store touch, ADR 0015 §0). Idempotent; opt-in (unbound OIDC
   // callers keep the backward-compatible `oidc:<sub>` principal).
-  app.post('/v1/host/sample/users/auth/oidc/bind', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/users/auth/oidc/bind', async (req, res, next) => {
     try {
       const personalTenant = req.personalTenant; // `user:<sha256(iss:sub)>`
       if (!personalTenant?.startsWith('user:')) {

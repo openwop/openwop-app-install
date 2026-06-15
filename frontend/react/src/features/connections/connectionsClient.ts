@@ -1,6 +1,6 @@
 /**
  * Connections feature client (host-extension, non-normative). Wraps
- * /v1/host/sample/{connections,providers}/*. Always-on — Connections graduated
+ * /v1/host/openwop-app/{connections,providers}/*. Always-on — Connections graduated
  * off its feature toggle to a permanent admin surface (ADR 0024 § Correction).
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -33,7 +33,7 @@ export interface Connection {
   orgId?: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample`;
+const base = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

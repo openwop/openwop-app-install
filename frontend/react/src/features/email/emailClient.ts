@@ -1,6 +1,6 @@
 /**
  * Email Marketing API client (ADR 0019). Authed org-scoped templates + campaigns
- * under /v1/host/sample/email/orgs/:orgId. No public surface.
+ * under /v1/host/openwop-app/email/orgs/:orgId. No public surface.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
@@ -13,7 +13,7 @@ export interface CampaignStats { sent: number; failed: number; skipped: number }
 export interface Campaign { campaignId: string; orgId: string; templateId: string; audience: { stage?: ContactStage }; status: 'draft' | 'sending' | 'sent'; stats?: CampaignStats; createdAt: string; updatedAt: string }
 export interface SendLog { sendId: string; campaignId: string; contactId: string; status: 'sent' | 'failed' | 'skipped'; error?: string; ts: string }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

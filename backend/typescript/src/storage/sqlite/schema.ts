@@ -212,8 +212,8 @@ const MIGRATIONS: Record<number, (db: Database) => void> = {
     `);
   },
   7: (db) => {
-    // Sample-extension chat-session history backing the new
-    // `/v1/host/sample/chat/sessions/*` routes (chat improvements
+    // Host-extension chat-session history backing the new
+    // `/v1/host/openwop-app/chat/sessions/*` routes (chat improvements
     // plan §2C.1). Two tables: per-session headers (`chat_sessions`)
     // and per-session messages (`chat_messages`) with cascade delete.
     // `tenant_id` lets the routes scope listings per tenant; `meta`
@@ -458,7 +458,7 @@ const MIGRATIONS: Record<number, (db: Database) => void> = {
   },
   16: (db) => {
     // User-authored agents — backs the Agents-tab "+ Author new" form
-    // (`POST /v1/host/sample/agents`) added 2026-05-28. Pack-installed
+    // (`POST /v1/host/openwop-app/agents`) added 2026-05-28. Pack-installed
     // agents stay in the registry as today (RFC 0003 §C); these rows
     // are merged into the same `getAgentRegistry().list()` at boot so
     // `GET /v1/agents` projects both sources without consumers
@@ -516,7 +516,7 @@ const MIGRATIONS: Record<number, (db: Database) => void> = {
     `);
   },
   18: (db) => {
-    // Generic key→JSON store backing the sample host-extension stores (Kanban
+    // Generic key→JSON store backing the reference app-extension stores (Kanban
     // boards, agent roster, org-chart) so they survive a restart. Coarse by
     // design — each service serializes its whole collection to one key.
     db.exec(`

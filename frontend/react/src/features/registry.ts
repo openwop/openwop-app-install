@@ -27,6 +27,9 @@ import { analyticsFeature } from './analytics/routes.js';
 import { connectionsFeature } from './connections/routes.js';
 import { emailFeature } from './email/routes.js';
 import { commentsFeature } from './comments/routes.js';
+import { marketplaceFeature } from './marketplace/routes.js';
+import { agentKnowledgeFeature } from './agent-knowledge/routes.js';
+import { advisoryBoardFeature } from './advisory-board/routes.js';
 
 export interface FrontendFeature {
   /** Feature id — matches the backend toggle id. */
@@ -36,7 +39,7 @@ export interface FrontendFeature {
 }
 
 /** Every frontend feature the app composes. Append a new feature here. */
-export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature];
+export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature];
 
 /** Flatten every feature's routes for the manifest. */
 export function featureRoutes(): FeatureRoute[] {

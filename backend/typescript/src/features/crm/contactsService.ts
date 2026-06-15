@@ -1,5 +1,5 @@
 /**
- * CRM contacts store (host-extension, sample-grade — ADR 0001 §4).
+ * CRM contacts store (host-extension, best-effort — ADR 0001 §4).
  *
  * Tenant-scoped contacts backed by the durable host_ext_kv collection (same
  * read-through, cross-instance store as roster/kanban; no schema migration).

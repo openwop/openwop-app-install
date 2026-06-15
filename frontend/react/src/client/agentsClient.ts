@@ -1,9 +1,9 @@
 /**
  * Agents inventory client — wraps the SDK's `agents` + `userAgents`
  * surfaces (RFC 0072 §A normative `GET /v1/agents` +
- * `/v1/agents/{agentId}` + sample-extension
- * `POST/DELETE /v1/host/sample/agents` +
- * `GET/POST /v1/host/sample/registry/agent-packs`).
+ * `/v1/agents/{agentId}` + host-extension
+ * `POST/DELETE /v1/host/openwop-app/agents` +
+ * `GET/POST /v1/host/openwop-app/registry/agent-packs`).
  *
  * The frontend pattern is one thin module per backend surface (see
  * `runsClient.ts`, `interruptsClient.ts`, etc.); these wrappers
@@ -40,8 +40,8 @@ export async function getAgent(agentId: string): Promise<AgentEntry | null> {
   return getSdkClient().agents.get(agentId);
 }
 
-/** Create a user-authored agent via `POST /v1/host/sample/agents`
- *  (sample-extension). Returns the projected record on success;
+/** Create a user-authored agent via `POST /v1/host/openwop-app/agents`
+ *  (host-extension). Returns the projected record on success;
  *  the underlying SDK throws on validation / conflict / forbidden
  *  with the server error body in the message. */
 export interface CreateUserAgentInput {
@@ -95,7 +95,7 @@ export interface UserAgentProjection {
 }
 
 /** Edit a user-authored agent's instructions + persona-shaping metadata via
- *  `PATCH /v1/host/sample/agents/:id` (sample-extension; not in the SDK).
+ *  `PATCH /v1/host/openwop-app/agents/:id` (host-extension; not in the SDK).
  *  `persona` is immutable — omit it. The response carries the saved
  *  `systemPrompt` (the read projection on `GET /v1/agents` omits it). */
 export async function updateUserAgent(
@@ -111,7 +111,7 @@ export async function updateUserAgent(
   },
 ): Promise<UserAgentProjection> {
   const res = await fetch(
-    `${config.baseUrl}/v1/host/sample/agents/${encodeURIComponent(agentId)}`,
+    `${config.baseUrl}/v1/host/openwop-app/agents/${encodeURIComponent(agentId)}`,
     fetchOpts({ method: 'PATCH', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify(patch) }),
   );
   if (!res.ok) {

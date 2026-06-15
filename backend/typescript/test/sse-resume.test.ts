@@ -23,7 +23,7 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 const PORT = 18484;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -102,7 +102,7 @@ async function createSampleRun(): Promise<string> {
       authorization: `Bearer ${TOKEN}`,
     },
     body: JSON.stringify({
-      workflowId: 'sample.demo.uppercase',
+      workflowId: 'openwop-app.uppercase',
       tenantId: 'demo',
       inputs: { text: 'hello' },
     }),

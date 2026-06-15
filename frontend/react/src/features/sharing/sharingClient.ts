@@ -1,6 +1,6 @@
 /**
  * Sharing API client (ADR 0013). Authed link management under
- * /v1/host/sample/sharing/orgs/:orgId; reads CMS pages + KB collections to pick a
+ * /v1/host/openwop-app/sharing/orgs/:orgId; reads CMS pages + KB collections to pick a
  * resource, and surfaces the PUBLIC /shared/:token URL.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -20,7 +20,7 @@ export interface ShareLink {
   revoked: boolean;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

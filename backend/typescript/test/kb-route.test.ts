@@ -50,7 +50,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('kb'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('kb'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -64,14 +64,14 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId };
 }
-const u = (orgId: string, suffix = ''): string => `/v1/host/sample/kb/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const u = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content. A kitten is a young cat that loves to play and pounce.';
 const DB = 'Relational databases use B-tree indexes to speed up SQL query execution and JOIN operations across large tables.';
@@ -137,7 +137,7 @@ describe('kb — Media-token source', () => {
     const { owner, orgId } = await ownerWithMember('viewer');
     const cid = (await owner.post(u(orgId, '/collections'), { name: 'Docs' })).body.collectionId;
 
-    const upload = await owner.post('/v1/host/sample/media/upload', {
+    const upload = await owner.post('/v1/host/openwop-app/media/upload', {
       contentBase64: Buffer.from(FELINE, 'utf8').toString('base64'),
       contentType: 'text/plain',
       name: 'cats.txt',
@@ -156,7 +156,7 @@ describe('kb — Media-token source', () => {
     expect(search.body.results[0].documentId).toBe(doc.body.documentId);
 
     // A binary asset can't be text-extracted → 415.
-    const png = await owner.post('/v1/host/sample/media/upload', {
+    const png = await owner.post('/v1/host/openwop-app/media/upload', {
       contentBase64: Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString('base64'),
       contentType: 'image/png',
       name: 'x.png',

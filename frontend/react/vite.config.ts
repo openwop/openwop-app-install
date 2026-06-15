@@ -155,6 +155,11 @@ export default defineConfig(({ mode }) => {
     build: {
       outDir: 'dist',
       sourcemap: true,
+      // esbuild 0.28 (the #263 security bump) refuses to down-level some modern
+      // dependency syntax (destructuring lowering) to vite's legacy default target,
+      // breaking the production build. Pin a modern, widely-supported target so no
+      // lowering is needed — keeps the esbuild security bump. (Safari 16+/Chrome 94+.)
+      target: 'es2022',
       rollupOptions: {
         output: {
           // Code-split the markdown stack into its own chunk. The chat

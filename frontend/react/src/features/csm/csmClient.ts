@@ -1,6 +1,6 @@
 /**
  * CSM feature client (host-extension, non-normative). Wraps
- * /v1/host/sample/csm/*. 404s when the CSM toggle is off.
+ * /v1/host/openwop-app/csm/*. 404s when the CSM toggle is off.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
@@ -13,7 +13,7 @@ export interface Account {
   updatedAt: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample/csm`;
+const base = `${config.baseUrl}/v1/host/openwop-app/csm`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

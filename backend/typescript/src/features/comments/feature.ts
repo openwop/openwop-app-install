@@ -21,7 +21,7 @@ export const commentsFeature: BackendFeature = {
   toggleDefault: {
     id: 'comments',
     label: 'Collaboration / Comments',
-    description: 'Threaded comments on CMS pages + KB collections, notified over the existing inbox — product feature (ADR 0021).',
+    description: 'Threaded comments on CMS pages + KB collections, notified over the existing inbox — product feature.',
     category: 'Business Tools',
     status: 'off',
     bucketUnit: 'tenant',

@@ -1,9 +1,9 @@
 /**
  * RFC 0095 conformance test seams — `host-sample-test-seams.md` §10.
  *
- *   POST /v1/host/sample/connection-packs/install       { manifest }
- *   POST /v1/host/sample/connection-packs/resolve       { provider, simulateBuiltinVersion? }
- *   POST /v1/host/sample/connection-packs/consent-plan  { provider, requested: ('read'|'write')[] }
+ *   POST /v1/host/openwop-app/connection-packs/install       { manifest }
+ *   POST /v1/host/openwop-app/connection-packs/resolve       { provider, simulateBuiltinVersion? }
+ *   POST /v1/host/openwop-app/connection-packs/consent-plan  { provider, requested: ('read'|'write')[] }
  *
  * The seams route through the SAME validation + resolution + consent code the
  * production install/authorize paths use (`connectionPackLoader.ts`,
@@ -66,10 +66,10 @@ export function registerConnectionPackSeamRoutes(app: Express): void {
     return;
   }
   log.warn(
-    'connection-pack seams ENABLED — /v1/host/sample/connection-packs/* installs caller-supplied provider definitions. NEVER enable in production.',
+    'connection-pack seams ENABLED — /v1/host/openwop-app/connection-packs/* installs caller-supplied provider definitions. NEVER enable in production.',
   );
 
-  app.post('/v1/host/sample/connection-packs/install', (req: Request, res: Response) => {
+  app.post('/v1/host/openwop-app/connection-packs/install', (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { manifest?: unknown };
     if (body.manifest === undefined || body.manifest === null || typeof body.manifest !== 'object') {
       res.status(400).json({ error: 'validation_error', details: { message: 'manifest (object) required' } });
@@ -78,7 +78,7 @@ export function registerConnectionPackSeamRoutes(app: Express): void {
     res.status(200).json(installConnectionPackManifest(body.manifest));
   });
 
-  app.post('/v1/host/sample/connection-packs/resolve', (req: Request, res: Response) => {
+  app.post('/v1/host/openwop-app/connection-packs/resolve', (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { provider?: unknown; simulateBuiltinVersion?: unknown };
     if (typeof body.provider !== 'string' || body.provider.length === 0) {
       res.status(400).json({ error: 'validation_error', details: { message: 'provider (string) required' } });
@@ -88,7 +88,7 @@ export function registerConnectionPackSeamRoutes(app: Express): void {
     res.status(200).json(seamResolveProvider(body.provider, simulate));
   });
 
-  app.post('/v1/host/sample/connection-packs/consent-plan', (req: Request, res: Response) => {
+  app.post('/v1/host/openwop-app/connection-packs/consent-plan', (req: Request, res: Response) => {
     const body = (req.body ?? {}) as { provider?: unknown; requested?: unknown };
     const requested = Array.isArray(body.requested)
       ? body.requested.filter((r): r is 'read' | 'write' => r === 'read' || r === 'write')

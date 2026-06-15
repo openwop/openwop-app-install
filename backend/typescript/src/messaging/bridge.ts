@@ -327,7 +327,7 @@ async function dispatchToAgent(a: AgentDispatchArgs): Promise<void> {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   let res: Response;
   try {
-    res = await a.fetchImpl(`${a.baseUrl}/v1/host/sample/agents/${encodeURIComponent(a.agentId)}/dispatch`, {
+    res = await a.fetchImpl(`${a.baseUrl}/v1/host/openwop-app/agents/${encodeURIComponent(a.agentId)}/dispatch`, {
       method: 'POST',
       headers: a.headers,
       body: JSON.stringify({

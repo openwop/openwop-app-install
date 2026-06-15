@@ -21,7 +21,7 @@ describe('CSM feature (sqlite memory app)', () => {
   let server: http.Server;
   const PORT = 18891;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -51,21 +51,21 @@ describe('CSM feature (sqlite memory app)', () => {
   });
 
   it('404s while off, CRUD works once enabled', async () => {
-    expect((await jf('/v1/host/sample/csm/accounts')).status).toBe(404);
-    const on = await jf('/v1/host/sample/feature-toggles/admin/configs/csm', {
+    expect((await jf('/v1/host/openwop-app/csm/accounts')).status).toBe(404);
+    const on = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/csm', {
       method: 'PUT',
       body: JSON.stringify({ status: 'on', bucketUnit: 'tenant', salt: 'csm' }),
     });
     expect(on.status).toBe(200);
 
-    const created = await jf<{ accountId: string; healthScore: number }>('/v1/host/sample/csm/accounts', {
+    const created = await jf<{ accountId: string; healthScore: number }>('/v1/host/openwop-app/csm/accounts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Acme', healthScore: 42 }),
     });
     expect(created.status).toBe(201);
     expect(created.body.healthScore).toBe(42);
 
-    const list = await jf<{ accounts: { accountId: string }[] }>('/v1/host/sample/csm/accounts');
+    const list = await jf<{ accounts: { accountId: string }[] }>('/v1/host/openwop-app/csm/accounts');
     expect(list.body.accounts.some((a) => a.accountId === created.body.accountId)).toBe(true);
   });
 

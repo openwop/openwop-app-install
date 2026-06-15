@@ -2,7 +2,7 @@
  * Organizations / teams / members + roles — host-extension (non-normative).
  *
  * Two layers:
- *   1. HTTP integration over /v1/host/sample/{roles,access,orgs,...} — CRUD,
+ *   1. HTTP integration over /v1/host/openwop-app/{roles,access,orgs,...} — CRUD,
  *      validation, cascade delete, effective-access, scope-gated mutations.
  *   2. Service-level unit tests for the protocol-safety guardrails the
  *      architect review called out: tenant isolation, fail-closed resolution,
@@ -28,7 +28,7 @@ import {
 let server: http.Server;
 const PORT = 18244;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -67,7 +67,7 @@ interface Member { memberId: string; orgId: string; displayName: string; roles: 
 
 describe('access-control host-extension — HTTP', () => {
   it('serves the built-in role catalog mapping roles to RFC 0049 scopes', async () => {
-    const res = await api<{ roles: Array<{ id: string; scopes: string[] }> }>('/v1/host/sample/roles');
+    const res = await api<{ roles: Array<{ id: string; scopes: string[] }> }>('/v1/host/openwop-app/roles');
     expect(res.status).toBe(200);
     const ids = res.body.roles.map((r) => r.id);
     expect(ids).toEqual(['viewer', 'editor', 'admin', 'owner']);
@@ -79,43 +79,43 @@ describe('access-control host-extension — HTTP', () => {
   });
 
   it('creates, lists, fetches, patches, and cascade-deletes an org with teams + members', async () => {
-    const created = await api<Org>('/v1/host/sample/orgs', { method: 'POST', body: JSON.stringify({ name: 'Acme Inc' }) });
+    const created = await api<Org>('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Acme Inc' }) });
     expect(created.status).toBe(201);
     expect(created.body.slug).toBe('acme-inc');
     const orgId = created.body.orgId;
 
-    const team = await api<Team>(`/v1/host/sample/orgs/${orgId}/teams`, {
+    const team = await api<Team>(`/v1/host/openwop-app/orgs/${orgId}/teams`, {
       method: 'POST',
       body: JSON.stringify({ name: 'Growth', color: '#abc' }),
     });
     expect(team.status).toBe(201);
 
-    const member = await api<Member>(`/v1/host/sample/orgs/${orgId}/members`, {
+    const member = await api<Member>(`/v1/host/openwop-app/orgs/${orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'Dana', email: 'dana@acme.test', roles: ['editor'], teamIds: [team.body.teamId] }),
     });
     expect(member.status).toBe(201);
     expect(member.body.roles).toEqual(['editor']);
 
-    const list = await api<{ orgs: Org[] }>('/v1/host/sample/orgs');
+    const list = await api<{ orgs: Org[] }>('/v1/host/openwop-app/orgs');
     expect(list.body.orgs.some((o) => o.orgId === orgId)).toBe(true);
 
-    const patched = await api<Org>(`/v1/host/sample/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name: 'Acme Corp' }) });
+    const patched = await api<Org>(`/v1/host/openwop-app/orgs/${orgId}`, { method: 'PATCH', body: JSON.stringify({ name: 'Acme Corp' }) });
     expect(patched.body.slug).toBe('acme-corp');
 
-    const del = await api<{ deleted: { teams: number; members: number } }>(`/v1/host/sample/orgs/${orgId}`, { method: 'DELETE' });
+    const del = await api<{ deleted: { teams: number; members: number } }>(`/v1/host/openwop-app/orgs/${orgId}`, { method: 'DELETE' });
     expect(del.status).toBe(200);
     expect(del.body.deleted.teams).toBe(1);
     // 2 members: the explicit owner seeded at creation (ADR 0006) + Dana.
     expect(del.body.deleted.members).toBe(2);
 
-    const gone = await api(`/v1/host/sample/orgs/${orgId}`);
+    const gone = await api(`/v1/host/openwop-app/orgs/${orgId}`);
     expect(gone.status).toBe(404);
   });
 
   it('rejects an unknown role id at the boundary (fail-closed)', async () => {
-    const org = await api<Org>('/v1/host/sample/orgs', { method: 'POST', body: JSON.stringify({ name: 'RoleTest' }) });
-    const bad = await api(`/v1/host/sample/orgs/${org.body.orgId}/members`, {
+    const org = await api<Org>('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'RoleTest' }) });
+    const bad = await api(`/v1/host/openwop-app/orgs/${org.body.orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'X', roles: ['superuser'] }),
     });
@@ -123,29 +123,29 @@ describe('access-control host-extension — HTTP', () => {
   });
 
   it('effective access is MEMBERSHIP-derived (ADR 0006 Phase 2): creator is owner in-org; non-member is fail-closed', async () => {
-    const org = await api<Org>('/v1/host/sample/orgs', { method: 'POST', body: JSON.stringify({ name: 'Preview Co' }) });
+    const org = await api<Org>('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Preview Co' }) });
     const orgId = org.body.orgId;
 
     // The creator was seeded as an explicit owner member, so scoped to the org
     // the caller resolves to `owner` — NOT via an implicit tenant-owner shortcut.
-    const mine = await api<{ basis: string; roles: string[] }>(`/v1/host/sample/access/effective?orgId=${orgId}`);
+    const mine = await api<{ basis: string; roles: string[] }>(`/v1/host/openwop-app/access/effective?orgId=${orgId}`);
     expect(mine.body.basis).toBe('member');
     expect(mine.body.roles).toEqual(['owner']);
 
     // An authenticated NON-member subject gets ZERO authority (the multi-principal
     // fix: no implicit tenant-owner for someone who isn't a member).
     const stranger = await api<{ basis: string; roles: string[]; scopes: string[] }>(
-      `/v1/host/sample/access/effective?orgId=${orgId}&subject=not-a-member`,
+      `/v1/host/openwop-app/access/effective?orgId=${orgId}&subject=not-a-member`,
     );
     expect(stranger.body.basis).toBe('none');
     expect(stranger.body.scopes).toEqual([]);
 
-    const m = await api<Member>(`/v1/host/sample/orgs/${orgId}/members`, {
+    const m = await api<Member>(`/v1/host/openwop-app/orgs/${orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'Read Only', subject: 'subj-ro', roles: ['viewer'] }),
     });
     const preview = await api<{ basis: string; roles: string[]; scopes: string[] }>(
-      `/v1/host/sample/access/effective?memberId=${m.body.memberId}`,
+      `/v1/host/openwop-app/access/effective?memberId=${m.body.memberId}`,
     );
     expect(preview.body.basis).toBe('member');
     expect(preview.body.roles).toEqual(['viewer']);
@@ -154,26 +154,26 @@ describe('access-control host-extension — HTTP', () => {
   });
 
   it('groups carry roles and grant them to members (batch RBAC, group-derived scopes)', async () => {
-    const org = await api<Org>('/v1/host/sample/orgs', { method: 'POST', body: JSON.stringify({ name: 'Group Co' }) });
+    const org = await api<Org>('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Group Co' }) });
     const orgId = org.body.orgId;
     // A member with NO direct role beyond viewer.
-    const m = await api<Member>(`/v1/host/sample/orgs/${orgId}/members`, {
+    const m = await api<Member>(`/v1/host/openwop-app/orgs/${orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'Grace', roles: ['viewer'] }),
     });
     // A group that carries `editor` and contains the member.
     const grp = await api<{ groupId: string; roles: string[]; memberIds: string[] }>(
-      `/v1/host/sample/orgs/${orgId}/groups`,
+      `/v1/host/openwop-app/orgs/${orgId}/groups`,
       { method: 'POST', body: JSON.stringify({ name: 'Editors', roles: ['editor'], memberIds: [m.body.memberId] }) },
     );
     expect(grp.status).toBe(201);
 
-    const list = await api<{ groups: Array<{ groupId: string }> }>(`/v1/host/sample/orgs/${orgId}/groups`);
+    const list = await api<{ groups: Array<{ groupId: string }> }>(`/v1/host/openwop-app/orgs/${orgId}/groups`);
     expect(list.body.groups.some((g) => g.groupId === grp.body.groupId)).toBe(true);
 
     // Effective access now unions direct (viewer) + group (editor) → editor scopes.
     const eff = await api<{ roles: string[]; scopes: string[]; directRoles: string[]; groupRoles: string[] }>(
-      `/v1/host/sample/access/effective?memberId=${m.body.memberId}`,
+      `/v1/host/openwop-app/access/effective?memberId=${m.body.memberId}`,
     );
     expect(eff.body.directRoles).toEqual(['viewer']);
     expect(eff.body.groupRoles).toContain('editor');
@@ -181,23 +181,23 @@ describe('access-control host-extension — HTTP', () => {
   });
 
   it('enforces scopes via the act-as seam: a viewer member is DENIED a management mutation', async () => {
-    const org = await api<Org>('/v1/host/sample/orgs', { method: 'POST', body: JSON.stringify({ name: 'Enforce Co' }) });
+    const org = await api<Org>('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Enforce Co' }) });
     const orgId = org.body.orgId;
-    const viewer = await api<Member>(`/v1/host/sample/orgs/${orgId}/members`, {
+    const viewer = await api<Member>(`/v1/host/openwop-app/orgs/${orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'Val', roles: ['viewer'] }),
     });
-    const admin = await api<Member>(`/v1/host/sample/orgs/${orgId}/members`, {
+    const admin = await api<Member>(`/v1/host/openwop-app/orgs/${orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'Ada', roles: ['admin'] }),
     });
 
     // No header → the caller's own membership (the seeded owner of this org) → allowed.
-    const asOwner = await api(`/v1/host/sample/orgs/${orgId}/teams`, { method: 'POST', body: JSON.stringify({ name: 'T-owner' }) });
+    const asOwner = await api(`/v1/host/openwop-app/orgs/${orgId}/teams`, { method: 'POST', body: JSON.stringify({ name: 'T-owner' }) });
     expect(asOwner.status).toBe(201);
 
     // Acting as a viewer (lacks host:teams:manage) → 403 forbidden_scope.
-    const asViewer = await api<{ error?: { code?: string } }>(`/v1/host/sample/orgs/${orgId}/teams`, {
+    const asViewer = await api<{ error?: { code?: string } }>(`/v1/host/openwop-app/orgs/${orgId}/teams`, {
       method: 'POST',
       headers: { 'x-openwop-act-as': viewer.body.memberId },
       body: JSON.stringify({ name: 'T-viewer' }),
@@ -205,7 +205,7 @@ describe('access-control host-extension — HTTP', () => {
     expect(asViewer.status).toBe(403);
 
     // Acting as an admin (has host:teams:manage) → allowed.
-    const asAdmin = await api(`/v1/host/sample/orgs/${orgId}/teams`, {
+    const asAdmin = await api(`/v1/host/openwop-app/orgs/${orgId}/teams`, {
       method: 'POST',
       headers: { 'x-openwop-act-as': admin.body.memberId },
       body: JSON.stringify({ name: 'T-admin' }),
@@ -213,7 +213,7 @@ describe('access-control host-extension — HTTP', () => {
     expect(asAdmin.status).toBe(201);
 
     // /access/effective honors the header too.
-    const eff = await api<{ basis: string; scopes: string[] }>('/v1/host/sample/access/effective', {
+    const eff = await api<{ basis: string; scopes: string[] }>('/v1/host/openwop-app/access/effective', {
       headers: { 'x-openwop-act-as': viewer.body.memberId },
     });
     expect(eff.body.basis).toBe('member');
@@ -221,44 +221,44 @@ describe('access-control host-extension — HTTP', () => {
   });
 
   it('custom roles: define a role with scopes (unknown scope rejected), assign it, and it resolves', async () => {
-    const org = await api<Org>('/v1/host/sample/orgs', { method: 'POST', body: JSON.stringify({ name: 'Custom Co' }) });
+    const org = await api<Org>('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'Custom Co' }) });
     const orgId = org.body.orgId;
 
     // Unknown scope rejected fail-closed.
-    const bad = await api(`/v1/host/sample/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'X', scopes: ['not-a-scope'] }) });
+    const bad = await api(`/v1/host/openwop-app/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'X', scopes: ['not-a-scope'] }) });
     expect(bad.status).toBe(400);
 
     // A `host:` management scope is NOT assignable to a custom role (reserved to
     // built-in admin/owner) — a custom role can't administer the access surface.
-    const mgmt = await api(`/v1/host/sample/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'Sneaky', scopes: ['host:roles:manage'] }) });
+    const mgmt = await api(`/v1/host/openwop-app/orgs/${orgId}/roles`, { method: 'POST', body: JSON.stringify({ name: 'Sneaky', scopes: ['host:roles:manage'] }) });
     expect(mgmt.status).toBe(400);
 
     // Define a custom role carrying two protocol scopes.
-    const role = await api<{ roleId: string; scopes: string[] }>(`/v1/host/sample/orgs/${orgId}/roles`, {
+    const role = await api<{ roleId: string; scopes: string[] }>(`/v1/host/openwop-app/orgs/${orgId}/roles`, {
       method: 'POST',
       body: JSON.stringify({ name: 'Runner', scopes: ['runs:create', 'runs:read'] }),
     });
     expect(role.status).toBe(201);
 
     // The org role catalog returns built-in (4) + custom.
-    const cat = await api<{ roles: Array<{ id: string }>; customRoles: Array<{ roleId: string }> }>(`/v1/host/sample/orgs/${orgId}/roles`);
+    const cat = await api<{ roles: Array<{ id: string }>; customRoles: Array<{ roleId: string }> }>(`/v1/host/openwop-app/orgs/${orgId}/roles`);
     expect(cat.body.roles.length).toBe(4);
     expect(cat.body.customRoles.some((r) => r.roleId === role.body.roleId)).toBe(true);
 
     // Assign ONLY the custom role to a member, then resolve effective access.
-    const m = await api<Member>(`/v1/host/sample/orgs/${orgId}/members`, {
+    const m = await api<Member>(`/v1/host/openwop-app/orgs/${orgId}/members`, {
       method: 'POST',
       body: JSON.stringify({ displayName: 'Runner Person', roles: [role.body.roleId] }),
     });
     expect(m.status).toBe(201);
-    const eff = await api<{ scopes: string[]; roles: string[] }>(`/v1/host/sample/access/effective?memberId=${m.body.memberId}`);
+    const eff = await api<{ scopes: string[]; roles: string[] }>(`/v1/host/openwop-app/access/effective?memberId=${m.body.memberId}`);
     expect(eff.body.roles).toEqual([role.body.roleId]);
     expect(eff.body.scopes).toContain('runs:create'); // from the custom role
     expect(eff.body.scopes).not.toContain('artifacts:read'); // NOT in the custom role, no built-in role assigned
   });
 
   it('404s a foreign/unknown orgId rather than leaking it', async () => {
-    const res = await api('/v1/host/sample/orgs/org-doesnotexist');
+    const res = await api('/v1/host/openwop-app/orgs/org-doesnotexist');
     expect(res.status).toBe(404);
   });
 });

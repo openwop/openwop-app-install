@@ -1,6 +1,6 @@
 /**
  * A8 end-to-end: the agent-eval grader seam over HTTP. Boots the real app via
- * createApp and exercises POST /v1/host/sample/agents/eval-run:
+ * createApp and exercises POST /v1/host/openwop-app/agents/eval-run:
  *   - 404 when the eval suite is disabled (honest gate, RFC 0081/0031)
  *   - 200 + a content-free EvalSummary when enabled (golden/rubric/schema)
  *   - 400 on a malformed envelope (length mismatch / missing arrays)
@@ -14,9 +14,9 @@ import { createApp } from '../src/index.js';
 
 const PORT = 18253;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 const H = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
-const URL = `${BASE}/v1/host/sample/agents/eval-run`;
+const URL = `${BASE}/v1/host/openwop-app/agents/eval-run`;
 
 let server: http.Server;
 
@@ -29,7 +29,7 @@ beforeAll(async () => {
 
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
-describe('A8 — agent-eval grader seam (POST /v1/host/sample/agents/eval-run)', () => {
+describe('A8 — agent-eval grader seam (POST /v1/host/openwop-app/agents/eval-run)', () => {
   it('404s when the eval suite is disabled (honest gate)', async () => {
     delete process.env.OPENWOP_AGENT_EVAL_SUITE_ENABLED;
     const res = await fetch(URL, {

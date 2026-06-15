@@ -29,7 +29,7 @@ export function McpToolsPanel() {
 
   return (
     <div className="card">
-      <h2>MCP tools <span className="muted u-fs-12 u-fw-400">(RFC 0020)</span></h2>
+      <h2>MCP tools</h2>
       {state.status === 'loading' && <div className="muted">Probing host MCP seam…</div>}
       {state.status === 'disabled' && (
         <p className="muted u-fs-13">

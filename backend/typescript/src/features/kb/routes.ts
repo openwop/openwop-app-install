@@ -1,6 +1,6 @@
 /**
- * Knowledge Base routes (ADR 0011) — host-extension, sample-grade. Org-scoped
- * under /v1/host/sample/kb/orgs/:orgId, gated by the shared `authorizeOrgScope`:
+ * Knowledge Base routes (ADR 0011) — host-extension, best-effort. Org-scoped
+ * under /v1/host/openwop-app/kb/orgs/:orgId, gated by the shared `authorizeOrgScope`:
  *   read (list/get/search/rag)         → workspace:read
  *   ingest/manage (create/delete)      → workspace:write
  * Tenant+org IDOR-guarded throughout.
@@ -29,7 +29,7 @@ const FEATURE = { toggleId: TOGGLE_ID, label: 'Knowledge Base' };
 
 export function registerKbRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/sample/kb/orgs/:orgId';
+  const BASE = '/v1/host/openwop-app/kb/orgs/:orgId';
 
   // ── collections ──
   app.get(`${BASE}/collections`, async (req, res, next) => {

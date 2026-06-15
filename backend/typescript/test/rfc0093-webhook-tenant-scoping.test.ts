@@ -25,7 +25,7 @@ import type { Storage } from '../src/storage/storage.js';
 import { __deliverToSubscribersForTests } from '../src/routes/webhooks.js';
 import type { EventRecord, RunRecord, WebhookSubscriptionRecord } from '../src/types.js';
 
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 let server: http.Server;
 let base = '';
 
@@ -69,7 +69,7 @@ async function jsonFetch(
 const SAFE_URL = 'https://example.com/openwop-test/webhook-tenant';
 
 async function seam(tenantId: string, op: string, args: Record<string, unknown>) {
-  return jsonFetch('/v1/host/sample/test/surface', {
+  return jsonFetch('/v1/host/openwop-app/test/surface', {
     method: 'POST',
     body: JSON.stringify({ tenantId, surface: 'webhooks', op, args }),
   });

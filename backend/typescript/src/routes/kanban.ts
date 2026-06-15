@@ -1,7 +1,7 @@
 /**
- * Kanban boards — host-extension routes (sample-grade, non-normative).
+ * Kanban boards — host-extension routes (non-normative).
  *
- * Surface under `/v1/host/sample/kanban/*`:
+ * Surface under `/v1/host/openwop-app/kanban/*`:
  *   GET    /boards                       list the caller's boards
  *   POST   /boards                       create a board (default To Do/Doing/Done lanes)
  *   GET    /boards/:boardId              board + its cards
@@ -194,7 +194,7 @@ async function startKanbanRun(
       await recordRunAttribution(storage, run);
       // Host-extension-namespaced attribution event (RFC 0086 §E).
       await getEventLog().append({ runId, type: 'host.kanban.card.moved', payload: attribution });
-      // Dispatch inline (sample single-instance) — same posture as POST /v1/runs.
+      // Dispatch inline (single-instance) — same posture as POST /v1/runs.
       setImmediate(() => {
         executeRun(storage, run, wf.definition, { policyResolver: hostSuite.providerPolicyResolver }).catch((err) => {
           log.error('kanban_trigger_dispatch_failed', { runId, error: err instanceof Error ? err.message : String(err) });
@@ -226,7 +226,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // and refetch on `board.changed`. Tenant-scoped at subscribe time. A plain
   // text/event-stream with heartbeats; the payload is just the boardId — the
   // client refetches GET /boards/:id (no card bodies on the wire here).
-  app.get('/v1/host/sample/kanban/boards/:boardId/events', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/kanban/boards/:boardId/events', async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId);
       if (!board) {
@@ -262,7 +262,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
 
   // --- boards ---
 
-  app.get('/v1/host/sample/kanban/boards', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/kanban/boards', async (req, res, next) => {
     try {
       // `?include=cards` returns each board with its cards attached in a single
       // round trip — lets the agents dashboard render lane previews without an
@@ -277,7 +277,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.post('/v1/host/sample/kanban/boards', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/kanban/boards', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as {
         name?: unknown;
@@ -339,7 +339,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // it is the human's own board regardless of which workspace is active. This
   // makes a human a board-owning orchestration principal, mirroring how an agent
   // board is surfaced on the agent profile.
-  app.get('/v1/host/sample/kanban/boards/personal', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/kanban/boards/personal', async (req, res, next) => {
     try {
       const subject = callerSubject(req);
       const personal = personalTenantOf(req);
@@ -356,7 +356,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/host/sample/kanban/boards/:boardId', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/kanban/boards/:boardId', async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId);
       if (!board) {
@@ -371,7 +371,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // Rename only (architect memo 2026-06-05): `rosterId` rebinding and column
   // edits are deliberately rejected — owner changes alter run attribution
   // (RFC 0086 §C) and column changes alter trigger semantics.
-  app.patch('/v1/host/sample/kanban/boards/:boardId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/kanban/boards/:boardId', async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId);
       if (!board) {
@@ -395,7 +395,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/sample/kanban/boards/:boardId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/kanban/boards/:boardId', async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId);
       if (!board) {
@@ -410,7 +410,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
 
   // --- cards ---
 
-  app.post('/v1/host/sample/kanban/boards/:boardId/cards', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/kanban/boards/:boardId/cards', async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId);
       if (!board) {
@@ -461,7 +461,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.patch('/v1/host/sample/kanban/cards/:cardId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/kanban/cards/:cardId', async (req, res, next) => {
     try {
       const cardId = req.params.cardId;
       const existing = await getCard(cardId);
@@ -532,7 +532,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/sample/kanban/cards/:cardId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/kanban/cards/:cardId', async (req, res, next) => {
     try {
       const card = await getCard(req.params.cardId);
       if (!card) {

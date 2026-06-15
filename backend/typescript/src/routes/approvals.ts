@@ -1,14 +1,14 @@
 /**
- * Approval inbox — host-extension routes (sample-grade, non-normative).
+ * Approval inbox — host-extension routes (non-normative).
  *
  * The human side of the "agents propose, humans dispose" gate. A review-mode
  * roster member's heartbeat queues a PendingApproval (host/approvalService.ts)
  * instead of starting the run; these routes let a human resolve it:
  *
- *   GET  /v1/host/sample/approvals[?status=pending]   — the queue
- *   POST /v1/host/sample/approvals/{id}/claim          — affirmative sign-off:
+ *   GET  /v1/host/openwop-app/approvals[?status=pending]   — the queue
+ *   POST /v1/host/openwop-app/approvals/{id}/claim          — affirmative sign-off:
  *                                                        starts the proposed run
- *   POST /v1/host/sample/approvals/{id}/reject         — dismiss the proposal
+ *   POST /v1/host/openwop-app/approvals/{id}/reject         — dismiss the proposal
  *
  * A CLAIM is the affirmative act — it starts the proposed run (via the shared
  * runStarter, so replay/fork/observability are inherited) and moves the card to
@@ -52,7 +52,7 @@ function noteOf(req: Request): string | undefined {
 
 export function registerApprovalRoutes(app: Express, deps: Deps): void {
   // The queue. `?status=pending|approved|rejected` filters; default = all.
-  app.get('/v1/host/sample/approvals', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/approvals', async (req, res, next) => {
     try {
       const raw = String(req.query.status ?? '');
       const status: ApprovalStatus | undefined =
@@ -77,7 +77,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
   });
 
   // Claim — the affirmative sign-off that starts the proposed run.
-  app.post('/v1/host/sample/approvals/:approvalId/claim', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/approvals/:approvalId/claim', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const approval = await getApproval(req.params.approvalId);
@@ -192,7 +192,7 @@ export function registerApprovalRoutes(app: Express, deps: Deps): void {
 
   // Reject — dismiss the proposal; park the card in the terminal column so the
   // heartbeat won't re-propose it on the next "Check now".
-  app.post('/v1/host/sample/approvals/:approvalId/reject', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/approvals/:approvalId/reject', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const approval = await getApproval(req.params.approvalId);

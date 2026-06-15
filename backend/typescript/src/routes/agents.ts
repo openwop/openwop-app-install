@@ -1,7 +1,7 @@
 /**
  * Manifest-agent inventory + dispatch (RFC 0070).
  *
- * Namespace: sample-extension under `/v1/host/sample/*`; not part of the
+ * Namespace: host-extension under `/v1/host/openwop-app/*`; not part of the
  * normative wire contract (the RFC 0070 §Unresolved-questions entry tracks
  * whether `/v1/agents` should be promoted to normative).
  *
@@ -23,8 +23,18 @@ import { advertisedCapabilitySet, mergeDegraded } from '../host/agentCapabilitie
 import { gradeSuite, type EvalTask } from '../host/agentEvalGrader.js';
 import { evalSuiteEnabled } from '../host/workforceEval.js';
 import { createAgentMemoryPort, agentMemoryScope } from '../host/agentMemoryAdapter.js';
+import { resolveAgentKnowledgeRetrieve } from '../host/agentKnowledgeComposition.js';
 import { handleA2aRequest, type A2aJsonRpcRequest } from '../host/a2aServer.js';
 import { getPublishedAgentCard } from '../host/a2aSurface.js';
+import {
+  getA2aTask,
+  upsertA2aTask,
+  setA2aTaskPushConfig,
+  assertPushUrlAllowed,
+  A2aPushUrlDeniedError,
+} from '../host/a2aTaskStore.js';
+import { startWorkflowRun } from '../host/runStarter.js';
+import { requestOrigin } from '../host/requestOrigin.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import type { UserAgentRecord } from '../types.js';
@@ -116,7 +126,7 @@ async function listVisibleAgents(
 /** Cross-tenant isolation filter for user-authored agents (phase E1,
  *  2026-05-28). Pack-installed agents (no `ownerTenant`) are
  *  tenant-agnostic — every tenant sees them. User-authored agents
- *  (a tenant POSTed them via `/v1/host/sample/agents`) carry an
+ *  (a tenant POSTed them via `/v1/host/openwop-app/agents`) carry an
  *  `ownerTenant` and are only visible to that tenant.
  *
  *  `requestTenant` comes from `req.tenantId` populated by the auth
@@ -179,14 +189,14 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     res.json(toEntry(a));
   });
 
-  // Sample-extension aliases (RFC 0070 convenience; non-normative). The list
+  // Host-extension aliases (RFC 0070 convenience; non-normative). The list
   // form additionally reports the host's runtime posture for the CLI.
-  app.get('/v1/host/sample/agents', async (req, res) => {
+  app.get('/v1/host/openwop-app/agents', async (req, res) => {
     const tenant = tenantForInventory(req);
     const agents = await listVisibleAgents(deps.storage, tenant);
     res.json({ agents, total: agents.length, runtime: { manifestRuntime: true } });
   });
-  app.get('/v1/host/sample/agents/:agentId', async (req, res) => {
+  app.get('/v1/host/openwop-app/agents/:agentId', async (req, res) => {
     const tenant = tenantForInventory(req);
     const a = await getAgentRegistry().resolve(req.params.agentId);
     if (!a || !visibleTo(a, tenant)) {
@@ -200,7 +210,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // default (replay-safe, conformance-stable); a real model turn when the body
   // sets `live: true` AND the host wired an AI adapter (deps.hostSuite). Live
   // turns default to the managed tier so no BYOK is required.
-  app.post('/v1/host/sample/agents/:agentId/dispatch', async (req, res) => {
+  app.post('/v1/host/openwop-app/agents/:agentId/dispatch', async (req, res) => {
     const body = (req.body ?? {}) as Partial<AgentDispatchRequest> & { live?: boolean };
     const reqShape: AgentDispatchRequest = {
       agentId: req.params.agentId,
@@ -230,6 +240,12 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         // (intersected with the agent's toolAllowlist inside dispatch, §A14);
         // the caller MAY still pin a narrower `availableTools`.
         const toolProvider = createAgentToolProvider({ tenantId, runId: reqShape.agentId });
+        const memory = createAgentMemoryPort(tenantId);
+        const memoryScope = agentMemoryScope(reqShape.agentId);
+        // ADR 0038 Phase 3 — compose the agent's BOUND knowledge (cited KB docs +
+        // private memory) into the turn, from host-owned primitives. `undefined`
+        // (no `knowledge` capability / no binding) ⇒ dispatch is unchanged.
+        const knowledgeRetrieve = await resolveAgentKnowledgeRetrieve(tenantId, reqShape.agentId, memory, memoryScope);
         const result = await runAgentDispatchLive(
           { ...reqShape, availableTools: reqShape.availableTools ?? [...builtinAgentToolIds()] },
           {
@@ -241,8 +257,9 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
             // dispatch's `memoryEnabled` gate only reads/writes when the agent's
             // manifest declares `memoryShape.longTerm`, so agents without it are
             // unaffected. tenant-bound for CTI-1; per-agent namespace.
-            memory: createAgentMemoryPort(tenantId),
-            memoryScope: agentMemoryScope(reqShape.agentId),
+            memory,
+            memoryScope,
+            ...(knowledgeRetrieve ? { knowledgeRetrieve } : {}),
           },
         );
         res.status(200).json(result);
@@ -267,7 +284,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // sandbox-MVP seam's gating in testSeam.ts). The request supplies parallel
   // `tasks[]` / `results[]` arrays — the runner produces the results, the host
   // grades them; the grader never makes a model call (replay-safe).
-  app.post('/v1/host/sample/agents/eval-run', (req, res) => {
+  app.post('/v1/host/openwop-app/agents/eval-run', (req, res) => {
     if (!evalSuiteEnabled()) {
       res.status(404).json({ error: 'not_found', message: 'agent eval suite disabled (set OPENWOP_AGENT_EVAL_SUITE_ENABLED=true)' });
       return;
@@ -304,7 +321,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // (never silently dropped). Deterministic + replay-safe — the guard is pure, so
   // the seam needs no model call to prove the contract. A `string` content stays
   // valid forever (back-compat).
-  app.post('/v1/host/sample/ai/call', (req, res) => {
+  app.post('/v1/host/openwop-app/ai/call', (req, res) => {
     const body = (req.body ?? {}) as { messages?: unknown; provider?: unknown; model?: unknown };
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       res.status(400).json({ error: 'validation_error', message: 'messages[] (non-empty) is required' });
@@ -347,7 +364,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // Gated on OPENWOP_AGENT_VERIFIER_GATING (mirrors the discovery advertisement
   // of multiAgent.executionModel.verifier{supported,gating} + version 6) — 404
   // when the host does not advertise the verifier, so the scenario soft-skips.
-  app.post('/v1/host/sample/agents/verify-run', async (req, res) => {
+  app.post('/v1/host/openwop-app/agents/verify-run', async (req, res) => {
     if (process.env.OPENWOP_AGENT_VERIFIER_GATING !== 'true') {
       res.status(404).json({ error: 'not_found', message: 'verifier gating disabled (set OPENWOP_AGENT_VERIFIER_GATING=true)' });
       return;
@@ -385,27 +402,152 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // (OPENWOP_A2A_SERVER_ENABLED, mirrors the MCP-server seam + the honest
   // host.a2a advertisement flip); 404 when off. JSON-RPC only — no
   // `/.well-known/agent-card.json` (deferred to an a2a-integration discussion).
-  app.post('/v1/host/sample/a2a', (req, res) => {
+  app.post('/v1/host/openwop-app/a2a', (req, res) => {
     if (process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
       res.status(404).json({ error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
       return;
     }
     const tenantId = (req as AgentReqLike).tenantId ?? 'default';
     const agentCard = getPublishedAgentCard(tenantId) ?? synthesizeAgentCard(req);
-    const rpc = handleA2aRequest(req.body as A2aJsonRpcRequest, {
+    // ADR 0035 / RFC 0100 — durable Tasks (persist + tasks/get/resubscribe +
+    // push) are wired on the same env-gated server when
+    // OPENWOP_A2A_DURABLE_TASKS=true; otherwise the synchronous core (today's
+    // behavior, no task store). The `a2a.durableTasks` capability is advertised
+    // only when this is set (discovery.ts), so the advertisement never outruns
+    // the wiring.
+    handleA2aRequest(req.body as A2aJsonRpcRequest, {
       agentCard,
       availableTools: [...builtinAgentToolIds()],
-    });
-    // JSON-RPC transport is always HTTP 200; method/params errors live in the body.
-    res.status(200).json(rpc);
+      durableTasks: process.env.OPENWOP_A2A_DURABLE_TASKS === 'true',
+    })
+      // JSON-RPC transport is always HTTP 200; method/params errors live in the body.
+      .then((rpc) => res.status(200).json(rpc))
+      .catch((err) =>
+        res
+          .status(200)
+          .json({ jsonrpc: '2.0', id: (req.body as { id?: string | number })?.id ?? 0, error: { code: -32603, message: err instanceof Error ? err.message : String(err) } }),
+      );
   });
+
+  // ── RFC 0100 §2/§4 — durable A2A Task host-sample conformance seams ──────────
+  // Non-normative seams (the `/v1/host/openwop-app/*` extension namespace) that drive
+  // the REAL durable-task store (a2aTaskStore — ADR 0035), not a parallel stub:
+  // `tasks/start` starts a genuine approval-gated run and binds taskId==runId;
+  // `tasks/{id}` reads the persisted DurableCollection projection; `push-config`
+  // runs the caller URL through the same RFC 0093 egress guard the push path
+  // uses. Gated on `OPENWOP_A2A_DURABLE_TASKS` (the same flag that flips the
+  // `a2a.durableTasks`/`pushNotifications` advertisement in discovery.ts, so the
+  // seam is served iff the capability is advertised); 404 otherwise — the
+  // conformance behavioral legs soft-skip on 404/403.
+
+  // Start a backing run paused at a HITL approval gate and persist its durable
+  // Task projection (`input-required`/approval), so a later `tasks/get` returns
+  // live state after the original connection is gone (RFC 0100 §2).
+  app.post('/v1/host/openwop-app/a2a/tasks/start', async (req, res, next) => {
+    try {
+      if (!durableTasksEnabled() || !deps.storage || !deps.hostSuite) {
+        res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
+        return;
+      }
+      const tenantId = (req as AgentReqLike).tenantId ?? 'default';
+      const scenario = (req.body as { scenario?: string })?.scenario ?? 'paused-at-approval';
+      if (scenario !== 'paused-at-approval') {
+        res.status(400).json({ error: 'validation_error', message: 'Only scenario `paused-at-approval` is supported by this sample seam.' });
+        return;
+      }
+      // A real approval-gated run — it suspends at `core.approvalGate`, which the
+      // forward projection maps to input-required/approval (a2a-integration.md
+      // §"State projection (forward)"). taskId == runId (RFC 0100 §2).
+      const runId = await startWorkflowRun(
+        { storage: deps.storage, hostSuite: deps.hostSuite },
+        { tenantId, workflowId: 'openwop-app.approval-gate' },
+      );
+      if (!runId) {
+        res.status(500).json({ error: 'internal', message: 'sample approval-gate workflow did not resolve' });
+        return;
+      }
+      await upsertA2aTask({ taskId: runId, runId, state: 'input-required', interruptKind: 'approval' });
+      res.status(201).json({ taskId: runId });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Read the persisted durable Task projection (RFC 0100 §2 / §3 `tasks/get`).
+  // Returns the A2ATaskState record shape (top-level `state` + `runId`).
+  app.get('/v1/host/openwop-app/a2a/tasks/:taskId', async (req, res, next) => {
+    try {
+      if (!durableTasksEnabled()) {
+        res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
+        return;
+      }
+      const rec = await getA2aTask(req.params.taskId);
+      if (!rec) {
+        res.status(404).json({ error: 'not_found', message: 'durable task not found' });
+        return;
+      }
+      // The persisted record is already the a2a-task-state.schema.json shape
+      // (taskId, runId, contextId?, state, interruptKind?, updatedAt, pushConfig?).
+      res.status(200).json(rec);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Register a push-config (RFC 0100 §4). The caller URL MUST pass the RFC 0093
+  // webhook-egress SSRF guard before any push — a private/loopback target is
+  // refused with 400 (a2a-push-egress-ssrf), before the task lookup.
+  app.post('/v1/host/openwop-app/a2a/tasks/push-config', async (req, res, next) => {
+    try {
+      if (!durableTasksEnabled()) {
+        res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
+        return;
+      }
+      const body = (req.body ?? {}) as { taskId?: string; url?: string; tokenFingerprint?: string };
+      if (typeof body.taskId !== 'string' || typeof body.url !== 'string') {
+        res.status(400).json({ error: 'validation_error', message: 'Fields `taskId` and `url` are required.' });
+        return;
+      }
+      try {
+        assertPushUrlAllowed(body.url); // throws A2aPushUrlDeniedError for a denied target
+      } catch (err) {
+        if (err instanceof A2aPushUrlDeniedError) {
+          res.status(400).json({ error: 'a2a_push_egress_denied', message: err.message });
+          return;
+        }
+        throw err;
+      }
+      const updated = await setA2aTaskPushConfig(body.taskId, {
+        url: body.url,
+        ...(typeof body.tokenFingerprint === 'string' ? { tokenFingerprint: body.tokenFingerprint } : {}),
+      });
+      if (!updated) {
+        res.status(404).json({ error: 'not_found', message: 'durable task not found' });
+        return;
+      }
+      res.status(200).json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+}
+
+/** Durable A2A tasks are wired iff the A2A server is on AND durable tasks are
+ *  enabled — the same predicate that flips the `a2a.durableTasks` /
+ *  `pushNotifications` advertisement (discovery.ts), so the seam is served iff
+ *  the capability is advertised (advertise/enforce parity). */
+function durableTasksEnabled(): boolean {
+  return process.env.OPENWOP_A2A_SERVER_ENABLED === 'true' && process.env.OPENWOP_A2A_DURABLE_TASKS === 'true';
 }
 
 /** A7 — synthesize an A2A agent card from the installed manifest agents when the
  *  tenant hasn't published one, so `agent/getCard` returns a real surface (each
  *  installed agent becomes an A2A skill) rather than a dead stub. */
 function synthesizeAgentCard(req: Request): unknown {
-  const base = `${req.protocol}://${req.get('host') ?? 'localhost'}`;
+  // Forwarded-aware, sanitized origin (host/requestOrigin.ts) — behind Cloud Run
+  // `req.protocol` alone is `http`; the shared helper honors X-Forwarded-Proto so
+  // the card `url` is an honest cross-host https origin, not a localhost stub.
+  const base = requestOrigin(req);
   const skills = getAgentRegistry().list().map((a) => ({
     id: a.agentId,
     name: a.label ?? a.persona,
@@ -415,10 +557,16 @@ function synthesizeAgentCard(req: Request): unknown {
   return {
     name: 'openwop-reference-host',
     description: 'OpenWOP reference workflow-engine host exposing its installed manifest agents over A2A (RFC 0076).',
-    url: `${base}/v1/host/sample/a2a`,
+    url: `${base}/v1/host/openwop-app/a2a`,
     version: '1.0.0',
     protocolVersion: '0.3',
-    capabilities: { streaming: false, pushNotifications: false },
+    // ADR 0035 / RFC 0100 — the A2A AgentCard `capabilities` reflect the durable
+    // wiring: streaming (tasks/resubscribe) + pushNotifications are honest only
+    // when OPENWOP_A2A_DURABLE_TASKS is set, mirroring the `a2a` discovery slot.
+    capabilities:
+      process.env.OPENWOP_A2A_DURABLE_TASKS === 'true'
+        ? { streaming: true, pushNotifications: true }
+        : { streaming: false, pushNotifications: false },
     defaultInputModes: ['text/plain'],
     defaultOutputModes: ['text/plain'],
     skills,

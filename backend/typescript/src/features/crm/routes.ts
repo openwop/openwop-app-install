@@ -1,7 +1,7 @@
 /**
- * CRM feature routes (host-extension, sample-grade — ADR 0001 §4).
+ * CRM feature routes (host-extension, best-effort — ADR 0001 §4).
  *
- * Surface under /v1/host/sample/crm:
+ * Surface under /v1/host/openwop-app/crm:
  *   GET    /contacts            list the caller's contacts
  *   POST   /contacts            create a contact
  *   GET    /contacts/:id        one contact
@@ -95,7 +95,7 @@ function patchString(value: unknown, field: string): string | null | undefined {
 export function registerCrmRoutes(deps: RouteDeps): void {
   const { app, storage, hostSuite } = deps;
 
-  app.get('/v1/host/sample/crm/contacts', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/crm/contacts', async (req, res, next) => {
     try {
       await requireEnabled(req);
       res.json({ contacts: await listContacts(tenantOf(req)) });
@@ -104,7 +104,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/sample/crm/contacts', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/crm/contacts', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const body = (req.body ?? {}) as { name?: unknown; email?: unknown; company?: unknown; stage?: unknown };
@@ -121,7 +121,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/sample/crm/contacts/:id', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const contact = await getContact(req.params.id);
@@ -134,7 +134,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.patch('/v1/host/sample/crm/contacts/:id', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const existing = await getContact(req.params.id);
@@ -154,7 +154,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/sample/crm/contacts/:id', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/crm/contacts/:id', async (req, res, next) => {
     try {
       await requireEnabled(req);
       const existing = await getContact(req.params.id);
@@ -173,7 +173,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   // regardless of the feature's CURRENT state — this is exactly the decoupling
   // that keeps replay/fork honest (ADR §3.4). Tenant-scoped. The stamp lives in
   // host-internal run.metadata, NOT on the normative RunSnapshot wire.
-  app.get('/v1/host/sample/crm/runs/:runId', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/crm/runs/:runId', async (req, res, next) => {
     try {
       const run = await storage.getRun(req.params.runId);
       const metadata = (run?.metadata ?? {}) as { featureVariant?: { feature?: string }; crm?: unknown };
@@ -196,9 +196,9 @@ export function registerCrmRoutes(deps: RouteDeps): void {
   // Start a triage run for a contact, stamping the resolved variant + bindings
   // into run.metadata (replay-safe). The variant's bindings select the triage
   // node a fuller workflow would dispatch; the run itself executes the
-  // configured triage workflow (default sample.demo.uppercase) so observability
+  // configured triage workflow (default openwop-app.uppercase) so observability
   // / replay / fork are inherited from the standard run pipeline.
-  app.post('/v1/host/sample/crm/contacts/:id/triage', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/crm/contacts/:id/triage', async (req, res, next) => {
     try {
       const assignment = await requireEnabled(req);
       const tenantId = tenantOf(req);
@@ -210,7 +210,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
       const workflowId =
         (typeof body.workflowId === 'string' && body.workflowId.length > 0 ? body.workflowId : undefined) ??
         process.env.OPENWOP_CRM_TRIAGE_WORKFLOW_ID ??
-        'sample.demo.uppercase';
+        'openwop-app.uppercase';
 
       // Resolve the triage workflow up front — refuse with 422 rather than
       // leaving a dangling pending run that can never execute.

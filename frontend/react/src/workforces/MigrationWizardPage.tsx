@@ -221,8 +221,8 @@ export function MigrationWizardPage(): JSX.Element {
         {stage.key === 'shadow-prove' ? (
           <div>
             <p className="muted u-mt-0">
-              A <strong>live-shadow eval</strong> (RFC 0081) scores the agent's decisions against the baseline (the
-              human/legacy outcome) into an <code>EvalSummary</code>. Content-free per RFC 0081 §F — findings carry
+              A <strong>live-shadow eval</strong> scores the agent's decisions against the baseline (the
+              human/legacy outcome) into an <code>EvalSummary</code>. Content-free — findings carry
               digests, never raw values.
             </p>
 
@@ -261,7 +261,7 @@ export function MigrationWizardPage(): JSX.Element {
             </div>
 
             {!shadow || shadow.status === 'pending' ? (
-              <Notice variant="info">No shadow evidence yet — load the demo data (or run a live-shadow eval) to populate a scorecard.</Notice>
+              <Notice variant="info">No shadow evidence yet — load the example data (or run a live-shadow eval) to populate a scorecard.</Notice>
             ) : (
               <>
                 <div className="action-bar u-gap-3 u-wrap u-mb-2">
@@ -289,7 +289,7 @@ export function MigrationWizardPage(): JSX.Element {
                   type="button"
                   className="btn u-mt-2"
                   disabled={busy || !proven}
-                  title={!proven ? 'Run an eval (or load demo data) to gather proof first' : undefined}
+                  title={!proven ? 'Run an eval (or load example data) to gather proof first' : undefined}
                   onClick={() => void markDone('shadow-prove')}
                 >
                   Mark proven &amp; continue

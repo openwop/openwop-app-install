@@ -45,25 +45,25 @@ function extractCookie(setCookieHeader: string | null): string | null {
 
 describe('cookie-mode auth (P0.2)', () => {
   it('mints a session cookie on first request', async () => {
-    // Hit a route that requires auth. /v1/host/sample/workflows is a
+    // Hit a route that requires auth. /v1/host/openwop-app/workflows is a
     // GET that 200s with an empty list once authed.
-    const res = await fetch(`${BASE}/v1/host/sample/workflows`);
+    const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
     expect(res.status).toBe(200);
     const cookie = extractCookie(res.headers.get('set-cookie'));
     expect(cookie).toMatch(/^__session=/);
   });
 
   it('preserves the session across requests + derives tenantId from cookie', async () => {
-    const first = await fetch(`${BASE}/v1/host/sample/workflows`);
+    const first = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
     const cookie = extractCookie(first.headers.get('set-cookie'))!;
     // Register a workflow (POST) carrying the cookie; the run should
     // inherit the cookie-derived tenant.
-    const reg = await fetch(`${BASE}/v1/host/sample/workflows`, {
+    const reg = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
         workflowId: 'cookie-test',
-        nodes: [{ nodeId: 'shout', typeId: 'local.sample.demo.uppercase' }],
+        nodes: [{ nodeId: 'shout', typeId: 'local.openwop-app.uppercase' }],
       }),
     });
     expect(reg.status).toBe(201);
@@ -91,14 +91,14 @@ describe('cookie-mode auth (P0.2)', () => {
   });
 
   it('rejects a body.tenantId that doesn\'t match the cookie\'s tenant', async () => {
-    const first = await fetch(`${BASE}/v1/host/sample/workflows`);
+    const first = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
     const cookie = extractCookie(first.headers.get('set-cookie'))!;
-    await fetch(`${BASE}/v1/host/sample/workflows`, {
+    await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', cookie },
       body: JSON.stringify({
         workflowId: 'cookie-impersonation-test',
-        nodes: [{ nodeId: 'shout', typeId: 'local.sample.demo.uppercase' }],
+        nodes: [{ nodeId: 'shout', typeId: 'local.openwop-app.uppercase' }],
       }),
     });
     const runRes = await fetch(`${BASE}/v1/runs`, {
@@ -119,7 +119,7 @@ describe('cookie-mode auth (P0.2)', () => {
   it('rejects a tampered signature → new cookie minted', async () => {
     // Forge a payload + bad sig
     const forged = '__session=eyJzaWQiOiJYIiwidGVuYW50SWQiOiJhbm9uOlgiLCJ0aWVyIjoiYW5vbiIsImlhdCI6MSwiZXhwIjoyMDAwMDAwMDAwfQ.BADSIG';
-    const res = await fetch(`${BASE}/v1/host/sample/workflows`, {
+    const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
       headers: { cookie: forged },
     });
     expect(res.status).toBe(200); // a fresh cookie is minted

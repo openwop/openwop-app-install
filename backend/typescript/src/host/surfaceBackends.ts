@@ -4,7 +4,7 @@
  *
  * Why this exists
  * ----------------
- * The in-memory surfaces in `inMemorySurfaces.ts` are demo-grade: process-local
+ * The in-memory surfaces in `inMemorySurfaces.ts` are non-durable: process-local
  * Maps + `sqlite :memory:`, wiped on restart, single-instance. Turning the app
  * "production-grade" does NOT mean changing any wire shape — the surface
  * interfaces (`KvSurface`, `SqlSurface`, … per RFC 0014–0019) ARE the contract.
@@ -40,7 +40,7 @@
  *      — typically from that adapter module, imported at boot.
  *   3. Re-advertise: the adapter (or init) calls `registerHostSurface` so the
  *      `implementation` tag flips from a demo tag to `'redis'`; the UI
- *      demo-grade badge self-clears (see CapabilitiesPanel + ARCHITECTURE.md
+ *      non-durable badge self-clears (see CapabilitiesPanel + ARCHITECTURE.md
  *      §"Path to real backends").
  *   4. Re-run conformance against the new wiring.
  */
@@ -164,7 +164,7 @@ export function assertSelectedBackendsAvailable(keys: readonly SurfaceKey[]): vo
  * The advertised `implementation` tag for a surface: the selected backend id
  * when a real backend is chosen, else the descriptive demo tag passed in.
  * Keeps `/.well-known/openwop` honest — a non-demo value signals a real
- * backend and clears the UI demo-grade badge.
+ * backend and clears the UI non-durable badge.
  */
 export function effectiveImplementation(key: SurfaceKey, demoTag: string): string {
   const id = resolveBackendId(key);

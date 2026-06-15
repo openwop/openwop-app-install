@@ -7,7 +7,7 @@
 > That was wrong for an identity foundation: the `SignInButton`'s `/me`
 > signed-in check, ADR 0003's OIDC bind, and every feature keying on durable
 > `User.userId` need it unconditionally — in a toggle-OFF deploy every sign-in
-> hit a 404 on `/v1/host/sample/users/me`. Graduated to a permanent, always-on
+> hit a 404 on `/v1/host/openwop-app/users/me`. Graduated to a permanent, always-on
 > **admin** surface (nav under "Access & data", alongside Connections),
 > mirroring the Connections (ADR 0024 § Correction) and Notifications
 > (ADR 0010 § Correction) graduations: no `toggleDefault`, no `requireEnabled`
@@ -67,10 +67,10 @@ Ship a toggle-gated **`users`** feature package (per ADR 0001) that introduces:
    - **Email/password** + reset + verification — the baseline non-SSO path.
    - **Enterprise SSO (the headline requirement):**
      - **SAML 2.0 ACS** advertising `openwop-auth-saml`, wiring the host-sample
-       seam `POST /v1/host/sample/auth/saml/validate`, passing
+       seam `POST /v1/host/openwop-app/auth/saml/validate`, passing
        `auth-saml-profile.test.ts` non-vacuously.
      - **SCIM 2.0 provisioning** advertising `openwop-auth-scim`, wiring
-       `POST /v1/host/sample/auth/scim/provision`, passing
+       `POST /v1/host/openwop-app/auth/scim/provision`, passing
        `auth-scim-profile.test.ts` non-vacuously.
 3. **Group capture, not role resolution.** SAML assertion groups and SCIM
    `assign-group` ops are captured **onto the principal** here; the mapping from
@@ -161,12 +161,12 @@ Severity-ordered; each is a binding constraint on the implementation.
   routes gated by `resolveOne('users', subject).enabled`.
 - **Phase 3 — SAML 2.0 ACS (`openwop-auth-saml`).** Port `SAMLValidationService` +
   `samlAcs.ts` logic (C2 negative suite, XSW defense). Wire
-  `POST /v1/host/sample/auth/saml/validate`. IdP certs in secret store (C3). Flip
+  `POST /v1/host/openwop-app/auth/saml/validate`. IdP certs in secret store (C3). Flip
   the advertised profile **only** when `auth-saml-profile.test.ts` passes
   non-vacuously (C1). SAML groups captured onto the principal (H6).
 - **Phase 4 — SCIM 2.0 (`openwop-auth-scim`).** `create-user` / `assign-group` /
   `deactivate-user` → upsert principal + raw groups; deactivate ⇒ fail-closed deny
-  (H5). Wire `POST /v1/host/sample/auth/scim/provision`. SCIM bearer in secret
+  (H5). Wire `POST /v1/host/openwop-app/auth/scim/provision`. SCIM bearer in secret
   store (C3). Flip advertisement only on `auth-scim-profile.test.ts` green (C1).
 - **Phase 5 (deferred) — MFA / break-glass TOTP** (M8).
 

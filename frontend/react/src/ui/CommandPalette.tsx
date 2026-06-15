@@ -25,10 +25,10 @@ interface Command {
 
 // Quick actions beyond raw navigation — the verbs an operator reaches for.
 const ACTIONS: Command[] = [
-  { id: 'act-new-run', label: 'Create a run', hint: 'Submit a workflow on the sample host', group: 'Actions', icon: PlayIcon, to: '/runs' },
+  { id: 'act-new-run', label: 'Create a run', hint: 'Submit a workflow on this host', group: 'Actions', icon: PlayIcon, to: '/runs' },
   { id: 'act-new-agent', label: 'New agent', hint: 'Create a named AI coworker', group: 'Actions', icon: BotIcon, to: '/agents/new' },
   { id: 'act-compare', label: 'Compare runs', hint: 'Diff two run executions', group: 'Actions', icon: ScaleIcon, to: '/compare' },
-  { id: 'act-reseed', label: 'Re-seed demo data', hint: 'Reset the built-in demo roster', group: 'Actions', icon: DatabaseIcon, to: '/demo-data' },
+  { id: 'act-reseed', label: 'Re-seed example data', hint: 'Reset the built-in example roster', group: 'Actions', icon: DatabaseIcon, to: '/example-data' },
 ];
 
 const COMMANDS: Command[] = [

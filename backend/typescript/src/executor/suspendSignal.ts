@@ -16,7 +16,7 @@
  */
 
 /** Interrupt kinds the executor's NodeOutcome accepts (executor/types.ts). */
-export type SuspendKind = 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event';
+export type SuspendKind = 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation';
 
 /** Map a pack `reason` / spec `kind` to the NodeOutcome kind enum. Unknown
  *  values fall through to `external-event` — the documented escape hatch
@@ -35,6 +35,9 @@ export function mapSuspendKind(reason: unknown): SuspendKind {
       return 'cancellation';
     case 'external-event':
       return 'external-event';
+    case 'conversation':
+    case 'conversation.start':
+      return 'conversation';
     default:
       return 'external-event';
   }

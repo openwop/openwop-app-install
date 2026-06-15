@@ -133,7 +133,7 @@ export interface NodeCatalogEntry {
 //
 // IMPORTANT: every `defaultValue` string that points at a prompt
 // template MUST match a real `templateId` in
-// `frontend/react/src/prompts/samplePrompts.ts`
+// `frontend/react/src/prompts/bundledPrompts.ts`
 // (or whatever prompt library the host advertises). If the library
 // drops or renames a template, every fresh node arrives pointing at
 // a dead ref — the prompt-picker will show "unknown" silently.
@@ -179,7 +179,7 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
   },
   {
     kind: 'uppercase',
-    typeId: 'local.sample.demo.uppercase',
+    typeId: 'local.openwop-app.uppercase',
     label: 'Uppercase',
     description: 'Reads inputs.text and emits outputs.text uppercased.',
     category: 'data',
@@ -191,9 +191,9 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
   },
   {
     kind: 'image-emit',
-    typeId: 'local.sample.demo.image-emit',
-    label: 'Emit image (RFC 0055)',
-    description: 'Stores an image in the host media store and emits a media.image envelope referencing it by tenant-scoped URL. Demonstrates the RFC 0055 media-serving + rendering rails.',
+    typeId: 'local.openwop-app.image-emit',
+    label: 'Emit image',
+    description: 'Stores an image in the host media store and emits a media.image envelope referencing it by tenant-scoped URL. Demonstrates the media-serving + rendering rails.',
     category: 'ai',
     badge: 'I',
     accent: 'var(--clay)',
@@ -203,9 +203,9 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
   },
   {
     kind: 'memory-write',
-    typeId: 'local.sample.demo.memory-write',
-    label: 'Write memory (RFC 0057)',
-    description: 'Writes a tenant memory entry and emits a node-attributed memory.written event. Demonstrates the RFC 0057 write-attribution rail — the entry shows up in the run\'s memory ledger tagged with the writing node, and the timeline marks the write.',
+    typeId: 'local.openwop-app.memory-write',
+    label: 'Write memory',
+    description: 'Writes a tenant memory entry and emits a node-attributed memory.written event. Demonstrates the write-attribution rail — the entry shows up in the run\'s memory ledger tagged with the writing node, and the timeline marks the write.',
     category: 'data',
     badge: 'M',
     accent: 'var(--clay)',
@@ -234,7 +234,7 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
   },
   {
     kind: 'chat',
-    typeId: 'vendor.openwop-sample.chat-responder',
+    typeId: 'vendor.openwop-app.chat-responder',
     label: 'AI (LLM)',
     description: 'Calls a real LLM. Defaults to the managed openwop-free tile; pick a stored key in the Inspector to use your own provider.',
     category: 'ai',
@@ -253,7 +253,7 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     //
     // The backend chat-responder reads `provider`/`model`/`credentialRef`
     // from config FIRST and falls back to inputs (see
-    // `sampleChatResponderNode` in nodes.ts).
+    // `chatSessionsResponderNode` in nodes.ts).
     configFields: [
       {
         key: 'provider',
@@ -287,7 +287,7 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
         kind: 'prompt-picker',
         promptKind: 'system',
         defaultValue: 'chat-assistant-system',
-        help: 'PromptRef per RFC 0027. Resolved + prepended to the messages array server-side before the LLM dispatch.',
+        help: 'PromptRef. Resolved + prepended to the messages array server-side before the LLM dispatch.',
       },
       {
         key: 'userPromptRef',

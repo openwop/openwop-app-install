@@ -1,7 +1,7 @@
 /**
  * SAML assertion-validation seam (RFC 0050 §A — `openwop-auth-saml`).
  *
- *   POST /v1/host/sample/auth/saml/validate   { idpUrl, variant }
+ *   POST /v1/host/openwop-app/auth/saml/validate   { idpUrl, variant }
  *
  * Drives the host's real SAML ACS (`samlValidationService`) over the live wire,
  * per `spec/v1/host-sample-test-seams.md`: resolve `{ certificatePem, assertion }`
@@ -42,7 +42,7 @@ function sameOrigin(candidate: string, configured: string): boolean {
 }
 
 export function registerSamlAuthRoutes(app: Express): void {
-  app.post('/v1/host/sample/auth/saml/validate', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/auth/saml/validate', async (req, res, next) => {
     try {
       const configured = process.env.OPENWOP_TEST_SAML_IDP_URL;
       if (!configured) {

@@ -10,13 +10,13 @@
  * structured schemas; the next turn injects the response so the LLM
  * can continue with the schemas in context.
  *
- * Pure function. The chat executor (sampleChatResponderNode) detects
+ * Pure function. The chat executor (chatResponderNode) detects
  * a `schema.request` in the LLM's completion text, calls this
  * builder, and emits both envelopes as `agent.envelope` events so
  * the FE EnvelopeInspector can render the round-trip inline.
  *
  * Schema library source: the backend's NodeRegistry (`getNodeRegistry().listTypeIds()`)
- * — same source as `GET /v1/host/sample/node-catalog`, which is the
+ * — same source as `GET /v1/host/openwop-app/node-catalog`, which is the
  * canonical machine-readable inventory of node types this host knows.
  */
 

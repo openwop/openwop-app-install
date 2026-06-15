@@ -267,7 +267,7 @@ async function runOneNode(input: {
   // provider; per-call provider mismatch (a node that calls
   // `ctx.callAI({provider: 'openai', ...})` from a host where the default
   // is 'anthropic') is a future refinement requiring `dispatchPlain()`
-  // interception. The sample-grade gate is honest about its scope:
+  // interception. The best-effort gate is honest about its scope:
   // `substitutionSupported: false` by default, so the gate refuses on
   // any unmet capability rather than attempting fallback. Operators that
   // wire the interception flip OPENWOP_MODEL_CAPABILITY_SUBSTITUTION=true.

@@ -1,5 +1,5 @@
 /**
- * First-class chat-attachment upload (POST /v1/host/sample/media/upload).
+ * First-class chat-attachment upload (POST /v1/host/openwop-app/media/upload).
  *
  * Unlike the low-level /media/put (test-seam gated), the upload route is
  * ALWAYS ON so the public demo can attach files — bounded instead by a MIME
@@ -16,7 +16,7 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 const PORT = 18191;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -51,14 +51,14 @@ async function postJson<T>(path: string, body: unknown): Promise<{ status: numbe
   return { status: res.status, body: (await res.json()) as T };
 }
 
-describe('chat-attachment upload (POST /v1/host/sample/media/upload)', () => {
+describe('chat-attachment upload (POST /v1/host/openwop-app/media/upload)', () => {
   it('uploads an allowed file and serves it back over the capability URL', async () => {
     const up = await postJson<{ url: string; bytes: number; contentType: string; name?: string }>(
-      '/v1/host/sample/media/upload',
+      '/v1/host/openwop-app/media/upload',
       { contentBase64: PNG_1x1_BASE64, contentType: 'image/png', name: 'pixel.png' },
     );
     expect(up.status).toBe(201);
-    expect(up.body.url).toMatch(/^\/v1\/host\/sample\/assets\/[A-Za-z0-9_-]+$/);
+    expect(up.body.url).toMatch(/^\/v1\/host\/openwop-app\/assets\/[A-Za-z0-9_-]+$/);
     expect(up.body.contentType).toBe('image/png');
     expect(up.body.name).toBe('pixel.png');
 
@@ -71,7 +71,7 @@ describe('chat-attachment upload (POST /v1/host/sample/media/upload)', () => {
 
   it('accepts a text document type', async () => {
     const up = await postJson<{ url: string }>(
-      '/v1/host/sample/media/upload',
+      '/v1/host/openwop-app/media/upload',
       { contentBase64: Buffer.from('hello, world').toString('base64'), contentType: 'text/plain', name: 'note.txt' },
     );
     expect(up.status).toBe(201);
@@ -79,7 +79,7 @@ describe('chat-attachment upload (POST /v1/host/sample/media/upload)', () => {
 
   it('rejects a disallowed MIME type fail-closed (415)', async () => {
     const up = await postJson<{ error: string }>(
-      '/v1/host/sample/media/upload',
+      '/v1/host/openwop-app/media/upload',
       { contentBase64: PNG_1x1_BASE64, contentType: 'application/x-msdownload', name: 'evil.exe' },
     );
     expect(up.status).toBe(415);
@@ -88,7 +88,7 @@ describe('chat-attachment upload (POST /v1/host/sample/media/upload)', () => {
 
   it('rejects an empty upload (400)', async () => {
     const up = await postJson<{ error: string }>(
-      '/v1/host/sample/media/upload',
+      '/v1/host/openwop-app/media/upload',
       { contentType: 'image/png' },
     );
     expect(up.status).toBe(400);

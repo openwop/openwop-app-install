@@ -1,5 +1,5 @@
 /**
- * Standing agent roster — host extension (sample-grade, non-normative).
+ * Standing agent roster — host extension (non-normative).
  *
  * The reference implementation of RFCS/0086: a named, tenant-scoped agent
  * INSTANCE (the "digital-twin employee", e.g. "Sally") that references a
@@ -78,7 +78,7 @@ export interface RosterEntry {
    *  the normative manifest inventory is unaffected. Absent ⇒ `auto`. */
   autonomyLevel?: 'auto' | 'guided' | 'review';
   /** The seed role template this member was created from (e.g. `sales-ops`,
-   *  `chief-of-staff`). Set by the demo seed from `demoAgents.json`; absent for
+   *  `chief-of-staff`). Set by the demo seed from `exampleAgents.json`; absent for
    *  hand-created agents. Persisting it makes role identity + theming EXACT
    *  (the frontend no longer heuristically infers the theme from the workflow
    *  portfolio), and lets a feature find its system agent by role regardless of

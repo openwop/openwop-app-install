@@ -10,7 +10,7 @@
 
 | Phase | What landed | Key tests |
 |---|---|---|
-| 1 — Toggle registry + authority | `host/featureToggles/*` (bucketing, registry, service, validate), `/v1/host/sample/feature-toggles/*` routes (superadmin admin + caller assignments), FE `FeatureAccessProvider`/`useFeatureAccess` + admin screen | `feature-toggles.test.ts` (22), `feature-toggles-routes.test.ts` (5) |
+| 1 — Toggle registry + authority | `host/featureToggles/*` (bucketing, registry, service, validate), `/v1/host/openwop-app/feature-toggles/*` routes (superadmin admin + caller assignments), FE `FeatureAccessProvider`/`useFeatureAccess` + admin screen | `feature-toggles.test.ts` (22), `feature-toggles-routes.test.ts` (5) |
 | 2 — Feature-manifest seam | `BackendFeature` + `BACKEND_FEATURES`/`registerBackendFeatures`; FE `featureTypes.ts` + `FRONTEND_FEATURES`; Widgets migrated | `register-all-routes.test.ts` |
 | 3 — Pack pipeline unblock | config-driven `OPENWOP_LOCAL_PACK_PREFIXES` incl. `feature.` | `local-pack-prefixes.test.ts` (4) |
 | 4 — CRM end-to-end | `feature.crm.nodes` pack, contacts + toggle-gated routes, variant stamp into `run.metadata`, FE page + gated nav | `crm-feature.test.ts` (6) |
@@ -311,7 +311,7 @@ Rationale (severity-ordered):
    variant + binding (§3.5) into **`run.metadata.featureVariant`** — host-internal,
    redaction-safe (no secrets, SECURITY SR-1), and **deliberately absent from the
    normative `RunSnapshot` wire** (a host-ext read surface,
-   `GET /v1/host/sample/crm/runs/{runId}`, exposes it).
+   `GET /v1/host/openwop-app/crm/runs/{runId}`, exposes it).
 
    > **Implementation correction (was: RFC 0056 annotations).** The annotation surface
    > does NOT survive `POST /v1/runs/{runId}:fork` — annotations live in a side table the

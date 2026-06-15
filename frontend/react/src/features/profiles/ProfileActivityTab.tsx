@@ -1,7 +1,7 @@
 /**
  * Profile Activity tab (ADR 0025) — the human's run-activity feed, the user-side
  * mirror of an agent's `AgentActivityTab`. Reads the durable runs store via
- * `GET /v1/host/sample/profiles/me/activity`, so every row carries a real
+ * `GET /v1/host/openwop-app/profiles/me/activity`, so every row carries a real
  * timestamp, the run OUTCOME (a status chip), and a link to the run. Surfaces
  * runs the user's personal board / schedule fired on their behalf.
  */
@@ -92,7 +92,7 @@ export function ProfileActivityTab(): JSX.Element {
                 <div className="muted u-fs-12">
                   {relativeTime(item.timestamp)}
                   {item.durationMs != null && <> · ran in {fmtDuration(item.durationMs)}</>}
-                  {item.causationId && <> · <span title="Caused by an upstream trigger (RFC 0040)">chained</span></>}
+                  {item.causationId && <> · <span title="Caused by an upstream trigger">chained</span></>}
                   {' · '}<Link to={`/runs/${item.runId}`}>view run</Link>
                 </div>
               </div>

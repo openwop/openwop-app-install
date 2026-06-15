@@ -8,7 +8,7 @@
 RFC 0084 (budget/cost), `observability.md` (canonical `openwop.*` namespace +
 host-extension rule for vendor metrics), RFC 0052 (the loops whose latency is
 tracked).
-**Surface:** `/v1/host/sample/assistant/health` (admin/debug) — host-extension,
+**Surface:** `/v1/host/openwop-app/assistant/health` (admin/debug) — host-extension,
 **NON-NORMATIVE — no RFC**.
 
 > **One-line thesis.** The assistant graduates from demo to product only when
@@ -43,7 +43,7 @@ run-budget spend (`emitCost`/RFC 0084). Host-specific metric names stay under
 the host vendor namespace per `observability.md`/`host-extensions.md`; nothing
 new claims `openwop.*`.
 
-### `GET /v1/host/sample/assistant/health` (admin-gated)
+### `GET /v1/host/openwop-app/assistant/health` (admin-gated)
 
 One batched read (per-IP rate-limit discipline) returning the metric snapshot +
 per-loop status; rendered as an "Assistant health" panel on the admin surface

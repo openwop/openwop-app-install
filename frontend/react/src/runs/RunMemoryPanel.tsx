@@ -2,7 +2,7 @@
  * Memory ledger (app-ux §A3).
  *
  * Read-only view of the tenant's RFC 0004 memory entries (host-extension
- * GET /v1/host/sample/memory), tied to the run you're looking at.
+ * GET /v1/host/openwop-app/memory), tied to the run you're looking at.
  *
  * Attribution (RFC 0057). When the host advertises
  * `capabilities.memory.attribution.emitsWriteEvents`, this panel reads the
@@ -90,7 +90,7 @@ function MEMORY_COLUMNS(attribution: Map<string, WriteAttribution>): DataColumn<
             {attr?.nodeId && (
               <span
                 className="memory-wrote-badge"
-                title={`Written by node ${attr.nodeId}${attr.agentId ? ` (agent ${attr.agentId})` : ''} — RFC 0057 memory.written`}
+                title={`Written by node ${attr.nodeId}${attr.agentId ? ` (agent ${attr.agentId})` : ''} — memory.written`}
               >
                 <PencilIcon size={12} /> {attr.nodeId}
               </span>
@@ -202,9 +202,9 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
         )}
       </div>
       <p className="muted runmem-subhead">
-        Tenant memory (RFC 0004 read-side).{' '}
+        Tenant memory.{' '}
         {useEvents
-          ? 'Entries this run wrote are highlighted and attributed to the node that wrote them (RFC 0057).'
+          ? 'Entries this run wrote are highlighted and attributed to the node that wrote them.'
           : 'Entries this run wrote are highlighted.'}
       </p>
       {error ? (

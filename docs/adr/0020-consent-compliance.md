@@ -5,8 +5,8 @@
 **Depends on:** ADR 0001 (feature-package), ADR 0006 (RBAC), ADR 0014 (feature workflow surfaces)
 **Gates:** ADR 0018 (Analytics ingest), ADR 0019 (Email marketing sends),
 ADR 0017 (Forms, if it captures marketing opt-in)
-**Toggle:** `consent` · **Surfaces:** authed `/v1/host/sample/consent/orgs/:orgId/*`
-+ **public (unauthed)** `/v1/host/sample/public-consent/:orgId`
+**Toggle:** `consent` · **Surfaces:** authed `/v1/host/openwop-app/consent/orgs/:orgId/*`
++ **public (unauthed)** `/v1/host/openwop-app/public-consent/:orgId`
 (host-extension, NON-NORMATIVE — no RFC)
 **MyndHyve §:** Consent & Compliance · **Baseline:**
 `src/features/consent/{ConsentManager,ConsentEnforcer}.ts` (region-aware, 3
@@ -58,10 +58,10 @@ subjectKey)`, latest-wins.
 
 ### Phase 1 — consent store + public record/read
 
-- **Public** `POST /v1/host/sample/public-consent/:orgId` `{ subjectKey,
+- **Public** `POST /v1/host/openwop-app/public-consent/:orgId` `{ subjectKey,
   categories, region? }` — unauthed; tenant from the org; gated on the org-tenant's
   `consent` toggle; upsert latest-wins. `GET .../:orgId/:subjectKey` → current
-  choices (or policy default). (Add `/v1/host/sample/public-consent` to
+  choices (or policy default). (Add `/v1/host/openwop-app/public-consent` to
   `PUBLIC_PATH_PREFIXES`.)
 
 ### Phase 2 — enforcement helper + wire into 0018/0019

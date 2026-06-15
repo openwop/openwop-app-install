@@ -1,7 +1,7 @@
 /**
- * Governed Workforce — host-extension routes (sample-grade, non-normative).
+ * Governed Workforce — host-extension routes (non-normative).
  *
- * Surface under `/v1/host/sample/workforces`:
+ * Surface under `/v1/host/openwop-app/workforces`:
  *   GET  /                       list workforce definitions
  *   GET  /:workforceId           one workforce (the full bundle)
  *   GET  /:workforceId/metrics   aggregate telemetry for the caller's tenant
@@ -116,7 +116,7 @@ async function dashboardRuns(
 }
 
 export function registerWorkforceRoutes(app: Express, deps: Deps): void {
-  app.get('/v1/host/sample/workforces', async (_req, res, next) => {
+  app.get('/v1/host/openwop-app/workforces', async (_req, res, next) => {
     try {
       res.json({ workforces: await listWorkforces() });
     } catch (err) {
@@ -124,7 +124,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/host/sample/workforces/:workforceId', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/workforces/:workforceId', async (req, res, next) => {
     try {
       const wf = await getWorkforce(req.params.workforceId);
       if (!wf) {
@@ -138,7 +138,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/host/sample/workforces/:workforceId/metrics', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/workforces/:workforceId/metrics', async (req, res, next) => {
     try {
       const wf = await getWorkforce(req.params.workforceId);
       if (!wf) {
@@ -154,7 +154,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/host/sample/workforces/:workforceId/governance', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/workforces/:workforceId/governance', async (req, res, next) => {
     try {
       const wf = await getWorkforce(req.params.workforceId);
       if (!wf) {
@@ -177,7 +177,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   // the agent having graduated to bounded-autonomous (currentTier === 'auto'),
   // so cutover is evidence-based, not a toggle. Rollback to shadow/piloting is
   // ALWAYS allowed (the kill-switch is always available).
-  app.patch('/v1/host/sample/workforces/:workforceId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/workforces/:workforceId', async (req, res, next) => {
     try {
       const status = (req.body as { status?: unknown } | undefined)?.status;
       if (typeof status !== 'string' || !WORKFORCE_STATUSES.includes(status as WorkforceStatus)) {
@@ -213,7 +213,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   });
 
   // MG-0 — Workflow Migration journey state (per workforce).
-  app.get('/v1/host/sample/workforces/:workforceId/migration', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/workforces/:workforceId/migration', async (req, res, next) => {
     try {
       const wf = await getWorkforce(req.params.workforceId);
       if (!wf) {
@@ -227,7 +227,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.patch('/v1/host/sample/workforces/:workforceId/migration', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/workforces/:workforceId/migration', async (req, res, next) => {
     try {
       const wf = await getWorkforce(req.params.workforceId);
       if (!wf) {
@@ -243,7 +243,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
 
   // GA-2 — cross-run trace/audit search by correlationId / batchId / runId /
   // outcome / status. Single listRuns read; pure metadata search.
-  app.get('/v1/host/sample/workforces/:workforceId/trace', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/workforces/:workforceId/trace', async (req, res, next) => {
     try {
       const wf = await getWorkforce(req.params.workforceId);
       if (!wf) {
@@ -262,7 +262,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   // MG-5 — "Shadow & Prove": a host-ext stand-in for RFC 0081's `live-shadow`
   // EvalSummary (NOT a bespoke shadow surface — see workforceService). The
   // canonical surface is RFC 0081 + the RFC 0082 promotion gate.
-  app.get('/v1/host/sample/workforces/:workforceId/shadow', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/workforces/:workforceId/shadow', async (req, res, next) => {
     try {
       const wf = await getWorkforce(req.params.workforceId);
       if (!wf) {
@@ -281,7 +281,7 @@ export function registerWorkforceRoutes(app: Express, deps: Deps): void {
   // supervisor agent over the embedded suite, returning a real EvalSummary (vs
   // the runs-derived `/shadow` stand-in). GATED on the host advertising the eval
   // capability, so the disabled default stays honest (RFC 0031).
-  app.post('/v1/host/sample/workforces/:workforceId/eval', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/workforces/:workforceId/eval', async (req, res, next) => {
     try {
       if (!evalSuiteEnabled()) {
         throw new OpenwopError(

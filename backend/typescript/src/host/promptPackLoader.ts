@@ -240,7 +240,7 @@ function verifyManifestSignature(
 
 /** Convenience helper: default pack roots for the workflow-engine
  *  sample. Includes the in-tree `examples/packs/` so the
- *  `vendor.openwop.prompt-sample` example pack auto-installs at boot
+ *  `vendor.openwop.prompt-example` example pack auto-installs at boot
  *  without operator config. Production hosts override via the
  *  `roots: [...]` arg. */
 export function defaultPromptPackRoots(): readonly string[] {

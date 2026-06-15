@@ -1,6 +1,6 @@
 /**
  * CRM org-scoped API client (ADR 0008) — Companies, Deals, Pipelines, Tasks
- * under /v1/host/sample/crm/orgs/:orgId/*. Separate from the legacy contacts
+ * under /v1/host/openwop-app/crm/orgs/:orgId/*. Separate from the legacy contacts
  * client (`crmClient.ts`), which is preserved unchanged.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -46,7 +46,7 @@ export interface Task {
   dealId?: string;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

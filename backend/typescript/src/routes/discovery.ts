@@ -7,8 +7,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import type { Express } from 'express';
+import type { Express, Request } from 'express';
 import { DEFAULT_SERVICE_DESCRIPTION, DEFAULT_SERVICE_VENDOR, type AppConfig } from '../index.js';
+import { requestOrigin } from '../host/requestOrigin.js';
 import { listCapabilities } from '../executor/runtimeCapabilities.js';
 import { demoMode } from '../host/demoMode.js';
 import type { Storage } from '../storage/storage.js';
@@ -25,6 +26,9 @@ import { getModelCapabilityGateConfig } from '../host/modelCapabilityGateConfig.
 import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
 import { authorizationCapability } from '../host/protocolAuthorization.js';
 import { registeredFeatureSurfaceIds } from '../host/featureSurfaces.js';
+import { triggerIngestionEnabled, MAX_INGEST_BODY_BYTES } from '../host/triggerIngestionService.js';
+import { activationMode as proposalsActivationMode } from '../features/proposals/proposalsService.js';
+import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
 
 /**
  * Auth profiles this host actually SERVES (review finding #10 / ADR 0002 C1).
@@ -73,8 +77,8 @@ interface Deps {
 }
 
 export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
-  app.get('/.well-known/openwop', (_req, res) => {
-    const advertisement = buildAdvertisement(_deps.config);
+  app.get('/.well-known/openwop', (req, res) => {
+    const advertisement = buildAdvertisement(_deps.config, req);
     const etag = `"${createHash('sha256').update(JSON.stringify(advertisement)).digest('hex').slice(0, 16)}"`;
     res.set('Capabilities-Etag', etag);
     res.set('Cache-Control', 'public, max-age=60');
@@ -132,80 +136,80 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
           post: { summary: 'Render a prompt template with supplied variable bindings (RFC 0028 §A)' },
         },
 
-        // ── Sample-extension routes (NOT part of the OpenWOP wire
+        // ── Host-extension routes (NOT part of the OpenWOP wire
         //    contract — vendor-prefixed per host-extensions.md) ──
-        '/v1/host/sample/byok/secrets': {
-          get: { summary: 'List stored BYOK credentialRefs (refs only)', tags: ['sample-extension'] },
-          post: { summary: 'Store a BYOK credentialRef + value', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/byok/secrets': {
+          get: { summary: 'List stored BYOK credentialRefs (refs only)', tags: ['host-extension'] },
+          post: { summary: 'Store a BYOK credentialRef + value', tags: ['host-extension'] },
         },
-        '/v1/host/sample/byok/secrets/{credentialRef}': {
-          delete: { summary: 'Remove a stored BYOK secret', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/byok/secrets/{credentialRef}': {
+          delete: { summary: 'Remove a stored BYOK secret', tags: ['host-extension'] },
         },
-        '/v1/host/sample/runs/{runId}/interrupts': {
-          get: { summary: 'List open interrupts for a run (authed; returns tokens)', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/runs/{runId}/interrupts': {
+          get: { summary: 'List open interrupts for a run (authed; returns tokens)', tags: ['host-extension'] },
         },
-        '/v1/host/sample/demo-summary': {
-          get: { summary: 'Summarize demo-app readiness for CLI and diagnostics', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/example-data-summary': {
+          get: { summary: 'Summarize app readiness for CLI and diagnostics', tags: ['host-extension'] },
         },
-        '/v1/host/sample/daemon-status': {
-          get: { summary: 'Report demo-backend pid / startTime / uptimeSeconds / lastHeartbeat for CLI lifecycle commands', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/daemon-status': {
+          get: { summary: 'Report backend pid / startTime / uptimeSeconds / lastHeartbeat for CLI lifecycle commands', tags: ['host-extension'] },
         },
-        '/v1/host/sample/scheduler/jobs': {
-          get: { summary: 'List scheduled cron jobs (RFC 0052 sample CRUD)', tags: ['sample-extension'] },
-          post: { summary: 'Register a scheduled cron job; rejects beyond maxFutureHorizon with schedule_horizon_exceeded (RFC 0052 §B)', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/scheduler/jobs': {
+          get: { summary: 'List scheduled cron jobs (RFC 0052 sample CRUD)', tags: ['host-extension'] },
+          post: { summary: 'Register a scheduled cron job; rejects beyond maxFutureHorizon with schedule_horizon_exceeded (RFC 0052 §B)', tags: ['host-extension'] },
         },
-        '/v1/host/sample/scheduler/jobs/{jobId}': {
-          delete: { summary: 'Remove a scheduled cron job (RFC 0052 sample CRUD)', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/scheduler/jobs/{jobId}': {
+          delete: { summary: 'Remove a scheduled cron job (RFC 0052 sample CRUD)', tags: ['host-extension'] },
         },
-        '/v1/host/sample/scheduler/jobs/{jobId}/trigger': {
-          post: { summary: 'Fire a scheduled job once now (RFC 0052 §B.2 fire-once-per-tick)', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/scheduler/jobs/{jobId}/trigger': {
+          post: { summary: 'Fire a scheduled job once now (RFC 0052 §B.2 fire-once-per-tick)', tags: ['host-extension'] },
         },
-        '/v1/host/sample/chat/sessions': {
-          get: { summary: 'List chat sessions for the calling tenant', tags: ['sample-extension'] },
-          post: { summary: 'Create a new chat session', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/chat/sessions': {
+          get: { summary: 'List chat sessions for the calling tenant', tags: ['host-extension'] },
+          post: { summary: 'Create a new chat session', tags: ['host-extension'] },
         },
-        '/v1/host/sample/chat/sessions/{sessionId}': {
-          get: { summary: 'Fetch a chat session header', tags: ['sample-extension'] },
-          patch: { summary: 'Rename a chat session', tags: ['sample-extension'] },
-          delete: { summary: 'Delete a chat session (cascades to messages)', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/chat/sessions/{sessionId}': {
+          get: { summary: 'Fetch a chat session header', tags: ['host-extension'] },
+          patch: { summary: 'Rename a chat session', tags: ['host-extension'] },
+          delete: { summary: 'Delete a chat session (cascades to messages)', tags: ['host-extension'] },
         },
-        '/v1/host/sample/chat/sessions/{sessionId}/messages': {
-          get: { summary: 'Load every message in a chat session', tags: ['sample-extension'] },
-          post: { summary: 'Append a message to a chat session', tags: ['sample-extension'] },
+        '/v1/host/openwop-app/chat/sessions/{sessionId}/messages': {
+          get: { summary: 'Load every message in a chat session', tags: ['host-extension'] },
+          post: { summary: 'Append a message to a chat session', tags: ['host-extension'] },
         },
-        '/v1/host/sample/prompt/compose': {
+        '/v1/host/openwop-app/prompt/compose': {
           post: {
             summary: 'RFC 0027 §E compose seam — drives prompt-composed-* conformance scenarios (sample-only; NOT part of the canonical wire contract)',
-            tags: ['sample-extension'],
+            tags: ['host-extension'],
           },
         },
-        '/v1/host/sample/prompt/resolve': {
+        '/v1/host/openwop-app/prompt/resolve': {
           post: {
             summary: 'RFC 0029 §A four-layer resolve seam — drives prompt-resolution-chain-* conformance scenarios (sample-only; NOT part of the canonical wire contract)',
-            tags: ['sample-extension'],
+            tags: ['host-extension'],
           },
         },
-        '/v1/host/sample/test/evaluate-model-capability-gate': {
+        '/v1/host/openwop-app/test/evaluate-model-capability-gate': {
           post: {
             summary: 'RFC 0031 §B model-capability gate seam — drives model-capability-{substituted,insufficient} conformance scenarios with synthetic input (sample-only; NOT part of the canonical wire contract)',
-            tags: ['sample-extension'],
+            tags: ['host-extension'],
           },
         },
-        '/v1/host/sample/test/emit-envelope-reliability': {
+        '/v1/host/openwop-app/test/emit-envelope-reliability': {
           post: {
             summary: 'RFC 0032 §B envelope-reliability event emission seam — drives envelope-{retry.*,refusal,truncated,nlToFormat.engaged,recovery.applied} conformance scenarios via synthetic test-event-log emission with defense-in-depth credentialRef/recoveredContent rejection (sample-only; NOT part of the canonical wire contract)',
-            tags: ['sample-extension'],
+            tags: ['host-extension'],
           },
         },
       },
       tags: [
-        { name: 'sample-extension', description: 'Sample-only routes outside the canonical OpenWOP v1 wire contract. Vendor-prefixed under /v1/host/sample/* per spec/v1/host-extensions.md.' },
+        { name: 'host-extension', description: 'Sample-only routes outside the canonical OpenWOP v1 wire contract. Vendor-prefixed under /v1/host/openwop-app/* per spec/v1/host-extensions.md.' },
       ],
     });
   });
 }
 
-function buildAdvertisement(config: AppConfig): Record<string, unknown> {
+function buildAdvertisement(config: AppConfig, req?: Request): Record<string, unknown> {
   // Honest advertise/enforce parity (capabilities.md): seam-only capabilities
   // are advertised ONLY when their (test-seam) implementation is reachable. A
   // default deploy claims only the production-wired surface — runTimeoutMs +
@@ -220,7 +224,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
   // on the ladder: v6 implies v1..v5, so it requires phase5 (the stateful loop)
   // to be honest. Gated on OPENWOP_AGENT_VERIFIER_GATING; when set, the host runs
   // the RFC 0090 verifier as a commit gate (host/agentDispatch.ts runVerifier) and
-  // serves POST /v1/host/sample/agents/verify-run.
+  // serves POST /v1/host/openwop-app/agents/verify-run.
   const phase6 = phase5 && process.env.OPENWOP_AGENT_VERIFIER_GATING === 'true';
   const advertisement = {
     protocolVersion: '1.1',
@@ -295,7 +299,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
     },
     // RFC 0064 — per-tool authorization + rate-limit + content-free audit.
     // This host demonstrates the contract through the
-    // `POST /v1/host/sample/toolhooks/invoke` seam (host/toolHooks.ts); the
+    // `POST /v1/host/openwop-app/toolhooks/invoke` seam (host/toolHooks.ts); the
     // live MCP `tools/call` path is not yet hooked. So advertise ONLY when
     // the seam is reachable (OPENWOP_TEST_SEAM_ENABLED) — never over-claim
     // toolHooks on a production deploy where no path emits the events.
@@ -311,7 +315,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       : {}),
     // RFC 0052 — time-based run initiation. The once-per-tick + missed-tick
     // policy is demonstrated through the deterministic-clock
-    // `POST /v1/host/sample/scheduling/tick` seam (host/schedulingService.ts);
+    // `POST /v1/host/openwop-app/scheduling/tick` seam (host/schedulingService.ts);
     // no clock yet fires real runs from the trigger node. Advertise ONLY when
     // the seam is reachable. `delayed`/`calendar` honestly absent.
     ...(seamEnabled
@@ -334,7 +338,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
     // the RFCS/0086 "named workflow agents" work surface: a card landing
     // in a trigger column starts a workflow run (RFC 0086 §E keeps the
     // board itself a host/vendor extension, not a normative protocol
-    // surface). Routes under `/v1/host/sample/kanban/*`.
+    // surface). Routes under `/v1/host/openwop-app/kanban/*`.
     kanban: {
       supported: true,
       features: ['boards', 'columns', 'cards', 'card-move-trigger'],
@@ -350,12 +354,29 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
     // subscription + surfaced via `GET /v1/trigger-subscriptions[/{id}]`
     // rather than emitted as a RunEvent. State + delivery attempts are durable
     // (survive restart) per `hostExtPersistence`.
+    // RFC 0099 §F.3 — when external-event ingestion is wired (default; gate off
+    // via OPENWOP_TRIGGER_INGESTION_ENABLED=false), the host ALSO ingests
+    // webhook/email/form events → run (the `ingestion` sub-block + the widened
+    // `sources[]`). The sub-block is the honesty gate: a source listed in
+    // `ingestion.externalSources[]` MUST actually accept an external event,
+    // normalize it to a `TriggerEvent`, and start a run (`triggerIngestionService`).
+    // Absent ⇒ schedule/queue ingestion only (today's RFC 0083 behavior).
     triggerBridge: {
       supported: true,
       subscriptionStates: ['active', 'paused', 'failed', 'dead-lettered'],
       dedup: true,
       retryPolicy: { maxAttempts: 3, backoff: 'fixed' },
-      sources: ['queue'],
+      sources: triggerIngestionEnabled() ? ['queue', 'webhook', 'email', 'form'] : ['queue'],
+      ...(triggerIngestionEnabled()
+        ? {
+            ingestion: {
+              externalSources: ['webhook', 'email', 'form'],
+              maxBodyBytes: MAX_INGEST_BODY_BYTES,
+              verification: ['webhook-signature', 'email-dmarc', 'form-origin'],
+              registrationEndpoint: true,
+            },
+          }
+        : {}),
     },
     supportedTransports: ['rest', 'sse'],
     stream: { modes: ['values', 'updates', 'messages', 'debug'] },
@@ -390,7 +411,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       auth: { profiles: advertisedAuthProfiles() },
       // RFC 0049 (`Draft`) role→scope authorization (ADR 0006 Phase 3).
       // `supported` tracks ACTUAL enforcement on the protocol surface
-      // (runs/artifacts) + the `/v1/host/sample/authorization/decide` seam —
+      // (runs/artifacts) + the `/v1/host/openwop-app/authorization/decide` seam —
       // both gated on `OPENWOP_AUTHORIZATION_ENFORCEMENT`. Advertised
       // `supported: true` ONLY when the host fail-closes on RFC 0049 scopes,
       // so the claim is never a false authorization-oracle (the conformance leg
@@ -432,12 +453,16 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
         videoGeneration: { supported: false },
         // RFC 0055 §C rule 2 — inline-vs-URL cap for media.* envelope payloads.
         // Assets above this size are served by a tenant-scoped URL
-        // (GET /v1/host/sample/assets/{token}) rather than inlined.
+        // (GET /v1/host/openwop-app/assets/{token}) rather than inlined.
         maxInlineMediaBytes: MAX_INLINE_MEDIA_BYTES,
       },
+      // RFC 0005 (MAS Phase 4) — the host implements `core.conversationGate`
+      // (open/exchange/close) + honors the `conversation.*` suspend variants.
+      // Advertising obligates the full contract (capabilities.md §conversationPrimitive).
+      conversationPrimitive: true,
       interrupts: {
         supported: true,
-        kinds: ['approval', 'clarification', 'refinement', 'cancellation', 'external-event'],
+        kinds: ['approval', 'clarification', 'refinement', 'cancellation', 'external-event', 'conversation.start', 'conversation.exchange', 'conversation.close'],
         // `interrupt-profiles.md` (FINAL v1) catalogs optional
         // interrupt profiles. Sample claims only the profiles its
         // implementation actually backs end-to-end today:
@@ -496,28 +521,77 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       // Phase 1 of the multi-agent shift + RFC 0024 streaming. Sample
       // host emits both `agent.reasoned` (closing) AND
       // `agent.reasoning.delta` (streaming) events from the chat-responder
-      // (`vendor.openwop-sample.chat-responder`) for managed-provider
+      // (`vendor.openwop-app.chat-responder`) for managed-provider
       // turns. Per-run override via `RunOptions.configurable.reasoningVerbosity`.
       agents: {
         supported: true,
         reasoning: { verbosity: 'full', tokenLimit: 512, streaming: true },
         // RFC 0070 — this host loads pack `agents[]` into an AgentRegistry
         // (RFC 0003 installAgents) and dispatches a manifest agent via the
-        // floor seam (`POST /v1/host/sample/agents/{agentId}/dispatch`),
+        // floor seam (`POST /v1/host/openwop-app/agents/{agentId}/dispatch`),
         // enforcing toolAllowlist (§A14) + handoff schema validation (§D).
         manifestRuntime: { supported: true, handoffValidation: true },
         // RFCS/0086 reference impl — standing agent roster (named agent
         // instances owning a workflow portfolio). Sample host-extension
-        // under `/v1/host/sample/roster`; tenant-scoped. Non-normative
+        // under `/v1/host/openwop-app/roster`; tenant-scoped. Non-normative
         // until RFC 0086 reaches Active.
         roster: { supported: true, installScope: 'tenant' },
         // RFCS/0087 reference impl — agent org-chart (departments/roles/
         // reportsTo over roster members + responsibility roll-up). DESCRIPTIVE
         // ONLY: an org edge confers no authority (org-position-no-authority-
-        // escalation). Sample host-extension under `/v1/host/sample/org-chart`;
+        // escalation). Sample host-extension under `/v1/host/openwop-app/org-chart`;
         // tenant-scoped. Non-normative until RFC 0087 reaches Active.
         orgChart: { supported: true, installScope: 'tenant', departmentNesting: true, responsibilityView: true },
+        // RFC 0096 reviewable-learning proposals — host-sample seam under
+        // `/v1/host/openwop-app/proposals`. Advertised ONLY when
+        // `OPENWOP_PROPOSALS_ENABLED=true` (advertise/enforce parity). `apply`
+        // installs the stored byte image (no re-synthesis) and is fail-closed on
+        // `packs:publish` (proven non-vacuously by `proposal-reviewable-learning`).
+        // `rule` was dropped from the kind enum pre-Active; dup-detection not yet
+        // implemented (honest default-false).
+        ...(process.env.OPENWOP_PROPOSALS_ENABLED === 'true'
+          ? {
+              proposals: {
+                artifactKinds: ['agent-pack', 'workflow-chain-pack', 'prompt-template', 'automation'],
+                duplicationDetection: false,
+                activation: proposalsActivationMode(),
+              },
+            }
+          : {}),
+        // RFC 0097 standing goals — host-sample seam under `/v1/host/openwop-app/goals`.
+        // Advertised when `OPENWOP_GOALS_ENABLED=true`. Judge = `verifier` (this
+        // host's verifier turn; `host` judge honest-omitted). Continuation modes
+        // honored: schedule/commitment/manual (`heartbeat` omitted — no goal-
+        // retrigger beat). `requiresBounds` true ⇒ create without RFC 0058 bounds
+        // is 422 (`goal-standing-continuation`, non-vacuous).
+        ...(process.env.OPENWOP_GOALS_ENABLED === 'true'
+          ? {
+              goals: {
+                judge: 'verifier',
+                continuation: ['schedule', 'commitment', 'manual'],
+                requiresBounds: goalsRequiresBounds(),
+              },
+            }
+          : {}),
       },
+      // RFC 0098 portability — TOP-LEVEL capability (sibling of `agents`, not
+      // nested). Host-sample seam `GET /v1/host/openwop-app/export` + `POST
+      // /v1/host/openwop-app/import[?dryRun=]`. Advertised when
+      // `OPENWOP_PORTABILITY_ENABLED=true`. openwop-app is the `import:true`
+      // non-vacuous graduation witness (RFC 0098 Active→Accepted): import
+      // rejects 422 a bundle carrying a literal credential value BEFORE applying
+      // (`export-bundle-no-credential-material`), and `dryRun:true` makes zero
+      // writes. `import:true ⟹ dryRun:true` (the schema if/then).
+      ...(process.env.OPENWOP_PORTABILITY_ENABLED === 'true'
+        ? {
+            portability: {
+              export: true,
+              import: true,
+              kinds: ['agent', 'pack', 'prompt-template', 'connection-ref', 'schedule', 'roster', 'org-chart'],
+              dryRun: true,
+            },
+          }
+        : {}),
       // RFC 0026 — `provider.usage` event support. Reference host emits
       // one `provider.usage` event per real LLM dispatch from
       // `aiProvidersHost.ts` (callAI / callAIWithTools / callAIManaged).
@@ -533,7 +607,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       // host-resident PromptTemplate fixtures from
       // `conformance-fixtures/prompt-templates/` (vendored from
       // `conformance/fixtures/prompt-templates/` by `sync-fixtures.sh`)
-      // and exposes a `POST /v1/host/sample/prompt/compose` test seam
+      // and exposes a `POST /v1/host/openwop-app/prompt/compose` test seam
       // that drives the conformance suite's `prompt.composed`
       // assertions. observability: 'full' is advertised so the
       // capability-gated scenarios `prompt-composed-secret-redaction`
@@ -652,7 +726,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       })(),
       // `supported: false` — no standard four-op MemoryAdapter; this demo
       // only does host-internal run-summary writes + the read-side
-      // (GET /v1/host/sample/memory). RFC 0057: it DOES attribute those
+      // (GET /v1/host/openwop-app/memory). RFC 0057: it DOES attribute those
       // writes via the content-free `memory.written` event, so it advertises
       // attribution independently of the adapter contract.
       // RFC 0012 — compaction. The host distills its internal longTerm
@@ -701,11 +775,45 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       // RFC 0083 trigger-bridge `durable` mode (the host's internal retry
       // queue is best-effort-plus, not the four-state subscription model).
       webhooks: { supported: true, signed: true, signatureAlgorithms: ['v1'], durable: false },
+      // RFC 0100 §1 — the `a2a` capability slot. Advertised ONLY when this host
+      // actually exposes itself as an A2A agent (OPENWOP_A2A_SERVER_ENABLED) —
+      // otherwise a cross-host caller would feature-detect an A2A surface that
+      // 404s. `durableTasks`/`streaming`/`pushNotifications` are honest only when
+      // the durable wiring (ADR 0035 / a2aTaskStore) is on
+      // (OPENWOP_A2A_DURABLE_TASKS); with it off this is the synchronous
+      // round-trip already specified — no regression, the async conformance
+      // subtests soft-skip. `agentCardUrl` points at the JSON-RPC server the
+      // synthesized AgentCard advertises (`url`); the host serves no
+      // `/.well-known/agent-card.json` yet (the card is fetched via
+      // `agent/getCard` over JSON-RPC). The base MUST be a cross-host-reachable
+      // backend origin (else `supported:true` is a dishonest advertisement —
+      // capabilities.md advertise-honestly): a dedicated
+      // `OPENWOP_A2A_PUBLIC_BASE_URL` override (custom-domain backends), else the
+      // forwarded request origin the caller actually reached us on. We do NOT
+      // reuse `OPENWOP_PUBLIC_BASE_URL` — that is the SPA/OAuth origin
+      // (oauthFlow.ts), and the SPA host only routes `/api/**` to this backend,
+      // not the bare `/v1/...` A2A path.
+      ...(process.env.OPENWOP_A2A_SERVER_ENABLED === 'true'
+        ? (() => {
+            const durable = process.env.OPENWOP_A2A_DURABLE_TASKS === 'true';
+            const override = process.env.OPENWOP_A2A_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
+            const base = override || (req ? requestOrigin(req) : 'http://localhost:8080');
+            return {
+              a2a: {
+                supported: true,
+                agentCardUrl: `${base}/v1/host/openwop-app/a2a`,
+                streaming: durable,
+                pushNotifications: durable,
+                durableTasks: durable,
+              },
+            };
+          })()
+        : {}),
       observability: {
         otel: { namespace: 'openwop' },
         // RFC 0034 — OTel collector test seam advertisement. The two test
-        // endpoints (GET /v1/host/sample/test/otel/spans and POST
-        // /v1/host/sample/test/debug-bundle/export) live in routes/testSeam.ts
+        // endpoints (GET /v1/host/openwop-app/test/otel/spans and POST
+        // /v1/host/openwop-app/test/debug-bundle/export) live in routes/testSeam.ts
         // and only mount when OPENWOP_TEST_SEAM_ENABLED=true. We advertise the
         // capability only when the seam is mounted, so a conformance suite
         // that finds the advertisement is guaranteed to find serving endpoints.
@@ -719,7 +827,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       },
       // RFC 0035 — sandbox-vm MVP advertisement. The node:vm-based
       // sandbox executes synthetic misbehaving packs via the
-      // POST /v1/host/sample/test/sandbox-{load,invoke} seams in
+      // POST /v1/host/openwop-app/test/sandbox-{load,invoke} seams in
       // routes/testSeam.ts. Advertised only when OPENWOP_TEST_SANDBOX_MVP=true
       // is set — the MVP is conformance-only (production deployments use
       // wasmtime/nsjail for real isolation).
@@ -837,7 +945,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
                   // RFC 0090 §B — verifier turn + gating. A host advertising
                   // `version: 6` MUST advertise this block; `gating: true` means a
                   // `fail` verdict blocks the commit (merge/terminate) — the host
-                  // serves POST /v1/host/sample/agents/verify-run to prove it.
+                  // serves POST /v1/host/openwop-app/agents/verify-run to prove it.
                   ...(phase6 ? { verifier: { supported: true, gating: true } } : {}),
                 },
               },
@@ -913,7 +1021,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       // RFC 0020 — host-side MCP server composition. Sample host
       // exposes workflows as MCP tools/resources/prompts when
       // OPENWOP_MCP_SERVER_ENABLED=true. Endpoint:
-      // POST /v1/host/sample/mcp (sample-vendor-namespaced).
+      // POST /v1/host/openwop-app/mcp (sample-vendor-namespaced).
       //
       // Wire shape (per spec/v1/mcp-integration.md §"Conformance +
       // interop"): a top-level `mcp` slot with `supported: boolean`
@@ -924,7 +1032,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
       mcp: process.env.OPENWOP_MCP_SERVER_ENABLED === 'true'
         ? {
             supported: true,
-            serverUrls: ['/v1/host/sample/mcp'],
+            serverUrls: ['/v1/host/openwop-app/mcp'],
             serverMount: {
               supported: true,
               transports: ['streamable-http'] as const,
@@ -940,7 +1048,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
     },
     extensions: {
       // Sample-namespace extensions block. Clients tolerate absence.
-      'sample.notes': 'This is the openwop reference application sample. Not production-hardened.',
+      'openwop-app.notes': 'This is the openwop reference application sample. Not production-hardened.',
     },
     // Governed-workforce surface (EP0) — EXPERIMENTAL host extension under the
     // canonical `x-host-<host>-<key>` prefix (host-extensions.md). NOT a spec
@@ -966,7 +1074,7 @@ function buildAdvertisement(config: AppConfig): Record<string, unknown> {
               supported: true,
               surface: 'host-ext',
               mode: 'live-shadow',
-              suiteId: 'sample.openwop.evals.invoice-exception',
+              suiteId: 'openwop-app.evals.invoice-exception',
             },
           }
         : {}),

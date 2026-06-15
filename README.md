@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `d01cd9b`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `e7dd266`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
@@ -12,7 +12,7 @@
 
 A deployable reference application demonstrating the full vertical slice of an OpenWOP host: a Cloud Run-shape TypeScript backend that implements the v1.1 wire contract, paired with a React frontend that consumes it via the published SDK.
 
-## What this sample demonstrates
+## What this app demonstrates
 
 ### Backend (`backend/typescript/`)
 
@@ -22,42 +22,43 @@ A deployable reference application demonstrating the full vertical slice of an O
 - **Two-layer idempotency** — HTTP `Idempotency-Key` + engine `invocationId`
 - **BYOK end-to-end** — node manifest declares `requires.secrets[]`, run options carry `credentialRef`, secret resolves at execute time, secret material is stripped from persisted run-doc / events / errors
 - **Pack consumption** — fetch + verify + extract pack tarballs from `packs.openwop.dev` at boot (SHA-256 SRI + Ed25519 sig over `pack.json` bytes per `registry/scripts/verify-signatures.mjs`). Installed packs survive across restarts under `~/.openwop-packs/` and are re-verified against their trust marker on every load to catch post-install tampering.
-- **MCP server mount** (RFC 0020) — opt-in JSON-RPC endpoint at `POST /v1/host/sample/mcp` that lets external MCP clients (Claude Desktop, Cursor, conformance harness) discover and invoke workflows as MCP tools/resources/prompts, with bidirectional `sampling/createMessage` + `elicitation/create` bridged into `ctx.callAI` / `ctx.suspend`. Env-gated on `OPENWOP_MCP_SERVER_ENABLED=true`. OFF by default; the boot log emits a `NEVER enable in production without auth review` warning when ON. All 6 `mcp-server-*.test.ts` conformance scenarios pass behaviorally against this mount.
-- **Full `core.openwop.*` + reference `vendor.myndhyve.*` palette out of the box** — every core pack in the repo (`a2a, agents, ai, crypto, data, db, examples, files, flow, hitl, http, integration, mcp, messaging, obs, rag, storage, triggers`) **plus the reference vendor packs** (`chat, canvas, kanban, knowledge-tools, launch-studio, web-research`) surfaces in the visual builder — the sample now wires their `host.{chat,canvas,kanban,knowledge,launchStudio,webResearch}` surfaces (+ `host.a2a`, `host.triggers`, `host.db.nosql`) so those nodes run, not just render. Unsigned packs from the repo are mounted as dev-mode symlinks alongside signed registry installs; the catalog response marks any node whose host surface isn't advertised so the UI can dim it and the inspector can explain. See `ARCHITECTURE.md §"Pack coverage"`.
-- **In-memory host surfaces (demo-grade)** — `ctx.storage.{kv,table,cache,blob,queue}`, `ctx.db.{sql,vector}`, `ctx.fs`, `ctx.queueBus`, `ctx.observability` are wired with process-local adapters so most core-pack nodes execute end-to-end. State is wiped on restart. The interface contracts match what a real-backend host (`examples/hosts/postgres`) implements, so swapping any surface is a one-file change. See `ARCHITECTURE.md §"Path to real backends"`.
+- **MCP server mount** (RFC 0020) — opt-in JSON-RPC endpoint at `POST /v1/host/openwop-app/mcp` that lets external MCP clients (Claude Desktop, Cursor, conformance harness) discover and invoke workflows as MCP tools/resources/prompts, with bidirectional `sampling/createMessage` + `elicitation/create` bridged into `ctx.callAI` / `ctx.suspend`. Env-gated on `OPENWOP_MCP_SERVER_ENABLED=true`. OFF by default; the boot log emits a `NEVER enable in production without auth review` warning when ON. All 6 `mcp-server-*.test.ts` conformance scenarios pass behaviorally against this mount.
+- **Full `core.openwop.*` + reference `vendor.myndhyve.*` palette out of the box** — every core pack in the repo (`a2a, agents, ai, crypto, data, db, examples, files, flow, hitl, http, integration, mcp, messaging, obs, rag, storage, triggers`) **plus the reference vendor packs** (`chat, canvas, kanban, knowledge-tools, launch-studio, web-research`) surfaces in the visual builder — the app now wires their `host.{chat,canvas,kanban,knowledge,launchStudio,webResearch}` surfaces (+ `host.a2a`, `host.triggers`, `host.db.nosql`) so those nodes run, not just render. Unsigned packs from the repo are mounted as dev-mode symlinks alongside signed registry installs; the catalog response marks any node whose host surface isn't advertised so the UI can dim it and the inspector can explain. See `ARCHITECTURE.md §"Pack coverage"`.
+- **In-memory host surfaces (non-durable)** — `ctx.storage.{kv,table,cache,blob,queue}`, `ctx.db.{sql,vector}`, `ctx.fs`, `ctx.queueBus`, `ctx.observability` are wired with process-local adapters so most core-pack nodes execute end-to-end. State is wiped on restart. The interface contracts match what a real-backend host (`examples/hosts/postgres`) implements, so swapping any surface is a one-file change. See `ARCHITECTURE.md §"Path to real backends"`.
 - **`aiProviders` host surface end-to-end** — packs that declare `peerDependencies: { aiProviders: "supported" }` (e.g., `core.openwop.ai`) execute via `ctx.callAI(...)` per `spec/v1/host-capabilities.md §host.aiProviders`. All four policy modes (`disabled` / `optional` / `required` / `restricted`) gated per `spec/v1/capabilities.md:246-289`; credentials resolved by convention (`secrets[provider]` then `<provider>-*` / `<provider>:*` prefixes); cleartext API keys never cross the result boundary or land in events; provider-specific error bodies are NEVER forwarded (they get mapped to the 15 canonical error codes from `host-capabilities.md:141-154` so upstream credential-shaped error payloads can't leak through). `OPENWOP_AI_POLICY_<PROVIDER>` env-vars drive the resolver.
-- **Prompt-library composition seam (RFC 0027 Phase A)** — advertises `capabilities.prompts.{supported: true, endpointsSupported: false, observability: "full"}`. The composition pipeline (`src/host/promptCompose.ts`) implements RFC 0027 §E's secret redaction (`[REDACTED:<credentialRef>]` markers) + untrusted-content wrapping (`<UNTRUSTED>...</UNTRUSTED>`) + sha256 deterministic hashing for `prompt.composed` events. Exercised end-to-end via `POST /v1/host/sample/prompt/compose` (host-extension test seam) by the conformance scenarios `prompt-composed-secret-redaction.test.ts` + `prompt-composed-trust-marker.test.ts`. The spec'd Phase B `/v1/prompts*` REST surface (RFC 0028) is **not** implemented in this sample — `endpointsSupported: false` is honestly advertised so clients see the spec'd `501 capability_not_provided` instead of a 404 (route missing).
+- **Prompt-library composition seam (RFC 0027 Phase A)** — advertises `capabilities.prompts.{supported: true, endpointsSupported: false, observability: "full"}`. The composition pipeline (`src/host/promptCompose.ts`) implements RFC 0027 §E's secret redaction (`[REDACTED:<credentialRef>]` markers) + untrusted-content wrapping (`<UNTRUSTED>...</UNTRUSTED>`) + sha256 deterministic hashing for `prompt.composed` events. Exercised end-to-end via `POST /v1/host/openwop-app/prompt/compose` (host-extension test seam) by the conformance scenarios `prompt-composed-secret-redaction.test.ts` + `prompt-composed-trust-marker.test.ts`. The spec'd Phase B `/v1/prompts*` REST surface (RFC 0028) is **not** implemented — `endpointsSupported: false` is honestly advertised so clients see the spec'd `501 capability_not_provided` instead of a 404 (route missing).
 - **OTel under `openwop.*`** with W3C `traceparent` propagation
 - **Cloud Run shape** — single container, `$PORT`, `/health` + `/readiness`, multi-stage Dockerfile with esbuild bundle
 - **Conformance harness** — `npm run test:conformance` runs `@openwop/openwop-conformance` against the local service
-- **Multi-member B2B workspace tenancy + RBAC (ADR 0015)** — the tenant *is* the workspace. A signed-in user gets a personal workspace, can create **shared workspaces**, **invite members** with RFC 0049 roles (`owner` / `admin` / `editor` / `viewer`), and **switch** the active workspace — membership-gated and fail-closed, so one session only ever holds one active workspace (RFC 0048 §D cross-workspace isolation). A **≥1-owner invariant** is enforced atomically on member demote/remove (`updateMember` / `deleteMember`, post-write re-check) with an **ownership-transfer** escape hatch (`POST /v1/host/sample/orgs/:orgId/members/:memberId/transfer-ownership`); **account deletion cascades** the user out of their shared workspaces and *refuses* — rather than orphaning — any workspace they solely own. Intra-workspace role-scoping on the *protocol* surface is gated on `OPENWOP_AUTHORIZATION_ENFORCEMENT` (advertised via `capabilities.authorization` only when honored). See [`docs/adr/0015-workspace-as-tenant-b2b.md`](docs/adr/0015-workspace-as-tenant-b2b.md).
+- **Multi-member B2B workspace tenancy + RBAC (ADR 0015)** — the tenant *is* the workspace. A signed-in user gets a personal workspace, can create **shared workspaces**, **invite members** with RFC 0049 roles (`owner` / `admin` / `editor` / `viewer`), and **switch** the active workspace — membership-gated and fail-closed, so one session only ever holds one active workspace (RFC 0048 §D cross-workspace isolation). A **≥1-owner invariant** is enforced atomically on member demote/remove (`updateMember` / `deleteMember`, post-write re-check) with an **ownership-transfer** escape hatch (`POST /v1/host/openwop-app/orgs/:orgId/members/:memberId/transfer-ownership`); **account deletion cascades** the user out of their shared workspaces and *refuses* — rather than orphaning — any workspace they solely own. Intra-workspace role-scoping on the *protocol* surface is gated on `OPENWOP_AUTHORIZATION_ENFORCEMENT` (advertised via `capabilities.authorization` only when honored). See [`docs/adr/0015-workspace-as-tenant-b2b.md`](docs/adr/0015-workspace-as-tenant-b2b.md).
 - **Real enterprise auth — OIDC, password, MFA (TOTP), SAML 2.0 SSO + SCIM 2.0 provisioning (ADR 0002 / RFC 0050)** — sign in with a federated OIDC issuer, an email/password local account (with optional TOTP MFA), or **enterprise SSO** against a real IdP (Okta / Azure AD / Ping) via a production SAML Service Provider (real XML-DSig); **SCIM 2.0** endpoints sync joiner/mover/leaver lifecycle out-of-band (fail-closed deactivation). Both are env-gated OFF until configured and advertised honestly (`openwop-auth-saml` / `openwop-auth-scim` appear in `/.well-known/openwop` only when the host can back them). Every method resolves to one durable `User` with a stable `user:<id>` subject (ADR 0003). See [**Enterprise SSO (SAML 2.0)**](#enterprise-sso-saml-20--okta--azure-ad--ping) below to configure it.
 - **DAG executor with concurrent paths** — workflows are no longer limited to a single linear chain. The scheduler (`src/executor/scheduler.ts`) drains a topological ready-queue with bounded concurrency (`OPENWOP_MAX_CONCURRENT_NODES`, default 8) and honors the five canonical `WorkflowEdge.triggerRule` values from `spec/v1/workflow-definition.schema.json` (`all_success` / `any_success` / `all_complete` / `none_failed` / `any_failed`). Edge `condition` predicates filter per-edge input contributions. Per-node outputs land in a port-keyed map (`{ output: ... }`); downstream nodes read by `targetInput` from any incoming edge. Suspended branches keep the run alive while other branches drain; on resume, the resolved node flips to `completed` and the scheduler re-enters. Cycles reject at run-start with `cycle_detected`. Linear workflows are a degenerate case of the same scheduler — back-compat preserved bit-for-bit.
+- **Enterprise Work-Twin agent suite (ADR 0031/0032/0033)** — a seeded portfolio of **ten role-based work twins** (Chief of Staff, Executive Operations, Sales Execution, Customer Success, Finance Close, IT Service Desk, Internal Communications, Recruiting Coordinator, People Operations, Contract & Procurement) built entirely on the existing roster / workflow / scheduler / connections seams — not a parallel system. Each twin carries a rich **`agentProfile`** (`GET/PUT /v1/host/openwop-app/agents/:id/profile`: config params, permissions, HITL, escalation, channels, metrics, `requiredConnections`, autonomy + `capabilities`), binds a portfolio from a pinned **44-template workflow pack** (`tmpl.*`, approval-gated), and runs at draft/recommend autonomy with **`requiredConnections` activation gating** (fail-closed / `supported:false` until a Connection is configured). The **assistant operating-rhythm capability is core + profile-activated** — decoupled from `roleKey` so any agent (Iris, Exec-Ops) activates it over the shared tenant work-graph (ADR 0023 §Correction). See [`FEATURES.md`](FEATURES.md) § "Enterprise Work-Twin agent suite".
 
 ### Frontend (`frontend/react/`)
 
 - **`@openwop/openwop` SDK consumption from the browser** — same package as the BE for wire types
 - **Run lifecycle UI** — create, status, cancel, fork from any event
 - **SSE event stream rendering** with `Last-Event-ID` resume across reconnect
-- **Interrupt rendering for all four `kind`s** — sample-quality cards demonstrating the host-extension renderer pattern
+- **Interrupt rendering for all four `kind`s** — reference cards demonstrating the host-extension renderer pattern
 - **Capability discovery panel** — live render of `GET /.well-known/openwop`
 - **BYOK key entry + policy explainer** — visualizes the resolution order
 - **Branching + merging in the builder** — drag a second outgoing edge from any node for fan-out; multiple edges into a single target node form a fan-in. The right-hand inspector exposes the edge's `triggerRule` (`all_success` / `any_success` / `all_complete` / `none_failed` / `any_failed`) and optional `condition` predicate (`path`+`op`+`value` over the source's output). Cycles still reject at save time.
 
-## What this sample is NOT
+## What this app is NOT
 
-- **Not a fifth reference host.** Conformance is owned by `examples/hosts/postgres/` (production-profile, 91.9% of 850 scenarios). This sample stubs more and targets ~70% — that figure is a **2026-05-15, suite-v1.1.0-era estimate**; the sample has since wired the full `host.{kanban,chat,canvas,knowledge,webResearch,launchStudio,a2a,triggers,db.nosql}` vendor-surface set + the normative `ctx.interrupt`/`ctx.suspend` primitive, so it now stubs fewer surfaces than that figure implies (un-re-measured against the current suite).
-- **Not normative.** It is sample/template code, not part of the v1.1 spec corpus.
+- **Not a fifth reference host.** Conformance is owned by `examples/hosts/postgres/` (production-profile, 91.9% of 850 scenarios). This app targets ~70% — that figure is a **2026-05-15, suite-v1.1.0-era estimate**; the app has since wired the full `host.{kanban,chat,canvas,knowledge,webResearch,launchStudio,a2a,triggers,db.nosql}` vendor-surface set + the normative `ctx.interrupt`/`ctx.suspend` primitive, so it now stubs fewer surfaces than that figure implies (un-re-measured against the current suite).
+- **Not normative.** Reference implementation of an OpenWOP host; not part of the v1.1 spec corpus.
 - **Not coupled to one cloud.** The single container image runs on any platform, and [`deploy/`](./deploy/README.md) ships ready-made packs for **Docker Compose** (the cloud-free default), **Fly.io**, **Render/Railway**, **AWS**, **Azure**, and **Google Cloud**. Storage, BYOK key-wrapping (KMS), identity (OIDC), and object storage are env-selected behind interfaces; the cloud SDKs are *optional* dependencies loaded only when chosen. Real KMS backends exist for **AWS KMS**, **Azure Key Vault**, and **Google Cloud KMS** (`OPENWOP_BYOK_KMS_KEY=aws-kms:… / azure-keyvault:… / projects/…`), plus a portable local-AES fallback.
-- **Not a fork of the production-grade postgres host.** It deliberately omits the audit-log integrity profile, durable webhook queue, multi-region partition handling, and other production concerns to stay at "starter-template" scope.
-- **Tenancy invariants are demo-grade.** The workspace ≥1-owner guard (and other read-then-write invariants) are enforced over the in-memory / portable `DurableCollection` with a **post-write re-check + compensating restore** — correct (it never leaves a workspace ownerless, even across instances under read-committed reads), but a concurrent collision returns a *retryable* `409` rather than serializing, and a reader can transiently observe the mid-operation state. A production multi-region host should back these with a real DB transaction or a `CHECK`/uniqueness constraint. The public demo also runs with `OPENWOP_AUTHORIZATION_ENFORCEMENT=off` — role-scoping is *previewed*, not enforced, on the protocol surface (flip it on for enforced B2B; see the ADR 0015 "Deployment postures" table and [`ARCHITECTURE.md §"Path to real backends"`](ARCHITECTURE.md)).
+- **Not a fork of the production-grade postgres host.** It deliberately omits the audit-log integrity profile, durable webhook queue, multi-region partition handling, and other production concerns outside this app's scope.
+- **Tenancy invariants over the in-memory tier.** The workspace ≥1-owner guard (and other read-then-write invariants) are enforced over the in-memory / portable `DurableCollection` with a **post-write re-check + compensating restore** — correct (it never leaves a workspace ownerless, even across instances under read-committed reads), but a concurrent collision returns a *retryable* `409` rather than serializing, and a reader can transiently observe the mid-operation state. A production multi-region host should back these with a real DB transaction or a `CHECK`/uniqueness constraint. The public demo also runs with `OPENWOP_AUTHORIZATION_ENFORCEMENT=off` — role-scoping is *previewed*, not enforced, on the protocol surface (flip it on for enforced B2B; see the ADR 0015 "Deployment postures" table and [`ARCHITECTURE.md §"Path to real backends"`](ARCHITECTURE.md)).
 
 ### `aiProviders` known limits
 
-- **Embeddings, image generation, video generation** — advertised as `false`; the corresponding `core.ai` pack nodes throw `host_capability_missing`. The sample's `providers/dispatch.ts` only wires the three chat-completion endpoints.
-- **Tool-calling is Anthropic-only** — advertised via `aiProviders.toolCalling.providers: ['anthropic']`. OpenAI / Google tool-use wire shapes are not implemented in this sample. Packs requesting tool-calling on other providers fail with `host_capability_missing`.
-- **Tool-calling is single-round** — `ctx.callAIWithTools(...)` returns `{ content, toolCalls[], finishReason, usage, model }` from one Anthropic round trip. The pack (or downstream workflow nodes) is responsible for executing the tools and re-invoking the LLM with results appended to `messages`. The sample's chat tab uses a separate multi-round helper (`dispatchAnthropicWithTools`) for its in-bubble tool-use loop; that is not exposed on `ctx`.
-- **Per-tenant policy is sample-grade** — `OPENWOP_AI_POLICY_<PROVIDER>` env vars apply to every `(tenantId, scopeId)` tuple. Real hosts persist per-tenant policy in their tenants table; the policy resolver's signature accepts `{tenantId, scopeId}` so swapping the impl is a one-file change.
+- **Embeddings, image generation, video generation** — advertised as `false`; the corresponding `core.ai` pack nodes throw `host_capability_missing`. The app's `providers/dispatch.ts` only wires the three chat-completion endpoints.
+- **Tool-calling is Anthropic-only** — advertised via `aiProviders.toolCalling.providers: ['anthropic']`. OpenAI / Google tool-use wire shapes are not implemented. Packs requesting tool-calling on other providers fail with `host_capability_missing`.
+- **Tool-calling is single-round** — `ctx.callAIWithTools(...)` returns `{ content, toolCalls[], finishReason, usage, model }` from one Anthropic round trip. The pack (or downstream workflow nodes) is responsible for executing the tools and re-invoking the LLM with results appended to `messages`. The app's chat tab uses a separate multi-round helper (`dispatchAnthropicWithTools`) for its in-bubble tool-use loop; that is not exposed on `ctx`.
+- **Per-tenant policy uses env-var defaults** — `OPENWOP_AI_POLICY_<PROVIDER>` env vars apply to every `(tenantId, scopeId)` tuple. Real hosts persist per-tenant policy in their tenants table; the policy resolver's signature accepts `{tenantId, scopeId}` so swapping the impl is a one-file change.
 - **Sub-run-via-tool tenant inheritance** — when the chat node invokes a workflow as a tool, the sub-run inherits the chat run's `tenantId` / `scopeId` (not hardcoded). See `subruns/subRunDispatcher.ts`.
 - **No host-managed credential of last resort** — every AI call requires a BYOK secret. `req.credentialRef` is honored when explicitly passed; otherwise the host falls back to `secrets[provider]` (e.g., `secrets['anthropic']`) and then any secret prefixed with `<provider>-` or `<provider>:`.
 
@@ -108,7 +109,7 @@ curl http://localhost:8080/.well-known/openwop | jq
 curl -X POST http://localhost:8080/v1/runs \
   -H 'Authorization: Bearer sample-token' \
   -H 'Content-Type: application/json' \
-  -d '{"workflowId":"sample.demo.uppercase","tenantId":"demo","inputs":{"text":"hello"}}'
+  -d '{"workflowId":"openwop-app.uppercase","tenantId":"demo","inputs":{"text":"hello"}}'
 ```
 
 ### Conformance
@@ -118,7 +119,7 @@ cd backend/typescript
 npm run test:conformance
 ```
 
-Honest pass-matrix vs. `@openwop/openwop-conformance` v1.1.0 — a **2026-05-15-era snapshot**. The sample has since wired 9 vendor host surfaces + the `ctx.interrupt`/`ctx.suspend` primitive, which adds capability coverage but has **not been re-measured** against the current suite; treat the counts below as a floor, not the current state:
+Honest pass-matrix vs. `@openwop/openwop-conformance` v1.1.0 — a **2026-05-15-era snapshot**. The app has since wired 9 vendor host surfaces + the `ctx.interrupt`/`ctx.suspend` primitive, which adds capability coverage but has **not been re-measured** against the current suite; treat the counts below as a floor, not the current state:
 
 | Suite | Pass | Skip-equivalent | Reason for skip |
 |---|---|---|---|
@@ -128,7 +129,7 @@ Honest pass-matrix vs. `@openwop/openwop-conformance` v1.1.0 — a **2026-05-15-
 | `openwop-replay-fork` | ✅ all | — | — |
 | `openwop-node-packs` | ✅ all | — | — |
 | `openwop-audit-log-integrity` | — | ❌ all | Stubbed auth; no Ed25519 checkpoint signing |
-| `openwop-production-profile` | — | ❌ all | Sample doesn't claim production-profile (no SLA, no claim acquisition) |
+| `openwop-production-profile` | — | ❌ all | This app doesn't claim production-profile (no SLA, no claim acquisition) |
 | `openwop-durable-webhooks` | partial | partial | Demonstrates HMAC delivery; Cloud Tasks queue stubbed |
 
 ## Deploy to Cloud Run
@@ -164,21 +165,21 @@ groups are captured verbatim for host-side group→role mapping (ADR 0006).
 
 | Route | Purpose |
 |---|---|
-| `GET  /v1/host/sample/auth/saml/sso/login[?returnTo=/]` | SP-initiated redirect to the IdP |
-| `POST /v1/host/sample/auth/saml/sso/acs` | IdP POSTs the `SAMLResponse` → validate → session |
-| `GET  /v1/host/sample/auth/saml/sso/metadata` | SP metadata XML (upload to the IdP) |
+| `GET  /v1/host/openwop-app/auth/saml/sso/login[?returnTo=/]` | SP-initiated redirect to the IdP |
+| `POST /v1/host/openwop-app/auth/saml/sso/acs` | IdP POSTs the `SAMLResponse` → validate → session |
+| `GET  /v1/host/openwop-app/auth/saml/sso/metadata` | SP metadata XML (upload to the IdP) |
 
 ### Configure (two sides — IdP + this host)
 
 **1. In your IdP (Okta example) — create a "SAML 2.0" app:**
 
-- **Single sign-on URL (ACS):** `https://<your-host>/api/v1/host/sample/auth/saml/sso/acs`
+- **Single sign-on URL (ACS):** `https://<your-host>/api/v1/host/openwop-app/auth/saml/sso/acs`
 - **Audience URI (SP Entity ID):** a stable value, e.g. `https://<your-host>/saml`
   (use the **same** value as `OPENWOP_SAML_SP_ENTITY_ID` below)
 - **Name ID format:** `EmailAddress` (recommended); add a `groups` attribute if you
   want IdP groups captured.
 - *(Optional)* instead of typing the above, import this SP's metadata URL:
-  `https://<your-host>/api/v1/host/sample/auth/saml/sso/metadata`
+  `https://<your-host>/api/v1/host/openwop-app/auth/saml/sso/metadata`
 
 Then, from the app's **Sign On** tab, copy the **Identity Provider Single Sign-On
 URL** and the **X.509 Signing Certificate**.
@@ -190,7 +191,7 @@ defaults to `default`). Locally, drop them in `backend/typescript/.env`:
 OPENWOP_SAML_IDP_SSO_URL=https://<your-org>.okta.com/app/<app-id>/sso/saml
 OPENWOP_SAML_IDP_CERT=<X.509 signing cert — full PEM, or one-line base64 body>
 OPENWOP_SAML_SP_ENTITY_ID=https://<your-host>/saml
-OPENWOP_SAML_ACS_URL=https://<your-host>/api/v1/host/sample/auth/saml/sso/acs
+OPENWOP_SAML_ACS_URL=https://<your-host>/api/v1/host/openwop-app/auth/saml/sso/acs
 OPENWOP_SAML_TENANT=<workspace SAML users land in; default `default`>
 ```
 
@@ -201,7 +202,7 @@ the certificate in Secret Manager rather than a plaintext env var:
 ```bash
 gcloud run services update openwop-app-backend \
   --region us-central1 --project openwop-dev \
-  --update-env-vars OPENWOP_SAML_IDP_SSO_URL=https://<org>.okta.com/app/<id>/sso/saml,OPENWOP_SAML_SP_ENTITY_ID=https://app.openwop.dev/saml,OPENWOP_SAML_ACS_URL=https://app.openwop.dev/api/v1/host/sample/auth/saml/sso/acs,OPENWOP_SAML_TENANT=<tenant> \
+  --update-env-vars OPENWOP_SAML_IDP_SSO_URL=https://<org>.okta.com/app/<id>/sso/saml,OPENWOP_SAML_SP_ENTITY_ID=https://app.openwop.dev/saml,OPENWOP_SAML_ACS_URL=https://app.openwop.dev/api/v1/host/openwop-app/auth/saml/sso/acs,OPENWOP_SAML_TENANT=<tenant> \
   --update-secrets OPENWOP_SAML_IDP_CERT=<secret-name>:latest
 ```
 
@@ -252,8 +253,9 @@ Full setup in [`backend/typescript/.env.example`](backend/typescript/.env.exampl
 ## Connections (third-party app integrations)
 
 **Connections** (ADR 0024) is a per-user / per-org credential broker for external
-apps — Google Workspace, Slack, ServiceNow, Zoom — that feeds the existing
-MCP/HTTP/integration nodes. It lives at **Admin → Access & data → Connections**
+apps — Google Workspace, Slack, ServiceNow, Zoom (built-in), plus example RFC 0095
+connection packs for Microsoft 365, Jira, Salesforce, Notion and Workday under
+`examples/connection-packs/` — that feeds the existing MCP/HTTP/integration nodes. It lives at **Admin → Access & data → Connections**
 (`/connections`). Two kinds of provider:
 
 - **Token providers** (ServiceNow `api_key`, Zoom `bearer`) — **no host setup**. A
@@ -271,7 +273,7 @@ MCP/HTTP/integration nodes. It lives at **Admin → Access & data → Connection
 (exact — the host builds the same path):
 
 ```
-https://<your-host>/api/v1/host/sample/connections/<provider>/callback
+https://<your-host>/api/v1/host/openwop-app/connections/<provider>/callback
 ```
 
 | Provider | Where | Scopes (read defaults · write re-consent) | Notes |
@@ -302,7 +304,7 @@ gcloud run services update openwop-app-backend \
 
 The UI-managed store takes precedence over env vars when both are set.
 
-**Verify:** `curl https://<your-host>/api/v1/host/sample/providers` shows
+**Verify:** `curl https://<your-host>/api/v1/host/openwop-app/providers` shows
 `"oauthConfigured": true` for the provider, its **Connect** button enables, and the
 consent round-trip returns you to `/connections` with the app connected. The token
 is stored KMS-enveloped, scoped to the connecting user (or shared to an org for an
@@ -310,7 +312,7 @@ admin-managed connection); write access (e.g. Gmail send) is a separate re-conse
 
 ## Architecture
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for component diagram, boundary discipline, and the file-by-file map between this sample and `MYNDHYVE-ON-OPENWOP-SHOULD-BE-ANALYSIS.md` §3.
+See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for component diagram, boundary discipline, and the file-by-file map between this app and `MYNDHYVE-ON-OPENWOP-SHOULD-BE-ANALYSIS.md` §3.
 
 ## File map
 
@@ -369,6 +371,6 @@ When adding, mirror the structure (README + Dockerfile/build config + src/) and 
 
 ## See also
 
-- `plans/openwop-reference-app-plan.md` — the analysis this sample was built from
+- `plans/openwop-reference-app-plan.md` — the analysis this app was built from
 - `examples/hosts/postgres/README.md` — the production-profile reference host
-- `MYNDHYVE-ON-OPENWOP-SHOULD-BE-ANALYSIS.md` (in the MyndHyve repo) — the should-be guide that informed this sample's scope
+- `MYNDHYVE-ON-OPENWOP-SHOULD-BE-ANALYSIS.md` (in the MyndHyve repo) — the should-be guide that informed this app's scope

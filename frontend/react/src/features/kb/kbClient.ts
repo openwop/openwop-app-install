@@ -1,6 +1,6 @@
 /**
  * Knowledge Base API client (ADR 0011). Org-scoped under
- * /v1/host/sample/kb/orgs/:orgId. Sources are pasted text or Media-Library
+ * /v1/host/openwop-app/kb/orgs/:orgId. Sources are pasted text or Media-Library
  * tokens; retrieval returns scored chunks + citations.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -40,7 +40,7 @@ export interface RagResult {
   augmentedPrompt: string;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

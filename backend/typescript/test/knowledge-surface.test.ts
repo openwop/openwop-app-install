@@ -13,7 +13,7 @@ import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 let server: http.Server;
 const PORT = 18197;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -32,13 +32,13 @@ interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string,
 
 describe('host.knowledge: retrieve node returns ranked chunks + sources', () => {
   it('a knowledge.retrieve run surfaces query-relevant chunks', async () => {
-    await jsonFetch('/v1/host/sample/workflows', {
+    await jsonFetch('/v1/host/openwop-app/workflows', {
       method: 'POST',
-      body: JSON.stringify({ workflowId: 'sample.knowledge', nodes: [{ nodeId: 'op', typeId: 'knowledge.retrieve' }], edges: [] }),
+      body: JSON.stringify({ workflowId: 'openwop-app.knowledge', nodes: [{ nodeId: 'op', typeId: 'knowledge.retrieve' }], edges: [] }),
     });
     const create = await jsonFetch<{ runId: string }>('/v1/runs', {
       method: 'POST',
-      body: JSON.stringify({ workflowId: 'sample.knowledge', inputs: { query: 'how do I rotate API keys and report secret leakage' } }),
+      body: JSON.stringify({ workflowId: 'openwop-app.knowledge', inputs: { query: 'how do I rotate API keys and report secret leakage' } }),
     });
     expect(create.status).toBe(201);
     const { runId } = create.body;

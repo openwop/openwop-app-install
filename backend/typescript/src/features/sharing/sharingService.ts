@@ -203,7 +203,7 @@ export async function resolveSharedCard(token: string, baseUrl: string): Promise
   return {
     title: card.title,
     description: card.description,
-    ...(card.imageToken ? { imageUrl: `${baseUrl}/v1/host/sample/assets/${encodeURIComponent(card.imageToken)}` } : {}),
+    ...(card.imageToken ? { imageUrl: `${baseUrl}/v1/host/openwop-app/assets/${encodeURIComponent(card.imageToken)}` } : {}),
   };
 }
 

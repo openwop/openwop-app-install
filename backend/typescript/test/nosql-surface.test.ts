@@ -19,7 +19,7 @@ import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 let server: http.Server;
 const PORT = 18193;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -51,7 +51,7 @@ interface BundleBody { events?: BundleEvent[] }
 
 /** Register a one-node db workflow, run it, return the node's outputs. */
 async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await jsonFetch('/v1/host/sample/workflows', {
+  await jsonFetch('/v1/host/openwop-app/workflows', {
     method: 'POST',
     body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'op', typeId, config }], edges: [] }),
   });

@@ -1,6 +1,6 @@
 /**
  * Users feature client (host-extension, non-normative). Wraps
- * /v1/host/sample/users/*. The surface 404s when the `users` toggle is off — the
+ * /v1/host/openwop-app/users/*. The surface 404s when the `users` toggle is off — the
  * page gates on useFeatureAccess('users') so it never calls a disabled surface.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -21,7 +21,7 @@ export interface User {
   updatedAt: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample/users`;
+const base = `${config.baseUrl}/v1/host/openwop-app/users`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

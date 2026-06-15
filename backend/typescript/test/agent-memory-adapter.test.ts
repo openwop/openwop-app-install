@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
 import { createAgentMemoryPort, agentMemoryScope } from '../src/host/agentMemoryAdapter.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
-import { runAgentDispatchLive, type LiveDispatchDeps } from '../src/host/agentDispatch.js';
+import { runAgentDispatchLive, MEMORY_UNTRUSTED_TAG, type LiveDispatchDeps } from '../src/host/agentDispatch.js';
 import type { AiCallResult } from '../src/executor/types.js';
 
 beforeAll(() => {
@@ -39,6 +39,32 @@ describe('createAgentMemoryPort — real store round-trip', () => {
     const contents = entries.map((e) => e.content);
     expect(contents).toContain('user prefers terse answers');
     expect(contents).toContain('project deadline is friday');
+  });
+
+  it('SR-1: scrubs secret-shaped tokens before the durable write + embed (RFC 0004)', async () => {
+    const port = createAgentMemoryPort('tenant-sr1');
+    const scope = agentMemoryScope('mem.sr1');
+    await port.write(scope, { content: 'the api key is sk-abcd1234efgh5678ijkl and the user prefers email' });
+    const joined = (await port.read(scope)).map((e) => e.content).join(' ');
+    expect(joined).toContain('[REDACTED:secret-shaped]');
+    expect(joined).not.toContain('sk-abcd1234efgh5678ijkl');
+    expect(joined).toContain('prefers email'); // surrounding non-secret text preserved
+  });
+
+  it('surfaces contentTrust from the untrusted tag on BOTH read paths (ADR 0038 §C review fix)', async () => {
+    const port = createAgentMemoryPort('tenant-trust');
+    const scope = agentMemoryScope('mem.trust');
+    await port.write(scope, { content: 'derived from a webhook payload', tags: ['mem.trust', MEMORY_UNTRUSTED_TAG] });
+    await port.write(scope, { content: 'a hand-curated trusted note', tags: ['mem.trust'] });
+
+    // Recency path (no query) carries the durable tag → contentTrust.
+    const recency = await port.read(scope);
+    expect(recency.find((e) => e.content.includes('webhook'))?.contentTrust).toBe('untrusted');
+    expect(recency.find((e) => e.content.includes('curated'))?.contentTrust).toBe('trusted');
+
+    // RAG path (query) carries the mirrored vector-metadata contentTrust.
+    const rag = await port.read(scope, 'webhook payload');
+    expect(rag.find((e) => e.content.includes('webhook'))?.contentTrust).toBe('untrusted');
   });
 
   it('isolates by tenant (CTI-1) — a different tenant sees nothing', async () => {

@@ -1,6 +1,6 @@
 /**
  * Media library API client (ADR 0007). Org-scoped — every call targets a path
- * `:orgId`. Mirrors /v1/host/sample/media/orgs/:orgId/* and reuses the
+ * `:orgId`. Mirrors /v1/host/openwop-app/media/orgs/:orgId/* and reuses the
  * accessControl org list to populate the org picker.
  */
 
@@ -32,7 +32,7 @@ export interface MediaAsset {
   updatedAt: string;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

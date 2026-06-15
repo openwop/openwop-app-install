@@ -1,10 +1,10 @@
 /**
- * User-authored agent CRUD — sample-extension surface backing the
+ * User-authored agent CRUD — host-extension surface backing the
  * Agents-tab "+ Author new" form (phase E1, 2026-05-28).
  *
  * Endpoints:
- *   POST   /v1/host/sample/agents              create
- *   DELETE /v1/host/sample/agents/{agentId}    delete (user records only)
+ *   POST   /v1/host/openwop-app/agents              create
+ *   DELETE /v1/host/openwop-app/agents/{agentId}    delete (user records only)
  *
  * READ surface stays unified with pack-installed agents — the existing
  * `GET /v1/agents` + `GET /v1/agents/:agentId` in `routes/agents.ts`
@@ -13,7 +13,7 @@
  * `user_agents` row at startup and registers them; this route
  * registers freshly-created ones inline.
  *
- * Namespace: vendor-prefixed (`/v1/host/sample/*`) because the create
+ * Namespace: vendor-prefixed (`/v1/host/openwop-app/*`) because the create
  * surface is host-extension, not normative. A future RFC could
  * promote it to `/v1/agents` POST.
  */
@@ -87,7 +87,7 @@ function hashRequestBody(body: unknown): string {
 export function registerUserAgentRoutes(app: Express, deps: Deps): void {
   const { storage } = deps;
 
-  app.post('/v1/host/sample/agents', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/agents', async (req, res, next) => {
     try {
       const tenantId = readTenantId(req);
       // Idempotency-Key handling per spec/v1/idempotency.md Layer 1.
@@ -204,7 +204,7 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
   // mutable fields. `agentId`/`tenantId`/`createdAt` are immutable; persona is
   // immutable too (it derives the agentId). Pack-installed agents are NOT
   // editable here (different storage) — the UI forks them instead.
-  app.patch('/v1/host/sample/agents/:agentId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/agents/:agentId', async (req, res, next) => {
     try {
       const tenantId = readTenantId(req);
       const { agentId } = req.params;
@@ -255,7 +255,7 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/sample/agents/:agentId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/agents/:agentId', async (req, res, next) => {
     try {
       const tenantId = readTenantId(req);
       const { agentId } = req.params;
@@ -344,7 +344,7 @@ export async function loadUserAgentsIntoRegistry(storage: Storage): Promise<numb
 /** Durably persist a user-authored agent (insert-if-absent) AND register it
  *  with the in-process `AgentRegistry`, so it is both (a) visible to
  *  `GET /v1/agents` after a boot/rehydrate on any instance and (b) immediately
- *  live on THIS instance. Used by the demo seed (`demoSeed.ts`) to make its
+ *  live on THIS instance. Used by the demo seed (`exampleDataSeed.ts`) to make its
  *  named personas chat-callable through the same isolation-correct path the
  *  create-wizard uses — `ownerTenant` scopes them per-tenant. Idempotent:
  *  skips the durable insert when the record already exists, and the registry
@@ -597,7 +597,7 @@ function readTenantId(req: { tenantId?: unknown }): string {
   // Bearer-authed demo callers reach this route with `req.tenantId ===
   // undefined` because the API-key allowlist path doesn't bind a tenant
   // (`tenants: ['*']` instead). Bucket them under the shared demo tenant so
-  // POST /v1/host/sample/agents and GET /v1/agents agree in bearer-shared
+  // POST /v1/host/openwop-app/agents and GET /v1/agents agree in bearer-shared
   // posture. Cookie-anon sessions get their own real `anon:<sid>`.
   return 'default';
 }

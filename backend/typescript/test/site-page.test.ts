@@ -12,7 +12,7 @@ import { createApp } from '../src/index.js';
 
 const PORT = 8801;
 const BASE = `http://localhost:${PORT}`;
-const ADMIN = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
+const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let server: Server;
 let n = 0;
 
@@ -30,7 +30,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 const j = async <T>(res: Response): Promise<T> => (await res.json()) as T;
 const sp = (method: string, body?: unknown) =>
-  fetch(`${BASE}/v1/host/sample/site-page`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+  fetch(`${BASE}/v1/host/openwop-app/site-page`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
 
 async function normalClient(): Promise<(method: string, path: string, body?: unknown) => Promise<Response>> {
   let cookie = '';
@@ -44,7 +44,7 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
     for (const ck of sc as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
     return res;
   };
-  const login = await call('POST', '/v1/host/sample/test/login', { email: `sp-${n++}@x.test` });
+  const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `sp-${n++}@x.test` });
   expect(login.status).toBe(201);
   return call;
 }
@@ -53,7 +53,7 @@ describe('system home page — public render (unauthenticated)', () => {
   it('serves the seeded host-site home page to an anonymous visitor', async () => {
     // touch the editor once so the site is ensured (boot also does this in prod)
     await sp('GET');
-    const res = await fetch(`${BASE}/v1/host/sample/public/host-site/pages/home`);
+    const res = await fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`);
     expect(res.status).toBe(200);
     const page = await j<{ slug: string; sections: unknown[] }>(res);
     expect(page.slug).toBe('home');
@@ -73,7 +73,7 @@ describe('system home page — super admin edit', () => {
     expect(page.sections[0]?.data?.heading).toBe('Edited by super admin');
 
     // the edit is live on the public surface
-    const pub = await j<{ sections: { data: { heading?: string } }[] }>(await fetch(`${BASE}/v1/host/sample/public/host-site/pages/home`));
+    const pub = await j<{ sections: { data: { heading?: string } }[] }>(await fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`));
     expect(pub.sections[0]?.data?.heading).toBe('Edited by super admin');
   });
 });
@@ -81,8 +81,8 @@ describe('system home page — super admin edit', () => {
 describe('system home page — authority + isolation', () => {
   it('forbids a non-superadmin (403)', async () => {
     const call = await normalClient();
-    expect((await call('GET', '/v1/host/sample/site-page')).status).toBe(403);
-    expect((await call('PUT', '/v1/host/sample/site-page', { sections: [] })).status).toBe(403);
+    expect((await call('GET', '/v1/host/openwop-app/site-page')).status).toBe(403);
+    expect((await call('PUT', '/v1/host/openwop-app/site-page', { sections: [] })).status).toBe(403);
   });
 
   it('a malformed edit 400s WITHOUT taking the live homepage offline', async () => {
@@ -91,7 +91,7 @@ describe('system home page — authority + isolation', () => {
     // malformed sections (not an array) → 400, and the page must STAY published
     const bad = await sp('PUT', { sections: { not: 'an array' } });
     expect(bad.status).toBe(400);
-    const pub = await fetch(`${BASE}/v1/host/sample/public/host-site/pages/home`);
+    const pub = await fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`);
     expect(pub.status).toBe(200); // still live (validate-before-unpublish)
     expect((await j<{ sections: { data: { heading?: string } }[] }>(pub)).sections[0]?.data?.heading).toBe('Live');
   });
@@ -99,7 +99,7 @@ describe('system home page — authority + isolation', () => {
   it('hides the reserved system org from a normal user via the org-scoped CMS routes (404, cross-tenant)', async () => {
     const call = await normalClient();
     // requireOrgScope: host-site is not in the caller's tenant ⇒ 404, never editable.
-    expect((await call('GET', '/v1/host/sample/cms/orgs/host-site/pages')).status).toBe(404);
-    expect((await call('POST', '/v1/host/sample/cms/orgs/host-site/pages', { title: 'X' })).status).toBe(404);
+    expect((await call('GET', '/v1/host/openwop-app/cms/orgs/host-site/pages')).status).toBe(404);
+    expect((await call('POST', '/v1/host/openwop-app/cms/orgs/host-site/pages', { title: 'X' })).status).toBe(404);
   });
 });

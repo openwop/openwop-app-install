@@ -50,12 +50,12 @@ describe('P0.5 admin cleanup', () => {
   });
 
   it('rejects requests without admin token', async () => {
-    const r = await fetch(`http://127.0.0.1:${port}/v1/host/sample/admin/cleanup`, { method: 'POST' });
+    const r = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/admin/cleanup`, { method: 'POST' });
     expect(r.status).toBe(401);
   });
 
   it('rejects requests with wrong admin token', async () => {
-    const r = await fetch(`http://127.0.0.1:${port}/v1/host/sample/admin/cleanup`, {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/admin/cleanup`, {
       method: 'POST',
       headers: { authorization: 'Bearer wrong-token' },
     });
@@ -64,7 +64,7 @@ describe('P0.5 admin cleanup', () => {
 
   it('503 when OPENWOP_ADMIN_TOKEN is unset', async () => {
     process.env.OPENWOP_ADMIN_TOKEN = '';
-    const r = await fetch(`http://127.0.0.1:${port}/v1/host/sample/admin/cleanup`, {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/admin/cleanup`, {
       method: 'POST',
       headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
     });
@@ -82,7 +82,7 @@ describe('P0.5 admin cleanup', () => {
     noteTenantActivity('anon:active');
     noteTenantActivity('anon:also-active');
 
-    const r = await fetch(`http://127.0.0.1:${port}/v1/host/sample/admin/cleanup`, {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/admin/cleanup`, {
       method: 'POST',
       headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
     });
@@ -101,7 +101,7 @@ describe('P0.5 admin cleanup', () => {
   it('GET status reports tracked tenant count without cleanup', async () => {
     await setSecret('a', '1', { tenantId: 'anon:t1' });
     noteTenantActivity('anon:t1');
-    const r = await fetch(`http://127.0.0.1:${port}/v1/host/sample/admin/cleanup/status`, {
+    const r = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/admin/cleanup/status`, {
       headers: { authorization: `Bearer ${ADMIN_TOKEN}` },
     });
     expect(r.status).toBe(200);

@@ -47,7 +47,7 @@ export interface WorkforceHistory {
 export interface WorkforceHistoryOptions {
   workforceId: string;
   tenantId: string;
-  /** Hero workflow id (e.g. `sample.agents.invoice-exception`). */
+  /** Hero workflow id (e.g. `openwop-app.agents.invoice-exception`). */
   workflowId: string;
   /** Deterministic seed string. */
   seed: string;

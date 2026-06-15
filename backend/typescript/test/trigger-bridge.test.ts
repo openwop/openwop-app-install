@@ -108,7 +108,7 @@ describe('trigger-bridge read surface + Kanban bridge (sqlite memory app)', () =
   let server: http.Server;
   const PORT = 18755;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -134,18 +134,18 @@ describe('trigger-bridge read surface + Kanban bridge (sqlite memory app)', () =
 
   it('a Kanban card→To Do move registers a queue subscription with a delivered delivery, and re-moves de-duplicate', async () => {
     const triggerWorkflowId = (await jsonFetch<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0];
-    const board = await jsonFetch<{ id: string }>('/v1/host/sample/kanban/boards', {
+    const board = await jsonFetch<{ id: string }>('/v1/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({ name: 'TB board', triggerWorkflowId }),
     });
     const boardId = board.body.id;
-    const card = await jsonFetch<{ id: string }>(`/v1/host/sample/kanban/boards/${boardId}/cards`, {
+    const card = await jsonFetch<{ id: string }>(`/v1/host/openwop-app/kanban/boards/${boardId}/cards`, {
       method: 'POST',
       body: JSON.stringify({ title: 'x', columnId: 'doing' }),
     });
 
     // Move into To Do → delivered.
-    const m1 = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/sample/kanban/cards/${card.body.id}`, {
+    const m1 = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });
@@ -160,8 +160,8 @@ describe('trigger-bridge read surface + Kanban bridge (sqlite memory app)', () =
     expect(detail.body.deliveries.some((d) => d.outcome === 'delivered' && d.runId === m1.body.triggeredRunId)).toBe(true);
 
     // Move out and back into To Do → same dedupKey → deduped to the same run.
-    await jsonFetch(`/v1/host/sample/kanban/cards/${card.body.id}`, { method: 'PATCH', body: JSON.stringify({ columnId: 'doing' }) });
-    const m2 = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/sample/kanban/cards/${card.body.id}`, {
+    await jsonFetch(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, { method: 'PATCH', body: JSON.stringify({ columnId: 'doing' }) });
+    const m2 = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });

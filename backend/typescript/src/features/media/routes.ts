@@ -1,7 +1,7 @@
 /**
- * Media library feature routes (host-extension, sample-grade — ADR 0007).
+ * Media library feature routes (host-extension, best-effort — ADR 0007).
  *
- * Surface under /v1/host/sample/media/orgs/:orgId:
+ * Surface under /v1/host/openwop-app/media/orgs/:orgId:
  *   POST   /collections                 create a collection            [workspace:write]
  *   GET    /collections                 list collections               [workspace:read]
  *   DELETE /collections/:collectionId   delete (re-homes its assets)   [workspace:write]
@@ -70,7 +70,7 @@ const authorize = (req: Request, scope: Scope): ReturnType<typeof requireOrgScop
 
 export function registerMediaRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/sample/media/orgs/:orgId';
+  const BASE = '/v1/host/openwop-app/media/orgs/:orgId';
 
   // ── Collections ──
   app.post(`${BASE}/collections`, async (req, res, next) => {

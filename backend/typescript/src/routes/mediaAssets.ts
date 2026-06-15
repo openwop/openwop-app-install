@@ -1,11 +1,11 @@
 /**
  * RFC 0055 §C reference-host media-asset serving.
  *
- *   GET  /v1/host/sample/assets/:token   → serves the asset bytes (public,
+ *   GET  /v1/host/openwop-app/assets/:token   → serves the asset bytes (public,
  *                                          token-authed — like /v1/interrupts/{token}).
- *   POST /v1/host/sample/media/upload     → first-class chat-attachment upload
+ *   POST /v1/host/openwop-app/media/upload     → first-class chat-attachment upload
  *                                           (always-on, per-tenant daily quota).
- *   POST /v1/host/sample/media/put        → low-level asset put (test-seam gated).
+ *   POST /v1/host/openwop-app/media/put        → low-level asset put (test-seam gated).
  *
  * The serve route is token-authed: the capability token (32 random bytes,
  * base64url — the interrupt recipe) IS the credential, so the URL is
@@ -40,7 +40,7 @@ export const MAX_INLINE_MEDIA_BYTES = process.env.OPENWOP_MAX_INLINE_MEDIA_BYTES
 
 // Cap a stored asset at 8 MiB of base64 (~6 MiB binary) so the demo's store
 // can't be flooded by a single request. Kept in lockstep with the scoped
-// body-parser limit mounted in index.ts (`/v1/host/sample/media` → 12mb).
+// body-parser limit mounted in index.ts (`/v1/host/openwop-app/media` → 12mb).
 const MAX_STORE_BASE64_LEN = 8 * 1024 * 1024;
 
 // Per-tenant daily upload quota for the first-class `media/upload` route. The
@@ -107,7 +107,7 @@ async function chargeUploadQuota(tenantId: string, bytes: number): Promise<strin
 
 export function registerMediaAssetRoutes(app: Express): void {
   // Serve — always on. The token is the capability.
-  app.get('/v1/host/sample/assets/:token', async (req, res) => {
+  app.get('/v1/host/openwop-app/assets/:token', async (req, res) => {
     const token = req.params.token ?? '';
     const entry = await resolveMediaAsset(token);
     if (!entry) {
@@ -124,7 +124,7 @@ export function registerMediaAssetRoutes(app: Express): void {
   // req.tenantId (never the body), per CTI-1. Accepts a base64 body so it rides
   // the same JSON pipeline as the rest of the demo (the scoped 12mb parser in
   // index.ts admits an 8mb-base64 payload).
-  app.post('/v1/host/sample/media/upload', async (req: Request, res: Response) => {
+  app.post('/v1/host/openwop-app/media/upload', async (req: Request, res: Response) => {
     const tenantId = req.tenantId ?? 'default';
     const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown };
     if (typeof body.contentBase64 !== 'string' || body.contentBase64.length === 0) {
@@ -160,7 +160,7 @@ export function registerMediaAssetRoutes(app: Express): void {
   // tooling/tests that need to seed an asset without quota accounting.
   const storeEnabled = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
   if (storeEnabled) {
-    app.post('/v1/host/sample/media/put', async (req, res) => {
+    app.post('/v1/host/openwop-app/media/put', async (req, res) => {
       const tenantId = req.tenantId ?? 'default';
       const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; ttlSeconds?: unknown };
       if (typeof body.contentBase64 !== 'string' || body.contentBase64.length === 0) {
@@ -180,7 +180,7 @@ export function registerMediaAssetRoutes(app: Express): void {
       });
       res.status(201).json(stored);
     });
-    log.warn('media-asset low-level store ENABLED (POST /v1/host/sample/media/put) — test/demo only.');
+    log.warn('media-asset low-level store ENABLED (POST /v1/host/openwop-app/media/put) — test/demo only.');
   }
 
   // ── Sample media generation endpoints (gap D-2) ──────────────────────
@@ -195,10 +195,10 @@ export function registerMediaAssetRoutes(app: Express): void {
   // LLM-emitted media would use), but the bytes are a fixture so replays and
   // demos stay deterministic. Each response is tagged `stub: true`.
   //
-  // Namespace: sample-extension under `/v1/host/sample/*` — NOT part of the
+  // Namespace: host-extension under `/v1/host/openwop-app/*` — NOT part of the
   // normative OpenWOP wire contract. Tenant always from req.tenantId (never
   // the body), per CTI-1.
-  app.post('/v1/host/sample/media/generate-image', async (req, res) => {
+  app.post('/v1/host/openwop-app/media/generate-image', async (req, res) => {
     const tenantId = req.tenantId ?? 'default';
     const body = (req.body ?? {}) as { prompt?: unknown };
     const prompt = typeof body.prompt === 'string' ? body.prompt : '';
@@ -210,7 +210,7 @@ export function registerMediaAssetRoutes(app: Express): void {
     res.status(201).json({ ...stored, contentType: 'image/png', prompt, stub: true });
   });
 
-  app.post('/v1/host/sample/media/transcribe', (req, res) => {
+  app.post('/v1/host/openwop-app/media/transcribe', (req, res) => {
     const body = (req.body ?? {}) as { audioBase64?: unknown; language?: unknown };
     if (typeof body.audioBase64 !== 'string' || body.audioBase64.length === 0) {
       res.status(400).json({ error: 'invalid_argument', message: 'audioBase64 (non-empty string) required' });
@@ -227,7 +227,7 @@ export function registerMediaAssetRoutes(app: Express): void {
     res.status(200).json({ text, language, bytes, stub: true });
   });
 
-  app.post('/v1/host/sample/media/synthesize', async (req, res) => {
+  app.post('/v1/host/openwop-app/media/synthesize', async (req, res) => {
     const tenantId = req.tenantId ?? 'default';
     const body = (req.body ?? {}) as { text?: unknown; voice?: unknown };
     const text = typeof body.text === 'string' ? body.text : '';
@@ -240,8 +240,8 @@ export function registerMediaAssetRoutes(app: Express): void {
     res.status(201).json({ ...stored, contentType: 'audio/wav', voice, characters: text.length, stub: true });
   });
 
-  log.info('media-asset serve + upload routes registered (GET /v1/host/sample/assets/:token, POST /v1/host/sample/media/upload)');
-  log.info('sample media generation routes registered (POST /v1/host/sample/media/{generate-image,transcribe,synthesize})');
+  log.info('media-asset serve + upload routes registered (GET /v1/host/openwop-app/assets/:token, POST /v1/host/openwop-app/media/upload)');
+  log.info('sample media generation routes registered (POST /v1/host/openwop-app/media/{generate-image,transcribe,synthesize})');
 }
 
 // A 1×1 transparent PNG — the deterministic stub the generate-image demo

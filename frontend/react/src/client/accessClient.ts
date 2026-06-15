@@ -1,7 +1,7 @@
 /**
  * Access-control host-extension client (non-normative).
  *
- * Wraps /v1/host/sample/{roles,access,orgs,…} — organizations, teams, named
+ * Wraps /v1/host/openwop-app/{roles,access,orgs,…} — organizations, teams, named
  * members, and the built-in role catalog. Roles map to RFC 0049 scopes;
  * authority resolves only from a member's explicit roles (never the org-chart).
  *
@@ -88,7 +88,7 @@ export interface EffectiveAccess {
   groupRoles?: string[];
 }
 
-const base = `${config.baseUrl}/v1/host/sample`;
+const base = `${config.baseUrl}/v1/host/openwop-app`;
 
 /**
  * "View as member" demo seam (reference host only). When set, every access

@@ -8,13 +8,13 @@
  * `ctx.mcp.expose(...)` call (which requires running the workflow once),
  * the registry scans each workflow definition at lookup time and extracts
  * the manifest from the node config. The conformance suite can register a
- * workflow via `POST /v1/host/sample/workflows` and immediately have it
+ * workflow via `POST /v1/host/openwop-app/workflows` and immediately have it
  * advertised in `tools/list`.
  *
- * Tenant scoping (sample-grade HONESTLY): the underlying `workflowsRegistry`
+ * Tenant scoping (best-effort HONESTLY): the underlying `workflowsRegistry`
  * is process-global by design (a real host would persist per-tenant in
  * storage). The functions below enumerate ALL registered workflows without
- * a tenant filter — the sample host has a single shared workflow space.
+ * a tenant filter — the reference app has a single shared workflow space.
  * **Real hosts MUST tenant-scope** every lookup (`listTools`, `listResources`,
  * `listPrompts`, `find*ByName/Uri`) against the calling `principal.tenants`
  * before returning entries to the MCP wire, or cross-tenant workflow

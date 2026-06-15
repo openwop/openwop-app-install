@@ -13,19 +13,19 @@ describe('networkRecorder redaction (threat-model-secret-leakage)', () => {
 
   it('drops the BYOK secrets POST body entirely', () => {
     const body = JSON.stringify({ credentialRef: 'openai:default', value: SECRET });
-    const out = redactRequestBody('/v1/host/sample/byok/secrets', body);
+    const out = redactRequestBody('/v1/host/openwop-app/byok/secrets', body);
     expect(out).toBe('[redacted: credential request body]');
     expect(out).not.toContain(SECRET);
   });
 
   it('redacts the same route behind the /api Firebase rewrite', () => {
     const body = JSON.stringify({ credentialRef: 'x', value: SECRET });
-    expect(redactRequestBody('/api/v1/host/sample/byok/secrets', body)).not.toContain(SECRET);
+    expect(redactRequestBody('/api/v1/host/openwop-app/byok/secrets', body)).not.toContain(SECRET);
   });
 
   it('redacts the DELETE-by-ref subpath form too', () => {
     const body = JSON.stringify({ value: SECRET });
-    expect(redactRequestBody('/v1/host/sample/byok/secrets/openai:default', body)).not.toContain(SECRET);
+    expect(redactRequestBody('/v1/host/openwop-app/byok/secrets/openai:default', body)).not.toContain(SECRET);
   });
 
   it('scrubs secret-named fields on unknown routes (defense in depth)', () => {

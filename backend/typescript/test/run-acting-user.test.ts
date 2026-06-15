@@ -19,7 +19,7 @@ describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
   let storage: Storage;
   const PORT = 18943;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
   const EXPECTED_ACTOR = `bearer:${TOKEN.slice(0, 8)}`; // auth.ts derives bearer:<8>
   let workflowId: string;
 
@@ -32,7 +32,7 @@ describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
       server = app.listen(PORT, res);
     });
     const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');
-    workflowId = disco.body.fixtures?.[0] ?? 'sample.demo.uppercase';
+    workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';
   });
   afterAll(async () => {
     await new Promise<void>((res) => server.close(() => res()));

@@ -63,7 +63,7 @@ export const MANAGED_REF_PREFIX = 'managed:';
  *  preflight in `routes/runs.ts`. Renaming the typeId in only one
  *  place would silently break the preflight; routing it through one
  *  constant makes the rename atomic. */
-export const CHAT_RESPONDER_TYPE_ID = 'vendor.openwop-sample.chat-responder';
+export const CHAT_RESPONDER_TYPE_ID = 'vendor.openwop-app.chat-responder';
 
 /** Node typeIds whose chat-class dispatch defaults to `managed:openwop-free`
  *  when neither `config.credentialRef` nor `inputs.credentialRef` is set.

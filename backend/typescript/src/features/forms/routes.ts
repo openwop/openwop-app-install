@@ -1,7 +1,7 @@
 /**
  * Forms feature routes (host-extension, ADR 0017).
- *   Authed (org-scoped, RBAC):  /v1/host/sample/forms/orgs/:orgId/forms[...]
- *   Public (unauthed):          /v1/host/sample/public-forms/:formId[/submit]
+ *   Authed (org-scoped, RBAC):  /v1/host/openwop-app/forms/orgs/:orgId/forms[...]
+ *   Public (unauthed):          /v1/host/openwop-app/public-forms/:formId[/submit]
  * The public prefix is on PUBLIC_PATH_PREFIXES (auth.ts) — `public-forms` does
  * NOT shadow the authed `…/forms/*`. The public submit relies on the global
  * per-IP rate-limit middleware for abuse control (plus the honeypot + caps here).
@@ -19,8 +19,8 @@ import {
 } from './formsService.js';
 
 const FEATURE = { toggleId: 'forms', label: 'Forms' };
-const ORG = '/v1/host/sample/forms/orgs/:orgId';
-const PUB = '/v1/host/sample/public-forms';
+const ORG = '/v1/host/openwop-app/forms/orgs/:orgId';
+const PUB = '/v1/host/openwop-app/public-forms';
 
 type Scope = 'workspace:read' | 'workspace:write';
 

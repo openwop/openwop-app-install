@@ -14,7 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { checkAgent, seedDemoAgents } from './rosterClient.js';
+import { checkAgent, seedExampleAgents } from './rosterClient.js';
 import { listApprovals, type PendingApproval } from './approvalsClient.js';
 import { getCapabilities } from '../client/runsClient.js';
 import { loadAgentViews, type AgentView, type AgentStatus } from './agentViewModel.js';
@@ -145,7 +145,7 @@ export function AgentDashboardPage(): JSX.Element {
     }
   }, []);
 
-  // First load: hydrate; if the tenant has no agents yet, seed the demo set
+  // First load: hydrate; if the tenant has no agents yet, seed the example set
   // automatically (idempotent) so the first visit is never an empty screen.
   useEffect(() => {
     let cancelled = false;
@@ -155,10 +155,10 @@ export function AgentDashboardPage(): JSX.Element {
         if (loaded.length === 0) {
           // Only the public demo deployment auto-seeds on an empty roster; a
           // clean / white-label install stays empty and shows the explicit
-          // "Load demo agents" / "Create" empty state instead.
+          // "Load example agents" / "Create" empty state instead.
           const caps = await getCapabilities().catch(() => ({} as Record<string, unknown>));
           if ((caps as { demoMode?: boolean }).demoMode === true) {
-            await seedDemoAgents();
+            await seedExampleAgents();
             loaded = await loadAgentViews();
           }
         }
@@ -208,7 +208,7 @@ export function AgentDashboardPage(): JSX.Element {
     setSeeding(true);
     setError(null);
     try {
-      await seedDemoAgents({ heal: true });
+      await seedExampleAgents({ heal: true });
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -280,7 +280,7 @@ export function AgentDashboardPage(): JSX.Element {
             <>
               <button type="button" className="primary" onClick={() => navigate('/agents/new')}>Create from template</button>
               <button type="button" className="secondary" onClick={() => void onLoadDemo()} disabled={seeding}>
-                {seeding ? 'Loading…' : 'Load demo agents'}
+                {seeding ? 'Loading…' : 'Load example agents'}
               </button>
             </>
           }

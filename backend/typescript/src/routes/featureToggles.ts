@@ -1,9 +1,9 @@
 /**
- * Feature-toggle host-extension routes (sample-grade, NON-NORMATIVE).
+ * Feature-toggle host-extension routes (NON-NORMATIVE).
  *
  * Backend is the authority (ADR §3.4) — resolution runs server-side from the
  * authenticated principal, and the FE consumes a read-only assignments map.
- * Surface under /v1/host/sample/feature-toggles:
+ * Surface under /v1/host/openwop-app/feature-toggles:
  *
  *   GET /assignments              resolve EVERY toggle for the caller   [authed]
  *   GET /assignments/:id          resolve one toggle for the caller     [authed]
@@ -17,7 +17,7 @@
  * locally without an allowlist). The gate FAILS CLOSED by default — a deploy
  * that forgets the allowlist is never world-writable, regardless of NODE_ENV.
  *
- * NOTE: deliberately NOT mounted under /v1/host/sample/admin (which bypasses
+ * NOTE: deliberately NOT mounted under /v1/host/openwop-app/admin (which bypasses
  * cookie auth and does its own OPENWOP_ADMIN_TOKEN check) — the SPA superadmin
  * authenticates via the normal session/bearer path, which this needs.
  *
@@ -62,7 +62,7 @@ export function registerFeatureToggleRoutes(app: Express): void {
   // "not enabled" state and to gate nav. Only toggle ids + the caller's own
   // resolved status/variant/bindings are exposed; cohorts, per-tenant overrides,
   // and other tenants' assignments never appear here (that's the admin surface).
-  app.get('/v1/host/sample/feature-toggles/assignments', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/feature-toggles/assignments', async (req, res, next) => {
     try {
       res.json({ assignments: await resolveAssignments(subjectOf(req)) });
     } catch (err) {
@@ -70,7 +70,7 @@ export function registerFeatureToggleRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/sample/feature-toggles/assignments/:id', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/feature-toggles/assignments/:id', async (req, res, next) => {
     try {
       const assignment = await resolveOne(req.params.id, subjectOf(req));
       if (!assignment) {
@@ -83,7 +83,7 @@ export function registerFeatureToggleRoutes(app: Express): void {
   });
 
   // ── Admin (superadmin only) ──
-  app.get('/v1/host/sample/feature-toggles/admin/configs', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/feature-toggles/admin/configs', async (req, res, next) => {
     try {
       requireSuperadmin(req);
       res.json({ configs: await listEffectiveConfigs() });
@@ -92,7 +92,7 @@ export function registerFeatureToggleRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/sample/feature-toggles/admin/configs/:id', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/feature-toggles/admin/configs/:id', async (req, res, next) => {
     try {
       requireSuperadmin(req);
       const config = await getEffectiveConfig(req.params.id);
@@ -105,7 +105,7 @@ export function registerFeatureToggleRoutes(app: Express): void {
     }
   });
 
-  app.put('/v1/host/sample/feature-toggles/admin/configs/:id', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/feature-toggles/admin/configs/:id', async (req, res, next) => {
     try {
       requireSuperadmin(req);
       const config = validateToggleConfig(req.params.id, req.body);

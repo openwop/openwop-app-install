@@ -1,6 +1,6 @@
 /**
  * A7 / RFC 0076 §A — the live A2A SERVER endpoint over HTTP. Boots the real app
- * with OPENWOP_A2A_SERVER_ENABLED=true and exercises POST /v1/host/sample/a2a:
+ * with OPENWOP_A2A_SERVER_ENABLED=true and exercises POST /v1/host/openwop-app/a2a:
  *   - host.a2a advertises a live server endpoint (honest flip)
  *   - agent/getCard returns a real (registry-synthesized) card, not a dead stub
  *   - message/send routes to a real manifest-agent dispatch → terminal A2A task
@@ -18,8 +18,8 @@ import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 
 const PORT = 18272;
 const BASE = `http://127.0.0.1:${PORT}`;
-const H = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
-const A2A_URL = `${BASE}/v1/host/sample/a2a`;
+const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+const A2A_URL = `${BASE}/v1/host/openwop-app/a2a`;
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', '..');
 const SUPERVISOR = 'core.openwop.agents.supervisor.default';
 
@@ -29,6 +29,10 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_A2A_SERVER_ENABLED = 'true';
+  // This suite exercises the SYNCHRONOUS core — keep durable Tasks off
+  // deterministically (a sibling durable-route suite may set it; env is
+  // per-process, so pin it here rather than rely on ordering).
+  delete process.env.OPENWOP_A2A_DURABLE_TASKS;
   const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor'));
   await new Promise<void>((res) => { server = app.listen(PORT, res); });
@@ -48,6 +52,19 @@ describe('A7 / RFC 0076 — live A2A server endpoint', () => {
     };
     const a2a = (doc.hostSurfaces ?? []).find((s) => s.name === 'host.a2a');
     expect(a2a?.note ?? '').toContain('live server endpoint');
+  });
+
+  // ADR 0035 / RFC 0100 — the `a2a` capability slot is advertised whenever the
+  // host exposes A2A (this suite enables the server). `supported` + a uri
+  // `agentCardUrl` are env-independent; the durable sub-flags are asserted in
+  // the dedicated a2a-durable-route suite (which controls OPENWOP_A2A_DURABLE_TASKS).
+  it('advertises the a2a capability slot when the server is enabled', async () => {
+    const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
+      capabilities?: { a2a?: { supported?: boolean; agentCardUrl?: string } };
+    };
+    const a2a = doc.capabilities?.a2a;
+    expect(a2a?.supported).toBe(true);
+    expect(typeof a2a?.agentCardUrl).toBe('string');
   });
 
   it('agent/getCard returns a registry-synthesized card with skills', async () => {

@@ -4,7 +4,7 @@
  * Used by Thread E.2 of the test-coverage debt plan: conformance
  * scenarios that need to verify the absence (or presence) of specific
  * OTel span attributes scrape this buffer via
- * `GET /v1/host/sample/test/otel/spans?envelopeId=…&runId=…`.
+ * `GET /v1/host/openwop-app/test/otel/spans?envelopeId=…&runId=…`.
  *
  * Production hosts wire a real OTel exporter (gRPC OTLP, Honeycomb,
  * etc.); this test-only buffer captures the same Span shape the

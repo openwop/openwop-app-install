@@ -3,7 +3,7 @@
  *
  * Proves over HTTP against the real app (createApp + the real auth middleware +
  * a synthetic OIDC issuer):
- *   - POST /v1/host/sample/users/auth/oidc/bind find-or-creates a durable User for
+ *   - POST /v1/host/openwop-app/users/auth/oidc/bind find-or-creates a durable User for
  *     the verified oidc:<sub> and is idempotent;
  *   - it re-keys an existing membership seeded under oidc:<sub> to the canonical
  *     user:<userId> (the personal-workspace owner member, deterministic id);
@@ -110,7 +110,7 @@ function client(token: string): { get: (p: string) => Promise<Res>; post: (p: st
 
 describe('ADR 0003 Phase 4a — OIDC bind', () => {
   it('refuses bind without an OIDC bearer', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/users/auth/oidc/bind`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+    const res = await fetch(`${BASE}/v1/host/openwop-app/users/auth/oidc/bind`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(res.status).toBe(401);
   });
 
@@ -121,11 +121,11 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     const c = client(mint(sub));
 
     // First touch seeds the personal workspace under the UNBOUND subject oidc:<sub>.
-    expect((await c.get('/v1/host/sample/me/workspaces')).status).toBe(200);
+    expect((await c.get('/v1/host/openwop-app/me/workspaces')).status).toBe(200);
     expect(await isWorkspaceMember(oidcSubject, personalTenant)).toBe(true);
 
     // Bind: creates the durable User + re-keys the owner member to user:<userId>.
-    const bind = await c.post('/v1/host/sample/users/auth/oidc/bind');
+    const bind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
     expect(bind.status, JSON.stringify(bind.body)).toBe(200);
     expect(bind.body.bound).toBe(true);
     const userId = bind.body.user.userId as string;
@@ -140,7 +140,7 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     expect(owners[0]!.subject).toBe(userId);
 
     // Idempotent: a second bind resolves the SAME userId, nothing left to re-key.
-    const bind2 = await c.post('/v1/host/sample/users/auth/oidc/bind');
+    const bind2 = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
     expect(bind2.body.user.userId).toBe(userId);
     expect(bind2.body.rekeyed).toBe(0);
   });
@@ -150,12 +150,12 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     const personalTenant = personalTenantOfSub(sub);
     const c = client(mint(sub));
 
-    const bind = await c.post('/v1/host/sample/users/auth/oidc/bind');
+    const bind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
     const userId = bind.body.user.userId as string;
 
     // A subsequent request (bearer + bound cookie) resolves user:<userId>: the
     // personal-workspace owner membership (keyed user:<userId>) is honored.
-    const me = await c.get('/v1/host/sample/me/workspaces');
+    const me = await c.get('/v1/host/openwop-app/me/workspaces');
     expect(me.status).toBe(200);
     const personal = me.body.workspaces.find((w: any) => w.workspaceId === personalTenant);
     expect(personal).toBeTruthy();
@@ -172,18 +172,18 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     const sub = 'firebase-uid-switch';
     const c = client(mint(sub));
 
-    const userId = (await c.post('/v1/host/sample/users/auth/oidc/bind')).body.user.userId as string;
+    const userId = (await c.post('/v1/host/openwop-app/users/auth/oidc/bind')).body.user.userId as string;
 
     // Create a shared workspace (caller becomes owner) and switch into it.
-    const ws = (await c.post('/v1/host/sample/workspaces', { name: 'SwitchCo' })).body.workspaceId as string;
+    const ws = (await c.post('/v1/host/openwop-app/workspaces', { name: 'SwitchCo' })).body.workspaceId as string;
     expect(ws).toMatch(/^ws:/);
-    const sw = await c.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+    const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
     expect(sw.body.active).toBe(ws);
 
     // The next BEARER request must keep active === ws (not revert to personal)
     // and resolve the caller as user:<userId> (shared membership keyed on it).
-    const me = await c.get('/v1/host/sample/me/workspaces');
+    const me = await c.get('/v1/host/openwop-app/me/workspaces');
     expect(me.body.active).toBe(ws);
     const shared = me.body.workspaces.find((w: any) => w.workspaceId === ws);
     expect(shared?.roles).toContain('owner');

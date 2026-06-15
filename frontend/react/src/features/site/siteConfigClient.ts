@@ -11,7 +11,7 @@
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 import type { Page, Section } from '../cms/cmsClient.js';
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 export interface FrontPagePointer { enabled: boolean; orgId: string; slug: string }

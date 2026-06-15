@@ -70,7 +70,7 @@ async function main(): Promise<void> {
       ...process.env,
       OPENWOP_BASE_URL: BASE_URL,
       OPENWOP_API_KEY: API_KEY,
-      OPENWOP_IMPLEMENTATION_NAME: 'openwop-workflow-engine-sample',
+      OPENWOP_IMPLEMENTATION_NAME: 'openwop-workflow-engine',
       OPENWOP_IMPLEMENTATION_VERSION: '0.1.0',
     },
   });

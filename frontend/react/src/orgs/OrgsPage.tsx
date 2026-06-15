@@ -29,7 +29,7 @@ export function OrgsPage(): JSX.Element {
       <PageHeader
         eyebrow="Settings"
         title="Organizations & access"
-        lede={<>Organizations, teams, and members with role-based access. Roles map to OpenWOP authorization scopes (RFC 0049); a member&rsquo;s authority comes from its assigned roles only — org-chart position confers none.</>}
+        lede={<>Organizations, teams, and members with role-based access. Roles map to OpenWOP authorization scopes; a member&rsquo;s authority comes from its assigned roles only — org-chart position confers none.</>}
       />
       {c.error ? <Notice variant="error">{c.error}</Notice> : null}
 

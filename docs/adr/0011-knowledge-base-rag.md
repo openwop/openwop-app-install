@@ -4,7 +4,7 @@
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC), ADR 0007 (Media Library — source documents)
-**Toggle:** `kb` · **Surface:** host-extension `/v1/host/sample/kb/*` (non-normative)
+**Toggle:** `kb` · **Surface:** host-extension `/v1/host/openwop-app/kb/*` (non-normative)
 
 ---
 
@@ -81,7 +81,7 @@ vector + embedder + media surfaces. Mirrors the ADR 0007/0009 org-scoped templat
 
 ### Phase 1 — Collections + documents + ingest (backend)
 
-Routes under `/v1/host/sample/kb/orgs/:orgId/*`, all `authorizeOrgScope`-gated:
+Routes under `/v1/host/openwop-app/kb/orgs/:orgId/*`, all `authorizeOrgScope`-gated:
 - `POST/GET/DELETE …/collections[/:collectionId]` — CRUD; delete cascades its
   documents + clears its vector namespace.
 - `POST …/collections/:collectionId/documents` — ingest pasted **text** or a

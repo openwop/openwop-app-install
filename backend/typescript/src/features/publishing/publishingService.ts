@@ -169,7 +169,7 @@ export async function sitemapXml(orgId: string, baseUrl: string): Promise<string
 export async function robotsTxt(orgId: string, baseUrl: string): Promise<string> {
   // Touch the toggle gate so robots.txt for a publishing-off org 404s too.
   await resolvePublicOrg(orgId);
-  const sitemap = `${baseUrl}/v1/host/sample/public/${encodeURIComponent(orgId)}/sitemap.xml`;
+  const sitemap = `${baseUrl}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/sitemap.xml`;
   return `User-agent: *\nAllow: /\nSitemap: ${sitemap}\n`;
 }
 
@@ -186,8 +186,8 @@ export async function feedRss(orgId: string, baseUrl: string): Promise<string> {
       return `    <item>\n      <title>${escapeXml(title)}</title>\n      <link>${escapeXml(link)}</link>\n      <guid isPermaLink="true">${escapeXml(link)}</guid>\n      <pubDate>${escapeXml(new Date(page.updatedAt).toUTCString())}</pubDate>\n      <description>${escapeXml(desc)}</description>\n    </item>`;
     })
     .join('\n');
-  const self = `${baseUrl}/v1/host/sample/public/${encodeURIComponent(orgId)}/feed.rss`;
-  return `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0">\n  <channel>\n    <title>${escapeXml(orgId)}</title>\n    <link>${escapeXml(`${baseUrl}/v1/host/sample/public/${encodeURIComponent(orgId)}`)}</link>\n    <description>Published pages</description>\n    <atom:link xmlns:atom="http://www.w3.org/2005/Atom" href="${escapeXml(self)}" rel="self" type="application/rss+xml" />\n${items}\n  </channel>\n</rss>\n`;
+  const self = `${baseUrl}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/feed.rss`;
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0">\n  <channel>\n    <title>${escapeXml(orgId)}</title>\n    <link>${escapeXml(`${baseUrl}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}`)}</link>\n    <description>Published pages</description>\n    <atom:link xmlns:atom="http://www.w3.org/2005/Atom" href="${escapeXml(self)}" rel="self" type="application/rss+xml" />\n${items}\n  </channel>\n</rss>\n`;
 }
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
@@ -208,7 +208,7 @@ function projectPublic(page: Page, seo: PageSeo | null, orgId: string, baseUrl: 
       ogTitle: seo?.ogTitle ?? seo?.metaTitle ?? page.title,
       ogDescription: seo?.ogDescription ?? description,
       noindex: seo?.noindex ?? false,
-      ...(seo?.ogImageToken ? { ogImageUrl: `${baseUrl}/v1/host/sample/assets/${encodeURIComponent(seo.ogImageToken)}` } : {}),
+      ...(seo?.ogImageToken ? { ogImageUrl: `${baseUrl}/v1/host/openwop-app/assets/${encodeURIComponent(seo.ogImageToken)}` } : {}),
     },
   };
   return out;
@@ -228,7 +228,7 @@ function descriptionFrom(page: Page): string {
 }
 
 function pageUrl(baseUrl: string, orgId: string, slug: string): string {
-  return `${baseUrl}/v1/host/sample/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`;
+  return `${baseUrl}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`;
 }
 
 /** A media token is a base64url capability + an intended-public OG image — NOT

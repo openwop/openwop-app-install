@@ -1,7 +1,7 @@
 /**
  * Consent feature routes (host-extension, ADR 0020).
- *   Public (unauthed):  /v1/host/sample/public-consent/:orgId[/:subjectKey]
- *   Authed (org-scoped, RBAC):  /v1/host/sample/consent/orgs/:orgId/*
+ *   Public (unauthed):  /v1/host/openwop-app/public-consent/:orgId[/:subjectKey]
+ *   Authed (org-scoped, RBAC):  /v1/host/openwop-app/consent/orgs/:orgId/*
  * The public prefix is on PUBLIC_PATH_PREFIXES (auth.ts). Consent is TENANT-scoped
  * (a visitor's choices apply across the tenant's orgs); the public path resolves
  * org→tenant and gates on the org-tenant's `consent` toggle (uniform 404).
@@ -18,8 +18,8 @@ import {
 } from './consentService.js';
 
 const FEATURE = { toggleId: 'consent', label: 'Consent' };
-const ORG = '/v1/host/sample/consent/orgs/:orgId';
-const PUB = '/v1/host/sample/public-consent';
+const ORG = '/v1/host/openwop-app/consent/orgs/:orgId';
+const PUB = '/v1/host/openwop-app/public-consent';
 
 type Scope = 'workspace:read' | 'workspace:write';
 

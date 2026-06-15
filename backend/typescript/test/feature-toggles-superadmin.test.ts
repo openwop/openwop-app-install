@@ -33,7 +33,7 @@ describe('feature-toggle superadmin gate (fail-closed)', () => {
     await new Promise<void>((res) => server.close(() => res()));
   });
 
-  const adminPath = '/v1/host/sample/feature-toggles/admin/configs';
+  const adminPath = '/v1/host/openwop-app/feature-toggles/admin/configs';
 
   it('denies an authenticated non-superadmin (anon session) by default — 403', async () => {
     const res = await fetch(`${BASE}${adminPath}`); // no bearer ⇒ anon cookie session
@@ -41,7 +41,7 @@ describe('feature-toggle superadmin gate (fail-closed)', () => {
   });
 
   it('allows the wildcard bearer (admin key) — 200', async () => {
-    const res = await fetch(`${BASE}${adminPath}`, { headers: { authorization: 'Bearer sample-token' } });
+    const res = await fetch(`${BASE}${adminPath}`, { headers: { authorization: 'Bearer dev-token' } });
     expect(res.status).toBe(200);
   });
 

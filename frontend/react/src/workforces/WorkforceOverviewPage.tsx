@@ -156,7 +156,7 @@ export function WorkforceOverviewPage(): JSX.Element {
       {isShowcase ? (
         <Notice variant="info">
           <IllustrativeBadge detail="Synthetic showcase data — not derived from your runs" /> Showing built-in
-          <strong> showcase data</strong>. Run this workforce yourself (or load demo data) to populate your own numbers.
+          <strong> showcase data</strong>. Run this workforce yourself (or load example data) to populate your own numbers.
         </Notice>
       ) : null}
 
@@ -249,8 +249,8 @@ export function WorkforceOverviewPage(): JSX.Element {
         <StateCard
           icon={<BoxesIcon />}
           title="No results yet"
-          body="This workforce ships with weeks of sample runs. Load the demo data to see what it can do."
-          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/demo-data')}>Load demo data</button>}
+          body="This workforce ships with weeks of sample runs. Load the example data to see what it can do."
+          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/example-data')}>Load example data</button>}
         />
       ) : (
         <StateCard

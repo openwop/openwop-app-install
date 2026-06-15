@@ -1,0 +1,105 @@
+/**
+ * Agent connection-status surface (ADR 0033 §3.3 / T3.3).
+ *
+ * The honest "can this twin act?" view: which of the agent's
+ * `requiredConnections` (ADR 0031 `agentProfile`) are configured vs missing,
+ * and the effective autonomy after the fail-closed activation gate. When a
+ * required connection is unconfigured the backend forces `review` (propose,
+ * never auto-act) — this panel renders that as the advertised `supported:false`
+ * signal so a viewer sees exactly why a twin is held at draft/recommend.
+ *
+ * Cohesion: reuses the shared `chip`/`Notice`/`StateCard` layer, the Lucide
+ * icon set, and token-driven utility classes only (no raw hex) per DESIGN.md.
+ */
+
+import { useEffect, useState } from 'react';
+import { getConnectionReadiness, type ConnectionReadiness } from './rosterClient.js';
+import { Notice } from '../ui/Notice.js';
+import { StateCard } from '../ui/StateCard.js';
+import { CheckIcon, XIcon, ClockIcon, PlugIcon } from '../ui/icons/index.js';
+
+const AUTONOMY_LABEL: Record<ConnectionReadiness['gatedAutonomy'], string> = {
+  auto: 'Acts autonomously',
+  guided: 'Acts with guardrails',
+  review: 'Proposes for review',
+};
+
+function ProviderChip({ provider, configured, status }: ConnectionReadiness['entries'][number]): JSX.Element {
+  if (configured) {
+    return (
+      <span className="chip chip--success u-iflex u-items-center u-gap-1">
+        <CheckIcon size={13} /> {provider}
+      </span>
+    );
+  }
+  // A connection exists but isn't active (needs-reconsent / expired / revoked):
+  // distinct from "missing" so the fix is obvious (reconnect vs connect).
+  if (status) {
+    return (
+      <span className="chip chip--warning u-iflex u-items-center u-gap-1">
+        <ClockIcon size={13} /> {provider} · {status}
+      </span>
+    );
+  }
+  return (
+    <span className="chip chip--danger u-iflex u-items-center u-gap-1">
+      <XIcon size={13} /> {provider} · not connected
+    </span>
+  );
+}
+
+export function AgentConnectionStatusPanel({ rosterId }: { rosterId: string }): JSX.Element {
+  const [readiness, setReadiness] = useState<ConnectionReadiness | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    getConnectionReadiness(rosterId)
+      .then((r) => { if (!cancelled) { setReadiness(r); setError(null); } })
+      .catch((err) => { if (!cancelled) setError(err instanceof Error ? err.message : String(err)); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [rosterId]);
+
+  if (loading) return <p className="muted u-mt-0">Checking connection readiness…</p>;
+  if (error) return <Notice variant="error">{error}</Notice>;
+  if (!readiness) return <></>;
+
+  if (readiness.required.length === 0) {
+    return (
+      <StateCard
+        icon={<PlugIcon size={20} />}
+        title="No required connections"
+        body="This agent declares no external integrations, so nothing gates its autonomy."
+      />
+    );
+  }
+
+  const { allConfigured, effective, declaredAutonomy, gatedAutonomy, entries, missing } = readiness;
+
+  return (
+    <div className="u-flex u-flex-col u-gap-3">
+      {allConfigured ? (
+        <Notice variant="success">
+          All required connections are configured — {AUTONOMY_LABEL[gatedAutonomy].toLowerCase()}.
+        </Notice>
+      ) : (
+        <Notice variant="warning">
+          {missing.length} of {readiness.required.length} required connection{readiness.required.length > 1 ? 's' : ''} not
+          ready — held for review until connected (was “{AUTONOMY_LABEL[declaredAutonomy]}”).
+        </Notice>
+      )}
+
+      <div className="u-flex u-flex-wrap u-gap-2" aria-label="Required connections">
+        {entries.map((e) => <ProviderChip key={e.provider} {...e} />)}
+      </div>
+
+      <p className="muted u-fs-13 u-mt-0">
+        Effective autonomy: <strong>{AUTONOMY_LABEL[gatedAutonomy]}</strong>
+        {effective.acting ? '' : ' — external actions are draft/recommend only until every connection is configured.'}
+      </p>
+    </div>
+  );
+}

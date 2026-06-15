@@ -1,11 +1,11 @@
 # ADR 0013 — Sharing (public share links)
 
-**Status:** implemented (Phases 1–3 shipped — `src/features/sharing/` incl. public `/v1/host/sample/shared/:token`)
+**Status:** implemented (Phases 1–3 shipped — `src/features/sharing/` incl. public `/v1/host/openwop-app/shared/:token`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC), ADR 0009 (CMS — a shareable resource), ADR 0011 (KB — a shareable resource)
-**Toggle:** `sharing` · **Surfaces:** authed `/v1/host/sample/sharing/*`
-+ **public (unauthed)** `/v1/host/sample/shared/:token` (host-extension, non-normative)
+**Toggle:** `sharing` · **Surfaces:** authed `/v1/host/openwop-app/sharing/*`
++ **public (unauthed)** `/v1/host/openwop-app/shared/:token` (host-extension, non-normative)
 
 ---
 
@@ -73,7 +73,7 @@ distinguish (both still 404 publicly — uniform, no info leak).
 ### Phase 1 — share-link store + resolver registry + authed CRUD (backend)
 
 `DurableCollection<ShareLink>('sharing:link')` keyed by token. Routes under
-`/v1/host/sample/sharing/orgs/:orgId/links`, `authorizeOrgScope`-gated:
+`/v1/host/openwop-app/sharing/orgs/:orgId/links`, `authorizeOrgScope`-gated:
 - `POST` (`workspace:write`) `{resourceType, resourceId, label?, expiresInDays?}`
   → reject an unknown `resourceType`; `resolver.validate` asserts the resource is
   in this org (cross-org/tenant `resourceId` fails closed); mint + store.
@@ -83,13 +83,13 @@ distinguish (both still 404 publicly — uniform, no info leak).
 
 ### Phase 2 — public resolve + OG card (backend, unauthed)
 
-Add `'/v1/host/sample/shared'` to `PUBLIC_PATH_PREFIXES` (verified NOT to shadow
+Add `'/v1/host/openwop-app/shared'` to `PUBLIC_PATH_PREFIXES` (verified NOT to shadow
 the authed `…/sharing/*` — `sharing` ≠ `shared`). Routes (no auth; tenant from the
 link; gated on the link-tenant's `sharing` toggle; uniform 404 on
 missing/expired/revoked/feature-off/resource-gone — no enumeration signal):
-- `GET /v1/host/sample/shared/:token` → `{resourceType, label, resource}` via the
+- `GET /v1/host/openwop-app/shared/:token` → `{resourceType, label, resource}` via the
   type's `load`.
-- `GET /v1/host/sample/shared/:token/card` → `{title, description, imageUrl?}` via
+- `GET /v1/host/openwop-app/shared/:token/card` → `{title, description, imageUrl?}` via
   `card` (social preview).
 
 ### Phase 3 — frontend
@@ -112,7 +112,7 @@ expiry), the org's active links with **copyable public URLs** + revoke.
   allowlist (the ADR 0012 pattern).
 - **RBAC (ADR 0006):** mint/revoke = `workspace:write`, list = `workspace:read`;
   cross-org/tenant resource ids + links fail closed.
-- **No wire surface → no RFC:** entirely under `/v1/host/sample/*`.
+- **No wire surface → no RFC:** entirely under `/v1/host/openwop-app/*`.
 
 ## Alternatives considered
 

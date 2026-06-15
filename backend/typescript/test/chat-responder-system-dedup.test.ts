@@ -74,11 +74,11 @@ vi.mock('../src/providers/dispatch.js', async (importOriginal) => {
   };
 });
 
-let sampleChatResponderNode: typeof import('../src/bootstrap/nodes.js')['sampleChatResponderNode'];
+let chatResponderNode: typeof import('../src/bootstrap/nodes.js')['chatResponderNode'];
 
 beforeAll(async () => {
   const mod = await import('../src/bootstrap/nodes.js');
-  sampleChatResponderNode = mod.sampleChatResponderNode;
+  chatResponderNode = mod.chatResponderNode;
 });
 
 afterEach(() => {
@@ -125,7 +125,7 @@ describe('chat-responder: system-message de-duplication', () => {
       ],
       systemPrompt: 'You are Deep Researcher. Plan, retrieve, evaluate, write up findings.',
     });
-    const outcome = await sampleChatResponderNode.execute(ctx);
+    const outcome = await chatResponderNode.execute(ctx);
     expect(outcome.status).toBe('success');
     expect(capturedMessages).not.toBeNull();
     const systemMessages = capturedMessages!.filter((m) => m.role === 'system');
@@ -145,7 +145,7 @@ describe('chat-responder: system-message de-duplication', () => {
       ],
       // No config.systemPrompt and no agentId — chat-responder resolves nothing.
     });
-    const outcome = await sampleChatResponderNode.execute(ctx);
+    const outcome = await chatResponderNode.execute(ctx);
     expect(outcome.status).toBe('success');
     expect(capturedMessages).not.toBeNull();
     // Caller's exact messages flow through unmodified.
@@ -171,7 +171,7 @@ describe('chat-responder: system-message de-duplication', () => {
       credentialRef: 'byok:anthropic-test',
       secrets: { 'byok:anthropic-test': 'sk-ant-test-key-not-real' },
     });
-    const outcome = await sampleChatResponderNode.execute(ctx);
+    const outcome = await chatResponderNode.execute(ctx);
     expect(outcome.status).toBe('success');
     expect(capturedMessages).not.toBeNull();
     const systemMessages = capturedMessages!.filter((m) => m.role === 'system');
@@ -192,7 +192,7 @@ describe('chat-responder: system-message de-duplication', () => {
       ],
       systemPrompt: 'workflow-pinned system',
     });
-    const outcome = await sampleChatResponderNode.execute(ctx);
+    const outcome = await chatResponderNode.execute(ctx);
     expect(outcome.status).toBe('success');
     expect(capturedMessages).not.toBeNull();
     const systemMessages = capturedMessages!.filter((m) => m.role === 'system');

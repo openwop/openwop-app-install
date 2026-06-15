@@ -1,11 +1,11 @@
 /**
- * Sample-extension BYOK secret-management routes.
+ * Host-extension BYOK secret-management routes.
  *
- *   GET    /v1/host/sample/byok/secrets             — list stored refs (NEVER values)
- *   POST   /v1/host/sample/byok/secrets             — { credentialRef, value } → stored
- *   DELETE /v1/host/sample/byok/secrets/:credentialRef
+ *   GET    /v1/host/openwop-app/byok/secrets             — list stored refs (NEVER values)
+ *   POST   /v1/host/openwop-app/byok/secrets             — { credentialRef, value } → stored
+ *   DELETE /v1/host/openwop-app/byok/secrets/:credentialRef
  *
- * Namespace: these routes live under `/v1/host/sample/*` per
+ * Namespace: these routes live under `/v1/host/openwop-app/*` per
  * `spec/v1/host-extensions.md` §"Canonical prefixes" — they are NOT
  * part of the OpenWOP v1 wire contract, so they MUST live under a
  * vendor-prefixed path so a future spec version that defines its own
@@ -41,7 +41,7 @@ function scopeFromReq(req: import('express').Request): { tenantId: string } | un
 }
 
 export function registerByokRoutes(app: Express): void {
-  app.get('/v1/host/sample/byok/secrets', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/byok/secrets', async (req, res, next) => {
     try {
       res.json({ credentialRefs: await listSecretRefs(scopeFromReq(req)) });
     } catch (err) {
@@ -49,7 +49,7 @@ export function registerByokRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/byok/secrets', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/byok/secrets', async (req, res, next) => {
     try {
       const body = req.body as SetSecretRequest;
       if (!body || typeof body !== 'object') {
@@ -83,7 +83,7 @@ export function registerByokRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/byok/secrets/:credentialRef', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/byok/secrets/:credentialRef', async (req, res, next) => {
     try {
       const ref = req.params.credentialRef;
       if (!REF_PATTERN.test(ref)) {

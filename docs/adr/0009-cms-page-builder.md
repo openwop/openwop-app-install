@@ -5,7 +5,7 @@
 **Depends on:** ADR 0004 (Organizations), ADR 0006 (RBAC scopes), ADR 0007
 (Media Library — section assets)
 **Owner of CMS data:** a NEW feature-package `src/features/cms/`.
-**Surface:** `/v1/host/sample/cms/*` (host-extension, NON-NORMATIVE — no RFC).
+**Surface:** `/v1/host/openwop-app/cms/*` (host-extension, NON-NORMATIVE — no RFC).
 
 > **Correction (2026-06-11, ADR 0027):** CMS is now **always-on** — its
 > `toggleDefault` is removed and it no longer appears in the feature-toggle
@@ -129,7 +129,7 @@ Registered in `FRONTEND_FEATURES`; the `npm run build` gate must pass.
   verifies tenantId AND orgId; cross-tenant/org access fails closed.
 - **Content safety:** section `html` is sanitized and `url` scheme-checked before
   persistence (no stored XSS via page content — the lesson from the media review).
-- **No wire surface → no RFC:** entirely under `/v1/host/sample/*`; section
+- **No wire surface → no RFC:** entirely under `/v1/host/openwop-app/*`; section
   assets ride the already-accepted Media surface.
 
 ## Alternatives considered

@@ -6,7 +6,7 @@
  * `agents[]` arrays, keyed by `agentId`. `installAgents` is append-only;
  * a manifest agent is resolvable for dispatch via `core.dispatch` once it
  * lands here. Like the node registry, a single in-process map suffices for
- * the sample host; multi-instance hosts would replicate via a shared store.
+ * the reference app; multi-instance hosts would replicate via a shared store.
  */
 
 /** A pack-declared agent manifest, resolved for runtime use.
@@ -49,8 +49,8 @@ export interface ResolvedAgentManifest {
    *  `peerDependenciesMeta.optional` that this host does NOT satisfy, so they
    *  are inert for this installation. Absent/empty ⇒ full declared capability. */
   degraded?: string[];
-  /** Owning tenant id for user-authored agents (sample-extension
-   *  `POST /v1/host/sample/agents`, phase E1 2026-05-28). Pack-installed
+  /** Owning tenant id for user-authored agents (host-extension
+   *  `POST /v1/host/openwop-app/agents`, phase E1 2026-05-28). Pack-installed
    *  agents OMIT this field — they are tenant-agnostic (a host
    *  loads them once at boot for every tenant to share).
    *
@@ -85,7 +85,7 @@ export function getAgentRegistry() {
     /** Drop one agent from the in-process registry. Returns true when
      *  a row was removed. The pack-loader path is append-only (RFC
      *  0003), so this is intended only for user-authored agents
-     *  (`DELETE /v1/host/sample/agents/:agentId`, phase E1 2026-05-28).
+     *  (`DELETE /v1/host/openwop-app/agents/:agentId`, phase E1 2026-05-28).
      *  Calling on a pack-installed agentId is not blocked here — the
      *  delete route gates that at the storage layer (a row that
      *  doesn't exist in `user_agents` returns 404 before we get

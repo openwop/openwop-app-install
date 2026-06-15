@@ -26,7 +26,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
   const navigate = useNavigate();
   const agentId = entry.agentRef.agentId;
   const isUserAuthored = agentId.startsWith('user.');
-  // A `host:*` agentRef is a synthetic/built-in demo template — it does NOT
+  // A `host:*` agentRef is a synthetic/built-in example template — it does NOT
   // resolve to a forkable manifest agent (GET /v1/agents 404s), so a "Fork"
   // CTA would dead-end on an empty form. Only genuinely-installed pack agents
   // are forkable.
@@ -136,7 +136,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
           ) : (
             <>
               <p className="u-mt-0 u-fs-14">
-                {entry.persona} is a built-in demo agent — its underlying instructions aren't editable here. Create your
+                {entry.persona} is a built-in example agent — its underlying instructions aren't editable here. Create your
                 own agent to write custom instructions from scratch.
               </p>
               <button type="button" className="secondary" onClick={() => navigate('/agents/new')}>

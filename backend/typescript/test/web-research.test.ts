@@ -1,10 +1,10 @@
 /**
- * Gap D-4 — core.openwop.web-search pack + sample.web.research workflow.
+ * Gap D-4 — core.openwop.web-search pack + openwop-app.web.research workflow.
  *
  * Verifies:
  *   1. The `core.web.search` node is registered and runs as a deterministic
  *      stub (the demo host does NOT advertise host.webSearch).
- *   2. The hardcoded `sample.web.research` workflow runs end-to-end through
+ *   2. The hardcoded `openwop-app.web.research` workflow runs end-to-end through
  *      search → summarize with no BYOK provider, reaching `completed`.
  *   3. The stub result is deterministic across runs (replay safety).
  */
@@ -16,7 +16,7 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 const PORT = 18203;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -70,10 +70,10 @@ async function runToTerminal(workflowId: string, inputs: Record<string, unknown>
 
 describe('core.openwop.web-search — core.web.search node', () => {
   it('runs as a one-node workflow and returns a deterministic stub result', async () => {
-    const reg = await jsonFetch('/v1/host/sample/workflows', {
+    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
-        workflowId: 'sample.web.search-only',
+        workflowId: 'openwop-app.web.search-only',
         nodes: [{ nodeId: 'search', typeId: 'core.web.search', config: { maxResults: 3 } }],
         edges: [],
         variables: [{ name: 'query', type: 'string', defaultValue: 'OpenWOP protocol' }],
@@ -81,7 +81,7 @@ describe('core.openwop.web-search — core.web.search node', () => {
     });
     expect([200, 201]).toContain(reg.status);
 
-    const runId = await runToTerminal('sample.web.search-only', { query: 'OpenWOP protocol' });
+    const runId = await runToTerminal('openwop-app.web.search-only', { query: 'OpenWOP protocol' });
     const snap = await jsonFetch<RunSnap>(`/v1/runs/${runId}`);
     expect(snap.body.status).toBe('completed');
 
@@ -101,8 +101,8 @@ describe('core.openwop.web-search — core.web.search node', () => {
   });
 
   it('is deterministic: the same query yields identical results across runs', async () => {
-    const r1 = await runToTerminal('sample.web.search-only', { query: 'determinism check' });
-    const r2 = await runToTerminal('sample.web.search-only', { query: 'determinism check' });
+    const r1 = await runToTerminal('openwop-app.web.search-only', { query: 'determinism check' });
+    const r2 = await runToTerminal('openwop-app.web.search-only', { query: 'determinism check' });
     const b1 = await jsonFetch<BundleBody>(`/v1/runs/${r1}/debug-bundle`);
     const b2 = await jsonFetch<BundleBody>(`/v1/runs/${r2}/debug-bundle`);
     const pick = (b: BundleBody) => {
@@ -114,9 +114,9 @@ describe('core.openwop.web-search — core.web.search node', () => {
   });
 });
 
-describe('sample.web.research workflow (gap D-4)', () => {
+describe('openwop-app.web.research workflow (gap D-4)', () => {
   it('runs search → summarize end-to-end with no BYOK provider', async () => {
-    const runId = await runToTerminal('sample.web.research', { query: 'workflow orchestration' });
+    const runId = await runToTerminal('openwop-app.web.research', { query: 'workflow orchestration' });
     const snap = await jsonFetch<RunSnap>(`/v1/runs/${runId}`);
     expect(snap.body.status, 'web-research sample should complete without a provider').toBe('completed');
 

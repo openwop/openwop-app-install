@@ -1,8 +1,8 @@
 /**
- * Standing agent roster — host-extension routes (sample-grade, non-normative).
+ * Standing agent roster — host-extension routes (non-normative).
  *
  * The reference implementation of RFCS/0086 §B (roster discovery). Surface
- * under `/v1/host/sample/roster`:
+ * under `/v1/host/openwop-app/roster`:
  *   GET    /                     list the caller's roster (tenant-scoped)
  *   POST   /                     create a named agent (persona + agentRef + workflows[])
  *   GET    /:rosterId            one entry
@@ -22,12 +22,13 @@ import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
 import {
   createRosterEntry,
-  deleteRosterEntry,
   getRosterEntry,
   listRoster,
   updateRosterEntry,
   type RosterAgentRef,
 } from '../host/rosterService.js';
+import { deleteRosterMemberCascade } from '../host/rosterCascade.js';
+import { hostExtStorage } from '../host/hostExtPersistence.js';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -109,7 +110,7 @@ function parseAutonomyLevel(value: unknown): 'auto' | 'guided' | 'review' | unde
 }
 
 export function registerRosterRoutes(app: Express): void {
-  app.get('/v1/host/sample/roster', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/roster', async (req, res, next) => {
     try {
       res.json({ roster: await listRoster(tenantOf(req)) });
     } catch (err) {
@@ -117,7 +118,7 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/roster', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/roster', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as {
         persona?: unknown;
@@ -160,7 +161,7 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/sample/roster/:rosterId', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
       const entry = await getRosterEntry(req.params.rosterId);
       if (!entry || entry.tenantId !== tenantOf(req)) {
@@ -172,7 +173,7 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.patch('/v1/host/sample/roster/:rosterId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
       const existing = await getRosterEntry(req.params.rosterId);
       if (!existing || existing.tenantId !== tenantOf(req)) {
@@ -207,13 +208,17 @@ export function registerRosterRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/roster/:rosterId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
       const entry = await getRosterEntry(req.params.rosterId);
       if (!entry || entry.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
       }
-      await deleteRosterEntry(entry.rosterId);
+      // Cascade: removing a standing agent also drops its board (+ cards),
+      // schedule jobs, approvals, org-chart membership, sidebar pins, and its
+      // host-synthesized chat agent — so nothing is left orphaned referencing a
+      // now-gone rosterId.
+      await deleteRosterMemberCascade(entry.tenantId, hostExtStorage(), entry.rosterId);
       res.status(204).end();
     } catch (err) {
       next(err);

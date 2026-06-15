@@ -1,7 +1,7 @@
 /**
  * Account management routes (P3.6.5).
  *
- *   DELETE /v1/host/sample/account   — hard delete the caller's data
+ *   DELETE /v1/host/openwop-app/account   — hard delete the caller's data
  *
  * Hard delete wipes:
  *   - every row owned by the caller's user:* tenant (runs, events,
@@ -42,7 +42,7 @@ import {
 const log = createLogger('routes.account');
 
 export function registerAccountRoutes(app: Express, deps: { storage: Storage }): void {
-  app.delete('/v1/host/sample/account', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/account', async (req, res, next) => {
     try {
       // ADR 0015: "delete my account" wipes the caller's PERSONAL tenant — NOT
       // `req.tenantId`, which is the ACTIVE workspace and may be a shared `ws:`

@@ -71,8 +71,11 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 | 0022 | Marketplace (browse + install packs) | `marketplace` | 0001, 0006 | `feature.marketplace.*` (composes signed registry) | 🔵 Planned (ADR Proposed) | Marketplace |
 | 0024 | Connections — generic per-user/org credential broker (Google/Slack/ServiceNow/Zoom) for the existing MCP/HTTP/integration nodes | `connections` (graduated always-on, §Correction) | 0002, 0003, 0006, 0015 | — (composes core node packs; reuses BYOK + RFC 0076/0079) | 🟢 Done (Phases A–D + §4 integration adapters: HTTP injection · Slack · email · SMS · push · MCP) | (host capability — net-new) |
 | 0025 | User/Agent orchestration symmetry — auto-provisioned personal boards + polymorphic board owner; approvals via heartbeat/Notifications | (folds under `profiles`) | 0005, 0015, RFC 0086/0052 | — (generalizes `host.kanban`) | 🟡 In Progress (Phase 1 done — board owner + auto-provision) | (foundational — net-new) |
-| 0023 | Executive Assistant / Chief-of-Staff — memory graph + scheduled perception/action loops + prioritization, **RAG via `kb`** | `assistant` | 0024, 0025, 0014, 0001, 0015, 0006 | `feature.assistant.{nodes,agents}` (thin — graph/logic only) | 🟡 In Progress (graph + packs + prioritization + FE done; loops deploy-gated) | (new product — not a MyndHyve port) |
+| 0023 | Executive Assistant / Chief-of-Staff — memory graph + scheduled perception/action loops + prioritization, **RAG via `kb`**. §Correction (2026-06-13): the capability is **decoupled from `roleKey`** → core, `agentProfile`-activated (ADR 0031); foundation of the 10-twin suite | `assistant` | 0024, 0025, 0014, 0001, 0015, 0006 | `feature.assistant.{nodes,agents}` (thin — graph/logic only) | 🟢 Done (graph + packs + prioritization + FE + capability decouple; loops deploy-gated) | (new product — not a MyndHyve port) |
 | 0030 | Outbound MCP client — per-user-authed external MCP tool calls (`ctx.mcp.{invokeTool,readResource,listTools}`); the consuming half of RFC 0020 | — (host capability) | 0024, 0027, 0028 | — (composes `core.openwop.mcp`; reuses RFC 0093/0079) | 🟢 Done (Phase 1 + 2a SSE/Streamable-HTTP; Phase 2b `subscribe-resource` deferred) | (host capability — net-new) |
+| 0031 | **Rich `agentProfile` host-ext + seed-all-properties** — config params, permissions, HITL, escalation, channels, admin controls, risk/compliance, `requiredConnections`, metrics, `capabilities`, 4→3 autonomy map; `GET/PUT /v1/host/openwop-app/agents/:id/profile` + view/edit UI | — (host-ext, non-normative) | 0023, 0024, 0025 | — | 🟢 Done | Enterprise Work-Twin suite |
+| 0032 | **Work-twin persona reconciliation** — seed ONLY the 10 canonical twins; retire the legacy 5 (guarded migration); reuse Iris as the Chief-of-Staff twin; per-twin owner bindings (crm/csm/kb/…) | — (demo seed) | 0023, 0031, 0016, 0008, 0011 | composes the `tmpl.*` template pack | 🟢 Done | Enterprise Work-Twin suite |
+| 0033 | **Work-twin connector reachability + day-1 honesty matrix** — `requiredConnections` activation gating (fail-closed / `supported:false`); RFC 0095 connection packs (m365/jira/salesforce/notion/workday); google/slack via brokered HTTP correction | — (host) | 0024, 0030, 0031 | RFC 0095 connection packs | 🟢 Done (day-1; external-event triggers + async A2A deferred = RFC-gated) | Enterprise Work-Twin suite |
 
 > **ADR-0003 (Canonical identity & session binding) was inserted** as a
 > foundational refinement of ADR-0002 — it makes `User.userId` the one subject
@@ -109,10 +112,38 @@ Each feature, when its turn comes, follows the same lifecycle. This roadmap only
 > under a reserved tenant `host:site` (a `host:` prefix no real principal can hold),
 > seeded + served at `/` and **ON by default** (`OPENWOP_FRONTPAGE_DEFAULT_ENABLED=false`
 > to opt a fork out). A super admin edits it at **Admin → Content → "Front page"**
-> via the `requireSuperadmin`-gated `/v1/host/sample/site-page` — host authority, so
+> via the `requireSuperadmin`-gated `/v1/host/openwop-app/site-page` — host authority, so
 > it's editable regardless of any tenant, without touching `requireOrgScope`.
 > Mirrors MyndHyve's global admin-owned `cms_pages/home`. See
 > `docs/adr/0027-cms-front-page-and-always-on-content.md`.
+
+## Post-"day 1" follow-ups (proposed ADRs)
+
+"Day 1" of the Enterprise Work-Twin suite (ADRs 0031/0032/0033) shipped: all 10
+twins seeded, the rich `agentProfile`, the core/profile-activated assistant
+capability, the pinned `tmpl.*` workflow-template pack, and `requiredConnections`
+activation gating — twins run at **draft/recommend** over wired surfaces. The items
+below were explicitly **deferred** during that work and are tracked here as
+**proposed ADRs** to execute next. (RFC-gated rows cannot be done by an ADR alone —
+they need an upstream OpenWOP RFC in `../openwop/RFCS/` first; see
+[CLAUDE.md](CLAUDE.md) § "A spec change needs an RFC".)
+
+| ADR | Scope | Deps | Status | Source of deferral |
+|---|---|---|---|---|
+| 0034 | **External-event trigger ingestion** — wire `webhook` / `email` / `form` sources → run through the RFC 0083 trigger bridge (today only **cron + Kanban card moves** dispatch runs). Lets twins fire on "new case / document uploaded / stage change / NPS drop" instead of only schedules. | RFC 0083, RFC 0099, ADR 0033 | 🟢 Done (ADR 0034; rides RFC 0099 `Active` — `TriggerEvent` envelope + `POST /v1/trigger-subscriptions` + `triggerBridge.ingestion`, SSRF/redaction/replay-safe) | ADR 0033 §Deferrals |
+| 0035 | **Async / durable A2A tasks** — durable `A2ATaskState` persistence (via `DurableCollection`) on the existing A2A server: `message/send` persists the projected Task; `tasks/get` returns live state after disconnect; `tasks/resubscribe` re-attaches (read-only); `tasks/pushNotificationConfig/set` registers an SSRF-guarded push firing on the four terminal/blocking transitions. The `a2a` capability slot (RFC 0100 §1) advertises `durableTasks/streaming/push` **only when wired** (`OPENWOP_A2A_DURABLE_TASKS`); the synchronous round-trip is unchanged with it off. | RFC 0100 (Active), RFC 0093, RFC 0076, ADR 0033 | 🟢 Done (ADR 0035 — gating RFC 0100 now Active; persistence + resubscribe + push wired; long-running run-backed projection seam in place, deterministic-dispatch-terminal in the reference) | ADR 0033 §Deferrals |
+| 0036 | **`agentProfile` policy enforcement** — enforce `permissions.never` + `hitl` + the `autonomous-within-policy` `withinPolicyActions` allowlist via a pure resolver (`host/agentPolicyResolver.ts`) composed at the heartbeat pick + assistant action enqueue, most-restrictive-wins with ADR 0033 readiness gating. (`permissions.read/write` positive allowlists remain advisory pending a per-tool-call `toolHooks` follow-on.) | ADR 0031, ADR 0028 | 🟢 Done (ADR 0036) | ADR 0031 §Open questions |
+| 0037 | **Connector framework + remaining provider reach** — `connectorInvoker` is now a real broker-delegating impl (was a throw-on-use stub): resolves the acting user's provider Connection through the Connections broker + brokered egress, pins to the provider's `apiHosts`, fails closed when unconfigured; `host.connectors` advertised `supported:true` + resolvable as a pack peerDependency; ServiceNow `apiHosts` added. Per-provider packs still need **no ADR each**. Named-operation connector descriptors deferred. | ADR 0033, ADR 0024, RFC 0095 | 🟢 Done (framework wired; per-provider reach deploy-gated; descriptor catalog deferred) | ADR 0033 matrix (deploy-gated rows) |
+| 0038 | **Per-agent knowledge & memory** (toggle `agent-knowledge`, OFF, bucket `tenant`) — user-curated per-agent RAG: bind KB collections (cited docs) + private notes (auto-recalled); composed into dispatch retrieval; core `knowledge` capability activated per `agentProfile`. **Composes** kb (0011) + per-agent memory (RFC 0004) + agentProfile (0031) — a net-new per-agent store is FORBIDDEN (no-parallel-architecture). | ADR 0011, ADR 0031, ADR 0036 | 🟢 Done (ADR 0038 implemented — feature package + capability + dispatch composition + FE panel + route tests; host work, rides RFC 0004/0080/0018, **no new RFC**) | net-new (per-agent memory PRD; not a deferral) |
+| 0040 | **Board of Advisors** (toggle `advisory-board`, OFF, bucket `tenant`) — user-assembled councils of named digital-clone advisor agents, summoned together in one shared chat via `@@`; advisors address the user + each other by name, build on/challenge each other, then a moderator synthesizes. **Composes** roster + `agentProfile` persona (0031/0032), per-advisor RAG (0038, unchanged), the host multi-agent conversation seam (`conversationExchange`/`agentPromptScaffold`), the assistant moderator (0023), Sharing/RBAC (0013/0024/0006). New `AdvisoryBoard` entity under `/advisors/*` — explicitly **not** `host.kanban`'s board. Persona = `agentProfile`; capabilities stay core (David's law). | ADR 0031, ADR 0032, ADR 0038, ADR 0023, ADR 0025, ADR 0013 | 🟢 Done (Phases 1–5 — feature package + `@@` broadcast convene + per-advisor RAG + moderator synthesis + likeness governance + `ctx.features` surface + FE council chat + 8 route/orchestration tests; **phased RFC gate**: MVP rides Accepted RFC 0005/0002 §A8 as host-ext, **no blocking RFC**; non-blocking companion **RFC 0101** (Parked) upstreams normative multi-party — Phase 6 deferred. Node pack + chat envelope + `tmpl.advisors.*` seed deferred, logged in ADR.) | net-new (board-of-advisors PRD; not a deferral) |
+
+> **Per-twin product enhancements** (each twin's "Future Enhancements" in
+> `~/Downloads/new_agents.md` — board-packet assembly, predictive renewal scoring,
+> autonomous low-risk IT remediation, etc.) and the **platform future-state**
+> (ABAC, per-tool ephemeral tokens, a simulation/eval harness, ALM ring
+> deployments) are product-roadmap depth, not day-1 blockers. Group them under a
+> later ADR cluster when prioritized; they compose the same seams (no parallel
+> systems).
 
 ## Build sequence
 
@@ -207,7 +238,7 @@ This unblocks RBAC (0006) — roles bind to the canonical subject. See
 
 > **Reconciled.** A route-test harness found the app already had a full
 > Organizations / members / **roles** surface (`accessControl`, RFC 0049),
-> always-on at `/v1/host/sample/orgs`. The initial org-as-tenant feature collided
+> always-on at `/v1/host/openwop-app/orgs`. The initial org-as-tenant feature collided
 > with and duplicated it. Per the `/architect` options review (option B),
 > **accessControl is the single owner of orgs/members/roles**, and the `orgs`
 > feature was reduced to the one additive thing it lacked: **email-token
@@ -367,11 +398,11 @@ and upgrade the gaps, **without regressing the working surface**.
   toasts.
 - **Web-Push (RFC 8030 / VAPID)** — real, env-gated (`OPENWOP_VAPID_*`); per-tenant
   multi-device `push_subscriptions`; 404/410 pruning.
-- An **email/SMS webhook** delivery stub (`/v1/host/sample/messaging/notify`).
+- An **email/SMS webhook** delivery stub (`/v1/host/openwop-app/messaging/notify`).
 - **Run-lifecycle emit hooks** — interrupts (approval/clarification), run failure,
   run completion emit notifications via a backend seam (`setNotificationBackend`).
 - Storage: `notifications` + `push_subscriptions` tables (sqlite + postgres),
-  **tenant-scoped**; routes under `/v1/host/sample/notifications[/push]/*`.
+  **tenant-scoped**; routes under `/v1/host/openwop-app/notifications[/push]/*`.
 - It is **core-bootstrapped** (`src/bootstrap/notifications.ts`, `src/notifications/`,
   core route modules in `registerAllRoutes`) and **always-on** — NOT a `BackendFeature`.
 
@@ -449,7 +480,7 @@ value chain.
       Graph + canonical + noindex; OG image = a Media token) in its own store keyed
       by pageId — so ADR-0009 needs no migration and the two stay independently
       toggleable.
-- [x] A **PUBLIC, unauthenticated** surface `/v1/host/sample/public/:orgId/*`
+- [x] A **PUBLIC, unauthenticated** surface `/v1/host/openwop-app/public/:orgId/*`
       (page-by-slug, `sitemap.xml`, `robots.txt`, `feed.rss`): org→tenant via
       `getOrg`, gated on the org-tenant's `publishing` toggle (off = site offline),
       served **published-only**, `noindex` honored. One justified core edit — the
@@ -484,7 +515,7 @@ link to a SPECIFIC resource** — including ones the public surface won't serve 
       `cmsService`) + `kb_collection` (composes `kbService`); a new type is one
       map entry, no routing change (the altitude flagged in the 0012 review).
 - [x] Authed mint/list/revoke (`authorizeOrgScope` — write/read) +
-      **PUBLIC** `GET /v1/host/sample/shared/:token[/card]` (unauthed — the token
+      **PUBLIC** `GET /v1/host/openwop-app/shared/:token[/card]` (unauthed — the token
       IS the credential; tenant from the link; gated on the link-tenant's
       `sharing` toggle; uniform 404 on missing/revoked/expired/feature-off/gone).
 - [x] Frontend `SharingPage` — resource picker → mint (label + expiry) → active

@@ -4,11 +4,11 @@
  * → Schedule & heartbeat. No raw ids in the primary surface.
  *
  * On finish it composes the existing host-extension surfaces:
- *   1. POST /v1/host/sample/agents       — a user-authored agent (editable
+ *   1. POST /v1/host/openwop-app/agents       — a user-authored agent (editable
  *      instructions; agentRef `user.*` so the Instructions tab can edit it)
- *   2. POST /v1/host/sample/roster       — the named agent bound to that agent
- *   3. POST /v1/host/sample/kanban/boards — its task board (4 demo lanes)
- *   4. POST /v1/host/sample/scheduler/jobs — any chosen starter schedules
+ *   2. POST /v1/host/openwop-app/roster       — the named agent bound to that agent
+ *   3. POST /v1/host/openwop-app/kanban/boards — its task board (4 demo lanes)
+ *   4. POST /v1/host/openwop-app/scheduler/jobs — any chosen starter schedules
  * then routes to the new agent's workspace.
  */
 
@@ -31,15 +31,24 @@ const DEMO_LANES: KanbanColumn[] = [
   { id: 'done', name: 'Done' },
 ];
 
-// Suggested human names per role — same personas the demo seed uses, so the
-// name field reads as a coworker rather than a config value.
+// Suggested human names per role — a friendly default so the name field reads as
+// a coworker rather than a config value (the user edits it). Keyed by the ADR
+// 0032 canonical work-twin roleKeys; Chief of Staff (= Iris) is created via the
+// assistant path, not this wizard.
 const EXAMPLE_NAMES: Record<string, string> = {
-  'sales-ops': 'Sally',
-  'support-triage': 'Marcus',
-  'finance-ops': 'Priya',
-  'engineering-ops': 'Devon',
-  'marketing-ops': 'Nora',
+  'sales-execution': 'Sawyer',
+  'customer-success': 'Casey',
+  'finance-close': 'Fiona',
+  'it-service-desk': 'Ira',
+  'internal-comms': 'Cameron',
+  'recruiting-coordinator': 'Riley',
+  'people-ops': 'Parker',
+  'contract-procurement': 'Quinn',
+  'executive-ops': 'Evan',
 };
+
+/** Neutral fallback name when a role has no suggestion (e.g. a custom role). */
+const FALLBACK_EXAMPLE_NAME = 'Alex';
 
 const HEARTBEAT_OPTIONS = [
   { key: 'manual', label: 'Manual only (Check now)' },
@@ -178,7 +187,7 @@ export function AgentCreateWizard(): JSX.Element {
     return null;
   };
 
-  const exampleName = role ? EXAMPLE_NAMES[role.key] ?? 'Sally' : 'Sally';
+  const exampleName = (role && EXAMPLE_NAMES[role.key]) || FALLBACK_EXAMPLE_NAME;
   const CustomRoleIcon = roleThemeForKey('custom').Icon;
 
   const onFinish = async () => {
@@ -204,7 +213,7 @@ export function AgentCreateWizard(): JSX.Element {
         ...(heartbeatIntervalMs > 0 ? { heartbeatIntervalMs } : {}),
         ...(autonomy !== 'auto' ? { autonomyLevel: autonomy } : {}),
       });
-      // 3. board with the 4 demo lanes; To Do triggers the first workflow.
+      // 3. board with the 4 standard lanes; To Do triggers the first workflow.
       if (createBoardEnabled) {
         const columns = DEMO_LANES.map((c) =>
           c.id === 'todo' && workflows[0] ? { ...c, triggerWorkflowId: workflows[0] } : { ...c },
@@ -363,7 +372,7 @@ export function AgentCreateWizard(): JSX.Element {
           </label>
           <label className="u-flex u-gap-2 u-items-center">
             <input type="checkbox" checked={enableDiscord} onChange={(e) => setEnableDiscord(e.target.checked)} />
-            <span>Simulated Discord tasks (demo)</span>
+            <span>Simulated Discord tasks</span>
           </label>
         </div>
       ) : null}

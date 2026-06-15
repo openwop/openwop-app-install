@@ -66,7 +66,7 @@ function extractCookie(setCookieHeader: string | null): string | null {
 }
 
 async function mintAnonCookie(): Promise<string> {
-  const res = await fetch(`${BASE}/v1/host/sample/workflows`);
+  const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`);
   expect(res.status).toBe(200);
   const cookie = extractCookie(res.headers.get('set-cookie'));
   expect(cookie).toBeTruthy();
@@ -77,7 +77,7 @@ async function registerWorkflow(workflowId: string, nodes: object[], cookie?: st
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (cookie) headers.cookie = cookie;
   else headers.authorization = 'Bearer preflight-test-admin';
-  const res = await fetch(`${BASE}/v1/host/sample/workflows`, {
+  const res = await fetch(`${BASE}/v1/host/openwop-app/workflows`, {
     method: 'POST',
     headers,
     body: JSON.stringify({ workflowId, nodes }),
@@ -116,7 +116,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
     const cookie = await mintAnonCookie();
     await registerWorkflow(
       'wf-non-managed',
-      [{ nodeId: 'shout', typeId: 'local.sample.demo.uppercase' }],
+      [{ nodeId: 'shout', typeId: 'local.openwop-app.uppercase' }],
       cookie,
     );
 
@@ -130,10 +130,10 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
 
   it('rejects anon caller when chat-responder typeId implicitly defaults to managed (no explicit credentialRef)', async () => {
     // Regression for the code-review gap: the chat-responder node
-    // (typeId `vendor.openwop-sample.chat-responder`) defaults to
+    // (typeId `vendor.openwop-app.chat-responder`) defaults to
     // `managed:openwop-free` when neither `config.credentialRef` nor
     // `inputs.credentialRef` is set — see the precedence chain in
-    // bootstrap/nodes.ts. The host's own `sample.chat.turn` workflow
+    // bootstrap/nodes.ts. The host's own `openwop-app.chat.turn` workflow
     // is exactly this shape (no config at all). Before this fix, an
     // anon caller submitting it slipped past the preflight and only
     // failed mid-execution at the chat-node dispatch boundary with
@@ -142,7 +142,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
     const cookie = await mintAnonCookie();
     await registerWorkflow(
       'wf-chat-implicit-managed',
-      [{ nodeId: 'respond', typeId: 'vendor.openwop-sample.chat-responder' }],
+      [{ nodeId: 'respond', typeId: 'vendor.openwop-app.chat-responder' }],
       cookie,
     );
 
@@ -169,7 +169,7 @@ describe('POST /v1/runs — managed-credentialRef × anon-tenant preflight', () 
       'wf-chat-explicit-byok',
       [{
         nodeId: 'respond',
-        typeId: 'vendor.openwop-sample.chat-responder',
+        typeId: 'vendor.openwop-app.chat-responder',
         config: { credentialRef: 'anthropic:byok-anon' },
       }],
       cookie,

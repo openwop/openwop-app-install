@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
 import { App } from './App.js';
 import { initObservability } from './platform/initObservability.js';
+import { migrateSampleNamespace } from './platform/storage.js';
 // Side-effect import: initializes Firebase Auth (if configured) so the
 // `onIdTokenChanged` subscriber populates the cached ID token before
 // any fetch fires. No-op when Firebase env vars are unset.
@@ -16,6 +17,10 @@ void getCurrentUser();
 // Awaiting here pre-warms it so the redirect-back handler runs
 // before the first paint that might depend on its outcome.
 void getRedirectState();
+
+// Re-home legacy `openwop.sample.*` localStorage keys to `openwop-app.*` before
+// any module reads them, so returning users keep chat sessions / prompts / drafts.
+migrateSampleNamespace();
 
 // Wire observability (reporter, API timing seam, web vitals) before first paint.
 initObservability();

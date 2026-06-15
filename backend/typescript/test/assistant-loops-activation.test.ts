@@ -33,7 +33,7 @@ import { findChiefOfStaff } from '../src/features/assistant/chiefOfStaff.js';
 
 const PORT = 18963;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 let server: http.Server;
 
@@ -218,12 +218,12 @@ describe('loop routes (RFC 0052 activation surface)', () => {
   it('serves unconditionally (toggle graduated); enable/disable manage the scheduler job', async () => {
     // ADR 0023 § Correction — the assistant graduated off its toggle; the loop
     // surface serves always (no 404-while-off).
-    const before = await jf<{ loops: Array<{ loopId: string; enabled: boolean }> }>('/v1/host/sample/assistant/loops');
+    const before = await jf<{ loops: Array<{ loopId: string; enabled: boolean }> }>('/v1/host/openwop-app/assistant/loops');
     expect(before.status).toBe(200);
     expect(before.body.loops.map((l) => l.loopId).sort()).toEqual(['calendar-ingest', 'drive-ingest', 'morning-briefing']);
     expect(before.body.loops.every((l) => !l.enabled)).toBe(true);
 
-    const enabled = await jf<{ jobId: string; enabled: boolean }>('/v1/host/sample/assistant/loops/calendar-ingest/enable', {
+    const enabled = await jf<{ jobId: string; enabled: boolean }>('/v1/host/openwop-app/assistant/loops/calendar-ingest/enable', {
       method: 'POST',
       body: JSON.stringify({}),
     });
@@ -247,21 +247,21 @@ describe('loop routes (RFC 0052 activation surface)', () => {
     expect(job?.agentId).toBe(cos!.agentRef.agentId);
     expect(await getRosterEntry(job!.rosterId!)).not.toBeNull();
 
-    const after = await jf<{ loops: Array<{ loopId: string; enabled: boolean; cronExpr?: string }> }>('/v1/host/sample/assistant/loops');
+    const after = await jf<{ loops: Array<{ loopId: string; enabled: boolean; cronExpr?: string }> }>('/v1/host/openwop-app/assistant/loops');
     const cal = after.body.loops.find((l) => l.loopId === 'calendar-ingest');
     expect(cal?.enabled).toBe(true);
     expect(cal?.cronExpr).toBe('*/30 * * * *');
 
-    const disabled = await jf<{ enabled: boolean }>('/v1/host/sample/assistant/loops/calendar-ingest/disable', { method: 'POST', body: '{}' });
+    const disabled = await jf<{ enabled: boolean }>('/v1/host/openwop-app/assistant/loops/calendar-ingest/disable', { method: 'POST', body: '{}' });
     expect(disabled.status).toBe(200);
     expect(disabled.body.enabled).toBe(false);
 
-    expect((await jf('/v1/host/sample/assistant/loops/nope/enable', { method: 'POST', body: '{}' })).status).toBe(404);
+    expect((await jf('/v1/host/openwop-app/assistant/loops/nope/enable', { method: 'POST', body: '{}' })).status).toBe(404);
   });
 
   it('serves the brief on one batched route (T3)', async () => {
     const res = await jf<{ brief: { headline: string; topCommitments: unknown[]; awaitingApprovalCount: number } }>(
-      '/v1/host/sample/assistant/briefing',
+      '/v1/host/openwop-app/assistant/briefing',
     );
     expect(res.status).toBe(200);
     expect(typeof res.body.brief.headline).toBe('string');

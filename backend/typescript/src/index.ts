@@ -1,5 +1,5 @@
 /**
- * openwop-workflow-engine-sample — Cloud Run entry point.
+ * openwop-workflow-engine — Cloud Run entry point.
  *
  * Express bootstrap mirroring the shape of myndhyve/services/workflow-runtime
  * but with neutral substitutes for everything product-specific:
@@ -72,9 +72,9 @@ export const DEFAULT_SERVICE_DESCRIPTION =
   'An OpenWOP-compatible workflow and agent orchestration host.';
 
 /** Vendor tag emitted in `service.vendor` of `/.well-known/openwop`. Defaults to
- *  the reference-sample lineage; a white-label host overrides it with
+ *  the reference-app lineage; a white-label host overrides it with
  *  OPENWOP_SERVICE_VENDOR so its discovery doc doesn't claim a vendor it isn't. */
-export const DEFAULT_SERVICE_VENDOR = 'openwop-samples';
+export const DEFAULT_SERVICE_VENDOR = 'openwop-app';
 
 export interface AppConfig {
   port: number;
@@ -117,7 +117,7 @@ export function loadConfigFromEnv(): AppConfig {
     port: Number(process.env.PORT) || 8080,
     storageDsn: process.env.OPENWOP_STORAGE_DSN || 'sqlite://./data/workflow-engine.db',
     serviceName: boundServiceIdentity(
-      process.env.OPENWOP_SERVICE_NAME, 'openwop-workflow-engine-sample', 'OPENWOP_SERVICE_NAME'),
+      process.env.OPENWOP_SERVICE_NAME, 'openwop-workflow-engine', 'OPENWOP_SERVICE_NAME'),
     serviceVersion: boundServiceIdentity(
       process.env.OPENWOP_SERVICE_VERSION, '0.1.0', 'OPENWOP_SERVICE_VERSION'),
     // Surfaced in the OpenAPI discovery doc (`GET /v1/openapi.json`).
@@ -186,7 +186,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   }
 
   // Pre-seed BYOK from env (kept for backward-compat with conformance
-  // / scripted-test setups). Runtime adds via POST /v1/host/sample/byok/secrets.
+  // / scripted-test setups). Runtime adds via POST /v1/host/openwop-app/byok/secrets.
   await loadSecretsFromEnv();
 
   // Managed-provider key bootstrap. If MINIMAX_API_KEY (etc.) is set,
@@ -208,7 +208,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // /observability) so pack-authored nodes delegating to ctx.storage / ctx.db
   // / ctx.fs / ctx.queueBus / ctx.observability actually execute. Each surface
   // resolves through the backend seam (host/surfaceBackends.ts): the default
-  // 'memory' tier is demo-grade and process-local (restarts wipe it); set
+  // 'memory' tier is non-durable and process-local (restarts wipe it); set
   // OPENWOP_SURFACE_<KEY> / OPENWOP_SURFACE_BACKEND to a registered real-backend
   // adapter for production durability. The surface shapes don't change either
   // way. initInMemorySurfaces() refuses to boot if a selected backend is unwired.
@@ -228,7 +228,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   registerPgVectorAdapter();
   registerPgSqlAdapter();
   initInMemorySurfaces({ dataDir });
-  // host.chat writes the SAME chat tables the /v1/host/sample/chat routes + SPA
+  // host.chat writes the SAME chat tables the /v1/host/openwop-app/chat routes + SPA
   // read, so it needs the app Storage (not a host-ext singleton). Inject it here.
   setChatStorage(storage);
 
@@ -273,13 +273,13 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // mountLocalPacks.ts for the trust-model discussion.
   const mountResult = ensureLocalPacksMounted();
 
-  // Fetch + verify + install registry packs the sample wants in the
+  // Fetch + verify + install registry packs the app wants in the
   // builder palette. Non-blocking: install failures are logged and
   // the sample still serves the locally-registered nodes.
   //
   // Default: when the local mount found the workspace AND
   // OPENWOP_INSTALL_PACKS is unset, skip the network registry install
-  // — every default-pack the sample wants is already on disk from the
+  // — every default-pack the app wants is already on disk from the
   // local mount. Explicit `OPENWOP_INSTALL_PACKS=<list>` or running
   // outside the workspace (e.g., Docker / Cloud Run) still triggers
   // the registry fetch.
@@ -306,7 +306,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // `examples/packs/` plus any operator-managed dir
   // (`OPENWOP_PROMPT_PACKS_DIR`) for `kind: "prompt"` packs and
   // registers each pack's templates with the PromptStore. The
-  // in-tree `vendor.openwop.prompt-sample` pack auto-installs when
+  // in-tree `vendor.openwop.prompt-example` pack auto-installs when
   // the backend boots inside the workspace.
   const promptPackResults = loadPromptPacks({ roots: defaultPromptPackRoots() });
   if (promptPackResults.length > 0) {
@@ -365,12 +365,12 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // 8mb-base64 store cap in routes/mediaAssets.ts. Registered before the
   // global 1mb parser; body-parser is a no-op once req._body is set, so
   // registration order is precedence order.
-  app.use('/v1/host/sample/media', express.json({ limit: '12mb' }));
+  app.use('/v1/host/openwop-app/media', express.json({ limit: '12mb' }));
   // Inbound provider webhooks (ADR 0024 §6) need the EXACT raw bytes to verify a
   // provider HMAC, so this scoped parser stashes them on `req.rawBody` before the
   // global parser consumes the stream. Registered first; body-parser no-ops once
   // req._body is set, so this wins for the inbound prefix.
-  app.use('/v1/host/sample/connections-inbound', express.json({
+  app.use('/v1/host/openwop-app/connections-inbound', express.json({
     limit: '256kb',
     verify: (req, _res, buf) => {
       (req as import('express').Request).rawBody = Buffer.from(buf);

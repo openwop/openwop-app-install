@@ -391,7 +391,7 @@ export type NodeOutcome =
   | {
       status: 'suspended';
       interrupt: {
-        kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event';
+        kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation';
         data: unknown;
         resumeSchema?: Record<string, unknown>;
       };

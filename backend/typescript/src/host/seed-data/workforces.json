@@ -18,9 +18,9 @@
       "false_positive_rate"
     ],
     "workflowCatalog": [
-      "sample.agents.invoice-extract",
-      "sample.agents.invoice-match",
-      "sample.agents.invoice-post"
+      "openwop-app.agents.invoice-extract",
+      "openwop-app.agents.invoice-match",
+      "openwop-app.agents.invoice-post"
     ],
     "agents": [
       {
@@ -93,7 +93,7 @@
     "autonomyLevel": "review",
     "dataManifestId": "dm.support.escalation-triage",
     "successMetrics": ["cycle_time_p50_ms", "cost_per_resolved_escalation_usd", "override_rate", "false_positive_rate"],
-    "workflowCatalog": ["sample.agents.triage-classify", "sample.agents.triage-route", "sample.agents.triage-respond"],
+    "workflowCatalog": ["openwop-app.agents.triage-classify", "openwop-app.agents.triage-route", "openwop-app.agents.triage-respond"],
     "agents": [
       { "agentRef": "host.triage-supervisor", "role": "supervisor", "autonomyLevel": "review", "dataBoundary": "Support tenant; ticket + customer-tier read.", "decisionBoundary": "Routes severity 2-4; escalates severity 1 to a human.", "memoryBoundary": "Run-scoped + tenant ticket history.", "performanceTarget": "P50 triage < 5 min; misroute < 2%.", "recoveryBehavior": "On low confidence, hold for human." },
       { "agentRef": "host.triage-classify-worker", "role": "worker", "autonomyLevel": "auto", "dataBoundary": "Single ticket body; no write.", "decisionBoundary": "Severity + topic classification only.", "memoryBoundary": "Run-scoped.", "performanceTarget": "Severity accuracy >= 95%.", "recoveryBehavior": "Retry once, then default to severity 2." },
@@ -116,7 +116,7 @@
     "autonomyLevel": "review",
     "dataManifestId": "dm.insurance.claims-review",
     "successMetrics": ["cycle_time_p50_ms", "cost_per_adjudicated_claim_usd", "override_rate", "false_positive_rate"],
-    "workflowCatalog": ["sample.agents.claim-validate", "sample.agents.claim-assess", "sample.agents.claim-adjudicate"],
+    "workflowCatalog": ["openwop-app.agents.claim-validate", "openwop-app.agents.claim-assess", "openwop-app.agents.claim-adjudicate"],
     "agents": [
       { "agentRef": "host.claims-supervisor", "role": "supervisor", "autonomyLevel": "review", "dataBoundary": "Claims tenant; policy + claim read.", "decisionBoundary": "Adjudicates under $10k; escalates above + all fraud flags.", "memoryBoundary": "Run-scoped + tenant claims history.", "performanceTarget": "P50 cycle < 1 day; override < 5%.", "recoveryBehavior": "On ambiguity, route to a human adjuster." },
       { "agentRef": "host.claims-validate-worker", "role": "worker", "autonomyLevel": "auto", "dataBoundary": "Single claim packet; no write.", "decisionBoundary": "Completeness + eligibility check only.", "memoryBoundary": "Run-scoped.", "performanceTarget": "Validation accuracy >= 98%.", "recoveryBehavior": "On missing docs, request and pause." },
@@ -139,7 +139,7 @@
     "autonomyLevel": "guided",
     "dataManifestId": "dm.fulfillment.order-exception",
     "successMetrics": ["cycle_time_p50_ms", "cost_per_resolved_order_usd", "override_rate", "false_positive_rate"],
-    "workflowCatalog": ["sample.agents.order-detect", "sample.agents.order-plan", "sample.agents.order-apply"],
+    "workflowCatalog": ["openwop-app.agents.order-detect", "openwop-app.agents.order-plan", "openwop-app.agents.order-apply"],
     "agents": [
       { "agentRef": "host.order-supervisor", "role": "supervisor", "autonomyLevel": "guided", "dataBoundary": "Fulfillment tenant; order + inventory read.", "decisionBoundary": "Resolves under $2.5k impact; escalates above.", "memoryBoundary": "Run-scoped + tenant order history.", "performanceTarget": "P50 resolve < 2 h; SLA-breach rate < 1%.", "recoveryBehavior": "On low confidence, hold for ops." },
       { "agentRef": "host.order-detect-worker", "role": "worker", "autonomyLevel": "auto", "dataBoundary": "Single order; no write.", "decisionBoundary": "Exception classification only.", "memoryBoundary": "Run-scoped.", "performanceTarget": "Classification accuracy >= 97%.", "recoveryBehavior": "Retry once, then flag." },
@@ -162,7 +162,7 @@
     "autonomyLevel": "review",
     "dataManifestId": "dm.procurement.approval",
     "successMetrics": ["cycle_time_p50_ms", "cost_per_processed_request_usd", "override_rate", "false_positive_rate"],
-    "workflowCatalog": ["sample.agents.po-validate", "sample.agents.po-policy-check", "sample.agents.po-route"],
+    "workflowCatalog": ["openwop-app.agents.po-validate", "openwop-app.agents.po-policy-check", "openwop-app.agents.po-route"],
     "agents": [
       { "agentRef": "host.procurement-supervisor", "role": "supervisor", "autonomyLevel": "review", "dataBoundary": "Procurement tenant; PR + supplier read.", "decisionBoundary": "Routes under $25k; escalates above + SoD conflicts.", "memoryBoundary": "Run-scoped + tenant PR history.", "performanceTarget": "P50 routing < 1 h; policy-miss < 1%.", "recoveryBehavior": "On conflict, hold for a human approver." },
       { "agentRef": "host.procurement-validate-worker", "role": "worker", "autonomyLevel": "auto", "dataBoundary": "Single PR; no write.", "decisionBoundary": "Completeness + supplier-onboarding check only.", "memoryBoundary": "Run-scoped.", "performanceTarget": "Validation accuracy >= 98%.", "recoveryBehavior": "On missing fields, request and pause." },

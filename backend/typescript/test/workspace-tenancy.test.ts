@@ -64,7 +64,7 @@ let n = 0;
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam.
 async function signup(c: ReturnType<typeof client>): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email: `ws-${Date.now()}-${n++}@acme.test` });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: `ws-${Date.now()}-${n++}@acme.test` });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -73,7 +73,7 @@ describe('ADR 0015 — workspace-as-tenant', () => {
   it('a signed-in user has a personal workspace, active by default', async () => {
     const c = client();
     await signup(c);
-    const r = await c.get('/v1/host/sample/me/workspaces');
+    const r = await c.get('/v1/host/openwop-app/me/workspaces');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     const personal = r.body.workspaces.find((w: any) => w.kind === 'personal');
     expect(personal).toBeTruthy();
@@ -85,23 +85,23 @@ describe('ADR 0015 — workspace-as-tenant', () => {
   it('create a shared workspace → owner → switch makes it the active tenant', async () => {
     const c = client();
     await signup(c);
-    const created = await c.post('/v1/host/sample/workspaces', { name: 'Acme Corp' });
+    const created = await c.post('/v1/host/openwop-app/workspaces', { name: 'Acme Corp' });
     expect(created.status, JSON.stringify(created.body)).toBe(201);
     expect(created.body.workspaceId).toMatch(/^ws:/);
     expect(created.body.roles).toContain('owner');
 
     // It appears in the list as a shared workspace (not yet active).
-    const before = await c.get('/v1/host/sample/me/workspaces');
+    const before = await c.get('/v1/host/openwop-app/me/workspaces');
     const sharedBefore = before.body.workspaces.find((w: any) => w.workspaceId === created.body.workspaceId);
     expect(sharedBefore.kind).toBe('shared');
     expect(sharedBefore.active).toBe(false);
 
     // Switch re-binds the active workspace.
-    const sw = await c.post(`/v1/host/sample/workspaces/${encodeURIComponent(created.body.workspaceId)}/switch`);
+    const sw = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(created.body.workspaceId)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
     expect(sw.body.active).toBe(created.body.workspaceId);
 
-    const after = await c.get('/v1/host/sample/me/workspaces');
+    const after = await c.get('/v1/host/openwop-app/me/workspaces');
     expect(after.body.active).toBe(created.body.workspaceId);
     const sharedAfter = after.body.workspaces.find((w: any) => w.workspaceId === created.body.workspaceId);
     expect(sharedAfter.active).toBe(true);
@@ -110,22 +110,22 @@ describe('ADR 0015 — workspace-as-tenant', () => {
   it('a member invited into a shared workspace can switch in; a non-member cannot', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'TeamWS' })).body.workspaceId;
-    await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'TeamWS' })).body.workspaceId;
+    await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
 
     // Owner adds member B (editor) bound to B's subject.
     const memberC = client();
     const b = await signup(memberC);
     const add = await owner.post(
-      `/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`,
+      `/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`,
       { displayName: 'B', subject: b.userId, roles: ['editor'] },
     );
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // B can switch into the shared workspace and sees it in their list.
-    const bSwitch = await memberC.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+    const bSwitch = await memberC.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     expect(bSwitch.status, JSON.stringify(bSwitch.body)).toBe(200);
-    const bList = await memberC.get('/v1/host/sample/me/workspaces');
+    const bList = await memberC.get('/v1/host/openwop-app/me/workspaces');
     const bShared = bList.body.workspaces.find((w: any) => w.workspaceId === ws);
     expect(bShared).toBeTruthy();
     expect(bShared.roles).toContain('editor');
@@ -133,19 +133,19 @@ describe('ADR 0015 — workspace-as-tenant', () => {
     // A non-member cannot switch in (membership-gated, fail-closed).
     const outsider = client();
     await signup(outsider);
-    const denied = await outsider.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+    const denied = await outsider.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
     expect(denied.status).toBe(403);
   });
 
   it('anonymous sessions get an ephemeral personal sandbox and cannot create shared workspaces', async () => {
     const anon = client();
     // First call mints an anon session; /me/workspaces returns a synthetic personal entry.
-    const list = await anon.get('/v1/host/sample/me/workspaces');
+    const list = await anon.get('/v1/host/openwop-app/me/workspaces');
     expect(list.status).toBe(200);
     expect(list.body.personal).toMatch(/^anon:/);
     expect(list.body.workspaces.some((w: any) => w.kind === 'personal')).toBe(true);
     // Anon may not persist a shared workspace.
-    const create = await anon.post('/v1/host/sample/workspaces', { name: 'Nope' });
+    const create = await anon.post('/v1/host/openwop-app/workspaces', { name: 'Nope' });
     expect(create.status).toBe(403);
   });
 
@@ -156,28 +156,28 @@ describe('ADR 0015 — workspace-as-tenant', () => {
   it('removing a member after they switched in drops their access on the next request', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'RevokeCo' })).body.workspaceId;
-    await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'RevokeCo' })).body.workspaceId;
+    await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
 
     const member = client();
     const b = await signup(member);
     const add = await owner.post(
-      `/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`,
+      `/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`,
       { displayName: 'B', subject: b.userId, roles: ['editor'] },
     );
     const memberId = add.body.memberId as string;
     // B switches in — active workspace is the shared one.
-    expect((await member.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
-    expect((await member.get('/v1/host/sample/me/workspaces')).body.active).toBe(ws);
+    expect((await member.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
+    expect((await member.get('/v1/host/openwop-app/me/workspaces')).body.active).toBe(ws);
 
     // Owner (acting in the shared workspace) removes B.
-    expect((await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
-    const removed = await owner.del(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(memberId)}`);
+    expect((await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`)).status).toBe(200);
+    const removed = await owner.del(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(memberId)}`);
     expect(removed.status, JSON.stringify(removed.body)).toBe(204);
 
     // B's next request re-validates membership → no longer a member → active
     // falls back to B's personal workspace (not the shared one).
-    const after = await member.get('/v1/host/sample/me/workspaces');
+    const after = await member.get('/v1/host/openwop-app/me/workspaces');
     expect(after.body.active).not.toBe(ws);
     expect(after.body.active).toBe(after.body.personal);
   });
@@ -187,20 +187,20 @@ describe('ADR 0015 — workspace-as-tenant', () => {
   it('refuses to remove or demote the last owner of a shared workspace (409)', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'SoloOwnerCo' })).body.workspaceId;
-    await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'SoloOwnerCo' })).body.workspaceId;
+    await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
 
     // The owner's own member record (the only owner).
-    const members = (await owner.get(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`)).body.members as Array<{ memberId: string; roles: string[] }>;
+    const members = (await owner.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`)).body.members as Array<{ memberId: string; roles: string[] }>;
     const ownerMember = members.find((m) => m.roles.includes('owner'))!;
 
     // Demoting the last owner to editor is blocked.
-    const patch = await owner.patch(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(ownerMember.memberId)}`, { roles: ['editor'] });
+    const patch = await owner.patch(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(ownerMember.memberId)}`, { roles: ['editor'] });
     expect(patch.status, JSON.stringify(patch.body)).toBe(409);
     expect(patch.body.error).toBe('conflict');
 
     // Deleting the last owner is blocked too.
-    const del = await owner.del(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(ownerMember.memberId)}`);
+    const del = await owner.del(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(ownerMember.memberId)}`);
     expect(del.status, JSON.stringify(del.body)).toBe(409);
   });
 
@@ -209,23 +209,23 @@ describe('ADR 0015 — workspace-as-tenant', () => {
   it('transfer-ownership grants owner to a member and unblocks the original stepping down', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'HandoffCo' })).body.workspaceId;
-    await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws)}/switch`);
+    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'HandoffCo' })).body.workspaceId;
+    await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
 
     // Add member B (editor).
     const memberB = client();
     const b = await signup(memberB);
-    const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'B', subject: b.userId, roles: ['editor'] });
+    const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`, { displayName: 'B', subject: b.userId, roles: ['editor'] });
     const bMemberId = add.body.memberId as string;
 
     // Transfer ownership to B with stepDown — owner relinquishes in the same call.
-    const transfer = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(bMemberId)}/transfer-ownership`, { stepDown: true });
+    const transfer = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members/${encodeURIComponent(bMemberId)}/transfer-ownership`, { stepDown: true });
     expect(transfer.status, JSON.stringify(transfer.body)).toBe(200);
     expect(transfer.body.transferredTo).toBe(bMemberId);
     expect(transfer.body.steppedDown).toBeTruthy();
 
     // B is now an owner; there is exactly one owner (the original stepped down).
-    const after = (await owner.get(`/v1/host/sample/orgs/${encodeURIComponent(ws)}/members`)).body.members as Array<{ memberId: string; roles: string[] }>;
+    const after = (await owner.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(ws)}/members`)).body.members as Array<{ memberId: string; roles: string[] }>;
     expect(after.find((m) => m.memberId === bMemberId)!.roles).toContain('owner');
     expect(after.filter((m) => m.roles.includes('owner')).length).toBe(1);
   });
@@ -236,11 +236,11 @@ describe('ADR 0015 — workspace-as-tenant', () => {
     const c = client();
     await signup(c);
     // Fire many parallel /me/workspaces — each ensures the personal workspace.
-    await Promise.all(Array.from({ length: 8 }, () => c.get('/v1/host/sample/me/workspaces')));
-    const me = await c.get('/v1/host/sample/me/workspaces');
+    await Promise.all(Array.from({ length: 8 }, () => c.get('/v1/host/openwop-app/me/workspaces')));
+    const me = await c.get('/v1/host/openwop-app/me/workspaces');
     const personal = me.body.personal as string;
     // List the personal workspace's members (caller is its implicit owner).
-    const members = await c.get(`/v1/host/sample/orgs/${encodeURIComponent(personal)}/members`);
+    const members = await c.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(personal)}/members`);
     expect(members.status, JSON.stringify(members.body)).toBe(200);
     const owners = (members.body.members as Array<{ roles: string[] }>).filter((m) => m.roles.includes('owner'));
     expect(owners.length).toBe(1);

@@ -1,13 +1,13 @@
 /**
  * Kanban host-extension client (RFCS/0086 "named workflow agents" demo).
  *
- *   GET    /v1/host/sample/kanban/boards                  → { boards }
- *   POST   /v1/host/sample/kanban/boards                  → board
- *   GET    /v1/host/sample/kanban/boards/:boardId         → { board, cards }
- *   DELETE /v1/host/sample/kanban/boards/:boardId
- *   POST   /v1/host/sample/kanban/boards/:boardId/cards   → card
- *   PATCH  /v1/host/sample/kanban/cards/:cardId           → { card, triggeredRunId }
- *   DELETE /v1/host/sample/kanban/cards/:cardId
+ *   GET    /v1/host/openwop-app/kanban/boards                  → { boards }
+ *   POST   /v1/host/openwop-app/kanban/boards                  → board
+ *   GET    /v1/host/openwop-app/kanban/boards/:boardId         → { board, cards }
+ *   DELETE /v1/host/openwop-app/kanban/boards/:boardId
+ *   POST   /v1/host/openwop-app/kanban/boards/:boardId/cards   → card
+ *   PATCH  /v1/host/openwop-app/kanban/cards/:cardId           → { card, triggeredRunId }
+ *   DELETE /v1/host/openwop-app/kanban/cards/:cardId
  *
  * Tenant scoping is the backend's job (board ownership from the caller's
  * principal); the client never sends a tenantId. A `columnId` change on
@@ -58,7 +58,7 @@ export interface KanbanBoard {
   updatedAt: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample/kanban`;
+const base = `${config.baseUrl}/v1/host/openwop-app/kanban`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 export async function listBoards(): Promise<KanbanBoard[]> {

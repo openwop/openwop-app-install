@@ -1,0 +1,37 @@
+{
+  "name": "core.openwop.connections.salesforce",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Salesforce connection pack (RFC 0095) — OAuth2 (web-server flow) provider for the Salesforce REST API. ADR 0033 DEPLOY-GATED. Reach is `openapi`: Salesforce has no single global first-party MCP server (the API lives on a per-org `*.my.salesforce.com` instance host, supplied per connection via instanceUrlTemplate), so a documented OpenAPI/REST surface is the honest day-1 reach (ADR 0033 §4). Carries NO secret; the operator supplies the connected-app consumer key/secret host-side (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "provider": {
+    "id": "salesforce",
+    "displayName": "Salesforce",
+    "category": "crm",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://login.salesforce.com/services/oauth2/authorize",
+        "token": "https://login.salesforce.com/services/oauth2/token",
+        "revoke": "https://login.salesforce.com/services/oauth2/revoke"
+      },
+      "instanceUrlTemplate": "https://{instance}.my.salesforce.com",
+      "scopes": {
+        "read": [
+          { "key": "api", "label": "Access + manage data via APIs", "scopes": ["api"] },
+          { "key": "identity", "label": "Basic identity (id, profile, email)", "scopes": ["id", "profile", "email"] },
+          { "key": "offline", "label": "Refresh access", "scopes": ["refresh_token", "offline_access"] }
+        ],
+        "write": [
+          { "key": "full", "label": "Full access (write across objects)", "scopes": ["full"] }
+        ]
+      }
+    },
+    "reach": { "openapi": { "ref": "https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/intro_what_is_rest_api.htm" } },
+    "consumerNodes": ["core.openwop.http"],
+    "docsUrl": "https://help.salesforce.com/s/articleView?id=xcloud.remoteaccess_oauth_web_server_flow.htm"
+  }
+}

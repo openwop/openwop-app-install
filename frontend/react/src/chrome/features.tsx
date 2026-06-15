@@ -64,7 +64,7 @@ const AgentCreateWizard = lazy(() => import('../agents/AgentCreateWizard.js').th
 const WorkforcesGalleryPage = lazy(() => import('../workforces/WorkforcesGalleryPage.js').then((m) => ({ default: m.WorkforcesGalleryPage })));
 const WorkforceOverviewPage = lazy(() => import('../workforces/WorkforceOverviewPage.js').then((m) => ({ default: m.WorkforceOverviewPage })));
 const MigrationWizardPage = lazy(() => import('../workforces/MigrationWizardPage.js').then((m) => ({ default: m.MigrationWizardPage })));
-const DemoDataPage = lazy(() => import('../settings/DemoDataPage.js').then((m) => ({ default: m.DemoDataPage })));
+const ExampleDataPage = lazy(() => import('../settings/ExampleDataPage.js').then((m) => ({ default: m.ExampleDataPage })));
 const AdminOverviewPage = lazy(() => import('../settings/AdminOverviewPage.js').then((m) => ({ default: m.AdminOverviewPage })));
 const OrgsPage = lazy(() => import('../orgs/OrgsPage.js').then((m) => ({ default: m.OrgsPage })));
 const FeatureTogglePanel = lazy(() => import('../featureToggles/FeatureTogglePanel.js').then((m) => ({ default: m.FeatureTogglePanel })));
@@ -198,8 +198,8 @@ const CORE_FEATURES: FeatureRoute[] = [
     nav: { group: 'Content', label: 'Front page', icon: GlobeIcon, hint: 'The public landing page at / (which org + page)', order: 50 },
   },
   {
-    path: '/demo-data', element: <DemoDataPage />, tier: 'admin', chrome: 'narrow',
-    nav: { group: 'Access & data', label: 'Demo data', icon: DatabaseIcon, hint: 'Re-seed the built-in demo roster' },
+    path: '/example-data', element: <ExampleDataPage />, tier: 'admin', chrome: 'narrow',
+    nav: { group: 'Access & data', label: 'Example data', icon: DatabaseIcon, hint: 'Re-seed the built-in example roster' },
   },
 ];
 

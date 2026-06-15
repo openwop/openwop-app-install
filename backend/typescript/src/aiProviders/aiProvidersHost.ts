@@ -79,7 +79,7 @@ const log = createLogger('aiProviders.host');
 // `mock` is conformance-only — present unconditionally so RFC 0032/0033
 // test fixtures can route `provider: 'mock'` through dispatchStructured.
 // Production deployments are unaffected; the mock provider returns only
-// what the test seam pre-programs via `POST /v1/host/sample/test/mock-ai/
+// what the test seam pre-programs via `POST /v1/host/openwop-app/test/mock-ai/
 // program` keyed by (runId, nodeId), so a tenant that hasn't seeded a
 // program for its run gets empty completions.
 const SUPPORTED_PROVIDERS: readonly ProviderId[] = ['anthropic', 'openai', 'google', 'mock'];
@@ -990,7 +990,7 @@ function validateAgainstSchema(data: unknown, schema: unknown): boolean {
  *  to `title`, otherwise return null (caller substitutes `'structured-
  *  output'`). Production hosts that emit named envelope kinds (e.g.
  *  `prd.create`) typically carry the kind on a wrapping metadata layer;
- *  this sample-grade derivation is best-effort. */
+ *  this best-effort derivation is best-effort. */
 function inferEnvelopeType(schema: unknown): string | null {
   if (!schema || typeof schema !== 'object') return null;
   const s = schema as Record<string, unknown>;

@@ -16,7 +16,7 @@ import { createApp } from '../src/index.js';
 
 const PORT = 18242;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 let server: http.Server;
 
 async function api<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
@@ -28,7 +28,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<{ status: numbe
   return { status: res.status, body: (text.length ? JSON.parse(text) : null) as T };
 }
 const surface = <T>(surface: string, op: string, args: Record<string, unknown>) =>
-  api<T>('/v1/host/sample/test/surface', { method: 'POST', body: JSON.stringify({ tenantId: 'smoke', surface, op, args }) });
+  api<T>('/v1/host/openwop-app/test/surface', { method: 'POST', body: JSON.stringify({ tenantId: 'smoke', surface, op, args }) });
 
 beforeAll(async () => {
   // Select durable backends per-surface (a global OPENWOP_SURFACE_BACKEND=durable

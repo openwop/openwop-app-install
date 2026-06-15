@@ -1,6 +1,6 @@
 /**
  * Consent API client (ADR 0020). Authed org-scoped policy + records +
- * data-subject (GDPR) lookup/delete under /v1/host/sample/consent/orgs/:orgId.
+ * data-subject (GDPR) lookup/delete under /v1/host/openwop-app/consent/orgs/:orgId.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
@@ -15,7 +15,7 @@ export interface ConsentRecord {
   ts: string;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

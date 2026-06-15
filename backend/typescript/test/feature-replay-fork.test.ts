@@ -24,7 +24,7 @@ describe('feature variant — replay/fork safety', () => {
   let server: http.Server;
   const PORT = 18889;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
   let workflowId: string;
 
   beforeAll(async () => {
@@ -44,7 +44,7 @@ describe('feature variant — replay/fork safety', () => {
     });
     // A real catalog workflow id — fork 404s on an unknown workflow.
     const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');
-    workflowId = disco.body.fixtures?.[0] ?? 'sample.demo.uppercase';
+    workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';
   });
 
   afterAll(async () => {
@@ -61,7 +61,7 @@ describe('feature variant — replay/fork safety', () => {
   }
 
   async function setCrm(status: 'on' | 'off'): Promise<void> {
-    const r = await jf('/v1/host/sample/feature-toggles/admin/configs/crm', {
+    const r = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/crm', {
       method: 'PUT',
       body: JSON.stringify({
         status,
@@ -89,28 +89,28 @@ describe('feature variant — replay/fork safety', () => {
     await setCrm('on');
 
     // Triage a contact against a real workflow so the run is forkable.
-    const contact = await jf<{ contactId: string }>('/v1/host/sample/crm/contacts', {
+    const contact = await jf<{ contactId: string }>('/v1/host/openwop-app/crm/contacts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Katherine Johnson', company: 'NASA', stage: 'customer' }),
     });
     const triage = await jf<{ runId: string; variant: string | null }>(
-      `/v1/host/sample/crm/contacts/${contact.body.contactId}/triage`,
+      `/v1/host/openwop-app/crm/contacts/${contact.body.contactId}/triage`,
       { method: 'POST', body: JSON.stringify({ workflowId }) },
     );
     expect(triage.status).toBe(202);
     const sourceRunId = triage.body.runId;
 
     // Read the source stamp.
-    const source = await jf<{ featureVariant?: { variant?: string; bindings?: unknown } }>(`/v1/host/sample/crm/runs/${sourceRunId}`);
+    const source = await jf<{ featureVariant?: { variant?: string; bindings?: unknown } }>(`/v1/host/openwop-app/crm/runs/${sourceRunId}`);
     const sourceVariant = source.body.featureVariant?.variant;
     expect(['basic', 'enriched']).toContain(sourceVariant);
 
     // ── Flip CRM OFF ──
     await setCrm('off');
     // The live feature surface is now gone…
-    expect((await jf(`/v1/host/sample/crm/contacts`)).status).toBe(404);
+    expect((await jf(`/v1/host/openwop-app/crm/contacts`)).status).toBe(404);
     // …but the historical run's provenance is still readable (ungated).
-    const sourceAfterOff = await jf<{ featureVariant?: { variant?: string } }>(`/v1/host/sample/crm/runs/${sourceRunId}`);
+    const sourceAfterOff = await jf<{ featureVariant?: { variant?: string } }>(`/v1/host/openwop-app/crm/runs/${sourceRunId}`);
     expect(sourceAfterOff.body.featureVariant?.variant).toBe(sourceVariant);
 
     // ── Fork the run (core endpoint, not toggle-gated) ──
@@ -122,7 +122,7 @@ describe('feature variant — replay/fork safety', () => {
 
     // ── The forked run carries the SAME stamp, VERBATIM (not recomputed) ──
     const forked = await jf<{ featureVariant?: { variant?: string; feature?: string; bindings?: unknown } }>(
-      `/v1/host/sample/crm/runs/${fork.body.runId}`,
+      `/v1/host/openwop-app/crm/runs/${fork.body.runId}`,
     );
     expect(forked.body.featureVariant?.feature).toBe('crm');
     expect(forked.body.featureVariant?.variant).toBe(sourceVariant);

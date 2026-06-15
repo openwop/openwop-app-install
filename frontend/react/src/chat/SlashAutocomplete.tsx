@@ -33,6 +33,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { filterCommands, type CommandRegistration } from './registry/CommandRegistry.js';
 import {
+  detectSlashTrigger,
   filterMentions,
   listWorkflowMentions,
   type WorkflowMentionEntry,
@@ -57,16 +58,23 @@ interface Props {
 
 export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Element | null {
   const trimmed = text.trimStart();
-  const shouldShow = trimmed.startsWith('/') && !trimmed.includes(' ');
-  const query = shouldShow ? trimmed.slice(1) : '';
+  // Trigger on a `/` token at the trailing position, allowing an optional
+  // leading `@agent ` hand-off prefix so "@devon /" still opens the picker
+  // (preserved on apply). Fixes: `/` showed nothing once an @mention was typed.
+  const trigger = detectSlashTrigger(text);
+  const shouldShow = trigger !== null;
+  const prefix = trigger?.prefix ?? '';
+  const query = trigger?.query ?? '';
 
   // Re-source on every render so a newly-saved workflow shows up
   // without needing a route remount. `listWorkflowMentions()`
   // touches localStorage but the list is tiny.
   const allWorkflows = listWorkflowMentions();
   const commandMatches = useMemo(
-    () => (shouldShow ? filterCommands(query) : []),
-    [shouldShow, query],
+    // After an "@agent " hand-off, only workflows make sense (you can't `/clear`
+    // a hand-off), so suppress built-in commands when a mention prefix is present.
+    () => (shouldShow && !prefix ? filterCommands(query) : []),
+    [shouldShow, prefix, query],
   );
   const workflowMatches = useMemo(
     () => (shouldShow ? filterMentions(allWorkflows, query) : []),
@@ -128,14 +136,11 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
   }, [shouldShow, rows, selectedIdx]);
 
   function apply(row: SlashRow): void {
-    if (row.kind === 'command') {
-      // Match the legacy CommandAutocomplete behaviour: insert the
-      // command name + a trailing space so the user can keep typing
-      // args without a manual space press.
-      onPick(`${row.cmd.name} `);
-    } else {
-      onPick(`/${row.wf.slug} `);
-    }
+    // Insert the command/workflow + a trailing space so the user can keep
+    // typing args, and PRESERVE any leading "@agent " hand-off prefix so
+    // picking a workflow after "@devon /" keeps the agent.
+    const body = row.kind === 'command' ? `${row.cmd.name} ` : `/${row.wf.slug} `;
+    onPick(`${prefix}${body}`);
   }
 
   const listRef = useRef<HTMLDivElement>(null);

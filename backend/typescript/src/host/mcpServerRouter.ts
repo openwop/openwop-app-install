@@ -140,7 +140,7 @@ function initializeResult(): Record<string, unknown> {
   return {
     protocolVersion: '2025-06-18',
     serverInfo: {
-      name: 'openwop-workflow-engine-sample',
+      name: 'openwop-workflow-engine',
       version: '0.1.0',
     },
     capabilities: {

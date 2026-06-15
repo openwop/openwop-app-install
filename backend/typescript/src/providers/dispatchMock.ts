@@ -4,7 +4,7 @@
  * Deterministic — every behavior is read from a pre-programmed in-memory
  * queue keyed by `(runId, nodeId)`. The conformance suite POSTs a
  * `MockProgram` (one `MockBehavior` per expected provider call) via the
- * test seam `POST /v1/host/sample/test/mock-ai/program` before starting
+ * test seam `POST /v1/host/openwop-app/test/mock-ai/program` before starting
  * a run; `dispatchMock` consumes one entry per call.
  *
  * Used to drive the RFC 0032 envelope-reliability event family
@@ -46,7 +46,7 @@ interface ProgramState {
   program: MockProgram;
   cursor: number;
   /** Records the maxTokens value the most recent call received — read
-   *  by the conformance suite via `GET /v1/host/sample/test/mock-ai/
+   *  by the conformance suite via `GET /v1/host/openwop-app/test/mock-ai/
    *  last-dispatch-budget` to verify RFC 0033 §B truncation-budget
    *  multiplication landed. */
   lastReceivedMaxTokens: number | null;

@@ -1,6 +1,6 @@
 /**
  * Publishing & SEO API client (ADR 0012). Authed SEO CRUD under
- * /v1/host/sample/publishing/orgs/:orgId; reads CMS pages + Media assets (to
+ * /v1/host/openwop-app/publishing/orgs/:orgId; reads CMS pages + Media assets (to
  * attach SEO + pick OG images) and surfaces the PUBLIC URLs.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -20,7 +20,7 @@ export interface PageSeo {
   noindex: boolean;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

@@ -1,7 +1,7 @@
 /**
  * W-2 / RFC 0090 — the `verifier-gating` behavioral contract over HTTP. Boots the
  * real app with the verifier ladder enabled and exercises
- * POST /v1/host/sample/agents/verify-run:
+ * POST /v1/host/openwop-app/agents/verify-run:
  *   - discovery advertises executionModel.version 6 + verifier{supported,gating}
  *   - simulateVerdict 'pass' → commit (status 'completed'); agent.verified emitted
  *   - simulateVerdict 'fail' → commit BLOCKED (status != 'completed'); agent.verified
@@ -17,8 +17,8 @@ import { createApp } from '../src/index.js';
 
 const PORT = 18262;
 const BASE = `http://127.0.0.1:${PORT}`;
-const H = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
-const URL = `${BASE}/v1/host/sample/agents/verify-run`;
+const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+const URL = `${BASE}/v1/host/openwop-app/agents/verify-run`;
 
 let server: http.Server;
 

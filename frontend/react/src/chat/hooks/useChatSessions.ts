@@ -2,7 +2,7 @@
  * Collection hook for the chat-session sidebar (Phase 2C.1).
  *
  * Holds the list of session HEADERS (id + title + counts + timestamps)
- * fetched from the sample-extension `/v1/host/sample/chat/sessions`
+ * fetched from the host-extension `/v1/host/openwop-app/chat/sessions`
  * route family. The per-session MESSAGE thread lives in `useChatSession`;
  * this hook just owns the cross-session list.
  *

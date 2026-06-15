@@ -1,6 +1,6 @@
 /**
- * Frontend client for the sample-extension chat-session routes added
- * in Phase 2C.1. Wraps the seven `/v1/host/sample/chat/sessions/*`
+ * Frontend client for the host-extension chat-session routes added
+ * in Phase 2C.1. Wraps the seven `/v1/host/openwop-app/chat/sessions/*`
  * endpoints with typed return shapes that mirror the BE's
  * `ChatSessionRecord` + `ChatMessageRecord`.
  *
@@ -30,7 +30,7 @@ export interface ChatMessagePersisted {
   createdAt: string;
 }
 
-const PATH = '/v1/host/sample/chat/sessions';
+const PATH = '/v1/host/openwop-app/chat/sessions';
 
 async function http<T>(
   path: string,
@@ -65,12 +65,12 @@ export async function createChatSession(opts?: {
 }
 
 export async function getChatSession(sessionId: string): Promise<ChatSessionHeader> {
-  return http<ChatSessionHeader>(`/v1/host/sample/chat/sessions/${encodeURIComponent(sessionId)}`);
+  return http<ChatSessionHeader>(`/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`);
 }
 
 export async function renameChatSession(sessionId: string, title: string): Promise<ChatSessionHeader> {
   return http<ChatSessionHeader>(
-    `/v1/host/sample/chat/sessions/${encodeURIComponent(sessionId)}`,
+    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`,
     {
       method: 'PATCH',
       body: JSON.stringify({ title }),
@@ -79,14 +79,14 @@ export async function renameChatSession(sessionId: string, title: string): Promi
 }
 
 export async function deleteChatSession(sessionId: string): Promise<void> {
-  await http<void>(`/v1/host/sample/chat/sessions/${encodeURIComponent(sessionId)}`, {
+  await http<void>(`/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
   });
 }
 
 export async function listChatSessionMessages(sessionId: string): Promise<ChatMessagePersisted[]> {
   const r = await http<{ messages: ChatMessagePersisted[] }>(
-    `/v1/host/sample/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
   );
   return r.messages;
 }
@@ -96,7 +96,7 @@ export async function appendChatMessage(
   msg: { messageId: string; role: string; content: string; meta?: string },
 ): Promise<ChatMessagePersisted> {
   return http<ChatMessagePersisted>(
-    `/v1/host/sample/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
     {
       method: 'POST',
       body: JSON.stringify(msg),

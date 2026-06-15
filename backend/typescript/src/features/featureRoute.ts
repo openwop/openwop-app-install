@@ -7,6 +7,7 @@
  */
 import type { Request } from 'express';
 import { OpenwopError } from '../types.js';
+import { requestOrigin } from '../host/requestOrigin.js';
 import { resolveOne } from '../host/featureToggles/service.js';
 import type { ResolvedAssignment, ToggleSubject } from '../host/featureToggles/types.js';
 import { getOrg, resolveEffectiveAccess, type Scope } from '../host/accessControlService.js';
@@ -65,10 +66,9 @@ export function optionalString(value: unknown): string | undefined {
 export function publicBaseUrl(req: Request): string {
   const configured = process.env.OPENWOP_PUBLIC_BASE_URL?.trim().replace(/\/+$/, '');
   if (configured) return configured;
-  const rawHost = req.get('x-forwarded-host') ?? req.get('host') ?? 'localhost';
-  const host = (rawHost.split(',')[0] ?? '').trim().replace(/[^A-Za-z0-9.:\[\]-]/g, '') || 'localhost';
-  const rawProto = (req.get('x-forwarded-proto') ?? req.protocol ?? 'http').split(',')[0]!.trim().toLowerCase();
-  return `${rawProto === 'https' ? 'https' : 'http'}://${host}`;
+  // Forwarded-aware request origin, sanitized — the shared derivation in
+  // host/requestOrigin.ts (one place, so the host-token/scheme policy can't drift).
+  return requestOrigin(req);
 }
 
 /**

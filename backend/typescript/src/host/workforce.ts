@@ -5,7 +5,7 @@
  * VENDOR-NEUTRAL: no external operating-model framework brand appears here or
  * in any field name. An adopter maps their own vocabulary onto these neutral
  * shapes. Host-extension entity — NOT a wire-protocol type; it lives under the
- * non-normative `/v1/host/sample/workforces` namespace.
+ * non-normative `/v1/host/openwop-app/workforces` namespace.
  */
 
 export type AutonomyLevel = 'review' | 'guided' | 'auto';

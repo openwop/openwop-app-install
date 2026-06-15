@@ -19,7 +19,7 @@ export const emailFeature: BackendFeature = {
   toggleDefault: {
     id: 'email',
     label: 'Email Marketing',
-    description: 'Templated campaigns over CRM contacts, consent-gated marketing sends — product feature (ADR 0019).',
+    description: 'Templated campaigns over CRM contacts, consent-gated marketing sends — product feature.',
     category: 'Business Tools',
     status: 'off',
     bucketUnit: 'tenant',

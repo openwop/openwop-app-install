@@ -3,8 +3,8 @@
  * agent and dispatches it over HTTP. Boots the real app via createApp, seeds
  * the AgentRegistry from the on-disk supervisor pack (the same loadAgents path
  * bootstrap uses), then exercises the live routes:
- *   - GET  /v1/host/sample/agents               (registry-backed inventory)
- *   - POST /v1/host/sample/agents/{id}/dispatch (the dispatch floor)
+ *   - GET  /v1/host/openwop-app/agents               (registry-backed inventory)
+ *   - POST /v1/host/openwop-app/agents/{id}/dispatch (the dispatch floor)
  * and confirms the host advertises capabilities.agents.manifestRuntime.
  */
 
@@ -17,7 +17,7 @@ import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 
 const PORT = 18242;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 const H = { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' };
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', '..');
 const SUPERVISOR = 'core.openwop.agents.supervisor.default';
@@ -59,7 +59,7 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
   });
 
   it('serves the registry-backed inventory including the installed agent', async () => {
-    const body = await (await fetch(`${BASE}/v1/host/sample/agents`, { headers: H })).json() as {
+    const body = await (await fetch(`${BASE}/v1/host/openwop-app/agents`, { headers: H })).json() as {
       runtime?: { manifestRuntime?: boolean }; agents?: Array<{ agentId?: string }>;
     };
     expect(body.runtime?.manifestRuntime).toBe(true);
@@ -67,7 +67,7 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
   });
 
   it('dispatches the agent end-to-end with attributed events', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/agents/${encodeURIComponent(SUPERVISOR)}/dispatch`, {
+    const res = await fetch(`${BASE}/v1/host/openwop-app/agents/${encodeURIComponent(SUPERVISOR)}/dispatch`, {
       method: 'POST', headers: H, body: JSON.stringify({ task: {}, validateHandoff: false }),
     });
     expect(res.status).toBe(200);
@@ -78,7 +78,7 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
   });
 
   it('escalates a sub-threshold dispatch (RFC 0002 §F)', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/agents/${encodeURIComponent(SUPERVISOR)}/dispatch`, {
+    const res = await fetch(`${BASE}/v1/host/openwop-app/agents/${encodeURIComponent(SUPERVISOR)}/dispatch`, {
       method: 'POST', headers: H, body: JSON.stringify({ task: {}, validateHandoff: false, simulateConfidence: 0.01, confidenceThreshold: 0.99 }),
     });
     const r = await res.json() as { status?: string; result?: unknown };
@@ -87,7 +87,7 @@ describe('RFC 0070 — host loads + dispatches a manifest agent over HTTP', () =
   });
 
   it('404s an unknown agent', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/agents/core.nope.absent/dispatch`, {
+    const res = await fetch(`${BASE}/v1/host/openwop-app/agents/core.nope.absent/dispatch`, {
       method: 'POST', headers: H, body: JSON.stringify({ task: {} }),
     });
     expect(res.status).toBe(404);

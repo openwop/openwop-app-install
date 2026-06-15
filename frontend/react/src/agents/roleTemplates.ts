@@ -1,22 +1,26 @@
 /**
  * Role templates + workflow display metadata for the "AI coworkers" UX.
  *
- * Mirrors the backend's built-in demo catalog (host/demoWorkflows.ts): the
+ * Mirrors the backend's built-in example catalog (host/exampleWorkflows.ts): the
  * runnable workflow ids and their business-friendly names. The UI shows the
  * friendly names — raw ids stay out of first-use surfaces (PRD §16). Used by
  * the agent dashboard, workspace portfolio, and the create-agent wizard.
  *
- * Keep in sync with apps/.../backend/typescript/src/host/demoWorkflows.ts.
+ * Keep in sync with apps/.../backend/typescript/src/host/exampleWorkflows.ts.
  */
 
 import type { CSSProperties } from 'react';
 import {
+  ActivityIcon,
   BotIcon,
   BriefcaseIcon,
+  BuildingIcon,
+  FileTextIcon,
   LifeBuoyIcon,
   SparklesIcon,
   MegaphoneIcon,
   ScaleIcon,
+  UserIcon,
   WrenchIcon,
 } from '../ui/icons/index.js';
 
@@ -37,65 +41,125 @@ export interface RoleTemplate {
   workflows: WorkflowOption[];
 }
 
+// ADR 0032 — the create-agent wizard offers the ten canonical Enterprise Digital
+// Work Twins (the legacy demo roles were retired with the legacy-5 seed removal,
+// T2.A). Chief of Staff (= Iris) is the live `assistant` agent and is created via
+// its own path (ADR 0023), so it is not a wizard template. Each role binds the
+// shared `tmpl.*` workflow library (T2.0 / host/workflowTemplates.ts) — the
+// `personaPrompt` here is a wizard PRE-FILL the user edits, distinct from the
+// authoritative seed systemPrompt the backend owns (T2.A / exampleAgents.json).
 export const ROLE_TEMPLATES: ReadonlyArray<RoleTemplate> = [
   {
-    key: 'sales-ops',
-    title: 'Sales Ops Assistant',
-    blurb: 'Routes leads, keeps the CRM clean, follows up on opportunities.',
+    key: 'sales-execution',
+    title: 'Sales Execution',
+    blurb: 'Briefs accounts, drafts next steps, digests pipeline risk.',
     personaPrompt:
-      'You are a Sales Ops Assistant. You are precise, friendly, and CRM-aware. You route leads, keep the CRM clean, and follow up on stalled opportunities quickly.',
+      'You are a Sales Execution twin. You are pipeline-aware and concise. You assemble account briefs, draft the next step on an opportunity, and digest account risk for review.',
     workflows: [
-      { workflowId: 'sample.agents.lead-routing', name: 'Lead routing', purpose: 'Score a new lead and route it to the right account owner.' },
-      { workflowId: 'sample.agents.crm-hygiene', name: 'CRM hygiene review', purpose: 'Flag stale or incomplete CRM records for cleanup.' },
-      { workflowId: 'sample.agents.follow-up-reminder', name: 'Follow-up reminder generation', purpose: 'Draft follow-up reminders for stalled opportunities.' },
+      { workflowId: 'tmpl.commercial.account-brief', name: 'Account brief', purpose: 'Assemble an account brief.' },
+      { workflowId: 'tmpl.commercial.next-step-draft', name: 'Next-step draft', purpose: 'Assess stage and draft the next step.' },
+      { workflowId: 'tmpl.commercial.risk-digest', name: 'Risk digest', purpose: 'Scan and digest account risk.' },
     ],
   },
   {
-    key: 'support-triage',
-    title: 'Support Triage Specialist',
-    blurb: 'Classifies tickets, escalates the urgent ones, drafts responses.',
+    key: 'customer-success',
+    title: 'Customer Success',
+    blurb: 'Assembles renewal packs, digests account health, briefs accounts.',
     personaPrompt:
-      'You are a Support Triage Specialist. You are calm, concise, and customer-first. You classify inbound tickets, escalate the urgent ones, and draft first responses.',
+      'You are a Customer Success twin. You are retention-focused and proactive. You assemble renewal packs, digest account-health risk, and prep account briefs.',
     workflows: [
-      { workflowId: 'sample.agents.ticket-classification', name: 'Ticket classification', purpose: 'Categorize an inbound support ticket by topic and severity.' },
-      { workflowId: 'sample.agents.priority-escalation', name: 'Priority escalation', purpose: 'Escalate high-priority tickets to the on-call owner.' },
-      { workflowId: 'sample.agents.support-response', name: 'Support response drafting', purpose: 'Draft a customer-ready first response for review.' },
+      { workflowId: 'tmpl.commercial.renewal-pack', name: 'Renewal pack', purpose: 'Assemble a renewal pack.' },
+      { workflowId: 'tmpl.commercial.risk-digest', name: 'Risk digest', purpose: 'Scan and digest account risk.' },
+      { workflowId: 'tmpl.commercial.account-brief', name: 'Account brief', purpose: 'Assemble an account brief.' },
     ],
   },
   {
-    key: 'finance-ops',
-    title: 'Finance Ops Analyst',
-    blurb: 'Extracts invoices, summarizes spend, gates risky changes for approval.',
+    key: 'finance-close',
+    title: 'Finance Close',
+    blurb: 'Runs the close checklist, chases support, drafts variance notes.',
     personaPrompt:
-      'You are a Finance Ops Analyst. You are careful and audit-friendly. You extract invoice data, summarize spend anomalies, and ALWAYS request human approval before applying a risky change.',
+      'You are a Finance Close twin. You are careful and audit-friendly. You run the period-close checklist, collect missing support, and draft variance notes — always gating risky changes for approval.',
     workflows: [
-      { workflowId: 'sample.agents.invoice-extraction', name: 'Invoice extraction', purpose: 'Extract structured fields from an uploaded invoice.' },
-      { workflowId: 'sample.agents.approval-gate', name: 'Approval gate', purpose: 'Hold a risky change for human approval before applying it.' },
-      { workflowId: 'sample.agents.spend-anomaly', name: 'Spend anomaly summary', purpose: 'Summarize unusual spend for the finance team.' },
+      { workflowId: 'tmpl.finance.close-checklist', name: 'Close checklist', purpose: 'Build the period-close checklist.' },
+      { workflowId: 'tmpl.finance.support-collection', name: 'Support collection', purpose: 'Identify and request missing support.' },
+      { workflowId: 'tmpl.finance.variance-note-draft', name: 'Variance-note draft', purpose: 'Compute variance and draft a note.' },
+      { workflowId: 'tmpl.finance.approval-chase', name: 'Approval chase', purpose: 'Run a single-approver gate, then chase if pending.' },
     ],
   },
   {
-    key: 'engineering-ops',
-    title: 'Engineering Ops Coordinator',
-    blurb: 'Runs release checklists, summarizes incidents, coordinates handoffs.',
+    key: 'it-service-desk',
+    title: 'IT Service Desk',
+    blurb: 'Triages incidents, recommends KB articles, routes standard requests.',
     personaPrompt:
-      'You are an Engineering Ops Coordinator. You are pragmatic, technical, and risk-aware. You run release checklists, summarize incidents, and coordinate code-review handoffs.',
+      'You are an IT Service Desk twin. You are calm and methodical. You triage incidents, recommend KB articles, and route standard requests — confirming before any provisioning.',
     workflows: [
-      { workflowId: 'sample.agents.release-checklist', name: 'Release checklist', purpose: 'Run the pre-release checklist and report gaps.' },
-      { workflowId: 'sample.agents.incident-summary', name: 'Incident summary', purpose: 'Draft an incident summary from the timeline.' },
-      { workflowId: 'sample.agents.code-review-handoff', name: 'Code review handoff', purpose: 'Package a change for the next reviewer in the chain.' },
+      { workflowId: 'tmpl.it.incident-triage', name: 'Incident triage', purpose: 'Classify and route an incident.' },
+      { workflowId: 'tmpl.it.kb-recommendation', name: 'KB recommendation', purpose: 'Match and recommend a KB article.' },
+      { workflowId: 'tmpl.it.standard-request-routing', name: 'Standard request routing', purpose: 'Classify a request, confirm, then fulfill.' },
+      { workflowId: 'tmpl.it.major-incident-update', name: 'Major-incident update', purpose: 'Gather status and draft an update.' },
     ],
   },
   {
-    key: 'marketing-ops',
-    title: 'Marketing Campaign Coordinator',
-    blurb: 'Reviews briefs, routes content for approval, runs publish checklists.',
+    key: 'internal-comms',
+    title: 'Internal Communications',
+    blurb: 'Drafts announcements, adapts messaging, preps all-hands.',
     personaPrompt:
-      'You are a Marketing Campaign Coordinator. You are brand-aware and action-oriented. You review campaign briefs, route content for approval, and run channel publish checklists.',
+      'You are an Internal Communications twin. You are clear and audience-aware. You draft announcements, adapt messaging per audience, and prep all-hands agendas.',
     workflows: [
-      { workflowId: 'sample.agents.campaign-brief', name: 'Campaign brief review', purpose: 'Review a campaign brief against brand guidelines.' },
-      { workflowId: 'sample.agents.content-approval', name: 'Content approval routing', purpose: 'Route content for approval before publish.' },
-      { workflowId: 'sample.agents.channel-publish', name: 'Channel publish checklist', purpose: 'Run the publish checklist for each channel.' },
+      { workflowId: 'tmpl.comms.announcement-draft', name: 'Announcement draft', purpose: 'Draft an announcement.' },
+      { workflowId: 'tmpl.comms.audience-adaptation', name: 'Audience adaptation', purpose: 'Adapt a message to an audience.' },
+      { workflowId: 'tmpl.comms.faq-draft', name: 'FAQ draft', purpose: 'Draft an FAQ from questions.' },
+      { workflowId: 'tmpl.comms.all-hands-prep', name: 'All-hands prep', purpose: 'Collect topics and draft an agenda.' },
+    ],
+  },
+  {
+    key: 'recruiting-coordinator',
+    title: 'Recruiting Coordinator',
+    blurb: 'Matches availability, places interview holds, preps onboarding.',
+    personaPrompt:
+      'You are a Recruiting Coordinator twin. You are responsive and organized. You match interviewer availability, place calendar holds, and prep onboarding checklists.',
+    workflows: [
+      { workflowId: 'tmpl.scheduling.availability-match', name: 'Availability match', purpose: 'Propose slots from calendars.' },
+      { workflowId: 'tmpl.scheduling.hold-creation', name: 'Hold creation', purpose: 'Find a slot, confirm, then place a hold.' },
+      { workflowId: 'tmpl.people.onboarding-checklist', name: 'Onboarding checklist', purpose: 'Build an onboarding checklist.' },
+    ],
+  },
+  {
+    key: 'people-ops',
+    title: 'People Operations',
+    blurb: 'Builds on/offboarding, routes leave, nudges managers.',
+    personaPrompt:
+      'You are a People Operations twin. You are discreet and policy-aware. You build onboarding/offboarding checklists, route leave requests for approval, and nudge managers on open items.',
+    workflows: [
+      { workflowId: 'tmpl.people.onboarding-checklist', name: 'Onboarding checklist', purpose: 'Build an onboarding checklist.' },
+      { workflowId: 'tmpl.people.offboarding-checklist', name: 'Offboarding checklist', purpose: 'Build offboarding, confirm, then execute.' },
+      { workflowId: 'tmpl.people.leave-request-routing', name: 'Leave-request routing', purpose: 'Assess leave, manager approval, then record.' },
+      { workflowId: 'tmpl.people.manager-nudge', name: 'Manager nudge', purpose: 'Compose a manager nudge.' },
+    ],
+  },
+  {
+    key: 'contract-procurement',
+    title: 'Contract & Procurement',
+    blurb: 'Summarizes clauses, compares terms, routes approvals.',
+    personaPrompt:
+      'You are a Contract & Procurement twin. You are precise and risk-aware. You summarize policies and clauses, compare terms, and route contracts through the right approval chain.',
+    workflows: [
+      { workflowId: 'tmpl.knowledge.policy-summarization', name: 'Policy summarization', purpose: 'Summarize a policy document.' },
+      { workflowId: 'tmpl.knowledge.comparison-summary', name: 'Comparison summary', purpose: 'Compare items into a summary.' },
+      { workflowId: 'tmpl.approvals.manager-plus-compliance', name: 'Manager plus compliance', purpose: 'Manager then compliance approval.' },
+    ],
+  },
+  {
+    key: 'executive-ops',
+    title: 'Executive Operations',
+    blurb: 'Preps meetings, extracts actions, drafts daily/weekly summaries.',
+    personaPrompt:
+      'You are an Executive Operations twin. You run the executive operating rhythm: prep meeting briefs, extract and follow up on actions, and draft daily and weekly summaries.',
+    workflows: [
+      { workflowId: 'tmpl.meeting-ops.meeting-brief', name: 'Meeting brief', purpose: 'Assemble a pre-meeting brief from context.' },
+      { workflowId: 'tmpl.meeting-ops.post-meeting-follow-up', name: 'Post-meeting follow-up', purpose: 'Extract actions, then draft a follow-up.' },
+      { workflowId: 'tmpl.reporting.daily-summary', name: 'Daily summary', purpose: 'Summarize the day across signals.' },
+      { workflowId: 'tmpl.reporting.weekly-business-review', name: 'Weekly business review', purpose: 'Aggregate the week into a WBR.' },
     ],
   },
 ];
@@ -114,7 +178,7 @@ export function workflowPurpose(workflowId: string): string | undefined {
   return WF_BY_ID.get(workflowId)?.purpose;
 }
 
-/** True when the id is one of the built-in runnable demo workflows (vs a
+/** True when the id is one of the built-in runnable example workflows (vs a
  *  local-only/unregistered workflow that needs registration to run). */
 export function isKnownWorkflow(workflowId: string): boolean {
   return WF_BY_ID.has(workflowId);
@@ -140,14 +204,24 @@ export interface RoleTheme {
 }
 
 const ROLE_THEMES: Record<string, RoleTheme> = {
-  'sales-ops': { key: 'sales-ops', label: 'Sales', Icon: BriefcaseIcon },
-  'support-triage': { key: 'support-triage', label: 'Support', Icon: LifeBuoyIcon },
-  'finance-ops': { key: 'finance-ops', label: 'Finance', Icon: ScaleIcon },
-  'engineering-ops': { key: 'engineering-ops', label: 'Engineering', Icon: WrenchIcon },
-  'marketing-ops': { key: 'marketing-ops', label: 'Marketing', Icon: MegaphoneIcon },
   // ADR 0023 (corrected) — the Chief of Staff is a real roster agent; its
   // theme glyph is the sparkles mark the assistant has always carried.
   'chief-of-staff': { key: 'chief-of-staff', label: 'Chief of Staff', Icon: SparklesIcon },
+  // ADR 0032 — the ten canonical Enterprise Digital Work Twins. Each new roleKey
+  // gets a distinct glyph so a seeded roster reads at a glance (the seeder stamps
+  // RosterEntry.roleKey → roleThemeForKey resolves the glyph). Icon-only
+  // differentiation per DESIGN.md §3 (no per-role colour). Chief of Staff (=Iris)
+  // is above; Executive Operations rides the same assistant surface (ADR 0032
+  // §Exec-vs-Iris) but is a distinct roster instance, so it carries its own glyph.
+  'sales-execution': { key: 'sales-execution', label: 'Sales Execution', Icon: BriefcaseIcon },
+  'customer-success': { key: 'customer-success', label: 'Customer Success', Icon: LifeBuoyIcon },
+  'finance-close': { key: 'finance-close', label: 'Finance Close', Icon: ScaleIcon },
+  'it-service-desk': { key: 'it-service-desk', label: 'IT Service Desk', Icon: WrenchIcon },
+  'internal-comms': { key: 'internal-comms', label: 'Internal Comms', Icon: MegaphoneIcon },
+  'recruiting-coordinator': { key: 'recruiting-coordinator', label: 'Recruiting', Icon: UserIcon },
+  'people-ops': { key: 'people-ops', label: 'People Ops', Icon: BuildingIcon },
+  'contract-procurement': { key: 'contract-procurement', label: 'Contract & Procurement', Icon: FileTextIcon },
+  'executive-ops': { key: 'executive-ops', label: 'Executive Ops', Icon: ActivityIcon },
 };
 
 const CUSTOM_THEME: RoleTheme = { key: 'custom', label: 'Custom', Icon: BotIcon };
@@ -158,8 +232,9 @@ export function roleThemeForKey(key: string | undefined): RoleTheme {
 }
 
 /** Derive the role-template key for a roster member: prefer the seeded
- *  `host:demo-<key>` agentRef, else infer from the workflow portfolio, else
- *  fall back to the custom theme. Mirrors host/demoSeed.ts agentRef ids. */
+ *  `host:<example|demo>-<key>` agentRef, else infer from the workflow portfolio,
+ *  else fall back to the custom theme. Mirrors host/exampleDataSeed.ts agentRef
+ *  ids. (Legacy `host:demo-` refs from earlier demo tenants stay supported.) */
 export function roleKeyForAgent(
   agentId: string | undefined,
   workflows: ReadonlyArray<string>,
@@ -168,7 +243,7 @@ export function roleKeyForAgent(
   // The persisted seed roleKey (RosterEntry.roleKey) wins — exact, not inferred.
   if (explicitRoleKey && ROLE_THEMES[explicitRoleKey]) return explicitRoleKey;
   if (agentId) {
-    const m = /^host:demo-(.+)$/.exec(agentId);
+    const m = /^host:(?:example|demo)-(.+)$/.exec(agentId);
     const key = m?.[1];
     if (key && ROLE_THEMES[key]) return key;
   }

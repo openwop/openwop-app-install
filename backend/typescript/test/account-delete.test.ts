@@ -1,7 +1,7 @@
 /**
  * Account hard-delete tests (P3.6.5).
  *
- * Verifies DELETE /v1/host/sample/account:
+ * Verifies DELETE /v1/host/openwop-app/account:
  *   - Removes runs, events, interrupts, workflows for the caller
  *   - Removes KMS-encrypted BYOK secrets
  *   - Leaves other tenants' data untouched
@@ -126,7 +126,7 @@ function mintToken(sub: string): string {
 }
 
 async function callDelete(token?: string): Promise<Response> {
-  return fetch(`http://127.0.0.1:${appPort}/v1/host/sample/account`, {
+  return fetch(`http://127.0.0.1:${appPort}/v1/host/openwop-app/account`, {
     method: 'DELETE',
     headers: token ? { authorization: `Bearer ${token}` } : {},
   });

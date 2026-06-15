@@ -98,7 +98,7 @@ export function Inspector() {
                 <code>{missingModelCaps.join(', ')}</code>. At dispatch time the host will
                 either substitute a fallback model
                 (<code>model.capability.substituted</code>) or refuse with
-                <code> capability_not_provided</code> per RFC 0031 §B.
+                <code> capability_not_provided</code>.
               </>
             )}
           </div>
@@ -143,7 +143,7 @@ export function Inspector() {
             outputRole: v === 'primary' || v === 'secondary' ? v : undefined,
           });
         }}
-        title="RFC 0065 — author hint for which terminal node's output is the workflow's canonical deliverable. Advisory; engine ignores the value."
+        title="Author hint for which terminal node's output is the workflow's canonical deliverable. Advisory; engine ignores the value."
       >
         <option value="">(none)</option>
         <option value="primary">Primary</option>
@@ -152,7 +152,7 @@ export function Inspector() {
       <p className="muted binspector-output-role-note">
         Tag the canonical-deliverable terminal node so the chat's
         completion card surfaces this output as the workflow's primary
-        artifact. RFC 0065 — advisory; the engine ignores the value.
+        artifact. Advisory; the engine ignores the value.
       </p>
 
       <div className="builder-inspector-divider" />

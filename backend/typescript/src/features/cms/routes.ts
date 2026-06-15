@@ -1,6 +1,6 @@
 /**
- * CMS routes (ADR 0009) — host-extension, sample-grade. Org-scoped under
- * /v1/host/sample/cms/orgs/:orgId, gated by the shared `requireOrgScope` (ADR
+ * CMS routes (ADR 0009) — host-extension, best-effort. Org-scoped under
+ * /v1/host/openwop-app/cms/orgs/:orgId, gated by the shared `requireOrgScope` (ADR
  * 0027: CMS is always-on, so no toggle gate — the org-scoped RBAC remains):
  *   read (list/get/versions/by-slug)        → workspace:read
  *   content edits (create/patch/delete) + submit → workspace:write
@@ -29,7 +29,7 @@ import {
 
 export function registerCmsRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/sample/cms/orgs/:orgId';
+  const BASE = '/v1/host/openwop-app/cms/orgs/:orgId';
 
   // ── Reads ──
   app.get(`${BASE}/pages`, async (req, res, next) => {

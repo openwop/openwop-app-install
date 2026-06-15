@@ -1,9 +1,9 @@
 /**
  * Publishing & SEO routes (ADR 0012). Two surfaces:
- *   - AUTHED  /v1/host/sample/publishing/orgs/:orgId/pages/:pageId/seo
+ *   - AUTHED  /v1/host/openwop-app/publishing/orgs/:orgId/pages/:pageId/seo
  *       (requireOrgScope — GET workspace:read, PUT workspace:write)
- *   - PUBLIC  /v1/host/sample/public/:orgId/*  (NO auth — org→tenant from URL,
- *       published-only). The `/v1/host/sample/public` prefix is on
+ *   - PUBLIC  /v1/host/openwop-app/public/:orgId/*  (NO auth — org→tenant from URL,
+ *       published-only). The `/v1/host/openwop-app/public` prefix is on
  *       PUBLIC_PATH_PREFIXES (auth.ts).
  *
  * ADR 0027: Publishing is always-on — no toggle gate. The authed SEO routes keep
@@ -28,7 +28,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
   // ── authed: per-page SEO metadata ──
-  const SEO = '/v1/host/sample/publishing/orgs/:orgId/pages/:pageId/seo';
+  const SEO = '/v1/host/openwop-app/publishing/orgs/:orgId/pages/:pageId/seo';
 
   app.get(SEO, async (req, res, next) => {
     try {
@@ -46,7 +46,7 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
   });
 
   // ── public: the published site (NO auth; org→tenant; toggle-gated) ──
-  const PUB = '/v1/host/sample/public/:orgId';
+  const PUB = '/v1/host/openwop-app/public/:orgId';
 
   app.get(`${PUB}/pages/:slug`, async (req, res, next) => {
     try {

@@ -1,5 +1,5 @@
 /**
- * Outbound one-off notification delivery (email / SMS) for `/v1/host/sample/
+ * Outbound one-off notification delivery (email / SMS) for `/v1/host/openwop-app/
  * messaging/notify`.
  *
  * The relay channels (signal/whatsapp/…) are delivered by an external relay

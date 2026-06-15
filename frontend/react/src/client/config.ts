@@ -6,7 +6,7 @@
  * Auth modes:
  *   'bearer' (default) — send Authorization: Bearer <apiKey>. Used by
  *       local dev + the conformance harness. apiKey defaults to
- *       'sample-token' which matches the backend's OPENWOP_API_KEYS
+ *       'dev-token' which matches the backend's OPENWOP_API_KEYS
  *       fallback.
  *   'cookie' — send `credentials: 'include'` on every request; rely on
  *       the openwop.session cookie minted by the backend's auth
@@ -37,7 +37,7 @@ export const config = {
   sseBaseUrl: (import.meta.env.VITE_OPENWOP_SSE_BASE_URL as string | undefined)
     ?? (import.meta.env.VITE_OPENWOP_BASE_URL as string | undefined)
     ?? DEV_FALLBACK_BASE_URL,
-  apiKey: (import.meta.env.VITE_OPENWOP_API_KEY as string | undefined) ?? 'sample-token',
+  apiKey: (import.meta.env.VITE_OPENWOP_API_KEY as string | undefined) ?? 'dev-token',
   authMode: ((import.meta.env.VITE_OPENWOP_AUTH_MODE as string | undefined) ?? 'bearer') as AuthMode,
   /** Live pack registry root (RFC 0003 / 0013 / 0043). The pack browser
    *  fetches `${registryBaseUrl}/v1/index.json` + per-pack manifests,

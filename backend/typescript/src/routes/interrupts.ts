@@ -19,6 +19,7 @@ import { executeRun } from '../executor/executor.js';
 import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
 import { createLogger } from '../observability/logger.js';
 import { createHostAdapterSuite, type HostAdapterSuite } from '../host/index.js';
+import { handleConversationResolve } from '../host/conversationExchange.js';
 
 const log = createLogger('routes.interrupts');
 
@@ -125,6 +126,18 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
         throw new OpenwopError('interrupt_already_resolved', 'approval gate timed out (auto-rejected; reason: timeout)', 409);
       }
       if (interrupt.resolvedAt) throw new OpenwopError('interrupt_already_resolved', 'interrupt already resolved', 409);
+      // Conversation primitive (RFC 0005 §D/§E): an `exchange` processes the
+      // turn + agent reply and STAYS suspended; only `close` resumes. Routed to
+      // the conversation handler, which validates the turn itself.
+      if (interrupt.kind === 'conversation') {
+        const result = await handleConversationResolve(
+          storage, interrupt, (req.body as { resumeValue?: unknown })?.resumeValue,
+          (id, val) => resolveAndResume(storage, hostSuite, id, val),
+        );
+        const cRun = await storage.getRun(runId);
+        res.json({ runId, nodeId, status: cRun?.status ?? 'waiting-input', conversation: { operation: result.operation, turns: result.turns.length } });
+        return;
+      }
       const body = req.body as ResolveInterruptRequest;
       validateResumeValue(interrupt, body?.resumeValue);
       await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue);
@@ -169,12 +182,12 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
   // Authenticated list of open interrupts for a run. Returns tokens —
   // public event log no longer carries them (see executor.ts §node.suspended).
   //
-  // Vendor-prefixed under /v1/host/sample/* per host-extensions.md
+  // Vendor-prefixed under /v1/host/openwop-app/* per host-extensions.md
   // §"Canonical prefixes". This endpoint is a strong RFC candidate —
   // every host that strips tokens from the public event log needs a
   // way for authed callers to list open interrupts with tokens. For
   // now it stays sample-scoped to avoid contract drift.
-  app.get('/v1/host/sample/runs/:runId/interrupts', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/runs/:runId/interrupts', async (req, res, next) => {
     try {
       const run = await storage.getRun(req.params.runId);
       if (!run) throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);

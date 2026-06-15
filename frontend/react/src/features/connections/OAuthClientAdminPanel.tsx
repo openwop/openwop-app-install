@@ -28,7 +28,7 @@ import {
  *  (defaulting to this origin's `/api`). Shown as copy-paste guidance. */
 function redirectUriHint(provider: string): string {
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  return `${origin}/api/v1/host/sample/connections/${provider}/callback`;
+  return `${origin}/api/v1/host/openwop-app/connections/${provider}/callback`;
 }
 
 export function OAuthClientAdminPanel(): JSX.Element | null {

@@ -1,7 +1,7 @@
 /**
  * Memory ledger read-side (RFC 0004 / app-ux §A3).
  *
- * Verifies the host-extension GET /v1/host/sample/memory returns the
+ * Verifies the host-extension GET /v1/host/openwop-app/memory returns the
  * run-summary the executor writes on completion, tenant-scoped from the
  * caller's principal (not the query) per CTI-1.
  */
@@ -13,7 +13,7 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 const PORT = 18184;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -62,7 +62,7 @@ interface MemoryListBody {
 
 describe('memory ledger read-side', () => {
   it('requires auth', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/memory`);
+    const res = await fetch(`${BASE}/v1/host/openwop-app/memory`);
     expect(res.status).toBe(401);
   });
 
@@ -73,7 +73,7 @@ describe('memory ledger read-side', () => {
     const create = await jsonFetch<{ runId: string; status: string }>('/v1/runs', {
       method: 'POST',
       body: JSON.stringify({
-        workflowId: 'sample.demo.uppercase',
+        workflowId: 'openwop-app.uppercase',
         inputs: { text: 'remember me' },
       }),
     });
@@ -87,7 +87,7 @@ describe('memory ledger read-side', () => {
       if (['completed', 'failed', 'cancelled'].includes(snap.body.status)) break;
     }
 
-    const mem = await jsonFetch<MemoryListBody>('/v1/host/sample/memory');
+    const mem = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
     expect(mem.status).toBe(200);
     expect(mem.body.memoryRef).toBe('tenant-memory');
     const mine = mem.body.entries.filter((e) => e.tags.includes(`run-id:${runId}`));
@@ -97,31 +97,31 @@ describe('memory ledger read-side', () => {
   });
 
   it('filters by tag', async () => {
-    const mem = await jsonFetch<MemoryListBody>('/v1/host/sample/memory?tag=run-summary');
+    const mem = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory?tag=run-summary');
     expect(mem.status).toBe(200);
     for (const e of mem.body.entries) expect(e.tags).toContain('run-summary');
   });
 
   it('deletes a tenant-scoped entry (demo DELETE route)', async () => {
     // Grab an existing entry, delete it, and confirm it's gone.
-    const before = await jsonFetch<MemoryListBody>('/v1/host/sample/memory');
+    const before = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
     expect(before.body.entries.length).toBeGreaterThan(0);
     const target = before.body.entries[0]!;
 
     const del = await jsonFetch<{ memoryRef: string; memoryId: string; removed: boolean }>(
-      `/v1/host/sample/memory/${target.id}`,
+      `/v1/host/openwop-app/memory/${target.id}`,
       { method: 'DELETE' },
     );
     expect(del.status).toBe(200);
     expect(del.body.removed).toBe(true);
     expect(del.body.memoryId).toBe(target.id);
 
-    const after = await jsonFetch<MemoryListBody>('/v1/host/sample/memory');
+    const after = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
     expect(after.body.entries.find((e) => e.id === target.id)).toBeUndefined();
   });
 
   it('returns 404 deleting a missing entry', async () => {
-    const del = await jsonFetch<{ error: string }>('/v1/host/sample/memory/mem_does_not_exist', {
+    const del = await jsonFetch<{ error: string }>('/v1/host/openwop-app/memory/mem_does_not_exist', {
       method: 'DELETE',
     });
     expect(del.status).toBe(404);
@@ -129,7 +129,7 @@ describe('memory ledger read-side', () => {
   });
 
   it('requires auth to delete', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/memory/whatever`, { method: 'DELETE' });
+    const res = await fetch(`${BASE}/v1/host/openwop-app/memory/whatever`, { method: 'DELETE' });
     expect(res.status).toBe(401);
   });
 });

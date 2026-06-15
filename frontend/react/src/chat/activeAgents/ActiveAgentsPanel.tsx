@@ -11,7 +11,7 @@
  *
  * The chat dispatcher (phase D2) reads
  * `session.activeAgents.currentAgentId` per turn and passes it into
- * the `sample.chat.turn` workflow's `inputs.agentId`. All active
+ * the `openwop-app.chat.turn` workflow's `inputs.agentId`. All active
  * agents see the whole shared history (group-chat model per the
  * 2026-05-28 product decision).
  *

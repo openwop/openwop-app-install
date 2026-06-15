@@ -23,7 +23,7 @@ describe('Assistant feature (sqlite memory app)', () => {
   let server: http.Server;
   const PORT = 18931;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -54,14 +54,14 @@ describe('Assistant feature (sqlite memory app)', () => {
 
   it('project CRUD works (graduated off its toggle — serves unconditionally)', async () => {
     // ADR 0023 § Correction — no 404-while-off; the surface is always-on substrate.
-    const created = await jf<{ projectId: string; priority: number }>('/v1/host/sample/assistant/projects', {
+    const created = await jf<{ projectId: string; priority: number }>('/v1/host/openwop-app/assistant/projects', {
       method: 'POST',
       body: JSON.stringify({ name: 'Q3 launch', priority: 80 }),
     });
     expect(created.status).toBe(201);
     expect(created.body.priority).toBe(80);
 
-    const list = await jf<{ projects: { projectId: string }[] }>('/v1/host/sample/assistant/projects');
+    const list = await jf<{ projects: { projectId: string }[] }>('/v1/host/openwop-app/assistant/projects');
     expect(list.body.projects.some((p) => p.projectId === created.body.projectId)).toBe(true);
   });
 
@@ -74,7 +74,7 @@ describe('Assistant feature (sqlite memory app)', () => {
     };
     expect(enq.pendingAction.status).toBe('pending');
 
-    const approved = await jf<{ status: string }>(`/v1/host/sample/assistant/pending-actions/${enq.pendingAction.actionId}/approve`, { method: 'POST' });
+    const approved = await jf<{ status: string }>(`/v1/host/openwop-app/assistant/pending-actions/${enq.pendingAction.actionId}/approve`, { method: 'POST' });
     expect(approved.status).toBe(200);
     expect(approved.body.status).toBe('approved');
   });

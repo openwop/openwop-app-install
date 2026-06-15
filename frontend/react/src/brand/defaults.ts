@@ -69,7 +69,7 @@ export const BRAND_DEFAULTS: BrandConfig = {
   productName: 'OpenWOP',
   brandMark: { pre: 'Open', emphasis: 'WOP', sub: 'agent platform' },
   tagline: 'agent platform',
-  footerText: 'Sample / template code. Not production-hardened.',
+  footerText: '',
   assistantName: 'OpenWOP',
   markSrc: '/OpenWOP.svg',
   lockupSrc: '',
@@ -79,12 +79,12 @@ export const BRAND_DEFAULTS: BrandConfig = {
     "<rect width='32' height='32' rx='6' fill='%23a35a30'/>" +
     "<text x='16' y='22' font-family='Instrument Serif,Times New Roman,serif' " +
     "font-style='italic' font-size='20' fill='%23f4f1ea' text-anchor='middle'>O</text></svg>",
-  documentTitle: 'workflow-engine — OpenWOP Reference UI',
+  documentTitle: 'OpenWOP — agent platform',
   fontsHref:
     'https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1' +
     '&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap',
   primaryDomain: 'app.openwop.dev',
-  instanceName: 'Demo host',
+  instanceName: 'OpenWOP',
   homeUrl: 'https://openwop.dev/',
   repoUrl: 'https://github.com/openwop/openwop',
   themeColor: '#1a1a17',

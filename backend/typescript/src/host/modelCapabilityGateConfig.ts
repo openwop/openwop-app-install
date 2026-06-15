@@ -64,7 +64,7 @@ export interface ModelCapabilityGateConfig {
   defaultModel: string;
 }
 
-const SAMPLE_SUPPORTED_PROVIDERS: readonly string[] = ['anthropic', 'openai', 'google'] as const;
+const SUPPORTED_PROVIDERS: readonly string[] = ['anthropic', 'openai', 'google'] as const;
 
 function pickDefaultProvider(supportedProviders: readonly string[]): string {
   const override = process.env.OPENWOP_DEFAULT_AI_PROVIDER;
@@ -77,7 +77,7 @@ function pickDefaultProvider(supportedProviders: readonly string[]): string {
  * caching, no side effects. Cheap enough to call per-dispatch.
  */
 export function getModelCapabilityGateConfig(): ModelCapabilityGateConfig {
-  const supportedProviders = SAMPLE_SUPPORTED_PROVIDERS;
+  const supportedProviders = SUPPORTED_PROVIDERS;
   return {
     supported: true,
     advertised: aggregateAdvertisedCapabilities(supportedProviders),

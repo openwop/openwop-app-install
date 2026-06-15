@@ -12,7 +12,7 @@ import {
 const BASE: WorkforceHistoryOptions = {
   workforceId: 'workforce.finance.invoice-exception',
   tenantId: 'demo',
-  workflowId: 'sample.agents.invoice-exception',
+  workflowId: 'openwop-app.agents.invoice-exception',
   seed: 'ep0-fixed-seed',
   epochMs: 1_700_000_000_000, // fixed logical epoch — never the wall clock
   runCount: 240,

@@ -15,7 +15,7 @@ import {
 } from './emailService.js';
 
 const FEATURE = { toggleId: 'email', label: 'Email Marketing' };
-const ORG = '/v1/host/sample/email/orgs/:orgId';
+const ORG = '/v1/host/openwop-app/email/orgs/:orgId';
 type Scope = 'workspace:read' | 'workspace:write';
 
 export function registerEmailRoutes(deps: RouteDeps): void {

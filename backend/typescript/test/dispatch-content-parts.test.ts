@@ -61,7 +61,7 @@ describe('contentToAnthropicBlocks', () => {
     expect(String(blocks[0]!.text)).toContain('hello, world');
   });
   it('throws when an image part reaches dispatch unresolved (no bytes)', () => {
-    expect(() => contentToAnthropicBlocks([{ type: 'image', mimeType: 'image/png', url: '/v1/host/sample/assets/x' }]))
+    expect(() => contentToAnthropicBlocks([{ type: 'image', mimeType: 'image/png', url: '/v1/host/openwop-app/assets/x' }]))
       .toThrow(/unavailable|not resolved/i);
   });
 });

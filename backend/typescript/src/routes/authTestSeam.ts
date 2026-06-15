@@ -34,14 +34,14 @@ export function registerAuthTestSeamRoutes(app: Express): void {
     log.info('auth test seam disabled (set OPENWOP_TEST_AUTH_ENABLED=true to enable)');
     return;
   }
-  log.warn('auth test seam ENABLED — /v1/host/sample/test/login mints sessions. NEVER enable in a real deploy.');
+  log.warn('auth test seam ENABLED — /v1/host/openwop-app/test/login mints sessions. NEVER enable in a real deploy.');
 
-  // POST /v1/host/sample/test/login
+  // POST /v1/host/openwop-app/test/login
   //   { email?, displayName?, tenantId?, subject? }
   // Derives a stable subject from `email` (so re-login is idempotent, like real
   // auth) unless one is given; the home `tenantId` defaults to the subject's
   // deterministic personal tenant — pass an explicit one to make co-tenant users.
-  app.post('/v1/host/sample/test/login', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/test/login', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { email?: string; displayName?: string; tenantId?: string; subject?: string };
       const subject = body.subject ?? `oidc:test-${shortHash(body.email ?? randomUUID()).slice(0, 16)}`;

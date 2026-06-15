@@ -1,5 +1,5 @@
 /**
- * Shared run-starter for host-extension trigger surfaces (sample-grade).
+ * Shared run-starter for host-extension trigger surfaces (best-effort).
  *
  * The scheduler "Run now" + the agent heartbeat "Check now" both need to start
  * a workflow run the same way `POST /v1/runs` does — resolve the workflow via

@@ -14,7 +14,7 @@ export const sharingFeature: BackendFeature = {
   toggleDefault: {
     id: 'sharing',
     label: 'Sharing',
-    description: 'Mint unguessable public share links to a specific resource (CMS page — including a draft preview — or a KB collection) and resolve them read-only on a public surface, with social-card metadata. Composes CMS (ADR 0009) + KB (ADR 0011) via a pluggable resolver registry; the public surface is served only while this toggle is on.',
+    description: 'Mint unguessable public share links to a specific resource (CMS page — including a draft preview — or a KB collection) and resolve them read-only on a public surface, with social-card metadata. Composes CMS + KB via a pluggable resolver registry; the public surface is served only while this toggle is on.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

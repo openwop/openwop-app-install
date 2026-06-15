@@ -24,14 +24,19 @@ beforeEach(() => localStorage.clear());
 describe('PromptLibraryPage forms (Field migration)', () => {
   it('filter controls are label-associated', async () => {
     render(<PromptLibraryPage />);
-    await waitFor(() => expect(screen.getByLabelText('Search')).toBeTruthy());
-    expect(screen.getByLabelText('Kind')).toBeTruthy(); // filter Kind select
+    // Filter controls are label-associated via aria-label (the filter bar uses
+    // raw inputs with descriptive accessible names, distinct from the dialog's
+    // Field labels). getByLabelText resolves the aria-label.
+    await waitFor(() => expect(screen.getByLabelText('Search prompts')).toBeTruthy());
+    expect(screen.getByLabelText('Filter by kind')).toBeTruthy(); // filter Kind select
   });
 
   it('the editor modal exposes all fields by label', async () => {
     render(<PromptLibraryPage />);
-    await waitFor(() => expect(screen.getByText('+ New prompt')).toBeTruthy());
-    fireEvent.click(screen.getByText('+ New prompt'));
+    // "+ New prompt" renders twice (page header action + empty-state action);
+    // either opens the same editor, so click the first.
+    await waitFor(() => expect(screen.getAllByText('+ New prompt').length).toBeGreaterThan(0));
+    fireEvent.click(screen.getAllByText('+ New prompt')[0]);
 
     const dialog = await screen.findByRole('dialog', { name: 'New prompt' });
     const q = within(dialog);

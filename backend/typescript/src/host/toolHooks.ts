@@ -6,7 +6,7 @@
  * `agent.toolCalled` / `agent.toolReturned` fields and applies per-tool
  * authorization + rate limiting. This module is the host-side evaluator;
  * it is driven both by the live MCP path and by the
- * `POST /v1/host/sample/toolhooks/invoke` conformance seam.
+ * `POST /v1/host/openwop-app/toolhooks/invoke` conformance seam.
  *
  * Contract (RFC 0064 §"Proposal"):
  *   - `agent.toolCalled` gains `{ argsHash, principal, transport }`.
@@ -84,7 +84,7 @@ export function computeArgsHash(args: unknown): string {
   return createHash('sha256').update(canonicalize(redacted), 'utf8').digest('hex');
 }
 
-/** Per-`(principal, tool)` token bucket. Module-scoped — sample-grade;
+/** Per-`(principal, tool)` token bucket. Module-scoped — best-effort;
  *  a production host would back this with a durable counter. */
 interface Bucket {
   tokens: number;

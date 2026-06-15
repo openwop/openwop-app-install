@@ -1,7 +1,7 @@
 /**
  * `ctx.chat` host surface (`host.chat`, `spec/v1/host-capabilities.md`
  * §host.chat) — bridges the `vendor.myndhyve.chat` pack to the demo's REAL chat
- * store (the `Storage` chat tables the `/v1/host/sample/chat` routes + the SPA
+ * store (the `Storage` chat tables the `/v1/host/openwop-app/chat` routes + the SPA
  * read/write). A message a workflow sends with `core.chat.sendMessage` shows up
  * in the same chat session the UI renders.
  *
@@ -46,7 +46,7 @@ function messageIdFrom(idempotencyKey: string): string {
 
 interface ChatCard { cardId: string; cardType: string; payload: Record<string, unknown>; emittedAt: string; updatedAt: string }
 // In-process card store (emitCard/updateCard). The chat MESSAGE stream is
-// durable via Storage; the card index is demo-grade in-process.
+// durable via Storage; the card index is non-durable in-process.
 const _cards = new Map<string, ChatCard>();
 
 export interface ChatSurface {

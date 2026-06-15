@@ -1,7 +1,7 @@
 /**
- * Users feature routes (host-extension, sample-grade — ADR 0002, Phase 1).
+ * Users feature routes (host-extension, best-effort — ADR 0002, Phase 1).
  *
- * Surface under /v1/host/sample/users:
+ * Surface under /v1/host/openwop-app/users:
  *   GET    /me                 find-or-create + return the caller's durable record
  *   GET    /users              list the tenant's users
  *   POST   /users              create a user (admin path)
@@ -90,7 +90,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   // The reconciliation seam: durable record for the authenticated caller.
   // Fail-closed — a disabled user is denied (finding H5).
-  app.get('/v1/host/sample/users/me', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/users/me', async (req, res, next) => {
     try {
       // ADR 0003: resolve the ONE canonical durable user. A bound session
       // (`req.userId`, after login) resolves by id; an anon session is refused
@@ -109,7 +109,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
   // Self-serve: update the CALLER's own mutable identity (display name). Distinct
   // from the admin PATCH /users/:id — this resolves the caller and edits only
   // their own record, so a user can set their name from their profile page.
-  app.patch('/v1/host/sample/users/me', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/users/me', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       if (user.status !== 'active') {
@@ -125,7 +125,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/sample/users/users', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/users/users', async (req, res, next) => {
     try {
       res.json({ users: await listUsers(tenantOf(req)) });
     } catch (err) {
@@ -133,7 +133,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/sample/users/users', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/users/users', async (req, res, next) => {
     try {
       requireSignedIn(req); // anon sessions can't create durable users / grant groups (finding #4)
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -151,7 +151,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.get('/v1/host/sample/users/users/:id', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/users/users/:id', async (req, res, next) => {
     try {
       const user = await getUser(req.params.id);
       if (!user || user.tenantId !== tenantOf(req)) {
@@ -163,7 +163,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.patch('/v1/host/sample/users/users/:id', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/users/users/:id', async (req, res, next) => {
     try {
       requireSignedIn(req);
       const existing = await getUser(req.params.id);
@@ -184,7 +184,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
 
   // Lifecycle — disable (fail-closed control) / enable.
   for (const [verb, status] of [['disable', 'disabled'], ['enable', 'active']] as const) {
-    app.post(`/v1/host/sample/users/users/:id/${verb}`, async (req, res, next) => {
+    app.post(`/v1/host/openwop-app/users/users/:id/${verb}`, async (req, res, next) => {
       try {
           requireSignedIn(req);
         const existing = await getUser(req.params.id);
@@ -200,7 +200,7 @@ export function registerUsersRoutes(deps: RouteDeps): void {
     });
   }
 
-  app.delete('/v1/host/sample/users/users/:id', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/users/users/:id', async (req, res, next) => {
     try {
       requireSignedIn(req);
       const existing = await getUser(req.params.id);

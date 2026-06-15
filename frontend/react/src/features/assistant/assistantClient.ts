@@ -17,7 +17,7 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 // AssistantActionView, the drift flag lives on the backend Commitment). Dropped
 // to avoid resurrecting the dead EA client surface — the backend behaviour
 // (#171 drift/dismiss) is untouched.
-const base = `${config.baseUrl}/v1/host/sample/assistant`;
+const base = `${config.baseUrl}/v1/host/openwop-app/assistant`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

@@ -4,8 +4,8 @@
 **Date:** 2026-06-10 (backend implemented 2026-06-11)
 **Depends on:** ADR 0001 (feature-package), ADR 0006 (RBAC), ADR 0012 (Publishing —
 the public surface measured), ADR 0014 (feature workflow surfaces), ADR 0020 (Consent — gates ingest, **shipped first**)
-**Toggle:** `analytics` · **Surfaces:** authed `/v1/host/sample/analytics/orgs/:orgId/*`
-+ **public (unauthed) beacon** `/v1/host/sample/public-analytics/:orgId/collect`
+**Toggle:** `analytics` · **Surfaces:** authed `/v1/host/openwop-app/analytics/orgs/:orgId/*`
++ **public (unauthed) beacon** `/v1/host/openwop-app/public-analytics/:orgId/collect`
 (host-extension, NON-NORMATIVE — no RFC)
 **MyndHyve §:** Analytics · **Baseline:** `src/features/analytics/{AnalyticsService,
 ABTestingService,WebVitalsService}.ts` + `src/features/tracking/clickIdCapture.ts`
@@ -23,7 +23,7 @@ ingests page/event/conversion hits from that surface and reports on them.
 - **`analytics` namespace is free** — no `src/features/analytics`, no analytics
   route (the broad grep only hits unrelated `authRoutes`/`workforces` substrings).
 - **The public surface to instrument already exists** — Publishing serves pages at
-  `/v1/host/sample/public/:orgId/*` via `publicPageBySlug` (`publishing/routes.ts:51`).
+  `/v1/host/openwop-app/public/:orgId/*` via `publicPageBySlug` (`publishing/routes.ts:51`).
   Analytics adds a sibling **public beacon** (`/public-analytics`), reusing the
   `PUBLIC_PATH_PREFIXES` + tenant-from-org pattern (0012/0013), not a new mechanism.
 - **A/B already exists host-side — do NOT re-port `ABTestingService`.** The
@@ -60,13 +60,13 @@ scale path (open question).
 
 ### Phase 1 — event store + public beacon + authed reporting
 
-- **Public ingest** `POST /v1/host/sample/public-analytics/:orgId/collect`
+- **Public ingest** `POST /v1/host/openwop-app/public-analytics/:orgId/collect`
   `{ type, path?, name?, utm?, clickIds?, props? }` — unauthed; tenant from the org
   (`getOrg`); gated on the org-tenant's `analytics` toggle **and** Consent (0020,
   `analytics` category — deny-by-default in regulated regions); per-IP rate-limited;
-  payload-capped; appends one event. (Add `/v1/host/sample/public-analytics` to
+  payload-capped; appends one event. (Add `/v1/host/openwop-app/public-analytics` to
   `PUBLIC_PATH_PREFIXES`.)
-- **Authed reporting** `GET /v1/host/sample/analytics/orgs/:orgId/{summary,events}`
+- **Authed reporting** `GET /v1/host/openwop-app/analytics/orgs/:orgId/{summary,events}`
   (`authorizeOrgScope`, `workspace:read`) — counts, top paths, UTM + variant
   breakdowns, recent events; tenant+org IDOR-guarded.
 
@@ -78,7 +78,7 @@ session/bounce metrics.
 
 ### Phase 3 — server-side Conversions API
 
-`POST /v1/host/sample/analytics/orgs/:orgId/conversions/forward` (`workspace:write`)
+`POST /v1/host/openwop-app/analytics/orgs/:orgId/conversions/forward` (`workspace:write`)
 — forwards a conversion to Meta / TikTok / Google Offline **behind the host's
 egress/SSRF policy** with **BYOK** provider tokens. Honest capability: a provider is
 advertised/forwardable only when its credentials are configured (else a structured
@@ -121,7 +121,7 @@ to `packs.openwop.dev` (decoupled from toggle state for replay).
   capped; the public surface 404s on toggle-off; opaque `sessionKey` (non-PII).
 - **Egress discipline (Conversions):** outbound forwards run through the SSRF guard;
   provider tokens are BYOK, host-side, never on a result boundary.
-- **No wire surface → no RFC:** entirely `/v1/host/sample/*`.
+- **No wire surface → no RFC:** entirely `/v1/host/openwop-app/*`.
 
 ## Alternatives considered
 

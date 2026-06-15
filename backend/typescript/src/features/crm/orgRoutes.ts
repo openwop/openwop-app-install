@@ -3,7 +3,7 @@
  * AROUND the preserved tenant-scoped contacts. Companies / Deals / Pipelines
  * (Phase 1); Tasks / Activities (Phase 2); custom fields + import (Phase 3).
  *
- * Surface under /v1/host/sample/crm/orgs/:orgId. Every route is gated by the
+ * Surface under /v1/host/openwop-app/crm/orgs/:orgId. Every route is gated by the
  * media-style `authorize()` (toggle on `crm` + the caller's RFC 0049 scope in
  * the path org): read → workspace:read, write → workspace:write; a non-member
  * fails closed (403); an org outside the caller's tenant 404s.
@@ -92,7 +92,7 @@ async function resolveCustomFields(ctx: Ctx, entityType: CustomEntity, raw: unkn
 
 export function registerCrmOrgRoutes(deps: RouteDeps): void {
   const { app } = deps;
-  const BASE = '/v1/host/sample/crm/orgs/:orgId';
+  const BASE = '/v1/host/openwop-app/crm/orgs/:orgId';
 
   // ── Pipelines ──
   app.get(`${BASE}/pipelines`, async (req, res, next) => {

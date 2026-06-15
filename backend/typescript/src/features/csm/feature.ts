@@ -23,7 +23,7 @@ export const csmFeature: BackendFeature = {
   toggleDefault: {
     id: 'csm',
     label: 'CSM',
-    description: 'Customer-success accounts + health — sample product feature (ADR 0001 §6).',
+    description: 'Customer-success accounts + health — sample product feature.',
     category: 'Business Tools',
     status: 'off',
     bucketUnit: 'tenant',

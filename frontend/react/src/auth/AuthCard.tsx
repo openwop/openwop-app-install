@@ -57,7 +57,7 @@ export function AuthCard({
 
   const ssoLogin = () => {
     const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
-    window.location.href = `${config.baseUrl}/v1/host/sample/auth/saml/sso/login?returnTo=${returnTo}`;
+    window.location.href = `${config.baseUrl}/v1/host/openwop-app/auth/saml/sso/login?returnTo=${returnTo}`;
   };
 
   const run = async (fn: () => Promise<void>): Promise<void> => {

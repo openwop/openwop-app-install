@@ -15,7 +15,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
   let server: http.Server;
   const PORT = 18861;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token'; // wildcard bearer ⇒ superadmin
+  const TOKEN = 'dev-token'; // wildcard bearer ⇒ superadmin
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -47,20 +47,20 @@ describe('feature-toggle routes (sqlite memory app)', () => {
   }
 
   it('lists the declared default toggle before any override is saved', async () => {
-    const { status, body } = await jsonFetch<{ configs: { id: string; status: string }[] }>('/v1/host/sample/feature-toggles/admin/configs');
+    const { status, body } = await jsonFetch<{ configs: { id: string; status: string }[] }>('/v1/host/openwop-app/feature-toggles/admin/configs');
     expect(status).toBe(200);
     expect(body.configs.find((c) => c.id === 'demo.crm')?.status).toBe('off');
   });
 
   it('admin save → assignments reflects the override', async () => {
-    const saved = await jsonFetch('/v1/host/sample/feature-toggles/admin/configs/demo.crm', {
+    const saved = await jsonFetch('/v1/host/openwop-app/feature-toggles/admin/configs/demo.crm', {
       method: 'PUT',
       body: JSON.stringify({ status: 'on', bucketUnit: 'user', salt: 'crm', label: 'CRM' }),
     });
     expect(saved.status).toBe(200);
 
     const { body } = await jsonFetch<{ assignments: { id: string; enabled: boolean; variant: string | null }[] }>(
-      '/v1/host/sample/feature-toggles/assignments',
+      '/v1/host/openwop-app/feature-toggles/assignments',
     );
     const crm = body.assignments.find((a) => a.id === 'demo.crm');
     expect(crm?.enabled).toBe(true);
@@ -68,7 +68,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
   });
 
   it('a saved A/B split yields a sticky, enabled variant', async () => {
-    await jsonFetch('/v1/host/sample/feature-toggles/admin/configs/demo.crm', {
+    await jsonFetch('/v1/host/openwop-app/feature-toggles/admin/configs/demo.crm', {
       method: 'PUT',
       body: JSON.stringify({
         status: 'on',
@@ -78,7 +78,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
       }),
     });
     const read = async () =>
-      (await jsonFetch<{ id: string; variant: string | null; enabled: boolean }>('/v1/host/sample/feature-toggles/assignments/demo.crm')).body;
+      (await jsonFetch<{ id: string; variant: string | null; enabled: boolean }>('/v1/host/openwop-app/feature-toggles/assignments/demo.crm')).body;
     const first = await read();
     expect(first.enabled).toBe(true);
     expect(['A', 'B']).toContain(first.variant);
@@ -87,7 +87,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
 
   it('rejects a save whose variant weights do not sum to 100', async () => {
     const { status, body } = await jsonFetch<{ error?: string; message?: string }>(
-      '/v1/host/sample/feature-toggles/admin/configs/demo.crm',
+      '/v1/host/openwop-app/feature-toggles/admin/configs/demo.crm',
       { method: 'PUT', body: JSON.stringify({ status: 'on', variants: [{ key: 'A', weight: 30 }, { key: 'B', weight: 30 }] }) },
     );
     expect(status).toBe(400);
@@ -96,7 +96,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
   });
 
   it('the admin surface is auth-gated (no bearer ⇒ 401)', async () => {
-    const { status } = await jsonFetch('/v1/host/sample/feature-toggles/admin/configs', {}, false);
+    const { status } = await jsonFetch('/v1/host/openwop-app/feature-toggles/admin/configs', {}, false);
     expect(status).toBe(401);
   });
 });

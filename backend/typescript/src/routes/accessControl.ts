@@ -1,6 +1,6 @@
 /**
  * Organizations / teams / members + roles — host-extension routes
- * (sample-grade, NON-NORMATIVE). Surface under /v1/host/sample/*:
+ * (NON-NORMATIVE). Surface under /v1/host/openwop-app/*:
  *
  *   GET    /roles                         built-in role catalog (role → scopes)
  *   GET    /access/effective[?memberId|?subject]  resolve effective access
@@ -243,12 +243,12 @@ async function loadOrgOwned(req: Request, orgId: string) {
 
 export function registerAccessControlRoutes(app: Express): void {
   // ── Role catalog (read-only) ──
-  app.get('/v1/host/sample/roles', (_req, res) => {
+  app.get('/v1/host/openwop-app/roles', (_req, res) => {
     res.json({ roles: BUILT_IN_ROLE_IDS.map((id) => BUILT_IN_ROLES[id]) });
   });
 
   // ── Effective access ──
-  app.get('/v1/host/sample/access/effective', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/access/effective', async (req, res, next) => {
     try {
       // Explicit ?memberId / act-as wins (the UI's per-member preview); else an
       // explicit ?subject; else default to the CALLER's own subject (ADR 0006
@@ -267,14 +267,14 @@ export function registerAccessControlRoutes(app: Express): void {
   });
 
   // ── RFC 0049 §C — fail-closed authorization-decision seam (ADR 0006 Phase 3) ──
-  // `POST /v1/host/sample/authorization/decide` per spec/v1/host-sample-test-seams.md.
+  // `POST /v1/host/openwop-app/authorization/decide` per spec/v1/host-sample-test-seams.md.
   // Gated on capabilities.authorization.supported: when enforcement is OFF the
   // capability is unadvertised and the seam 404s (the conformance probe
   // soft-skips). When ON, resolves the principal's membership-derived scopes and
   // returns `{ allowed }` — fail-closed: an absent/unseeded principal (basis
   // 'none', zero scopes) MUST resolve `allowed: false` (SECURITY invariant
   // `authorization-fail-closed`); the host MUST NOT default-allow.
-  app.post('/v1/host/sample/authorization/decide', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/authorization/decide', async (req, res, next) => {
     try {
       if (!isAuthorizationEnforced()) {
         res.status(404).json({
@@ -299,7 +299,7 @@ export function registerAccessControlRoutes(app: Express): void {
   });
 
   // ── Organizations ──
-  app.get('/v1/host/sample/orgs', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/orgs', async (req, res, next) => {
     try {
       res.json({ orgs: await listOrgs(tenantOf(req)) });
     } catch (err) {
@@ -307,7 +307,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/orgs', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/orgs', async (req, res, next) => {
     try {
       requireAuthenticated(req); // bootstrap: any signed-in caller may create an org (becomes owner)
       const body = (req.body ?? {}) as { name?: unknown; description?: unknown };
@@ -330,7 +330,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.get('/v1/host/sample/orgs/:orgId', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/orgs/:orgId', async (req, res, next) => {
     try {
       res.json(await loadOrgOwned(req, req.params.orgId));
     } catch (err) {
@@ -338,7 +338,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.patch('/v1/host/sample/orgs/:orgId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/orgs/:orgId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:org:manage');
@@ -353,7 +353,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/orgs/:orgId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/orgs/:orgId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:org:manage');
@@ -365,7 +365,7 @@ export function registerAccessControlRoutes(app: Express): void {
   });
 
   // ── Teams (nested under an org) ──
-  app.get('/v1/host/sample/orgs/:orgId/teams', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/orgs/:orgId/teams', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       res.json({ teams: await listTeams(tenantOf(req), req.params.orgId) });
@@ -374,7 +374,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/orgs/:orgId/teams', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/orgs/:orgId/teams', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:teams:manage');
@@ -392,7 +392,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.patch('/v1/host/sample/orgs/:orgId/teams/:teamId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/orgs/:orgId/teams/:teamId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:teams:manage');
@@ -412,7 +412,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/orgs/:orgId/teams/:teamId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/orgs/:orgId/teams/:teamId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:teams:manage');
@@ -428,7 +428,7 @@ export function registerAccessControlRoutes(app: Express): void {
   });
 
   // ── Members (nested under an org) ──
-  app.get('/v1/host/sample/orgs/:orgId/members', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/orgs/:orgId/members', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       res.json({ members: await listMembers(tenantOf(req), req.params.orgId) });
@@ -437,7 +437,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/orgs/:orgId/members', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/orgs/:orgId/members', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:members:manage');
@@ -463,7 +463,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.patch('/v1/host/sample/orgs/:orgId/members/:memberId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/orgs/:orgId/members/:memberId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:members:manage');
@@ -494,7 +494,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/orgs/:orgId/members/:memberId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/orgs/:orgId/members/:memberId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:members:manage');
@@ -519,7 +519,7 @@ export function registerAccessControlRoutes(app: Express): void {
   // already an owner, so the ≥1-owner invariant still holds. Owner-level
   // (`host:org:manage`). This is the in-app path to demote/remove a sole owner:
   // hand ownership over first, then the guard no longer blocks stepping down.
-  app.post('/v1/host/sample/orgs/:orgId/members/:memberId/transfer-ownership', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/orgs/:orgId/members/:memberId/transfer-ownership', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:org:manage');
@@ -556,7 +556,7 @@ export function registerAccessControlRoutes(app: Express): void {
   });
 
   // ── Groups (cross-cutting RBAC units carrying roles) ──
-  app.get('/v1/host/sample/orgs/:orgId/groups', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/orgs/:orgId/groups', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       res.json({ groups: await listGroups(tenantOf(req), req.params.orgId) });
@@ -565,7 +565,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/orgs/:orgId/groups', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/orgs/:orgId/groups', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:groups:manage');
@@ -584,7 +584,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.patch('/v1/host/sample/orgs/:orgId/groups/:groupId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/orgs/:orgId/groups/:groupId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:groups:manage');
@@ -605,7 +605,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/orgs/:orgId/groups/:groupId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/orgs/:orgId/groups/:groupId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:groups:manage');
@@ -621,7 +621,7 @@ export function registerAccessControlRoutes(app: Express): void {
   });
 
   // ── Custom roles (org-defined, beyond the built-in catalog) ──
-  app.get('/v1/host/sample/orgs/:orgId/roles', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/orgs/:orgId/roles', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       res.json({
@@ -633,7 +633,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/orgs/:orgId/roles', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/orgs/:orgId/roles', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:roles:manage');
@@ -651,7 +651,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.patch('/v1/host/sample/orgs/:orgId/roles/:roleId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/orgs/:orgId/roles/:roleId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:roles:manage');
@@ -671,7 +671,7 @@ export function registerAccessControlRoutes(app: Express): void {
     }
   });
 
-  app.delete('/v1/host/sample/orgs/:orgId/roles/:roleId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/orgs/:orgId/roles/:roleId', async (req, res, next) => {
     try {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:roles:manage');

@@ -63,7 +63,7 @@ export function BuilderToolbar({
       <button
         className="secondary"
         onClick={onExportChainPack}
-        title="Export as an RFC 0013 workflow-chain-pack manifest (submit via the registry PR flow)"
+        title="Export as a workflow-chain-pack manifest (submit via the registry PR flow)"
       >
         Export chain pack
       </button>

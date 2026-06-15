@@ -27,13 +27,13 @@ import { detectAgentMention, useAgentMentions } from './lib/agentMentions.js';
 // Tenant-suffixed so two tenants signed in on the same browser
 // (anon → signed-in transition, or a shared-machine demo) don't see
 // each other's state leak into their UI.
-const LS_RAIL_TAB_PREFIX = 'openwop.sample.chat.leftRail.activeTab';
-const LS_PROGRESS_FOCUSED_PREFIX = 'openwop.sample.chat.progressPanel.focusedRunMsgId';
+const LS_RAIL_TAB_PREFIX = 'openwop-app.chat.leftRail.activeTab';
+const LS_PROGRESS_FOCUSED_PREFIX = 'openwop-app.chat.progressPanel.focusedRunMsgId';
 // Legacy keys — pre-consolidation, History/Progress/Agents each had
 // their own open boolean. Read once on first mount per tenant to
 // migrate, then removed. Predates the LeftRail consolidation.
-const LS_LEGACY_PROGRESS_OPEN_PREFIX = 'openwop.sample.chat.progressPanel.open';
-const LS_LEGACY_AGENTS_OPEN_PREFIX = 'openwop.sample.chat.activeAgentsPanel.open';
+const LS_LEGACY_PROGRESS_OPEN_PREFIX = 'openwop-app.chat.progressPanel.open';
+const LS_LEGACY_AGENTS_OPEN_PREFIX = 'openwop-app.chat.activeAgentsPanel.open';
 const MOBILE_BREAKPOINT_PX = 720;
 
 function railTabKey(tenantId: string): string {

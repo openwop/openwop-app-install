@@ -1,7 +1,7 @@
 /**
  * Vendor-prefixed node-catalog endpoint used by the builder palette.
  *
- *   GET /v1/host/sample/node-catalog
+ *   GET /v1/host/openwop-app/node-catalog
  *
  * Returns every resolvable node typeId on this host: the locally-
  * registered sample modules + any node declared in a pack manifest
@@ -83,7 +83,7 @@ interface PackManifest {
 }
 
 export function registerNodeCatalogRoute(app: Express): void {
-  app.get('/v1/host/sample/node-catalog', (_req, res, next) => {
+  app.get('/v1/host/openwop-app/node-catalog', (_req, res, next) => {
     try {
       const supported = new Set(
         listHostSurfaces().filter((s) => s.supported).map((s) => s.name),

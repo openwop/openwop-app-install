@@ -173,7 +173,7 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
           value={agent.hasHandoffSchemas ? 'Declared' : 'Not declared'}
           hint={
             agent.hasHandoffSchemas
-              ? 'The pack declares typed input + output schemas for inter-agent handoff (RFC 0037 §B).'
+              ? 'The pack declares typed input + output schemas for inter-agent handoff.'
               : 'Inter-agent handoff falls back to free-form text.'
           }
         />
@@ -218,7 +218,7 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
         <DetailSection title="Degraded capability tiers" tone="warning">
           <p className="muted agentdetail-degraded-note">
             This pack declares capability tiers that this host does not
-            satisfy (RFC 0072 §C). The agent still dispatches; these
+            satisfy. The agent still dispatches; these
             features are inert until the host advertises them.
           </p>
           <ul className="u-list-none u-m-0 u-p-0 u-flex u-wrap u-gap-1-5">

@@ -6,7 +6,7 @@
  *   domain record (PendingAction), creates its PendingApproval on the host
  *   queue, back-links the two, and drops the Notifications-inbox item.
  * - `decideActionViaApproval()` — the ONE decision path, shared by
- *   `/v1/host/sample/approvals/:id/{claim,reject}` (via the handler hook the
+ *   `/v1/host/openwop-app/approvals/:id/{claim,reject}` (via the handler hook the
  *   feature registers at boot) and the assistant's own
  *   `/pending-actions/:id/{approve,reject}` routes: the CAS-guarded
  *   `resolveApproval` IS the decision; the PendingAction status is a
@@ -27,6 +27,9 @@ import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { sanitizeFreeText } from '../../byok/textRedaction.js';
 import { stripSecretsFromPersisted } from '../../byok/ephemeralRunSecrets.js';
 import { actionPolicyOf } from '../../host/governanceService.js';
+import { getAgentProfile } from '../../host/agentProfileService.js';
+import { resolveConnectionReadiness } from '../../host/connectionReadiness.js';
+import { resolveAgentPolicy } from '../../host/agentPolicyResolver.js';
 import type { StartRunDeps } from '../../host/runStarter.js';
 import {
   decidePendingAction,
@@ -36,7 +39,7 @@ import {
   type PendingAction,
 } from './assistantService.js';
 import { executeApprovedAction } from './actionExecution.js';
-import { ensureChiefOfStaff } from './chiefOfStaff.js';
+import { ensureAssistantAgent } from './capability.js';
 
 function summarize(action: PendingAction): string {
   const to = Array.isArray((action.payload as { to?: unknown }).to)
@@ -54,24 +57,45 @@ export async function enqueueActionWithApproval(
   input: Parameters<typeof enqueuePendingAction>[1],
 ): Promise<PendingAction> {
   // ADR 0028 — a 'disabled' kind drafts nothing at all (the most restrictive
-  // posture; 'draft-only' still enqueues, it just never executes — T6 seam).
+  // admin posture; 'draft-only' still enqueues, it just never executes — T6).
   if ((await actionPolicyOf(tenantId, input.kind)) === 'disabled') {
     throw Object.assign(
       new Error(`assistant action kind '${input.kind}' is disabled by workspace policy`),
       { code: 'forbidden', status: 403 },
     );
   }
+  // Attribute the approval to the REAL assistant-capability agent, so it appears
+  // in that roster member's "Waiting on me" lane as the agent itself, not a
+  // phantom `rosterId:'assistant'`. The agent is resolved by the `assistant`
+  // CAPABILITY (ADR 0023 corrected 2026-06-13), never by a hardcoded
+  // `chief-of-staff` roleKey. Resolved BEFORE the enqueue so its agentProfile
+  // policy can fail-closed before anything is drafted.
+  const agent = await ensureAssistantAgent(tenantId);
+  // ADR 0036 — agentProfile policy enforcement, composed with ADR 0033
+  // readiness (most-restrictive wins). The acting agent is the assistant-
+  // capability holder (profileId = its rosterId); the action class is the
+  // action `kind` (e.g. `email.send`). A `deny` verdict (the kind is on the
+  // agent's `permissions.never`) fails closed — nothing is drafted, enqueued,
+  // or approvable. `hitl` / `auto`-off-allowlist verdicts resolve to `review`,
+  // which is already this path's behavior (it ALWAYS proposes — execution waits
+  // on a human approve in T6), so they need no extra branch here; the deny is
+  // the load-bearing enforcement at this seam.
+  const readiness = await resolveConnectionReadiness(tenantId, agent.rosterId);
+  const profile = await getAgentProfile(tenantId, agent.rosterId);
+  const policy = resolveAgentPolicy({ profile, actionClass: input.kind, readiness });
+  if (policy.verdict === 'deny') {
+    throw Object.assign(
+      new Error(`assistant action kind '${input.kind}' is forbidden by the agent's policy (permissions.never)`),
+      { code: 'forbidden', status: 403 },
+    );
+  }
   const action = await enqueuePendingAction(tenantId, input);
-  // ADR 0023 (corrected) — attribute the approval to the REAL Chief-of-Staff
-  // roster member, so it appears in the roster's "Waiting on me" lane as the
-  // agent itself, not a phantom `rosterId:'assistant'`.
-  const cos = await ensureChiefOfStaff(tenantId);
   const approval = await createAssistantActionApproval({
     tenantId,
     actionId: action.actionId,
     proposal: summarize(action),
-    rosterId: cos.rosterId,
-    persona: cos.persona,
+    rosterId: agent.rosterId,
+    persona: agent.persona,
   });
   await setPendingActionApproval(tenantId, action.actionId, approval.approvalId);
   // Notifications (ADR 0010) — the inbox/bell is how the principal learns

@@ -76,7 +76,7 @@ existing approval loop. **NON-NORMATIVE — no RFC.**
   `derivedFromUntrusted`; no `PendingAction` reaches `sent` without
   `resolveApproval` claim; prompt assembly wraps the hostile payload in
   `<UNTRUSTED>` markers (assert via the existing
-  `POST /v1/host/sample/test/llm-prompt-wrap` seam pattern).
+  `POST /v1/host/openwop-app/test/llm-prompt-wrap` seam pattern).
 - **Laundering regression:** re-ingesting the same source with a new
   `contentHash` keeps taint; an edited draft keeps `derivedFromUntrusted`.
 
@@ -94,7 +94,7 @@ existing approval loop. **NON-NORMATIVE — no RFC.**
 
 **Host work — no new RFC.** `contentTrust` on run events is already RFC 0021
 wire surface; this ADR only *consumes* it on host-internal graph entities. The
-heightened gate is host policy inside non-normative `/v1/host/sample/*`
+heightened gate is host policy inside non-normative `/v1/host/openwop-app/*`
 surfaces. Tripwire: if cross-host interop ever needs "this action was derived
 from untrusted content" **on the wire** (e.g. a federated approval), that is an
 additive RFC on the approval-event payload — not needed for the tranches here.

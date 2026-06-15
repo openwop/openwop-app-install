@@ -2,13 +2,13 @@
  * Notification inbox routes (PR #146, follow-up PR moves routes under
  * the sample-host vendor prefix per `host-extensions.md`).
  *
- *   GET    /v1/host/sample/notifications                — list for tenant
- *   GET    /v1/host/sample/notifications/stream         — SSE: live new
- *   POST   /v1/host/sample/notifications/:id/read       — mark read
- *   POST   /v1/host/sample/notifications/:id/unread     — mark unread
- *   POST   /v1/host/sample/notifications/:id/archive    — archive
- *   POST   /v1/host/sample/notifications:mark-all-read  — mark every unread row read
- *   DELETE /v1/host/sample/notifications/:id            — hard delete
+ *   GET    /v1/host/openwop-app/notifications                — list for tenant
+ *   GET    /v1/host/openwop-app/notifications/stream         — SSE: live new
+ *   POST   /v1/host/openwop-app/notifications/:id/read       — mark read
+ *   POST   /v1/host/openwop-app/notifications/:id/unread     — mark unread
+ *   POST   /v1/host/openwop-app/notifications/:id/archive    — archive
+ *   POST   /v1/host/openwop-app/notifications:mark-all-read  — mark every unread row read
+ *   DELETE /v1/host/openwop-app/notifications/:id            — hard delete
  *
  * Vendor-prefixed because notifications are NOT a normative openwop v1
  * surface — only the openwop demo app uses them. Other hosts MAY add
@@ -39,7 +39,7 @@ import { getNotificationEmitter } from '../notifications/emitter.js';
 
 const VALID_STATUSES: readonly NotificationStatus[] = ['unread', 'read', 'archived'];
 
-const BASE = '/v1/host/sample/notifications';
+const BASE = '/v1/host/openwop-app/notifications';
 
 interface Deps {
   storage: Storage;

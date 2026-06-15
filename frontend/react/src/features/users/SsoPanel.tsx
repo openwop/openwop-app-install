@@ -15,8 +15,8 @@ import { config, authedHeaders, fetchOpts } from '../../client/config.js';
 
 interface Caps { auth?: { profiles?: string[] } }
 
-const ACS_PATH = '/v1/host/sample/auth/saml/validate';
-const SCIM_PATH = '/v1/host/sample/auth/scim/provision';
+const ACS_PATH = '/v1/host/openwop-app/auth/saml/validate';
+const SCIM_PATH = '/v1/host/openwop-app/auth/scim/provision';
 
 function Row({ name, detail, on, onLabel = 'Advertised', offLabel = 'Not configured' }: {
   name: string; detail: string; on: boolean; onLabel?: string; offLabel?: string;
@@ -54,7 +54,7 @@ export function SsoPanel(): JSX.Element {
       <div className="u-grid u-gap-1">
         <strong>Enterprise SSO &amp; provisioning</strong>
         <span className="muted">
-          SAML 2.0 single sign-on and SCIM 2.0 provisioning (RFC 0050). Host seams for
+          SAML 2.0 single sign-on and SCIM 2.0 provisioning. Host seams for
           white-label / B2B deployments — advertised only when configured + honored.
         </span>
       </div>
@@ -63,7 +63,7 @@ export function SsoPanel(): JSX.Element {
         <div className="muted">Reading host capabilities…</div>
       ) : (
         <div className="u-grid u-gap-2">
-          <Row name="OIDC (Google / GitHub)" detail="Firebase-brokered bearer — the demo's primary sign-in." on onLabel="Active" />
+          <Row name="OIDC (Google / GitHub)" detail="Firebase-brokered bearer — the host's primary sign-in." on onLabel="Active" />
           <Row name="Email &amp; password" detail="Local accounts with TOTP MFA (this app, when the Users feature is on)." on onLabel="Active" />
           <Row name="SAML 2.0 SSO" detail="The host validates IdP assertions at its ACS (Okta / Azure AD / Ping…)." on={saml} />
           <Row name="SCIM 2.0 provisioning" detail="The IdP create/deactivates users + assigns groups via SCIM." on={scim} />
@@ -85,7 +85,7 @@ export function SsoPanel(): JSX.Element {
       {!saml && !scim ? (
         <div className="alert info" role="status">
           Not enabled on this deployment. A white-label host turns these on by configuring an
-          IdP certificate / SCIM bearer (see ADR 0002 / RFC 0050); the host then advertises the
+          IdP certificate / SCIM bearer; the host then advertises the
           <code> openwop-auth-saml</code> / <code>openwop-auth-scim</code> profiles above.
         </div>
       ) : null}

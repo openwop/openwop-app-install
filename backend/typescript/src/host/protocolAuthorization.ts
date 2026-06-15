@@ -25,7 +25,7 @@
  *
  * @see docs/adr/0006-rbac.md (Phase 3)
  * @see RFCS/0049-rbac-scopes-and-authorization-decisions.md §C (fail-closed MUST)
- * @see spec/v1/host-sample-test-seams.md (`/v1/host/sample/authorization/decide`)
+ * @see spec/v1/host-sample-test-seams.md (`/v1/host/openwop-app/authorization/decide`)
  */
 
 import type { Request } from 'express';

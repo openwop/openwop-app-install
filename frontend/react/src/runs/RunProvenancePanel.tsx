@@ -259,7 +259,7 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
                   parent run <ChevronRightIcon size={12} />
                 </Link>
               ) : (
-                <span className="u-mono" title="RFC 0040 causation id">{p.causationId}</span>
+                <span className="u-mono" title="causation id">{p.causationId}</span>
               )}
             </dd>
           </>

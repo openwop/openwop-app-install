@@ -52,9 +52,9 @@ const pub = client();
 let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
   const owner = client();
-  const su = await owner.post('/v1/host/sample/test/login', { email: `consent-${Date.now()}-${n++}@acme.test` });
+  const su = await owner.post('/v1/host/openwop-app/test/login', { email: `consent-${Date.now()}-${n++}@acme.test` });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -70,28 +70,28 @@ describe('Consent: registration + public + authed', () => {
 
   it('public record + read (no auth)', async () => {
     const { orgId } = await ownerWithOrg();
-    const rec = await pub.post(`/v1/host/sample/public-consent/${orgId}`, { subjectKey: 'visitor-1', categories: { analytics: true, marketing: false } });
+    const rec = await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { subjectKey: 'visitor-1', categories: { analytics: true, marketing: false } });
     expect(rec.status, JSON.stringify(rec.body)).toBe(201);
     expect(rec.body.categories).toMatchObject({ necessary: true, analytics: true, marketing: false });
-    const read = await pub.get(`/v1/host/sample/public-consent/${orgId}/visitor-1`);
+    const read = await pub.get(`/v1/host/openwop-app/public-consent/${orgId}/visitor-1`);
     expect(read.body.recorded).toBe(true);
     expect(read.body.categories.analytics).toBe(true);
     // an unrecorded subject → defaults (not recorded)
-    const none = await pub.get(`/v1/host/sample/public-consent/${orgId}/nobody`);
+    const none = await pub.get(`/v1/host/openwop-app/public-consent/${orgId}/nobody`);
     expect(none.body.recorded).toBe(false);
   });
 
   it('authed policy + records + data-subject delete (RBAC)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    await pub.post(`/v1/host/sample/public-consent/${orgId}`, { subjectKey: 'v2', categories: { marketing: true } });
-    const setPol = await owner.put(`/v1/host/sample/consent/orgs/${orgId}/policy`, { defaultMode: 'opt-out', regulatedRegions: ['EU'] });
+    await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { subjectKey: 'v2', categories: { marketing: true } });
+    const setPol = await owner.put(`/v1/host/openwop-app/consent/orgs/${orgId}/policy`, { defaultMode: 'opt-out', regulatedRegions: ['EU'] });
     expect(setPol.body.policy.defaultMode).toBe('opt-out');
-    const recs = await owner.get(`/v1/host/sample/consent/orgs/${orgId}/records`);
+    const recs = await owner.get(`/v1/host/openwop-app/consent/orgs/${orgId}/records`);
     expect(recs.body.records.some((r: any) => r.subjectKey === 'v2')).toBe(true);
-    const del = await owner.del(`/v1/host/sample/consent/orgs/${orgId}/subjects/v2`);
+    const del = await owner.del(`/v1/host/openwop-app/consent/orgs/${orgId}/subjects/v2`);
     expect(del.status).toBe(200); // GDPR erasure is idempotent (no 404)
     expect(del.body.ok).toBe(true);
-    const after = await owner.get(`/v1/host/sample/consent/orgs/${orgId}/subjects/v2`);
+    const after = await owner.get(`/v1/host/openwop-app/consent/orgs/${orgId}/subjects/v2`);
     expect(after.body.record).toBeNull();
   });
 });
@@ -114,7 +114,7 @@ describe('Consent: isAllowed enforcement (the gate Analytics/Email call)', () =>
     const { orgId } = await ownerWithOrg();
     try {
       await enableConsent('off');
-      expect((await pub.post(`/v1/host/sample/public-consent/${orgId}`, { subjectKey: 'x', categories: {} })).status).toBe(404);
+      expect((await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { subjectKey: 'x', categories: {} })).status).toBe(404);
       expect(await isAllowed('tOff', 'anybody', 'analytics')).toBe(true); // no regime ⇒ permissive
     } finally {
       await enableConsent('on');

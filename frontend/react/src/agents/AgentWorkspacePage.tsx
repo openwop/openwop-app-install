@@ -6,7 +6,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { checkAgent, updateRosterEntry } from './rosterClient.js';
+import { checkAgent, deleteRosterEntry, updateRosterEntry } from './rosterClient.js';
 import { loadAgentView, statusMeta, relativeTime, type AgentView } from './agentViewModel.js';
 import { workflowName, roleThemeForAgent } from './roleTemplates.js';
 import { PlayIcon, ColumnsIcon, AlertIcon, PinIcon } from '../ui/icons/index.js';
@@ -15,7 +15,11 @@ import { AgentBoardPanel } from './AgentBoardPanel.js';
 import { AgentWorkflowPortfolioPanel } from './AgentWorkflowPortfolioPanel.js';
 import { AgentSchedulesPanel } from './AgentSchedulesPanel.js';
 import { AgentInstructionsPanel } from './AgentInstructionsPanel.js';
+import { AgentProfilePanel } from './AgentProfilePanel.js';
+import { AgentKnowledgePanel } from '../features/agent-knowledge/AgentKnowledgePanel.js';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { AgentIntegrationsPanel } from './AgentIntegrationsPanel.js';
+import { AgentConnectionStatusPanel } from './AgentConnectionStatusPanel.js';
 import { AgentActivityTab } from './AgentActivityTab.js';
 import { RecurringTasksPanel } from './RecurringTasksPanel.js';
 import { AgentHealthPanel } from './AgentHealthPanel.js';
@@ -35,13 +39,16 @@ function formatHeartbeat(intervalMs: number | undefined): string {
   return `every ${hrs}h`;
 }
 
-type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'integrations' | 'activity';
-const TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
+type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'profile' | 'knowledge' | 'integrations' | 'activity';
+const TABS: ReadonlyArray<{ key: TabKey; label: string; featureId?: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'workflows', label: 'Workflows' },
   { key: 'board', label: 'Board' },
   { key: 'schedules', label: 'Recurring tasks' },
   { key: 'instructions', label: 'Instructions' },
+  { key: 'profile', label: 'Profile' },
+  // ADR 0038 — the per-agent knowledge tab, shown only when the feature is on.
+  { key: 'knowledge', label: 'Knowledge', featureId: 'agent-knowledge' },
   { key: 'integrations', label: 'Integrations' },
   { key: 'activity', label: 'Activity' },
 ];
@@ -69,6 +76,11 @@ export function AgentWorkspacePage(): JSX.Element {
       return p;
     }, { replace: true });
   };
+
+  // ADR 0038 — the Knowledge tab is shown only when the agent-knowledge feature
+  // resolves enabled for the caller (the same toggle the panel + backend gate on).
+  const agentKnowledge = useFeatureAccess('agent-knowledge');
+  const visibleTabs = TABS.filter((t) => !t.featureId || (t.featureId === 'agent-knowledge' && agentKnowledge.enabled));
 
   const refresh = useCallback(async () => {
     if (!rosterId) return;
@@ -149,6 +161,25 @@ export function AgentWorkspacePage(): JSX.Element {
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  // Delete this coworker. The backend cascades the member's board, schedules,
+  // pending approvals, org-chart seat, and chat agent (no orphans), so this is
+  // a clean removal — and the silent demo auto-seed will NOT resurrect it.
+  const onDelete = async () => {
+    if (!view) return;
+    if (!window.confirm(
+      `Delete ${view.entry.persona}? This removes the agent and its board, schedules, and pending approvals. It can't be undone.`,
+    )) return;
+    setBusy(true);
+    setError(null);
+    try {
+      await deleteRosterEntry(view.entry.rosterId);
+      navigate('/agents');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+      setBusy(false); // stay on the page so the user can retry; on success we navigate away
     }
   };
 
@@ -238,6 +269,15 @@ export function AgentWorkspacePage(): JSX.Element {
         <button type="button" className="secondary" onClick={() => setTab('workflows')}>Run workflow</button>
         <button type="button" className="secondary" onClick={() => void onTogglePause()}>{entry.enabled ? 'Pause' : 'Resume'}</button>
         <button type="button" className="secondary" onClick={() => setTab('instructions')}>Instructions</button>
+        <button
+          type="button"
+          className="secondary u-text-danger"
+          onClick={() => void onDelete()}
+          disabled={busy}
+          title={`Delete ${entry.persona} and its board, schedules, and pending approvals`}
+        >
+          Delete
+        </button>
         <span className="muted u-fs-12">
           {entry.lastHeartbeatAt
             ? `Last checked ${relativeTime(entry.lastHeartbeatAt)}`
@@ -254,7 +294,7 @@ export function AgentWorkspacePage(): JSX.Element {
       {/* Tabs — the canonical editorial tab strip (DESIGN.md §5 `.tabs`/`.tab`),
           symmetric with the user profile's tabs (ADR 0025). */}
       <div className="tabs u-mb-4 u-wrap" role="tablist">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t.key}
             type="button"
@@ -273,7 +313,14 @@ export function AgentWorkspacePage(): JSX.Element {
       {tab === 'board' ? (view.board ? <AgentBoardPanel boardId={view.board.id} persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} workflows={entry.workflows} refreshSignal={boardRefresh} onChanged={() => void refresh()} /> : <NoBoard persona={entry.persona} />) : null}
       {tab === 'schedules' ? <AgentSchedulesPanel entry={entry} /> : null}
       {tab === 'instructions' ? <AgentInstructionsPanel entry={entry} onChanged={() => void refresh()} /> : null}
-      {tab === 'integrations' ? <AgentIntegrationsPanel boardId={view.board?.id ?? null} persona={entry.persona} onChanged={() => void refresh()} /> : null}
+      {tab === 'profile' ? <AgentProfilePanel rosterId={entry.rosterId} roleKey={entry.roleKey} persona={entry.persona} /> : null}
+      {tab === 'knowledge' ? <AgentKnowledgePanel rosterId={entry.rosterId} persona={entry.persona} /> : null}
+      {tab === 'integrations' ? (
+        <div className="u-flex u-flex-col u-gap-4">
+          <AgentConnectionStatusPanel rosterId={entry.rosterId} />
+          <AgentIntegrationsPanel boardId={view.board?.id ?? null} persona={entry.persona} onChanged={() => void refresh()} />
+        </div>
+      ) : null}
       {tab === 'activity' ? <AgentActivityTab rosterId={entry.rosterId} persona={entry.persona} refreshSignal={boardRefresh} /> : null}
 
       {/* ADR 0023 — the Chief of Staff's recurring tasks (perception loops) +
@@ -283,7 +330,7 @@ export function AgentWorkspacePage(): JSX.Element {
       {entry.roleKey === 'chief-of-staff' ? (
         <div className="u-mt-4 u-grid u-gap-4">
           <RecurringTasksPanel />
-          <AgentHealthPanel />
+          <AgentHealthPanel persona={entry.persona} />
         </div>
       ) : null}
 

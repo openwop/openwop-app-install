@@ -1,7 +1,7 @@
 /**
  * Runtime-augmentable catalog of NodeCatalogEntry rows.
  *
- * On boot, `loadDynamicCatalog()` fetches GET /v1/host/sample/node-catalog
+ * On boot, `loadDynamicCatalog()` fetches GET /v1/host/openwop-app/node-catalog
  * and merges every pack-declared node into the registry. Subscribers
  * (palette / canvas nodes / inspector) re-render via `useCatalog()`.
  *
@@ -107,7 +107,7 @@ export function loadDynamicCatalog(): Promise<void> {
   if (loadPromise) return loadPromise;
   loadPromise = (async () => {
     try {
-      const res = await fetch(`${config.baseUrl}/v1/host/sample/node-catalog`, fetchOpts({
+      const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/node-catalog`, fetchOpts({
         headers: authedHeaders(),
       }));
       if (!res.ok) return;

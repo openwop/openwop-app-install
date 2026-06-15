@@ -78,7 +78,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('m'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('m'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -92,14 +92,14 @@ async function ownerWithViewer(): Promise<{ owner: Client; viewer: Client; viewe
   await signup(owner, { tenantId });
   const viewer = client();
   const viewerUser = await signup(viewer, { tenantId });
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles: ['viewer'] });
+  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'Viewer', subject: viewerUser.userId, roles: ['viewer'] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, viewer, viewerId: viewerUser.userId, orgId };
 }
-const m = (orgId: string, suffix = ''): string => `/v1/host/sample/media/orgs/${encodeURIComponent(orgId)}${suffix}`;
+const m = (orgId: string, suffix = ''): string => `/v1/host/openwop-app/media/orgs/${encodeURIComponent(orgId)}${suffix}`;
 
 describe('media library — always-on (ADR 0027)', () => {
   it('has no media toggle in the catalog and serves regardless', async () => {
@@ -128,7 +128,7 @@ describe('media library — collections + assets (owner = workspace:write)', () 
     const assetId = up.body.assetId;
     expect(up.body.sizeBytes).toBeGreaterThan(0);
     expect(up.body.tags).toEqual(['logo']); // deduped + lowercased
-    expect(up.body.serveUrl).toContain('/v1/host/sample/assets/');
+    expect(up.body.serveUrl).toContain('/v1/host/openwop-app/assets/');
 
     // The serve URL streams the bytes (capability token, public).
     const served = await owner.raw(up.body.serveUrl);
@@ -216,9 +216,9 @@ describe('media library — followup hardening', () => {
     await signup(owner, { tenantId });
     const bob = client();
     const bobUser = await signup(bob, { tenantId });
-    const orgA = (await owner.post('/v1/host/sample/orgs', { name: 'A' })).body.orgId;
-    const orgB = (await owner.post('/v1/host/sample/orgs', { name: 'B' })).body.orgId;
-    const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
+    const orgA = (await owner.post('/v1/host/openwop-app/orgs', { name: 'A' })).body.orgId;
+    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'B' })).body.orgId;
+    const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'Bob', subject: bobUser.userId, roles: ['editor'] });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
 
     // Editor of A (not owner) holds workspace:write → can create in A.

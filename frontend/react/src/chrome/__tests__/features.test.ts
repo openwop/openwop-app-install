@@ -66,12 +66,16 @@ describe('nav registry — category + position ordering', () => {
     expect(ws.indexOf('Agents')).toBeLessThan(ws.indexOf('Boards'));
   });
 
-  it('feature items slot at their declared order (CRM=40, CMS=50 after Boards=30)', () => {
+  it('feature items slot into their declared group + order (CRM→Workspace@40, CMS→Content)', () => {
     // NAV includes feature-gated items regardless of resolved enablement (the
-    // catalog; the Sidebar/⌘K filter visibility separately).
+    // catalog; the Sidebar/⌘K filter visibility separately). The CRM feature
+    // package declares Workspace@40, so it slots after the core Boards@30 item.
     const ws = NAV.find((g) => g.label === 'Workspace')?.items.map((i) => i.label) ?? [];
     expect(ws.indexOf('Boards')).toBeLessThan(ws.indexOf('CRM'));
-    expect(ws.indexOf('CRM')).toBeLessThan(ws.indexOf('CMS'));
+    // CMS moved to the 'Content' group in the 2026-06-04 IA rename (alongside
+    // Media / Publishing / Sharing), so it lands there rather than in Workspace.
+    const content = NAV.find((g) => g.label === 'Content')?.items.map((i) => i.label) ?? [];
+    expect(content).toContain('CMS');
   });
 
   it('an order-less item sorts after ordered ones (append-at-end preserved)', () => {

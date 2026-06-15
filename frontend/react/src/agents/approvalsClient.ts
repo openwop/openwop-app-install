@@ -1,9 +1,9 @@
 /**
  * Approval-inbox client — the "agents propose, humans dispose" queue.
  *
- *   GET  /v1/host/sample/approvals[?status=pending]   — the queue
- *   POST /v1/host/sample/approvals/{id}/claim          — sign off + start the run
- *   POST /v1/host/sample/approvals/{id}/reject         — dismiss the proposal
+ *   GET  /v1/host/openwop-app/approvals[?status=pending]   — the queue
+ *   POST /v1/host/openwop-app/approvals/{id}/claim          — sign off + start the run
+ *   POST /v1/host/openwop-app/approvals/{id}/reject         — dismiss the proposal
  *
  * Tenant scoping is the backend's job (caller's principal); the client never
  * sends a tenantId.
@@ -63,8 +63,8 @@ export interface PendingApproval {
   note?: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample/approvals`;
-const assistantBase = `${config.baseUrl}/v1/host/sample/assistant`;
+const base = `${config.baseUrl}/v1/host/openwop-app/approvals`;
+const assistantBase = `${config.baseUrl}/v1/host/openwop-app/assistant`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 export async function listApprovals(status?: ApprovalStatus): Promise<PendingApproval[]> {

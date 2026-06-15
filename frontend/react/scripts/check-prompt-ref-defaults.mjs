@@ -2,7 +2,7 @@
 /**
  * Asserts every `defaultValue` on a `prompt-picker` configField in
  * `src/builder/palette/nodeCatalog.ts` matches a real `templateId` in
- * `src/prompts/samplePrompts.ts`.
+ * `src/prompts/bundledPrompts.ts`.
  *
  * Run in CI to prevent silent dead-ref defaults when the prompt
  * library is renamed/refactored.
@@ -16,7 +16,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..');
 
 const CATALOG_PATH = join(ROOT, 'src', 'builder', 'palette', 'nodeCatalog.ts');
-const PROMPTS_PATH = join(ROOT, 'src', 'prompts', 'samplePrompts.ts');
+const PROMPTS_PATH = join(ROOT, 'src', 'prompts', 'bundledPrompts.ts');
 
 const catalog = readFileSync(CATALOG_PATH, 'utf8');
 const prompts = readFileSync(PROMPTS_PATH, 'utf8');
@@ -50,7 +50,7 @@ const missing = pairs.filter((p) => !promptIds.has(p.defaultValue));
 if (missing.length > 0) {
   console.error('check-prompt-ref-defaults FAILED:');
   for (const m of missing) {
-    console.error(`  nodeCatalog.ts:${m.line} — defaultValue '${m.defaultValue}' is not a templateId in samplePrompts.ts`);
+    console.error(`  nodeCatalog.ts:${m.line} — defaultValue '${m.defaultValue}' is not a templateId in bundledPrompts.ts`);
   }
   console.error('');
   console.error(`Known prompt templateIds: ${[...promptIds].sort().join(', ')}`);

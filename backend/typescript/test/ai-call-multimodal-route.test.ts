@@ -1,6 +1,6 @@
 /**
  * W-2 / RFC 0091 — the `callai-multimodal` behavioral contract over HTTP. Boots
- * the real app via createApp and exercises POST /v1/host/sample/ai/call:
+ * the real app via createApp and exercises POST /v1/host/openwop-app/ai/call:
  *   - a `string` content stays valid (back-compat)
  *   - an advertised modality ContentPart (image / document) is accepted
  *   - an UNADVERTISED modality (audio) is rejected with `unsupported_modality`
@@ -15,8 +15,8 @@ import { createApp } from '../src/index.js';
 
 const PORT = 18261;
 const BASE = `http://127.0.0.1:${PORT}`;
-const H = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
-const URL = `${BASE}/v1/host/sample/ai/call`;
+const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+const URL = `${BASE}/v1/host/openwop-app/ai/call`;
 
 let server: http.Server;
 

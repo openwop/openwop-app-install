@@ -53,7 +53,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('pub'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pub'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, r.text).toBe(201);
   return r.body.user;
 }
@@ -64,17 +64,17 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, org.text).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, add.text).toBe(201);
   return { owner, member, orgId };
 }
 
 /** Create a page and publish it (owner has host:members:manage → direct publish). */
 async function publishedPage(owner: Client, orgId: string, title: string): Promise<{ pageId: string; slug: string }> {
-  const cms = (s = ''): string => `/v1/host/sample/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+  const cms = (s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
   const created = await owner.post(cms('/pages'), { title, sections: [{ type: 'hero', data: { heading: 'Hello', subheading: 'A subheading used as the description fallback.' } }] });
   expect(created.status, created.text).toBe(201);
   const { pageId, slug } = created.body;
@@ -83,8 +83,8 @@ async function publishedPage(owner: Client, orgId: string, title: string): Promi
   return { pageId, slug };
 }
 
-const seoUrl = (orgId: string, pageId: string): string => `/v1/host/sample/publishing/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(pageId)}/seo`;
-const pub = (orgId: string, s: string): string => `/v1/host/sample/public/${encodeURIComponent(orgId)}${s}`;
+const seoUrl = (orgId: string, pageId: string): string => `/v1/host/openwop-app/publishing/orgs/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(pageId)}/seo`;
+const pub = (orgId: string, s: string): string => `/v1/host/openwop-app/public/${encodeURIComponent(orgId)}${s}`;
 
 describe('publishing — authed SEO CRUD (RBAC)', () => {
   it('owner sets + reads SEO; viewer reads but cannot write (403)', async () => {
@@ -141,7 +141,7 @@ describe('publishing — public surface (unauthenticated)', () => {
 
   it('404s a draft (published-only) and an unknown slug', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const cms = (s = ''): string => `/v1/host/sample/cms/orgs/${encodeURIComponent(orgId)}${s}`;
+    const cms = (s = ''): string => `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}${s}`;
     const draft = await owner.post(cms('/pages'), { title: 'Secret Draft' });
     const anon = client();
     expect((await anon.get(pub(orgId, `/pages/${draft.body.slug}`))).status).toBe(404);
@@ -207,7 +207,7 @@ describe('publishing — public surface (unauthenticated)', () => {
     expect((await anon.get(pub(orgId, '/robots.txt'))).status).toBe(200);
 
     // Unpublish the page → it (and only it) leaves the public surface.
-    const cms = `/v1/host/sample/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}/unpublish`;
+    const cms = `/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}/unpublish`;
     expect((await owner.post(cms)).status).toBe(200);
     expect((await anon.get(pub(orgId, `/pages/${slug}`))).status).toBe(404);
   });

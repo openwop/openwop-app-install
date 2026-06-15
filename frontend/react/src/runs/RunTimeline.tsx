@@ -188,7 +188,7 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
                 return (
                   <span
                     className="muted run-timeline-mem-write"
-                    title={`Wrote ${mw.count} memory entr${mw.count === 1 ? 'y' : 'ies'} (RFC 0057)${mw.refs.length ? ` → ${mw.refs.join(', ')}` : ''}`}
+                    title={`Wrote ${mw.count} memory entr${mw.count === 1 ? 'y' : 'ies'}${mw.refs.length ? ` → ${mw.refs.join(', ')}` : ''}`}
                   >
                     {' '}<span aria-hidden="true"><SaveIcon size={12} /></span>{mw.count > 1 ? ` ${mw.count}` : ''}
                   </span>

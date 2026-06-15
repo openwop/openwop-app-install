@@ -4,7 +4,7 @@
 **Date:** 2026-06-10 (backend implemented 2026-06-11)
 **Depends on:** ADR 0001 (feature-package), ADR 0006 (RBAC), ADR 0008 (CRM — the
 contact audience), ADR 0014 (feature workflow surfaces), ADR 0020 (Consent — gates marketing sends, **shipped first**)
-**Toggle:** `email` · **Surface:** authed `/v1/host/sample/email/orgs/:orgId/*`
+**Toggle:** `email` · **Surface:** authed `/v1/host/openwop-app/email/orgs/:orgId/*`
 (host-extension, NON-NORMATIVE — no RFC). No public surface.
 **MyndHyve §:** Email Marketing · **Baseline:** `src/features/email-marketing/`
 (`MultiProviderCoordinator`, `adapters/`, `envelope/`, `services/`, `stores/`)
@@ -58,7 +58,7 @@ SendLog       { sendId, campaignId, contactId, status('sent'|'failed'|'skipped')
 ### Phase 1 — templates + campaigns store + CRUD (RBAC)
 
 `emailService` + `DurableCollection`s (`email:template`, `email:campaign`).
-Routes under `/v1/host/sample/email/orgs/:orgId/{templates,campaigns}`, all
+Routes under `/v1/host/openwop-app/email/orgs/:orgId/{templates,campaigns}`, all
 `authorizeOrgScope`-gated (read=`workspace:read`, write=`workspace:write`), tenant+org
 IDOR-guarded. Route harness tests.
 

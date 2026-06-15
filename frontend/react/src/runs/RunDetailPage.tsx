@@ -285,7 +285,7 @@ export function RunDetailPage() {
             <select
               value={streamMode}
               onChange={(e) => setStreamMode(e.target.value as StreamMode)}
-              title="SSE stream mode (RFC 0002) — re-subscribes on change"
+              title="SSE stream mode — re-subscribes on change"
             >
               <option value="updates">updates</option>
               <option value="values">values</option>

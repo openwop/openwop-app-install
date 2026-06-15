@@ -2,9 +2,9 @@
  * `/memory` route — MemoryAdapter inspector (RFC 0004 read-side).
  *
  * Lists the authenticated tenant's memory entries (host-extension
- * GET /v1/host/sample/memory), with a free-text search over content + tags
+ * GET /v1/host/openwop-app/memory), with a free-text search over content + tags
  * and an optional server-side tag filter. Each row can be deleted via the
- * demo-only DELETE /v1/host/sample/memory/:memoryId route.
+ * demo-only DELETE /v1/host/openwop-app/memory/:memoryId route.
  *
  * Companion to RunMemoryPanel (which shows the same ledger scoped to a single
  * run); this is the standalone, run-agnostic browser. Reuses the same
@@ -140,7 +140,7 @@ export function MemoryInspectorPage(): JSX.Element {
       <PageHeader
         eyebrow="Memory"
         title="Memory inspector"
-        lede={<>Browse the tenant&apos;s memory ledger (RFC 0004 read-side). Entries are written host-internally — the executor writes a run-summary on completion. Reads and deletes are scoped to your credential server-side; the inspector can&apos;t see another tenant&apos;s memory.{memoryRef && <> Showing <code>{memoryRef}</code>.</>}</>}
+        lede={<>Browse the tenant&apos;s memory ledger. Entries are written host-internally — the executor writes a run-summary on completion. Reads and deletes are scoped to your credential server-side; the inspector can&apos;t see another tenant&apos;s memory.{memoryRef && <> Showing <code>{memoryRef}</code>.</>}</>}
         actions={<button className="secondary" onClick={() => { void refresh(); }}>Refresh</button>}
       />
       <div className="card">

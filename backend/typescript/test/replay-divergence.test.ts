@@ -86,7 +86,7 @@ describe('replay round-trip (end-to-end)', () => {
   const jf = async <T = unknown>(path: string, init: RequestInit = {}): Promise<{ status: number; body: T }> => {
     const r = await fetch(`${BASE}${path}`, {
       ...init,
-      headers: { 'content-type': 'application/json', authorization: 'Bearer sample-token', ...(init.headers ?? {}) },
+      headers: { 'content-type': 'application/json', authorization: 'Bearer dev-token', ...(init.headers ?? {}) },
     });
     return { status: r.status, body: (await r.json()) as T };
   };
@@ -127,7 +127,7 @@ describe('replay round-trip (end-to-end)', () => {
   });
 
   it('full replay of a deterministic run reproduces it with no replay.diverged', async () => {
-    await jf('/v1/host/sample/workflows', {
+    await jf('/v1/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
         workflowId: 'wf.det.replay',

@@ -9,7 +9,7 @@
 
 import { setRuntimeCapabilities } from '../executor/runtimeCapabilities.js';
 
-const SAMPLE_CAPABILITIES = [
+const RUNTIME_CAPABILITIES = [
   'secrets',
   'audit',
   'observability',
@@ -17,5 +17,5 @@ const SAMPLE_CAPABILITIES = [
 ];
 
 export function ensureRuntimeCapabilityRegistryInstalled(): void {
-  setRuntimeCapabilities(SAMPLE_CAPABILITIES);
+  setRuntimeCapabilities(RUNTIME_CAPABILITIES);
 }

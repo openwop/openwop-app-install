@@ -9,7 +9,7 @@
  *
  * Strategy: stub `dispatchManagedChat` to return a never-resolving
  * promise (until the AbortSignal fires), call the chat-responder
- * directly via the exported `sampleChatResponderNode`, assert the
+ * directly via the exported `chatResponderNode`, assert the
  * outcome is `{status: 'failure', error: {code: 'timeout', ...}}`
  * within `OPENWOP_MANAGED_CHAT_TIMEOUT_MS`. Override the timeout
  * via the `_setManagedChatTimeoutMs` test affordance so the test
@@ -53,12 +53,12 @@ vi.mock('../src/providers/managedProvider.js', async (importOriginal) => {
 });
 
 // Import AFTER vi.mock so the stub is in place.
-let sampleChatResponderNode: typeof import('../src/bootstrap/nodes.js')['sampleChatResponderNode'];
+let chatResponderNode: typeof import('../src/bootstrap/nodes.js')['chatResponderNode'];
 let _setManagedChatTimeoutMs: typeof import('../src/bootstrap/nodes.js')['_setManagedChatTimeoutMs'];
 
 beforeAll(async () => {
   const mod = await import('../src/bootstrap/nodes.js');
-  sampleChatResponderNode = mod.sampleChatResponderNode;
+  chatResponderNode = mod.chatResponderNode;
   _setManagedChatTimeoutMs = mod._setManagedChatTimeoutMs;
 });
 
@@ -101,7 +101,7 @@ describe('chat-responder: managed-chat dispatch timeout', () => {
     _setManagedChatTimeoutMs(250);
     const { ctx } = makeCtx();
     const t0 = Date.now();
-    const outcome = await sampleChatResponderNode.execute(ctx);
+    const outcome = await chatResponderNode.execute(ctx);
     const elapsed = Date.now() - t0;
     expect(outcome.status).toBe('failure');
     if (outcome.status !== 'failure') return; // type narrowing
@@ -124,7 +124,7 @@ describe('chat-responder: managed-chat dispatch timeout', () => {
     // the source of truth is the module constant, not the env.
     _setManagedChatTimeoutMs(420);
     const { ctx } = makeCtx();
-    const outcome = await sampleChatResponderNode.execute(ctx);
+    const outcome = await chatResponderNode.execute(ctx);
     expect(outcome.status).toBe('failure');
     if (outcome.status !== 'failure') return;
     expect(outcome.error.message).toMatch(/exceeded 420ms/);

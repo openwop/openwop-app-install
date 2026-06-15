@@ -1,12 +1,12 @@
 # ADR 0012 — Publishing & SEO
 
-**Status:** implemented (Phases 1–3 shipped — `src/features/publishing/` incl. public `/v1/host/sample/public/:orgId/*`)
+**Status:** implemented (Phases 1–3 shipped — `src/features/publishing/` incl. public `/v1/host/openwop-app/public/:orgId/*`)
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC), ADR 0007 (Media — OG images), ADR 0009 (CMS — the pages it publishes)
 **Toggle:** ~~`publishing`~~ **none — always-on (ADR 0027)** · **Surfaces:** authed
-`/v1/host/sample/publishing/*` + **public (unauthed)**
-`/v1/host/sample/public/:orgId/*` (host-extension, non-normative)
+`/v1/host/openwop-app/publishing/*` + **public (unauthed)**
+`/v1/host/openwop-app/public/:orgId/*` (host-extension, non-normative)
 
 > **Correction (2026-06-11, ADR 0027):** Publishing is now **always-on** — its
 > `toggleDefault` is removed. The per-tenant `publishing` toggle that gated the
@@ -80,24 +80,24 @@ secret-scrubbed.
 
 `publishingService` + `DurableCollection<PageSeo>('publishing:seo')` keyed
 `(tenantId, orgId, pageId)`. Routes under
-`/v1/host/sample/publishing/orgs/:orgId/pages/:pageId/seo`, `authorizeOrgScope`-gated
+`/v1/host/openwop-app/publishing/orgs/:orgId/pages/:pageId/seo`, `authorizeOrgScope`-gated
 (GET `workspace:read`, PUT `workspace:write`). The pageId is validated to belong
 to the org (compose `cmsService.getPage`) — a cross-page/org id fails closed.
 
 ### Phase 2 — Public surface (backend, unauthed)
 
-Add `'/v1/host/sample/public'` to `PUBLIC_PATH_PREFIXES` (auth.ts) — the one
+Add `'/v1/host/openwop-app/public'` to `PUBLIC_PATH_PREFIXES` (auth.ts) — the one
 core edit, with a comment citing this ADR. Routes (no auth; org → tenant via
 `getOrg`; **gated on the `publishing` toggle resolved for the ORG's tenant**, so
 turning the feature off takes the site offline; **published-only**):
 
-- `GET /v1/host/sample/public/:orgId/pages/:slug` — the published page (CMS
+- `GET /v1/host/openwop-app/public/:orgId/pages/:slug` — the published page (CMS
   content + merged SEO + computed canonical), 404 for non-published/unknown;
   follows the CMS redirect hop (returns `redirectedFrom`).
-- `GET /v1/host/sample/public/:orgId/sitemap.xml` — published pages' public URLs
+- `GET /v1/host/openwop-app/public/:orgId/sitemap.xml` — published pages' public URLs
   + `lastmod`, XML-escaped, `noindex` pages excluded.
-- `GET /v1/host/sample/public/:orgId/robots.txt` — allow + a `Sitemap:` line.
-- `GET /v1/host/sample/public/:orgId/feed.rss` — RSS 2.0 of published pages,
+- `GET /v1/host/openwop-app/public/:orgId/robots.txt` — allow + a `Sitemap:` line.
+- `GET /v1/host/openwop-app/public/:orgId/feed.rss` — RSS 2.0 of published pages,
   newest first, XML-escaped.
 
 All generation is hand-rolled + XML/entity-escaped (no new deps); the toggle
@@ -125,7 +125,7 @@ OG image from the Media Library, canonical, noindex) writing the Phase-1 API.
   media serve route), not feature-distributable logic.
 - **Content safety:** `canonicalUrl` is `safeUrl`-guarded; all SEO strings
   bounded + secret-scrubbed; sitemap/RSS output XML-escaped (no injection).
-- **No wire surface → no RFC:** entirely under `/v1/host/sample/*`.
+- **No wire surface → no RFC:** entirely under `/v1/host/openwop-app/*`.
 
 ## Alternatives considered
 

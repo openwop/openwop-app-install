@@ -2,7 +2,7 @@
  * Capability overlay — sample-namespaced test seam for the conformance
  * harness to flip advertised capability flags on/off without rebooting
  * the host. Per `host-extensions.md` §"Canonical prefixes" the overlay
- * is exposed via `/v1/host/sample/test/capability-toggle` and is
+ * is exposed via `/v1/host/openwop-app/test/capability-toggle` and is
  * env-gated on `OPENWOP_TEST_SEAM_ENABLED=true` at the route layer.
  *
  * The overlay is consulted by workflow-register validation (`workflows.ts`

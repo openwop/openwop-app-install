@@ -34,13 +34,13 @@ function CommandPaletteLazy(): JSX.Element | null {
   if (!mounted) return null;
   return <Suspense fallback={null}><CommandPalette openSignal={openSignal} /></Suspense>;
 }
-import { DemoHostBanner } from './builder/DemoHostBanner.js';
+import { InMemoryHostBanner } from './builder/InMemoryHostBanner.js';
 import { NotFoundPage } from './NotFoundPage.js';
 import { Sidebar } from './chrome/Sidebar.js';
 import { AppGate } from './chrome/AppGate.js';
 import { PublicShell } from './chrome/PublicShell.js';
 import { AdminLayout } from './chrome/AdminLayout.js';
-import { AutoSeedDemoData } from './chrome/AutoSeedDemoData.js';
+import { AutoSeedExampleData } from './chrome/AutoSeedExampleData.js';
 import { FEATURES, chromeFor, isAdminPath } from './chrome/features.js';
 import { Toaster } from './ui/toast.js';
 import { ErrorBoundary } from './ui/ErrorBoundary.js';
@@ -154,13 +154,13 @@ export function App() {
     <FeatureAccessProvider>
     <div className={chrome === 'chat' ? 'app-shell app-shell--ai' : 'app-shell'}>
       <a className="skip-link" href="#main-content">Skip to content</a>
-      <AutoSeedDemoData />
+      <AutoSeedExampleData />
       {/* Persistent left rail: grouped workspace nav (Build / Operate) + the
           single Admin entry, collapsible, with the workspace/org switcher +
           account chrome. Chat stays first (feedback_chat_first_nav). */}
       <Sidebar netOpen={netOpen} onToggleNet={() => setNetOpen((v) => !v)} />
       <div className="app-body">
-        <DemoHostBanner />
+        <InMemoryHostBanner />
         <main id="main-content" ref={mainRef} tabIndex={-1} className={mainClass}>
         <ErrorBoundary resetKey={location.pathname} label="page">
         <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}>

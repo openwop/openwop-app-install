@@ -2,7 +2,7 @@
  * host.chat — `vendor.myndhyve.chat` bridge to the demo chat store.
  *
  * Proves the surface is a REAL bridge: a `core.chat.sendMessage` workflow node,
- * run end-to-end, lands a message in the SAME `/v1/host/sample/chat` session the
+ * run end-to-end, lands a message in the SAME `/v1/host/openwop-app/chat` session the
  * SPA reads, encoded as the JSON ChatMessage the UI round-trips via
  * `JSON.parse(content)`. Plus surface-direct: idempotency (same key → one
  * message) and emitCard/updateCard.
@@ -16,7 +16,7 @@ import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 let server: http.Server;
 const PORT = 18203;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -40,7 +40,7 @@ interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string,
 const TENANT = '_anon';
 
 async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await jsonFetch('/v1/host/sample/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'op', typeId, config }], edges: [] }) });
+  await jsonFetch('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'op', typeId, config }], edges: [] }) });
   const create = await jsonFetch<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs, tenantId: TENANT }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;
@@ -58,13 +58,13 @@ async function runNode(workflowId: string, typeId: string, config: Record<string
 
 describe('host.chat: sendMessage node lands in the demo chat store', () => {
   it('a core.chat.sendMessage run writes a UI-renderable message to the session', async () => {
-    const out = await runNode('sample.chat.send', 'core.chat.sendMessage', { role: 'agent' }, { content: 'Hello from the workflow' });
+    const out = await runNode('openwop-app.chat.send', 'core.chat.sendMessage', { role: 'agent' }, { content: 'Hello from the workflow' });
     expect(out.__status).toBe('completed');
     expect(typeof out.messageId).toBe('string');
 
     // Read back via the SAME route the SPA uses.
     const msgs = await jsonFetch<{ messages: Array<{ messageId: string; role: string; content: string }> }>(
-      `/v1/host/sample/chat/sessions/workflow-${TENANT}/messages`,
+      `/v1/host/openwop-app/chat/sessions/workflow-${TENANT}/messages`,
     );
     expect(msgs.status).toBe(200);
     const found = msgs.body.messages.find((m) => m.messageId === out.messageId);
@@ -85,7 +85,7 @@ describe('host.chat: surface-direct', () => {
     const a = await c.sendMessage({ role: 'agent', content: 'dedupe me', sessionId: 'idem-session', idempotencyKey: 'k-dedupe' });
     const b = await c.sendMessage({ role: 'agent', content: 'dedupe me', sessionId: 'idem-session', idempotencyKey: 'k-dedupe' });
     expect(a.messageId).toBe(b.messageId);
-    const msgs = await jsonFetch<{ messages: unknown[] }>('/v1/host/sample/chat/sessions/idem-session/messages');
+    const msgs = await jsonFetch<{ messages: unknown[] }>('/v1/host/openwop-app/chat/sessions/idem-session/messages');
     expect(msgs.body.messages.length).toBe(1);
   });
 

@@ -20,7 +20,7 @@ function configureSaml() {
   process.env.OPENWOP_SAML_IDP_SSO_URL = 'https://example.okta.com/app/abc/sso/saml';
   process.env.OPENWOP_SAML_IDP_CERT = 'MIIBdummybase64certbodywithoutpemheaders0000000000';
   process.env.OPENWOP_SAML_SP_ENTITY_ID = 'https://app.openwop.dev/saml';
-  process.env.OPENWOP_SAML_ACS_URL = 'https://app.openwop.dev/api/v1/host/sample/auth/saml/sso/acs';
+  process.env.OPENWOP_SAML_ACS_URL = 'https://app.openwop.dev/api/v1/host/openwop-app/auth/saml/sso/acs';
   process.env.OPENWOP_SAML_TENANT = 'acme-corp';
 }
 
@@ -79,9 +79,9 @@ describe('SAML SSO routes — 404 when unconfigured', () => {
   afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); clearSamlEnv(); });
 
   it.each([
-    ['GET', '/v1/host/sample/auth/saml/sso/login'],
-    ['GET', '/v1/host/sample/auth/saml/sso/metadata'],
-    ['POST', '/v1/host/sample/auth/saml/sso/acs'],
+    ['GET', '/v1/host/openwop-app/auth/saml/sso/login'],
+    ['GET', '/v1/host/openwop-app/auth/saml/sso/metadata'],
+    ['POST', '/v1/host/openwop-app/auth/saml/sso/acs'],
   ])('%s %s → 404', async (method, path) => {
     const res = await fetch(`http://127.0.0.1:${port}${path}`, { method, redirect: 'manual' });
     expect(res.status).toBe(404);

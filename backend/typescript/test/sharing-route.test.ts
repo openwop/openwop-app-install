@@ -49,7 +49,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('shr'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('shr'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -62,23 +62,23 @@ async function ownerWithMember(role: string): Promise<{ owner: Client; member: C
   await signup(owner, { tenantId });
   const member = client();
   const memberUser = await signup(member, { tenantId });
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   const orgId = org.body.orgId;
-  const add = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
+  const add = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: [role] });
   expect(add.status, JSON.stringify(add.body)).toBe(201);
   return { owner, member, orgId };
 }
 
 async function draftPage(owner: Client, orgId: string, title: string): Promise<string> {
-  const r = await owner.post(`/v1/host/sample/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title, sections: [{ type: 'hero', data: { heading: 'Hi', subheading: 'Card description text.' } }] });
+  const r = await owner.post(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages`, { title, sections: [{ type: 'hero', data: { heading: 'Hi', subheading: 'Card description text.' } }] });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   expect(r.body.status).toBe('draft');
   return r.body.pageId;
 }
 
-const links = (orgId: string): string => `/v1/host/sample/sharing/orgs/${encodeURIComponent(orgId)}/links`;
-const shared = (token: string, s = ''): string => `/v1/host/sample/shared/${encodeURIComponent(token)}${s}`;
+const links = (orgId: string): string => `/v1/host/openwop-app/sharing/orgs/${encodeURIComponent(orgId)}/links`;
+const shared = (token: string, s = ''): string => `/v1/host/openwop-app/shared/${encodeURIComponent(token)}${s}`;
 
 describe('sharing — link management (RBAC)', () => {
   it('owner mints + lists + revokes; viewer lists but cannot mint/revoke (403)', async () => {
@@ -133,9 +133,9 @@ describe('sharing — public resolve (unauthenticated)', () => {
 
   it('resolves a KB-collection overview by token', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    const col = await owner.post(`/v1/host/sample/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Handbook' });
+    const col = await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`, { name: 'Handbook' });
     const cid = col.body.collectionId;
-    await owner.post(`/v1/host/sample/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}/documents`, { title: 'Doc One', text: 'hello world' });
+    await owner.post(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections/${cid}/documents`, { title: 'Doc One', text: 'hello world' });
     const mint = await owner.post(links(orgId), { resourceType: 'kb_collection', resourceId: cid });
 
     const anon = client();
@@ -183,7 +183,7 @@ describe('sharing — public resolve (unauthenticated)', () => {
     expect([403, 404]).toContain((await stranger.del(`${links(orgId)}/${encodeURIComponent(token)}`)).status);
 
     // Delete the underlying page → the link resolves to a gone resource → 404.
-    await owner.del(`/v1/host/sample/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}`);
+    await owner.del(`/v1/host/openwop-app/cms/orgs/${encodeURIComponent(orgId)}/pages/${pageId}`);
     const anon = client();
     expect((await anon.get(shared(token))).status).toBe(404);
   });

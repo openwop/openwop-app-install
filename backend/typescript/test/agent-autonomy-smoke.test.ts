@@ -31,7 +31,7 @@ import { programMock } from '../src/providers/dispatchMock.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { runAgentDispatchLive } from '../src/host/agentDispatch.js';
 
-const OP: Record<string, string> = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
+const OP: Record<string, string> = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let server: http.Server;
 let base = '';
 let app: Awaited<ReturnType<typeof createApp>>;
@@ -64,20 +64,24 @@ function deps(): { storage: Storage; hostSuite: HostAdapterSuite } {
 describe('agent autonomy — end-to-end smoke', () => {
   it('seeds, auto-heartbeats a real run, and shows it in the index-backed fleet feed', async () => {
     // 1. Seed demo agents (roster + boards + To Do cards + schedules).
-    expect((await post('/v1/host/sample/demo/seed', {})).status).toBe(200);
+    expect((await post('/v1/host/openwop-app/example-data/seed', {})).status).toBe(200);
     const roster = await listRoster('default');
     expect(roster.length).toBeGreaterThan(0);
 
-    // 2. Opt the first agent into an autonomous heartbeat cadence, then run the
-    //    real heartbeat daemon pass against the app's storage.
-    const agent = roster[0]!;
+    // 2. Opt a `guided` twin whose first To Do card is routine (IT Service Desk
+    //    — Idris) into an autonomous heartbeat cadence, then run the real
+    //    heartbeat daemon pass. Guided + a routine (non-high) pick RUNS the
+    //    workflow (unlike a `review` twin, which would only queue a proposal),
+    //    so the daemon starts a real heartbeat-sourced run. (ADR 0032's canonical
+    //    set has no default-`auto` twin; guided-routine is the autonomous path.)
+    const agent = roster.find((r) => r.roleKey === 'it-service-desk')!;
     await updateRosterEntry(agent.rosterId, { heartbeatIntervalMs: 60_000 });
     const now = Date.now();
     const ran = await processDueHeartbeats(deps(), listRosterTenants, now);
     expect(ran).toBeGreaterThanOrEqual(1); // picked a To Do card → started a real run
 
     // 3. The fleet activity feed (index-backed, not a scan) shows it, attributed.
-    const fleet = (await get('/v1/host/sample/fleet/activity')).body;
+    const fleet = (await get('/v1/host/openwop-app/fleet/activity')).body;
     expect(fleet.truncated).toBe(false);
     expect(fleet.items.length).toBeGreaterThanOrEqual(1);
     const hb = fleet.items.find((i: { source: string }) => i.source === 'heartbeat');
@@ -87,7 +91,7 @@ describe('agent autonomy — end-to-end smoke', () => {
   });
 
   it('fires a due schedule through the real daemon', async () => {
-    await post('/v1/host/sample/demo/seed', {});
+    await post('/v1/host/openwop-app/example-data/seed', {});
     const agentEntry = (await listRoster('default'))[0]!;
     const workflowId = agentEntry.workflows[0]!;
     expect(workflowId).toBeTruthy();
@@ -100,21 +104,21 @@ describe('agent autonomy — end-to-end smoke', () => {
     expect(fired).toBeGreaterThanOrEqual(1);
 
     // The schedule run is attributed in the fleet feed.
-    const fleet = (await get('/v1/host/sample/fleet/activity?rosterId=' + encodeURIComponent(agentEntry.rosterId))).body;
+    const fleet = (await get('/v1/host/openwop-app/fleet/activity?rosterId=' + encodeURIComponent(agentEntry.rosterId))).body;
     expect(fleet.items.some((i: { source: string }) => i.source === 'schedule')).toBe(true);
   });
 
   it('connector deliverability probe reflects a live relay device', async () => {
-    const made = (await post('/v1/host/sample/messaging/connectors', { channel: 'signal', displayName: 'Signal' })).body;
-    await post(`/v1/host/sample/messaging/connectors/${made.connectorId}/enable`, {});
+    const made = (await post('/v1/host/openwop-app/messaging/connectors', { channel: 'signal', displayName: 'Signal' })).body;
+    await post(`/v1/host/openwop-app/messaging/connectors/${made.connectorId}/enable`, {});
     // No device yet → not deliverable.
-    expect((await post(`/v1/host/sample/messaging/connectors/${made.connectorId}/test`, {})).body.ok).toBe(false);
+    expect((await post(`/v1/host/openwop-app/messaging/connectors/${made.connectorId}/test`, {})).body.ok).toBe(false);
 
     // Register + activate + heartbeat a signal relay device → deliverable.
-    const reg = (await post('/v1/host/sample/messaging/relay/register', { channel: 'signal' })).body;
-    const act = (await post('/v1/host/sample/messaging/relay/activate', { relayId: reg.relayId, activationCode: reg.activationCode })).body;
-    await post('/v1/host/sample/messaging/device/heartbeat', { status: 'connected' }, { 'x-openwop-device-token': act.deviceToken, 'content-type': 'application/json' });
-    const probe = (await post(`/v1/host/sample/messaging/connectors/${made.connectorId}/test`, {})).body;
+    const reg = (await post('/v1/host/openwop-app/messaging/relay/register', { channel: 'signal' })).body;
+    const act = (await post('/v1/host/openwop-app/messaging/relay/activate', { relayId: reg.relayId, activationCode: reg.activationCode })).body;
+    await post('/v1/host/openwop-app/messaging/device/heartbeat', { status: 'connected' }, { 'x-openwop-device-token': act.deviceToken, 'content-type': 'application/json' });
+    const probe = (await post(`/v1/host/openwop-app/messaging/connectors/${made.connectorId}/test`, {})).body;
     expect(probe.ok).toBe(true);
     expect(probe.liveRelayDevices).toBeGreaterThanOrEqual(1);
   });
@@ -151,7 +155,7 @@ describe('agent autonomy — end-to-end smoke', () => {
   });
 
   it('/notify returns an honest synthetic receipt with no webhook configured', async () => {
-    const r = (await post('/v1/host/sample/messaging/notify', { kind: 'email', to: 'a@b.com', text: 'hi' })).body;
+    const r = (await post('/v1/host/openwop-app/messaging/notify', { kind: 'email', to: 'a@b.com', text: 'hi' })).body;
     expect(r.status).toBe('accepted'); // not 'delivered'
     expect(r.detail).toContain('no provider configured');
   });

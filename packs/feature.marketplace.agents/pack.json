@@ -1,0 +1,29 @@
+{
+  "name": "feature.marketplace.agents",
+  "version": "1.0.0",
+  "description": "Marketplace feature agent pack (ADR 0022/0014) — a recommender agent that suggests installable packs for a described need via feature.marketplace.nodes.search over ctx.features.marketplace. Tool-allowlisted to the marketplace search node only; READ-ONLY — it recommends, it NEVER auto-installs (install is a privileged admin/host:* REST action, deliberately outside any agent's reach).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "marketplace", "agent", "recommender", "packs"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.marketplace.agents.recommender",
+      "persona": "RESEARCH",
+      "label": "Marketplace Recommender",
+      "description": "Recommends installable packs for a described need, grounded in the live catalog via feature.marketplace.nodes.search over ctx.features.marketplace. Read-only: it suggests packs (name + why), it does NOT install them — install is a privileged admin/host:* action with no agent tool.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/marketplace-recommender.md",
+      "toolAllowlist": [
+        "openwop:feature.marketplace.nodes.search"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

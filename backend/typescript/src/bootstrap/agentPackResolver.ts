@@ -29,7 +29,12 @@ const PACK_DIR = resolveDefaultPackDir();
  * does NOT advertise the heavyweight `host.agentRuntime` swarm surface. A
  * production host would derive this set from its own advertised capabilities.
  */
-const HOST_SATISFIED_CAPS = new Set<string>(['agents.manifestRuntime', 'aiProviders']);
+// `host.connectors` added per ADR 0037: the connectorInvoker host slot is now a
+// real broker-delegating impl (no longer throw-on-use), so a pack declaring
+// `peerDependencies:["host.connectors"]` resolves here instead of getting
+// host_capability_missing. Honesty: we only list a capability whose host slot is
+// actually wired — see hostSurfaceRegistry `host.connectors` supported:true.
+const HOST_SATISFIED_CAPS = new Set<string>(['agents.manifestRuntime', 'aiProviders', 'host.connectors']);
 function hostSatisfies(cap: string): boolean {
   return HOST_SATISFIED_CAPS.has(cap);
 }

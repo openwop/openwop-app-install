@@ -1,0 +1,34 @@
+{
+  "name": "core.openwop.connections.jira",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Jira connection pack (RFC 0095) — Atlassian OAuth2 (3LO) provider for Jira Cloud. ADR 0033 DEPLOY-GATED. Reach is `mcp` against Atlassian's official first-party remote MCP server (the Rovo MCP server, https://mcp.atlassian.com/v1/mcp), which fronts Jira (and Confluence) under the signed-in user's permissions. Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "provider": {
+    "id": "jira",
+    "displayName": "Jira",
+    "category": "ticketing",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://auth.atlassian.com/authorize",
+        "token": "https://auth.atlassian.com/oauth/token"
+      },
+      "scopes": {
+        "read": [
+          { "key": "jira.read", "label": "Read Jira issues + projects", "scopes": ["read:jira-work", "read:jira-user"] },
+          { "key": "offline", "label": "Refresh access", "scopes": ["offline_access"] }
+        ],
+        "write": [
+          { "key": "jira.write", "label": "Create + edit Jira issues", "scopes": ["write:jira-work"] }
+        ]
+      }
+    },
+    "reach": { "mcp": { "server": { "url": "https://mcp.atlassian.com/v1/mcp", "transport": "http" } } },
+    "consumerNodes": ["core.openwop.mcp.invoke-tool", "core.openwop.mcp.read-resource"],
+    "docsUrl": "https://developer.atlassian.com/cloud/jira/platform/oauth-2-3lo-apps/"
+  }
+}

@@ -129,15 +129,16 @@ export function openHostSecret(record: EncryptedRecord): string {
 }
 
 /**
- * Bulk-load secrets from OPENWOP_SAMPLE_SECRETS at boot. Reads a JSON
+ * Bulk-load secrets from OPENWOP_BOOT_SECRETS at boot. Reads a JSON
  * object `{credentialRef: value}` and upserts each into storage. Useful
  * for conformance / scripted test environments that want a known set
- * of refs without going through the wizard.
+ * of refs without going through the wizard. (Legacy alias
+ * OPENWOP_SAMPLE_SECRETS still honored for existing deploys.)
  *
  * Returns the count of secrets loaded.
  */
 export async function loadSecretsFromEnv(): Promise<number> {
-  const raw = process.env.OPENWOP_SAMPLE_SECRETS;
+  const raw = process.env.OPENWOP_BOOT_SECRETS ?? process.env.OPENWOP_SAMPLE_SECRETS;
   if (!raw) return 0;
   try {
     const parsed = JSON.parse(raw) as Record<string, string>;
@@ -149,7 +150,7 @@ export async function loadSecretsFromEnv(): Promise<number> {
     log.info('loaded BYOK secrets from env', { count });
     return count;
   } catch (err) {
-    log.warn('OPENWOP_SAMPLE_SECRETS parse failed; secrets disabled', {
+    log.warn('OPENWOP_BOOT_SECRETS parse failed; secrets disabled', {
       error: err instanceof Error ? err.message : String(err),
     });
     return 0;
@@ -222,7 +223,7 @@ async function resolveTenantSecret(tenantId: string, credentialRef: string): Pro
   }
 }
 
-/** Persist a new (or updated) secret. Called by POST /v1/host/sample/byok/secrets. */
+/** Persist a new (or updated) secret. Called by POST /v1/host/openwop-app/byok/secrets. */
 export async function setSecret(credentialRef: string, value: string, scope?: SecretScope): Promise<void> {
   if (isSignedInTenant(scope?.tenantId)) {
     if (!isKmsConfigured()) {
@@ -253,7 +254,7 @@ export async function setSecret(credentialRef: string, value: string, scope?: Se
   plaintextCache.set(credentialRef, value);
 }
 
-/** Remove a secret. Called by DELETE /v1/host/sample/byok/secrets/:ref. */
+/** Remove a secret. Called by DELETE /v1/host/openwop-app/byok/secrets/:ref. */
 export async function removeSecret(credentialRef: string, scope?: SecretScope): Promise<void> {
   if (isSignedInTenant(scope?.tenantId)) {
     const { storage } = requireConfigured();

@@ -1,7 +1,7 @@
 /**
  * In-memory workflow registry consulted by the workflowCatalog after
  * the hardcoded sample workflows. Populated by clients via
- * `POST /v1/host/sample/workflows` — the builder UI calls this just
+ * `POST /v1/host/openwop-app/workflows` — the builder UI calls this just
  * before dispatching a run so the catalog can resolve the workflowId.
  *
  * Sample-grade: process-local, evicted on restart. Real hosts persist

@@ -14,7 +14,7 @@
  *
  * This is the master gate for everything AUTOMATIC. Explicit, user-triggered
  * seeding (the `/demo-data` dashboard) stays available regardless, governed by
- * {@link demoSeedEnabled} in `demoSeed.ts` — a clean install can still opt in to
+ * {@link exampleDataSeedEnabled} in `exampleDataSeed.ts` — a clean install can still opt in to
  * load demo data, it just never happens behind the user's back.
  */
 export function demoMode(): boolean {

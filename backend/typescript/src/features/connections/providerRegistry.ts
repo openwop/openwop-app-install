@@ -107,6 +107,11 @@ const BUILTIN: ProviderManifest[] = [
     refreshable: false,
     defaultScopes: [],
     consumerNodes: ['core.openwop.http'],
+    // ADR 0033 correction + ADR 0037: each customer instance is a subdomain of
+    // service-now.com (e.g. acme.service-now.com). The eTLD+1 pin matches any
+    // instance subdomain without naming a tenant. Without this, brokered egress
+    // (the http seam + the connector invoker) is not allow-listed to ServiceNow.
+    apiHosts: ['service-now.com'],
     openapiRef: 'https://docs.servicenow.com/api',
     docsUrl: 'https://developer.servicenow.com',
   },

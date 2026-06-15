@@ -49,7 +49,7 @@ subsystem:
   emit notifications via a backend seam (`setNotificationBackend`) from the
   executor + suspend manager.
 - Storage: `notifications` + `push_subscriptions` tables (sqlite + postgres),
-  **tenant-scoped**. Routes under `/v1/host/sample/notifications[/push]/*`.
+  **tenant-scoped**. Routes under `/v1/host/openwop-app/notifications[/push]/*`.
 
 The single architectural defect: it is **core-bootstrapped** (`bootstrap/
 notifications.ts` + core `ROUTE_MODULES` in `registerAllRoutes` + direct calls
@@ -71,7 +71,7 @@ tenant`). Its `registerRoutes`:
 1. installs the emit backend + web-push (`ensureNotificationEmitterInstalled` +
    `configureWebPush`) — **moved off `index.ts` into the feature**, so the
    feature owns its infra;
-2. **toggle-gates the surface** — a middleware on `/v1/host/sample/notifications`
+2. **toggle-gates the surface** — a middleware on `/v1/host/openwop-app/notifications`
    that 404s when the toggle is off for the caller (backend authority);
 3. mounts the existing `registerNotificationRoutes` + `registerPushSubscription
    Routes`.
@@ -89,7 +89,7 @@ with the default-ON toggle is identical to today — the existing
 Today notification **preferences** (mute-by-type, quiet hours) live in the
 browser's `localStorage` — per-device, lost on clear, invisible to the server.
 Promote them to a **durable, server-backed, per-(tenant, user) store**
-(`notifications:prefs`), with `GET`/`PUT /v1/host/sample/notifications/
+(`notifications:prefs`), with `GET`/`PUT /v1/host/openwop-app/notifications/
 preferences` (toggle + signed-in gated). The frontend reads/writes the server
 instead of `localStorage`, so preferences are cross-device and durable.
 (Server-side ENFORCEMENT — filtering emits / push by prefs — is the larger

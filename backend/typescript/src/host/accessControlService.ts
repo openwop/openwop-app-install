@@ -1,6 +1,6 @@
 /**
  * Organizations / teams / members + role-based access — host extension
- * (sample-grade, NON-NORMATIVE). Lives entirely under /v1/host/sample/* and
+ * (NON-NORMATIVE). Lives entirely under /v1/host/openwop-app/* and
  * is NOT part of the canonical v1 wire contract (spec/v1/host-extensions.md).
  *
  * Models the "RBAC like myndhyve" surface on top of openwop's existing

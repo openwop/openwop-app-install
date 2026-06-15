@@ -1,5 +1,5 @@
 /**
- * Executive-Assistant memory graph (ADR 0023 — host-extension, sample-grade).
+ * Executive-Assistant memory graph (ADR 0023 — host-extension, best-effort).
  *
  * The ONE new owned concept of the assistant feature: a structured entity graph
  * (Project / Commitment / Decision / Meeting / StakeholderProfile / PendingAction)

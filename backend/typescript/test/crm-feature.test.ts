@@ -25,7 +25,7 @@ describe('CRM feature (sqlite memory app)', () => {
   let server: http.Server;
   const PORT = 18877;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token'; // wildcard bearer ⇒ superadmin
+  const TOKEN = 'dev-token'; // wildcard bearer ⇒ superadmin
   let workflowId: string;
 
   beforeAll(async () => {
@@ -44,7 +44,7 @@ describe('CRM feature (sqlite memory app)', () => {
       server = app.listen(PORT, res);
     });
     // A real catalog workflow — triage 422s on an unresolvable workflow.
-    workflowId = (await jf<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0] ?? 'sample.demo.uppercase';
+    workflowId = (await jf<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0] ?? 'openwop-app.uppercase';
   });
 
   afterAll(async () => {
@@ -61,7 +61,7 @@ describe('CRM feature (sqlite memory app)', () => {
   }
 
   async function setCrm(status: 'on' | 'off'): Promise<void> {
-    const r = await jf('/v1/host/sample/feature-toggles/admin/configs/crm', {
+    const r = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/crm', {
       method: 'PUT',
       body: JSON.stringify({
         status,
@@ -77,31 +77,31 @@ describe('CRM feature (sqlite memory app)', () => {
   }
 
   it('the surface 404s while CRM is off (backend authority)', async () => {
-    const r = await jf('/v1/host/sample/crm/contacts');
+    const r = await jf('/v1/host/openwop-app/crm/contacts');
     expect(r.status).toBe(404);
   });
 
   it('contacts CRUD works once CRM is enabled', async () => {
     await setCrm('on');
-    const created = await jf<{ contactId: string; name: string; stage: string }>('/v1/host/sample/crm/contacts', {
+    const created = await jf<{ contactId: string; name: string; stage: string }>('/v1/host/openwop-app/crm/contacts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Ada Lovelace', company: 'Analytical Engines', stage: 'qualified' }),
     });
     expect(created.status).toBe(201);
     expect(created.body.contactId.startsWith('crm:')).toBe(true);
 
-    const list = await jf<{ contacts: { contactId: string }[] }>('/v1/host/sample/crm/contacts');
+    const list = await jf<{ contacts: { contactId: string }[] }>('/v1/host/openwop-app/crm/contacts');
     expect(list.body.contacts.some((c) => c.contactId === created.body.contactId)).toBe(true);
   });
 
   it('triage stamps the resolved variant + bindings into run.metadata (round-trips)', async () => {
     await setCrm('on');
-    const contact = await jf<{ contactId: string }>('/v1/host/sample/crm/contacts', {
+    const contact = await jf<{ contactId: string }>('/v1/host/openwop-app/crm/contacts', {
       method: 'POST',
       body: JSON.stringify({ name: 'Grace Hopper', company: 'Navy', stage: 'customer' }),
     });
     const triage = await jf<{ runId: string; variant: string | null; bindings: unknown }>(
-      `/v1/host/sample/crm/contacts/${contact.body.contactId}/triage`,
+      `/v1/host/openwop-app/crm/contacts/${contact.body.contactId}/triage`,
       { method: 'POST', body: JSON.stringify({ workflowId }) },
     );
     expect(triage.status).toBe(202);
@@ -111,7 +111,7 @@ describe('CRM feature (sqlite memory app)', () => {
     // The stamp lives in host-internal run.metadata (off the normative wire);
     // read it via the CRM provenance endpoint.
     const stamp = await jf<{ featureVariant?: { feature?: string; variant?: string }; crm?: { contactId?: string } }>(
-      `/v1/host/sample/crm/runs/${triage.body.runId}`,
+      `/v1/host/openwop-app/crm/runs/${triage.body.runId}`,
     );
     expect(stamp.status).toBe(200);
     expect(stamp.body.featureVariant?.feature).toBe('crm');
@@ -121,7 +121,7 @@ describe('CRM feature (sqlite memory app)', () => {
 
   it('flipping CRM off makes the surface 404 again', async () => {
     await setCrm('off');
-    const r = await jf('/v1/host/sample/crm/contacts');
+    const r = await jf('/v1/host/openwop-app/crm/contacts');
     expect(r.status).toBe(404);
   });
 });

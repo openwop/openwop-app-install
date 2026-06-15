@@ -2,7 +2,7 @@
  * Minimal MCP (RFC 0020) browser client.
  *
  * The reference host exposes its registered workflows as MCP tools over a
- * JSON-RPC seam at `POST /v1/host/sample/mcp` (gated behind
+ * JSON-RPC seam at `POST /v1/host/openwop-app/mcp` (gated behind
  * `OPENWOP_MCP_SERVER_ENABLED=true`). This issues a `tools/list` call so
  * the UI can show which tools the host advertises. The mount is disabled
  * by default, so callers must handle the "not enabled" (404) case.
@@ -28,7 +28,7 @@ export async function listMcpTools(): Promise<McpListResult> {
   let res: Response;
   try {
     res = await fetch(
-      `${config.baseUrl}/v1/host/sample/mcp`,
+      `${config.baseUrl}/v1/host/openwop-app/mcp`,
       fetchOpts({
         method: 'POST',
         headers: authedHeaders({ 'content-type': 'application/json', accept: 'application/json' }),

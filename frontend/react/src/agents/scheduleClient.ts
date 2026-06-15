@@ -1,11 +1,11 @@
 /**
  * Agent-scoped scheduler client (host extension; RFC 0052 reference impl).
  *
- *   GET    /v1/host/sample/scheduler/jobs[?rosterId=]      → { jobs }
- *   POST   /v1/host/sample/scheduler/jobs                  → job
- *   PATCH  /v1/host/sample/scheduler/jobs/:jobId           → job   (enable/disable)
- *   DELETE /v1/host/sample/scheduler/jobs/:jobId
- *   POST   /v1/host/sample/scheduler/jobs/:jobId/trigger   → { runsFired, runId? }
+ *   GET    /v1/host/openwop-app/scheduler/jobs[?rosterId=]      → { jobs }
+ *   POST   /v1/host/openwop-app/scheduler/jobs                  → job
+ *   PATCH  /v1/host/openwop-app/scheduler/jobs/:jobId           → job   (enable/disable)
+ *   DELETE /v1/host/openwop-app/scheduler/jobs/:jobId
+ *   POST   /v1/host/openwop-app/scheduler/jobs/:jobId/trigger   → { runsFired, runId? }
  *
  * Tenant scoping is the backend's job; the client never sends a tenantId.
  */
@@ -32,7 +32,7 @@ export interface ScheduledJob {
   createdAt?: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample/scheduler/jobs`;
+const base = `${config.baseUrl}/v1/host/openwop-app/scheduler/jobs`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 /** List jobs, optionally filtered to one roster member (the agent's tab). */

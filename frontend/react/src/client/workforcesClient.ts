@@ -1,6 +1,6 @@
 /**
- * Governed Workforce client — wraps the sample host-extension surface
- * `GET /v1/host/sample/workforces`, `/:id`, `/:id/metrics` (EP0).
+ * Governed Workforce client — wraps the reference app-extension surface
+ * `GET /v1/host/openwop-app/workforces`, `/:id`, `/:id/metrics` (EP0).
  *
  * Read-only in EP0. Raw fetch (the surface is a host extension, not in the
  * SDK), mirroring the accessClient/runsClient pattern. Shapes mirror the
@@ -10,7 +10,7 @@
 
 import { authedHeaders, config, fetchOpts } from './config.js';
 
-const base = `${config.baseUrl}/v1/host/sample/workforces`;
+const base = `${config.baseUrl}/v1/host/openwop-app/workforces`;
 
 export type AutonomyLevel = 'review' | 'guided' | 'auto';
 export type WorkforceStatus = 'shadow' | 'piloting' | 'production';

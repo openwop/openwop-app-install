@@ -55,7 +55,7 @@ afterAll(async () => {
 describe('workforce dashboards — showcase fallback (demo-mode gated)', () => {
   it('demo mode ON: a fresh tenant falls back to __showcase__, tagged source=showcase', async () => {
     process.env.OPENWOP_DEMO_MODE = 'true';
-    const visitor = await fetch(`${BASE}/v1/host/sample/workforces/${HERO}/metrics`);
+    const visitor = await fetch(`${BASE}/v1/host/openwop-app/workforces/${HERO}/metrics`);
     expect(visitor.status).toBe(200);
     const body = (await visitor.json()) as { totalRuns: number; source: string };
     expect(body.totalRuns).toBe(300); // fallback populated it
@@ -64,7 +64,7 @@ describe('workforce dashboards — showcase fallback (demo-mode gated)', () => {
 
   it('demo mode OFF (default): a fresh tenant sees its own empty data, source=tenant', async () => {
     delete process.env.OPENWOP_DEMO_MODE;
-    const visitor = await fetch(`${BASE}/v1/host/sample/workforces/${HERO}/metrics`);
+    const visitor = await fetch(`${BASE}/v1/host/openwop-app/workforces/${HERO}/metrics`);
     expect(visitor.status).toBe(200);
     const body = (await visitor.json()) as { totalRuns: number; source: string };
     expect(body.totalRuns).toBe(0); // NO synthetic fallback on a clean install

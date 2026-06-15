@@ -6,7 +6,7 @@
 ADR 0006 (RBAC — read/write authority via accessControl scopes)
 **Owner of media data:** a NEW feature-package `src/features/media/`
 (`feature.ts` + `routes.ts` + `mediaService.ts` + `mediaStorage.ts`).
-**Surface:** `/v1/host/sample/media/*` (host-extension, NON-NORMATIVE — no RFC;
+**Surface:** `/v1/host/openwop-app/media/*` (host-extension, NON-NORMATIVE — no RFC;
 bytes ride the existing RFC 0055 media-asset surface).
 
 > **Correction (2026-06-11, ADR 0027):** Media is now **always-on** — its
@@ -33,7 +33,7 @@ What already exists (so Media does NOT duplicate it):
   member's role grants. Media must NOT invent its own org or permission model —
   it reuses `resolveEffectiveAccess(tenant, { subject, orgId })`.
 - **Byte storage + capability serving** is the RFC 0055 media-asset surface
-  (`storeMediaAsset` → token, served by `GET /v1/host/sample/assets/{token}`).
+  (`storeMediaAsset` → token, served by `GET /v1/host/openwop-app/assets/{token}`).
   Media stores asset **metadata** + a storage reference; the bytes ride that
   surface, served by an unguessable capability token (the same path avatars use).
 
@@ -87,7 +87,7 @@ portfolio raised; centralizing it here is the fix.)
 ### Phase 1 — Collections + assets CRUD + org-scoped RBAC
 
 `mediaService` + three `DurableCollection`s (collections, asset metadata, and the
-storage-adapter blob store). Routes under `/v1/host/sample/media/orgs/:orgId`:
+storage-adapter blob store). Routes under `/v1/host/openwop-app/media/orgs/:orgId`:
 collections (create `[w]` / list `[r]` / delete `[w]`), assets (upload `[w]` /
 list+filter `[r]` / get `[r]` / patch rename·tag·move `[w]` / delete `[w]`).
 Deleting a collection re-homes its assets to uncategorized (never orphans bytes).
@@ -116,7 +116,7 @@ drag-free file upload, search/filter, and rename/tag/delete. Registered in
   caller's RFC 0049 scope in the org; a non-member gets zero scopes, fail-closed.
 - **Tenant isolation (CTI-1):** every collection/asset read/write is tenant +
   org scoped; cross-tenant or cross-org access fails closed with `not_found`.
-- **No wire surface → no RFC:** entirely under `/v1/host/sample/*`; bytes reuse
+- **No wire surface → no RFC:** entirely under `/v1/host/openwop-app/*`; bytes reuse
   the already-accepted RFC 0055 surface — nothing new on the protocol wire.
 - **Storage swap is one file:** `mediaStorage.ts` is the only thing a real-backend
   deployer touches.
@@ -128,7 +128,7 @@ drag-free file upload, search/filter, and rename/tag/delete. Registered in
    a storage ref keeps listing cheap; bytes are fetched only when served.
 2. **A new `media` capability + RFC for the serve surface.** Rejected — byte
    serving already exists (RFC 0055); the library is pure host-extension product
-   surface with no cross-host/wire contract (the CLAUDE.md `/v1/host/sample/*`
+   surface with no cross-host/wire contract (the CLAUDE.md `/v1/host/openwop-app/*`
    rule).
 3. **Tenant-scoped (not org-scoped) library.** Rejected — MyndHyve media is
    org-scoped and the roadmap places Media after Orgs+RBAC precisely so

@@ -84,7 +84,7 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
   if (message.reasoning) {
     rows.push({
       kind: 'envelope.reasoning',
-      detail: `${message.reasoning.length} chars (RFC 0030 §A carry-reasoning)`,
+      detail: `${message.reasoning.length} chars (carry-reasoning)`,
     });
   }
   if (message.meta?.rendering) {
@@ -92,7 +92,7 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
     const extra = [r.lang, r.mimeType, r.title && `“${r.title}”`].filter(Boolean).join(' · ');
     rows.push({
       kind: 'meta.rendering',
-      detail: `${r.display}${extra ? ` · ${extra}` : ''} (RFC 0055 §B hint)`,
+      detail: `${r.display}${extra ? ` · ${extra}` : ''} (rendering hint)`,
     });
   }
 
@@ -201,7 +201,7 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
         <div className="envelope-inspector-panel" role="region" aria-label="Envelope events">
           <div className="envelope-inspector-help">
             Wire-shape <code>agent.*</code> + <code>envelope.*</code> events
-            this turn emitted. Per RFC 0002 §B + RFCs 0030–0033.
+            this turn emitted.
           </div>
           <ol className="envelope-inspector-rows">
             {rows.map((r, i) => (

@@ -1,11 +1,11 @@
 /**
- * Agent operations — host-extension routes (sample-grade, non-normative).
+ * Agent operations — host-extension routes (non-normative).
  *
  * Two demo-experience surfaces (PRD §14, §17):
- *   POST /v1/host/sample/demo/seed            — idempotently seed all built-in
+ *   POST /v1/host/openwop-app/example-data/seed            — idempotently seed all built-in
  *                                                demo domains for the caller's
  *                                                tenant ("Load demo data")
- *   POST /v1/host/sample/roster/{rosterId}/check
+ *   POST /v1/host/openwop-app/roster/{rosterId}/check
  *                                              — the agent "heartbeat": pick the
  *                                                first eligible To Do card on the
  *                                                agent's board and start its
@@ -25,7 +25,7 @@ import { OpenwopError } from '../types.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import { seedEverything } from '../host/seedEverything.js';
-import { demoStatus, runDemoClear, runDemoSeed } from '../host/demoSeeders.js';
+import { exampleDataStatus, runDemoClear, runExampleDataSeed } from '../host/exampleDataSeeders.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { runHeartbeatOnce } from '../host/heartbeatService.js';
 import { projectAgentActivity } from '../host/agentActivity.js';
@@ -41,7 +41,7 @@ function tenantOf(req: Request): string {
 
 export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // "Load demo data" — idempotent per-tenant seed across registered domains.
-  app.post('/v1/host/sample/demo/seed', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/example-data/seed', async (req, res, next) => {
     try {
       // `heal: true` = the EXPLICIT "Load demo data" action — restores missing
       // boards/schedules/chart for existing personas. The silent auto-seed on
@@ -61,9 +61,9 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // ── /demo-data dashboard surface (extensible seeder registry) ─────────────
   // Per-step live inventory: one row per registered demo data type with its
   // current count. Drives the dashboard's "N present" + checkboxes.
-  app.get('/v1/host/sample/demo/status', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/example-data/status', async (req, res, next) => {
     try {
-      res.status(200).json({ steps: await demoStatus(tenantOf(req), deps.storage) });
+      res.status(200).json({ steps: await exampleDataStatus(tenantOf(req), deps.storage) });
     } catch (err) {
       next(err);
     }
@@ -72,12 +72,12 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // Seed selected steps (all when none given). `dryRun` previews without writing.
   // Returns per-step results + a summary (created/skipped/errors), so the
   // dashboard can show exactly what each type did — no more silent omissions.
-  app.post('/v1/host/sample/demo/run', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/example-data/run', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { steps?: unknown; dryRun?: unknown };
       const steps = Array.isArray(body.steps) ? body.steps.filter((s): s is string => typeof s === 'string') : undefined;
       const dryRun = body.dryRun === true;
-      res.status(200).json(await runDemoSeed(tenantOf(req), deps.storage, { steps, dryRun }));
+      res.status(200).json(await runExampleDataSeed(tenantOf(req), deps.storage, { steps, dryRun }));
     } catch (err) {
       next(err);
     }
@@ -85,7 +85,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
 
   // Clear selected steps (all when none given) — removes the canonical demo
   // entities only (never user-authored data). Confirmed in the UI.
-  app.post('/v1/host/sample/demo/clear', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/example-data/clear', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as { steps?: unknown };
       const steps = Array.isArray(body.steps) ? body.steps.filter((s): s is string => typeof s === 'string') : undefined;
@@ -96,7 +96,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   });
 
   // Agent heartbeat "Check now" — claim the first eligible To Do card and run it.
-  app.post('/v1/host/sample/roster/:rosterId/check', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/roster/:rosterId/check', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const entry = await getRosterEntry(req.params.rosterId);
@@ -121,7 +121,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // pick-ups, schedule fires, board-card triggers), each with a real timestamp,
   // outcome, and links. Derived from the durable runs store, so it carries the
   // run status + completion time the board-state-derived fleet feed can't.
-  app.get('/v1/host/sample/roster/:rosterId/activity', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/roster/:rosterId/activity', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const entry = await getRosterEntry(req.params.rosterId);
@@ -145,7 +145,7 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   // single timeline + a failures view (`?status=failed`). Backed by the
   // attribution index (no recent-run scan). Optional `?rosterId=` narrows to one
   // member without the path param.
-  app.get('/v1/host/sample/fleet/activity', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/fleet/activity', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const limit = Math.min(100, Math.max(1, Number.parseInt(String(req.query.limit ?? '50'), 10) || 50));

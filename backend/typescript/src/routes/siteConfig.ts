@@ -1,11 +1,11 @@
 /**
  * Site-config host-extension routes (ADR 0027) — the on/off switch for the public
  * front page. The CONTENT is always the host-level system home page
- * (`host/systemSite.ts`), edited by the super admin via `/v1/host/sample/site-page`.
+ * (`host/systemSite.ts`), edited by the super admin via `/v1/host/openwop-app/site-page`.
  *
- *   GET  /v1/host/sample/public-site-config   public front-page pointer   [PUBLIC]
- *   GET  /v1/host/sample/site-config          { enabled } (admin read)    [superadmin]
- *   PUT  /v1/host/sample/site-config          { enabled } (toggle)        [superadmin]
+ *   GET  /v1/host/openwop-app/public-site-config   public front-page pointer   [PUBLIC]
+ *   GET  /v1/host/openwop-app/site-config          { enabled } (admin read)    [superadmin]
+ *   PUT  /v1/host/openwop-app/site-config          { enabled } (toggle)        [superadmin]
  *
  * The public read is on PUBLIC_PATH_PREFIXES and exposes only the fixed system
  * site pointer `{ enabled, orgId, slug }` — no tenant data, no secrets. The write
@@ -18,7 +18,7 @@ import { requireSuperadmin } from '../host/superadmin.js';
 
 export function registerSiteConfigRoutes(app: Express): void {
   // ── PUBLIC: the front-page pointer the anonymous SPA reads at '/' ──
-  app.get('/v1/host/sample/public-site-config', async (_req, res, next) => {
+  app.get('/v1/host/openwop-app/public-site-config', async (_req, res, next) => {
     try {
       const c = await getSiteConfig();
       if (!c.enabled) { res.json({ enabled: false }); return; }
@@ -30,7 +30,7 @@ export function registerSiteConfigRoutes(app: Express): void {
   });
 
   // ── ADMIN (superadmin): read the on/off switch ──
-  app.get('/v1/host/sample/site-config', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/site-config', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Site configuration');
       res.json(await getSiteConfig());
@@ -38,7 +38,7 @@ export function registerSiteConfigRoutes(app: Express): void {
   });
 
   // ── ADMIN (superadmin): toggle the front page on/off ──
-  app.put('/v1/host/sample/site-config', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/site-config', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Site configuration');
       const body = (req.body ?? {}) as { enabled?: unknown };

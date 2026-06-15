@@ -5,7 +5,7 @@
  *
  *  1. The DETERMINISTIC TICK SEAM (`singleTick` / `missedWindow` / `currentTick`)
  *     — an in-memory, synchronous clock that backs the
- *     `POST /v1/host/sample/scheduling/tick` conformance seam. It honors the
+ *     `POST /v1/host/openwop-app/scheduling/tick` conformance seam. It honors the
  *     two RFC 0052 §B invariants:
  *       - §B.2 fire-once-per-tick: one scheduler wake-up fires a job exactly
  *         once; no duplicate concurrent runs.
@@ -17,7 +17,7 @@
  *
  *  2. The DURABLE JOB STORE (`registerJob` / `listJobs` / `getJob` /
  *     `deleteJob` / `setJobEnabled` / `markJobFired` / `listJobsByRoster`) —
- *     the CRUD surface behind `/v1/host/sample/scheduler/jobs`. Backed by the
+ *     the CRUD surface behind `/v1/host/openwop-app/scheduler/jobs`. Backed by the
  *     read-through per-entity `DurableCollection` (host/hostExtPersistence.ts)
  *     so jobs survive a restart AND a job created on one Cloud Run instance is
  *     visible on every other (the app scales to max=10). Jobs carry optional

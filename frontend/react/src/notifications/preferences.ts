@@ -5,7 +5,7 @@
  * Storage: localStorage under `openwop:notification-prefs:v1`. As of ADR 0010
  * Phase 2 this is the SYNCHRONOUS BOOTSTRAP CACHE, not the source of truth: the
  * durable, cross-device record lives server-side (`GET`/`PUT
- * /v1/host/sample/notifications/preferences`). The store seeds from this cache
+ * /v1/host/openwop-app/notifications/preferences`). The store seeds from this cache
  * for an immediate value, then `hydratePreferences()` adopts the server copy and
  * refreshes the cache; writes go to the server and mirror back here. The cache
  * keeps the desktop-toast predicate working synchronously + offline/anon.

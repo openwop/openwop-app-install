@@ -61,7 +61,7 @@ export function RunConversationPanel({ events, activeInterrupt, onResolved }: Pr
     <section className="card" aria-label="Multi-turn conversations">
       <h2>Conversations</h2>
       <p className="muted runconv-subhead">
-        Multi-turn dialog driven by <code>core.conversationGate</code> (RFC 0005).
+        Multi-turn dialog driven by <code>core.conversationGate</code>.
       </p>
       {conversations.map((c) => (
         <ConversationCard

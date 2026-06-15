@@ -22,8 +22,9 @@ import { Field, TextField } from '../ui/Field.js';
 import { Modal } from '../ui/Modal.js';
 import { IconButton } from '../ui/IconButton.js';
 import {
-  PlusIcon, TrashIcon, BotIcon, BuildingIcon, ZapIcon, UserIcon, XIcon,
+  PlusIcon, TrashIcon, BotIcon, BuildingIcon, ZapIcon, UserIcon, XIcon, ShieldIcon,
 } from '../ui/icons/index.js';
+import { AgentProfilePanel } from './AgentProfilePanel.js';
 import {
   createRosterEntry,
   deleteRosterEntry,
@@ -62,6 +63,8 @@ export function RosterPage(): JSX.Element {
   const [autonomyFilter, setAutonomyFilter] = useState<string | null>(null);
   // The roster entry awaiting destructive-delete confirmation (cohesion <Modal>).
   const [pendingDelete, setPendingDelete] = useState<RosterEntry | null>(null);
+  // The roster entry whose governance profile is open in the editor modal (ADR 0031).
+  const [profileFor, setProfileFor] = useState<RosterEntry | null>(null);
   const personaInputRef = useRef<HTMLInputElement>(null);
 
   const focusAddAgent = useCallback(() => {
@@ -231,13 +234,23 @@ export function RosterPage(): JSX.Element {
       key: 'actions',
       header: '',
       align: 'right',
-      width: '52px',
+      width: '120px',
       render: (r) => (
-        <IconButton
-          label={`Delete ${r.persona}`}
-          icon={<TrashIcon size={15} />}
-          onClick={() => setPendingDelete(r)}
-        />
+        <div className="u-flex u-items-center u-gap-2 u-justify-end">
+          <button
+            type="button"
+            className="secondary u-fs-12 u-flex u-items-center u-gap-1"
+            onClick={() => setProfileFor(r)}
+            title={`View / edit ${r.persona}'s governance profile`}
+          >
+            <ShieldIcon size={13} aria-hidden /> Profile
+          </button>
+          <IconButton
+            label={`Delete ${r.persona}`}
+            icon={<TrashIcon size={15} />}
+            onClick={() => setPendingDelete(r)}
+          />
+        </div>
       ),
     },
   ];
@@ -262,7 +275,7 @@ export function RosterPage(): JSX.Element {
       <PageHeader
         eyebrow="Roster"
         title="Roster & Org-Chart"
-        lede={<>Named "digital-twin employee" agents that own a workflow portfolio (RFC 0086), grouped into a descriptive org-chart (RFC 0087). Bind a roster member to a board on the <strong>Boards</strong> page to make its To&nbsp;Do column fire that agent's workflow.</>}
+        lede={<>Named "digital-twin employee" agents that own a workflow portfolio, grouped into a descriptive org-chart. Bind a roster member to a board on the <strong>Boards</strong> page to make its To&nbsp;Do column fire that agent's workflow.</>}
         actions={
           <button type="button" className="btn-accent-solid u-flex u-items-center u-gap-2" onClick={focusAddAgent}>
             <PlusIcon size={14} aria-hidden /> Add agent
@@ -367,8 +380,8 @@ export function RosterPage(): JSX.Element {
 
       <h2 className="u-fs-16 u-mt-5">Org-chart</h2>
       <p className="roster-orgchart-lede">
-        Departments + roles + reporting lines over roster members. An org edge is metadata only — it grants no authority
-        (RFC 0087 §B). The responsibility roll-up is the union of a department's members' portfolios.
+        Departments + roles + reporting lines over roster members. An org edge is metadata only — it grants no authority.
+        The responsibility roll-up is the union of a department's members' portfolios.
       </p>
 
       {loading ? (
@@ -466,6 +479,30 @@ export function RosterPage(): JSX.Element {
               <TrashIcon size={14} aria-hidden /> Delete agent
             </button>
           </div>
+        </Modal>
+      ) : null}
+
+      {profileFor ? (
+        <Modal
+          onClose={() => setProfileFor(null)}
+          label={`${profileFor.persona}'s profile`}
+          className="surface-card agentprofile-modal"
+        >
+          <div className="hire-head">
+            <div>
+              <div className="hire-eyebrow">Governance profile</div>
+              <h2 className="hire-title">{profileFor.persona}</h2>
+              <p className="hire-lede">
+                Config, permissions, escalation, autonomy, and compliance for this agent.
+              </p>
+            </div>
+            <IconButton label="Close" icon={<XIcon size={16} />} onClick={() => setProfileFor(null)} />
+          </div>
+          <AgentProfilePanel
+            rosterId={profileFor.rosterId}
+            roleKey={profileFor.roleKey}
+            persona={profileFor.persona}
+          />
         </Modal>
       ) : null}
     </section>

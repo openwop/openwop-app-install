@@ -153,15 +153,15 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
     const PORT = 18978;
     const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     const server: http.Server = await new Promise((res) => { const s = app.listen(PORT, () => res(s)); });
-    const hdrs = { 'content-type': 'application/json', authorization: 'Bearer sample-token' };
+    const hdrs = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
     try {
       // examples/connection-packs/github auto-loaded → `github` resolvable, honest oauthConfigured:false (no host creds).
-      const provs = await (await fetch(`http://127.0.0.1:${PORT}/v1/host/sample/providers`, { headers: hdrs })).json() as { providers: { id: string; reach: string; oauthConfigured?: boolean }[] };
+      const provs = await (await fetch(`http://127.0.0.1:${PORT}/v1/host/openwop-app/providers`, { headers: hdrs })).json() as { providers: { id: string; reach: string; oauthConfigured?: boolean }[] };
       const gh = provs.providers.find((p) => p.id === 'github');
       expect(gh?.reach).toBe('mcp');
       expect(gh?.oauthConfigured).toBe(false);
       // Option C: an unknown provider at the create seam → the spec code, 404.
-      const res = await fetch(`http://127.0.0.1:${PORT}/v1/host/sample/connections`, {
+      const res = await fetch(`http://127.0.0.1:${PORT}/v1/host/openwop-app/connections`, {
         method: 'POST', headers: hdrs,
         body: JSON.stringify({ provider: 'doesnotexist', kind: 'api_key', secret: 'x', scope: 'user' }),
       });

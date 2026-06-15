@@ -27,7 +27,7 @@ interface Props {
   onCancel?: (() => void) | undefined;
 }
 
-const MANAGED_PENDING_KEY = 'openwop.sample.byok.pendingManaged';
+const MANAGED_PENDING_KEY = 'openwop-app.byok.pendingManaged';
 
 /** Sentinel credentialRef for managed providers. The BE recognizes this
  *  prefix and routes through `managedProvider.ts` instead of looking up

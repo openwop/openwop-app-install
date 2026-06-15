@@ -17,7 +17,7 @@
  * The helper is the canonical wrap site for the workflow-engine
  * sample. LLM-node implementations consume `wrapForLLMPrompt(...)`
  * before composing their prompt; the seam at
- * `POST /v1/host/sample/test/llm-prompt-wrap` exposes it directly
+ * `POST /v1/host/openwop-app/test/llm-prompt-wrap` exposes it directly
  * so conformance can assert the wrap contract without driving a
  * full LLM-node execution.
  *

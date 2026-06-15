@@ -34,8 +34,8 @@ export function TryItFreeCard({
               <span className="byok-try-free-suffix">by creating an account</span>
             </div>
             <div className="byok-try-free-desc">
-              No API key needed. Sign in and start chatting — the sample
-              server uses a host-managed key with reasonable per-account
+              No API key needed. Sign in and start chatting — the server
+              uses a host-managed key with reasonable per-account
               limits.
             </div>
             {!isAuthed && p.signedInHint && (
@@ -70,11 +70,11 @@ export function ProviderGrid({
         <abbr title="Bring Your Own Key"><strong>BYOK</strong></abbr> means
         you supply the API key for the model provider you pick below. The
         provider bills you directly for your usage; OpenWOP doesn't bill you
-        or take a cut. The sample server forwards each request to the
+        or take a cut. The server forwards each request to the
         provider using your key, then streams the response back.
       </p>
       <p className="byok-section-fineprint">
-        Your key is stored on the sample server (sqlite-backed, AES-256-GCM
+        Your key is stored on the server (sqlite-backed, AES-256-GCM
         encrypted at rest) and sent only to the provider you picked. Set
         <code className="providergrid-inline-code">OPENWOP_BYOK_EPHEMERAL=true</code> on
         the server to switch to in-memory-only mode that wipes on restart.

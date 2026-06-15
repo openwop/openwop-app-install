@@ -1,9 +1,9 @@
 /**
  * Host-extension read routes for the demo MemoryAdapter (RFC 0004).
  *
- *   GET    /v1/host/sample/memory[?memoryRef=&tag=&limit=]  → { memoryRef, entries }
- *   GET    /v1/host/sample/memory/:memoryId[?memoryRef=]    → { memoryRef, entry }
- *   DELETE /v1/host/sample/memory/:memoryId[?memoryRef=]    → { memoryRef, memoryId, removed }
+ *   GET    /v1/host/openwop-app/memory[?memoryRef=&tag=&limit=]  → { memoryRef, entries }
+ *   GET    /v1/host/openwop-app/memory/:memoryId[?memoryRef=]    → { memoryRef, entry }
+ *   DELETE /v1/host/openwop-app/memory/:memoryId[?memoryRef=]    → { memoryRef, memoryId, removed }
  *
  * Reads are per the agent-memory.md wire contract (host-internal writes — the
  * executor writes a run-summary on completion). DELETE is a demo-only host
@@ -29,7 +29,7 @@ export function registerMemoryRoutes(app: Express): void {
   // exactly as run-create does (`req.tenantId ?? 'default'`) so the ledger
   // scopes to the same tenant the run wrote under. Never read tenant from the
   // query (CTI-1).
-  app.get('/v1/host/sample/memory', (req, res) => {
+  app.get('/v1/host/openwop-app/memory', (req, res) => {
     const tenantId = req.tenantId ?? 'default';
     const memoryRef = resolveRef(req.query.memoryRef);
     const tag = typeof req.query.tag === 'string' ? req.query.tag : undefined;
@@ -42,7 +42,7 @@ export function registerMemoryRoutes(app: Express): void {
     res.status(200).json({ memoryRef, entries });
   });
 
-  app.get('/v1/host/sample/memory/:memoryId', (req, res) => {
+  app.get('/v1/host/openwop-app/memory/:memoryId', (req, res) => {
     const tenantId = req.tenantId ?? 'default';
     const memoryRef = resolveRef(req.query.memoryRef);
     const entry = getMemoryEntry(tenantId, memoryRef, req.params.memoryId);
@@ -53,7 +53,7 @@ export function registerMemoryRoutes(app: Express): void {
     res.status(200).json({ memoryRef, entry });
   });
 
-  app.delete('/v1/host/sample/memory/:memoryId', (req, res) => {
+  app.delete('/v1/host/openwop-app/memory/:memoryId', (req, res) => {
     const tenantId = req.tenantId ?? 'default';
     const memoryRef = resolveRef(req.query.memoryRef);
     const removed = removeMemoryEntry(tenantId, memoryRef, req.params.memoryId);
@@ -64,5 +64,5 @@ export function registerMemoryRoutes(app: Express): void {
     res.status(200).json({ memoryRef, memoryId: req.params.memoryId, removed: true });
   });
 
-  log.info('memory read routes registered (GET /v1/host/sample/memory)');
+  log.info('memory read routes registered (GET /v1/host/openwop-app/memory)');
 }

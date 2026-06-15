@@ -8,7 +8,7 @@
  *      (union of members' RFC 0086 portfolios, recursive through
  *      sub-departments); and the §B structural guarantee that the stored
  *      chart carries NO authority field.
- *   2. The REST routes (`/v1/host/sample/org-chart/*`): PUT validate →
+ *   2. The REST routes (`/v1/host/openwop-app/org-chart/*`): PUT validate →
  *      GET chart → GET department roll-up; cycle / cross-tenant 400s;
  *      discovery advertises `agents.orgChart`.
  */
@@ -115,7 +115,7 @@ describe('org-chart routes (sqlite memory app)', () => {
   let server: http.Server;
   const PORT = 18744;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -135,7 +135,7 @@ describe('org-chart routes (sqlite memory app)', () => {
   }
 
   async function makeMember(persona: string, workflows: string[]): Promise<string> {
-    const r = await jsonFetch<{ rosterId: string }>('/v1/host/sample/roster', {
+    const r = await jsonFetch<{ rosterId: string }>('/v1/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({ persona, agentRef: { agentId: 'core.openwop.agents.brief-writer' }, workflows }),
     });
@@ -150,7 +150,7 @@ describe('org-chart routes (sqlite memory app)', () => {
   it('PUT → GET chart → GET department roll-up', async () => {
     const sally = await makeMember('Sally', ['email-campaign']);
     const morgan = await makeMember('Morgan', ['quarterly-plan']);
-    const put = await jsonFetch('/v1/host/sample/org-chart', {
+    const put = await jsonFetch('/v1/host/openwop-app/org-chart', {
       method: 'PUT',
       body: JSON.stringify({
         departments: DEPTS,
@@ -162,7 +162,7 @@ describe('org-chart routes (sqlite memory app)', () => {
     });
     expect(put.status).toBe(200);
 
-    const view = await jsonFetch<{ responsibilities: string[] }>('/v1/host/sample/org-chart/dept-marketing');
+    const view = await jsonFetch<{ responsibilities: string[] }>('/v1/host/openwop-app/org-chart/dept-marketing');
     expect(view.status).toBe(200);
     expect(view.body.responsibilities.sort()).toEqual(['email-campaign', 'quarterly-plan']);
   });
@@ -170,7 +170,7 @@ describe('org-chart routes (sqlite memory app)', () => {
   it('400s a cycle', async () => {
     const a = await makeMember('A', []);
     const b = await makeMember('B', []);
-    const res = await jsonFetch('/v1/host/sample/org-chart', {
+    const res = await jsonFetch('/v1/host/openwop-app/org-chart', {
       method: 'PUT',
       body: JSON.stringify({
         departments: DEPTS,
@@ -184,6 +184,6 @@ describe('org-chart routes (sqlite memory app)', () => {
   });
 
   it('404s an unknown department roll-up', async () => {
-    expect((await jsonFetch('/v1/host/sample/org-chart/dept-nope')).status).toBe(404);
+    expect((await jsonFetch('/v1/host/openwop-app/org-chart/dept-nope')).status).toBe(404);
   });
 });

@@ -2,7 +2,7 @@
  * Anon → user tenant migration helper (P3.5 client side).
  *
  * Called once after a successful Firebase Auth sign-in. POSTs to
- * /v1/host/sample/migrate-tenant carrying:
+ * /v1/host/openwop-app/migrate-tenant carrying:
  *   - the Bearer ID token (auto-attached by authedHeaders())
  *   - the openwop.session cookie (auto-attached by credentials:'include')
  *
@@ -24,7 +24,7 @@ export interface MigrateResult {
 export async function migrateAnonToUser(): Promise<MigrateResult | null> {
   try {
     const res = await fetch(
-      `${config.baseUrl}/v1/host/sample/migrate-tenant`,
+      `${config.baseUrl}/v1/host/openwop-app/migrate-tenant`,
       fetchOpts({
         method: 'POST',
         headers: authedHeaders({ 'content-type': 'application/json' }),

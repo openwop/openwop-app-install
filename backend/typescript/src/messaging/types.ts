@@ -1,6 +1,6 @@
 /**
  * Shared types for the demo messaging relay-gateway (NON-normative,
- * sample-extension). Kept dependency-free so both the Storage layer and the
+ * host-extension). Kept dependency-free so both the Storage layer and the
  * route handlers can import them without a cycle (routes → storage → types).
  */
 

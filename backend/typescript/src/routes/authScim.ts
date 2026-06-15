@@ -2,7 +2,7 @@
  * SCIM provisioning seam + minimal SCIM 2.0 endpoints (RFC 0050 §B —
  * `openwop-auth-scim`).
  *
- *   POST /v1/host/sample/auth/scim/provision   { scimUrl, op, user?, group? }
+ *   POST /v1/host/openwop-app/auth/scim/provision   { scimUrl, op, user?, group? }
  *   POST   /scim/v2/Users                       create/upsert a principal
  *   PATCH  /scim/v2/Users/:id   { active }      deactivate/reactivate
  *   DELETE /scim/v2/Users/:id                   deactivate (leaver)
@@ -120,7 +120,7 @@ export function readActive(body: unknown): boolean | undefined {
 
 export function registerScimAuthRoutes(app: Express): void {
   // ---- Conformance seam ----
-  app.post('/v1/host/sample/auth/scim/provision', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/auth/scim/provision', async (req, res, next) => {
     try {
       if (!process.env.OPENWOP_TEST_SCIM_URL) {
         throw new OpenwopError('not_found', 'SCIM test seam not configured (set OPENWOP_TEST_SCIM_URL).', 404, {});

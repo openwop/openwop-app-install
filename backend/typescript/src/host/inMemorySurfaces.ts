@@ -1,5 +1,5 @@
 /**
- * In-memory host surfaces (demo-grade).
+ * In-memory host surfaces (non-durable).
  *
  * Wires the `ctx.*` surfaces that core packs delegate to (RFCs
  * 0014–0019 + queueBus + observability) so the workflow-engine sample
@@ -452,7 +452,7 @@ function createCache(state: TenantMap<KvEntry>, scope: BundleScope): CacheSurfac
 interface BlobEntry { contentBase64: string; contentType?: string; }
 /** RFC 0019 §B point 1 — presigned URLs MUST expire at the advertised
  *  TTL. The token map below pairs each issued token with the resource
- *  + expiry; the HTTP route at `/v1/host/sample/blob/presigned/:token`
+ *  + expiry; the HTTP route at `/v1/host/openwop-app/blob/presigned/:token`
  *  (registered by `registerTestSeamRoutes`) resolves it, returning 200
  *  inside the window and 403 after. */
 interface PresignToken { tenantId: string; key: string; contentBase64: string; contentType?: string; expiresAtMs: number; }
@@ -490,7 +490,7 @@ function createBlob(state: TenantMap<BlobEntry>, scope: BundleScope): BlobSurfac
         contentType: e.contentType,
         expiresAtMs,
       });
-      const url = `/v1/host/sample/blob/presigned/${encodeURIComponent(token)}`;
+      const url = `/v1/host/openwop-app/blob/presigned/${encodeURIComponent(token)}`;
       return { url, expiresAtMs, token, expiresInSeconds: ttlSec };
     },
   };
@@ -541,7 +541,7 @@ function createSql(dbPool: Map<string, Database.Database>, scope: BundleScope): 
   /** RFC 0018 §"SQL injection invariant": only parametric queries.
    *  Heuristic: if the input contains template literals (`${`) or
    *  obvious string-concat shapes, refuse. Real hosts wire a real
-   *  parser; this is sample-grade defense in depth. */
+   *  parser; this is best-effort defense in depth. */
   const requireParametric = (sql: string) => {
     if (PARAM_REJECT_RE.test(sql)) {
       throw Object.assign(
@@ -1043,7 +1043,7 @@ const _searchState = new TenantMap<Map<string, SearchDoc>>();
 const _nosqlState = new TenantMap<Map<string, NoSqlDoc>>();
 const _sqlPool = new Map<string, Database.Database>();
 // RFC 0004 memory: tenant → memoryRef → entries. Host-internal write side
-// (run-summary on completion); read side exposed via GET /v1/host/sample/memory.
+// (run-summary on completion); read side exposed via GET /v1/host/openwop-app/memory.
 const _memoryState = new TenantMap<MemoryRow[]>();
 
 let _fsRoot: string | null = null;
@@ -1065,7 +1065,7 @@ export function initInMemorySurfaces(deps: { dataDir: string }): void {
   // Flip each surface to supported=true in the advertisement. The portable
   // surfaces advertise their *effective* backend (the demo tag below when the
   // default 'memory' backend is selected, else the chosen real backend id) so
-  // /.well-known/openwop stays honest and the UI demo-grade badge self-clears
+  // /.well-known/openwop stays honest and the UI non-durable badge self-clears
   // once a real backend is wired. See host/surfaceBackends.ts.
   const inmem = 'in-memory';
   const impl = (key: SurfaceKey, demoTag: string): string => effectiveImplementation(key, demoTag);
@@ -1127,6 +1127,10 @@ export interface MemoryListOpts {
 export const MEMORY_DEMO_REF = 'tenant-memory';
 
 const MEMORY_HARD_MAX = 500;
+/** Heap backstop: max entries retained per memory scope before oldest are evicted
+ *  (bounds unbounded turn-summary growth). Above MEMORY_HARD_MAX so reads are
+ *  unaffected; curated notes are separately count-capped at the feature layer. */
+const MEMORY_SCOPE_HARD_CAP = 2000;
 
 function memoryBucket(tenantId: string): Map<string, MemoryRow[]> {
   return _memoryState.bucket(tenantId);
@@ -1158,8 +1162,23 @@ export function writeMemoryEntry(
   const bucket = memoryBucket(tenantId);
   const entries = bucket.get(memoryRef) ?? [];
   entries.push(row);
+  // Bound unbounded per-scope growth (turn summaries accrue every run): retain the
+  // most-recent MEMORY_SCOPE_HARD_CAP, evicting oldest (a heap backstop above the
+  // read cap; user-curated notes are additionally count-capped at the feature layer).
+  if (entries.length > MEMORY_SCOPE_HARD_CAP) entries.splice(0, entries.length - MEMORY_SCOPE_HARD_CAP);
   bucket.set(memoryRef, entries);
   return row;
+}
+
+/** Host-internal: drop an ENTIRE memory scope (all entries under `memoryRef`).
+ *  Tenant-scoped (CTI-1). Used by cascade delete (a roster agent's `agent:<id>`
+ *  namespace when the agent is removed) so memory does not orphan. Returns the
+ *  number of entries removed. */
+export function clearMemoryScope(tenantId: string, memoryRef: string): number {
+  const bucket = memoryBucket(tenantId);
+  const n = bucket.get(memoryRef)?.length ?? 0;
+  bucket.delete(memoryRef);
+  return n;
 }
 
 /** RFC 0004 read side. Tenant-scoped; TTL-filtered; newest first. */
@@ -1369,7 +1388,7 @@ export async function storeMediaAsset(
   const expiresAtMs = Date.now() + ttlMs;
   await _mediaAssets.put({ token, tenantId, contentBase64: input.contentBase64, contentType: input.contentType, bytes, expiresAtMs });
   maybeSweepExpiredMediaAssets();
-  return { token, url: `/v1/host/sample/assets/${token}`, bytes, expiresAt: new Date(expiresAtMs).toISOString() };
+  return { token, url: `/v1/host/openwop-app/assets/${token}`, bytes, expiresAt: new Date(expiresAtMs).toISOString() };
 }
 
 /** Resolve a media-asset token. Returns null when unknown or expired (the

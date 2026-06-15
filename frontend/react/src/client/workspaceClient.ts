@@ -1,6 +1,6 @@
 /**
  * Workspace (tenancy) host-extension client — ADR 0015. Wraps
- * /v1/host/sample/{me/workspaces,workspaces,workspaces/:id/switch}: the B2B
+ * /v1/host/openwop-app/{me/workspaces,workspaces,workspaces/:id/switch}: the B2B
  * "workspace = tenant" surface. A user lists the workspaces they can act in,
  * creates a shared one (becoming its owner), and switches the ACTIVE workspace
  * (re-binding the session — the RFC 0048 §D one-active-workspace model).
@@ -27,7 +27,7 @@ export interface MyWorkspaces {
   personal: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample`;
+const base = `${config.baseUrl}/v1/host/openwop-app`;
 const headers = (): Record<string, string> => authedHeaders();
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 

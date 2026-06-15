@@ -1,5 +1,5 @@
 /**
- * Durable trigger bridge -- RFC 0083 reference durable-delivery (sample-grade).
+ * Durable trigger bridge -- RFC 0083 reference durable-delivery (best-effort).
  *
  * Implements the RFC 0083 section B subscription state machine + section C delivery model
  * (dedup -> attempt -> retry -> dead-letter -> trigger->run causation) that the RFC
@@ -41,6 +41,11 @@ export interface RetryPolicy {
   backoff: 'none' | 'fixed' | 'exponential';
 }
 
+/** RFC 0099 §F.2 — source-authenticity policy stamped on an external-event
+ *  subscription. `required` ⇒ an event that fails verification MUST NOT start a
+ *  run (it dead-letters with reason `signature-invalid`). */
+export type VerificationMode = 'required' | 'best-effort' | 'none';
+
 export interface TriggerSubscription {
   subscriptionId: string;
   source: SubscriptionSource;
@@ -49,6 +54,18 @@ export interface TriggerSubscription {
   retryPolicy: RetryPolicy;
   tenantId: string;
   label?: string;
+  /** RFC 0099 §F.2 — the Workflow a delivered external event starts. Present on
+   *  external-event subscriptions (webhook/email/form) registered via
+   *  `POST /v1/trigger-subscriptions`; absent on internal sources (the Kanban
+   *  `queue` subscription resolves its workflow per-card). */
+  workflowId?: string;
+  /** RFC 0099 §F.2 — source-authenticity policy. Defaults `required` for
+   *  external sources. */
+  verificationMode?: VerificationMode;
+  /** RFC 0099 §F.2 — `sha256(secret).slice(0,8)` of the webhook signing secret
+   *  (webhook source only). The cleartext secret is returned ONCE at
+   *  registration and never persisted (re-reads return the fingerprint). */
+  secretFingerprint?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -104,7 +121,7 @@ function nowMs(): number {
 }
 
 /** Evict dedup entries past the retention window, then trim oldest-first if
- *  still over the hard cap. Called on each delivery (sample-grade sweep). */
+ *  still over the hard cap. Called on each delivery (best-effort sweep). */
 async function evictStaleDedup(): Promise<void> {
   // Expired ⇔ now - at >= retentionMs ⇔ at <= now - retentionMs (so a 0ms
   // retention expires an entry on the very next delivery, even within the
@@ -149,6 +166,9 @@ export async function registerSubscription(input: {
   dedupEnabled?: boolean;
   retryPolicy?: Partial<RetryPolicy>;
   label?: string;
+  workflowId?: string;
+  verificationMode?: VerificationMode;
+  secretFingerprint?: string;
 }): Promise<TriggerSubscription> {
   const existing = await subscriptions.get(input.subscriptionId);
   if (existing) return existing;
@@ -160,6 +180,9 @@ export async function registerSubscription(input: {
     retryPolicy: { ...DEFAULT_RETRY, ...input.retryPolicy },
     tenantId: input.tenantId,
     label: input.label,
+    ...(input.workflowId ? { workflowId: input.workflowId } : {}),
+    ...(input.verificationMode ? { verificationMode: input.verificationMode } : {}),
+    ...(input.secretFingerprint ? { secretFingerprint: input.secretFingerprint } : {}),
     createdAt: nowIso(),
     updatedAt: nowIso(),
   };

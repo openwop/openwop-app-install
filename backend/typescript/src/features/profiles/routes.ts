@@ -1,7 +1,7 @@
 /**
- * User-profiles feature routes (host-extension, sample-grade — ADR 0005).
+ * User-profiles feature routes (host-extension, best-effort — ADR 0005).
  *
- * Surface under /v1/host/sample/profiles:
+ * Surface under /v1/host/openwop-app/profiles:
  *   GET   /me                       the caller's own profile (lazily created)
  *   PATCH /me                       self-edit (text / contact / equipment /
  *                                   interests / availability)        [self only]
@@ -145,7 +145,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // The personal tenant is single-principal + low-volume, so a scan is cheap;
   // the indexed path (agent_run_activity) is the future optimization if personal
   // tenants ever grow (agentActivity.ts). Durable-only.
-  app.get('/v1/host/sample/profiles/me/activity', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/profiles/me/activity', async (req, res, next) => {
     try {
       const subject = callerSubject(req);
       const personal = personalTenantOf(req);
@@ -164,7 +164,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   });
 
   // GET /me — the caller's own profile (lazily materialized).
-  app.get('/v1/host/sample/profiles/me', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/profiles/me', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const profile = await getOrCreateProfile(user.tenantId, user.userId);
@@ -176,7 +176,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   // PATCH /me — self-edit. Authority is intrinsic: a caller can only patch the
   // profile keyed on THEIR OWN resolved userId.
-  app.patch('/v1/host/sample/profiles/me', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/profiles/me', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -201,7 +201,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   // GET / — tenant directory. Tenant is the caller's resolved tenant (the single
   // source of truth — same `user.tenantId` the write paths key on).
-  app.get('/v1/host/sample/profiles', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/profiles', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const [profiles, users] = await Promise.all([listProfiles(user.tenantId), listUsers(user.tenantId)]);
@@ -239,7 +239,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     return token;
   };
 
-  app.put('/v1/host/sample/profiles/me/avatar', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/profiles/me/avatar', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
@@ -249,7 +249,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/sample/profiles/me/avatar', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/profiles/me/avatar', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       res.json(viewProfile(await clearAvatar(user.tenantId, user.userId)));
@@ -258,7 +258,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.post('/v1/host/sample/profiles/me/portfolio', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/profiles/me/portfolio', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
@@ -268,7 +268,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  app.delete('/v1/host/sample/profiles/me/portfolio/:token', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/profiles/me/portfolio/:token', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const updated = await removePortfolioToken(user.tenantId, user.userId, req.params.token);
@@ -282,7 +282,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // ── Phase 3: skills (self) + endorsements (peer) ──
   // PUT /me/skills — replace the caller's skill list. Endorsements on surviving
   // skill names are preserved by the service.
-  app.put('/v1/host/sample/profiles/me/skills', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/profiles/me/skills', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const raw = (req.body as { skills?: unknown })?.skills;
@@ -310,7 +310,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
 
   // PUT /me/workflows — replace the caller's assigned-workflow portfolio (ADR
   // 0025). Self-only authority (keyed on the caller's resolved userId).
-  app.put('/v1/host/sample/profiles/me/workflows', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/profiles/me/workflows', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
       const raw = (req.body as { workflows?: unknown })?.workflows;
@@ -344,8 +344,8 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       next(err);
     }
   };
-  app.put('/v1/host/sample/profiles/me/pinned-agents/:rosterId', pin(true));
-  app.delete('/v1/host/sample/profiles/me/pinned-agents/:rosterId', pin(false));
+  app.put('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin(true));
+  app.delete('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin(false));
 
   // POST/DELETE /:userId/skills/:skill/endorse — endorse a PEER's skill.
   // Fail-closed: not your own profile; the target + skill must exist in your
@@ -368,11 +368,11 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       next(err);
     }
   };
-  app.post('/v1/host/sample/profiles/:userId/skills/:skill/endorse', endorse(true));
-  app.delete('/v1/host/sample/profiles/:userId/skills/:skill/endorse', endorse(false));
+  app.post('/v1/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(true));
+  app.delete('/v1/host/openwop-app/profiles/:userId/skills/:skill/endorse', endorse(false));
 
   // GET /:userId — one user's profile (team-visible, tenant-scoped to the caller).
-  app.get('/v1/host/sample/profiles/:userId', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/profiles/:userId', async (req, res, next) => {
     try {
       const caller = await resolveCallerUser(req);
       const profile = await getProfile(caller.tenantId, req.params.userId);

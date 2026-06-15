@@ -122,7 +122,7 @@ export function CapabilitiesPanel() {
     let cancelled = false;
     Promise.all([
       getCapabilities() as Promise<Caps>,
-      fetch(`${config.baseUrl}/v1/host/sample/node-catalog`, fetchOpts({
+      fetch(`${config.baseUrl}/v1/host/openwop-app/node-catalog`, fetchOpts({
         headers: authedHeaders(),
       })).then((r) => r.json() as Promise<CatalogResp>),
     ])
@@ -230,7 +230,7 @@ export function CapabilitiesPanel() {
           Live render of <code>capabilities.hostSurfaces</code>. The
           <em> implementation</em> column tells you what's backing each surface
           — values like <code>in-memory</code> or <code>sqlite-in-memory</code>
-          mean the surface is demo-grade. Phase 6 swaps these with real-backend
+          mean the surface is non-durable. Phase 6 swaps these with real-backend
           adapters from <code>examples/hosts/postgres</code>.
         </p>
         {caps ? (
@@ -257,10 +257,7 @@ export function CapabilitiesPanel() {
         <h2>Envelope discipline</h2>
         <p className="muted">
           What this host promises about LLM-emission envelopes — the inbound
-          payload shape every AI node serves into the run. Three sub-surfaces
-          per <a href="https://github.com/openwop/openwop/blob/main/RFCS/0030-envelope-reasoning-and-tier-one-subset.md">RFC 0030</a>,
-          {' '}<a href="https://github.com/openwop/openwop/blob/main/RFCS/0032-envelope-reliability-events.md">0032</a>,
-          {' '}<a href="https://github.com/openwop/openwop/blob/main/RFCS/0033-envelope-completion-contract.md">0033</a>.
+          payload shape every AI node serves into the run.
           When a row reads <code>—</code>, the host hasn't advertised that surface yet.
         </p>
         <p className="muted u-fs-12 u-mt-0">
@@ -288,7 +285,7 @@ export function CapabilitiesPanel() {
       <div className="surface-card">
         <h2>Model capabilities</h2>
         <p className="muted">
-          Per <a href="https://github.com/openwop/openwop/blob/main/RFCS/0031-envelope-variants-and-model-capabilities.md">RFC 0031</a> — what each
+          What each
           installed provider/model can do (function-calling, vision, streaming, etc.), and whether
           this host will silently substitute a fallback model when the workflow asks for a capability
           the configured model lacks. Substitution is observable via the <code>model.capability.substituted</code> event.
@@ -317,7 +314,7 @@ export function CapabilitiesPanel() {
             <StateCard
               icon={<ZapIcon size={20} />}
               title="Model capabilities not advertised"
-              body={<>This host doesn't declare <code>modelCapabilities</code> yet, so capability-substitution behavior is unknown. See <a href="https://github.com/openwop/openwop/blob/main/RFCS/0031-envelope-variants-and-model-capabilities.md">RFC 0031</a>.</>}
+              body={<>This host doesn't declare <code>modelCapabilities</code> yet, so capability-substitution behavior is unknown.</>}
             />
           )
         ) : (
@@ -328,7 +325,7 @@ export function CapabilitiesPanel() {
       <div className="surface-card">
         <h2>Input modalities</h2>
         <p className="muted">
-          Per <a href="https://github.com/openwop/openwop/blob/main/RFCS/0091-multimodal-perception-input.md">RFC 0091</a> — the
+          The
           perception modalities this host accepts as <code>callAI</code> ContentParts. <code>text</code> is always valid; a
           non-text modality is only accepted when advertised here, else the call is rejected with <code>unsupported_modality</code>.
         </p>
@@ -343,7 +340,7 @@ export function CapabilitiesPanel() {
             <StateCard
               icon={<ImageIcon size={20} />}
               title="No non-text modalities advertised"
-              body={<>This host doesn't declare <code>aiProviders.input.modalities</code> yet — only <code>text</code> ContentParts are accepted. See <a href="https://github.com/openwop/openwop/blob/main/RFCS/0091-multimodal-perception-input.md">RFC 0091</a>.</>}
+              body={<>This host doesn't declare <code>aiProviders.input.modalities</code> yet — only <code>text</code> ContentParts are accepted.</>}
             />
           )
         ) : (
@@ -380,7 +377,7 @@ function envelopeRows(caps: Caps): EnvelopeRow[] {
     {
       key: 'envelopes.reasoning.supported',
       value: boolGlyph(env?.reasoning?.supported),
-      note: <>RFC 0030 §A — optional <code>reasoning</code> string on envelope payloads</>,
+      note: <>optional <code>reasoning</code> string on envelope payloads</>,
     },
     {
       key: 'envelopes.reasoning.promptDirective',
@@ -390,12 +387,12 @@ function envelopeRows(caps: Caps): EnvelopeRow[] {
     {
       key: 'envelopes.tierOneSubsetCompliance',
       value: env?.tierOneSubsetCompliance ? <code>{env.tierOneSubsetCompliance}</code> : <span className="muted">—</span>,
-      note: <>RFC 0030 §B — host's posture on the OpenAI ∩ Anthropic ∩ Gemini schema subset</>,
+      note: <>host's posture on the OpenAI ∩ Anthropic ∩ Gemini schema subset</>,
     },
     {
       key: 'envelopes.reliability.supported',
       value: boolGlyph(env?.reliability?.supported),
-      note: <>RFC 0032 — host emits retry / refusal / truncation events</>,
+      note: <>host emits retry / refusal / truncation events</>,
     },
     {
       key: 'envelopes.reliability.events',
@@ -409,7 +406,7 @@ function envelopeRows(caps: Caps): EnvelopeRow[] {
     {
       key: 'envelopes.reliability.completion.distinguishesTruncation',
       value: boolGlyph(env?.reliability?.completion?.distinguishesTruncation),
-      note: <>RFC 0033 — host branches retry strategy on truncation vs schema-violation</>,
+      note: <>host branches retry strategy on truncation vs schema-violation</>,
     },
     {
       key: 'envelopes.reliability.completion.truncationBudgetMultiplier',

@@ -1,5 +1,5 @@
 /**
- * Agent org-chart — host extension (sample-grade, non-normative).
+ * Agent org-chart — host extension (non-normative).
  *
  * The reference implementation of RFCS/0087: a tenant-scoped, DESCRIPTIVE
  * grouping of RFC 0086 roster members (host/rosterService.ts) into

@@ -17,7 +17,7 @@ describe('Host OAuth client config (superadmin surface)', () => {
   let server: http.Server;
   const PORT = 18953;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token'; // wildcard bearer ⇒ superadmin
+  const TOKEN = 'dev-token'; // wildcard bearer ⇒ superadmin
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -53,7 +53,7 @@ describe('Host OAuth client config (superadmin surface)', () => {
   const SECRET = 'goog-client-secret-super-sensitive-xyz';
 
   it('a non-superadmin caller is denied (fail-closed)', async () => {
-    const put = await jf('/v1/host/sample/connections-oauth-clients/google', {
+    const put = await jf('/v1/host/openwop-app/connections-oauth-clients/google', {
       method: 'PUT',
       auth: false,
       body: JSON.stringify({ clientId: 'id', clientSecret: 'sec' }),
@@ -63,12 +63,12 @@ describe('Host OAuth client config (superadmin surface)', () => {
   });
 
   it('rejects a non-OAuth provider (servicenow = api_key) and an unknown provider', async () => {
-    const sn = await jf('/v1/host/sample/connections-oauth-clients/servicenow', {
+    const sn = await jf('/v1/host/openwop-app/connections-oauth-clients/servicenow', {
       method: 'PUT',
       body: JSON.stringify({ clientId: 'id', clientSecret: 'sec' }),
     });
     expect(sn.status).toBe(400);
-    const nope = await jf('/v1/host/sample/connections-oauth-clients/nope', {
+    const nope = await jf('/v1/host/openwop-app/connections-oauth-clients/nope', {
       method: 'PUT',
       body: JSON.stringify({ clientId: 'id', clientSecret: 'sec' }),
     });
@@ -77,11 +77,11 @@ describe('Host OAuth client config (superadmin surface)', () => {
 
   it('configuring a provider flips its oauthConfigured flag — and never echoes the secret', async () => {
     // Before: google is NOT configured (no env, no store).
-    const before = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/sample/providers');
+    const before = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/openwop-app/providers');
     expect(before.body.providers.find((p) => p.id === 'google')?.oauthConfigured).toBe(false);
 
     // Configure it via the admin surface.
-    const put = await jf('/v1/host/sample/connections-oauth-clients/google', {
+    const put = await jf('/v1/host/openwop-app/connections-oauth-clients/google', {
       method: 'PUT',
       body: JSON.stringify({ clientId: 'google-client-id-123', clientSecret: SECRET }),
     });
@@ -89,11 +89,11 @@ describe('Host OAuth client config (superadmin surface)', () => {
     expect(put.text).not.toContain(SECRET); // PUT echoes nothing
 
     // After: the Connect button's honesty flag is now true.
-    const after = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/sample/providers');
+    const after = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/openwop-app/providers');
     expect(after.body.providers.find((p) => p.id === 'google')?.oauthConfigured).toBe(true);
 
     // The admin list shows clientId + metadata but NEVER the secret.
-    const list = await jf<{ clients: { provider: string; clientId: string; configured: boolean }[] }>('/v1/host/sample/connections-oauth-clients');
+    const list = await jf<{ clients: { provider: string; clientId: string; configured: boolean }[] }>('/v1/host/openwop-app/connections-oauth-clients');
     const g = list.body.clients.find((c) => c.provider === 'google');
     expect(g?.clientId).toBe('google-client-id-123');
     expect(g?.configured).toBe(true);
@@ -101,12 +101,12 @@ describe('Host OAuth client config (superadmin surface)', () => {
   });
 
   it('delete removes the config — oauthConfigured falls back to false (no env set)', async () => {
-    const del = await jf('/v1/host/sample/connections-oauth-clients/google', { method: 'DELETE' });
+    const del = await jf('/v1/host/openwop-app/connections-oauth-clients/google', { method: 'DELETE' });
     expect(del.status).toBe(204);
-    const after = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/sample/providers');
+    const after = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/openwop-app/providers');
     expect(after.body.providers.find((p) => p.id === 'google')?.oauthConfigured).toBe(false);
     // deleting again → 404 (idempotent-aware: nothing to remove)
-    const del2 = await jf('/v1/host/sample/connections-oauth-clients/google', { method: 'DELETE' });
+    const del2 = await jf('/v1/host/openwop-app/connections-oauth-clients/google', { method: 'DELETE' });
     expect(del2.status).toBe(404);
   });
 
@@ -114,7 +114,7 @@ describe('Host OAuth client config (superadmin surface)', () => {
     // `connections-oauth-clients` must not be captured by `/connections/:id` — a
     // GET for a (non-existent) connection id returns the connection surface's own
     // shape, not the oauth-client list. We assert it does NOT 200 as a client list.
-    const r = await jf<{ clients?: unknown }>('/v1/host/sample/connections-oauth-clients');
+    const r = await jf<{ clients?: unknown }>('/v1/host/openwop-app/connections-oauth-clients');
     expect(Array.isArray(r.body.clients)).toBe(true); // the admin route is reached, not a :id handler
   });
 });

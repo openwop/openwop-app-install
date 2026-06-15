@@ -1,9 +1,9 @@
 /**
  * Governance administration (ADR 0028) — host-extension, NON-NORMATIVE.
  *
- *   GET /v1/host/sample/governance/policy   — the tenant's policy (defaults shown)
- *   PUT /v1/host/sample/governance/policy   — upsert (superadmin; itself audited)
- *   GET /v1/host/sample/governance/audit    — the audit READ VIEW over
+ *   GET /v1/host/openwop-app/governance/policy   — the tenant's policy (defaults shown)
+ *   PUT /v1/host/openwop-app/governance/policy   — upsert (superadmin; itself audited)
+ *   GET /v1/host/openwop-app/governance/audit    — the audit READ VIEW over
  *       storage.appendAudit rows (no second audit store) — assistant
  *       decisions, policy edits, connector use.
  *
@@ -48,7 +48,7 @@ function parseActionPolicy(v: unknown): Record<string, ActionKindPolicy> | undef
 }
 
 export function registerGovernanceRoutes(app: Express, deps: { storage: Storage }): void {
-  app.get('/v1/host/sample/governance/policy', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/governance/policy', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const policy = await getGovernancePolicy(tenantOf(req));
@@ -62,7 +62,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
     }
   });
 
-  app.put('/v1/host/sample/governance/policy', async (req, res, next) => {
+  app.put('/v1/host/openwop-app/governance/policy', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const body = (req.body ?? {}) as Record<string, unknown>;
@@ -112,7 +112,7 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
     }
   });
 
-  app.get('/v1/host/sample/governance/audit', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/governance/audit', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
       const actionPrefix = typeof req.query.actionPrefix === 'string' ? req.query.actionPrefix : 'assistant.';

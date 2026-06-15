@@ -1,5 +1,5 @@
 /**
- * Profiles API client (ADR 0005). Mirrors the backend /v1/host/sample/profiles
+ * Profiles API client (ADR 0005). Mirrors the backend /v1/host/openwop-app/profiles
  * surface. Avatar/portfolio images are uploaded to the shared media surface and
  * referenced here by token (the same pattern the chat attachment path uses).
  */
@@ -54,7 +54,7 @@ export interface Profile {
   updatedAt: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample/profiles`;
+const base = `${config.baseUrl}/v1/host/openwop-app/profiles`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -73,7 +73,7 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 
 /** The token-scoped serve URL for a stored avatar/portfolio asset. */
 export function assetUrl(token: string): string {
-  return `${config.baseUrl}/v1/host/sample/assets/${encodeURIComponent(token)}`;
+  return `${config.baseUrl}/v1/host/openwop-app/assets/${encodeURIComponent(token)}`;
 }
 
 export interface ProfilePatch {
@@ -167,7 +167,7 @@ export async function unendorseSkill(userId: string, skill: string): Promise<Pro
 export async function uploadImage(file: File): Promise<string> {
   const contentBase64 = await blobToBase64(file);
   const res = await fetch(
-    `${config.baseUrl}/v1/host/sample/media/upload`,
+    `${config.baseUrl}/v1/host/openwop-app/media/upload`,
     fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ contentBase64, contentType: file.type, name: file.name }) }),
   );
   const body = await asJson<{ token: string }>(res, 'uploadImage');

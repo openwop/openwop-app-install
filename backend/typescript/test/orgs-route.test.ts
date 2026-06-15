@@ -69,7 +69,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // the env-gated auth test seam (the email becomes the federated identity's email,
 // which drives the invite email-ownership gate).
 async function signup(c: ReturnType<typeof client>, email: string): Promise<{ userId: string; email: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -79,33 +79,33 @@ describe('org invitations over HTTP (reconciled with accessControl)', () => {
     const ownerC = client();
     await signup(ownerC, uniqEmail('owner'));
     // org is created through the accessControl surface (the single owner)
-    const org = (await ownerC.post('/v1/host/sample/orgs', { name: 'Acme' })).body;
+    const org = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body;
     expect(org.orgId).toBeTruthy();
     expect(org.createdBy).toBeTruthy(); // accessControl shape, not the old feature shape
 
     const bobEmail = uniqEmail('bob');
-    const inv = await ownerC.post(`/v1/host/sample/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: bobEmail, role: 'editor' });
+    const inv = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: bobEmail, role: 'editor' });
     expect(inv.status).toBe(201);
     expect(inv.body.token).toBeTruthy();
 
     const bobC = client();
     const bob = await signup(bobC, bobEmail);
-    const acc = await bobC.post('/v1/host/sample/orgs/invitations/accept', { token: inv.body.token });
+    const acc = await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
     expect(acc.status, JSON.stringify(acc.body)).toBe(201);
     expect(acc.body.subject).toBe(bob.userId);
     expect(acc.body.roles).toEqual(['editor']);
 
     // accessControl now lists bob as a member of the org
-    const members = (await ownerC.get(`/v1/host/sample/orgs/${encodeURIComponent(org.orgId)}/members`)).body.members;
+    const members = (await ownerC.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/members`)).body.members;
     expect(members.some((m: any) => m.subject === bob.userId)).toBe(true);
   });
 
   it('ADR 0006: creating an org seeds an EXPLICIT owner member bound to the creator userId', async () => {
     const ownerC = client();
     const owner = await signup(ownerC, uniqEmail('founder'));
-    const org = (await ownerC.post('/v1/host/sample/orgs', { name: 'Founders' })).body;
+    const org = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'Founders' })).body;
 
-    const members = (await ownerC.get(`/v1/host/sample/orgs/${encodeURIComponent(org.orgId)}/members`)).body.members;
+    const members = (await ownerC.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/members`)).body.members;
     const ownerMember = members.find((m: any) => m.subject === owner.userId);
     expect(ownerMember, 'creator should be an explicit member').toBeTruthy();
     expect(ownerMember.roles).toEqual(['owner']); // membership-derived ownership, bound to User.userId — not tenant==principal
@@ -114,30 +114,30 @@ describe('org invitations over HTTP (reconciled with accessControl)', () => {
   it('email-ownership gate: a different user cannot accept someone else’s invite', async () => {
     const ownerC = client();
     await signup(ownerC, uniqEmail('owner'));
-    const org = (await ownerC.post('/v1/host/sample/orgs', { name: 'Acme' })).body;
+    const org = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body;
     const inviteEmail = uniqEmail('invitee');
-    const inv = await ownerC.post(`/v1/host/sample/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: inviteEmail, role: 'viewer' });
+    const inv = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: inviteEmail, role: 'viewer' });
 
     const strangerC = client();
     await signup(strangerC, uniqEmail('stranger'));
-    const acc = await strangerC.post('/v1/host/sample/orgs/invitations/accept', { token: inv.body.token });
+    const acc = await strangerC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
     expect(acc.status).toBe(403); // not your email
   });
 
   it('IDOR: inviting into an org in another tenant is 404 (no existence leak)', async () => {
     const aC = client();
     await signup(aC, uniqEmail('a'));
-    const org = (await aC.post('/v1/host/sample/orgs', { name: 'Private' })).body;
+    const org = (await aC.post('/v1/host/openwop-app/orgs', { name: 'Private' })).body;
 
     const bC = client();
     await signup(bC, uniqEmail('b')); // different tenant
-    const r = await bC.post(`/v1/host/sample/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: uniqEmail('x'), role: 'viewer' });
+    const r = await bC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: uniqEmail('x'), role: 'viewer' });
     expect(r.status).toBe(404);
   });
 
   it('the orgs invitation surface requires a signed-in session', async () => {
     const anonC = client(); // never signs up → anonymous session
-    const r = await anonC.post('/v1/host/sample/orgs/invitations/accept', { token: 'whatever' });
+    const r = await anonC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: 'whatever' });
     expect(r.status).toBe(401);
   });
 });

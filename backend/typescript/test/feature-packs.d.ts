@@ -43,3 +43,9 @@ declare module '*feature.comments.nodes/index.mjs' {
     (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>
   >;
 }
+declare module '*feature.marketplace.nodes/index.mjs' {
+  export const nodes: Record<
+    string,
+    (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>
+  >;
+}

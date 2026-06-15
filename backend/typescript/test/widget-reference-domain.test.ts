@@ -13,14 +13,14 @@ import { createApp } from '../src/index.js';
 import {
   archiveWidget,
   listWidgets,
-  seedDemoWidgets,
+  seedExampleWidgets,
   widgetSummary,
 } from '../src/host/examples/widgetService.js';
 
 let server: http.Server;
 const PORT = 18713;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -51,11 +51,11 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<{ status: n
 
 describe('widget reference domain — service conventions', () => {
   it('seed is idempotent and per-entity', async () => {
-    const first = await seedDemoWidgets('tenant-a');
+    const first = await seedExampleWidgets('tenant-a');
     expect(first.seeded).toBe(true);
     expect(first.widgets).toBe(2);
 
-    const second = await seedDemoWidgets('tenant-a');
+    const second = await seedExampleWidgets('tenant-a');
     expect(second.seeded).toBe(false);
     expect(second.widgets).toBe(2);
   });
@@ -86,27 +86,27 @@ describe('widget reference domain — service conventions', () => {
 
 describe('widget reference domain — route conventions', () => {
   it('seed + list round-trip over HTTP (bearer-shared default tenant)', async () => {
-    const seed = await api<{ seeded: boolean; widgets: number }>('/v1/host/sample/widgets/seed', { method: 'POST', body: '{}' });
+    const seed = await api<{ seeded: boolean; widgets: number }>('/v1/host/openwop-app/widgets/seed', { method: 'POST', body: '{}' });
     expect(seed.status).toBe(200);
-    const list = await api<{ widgets: Array<{ widgetId: string; status: string }>; total: number }>('/v1/host/sample/widgets');
+    const list = await api<{ widgets: Array<{ widgetId: string; status: string }>; total: number }>('/v1/host/openwop-app/widgets');
     expect(list.status).toBe(200);
     expect(list.body.total).toBe(2);
   });
 
   it('fail-closed mutation maps to 409 + machine-readable reason', async () => {
-    const list = await api<{ widgets: Array<{ widgetId: string }> }>('/v1/host/sample/widgets');
+    const list = await api<{ widgets: Array<{ widgetId: string }> }>('/v1/host/openwop-app/widgets');
     const id = list.body.widgets[0].widgetId;
 
-    const first = await api<{ status: string }>(`/v1/host/sample/widgets/${id}/archive`, { method: 'POST', body: '{}' });
+    const first = await api<{ status: string }>(`/v1/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
     expect(first.status).toBe(200);
 
-    const second = await api<{ error: string; reason: string }>(`/v1/host/sample/widgets/${id}/archive`, { method: 'POST', body: '{}' });
+    const second = await api<{ error: string; reason: string }>(`/v1/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
     expect(second.status).toBe(409);
     expect(second.body).toMatchObject({ error: 'conflict', reason: 'already_archived' });
   });
 
   it('validation failures are 400 with the canonical envelope', async () => {
-    const bad = await api<{ error: string }>('/v1/host/sample/widgets', { method: 'POST', body: '{}' });
+    const bad = await api<{ error: string }>('/v1/host/openwop-app/widgets', { method: 'POST', body: '{}' });
     expect(bad.status).toBe(400);
     expect(bad.body.error).toBe('validation_error');
   });

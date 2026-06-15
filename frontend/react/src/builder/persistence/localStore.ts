@@ -1,15 +1,15 @@
 /**
  * localStorage CRUD for SavedWorkflow records. Keyed under
- * `openwop.sample.builder.workflows` as a single JSON object
+ * `openwop-app.builder.workflows` as a single JSON object
  * `{ [workflowId]: SavedWorkflow }`. Quota failures swallow silently.
  */
 
 import type { SavedWorkflow } from '../schema/workflow.js';
 
-const LS_KEY = 'openwop.sample.builder.workflows';
-const LS_SEEDED_KEY = 'openwop.sample.builder.workflows.seeded';
-const LS_MIGRATION_STRIPPED_FROM_TEMPLATE_SUFFIX = 'openwop.sample.builder.workflows.migration.stripFromTemplate';
-const LS_MIGRATION_MOCK_AI_TO_CHAT = 'openwop.sample.builder.workflows.migration.mockAiToChat';
+const LS_KEY = 'openwop-app.builder.workflows';
+const LS_SEEDED_KEY = 'openwop-app.builder.workflows.seeded';
+const LS_MIGRATION_STRIPPED_FROM_TEMPLATE_SUFFIX = 'openwop-app.builder.workflows.migration.stripFromTemplate';
+const LS_MIGRATION_MOCK_AI_TO_CHAT = 'openwop-app.builder.workflows.migration.mockAiToChat';
 
 type Index = Record<string, SavedWorkflow>;
 
@@ -173,7 +173,7 @@ export function exportSavedWorkflowAsJSON(
  *
  * Returns the number of workflows seeded (0 if it no-op'd).
  */
-const LS_DELIVERED_KEY = 'openwop.sample.builder.workflows.seedDelivered';
+const LS_DELIVERED_KEY = 'openwop-app.builder.workflows.seedDelivered';
 
 /** Per-template seed top-up (replaces the all-or-nothing first-visit flag,
  *  2026-06-05). The old flag locked the WHOLE catalog after one visit, so

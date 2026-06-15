@@ -60,9 +60,9 @@ defaults. For existing Cloud Run services, the helper uses merge-style
 `--update-secrets` / `--update-env-vars`; keep using those forms for one-off
 changes and avoid `--set-*`, which replaces the whole binding set.
 
-## From demo-grade to production-grade
+## From the in-memory tier to durable storage
 
-The app has two planes, and only one defaults to demo-grade:
+The app has two planes, and only one defaults to non-durable:
 
 - **Control plane** — runs, the event log (replay/fork backbone), suspensions,
   and BYOK secrets. Already production-capable: set
@@ -70,9 +70,9 @@ The app has two planes, and only one defaults to demo-grade:
   schema migrations on boot. No code change.
 - **Host data-plane surfaces** — `ctx.storage.{kv,table,cache,blob,queue}`,
   `ctx.db.{sql,vector,search,nosql}`, `ctx.fs`, `ctx.queueBus`,
-  `ctx.observability`. These default to the **in-memory demo tier**:
+  `ctx.observability`. These default to the **in-memory tier**:
   process-local, wiped on restart, single-instance. This is the only
-  demo-grade part.
+  non-durable part.
 
 ### Required env for the production (`auth`) posture
 
@@ -99,7 +99,7 @@ OPENWOP_SURFACE_KV=<id>        # per-surface override (KV, TABLE, CACHE, BLOB,
 
 Shipped backends:
 
-- `memory` — the demo tier (default; process-local, wiped on restart).
+- `memory` — the in-memory tier (default; process-local, wiped on restart).
 - `durable` — backs **`kv`, `cache`, `table`, `queue`, `queueBus`, `vector`,
   `search`, `nosql`, and `fs`** (`OPENWOP_SURFACE_<KEY>=durable`). Real adapters
   over the shared `Storage` (whatever `OPENWOP_STORAGE_DSN` points at — sqlite or
@@ -123,7 +123,7 @@ Shipped backends:
     `<dataDir>/host-sql/` (durable + fully isolated; non-parametric SQL refused,
     RFC 0018). Single-node. For **cross-instance** SQL use
     `OPENWOP_SURFACE_SQL=postgres` (the `postgres` backend, below).
-  - Trade-offs (documented, sample-grade): `table`/`nosql` `query` and the
+  - Trade-offs (documented, in-memory tier): `table`/`nosql` `query` and the
     `durable` `vector`/`search` are O(n) prefix scans. For scale, point those at
     the dedicated engines below instead.
     `queueBus` nack re-publishes at the tail (visibility-timeout-style).
@@ -161,15 +161,15 @@ Shipped backends:
 **Every** portable host surface now has a real backend: `durable` for
 kv/cache/table/queue/queueBus/vector/search/nosql/fs/sql, `s3` for blob, plus
 optional `opensearch`/`pgvector` scale engines; `observability` routes to the
-structured logger / OTel. Only the `memory` defaults remain demo-grade. Any
+structured logger / OTel. Only the `memory` defaults remain non-durable. Any
 other id (`redis`, Postgres-schema-per-tenant `sql`, …) or new surface requires a
 **registered adapter** — implement the surface interface against the real store
 and `registerSurfaceAdapter(...)` per the seam file header (`durableKv.ts` /
 `s3Blob.ts` are the reference patterns). **The backend refuses to boot if a
-selected backend has no adapter** — it will not silently serve the demo store
+selected backend has no adapter** — it will not silently serve the in-memory store
 when durability was requested. As real adapters land, each surface's advertised
-`implementation` in `/.well-known/openwop` flips from a demo tag to the backend
-id, and the UI demo-grade badge self-clears.
+`implementation` in `/.well-known/openwop` flips from a non-durable tag to the
+backend id, and the UI non-durable badge self-clears.
 
 ## Prerequisites
 
@@ -374,7 +374,7 @@ curl -s https://app.openwop.dev/api/readiness   # {"status":"ready",...} — 503
 
 ### Verifying live agent dispatch (real model completion)
 
-`POST /v1/host/sample/agents/{agentId}/dispatch` with `{"live": true}` runs a
+`POST /v1/host/openwop-app/agents/{agentId}/dispatch` with `{"live": true}` runs a
 manifest agent's turn through the real provider pipeline. By default it routes
 to the **managed tier** (no per-tenant BYOK needed), so a real completion
 requires the managed key to be configured:
@@ -406,7 +406,7 @@ MINIMAX_API_KEY=... OPENWOP_VERIFY_LIVE=1 \
 By default the deploy above uses `min-instances=0` (Cloud Run evicts
 the container after ~15 min of no traffic). That's the cheapest
 posture (~$0/mo idle) but introduces the cold-start UX the AI chat
-surface mitigates with its "Spinning up your demo server…" card.
+surface mitigates with its "Waking up the server…" card.
 
 To eliminate cold starts entirely — at a cost of ~$30-40/month for
 a single always-warm `cpu=1, memory=512Mi` instance — flip the
@@ -495,7 +495,7 @@ ADMIN_TOKEN=$(gcloud secrets versions access latest --secret=openwop-admin-token
 gcloud scheduler jobs create http openwop-app-daily-cleanup \
   --location=us-central1 \
   --schedule="0 3 * * *" --time-zone="UTC" \
-  --uri="https://app.openwop.dev/api/v1/host/sample/admin/cleanup" \
+  --uri="https://app.openwop.dev/api/v1/host/openwop-app/admin/cleanup" \
   --http-method=POST \
   --headers="Authorization=Bearer ${ADMIN_TOKEN}" \
   --description="Daily wipe of expired anon-session BYOK secrets + tenant trackers" \
@@ -706,14 +706,14 @@ hour, so newly-deployed bundles aren't picked up until the cache expires.
 # Anon-tier still works (no auth).
 curl -i -X POST https://app.openwop.dev/api/v1/runs \
   -H 'content-type: application/json' \
-  -d '{"workflowId":"sample.demo.uppercase","tenantId":"","inputs":{"text":"hi"}}'
+  -d '{"workflowId":"openwop-app.uppercase","tenantId":"","inputs":{"text":"hi"}}'
 
 # Sign in via the SPA, copy the ID token from devtools, then:
 curl -i https://app.openwop.dev/api/v1/runs \
   -H "authorization: Bearer <ID_TOKEN>"
 
 # BYOK secret set as signed-in user
-curl -i -X POST https://app.openwop.dev/api/v1/host/sample/byok/secrets \
+curl -i -X POST https://app.openwop.dev/api/v1/host/openwop-app/byok/secrets \
   -H "authorization: Bearer <ID_TOKEN>" \
   -H 'content-type: application/json' \
   -d '{"credentialRef":"TEST_KEY","value":"sk-test"}'
@@ -759,7 +759,7 @@ debug cycle.
 
 - **Rules of Hooks**: any `useEffect` after a conditional return is a
   ticking time bomb that detonates on the first render where the
-  conditional flips. `DemoHostBanner` had `if (user) return null;` BEFORE
+  conditional flips. `InMemoryHostBanner` had `if (user) return null;` BEFORE
   a `useEffect` and crashed the whole SPA the moment a user signed in.
   Eslint-plugin-react-hooks catches this if enabled; we don't ship a
   lint config in this repo yet so use it locally

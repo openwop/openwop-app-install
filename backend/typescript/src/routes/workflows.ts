@@ -1,12 +1,12 @@
 /**
- * Sample-extension workflow-registration routes used by the in-app
- * builder UI. Vendor-prefixed under `/v1/host/sample/*` per
+ * Host-extension workflow-registration routes used by the in-app
+ * builder UI. Vendor-prefixed under `/v1/host/openwop-app/*` per
  * `spec/v1/host-extensions.md` §"Canonical prefixes" — these are NOT
  * part of the v1 wire contract.
  *
- *   POST   /v1/host/sample/workflows           — register / overwrite
- *   GET    /v1/host/sample/workflows           — list registered
- *   DELETE /v1/host/sample/workflows/:workflowId
+ *   POST   /v1/host/openwop-app/workflows           — register / overwrite
+ *   GET    /v1/host/openwop-app/workflows           — list registered
+ *   DELETE /v1/host/openwop-app/workflows/:workflowId
  *
  * The workflowCatalog (`src/host/index.ts`) consults the in-memory
  * registry after its hardcoded samples, so a registered workflow is
@@ -113,7 +113,7 @@ function hasNonEmptyMapping(cfg: Record<string, unknown>, fields: readonly strin
 }
 
 export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdapterSuite }): void {
-  app.get('/v1/host/sample/workflows', (_req, res) => {
+  app.get('/v1/host/openwop-app/workflows', (_req, res) => {
     res.json({ workflows: listRegisteredWorkflows() });
   });
 
@@ -121,7 +121,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
   // `api/openapi.yaml operationId=getWorkflow`. Returns the workflow
   // definition (including `id` and `nodes`) for any advertised
   // workflowId — both runtime-registered workflows (via POST
-  // /v1/host/sample/workflows) and conformance fixtures auto-loaded
+  // /v1/host/openwop-app/workflows) and conformance fixtures auto-loaded
   // from `conformance/fixtures/`. 404 on unknown ids per `rest-
   // endpoints.md §"Error envelope"`.
   app.get('/v1/workflows/:workflowId', async (req, res, next) => {
@@ -141,7 +141,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
     }
   });
 
-  app.post('/v1/host/sample/workflows', (req, res, next) => {
+  app.post('/v1/host/openwop-app/workflows', (req, res, next) => {
     try {
       const def = validateDefinition(req.body);
       registerWorkflow(def);
@@ -151,7 +151,7 @@ export function registerWorkflowRoutes(app: Express, deps: { hostSuite: HostAdap
     }
   });
 
-  app.delete('/v1/host/sample/workflows/:workflowId', (req, res, next) => {
+  app.delete('/v1/host/openwop-app/workflows/:workflowId', (req, res, next) => {
     try {
       const id = req.params.workflowId;
       if (!WORKFLOW_ID_PATTERN.test(id)) {

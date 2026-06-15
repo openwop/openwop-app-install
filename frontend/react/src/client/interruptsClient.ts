@@ -48,10 +48,10 @@ export interface OpenInterrupt {
 
 /** Authenticated list of open interrupts for a run — needed because the
  *  public event log no longer carries the resume token. Vendor-
- *  prefixed under /v1/host/sample/* per host-extensions.md (strong
+ *  prefixed under /v1/host/openwop-app/* per host-extensions.md (strong
  *  candidate for future RFC promotion). */
 export async function listOpenInterrupts(runId: string): Promise<readonly OpenInterrupt[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/sample/runs/${encodeURIComponent(runId)}/interrupts`, fetchOpts({
+  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/runs/${encodeURIComponent(runId)}/interrupts`, fetchOpts({
     headers: authedHeaders(),
   }));
   if (!res.ok) throw new ApiError({ status: res.status, statusText: res.statusText, url: res.url, message: `listOpenInterrupts returned ${res.status}` });

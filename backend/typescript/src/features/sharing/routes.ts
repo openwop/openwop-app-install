@@ -1,10 +1,10 @@
 /**
  * Sharing routes (ADR 0013). Two surfaces:
- *   - AUTHED  /v1/host/sample/sharing/orgs/:orgId/links
+ *   - AUTHED  /v1/host/openwop-app/sharing/orgs/:orgId/links
  *       (authorizeOrgScope — GET workspace:read, POST/DELETE workspace:write)
- *   - PUBLIC  /v1/host/sample/shared/:token  (NO auth — the unguessable token IS
+ *   - PUBLIC  /v1/host/openwop-app/shared/:token  (NO auth — the unguessable token IS
  *       the credential; tenant from the link, gated on the link-tenant's
- *       `sharing` toggle). The `/v1/host/sample/shared` prefix is on
+ *       `sharing` toggle). The `/v1/host/openwop-app/shared` prefix is on
  *       PUBLIC_PATH_PREFIXES (auth.ts) — it does NOT shadow `…/sharing/*`.
  *
  * @see docs/adr/0013-sharing.md
@@ -26,7 +26,7 @@ export function registerSharingRoutes(deps: RouteDeps): void {
   const { app } = deps;
 
   // ── authed: link management ──
-  const BASE = '/v1/host/sample/sharing/orgs/:orgId/links';
+  const BASE = '/v1/host/openwop-app/sharing/orgs/:orgId/links';
 
   app.get(BASE, async (req, res, next) => {
     try {
@@ -53,13 +53,13 @@ export function registerSharingRoutes(deps: RouteDeps): void {
   });
 
   // ── public: resolve a share link (NO auth; token is the credential) ──
-  app.get('/v1/host/sample/shared/:token', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/shared/:token', async (req, res, next) => {
     try {
       res.json(await resolveShared(req.params.token));
     } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/sample/shared/:token/card', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/shared/:token/card', async (req, res, next) => {
     try {
       res.json(await resolveSharedCard(req.params.token, publicBaseUrl(req)));
     } catch (err) { next(err); }

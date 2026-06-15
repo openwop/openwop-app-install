@@ -46,7 +46,7 @@ Workspace tier: `/` (chat home), `/agents*`, `/builder*`, `/boards`, `/inbox`,
 Admin tier (rendered inside `AdminLayout`): `/admin`, `/mission`, `/runs*`,
 `/compare`, `/workforces*`, `/agents/templates*`, `/roster`, `/prompts`,
 `/memory`, `/capabilities`, `/cli`, `/orgs`, `/keys`, `/feature-toggles`,
-`/demo-data`.
+`/example-data`.
 
 All route components except the chat home are `React.lazy`; the shell's
 `<Suspense>` renders the fallback.

@@ -37,7 +37,7 @@ describe('Connections feature (sqlite memory app)', () => {
   let server: http.Server;
   const PORT = 18941;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -70,13 +70,13 @@ describe('Connections feature (sqlite memory app)', () => {
     // Connections graduated off its toggle (2026-06-11): the surface is always-on,
     // so an empty connection list is 200 (not the old 404-while-off), with no
     // admin-config enable step needed.
-    expect((await jf('/v1/host/sample/connections')).status).toBe(200);
+    expect((await jf('/v1/host/openwop-app/connections')).status).toBe(200);
 
-    const providers = await jf<{ providers: { id: string; reach: string }[] }>('/v1/host/sample/providers');
+    const providers = await jf<{ providers: { id: string; reach: string }[] }>('/v1/host/openwop-app/providers');
     expect(providers.body.providers.find((p) => p.id === 'google')?.reach).toBe('mcp');
     expect(providers.body.providers.find((p) => p.id === 'servicenow')?.reach).toBe('openapi');
 
-    const created = await jf<{ connectionId: string; provider: string }>('/v1/host/sample/connections', {
+    const created = await jf<{ connectionId: string; provider: string }>('/v1/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'servicenow', kind: 'api_key', secret: 'sn-secret-xyz', scope: 'user', displayName: 'My ServiceNow' }),
     });
@@ -87,12 +87,12 @@ describe('Connections feature (sqlite memory app)', () => {
   });
 
   it('rejects oauth2 secret-post and org-scope create (fail-closed, D2)', async () => {
-    const oauthPost = await jf('/v1/host/sample/connections', {
+    const oauthPost = await jf('/v1/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'google', kind: 'oauth2', secret: 'x', scope: 'user' }),
     });
     expect(oauthPost.status).toBe(400);
-    const orgPost = await jf('/v1/host/sample/connections', {
+    const orgPost = await jf('/v1/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'servicenow', kind: 'api_key', secret: 'x', scope: 'org', orgId: 'o1' }),
     });
@@ -102,19 +102,19 @@ describe('Connections feature (sqlite memory app)', () => {
   it('authorize is 409 when OAuth is unconfigured; oauthConfigured reflects host env (Phase B)', async () => {
     delete process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_ID;
     delete process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_SECRET;
-    const before = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/sample/providers');
+    const before = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/openwop-app/providers');
     expect(before.body.providers.find((p) => p.id === 'google')?.oauthConfigured).toBe(false);
-    const unconfigured = await jf('/v1/host/sample/connections/google/authorize', { method: 'POST', body: '{}' });
+    const unconfigured = await jf('/v1/host/openwop-app/connections/google/authorize', { method: 'POST', body: '{}' });
     expect(unconfigured.status).toBe(409);
   });
 
   it('authorize mints a PKCE consent URL once OAuth client creds are present (Phase B)', async () => {
     process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_ID = 'test-client-id';
     process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_SECRET = 'test-client-secret';
-    const providers = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/sample/providers');
+    const providers = await jf<{ providers: { id: string; oauthConfigured?: boolean }[] }>('/v1/host/openwop-app/providers');
     expect(providers.body.providers.find((p) => p.id === 'google')?.oauthConfigured).toBe(true);
 
-    const authz = await jf<{ authorizeUrl: string }>('/v1/host/sample/connections/google/authorize', { method: 'POST', body: '{}' });
+    const authz = await jf<{ authorizeUrl: string }>('/v1/host/openwop-app/connections/google/authorize', { method: 'POST', body: '{}' });
     expect(authz.status).toBe(200);
     const url = new URL(authz.body.authorizeUrl);
     expect(url.origin + url.pathname).toBe('https://accounts.google.com/o/oauth2/v2/auth');
@@ -124,11 +124,11 @@ describe('Connections feature (sqlite memory app)', () => {
     expect(url.searchParams.get('state')).toBeTruthy();
     // Google needs offline access to actually return a refresh token.
     expect(url.searchParams.get('access_type')).toBe('offline');
-    expect(url.searchParams.get('redirect_uri')).toContain('/v1/host/sample/connections/google/callback');
+    expect(url.searchParams.get('redirect_uri')).toContain('/v1/host/openwop-app/connections/google/callback');
   });
 
   it('callback with a bad state bounces the browser back with connectError (never a JSON 4xx)', async () => {
-    const res = await fetch(`${BASE}/v1/host/sample/connections/google/callback?state=nope&code=abc`, {
+    const res = await fetch(`${BASE}/v1/host/openwop-app/connections/google/callback?state=nope&code=abc`, {
       headers: { authorization: `Bearer ${TOKEN}` },
       redirect: 'manual',
     });
@@ -141,11 +141,11 @@ describe('Connections feature (sqlite memory app)', () => {
     process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_ID = 'cid';
     process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_SECRET = 'csecret';
     // The provider list advertises the offerable write scopes.
-    const providers = await jf<{ providers: { id: string; writeScopes?: string[] }[] }>('/v1/host/sample/providers');
+    const providers = await jf<{ providers: { id: string; writeScopes?: string[] }[] }>('/v1/host/openwop-app/providers');
     const googleWrite = providers.body.providers.find((p) => p.id === 'google')?.writeScopes ?? [];
     expect(googleWrite).toContain('https://www.googleapis.com/auth/gmail.send');
 
-    const authz = await jf<{ authorizeUrl: string }>('/v1/host/sample/connections/google/authorize', {
+    const authz = await jf<{ authorizeUrl: string }>('/v1/host/openwop-app/connections/google/authorize', {
       method: 'POST',
       body: JSON.stringify({ write: true }),
     });
@@ -157,7 +157,7 @@ describe('Connections feature (sqlite memory app)', () => {
   it('org-scoped create is fail-closed without host:connections:manage (Phase C D2)', async () => {
     // The default test tenant has no admin member ⇒ resolveEffectiveAccess is
     // empty ⇒ 403 forbidden_scope (not the blanket Phase B 403).
-    const orgPost = await jf<{ details?: { requiredScope?: string } }>('/v1/host/sample/connections', {
+    const orgPost = await jf<{ details?: { requiredScope?: string } }>('/v1/host/openwop-app/connections', {
       method: 'POST',
       body: JSON.stringify({ provider: 'servicenow', kind: 'api_key', secret: 'x', scope: 'org' }),
     });

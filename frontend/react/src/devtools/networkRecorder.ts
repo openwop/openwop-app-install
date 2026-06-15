@@ -170,7 +170,7 @@ function bodyToString(body: BodyInit | null | undefined): string | undefined {
  *  (threat-model-secret-leakage). Matched against the origin-relative path;
  *  the optional `/api/` prefix covers the Firebase Hosting rewrite. */
 const SECRET_REQUEST_PATHS: readonly RegExp[] = [
-  /^\/(?:api\/)?v1\/host\/sample\/byok\/secrets(?:$|\/|\?)/,
+  /^\/(?:api\/)?v1\/host\/(?:openwop-app|sample)\/byok\/secrets(?:$|\/|\?)/,
 ];
 
 /** Conservative field-name denylist applied to any *other* captured request

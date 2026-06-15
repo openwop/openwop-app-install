@@ -124,7 +124,7 @@ export function RunAuditPage() {
       </div>
       <p className="muted u-fs-13 u-mt-0">
         Append-only hash chain + Merkle-rooted signed checkpoints per the{' '}
-        <code>openwop-audit-log-integrity</code> profile (RFC 0009 / 0010).
+        <code>openwop-audit-log-integrity</code> profile.
         Verification re-runs <code>client.audit.verify(0, {lastSeq})</code>
         on demand and the export bundles the full <code>AuditVerifyResult</code>{' '}
         for offline re-verification via{' '}

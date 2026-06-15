@@ -1,7 +1,7 @@
 /**
  * Feature-toggle host-extension client (non-normative).
  *
- * Wraps /v1/host/sample/feature-toggles/*. The backend is the authority
+ * Wraps /v1/host/openwop-app/feature-toggles/*. The backend is the authority
  * (ADR 0001 §3.4) — the FE only READS its resolved assignments and (for a
  * superadmin) the admin config list / save endpoint.
  *
@@ -51,7 +51,7 @@ export interface ResolvedAssignment {
   bindings?: VariantBinding[];
 }
 
-const base = `${config.baseUrl}/v1/host/sample/feature-toggles`;
+const base = `${config.baseUrl}/v1/host/openwop-app/feature-toggles`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

@@ -1,6 +1,6 @@
 /**
  * CRM feature client (host-extension, non-normative). Wraps
- * /v1/host/sample/crm/*. The surface 404s when the CRM toggle is off — the
+ * /v1/host/openwop-app/crm/*. The surface 404s when the CRM toggle is off — the
  * page gates on useFeatureAccess('crm') so it never calls a disabled surface.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -26,7 +26,7 @@ export interface TriageResult {
   workflowId: string;
 }
 
-const base = `${config.baseUrl}/v1/host/sample/crm`;
+const base = `${config.baseUrl}/v1/host/openwop-app/crm`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

@@ -12,7 +12,7 @@ import { createApp } from '../src/index.js';
 
 const PORT = 8799;
 const BASE = `http://localhost:${PORT}`;
-const ADMIN = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
+const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let server: Server;
 let n = 0;
 
@@ -31,7 +31,7 @@ afterAll(async () => { await new Promise<void>((res) => server.close(() => res()
 
 const admin = (method: string, path: string, body?: unknown) =>
   fetch(`${BASE}${path}`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-const pub = () => fetch(`${BASE}/v1/host/sample/public-site-config`); // NO auth
+const pub = () => fetch(`${BASE}/v1/host/openwop-app/public-site-config`); // NO auth
 const j = async <T>(res: Response): Promise<T> => (await res.json()) as T;
 
 /** A signed-in but NON-superadmin caller (personal tenant), via the test seam. */
@@ -47,7 +47,7 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
     if (sc.length) cookie = sc.map((c: string) => c.split(';')[0]).join('; ');
     return res;
   };
-  const login = await call('POST', '/v1/host/sample/test/login', { email: `sc-${n++}@x.test` });
+  const login = await call('POST', '/v1/host/openwop-app/test/login', { email: `sc-${n++}@x.test` });
   expect(login.status).toBe(201);
   return call;
 }
@@ -63,20 +63,20 @@ describe('site-config — public read (unauthenticated)', () => {
 describe('site-config — superadmin gate', () => {
   it('a non-superadmin is forbidden on read and write (403)', async () => {
     const call = await normalClient();
-    expect((await call('GET', '/v1/host/sample/site-config')).status).toBe(403);
-    expect((await call('PUT', '/v1/host/sample/site-config', { enabled: false })).status).toBe(403);
+    expect((await call('GET', '/v1/host/openwop-app/site-config')).status).toBe(403);
+    expect((await call('PUT', '/v1/host/openwop-app/site-config', { enabled: false })).status).toBe(403);
   });
 });
 
 describe('site-config — superadmin toggle', () => {
   it('toggles the on/off switch; public pointer follows', async () => {
     // disable → public pointer hides
-    expect((await admin('PUT', '/v1/host/sample/site-config', { enabled: false })).status).toBe(200);
+    expect((await admin('PUT', '/v1/host/openwop-app/site-config', { enabled: false })).status).toBe(200);
     expect(await j(await pub())).toEqual({ enabled: false });
-    expect((await j<{ enabled: boolean }>(await admin('GET', '/v1/host/sample/site-config'))).enabled).toBe(false);
+    expect((await j<{ enabled: boolean }>(await admin('GET', '/v1/host/openwop-app/site-config'))).enabled).toBe(false);
 
     // re-enable → fixed system pointer returns
-    expect((await admin('PUT', '/v1/host/sample/site-config', { enabled: true })).status).toBe(200);
+    expect((await admin('PUT', '/v1/host/openwop-app/site-config', { enabled: true })).status).toBe(200);
     expect(await j(await pub())).toEqual({ enabled: true, orgId: 'host-site', slug: 'home' });
   });
 });

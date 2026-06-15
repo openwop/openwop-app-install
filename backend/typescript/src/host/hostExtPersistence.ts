@@ -1,5 +1,5 @@
 /**
- * Host-extension durability helper (read-through, sample-grade-hardened).
+ * Host-extension durability helper (read-through, best-effort-hardened).
  *
  * Backs the host-extension stores (Kanban boards/cards, agent roster,
  * org-chart, RFC 0083 trigger bridge) with the generic `Storage` kv table —
@@ -17,7 +17,7 @@
  *  - SYNCHRONOUS: a write `await`s its `kvSet`/`kvDelete` before the service
  *    returns, closing the fire-and-forget data-loss window.
  *
- * Remaining sample-grade trade-offs (a production host would do better):
+ * Remaining best-effort trade-offs (a production host would do better):
  *  - `list()` is a prefix SCAN of the whole collection (all tenants), filtered
  *    in the service layer — fine at demo scale, indexed by the kv primary key,
  *    but a production store keys/queries per (tenant, entity).

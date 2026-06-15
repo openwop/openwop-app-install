@@ -77,7 +77,7 @@ async function resolveSearchKey(tenantId: string): Promise<string | null> {
 }
 
 /** Honest demo result — a real query URL, not fabricated content. */
-function demoSearch(query: string, maxResults: number): SearchResult {
+function exampleSearch(query: string, maxResults: number): SearchResult {
   return {
     results: [{ url: `https://duckduckgo.com/?q=${encodeURIComponent(query)}`, title: `Web search: ${query}`, snippet: 'Demo result — configure a search provider (BYOK secret "web-search" or OPENWOP_WEBSEARCH_API_KEY) for live results.', rank: 1 }].slice(0, Math.max(1, maxResults)),
     engine: 'demo',
@@ -125,7 +125,7 @@ export function createWebResearchSurface(scope: BundleScope): WebResearchSurface
       const key = await resolveSearchKey(scope.tenantId);
       if (!key) {
         log.info('web search (demo — no provider key configured)', { query });
-        return demoSearch(query, maxResults);
+        return exampleSearch(query, maxResults);
       }
       try {
         const live = await searchLive(query, key, maxResults, siteFilter);
@@ -134,7 +134,7 @@ export function createWebResearchSurface(scope: BundleScope): WebResearchSurface
       } catch (err) {
         // Provider error → don't hard-fail the node; fall back to the honest demo.
         log.warn('web search provider failed — falling back to demo result', { query, error: err instanceof Error ? err.message : String(err) });
-        return demoSearch(query, maxResults);
+        return exampleSearch(query, maxResults);
       }
     },
 

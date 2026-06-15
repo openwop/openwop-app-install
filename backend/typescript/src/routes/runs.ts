@@ -320,7 +320,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
 
       // Dispatch inline. Real impls hand off to Cloud Tasks / Pub/Sub / SQS
       // so the HTTP response returns immediately and the dispatcher runs
-      // separately. setImmediate keeps the sample single-instance.
+      // separately. setImmediate keeps the single-instance.
       setImmediate(() => {
         executeRun(storage, run, wf.definition, {
           policyResolver: hostSuite.providerPolicyResolver,
@@ -427,7 +427,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // §openwop-interrupt-parent-child` so callers can reach the
       // child run for resolve / inspection. Same tenant + parentRunId
       // matching as the cancel-cascade walker. O(N) scan is acceptable
-      // for the sample tier; a production deployer SHOULD index on
+      // for the in-memory tier; a production deployer SHOULD index on
       // parent_run_id.
       const tenantSiblings = await storage.listRuns({ tenantId: run.tenantId });
       const children = tenantSiblings.filter((r) => r.parentRunId === run.runId);
@@ -650,11 +650,11 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // resolve attempts return 410/409. Walk by tenantId (the listRuns
       // surface filters by tenant; the parent/child pair always shares
       // a tenant by construction in subWorkflowDispatcher.ts) and match
-      // on parentRunId in-process. The sample tier's run population
+      // on parentRunId in-process. The in-memory tier's run population
       // stays small enough that an O(N) scan per cancel is fine; a
       // production deployer SHOULD index on parent_run_id.
       //
-      // Partial-failure posture (sample tier): each storage write here
+      // Partial-failure posture (in-memory tier): each storage write here
       // is independent — if `updateRun(child)` succeeds but a later
       // `resolveInterrupt` fails, the child is cancelled with stale
       // open interrupts, and `terminal.includes(run.status)` at the
@@ -1133,7 +1133,7 @@ function hasManagedCredentialRef(
     // chat-class typeIds default to `managed:openwop-free` (see the
     // precedence chain in `bootstrap/nodes.ts` chat-responder body).
     // Without this branch, the sample chat-tab workflow
-    // `sample.chat.turn` (which pins no credentialRef on its
+    // `openwop-app.chat.turn` (which pins no credentialRef on its
     // chat-responder node) slips past the preflight, dispatches under
     // an anon tenant, and fails with `sign_in_required` at chat-node
     // execution time — exactly the latency this preflight exists to
@@ -1148,16 +1148,13 @@ function hasManagedCredentialRef(
 function capabilityGatedTypeIdRefusal(
   nodes: ReadonlyArray<{ nodeId: string; typeId: string }>,
 ): OpenwopError | null {
-  for (const node of nodes) {
-    if (node.typeId === 'core.conversationGate') {
-      return new OpenwopError(
-        'validation_error',
-        `Node '${node.nodeId}' (core.conversationGate) requires capabilities.conversationPrimitive: true, which this host does not advertise.`,
-        400,
-        { requiredCapability: 'conversationPrimitive', offendingTypeId: 'core.conversationGate', nodeId: node.nodeId },
-      );
-    }
-  }
+  // `core.conversationGate` is now SUPPORTED — the host advertises
+  // `capabilities.conversationPrimitive: true` (routes/discovery.ts) and
+  // implements the open/exchange/close lifecycle (bootstrap/nodes.ts +
+  // host/conversationExchange.ts), so it is no longer refused here. Other
+  // capability-gated typeIds would be refused in this function when their
+  // gating capability is unadvertised; none currently are.
+  void nodes;
   return null;
 }
 

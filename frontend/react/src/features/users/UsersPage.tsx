@@ -96,7 +96,7 @@ export function UsersPage(): JSX.Element {
 
   return (
     <section className="u-grid u-gap-4">
-      <PageHeader eyebrow="Access & data" title="Users & Authentication" lede="Durable accounts behind the authenticated principal — the identity foundation (ADR 0002)." />
+      <PageHeader eyebrow="Access & data" title="Users & Authentication" lede="Durable accounts behind the authenticated principal — the identity foundation." />
       {error ? <Notice variant="error">{error}</Notice> : null}
       {me ? (
         <Notice variant="info">

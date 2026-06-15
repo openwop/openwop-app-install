@@ -51,10 +51,10 @@ let n = 0;
 async function ownerWithPage(): Promise<{ owner: ReturnType<typeof client>; orgId: string; pageId: string }> {
   const owner = client();
   const tenantId = `t-cmt-${n++}`;
-  expect((await owner.post('/v1/host/sample/test/login', { email: `cmt-${n}@acme.test`, tenantId })).status).toBe(201);
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  expect((await owner.post('/v1/host/openwop-app/test/login', { email: `cmt-${n}@acme.test`, tenantId })).status).toBe(201);
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
-  const page = await owner.post(`/v1/host/sample/cms/orgs/${org.body.orgId}/pages`, { title: 'Home' });
+  const page = await owner.post(`/v1/host/openwop-app/cms/orgs/${org.body.orgId}/pages`, { title: 'Home' });
   expect(page.status, JSON.stringify(page.body)).toBe(201);
   return { owner, orgId: org.body.orgId, pageId: page.body.pageId };
 }
@@ -69,7 +69,7 @@ describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
 
   it('owner posts a comment + reply, lists the thread, resolves, deletes', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/sample/comments/orgs/${orgId}/comments`;
+    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
     const c1 = await owner.post(base, { resourceType: 'cms_page', resourceId: pageId, body: 'First note' });
     expect(c1.status, JSON.stringify(c1.body)).toBe(201);
     expect(c1.body.status).toBe('open');
@@ -90,7 +90,7 @@ describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
 
   it('unknown resourceType 400s; unknown resourceId 404s', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/sample/comments/orgs/${orgId}/comments`;
+    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
     expect((await owner.post(base, { resourceType: 'nope', resourceId: pageId, body: 'x' })).status).toBe(400);
     expect((await owner.post(base, { resourceType: 'cms_page', resourceId: 'pg:ghost', body: 'x' })).status).toBe(404);
   });
@@ -99,12 +99,12 @@ describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
     const a = await ownerWithPage();
     const b = await ownerWithPage();
     // b cannot read a's org thread (org not in b's tenant)
-    expect((await b.owner.get(`/v1/host/sample/comments/orgs/${a.orgId}/comments?resourceType=cms_page&resourceId=${a.pageId}`)).status).toBe(404);
+    expect((await b.owner.get(`/v1/host/openwop-app/comments/orgs/${a.orgId}/comments?resourceType=cms_page&resourceId=${a.pageId}`)).status).toBe(404);
   });
 
   it('a non-author non-admin cannot edit another author’s body', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/sample/comments/orgs/${orgId}/comments`;
+    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
     const c = await owner.post(base, { resourceType: 'cms_page', resourceId: pageId, body: 'mine' });
     // a second user in the SAME tenant, added as a member with write — but not the author
     // (kept simple: the author guard is unit-covered in the service test below; here we
@@ -115,7 +115,7 @@ describe('Comments: thread CRUD (RBAC) + IDOR + validation', () => {
 
   it('toggle OFF ⇒ 404 (backend authority)', async () => {
     const { owner, orgId, pageId } = await ownerWithPage();
-    const base = `/v1/host/sample/comments/orgs/${orgId}/comments`;
+    const base = `/v1/host/openwop-app/comments/orgs/${orgId}/comments`;
     try {
       await enableComments('off');
       expect((await owner.get(`${base}?resourceType=cms_page&resourceId=${pageId}`)).status).toBe(404);

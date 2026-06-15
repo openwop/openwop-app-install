@@ -4,7 +4,7 @@
 **Date:** 2026-06-10 (Phase A/B implemented 2026-06-11; Phase C implemented 2026-06-11)
 **Depends on:** ADR 0002/0003 (identity), ADR 0006 (RBAC), ADR 0015 (workspace = tenant). Reuses the BYOK KMS envelope (`byok/secretResolver.ts`, ADR 0002 C3). Rides **RFC 0050** (auth profiles), **RFC 0076** (host `safeFetch` egress), **RFC 0079** (credential provenance) — all Accepted. Mirrors the catalog/compose discipline of ADR 0022 (Marketplace).
 **Consumed by:** ADR 0023 (Executive Assistant), ADR 0025 (user/agent orchestration), and any future feature needing a third-party token.
-**Surface:** `/v1/host/sample/connections/*` + `/v1/host/sample/providers/*` — host-extension, **NON-NORMATIVE — no RFC**.
+**Surface:** `/v1/host/openwop-app/connections/*` + `/v1/host/openwop-app/providers/*` — host-extension, **NON-NORMATIVE — no RFC**.
 **Toggle:** ~~`connections` · category `Access & data` · default OFF · `bucketUnit: 'tenant'`~~ — **removed 2026-06-11**, see § Correction below.
 
 > **§ Correction (2026-06-11) — graduated off the toggle to a permanent admin
@@ -236,19 +236,19 @@ store of truth — the ADR 0022 discipline.
 ### 5. REST surface (non-normative)
 
 ```
-POST   /v1/host/sample/connections/{provider}/authorize     # oauth2 consent URL
-GET    /v1/host/sample/connections/{provider}/callback      # oauth2 code exchange
-POST   /v1/host/sample/connections                          # api_key/bearer/basic create
-GET    /v1/host/sample/connections                          # list caller's connections (status only, never secrets)
-DELETE /v1/host/sample/connections/{connectionId}           # revoke at provider + drop
-POST   /v1/host/sample/connections/{connectionId}/test      # fire a provider health call
-GET    /v1/host/sample/providers                            # the registry (manifests)
-GET    /v1/host/sample/providers/{provider}                 # one manifest + consumerNodes
+POST   /v1/host/openwop-app/connections/{provider}/authorize     # oauth2 consent URL
+GET    /v1/host/openwop-app/connections/{provider}/callback      # oauth2 code exchange
+POST   /v1/host/openwop-app/connections                          # api_key/bearer/basic create
+GET    /v1/host/openwop-app/connections                          # list caller's connections (status only, never secrets)
+DELETE /v1/host/openwop-app/connections/{connectionId}           # revoke at provider + drop
+POST   /v1/host/openwop-app/connections/{connectionId}/test      # fire a provider health call
+GET    /v1/host/openwop-app/providers                            # the registry (manifests)
+GET    /v1/host/openwop-app/providers/{provider}                 # one manifest + consumerNodes
 
 # Host-managed OAuth client config (§7) — SUPERADMIN only; secret never returned
-GET    /v1/host/sample/connections-oauth-clients            # list configured providers (clientId + metadata)
-PUT    /v1/host/sample/connections-oauth-clients/{provider} # set {clientId, clientSecret}; 204
-DELETE /v1/host/sample/connections-oauth-clients/{provider} # remove; falls back to env
+GET    /v1/host/openwop-app/connections-oauth-clients            # list configured providers (clientId + metadata)
+PUT    /v1/host/openwop-app/connections-oauth-clients/{provider} # set {clientId, clientSecret}; 204
+DELETE /v1/host/openwop-app/connections-oauth-clients/{provider} # remove; falls back to env
 ```
 
 ### 6. Inbound provider events (extensibility, designed-for not built-now)
@@ -277,7 +277,7 @@ provider lights up its Connect button the moment its app is configured.
   `openHostSecret` (`byok/secretResolver.ts`) — host-global, *not* the tenant-scoped
   `setSecret`. The envelope stays the single owner of encrypt-at-rest; this feature
   composes it rather than re-deriving the master key.
-- **Routes:** a **sibling** prefix `/v1/host/sample/connections-oauth-clients/*`
+- **Routes:** a **sibling** prefix `/v1/host/openwop-app/connections-oauth-clients/*`
   (NOT nested under `/connections/:id`, which the param routes own — same discipline
   as `connections-inbound`), gated by the shared `requireSuperadmin` (ADR 0028).
 - **UI:** `OAuthClientAdminPanel` on the (admin-tier) Connections page, hidden on a
@@ -302,7 +302,7 @@ API instead of reaching into BYOK internals; resolver fails closed, store-first.
 
 ## RFC gate
 
-**Host work — no new RFC.** All surfaces under `/v1/host/sample/{connections,
+**Host work — no new RFC.** All surfaces under `/v1/host/openwop-app/{connections,
 providers}/*` (non-normative), riding Accepted RFCs (0050/0076/0079). Advertise a
 provider only under non-normative `hostExtensions.connections` **and only once a
 real auth round-trip succeeds** (honesty rule; `OPENWOP_REQUIRE_BEHAVIOR=true`
@@ -321,7 +321,7 @@ RFC — deliberately **not** doing that.
 | Credential provenance | RFC 0079 — reuse |
 | Installable provider manifests (future) | Marketplace (ADR 0022) — compose |
 
-Route check: no prior registrant on `/v1/host/sample/connections` or `/providers`.
+Route check: no prior registrant on `/v1/host/openwop-app/connections` or `/providers`.
 The messaging `MessagingConnectorRecord` (routing/policy, no credentials) stays its
 own concern; it MAY later project as a `kind:'custom'` connection but is not folded
 in this ADR.

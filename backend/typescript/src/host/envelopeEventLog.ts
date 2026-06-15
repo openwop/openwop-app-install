@@ -11,7 +11,7 @@
  *
  * This module gives the test seam a parallel event log it can populate
  * by calling the projection module after each `acceptEnvelope` call.
- * The seam's query endpoint (`GET /v1/host/sample/test/runs/:runId/
+ * The seam's query endpoint (`GET /v1/host/openwop-app/test/runs/:runId/
  * events`) reads from this log. Production hosts emit the SAME shapes
  * into the real run event log (`storage.appendEvent`); the test log
  * lets conformance verify shape independently of the engine integration

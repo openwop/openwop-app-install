@@ -2,7 +2,7 @@
  * Unified cold-start / error card for the AI chat surface.
  *
  * Replaces the previous two-card flow (loading → error) that flashed
- * "Spinning up your demo server…" → "The demo is resting" as separate
+ * "Spinning up your server…" → "The server is resting" as separate
  * screens. The user perceived that as a confusing arc ("you said you
  * were starting, then you gave up").
  *
@@ -13,7 +13,7 @@
  *     "Loading…" with subtle dots. Should resolve in <1s.
  *
  *   Phase 1 — Loading, predict cold (no recent success):
- *     "Waking up your demo server…" with cold-start framing in the
+ *     "Waking up the server…" with cold-start framing in the
  *     body. Users expect 10-30s.
  *
  *   Phase 2 — Loading, elapsed ≥ 25s:
@@ -21,7 +21,7 @@
  *     this is taking longer than typical but not yet a failure.
  *
  *   Phase 3 — Error OR elapsed ≥ 40s:
- *     "The demo is resting" + refresh-instruction copy. Same chrome,
+ *     "The server is resting" + refresh-instruction copy. Same chrome,
  *     same card position — copy + dot animation change only.
  *
  * The shared chrome means the user sees ONE evolving card instead of
@@ -71,18 +71,18 @@ export function BackendStatusCard({ error, backendUrl }: Props): JSX.Element {
 
   const headline =
     phase === 'loading-warm' ? 'Loading'
-    : phase === 'loading-cold' ? 'Waking up your demo server'
+    : phase === 'loading-cold' ? 'Waking up the server'
     : phase === 'still-waking' ? 'Still waking up'
-    : 'The demo is resting';
+    : 'The server is resting';
 
   const body =
     phase === 'loading-warm'
       ? 'Reading your provider config from the host.'
       : phase === 'loading-cold'
-        ? 'The Cloud Run server spins down between visits to keep the sample cheap to host. First load takes 10–30 seconds.'
+        ? 'The Cloud Run server spins down between visits to keep hosting costs low. First load takes 10–30 seconds.'
         : phase === 'still-waking'
           ? 'Cold start is taking longer than usual. Hang tight — usually under a minute.'
-          : 'The Cloud Run server spins down between visits to keep the sample cheap to host. Please refresh your browser.';
+          : 'The Cloud Run server spins down between visits to keep hosting costs low. Please refresh your browser.';
 
   const showDots = phase !== 'resting';
 

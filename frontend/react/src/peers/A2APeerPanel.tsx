@@ -34,7 +34,7 @@ export function A2APeerPanel() {
       <h2>
         A2A peers{' '}
         <span className="muted u-fs-12 u-fw-400">
-          (RFC 0007 + <code>spec/v1/a2a-integration.md</code>)
+          (<code>spec/v1/a2a-integration.md</code>)
         </span>
       </h2>
       <p className="muted u-fs-13">

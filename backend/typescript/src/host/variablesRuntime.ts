@@ -80,7 +80,7 @@ export function snapshotRunVariables(runId: string): Record<string, unknown> | n
 
 /**
  * Set a single variable. Future scope (HVMAP-2 mid-run mutation seam)
- * will expose this via a `POST /v1/host/sample/test/runs/:runId/
+ * will expose this via a `POST /v1/host/openwop-app/test/runs/:runId/
  * variables` endpoint; today only the suite-init seeding path uses
  * it (via `seedRunVariables`).
  */

@@ -1,5 +1,5 @@
 /**
- * Thin client for `/v1/host/sample/workflows`. The Run button calls
+ * Thin client for `/v1/host/openwop-app/workflows`. The Run button calls
  * `register()` to ensure the catalog can resolve the workflowId, then
  * dispatches `POST /v1/runs` through the normal runs client.
  */
@@ -30,7 +30,7 @@ interface RegisterBody {
 }
 
 export async function registerWorkflow(body: RegisterBody): Promise<{ workflowId: string; nodeCount: number }> {
-  const res = await fetch(`${config.baseUrl}/v1/host/sample/workflows`, fetchOpts({
+  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/workflows`, fetchOpts({
     method: 'POST',
     headers: authedHeaders({ 'content-type': 'application/json' }),
     body: JSON.stringify(body),

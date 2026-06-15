@@ -1,7 +1,7 @@
 /**
  * Client for the prompt library — proposed `GET /v1/prompts` + related
  * surfaces from RFC 0028. Until a host advertises `capabilities.prompts`,
- * every method falls back to the local sample library in `samplePrompts.ts`.
+ * every method falls back to the local sample library in `bundledPrompts.ts`.
  *
  * When the backend lands, the only behavioral change visible to callers
  * is that `listPrompts()` starts returning host-resident templates instead
@@ -10,7 +10,7 @@
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
 import { getCapabilities } from '../client/runsClient.js';
-import { SAMPLE_PROMPTS } from './samplePrompts.js';
+import { BUNDLED_PROMPTS } from './bundledPrompts.js';
 import { listUserPrompts } from './userPrompts.js';
 import type { PromptKind, PromptRef, PromptTemplate } from './types.js';
 import { parseRef } from './types.js';
@@ -88,7 +88,7 @@ export async function listPrompts(filter: ListPromptsFilter = {}): Promise<Promp
   // on top of the bundled samples so users see both groups in one list.
   // Without this fallback, a user with no user-prompts and a BE that
   // returns `{items:[]}` would see an empty prompt library.
-  return applyFilter([...listUserPrompts(), ...SAMPLE_PROMPTS], filter);
+  return applyFilter([...listUserPrompts(), ...BUNDLED_PROMPTS], filter);
 }
 
 export async function getPrompt(templateId: string, version?: string): Promise<PromptTemplate | null> {
@@ -122,7 +122,7 @@ function resolveLocal(templateId: string, version?: string): PromptTemplate | nu
   // User-authored prompts shadow same-id samples (rare given the
   // `user:` prefix on user-ids, but coherent if a future BE adds a
   // canonical store that happens to collide).
-  const pool = [...listUserPrompts(), ...SAMPLE_PROMPTS];
+  const pool = [...listUserPrompts(), ...BUNDLED_PROMPTS];
   const matches = pool.filter((p) => p.templateId === templateId);
   if (matches.length === 0) return null;
   if (!version) return matches[0]!;

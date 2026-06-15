@@ -19,7 +19,7 @@ import { createCard, listBoards, getCard } from '../src/host/kanbanService.js';
 let server: http.Server;
 const PORT = 18195;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -45,7 +45,7 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 interface BundleEvent { type?: string; nodeId?: string; payload?: Record<string, unknown> }
 
 async function runNode(workflowId: string, typeId: string, config: Record<string, unknown>, inputs: Record<string, unknown>): Promise<Record<string, unknown>> {
-  await jsonFetch('/v1/host/sample/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'op', typeId, config }], edges: [] }) });
+  await jsonFetch('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'op', typeId, config }], edges: [] }) });
   const create = await jsonFetch<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs }) });
   expect(create.status).toBe(201);
   const { runId } = create.body;

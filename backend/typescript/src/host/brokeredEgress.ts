@@ -16,8 +16,9 @@
 import { fetch as undiciFetch } from 'undici';
 import type { Storage } from '../storage/storage.js';
 import { resolveConnectionCredential } from '../features/connections/connectionsService.js';
-import { webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
-import type { ConnectionUseProvenance } from './connectionInjection.js';
+import { getProvider } from '../features/connections/providerRegistry.js';
+import { hostMatchesApi, type ConnectionUseProvenance } from './connectionInjection.js';
+import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
 
 const TIMEOUT_MS = 10_000;
 
@@ -85,6 +86,86 @@ export async function brokeredPost(
       method: 'POST',
       headers: { 'content-type': opts.contentType ?? 'application/json; charset=utf-8', authorization: authHeader(opts.authScheme ?? 'bearer', resolved.secret) },
       body: opts.body,
+      dispatcher: webhookEgressDispatcher(),
+      redirect: 'error',
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    return { outcome: 'sent', res, provenance: resolved.provenance };
+  } catch (err) {
+    return { outcome: 'request_failed', timedOut: err instanceof Error && err.name === 'TimeoutError' };
+  }
+}
+
+/** A generic brokered call (arbitrary HTTP method) for the connector framework
+ *  (ADR 0037). `brokeredPost` covers the fixed-shape integration adapters; this
+ *  is the open-method egress a connector node/agent-tool needs (e.g. a ServiceNow
+ *  Table API `GET`/`PATCH`). It adds ONE thing on top of brokeredPost's spine: it
+ *  pins the destination to the provider's HOST-CURATED `apiHosts` so a connector
+ *  can never be turned into a generic egress bypass — the resolved token only ever
+ *  reaches the provider's own hosts (same eTLD+1 boundary as `connectionInjection`,
+ *  never substring). */
+export type BrokeredFetchOutcome =
+  | { outcome: 'no_connection' }
+  | { outcome: 'host_not_allowed'; host: string }
+  | { outcome: 'insecure_base' }
+  | { outcome: 'request_failed'; timedOut: boolean }
+  | { outcome: 'sent'; res: Awaited<ReturnType<typeof undiciFetch>>; provenance: ConnectionUseProvenance };
+
+export async function brokeredFetch(
+  deps: BrokeredEgressDeps,
+  opts: {
+    provider: string;
+    url: string;
+    method?: string;
+    body?: string;
+    contentType?: string;
+    authScheme?: AuthScheme;
+  },
+): Promise<BrokeredFetchOutcome> {
+  // Resolve the destination host up front so we can pin it BEFORE resolving a
+  // credential (fail closed on a bad URL without ever touching the secret).
+  let parsed: URL;
+  try {
+    parsed = new URL(opts.url);
+  } catch {
+    return { outcome: 'host_not_allowed', host: opts.url };
+  }
+
+  // SSRF: reject a denied host (loopback/metadata/private) unless private egress
+  // is explicitly enabled — same guard the http seam and webhook dispatcher use.
+  if (!webhookPrivateEgressAllowed() && isDeniedWebhookHost(parsed.hostname)) {
+    return { outcome: 'host_not_allowed', host: parsed.hostname };
+  }
+
+  // The connector may only reach the provider's curated apiHosts (eTLD+1, never
+  // substring). A provider with no apiHosts (or no manifest) is NOT reachable via
+  // a connector — fail closed rather than allow an open destination.
+  const apiHosts = getProvider(opts.provider)?.apiHosts ?? [];
+  if (!apiHosts.some((ah) => hostMatchesApi(parsed.hostname, ah))) {
+    return { outcome: 'host_not_allowed', host: parsed.hostname };
+  }
+
+  // Token over https only — loopback http allowed only when private egress is on.
+  if (parsed.protocol !== 'https:' && !webhookPrivateEgressAllowed()) {
+    return { outcome: 'insecure_base' };
+  }
+
+  const resolved = await resolveConnectionCredential({
+    tenantId: deps.tenantId,
+    provider: opts.provider,
+    ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
+    ...(deps.orgId ? { orgId: deps.orgId } : {}),
+  });
+  if (!resolved) return { outcome: 'no_connection' };
+
+  try {
+    const res = await undiciFetch(opts.url, {
+      method: opts.method ?? 'GET',
+      headers: {
+        ...(opts.body !== undefined ? { 'content-type': opts.contentType ?? 'application/json; charset=utf-8' } : {}),
+        authorization: authHeader(opts.authScheme ?? 'bearer', resolved.secret),
+      },
+      ...(opts.body !== undefined ? { body: opts.body } : {}),
       dispatcher: webhookEgressDispatcher(),
       redirect: 'error',
       signal: AbortSignal.timeout(TIMEOUT_MS),

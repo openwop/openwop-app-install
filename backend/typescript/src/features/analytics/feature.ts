@@ -18,7 +18,7 @@ export const analyticsFeature: BackendFeature = {
   toggleDefault: {
     id: 'analytics',
     label: 'Analytics',
-    description: 'Public-surface measurement (page/event/conversion) + reporting — product feature (ADR 0018).',
+    description: 'Public-surface measurement (page/event/conversion) + reporting — product feature.',
     category: 'Business Tools',
     status: 'off',
     bucketUnit: 'tenant',

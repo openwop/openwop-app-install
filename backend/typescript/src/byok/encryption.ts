@@ -1,7 +1,7 @@
 /**
  * BYOK encryption at rest — AES-256-GCM with a single master key.
  *
- * Security model (sample-grade, honest about its limits):
+ * Security model (best-effort, honest about its limits):
  *
  *   ✅ Protects against: backup leakage, database file extraction,
  *      casual sqlite browser inspection.

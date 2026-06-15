@@ -1,6 +1,6 @@
 /**
  * Thin HTTP client for the notification routes at
- * `/v1/host/sample/notifications/*`.
+ * `/v1/host/openwop-app/notifications/*`.
  *
  * Mirrors the conventions of `runsClient.ts` / `interruptsClient.ts`:
  *   - re-uses `authedHeaders()` + `fetchOpts()` from config so all auth
@@ -66,7 +66,7 @@ export async function listNotifications(
   if (params.limit != null) q.set('limit', String(params.limit));
   const qs = q.toString();
   const body = await jsonFetch<{ notifications: unknown }>(
-    `/v1/host/sample/notifications${qs ? `?${qs}` : ''}`,
+    `/v1/host/openwop-app/notifications${qs ? `?${qs}` : ''}`,
   );
   if (!Array.isArray(body.notifications)) return [];
   // Drop any rows the BE returned in an unexpected shape (forward-
@@ -85,25 +85,25 @@ async function mutateAndValidate(path: string, method: 'POST' | 'DELETE' = 'POST
 
 export async function markNotificationRead(notificationId: string): Promise<Notification> {
   return mutateAndValidate(
-    `/v1/host/sample/notifications/${encodeURIComponent(notificationId)}/read`,
+    `/v1/host/openwop-app/notifications/${encodeURIComponent(notificationId)}/read`,
   );
 }
 
 export async function markNotificationUnread(notificationId: string): Promise<Notification> {
   return mutateAndValidate(
-    `/v1/host/sample/notifications/${encodeURIComponent(notificationId)}/unread`,
+    `/v1/host/openwop-app/notifications/${encodeURIComponent(notificationId)}/unread`,
   );
 }
 
 export async function archiveNotification(notificationId: string): Promise<Notification> {
   return mutateAndValidate(
-    `/v1/host/sample/notifications/${encodeURIComponent(notificationId)}/archive`,
+    `/v1/host/openwop-app/notifications/${encodeURIComponent(notificationId)}/archive`,
   );
 }
 
 export async function deleteNotification(notificationId: string): Promise<void> {
   const res = await fetch(
-    `${config.baseUrl}/v1/host/sample/notifications/${encodeURIComponent(notificationId)}`,
+    `${config.baseUrl}/v1/host/openwop-app/notifications/${encodeURIComponent(notificationId)}`,
     fetchOpts({ method: 'DELETE', headers: authedHeaders() }),
   );
   if (!res.ok) throw new Error(`delete returned ${res.status}`);
@@ -111,7 +111,7 @@ export async function deleteNotification(notificationId: string): Promise<void> 
 
 export async function markAllNotificationsRead(): Promise<{ updated: number }> {
   return jsonFetch<{ updated: number }>(
-    `/v1/host/sample/notifications:mark-all-read`,
+    `/v1/host/openwop-app/notifications:mark-all-read`,
     { method: 'POST' },
   );
 }
@@ -123,12 +123,12 @@ export async function markAllNotificationsRead(): Promise<{ updated: number }> {
  * caller gets 401 (the store treats that as "use the local cache").
  */
 export async function getPreferences(): Promise<NotificationPreferences> {
-  const body = await jsonFetch<{ preferences: unknown }>('/v1/host/sample/notifications/preferences');
+  const body = await jsonFetch<{ preferences: unknown }>('/v1/host/openwop-app/notifications/preferences');
   return normalizeServerPreferences(body.preferences);
 }
 
 export async function putPreferences(prefs: NotificationPreferences): Promise<NotificationPreferences> {
-  const body = await jsonFetch<{ preferences: unknown }>('/v1/host/sample/notifications/preferences', {
+  const body = await jsonFetch<{ preferences: unknown }>('/v1/host/openwop-app/notifications/preferences', {
     method: 'PUT',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({
@@ -205,7 +205,7 @@ const HEALTHY_UPTIME_MS = 10_000;
 export function subscribeToNotifications(handlers: NotificationStreamHandlers): () => void {
   // Dedicated SSE base URL — same rationale as the run-event stream: the
   // Firebase Hosting proxy on prod buffers SSE, so we hit Cloud Run direct.
-  const url = `${config.sseBaseUrl}/v1/host/sample/notifications/stream`;
+  const url = `${config.sseBaseUrl}/v1/host/openwop-app/notifications/stream`;
   const isBearer = config.authMode === 'bearer';
   const abort = new AbortController();
   let closed = false;

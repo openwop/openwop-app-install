@@ -17,7 +17,7 @@
  * leaves a `packTemplates` slot that the pack-install path can populate.
  *
  * Persistence: in-memory only. State wipes on process restart, matching
- * the workflow-engine sample's "demo-grade" posture for every host
+ * the workflow-engine sample's "non-durable" posture for every host
  * surface (see ARCHITECTURE.md §"Path to real backends"). Production
  * hosts swap this module for a storage-adapter-backed implementation.
  */

@@ -26,7 +26,7 @@ export interface PushConfig {
 }
 
 export async function getPushConfig(): Promise<PushConfig> {
-  const res = await fetch(`${config.baseUrl}/v1/host/sample/notifications/push/config`, fetchOpts({}));
+  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/notifications/push/config`, fetchOpts({}));
   if (!res.ok) return { enabled: false };
   return res.json() as Promise<PushConfig>;
 }
@@ -86,7 +86,7 @@ export async function enablePush(vapidPublicKey: string): Promise<{ subscription
     throw new Error('Push subscription is missing endpoint or keys');
   }
   const res = await fetch(
-    `${config.baseUrl}/v1/host/sample/notifications/push/subscribe`,
+    `${config.baseUrl}/v1/host/openwop-app/notifications/push/subscribe`,
     fetchOpts({
       method: 'POST',
       headers: { 'content-type': 'application/json', ...authedHeaders() },
@@ -120,7 +120,7 @@ export async function disablePush(): Promise<boolean> {
   // delete the one matching the local endpoint.
   try {
     const listRes = await fetch(
-      `${config.baseUrl}/v1/host/sample/notifications/push/subscriptions`,
+      `${config.baseUrl}/v1/host/openwop-app/notifications/push/subscriptions`,
       fetchOpts({ headers: authedHeaders() }),
     );
     if (listRes.ok) {
@@ -128,7 +128,7 @@ export async function disablePush(): Promise<boolean> {
       const match = body.subscriptions.find((s) => s.endpoint === sub.endpoint);
       if (match) {
         await fetch(
-          `${config.baseUrl}/v1/host/sample/notifications/push/subscriptions/${encodeURIComponent(match.subscriptionId)}`,
+          `${config.baseUrl}/v1/host/openwop-app/notifications/push/subscriptions/${encodeURIComponent(match.subscriptionId)}`,
           fetchOpts({ method: 'DELETE', headers: authedHeaders() }),
         );
       }

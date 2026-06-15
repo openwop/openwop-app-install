@@ -21,9 +21,9 @@ import { FlagIcon, PlayIcon, RotateCwIcon, PlusIcon, SearchIcon } from '../ui/ic
 import { SelectField, TextareaField } from '../ui/Field.js';
 import { demoModeCached, loadDemoMode } from '../client/demoMode.js';
 
-const SAMPLE_WORKFLOWS = [
-  { id: 'sample.demo.uppercase', label: 'sample.demo.uppercase — single-node uppercase' },
-  { id: 'sample.demo.approval-gate', label: 'sample.demo.approval-gate — uppercase gated by an approval interrupt' },
+const EXAMPLE_WORKFLOWS = [
+  { id: 'openwop-app.uppercase', label: 'openwop-app.uppercase — single-node uppercase' },
+  { id: 'openwop-app.approval-gate', label: 'openwop-app.approval-gate — uppercase gated by an approval interrupt' },
 ];
 
 // Outcome buckets shared by the figure band (which doubles as a status filter)
@@ -40,20 +40,20 @@ function statusBucket(status: string): RunStatusBucket | null {
 export function RunsIndexPage() {
   const nav = useNavigate();
   const { user, isConfigured } = useAuth();
-  // Built-in sample workflows are demo scaffolding — offered only on the public
+  // Built-in example workflows are optional scaffolding — offered only on the public
   // showcase deployment, never on a clean / white-label install.
   const [demo, setDemo] = useState(demoModeCached());
   useEffect(() => { void loadDemoMode().then(setDemo); }, []);
   const savedWorkflows = useMemo(() => listSavedWorkflows(), []);
   const allOptions = useMemo(
     () => [
-      ...(demo ? SAMPLE_WORKFLOWS : []),
+      ...(demo ? EXAMPLE_WORKFLOWS : []),
       ...savedWorkflows.map((wf) => ({ id: wf.id, label: `${wf.name} — ${wf.nodes.length} nodes (saved in builder)` })),
     ],
     [savedWorkflows, demo],
   );
   const [workflowId, setWorkflowId] = useState('');
-  // Pick the first option once the (demo-gated) list resolves; never overwrite a
+  // Pick the first option once the (feature-gated) list resolves; never overwrite a
   // user's explicit choice.
   useEffect(() => { setWorkflowId((cur) => cur || allOptions[0]?.id || ''); }, [allOptions]);
   const [inputsRaw, setInputsRaw] = useState(() => (demoModeCached() ? JSON.stringify({ text: 'hello world' }, null, 2) : '{}'));
@@ -274,7 +274,7 @@ export function RunsIndexPage() {
               <StateCard
                 icon={<PlayIcon size={22} />}
                 title="No runs yet"
-                body="Submit a workflow on the live sample host and watch it stream — status, events, and outputs land in real time."
+                body="Submit a workflow and watch it stream — status, events, and outputs land in real time."
                 action={
                   <button type="button" className="btn-accent-solid" onClick={focusCreateForm}>
                     <PlusIcon size={14} /> Create a run
@@ -340,7 +340,7 @@ export function RunsIndexPage() {
       </div>
 
       <div className="surface-card">
-        <h2>About this sample</h2>
+        <h2>About this app</h2>
         <p className="muted">
           The two seeded workflows are defined in the backend's <code>workflowCatalog</code>
           (<code>src/host/index.ts</code>). The first runs end-to-end without HITL; the

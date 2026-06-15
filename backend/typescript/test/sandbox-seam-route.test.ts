@@ -13,8 +13,8 @@ import { createApp } from '../src/index.js';
 
 const PORT = 18271;
 const BASE = `http://127.0.0.1:${PORT}`;
-const H = { authorization: 'Bearer sample-token', 'content-type': 'application/json' };
-const INVOKE = `${BASE}/v1/host/sample/test/sandbox-invoke`;
+const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
+const INVOKE = `${BASE}/v1/host/openwop-app/test/sandbox-invoke`;
 
 let server: http.Server;
 

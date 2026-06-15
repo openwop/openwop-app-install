@@ -1,13 +1,13 @@
 /**
  * Admin routes (P0.5 of the app.openwop.dev deploy hardening).
- * Vendor-prefixed under /v1/host/sample/admin/* — outside the OpenWOP
+ * Vendor-prefixed under /v1/host/openwop-app/admin/* — outside the OpenWOP
  * wire contract. Authed via a separate Bearer token from
  * OPENWOP_ADMIN_TOKEN (NOT the regular OPENWOP_API_KEYS) so admin
  * privileges don't leak through a regular API key.
  *
  * Endpoints:
  *
- *   POST /v1/host/sample/admin/cleanup
+ *   POST /v1/host/openwop-app/admin/cleanup
  *     Daily cleanup: wipes anon-session ephemeral BYOK secrets that
  *     haven't been touched in the cleanup window (default 24h). The
  *     session cookie itself expires after 24h, so any secret keyed by
@@ -27,7 +27,7 @@
  *
  *     Cloud Scheduler hits this daily at 03:00 UTC:
  *       gcloud scheduler jobs create http openwop-app-daily-cleanup \
- *         --schedule="0 3 * * *" --uri="https://app.openwop.dev/api/v1/host/sample/admin/cleanup" \
+ *         --schedule="0 3 * * *" --uri="https://app.openwop.dev/api/v1/host/openwop-app/admin/cleanup" \
  *         --http-method=POST --headers="Authorization=Bearer <ADMIN-TOKEN>"
  *
  * Authn: requires `Authorization: Bearer <token>` where token matches
@@ -90,7 +90,7 @@ function authAdmin(req: Request, res: Response): boolean {
 }
 
 export function registerAdminRoutes(app: Express): void {
-  app.post('/v1/host/sample/admin/cleanup', (req, res) => {
+  app.post('/v1/host/openwop-app/admin/cleanup', (req, res) => {
     if (!authAdmin(req, res)) return;
 
     // Cleanup window: any tenant whose `lastSeen` is older than this
@@ -126,7 +126,7 @@ export function registerAdminRoutes(app: Express): void {
 
   // GET variant for liveness / monitoring — returns current state
   // without performing any cleanup. Still admin-authed.
-  app.get('/v1/host/sample/admin/cleanup/status', (req, res) => {
+  app.get('/v1/host/openwop-app/admin/cleanup/status', (req, res) => {
     if (!authAdmin(req, res)) return;
     const now = Date.now();
     res.json({

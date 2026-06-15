@@ -1122,6 +1122,14 @@ button.secondary:hover {
   color: var(--ink);
 }
 
+/* A destructive secondary button (`.secondary.u-text-danger`, e.g. the agent
+ * "Delete" + the user-agent template Delete) must KEEP its danger-red on hover —
+ * `button.secondary:hover` (0,2,1) above otherwise beats the `.u-text-danger`
+ * utility (0,1,0) and reverts the text to `--ink`, dropping the affordance. */
+button.secondary.u-text-danger:hover {
+  color: var(--color-danger-text);
+}
+
 input, textarea, select {
   font-family: var(--sans);
   font-size: 13px;
@@ -5965,6 +5973,110 @@ button.figure-tile.figure-tile--active:hover { background: var(--clay-soft); }
 .agentws-portfolio-list { margin: 0; padding-left: 1.1rem; font-size: 0.82rem; }
 .agentws-next-steps-list { margin: 0.4rem 0 0; padding-left: 1.1rem; font-size: 0.84rem; }
 
+/* Agent health (ADR 0029) — the Chief of Staff operating-metrics panel. KPI
+   tiles reuse the run-stat / wf-outcome display-numeral house style; only the
+   two unambiguous alarms (failed actions, stale commitments) carry colour. */
+.agenthealth { gap: var(--space-4); }
+.agenthealth-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: var(--space-3); flex-wrap: wrap;
+}
+.agenthealth-head h2 { font-size: 1.05rem; }
+/* Verdict strip — the one-glance answer + next step, tinted by severity. The
+   two alarms (danger/warn) and attention (accent) carry colour; healthy/idle
+   stay quiet so the panel only "lights up" when it has something to say. */
+.agenthealth-verdict {
+  display: flex; align-items: center; gap: var(--space-2);
+  padding: var(--space-2) var(--space-3); border-radius: var(--radius);
+  font-size: 13px; line-height: 1.4;
+}
+.agenthealth-verdict svg { flex-shrink: 0; }
+.agenthealth-verdict strong { font-weight: 600; }
+.agenthealth-verdict--danger  { background: color-mix(in oklch, var(--color-danger) 12%, transparent);  color: var(--color-danger-text); }
+.agenthealth-verdict--warn    { background: color-mix(in oklch, var(--color-warning) 14%, transparent); color: var(--color-warning-text); }
+.agenthealth-verdict--accent  { background: var(--clay-soft); color: var(--color-accent); }
+.agenthealth-verdict--success { background: color-mix(in oklch, var(--color-success) 12%, transparent); color: var(--color-success-text); }
+.agenthealth-verdict--muted   { background: var(--color-surface-2); color: var(--color-text-muted); }
+/* Summary row — the focal approval gauge beside the verdict. The gauge is
+   absent until there's action data, so an idle agent shows just the verdict. */
+.agenthealth-summary { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+.agenthealth-summary .agenthealth-verdict { flex: 1 1 280px; }
+.agenthealth-gauge { position: relative; width: 72px; height: 72px; flex-shrink: 0; }
+.agenthealth-gauge-svg { display: block; width: 72px; height: 72px; }
+.agenthealth-gauge-track { stroke: var(--color-border); }
+.agenthealth-gauge-fill { stroke: var(--color-accent); transition: stroke-dashoffset 700ms cubic-bezier(0.2, 0.7, 0.2, 1); }
+.agenthealth-gauge-c {
+  position: absolute; inset: 0; display: grid; place-content: center;
+  justify-items: center; gap: 1px; text-align: center;
+}
+.agenthealth-gauge-n {
+  font-family: var(--serif); font-size: 1.15rem; line-height: 1;
+  color: var(--ink); font-variant-numeric: tabular-nums;
+}
+.agenthealth-gauge-l { font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink-3); }
+.agenthealth-section { display: grid; gap: var(--space-2-5); }
+.agenthealth-group {
+  margin: 0; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--ink-3);
+}
+.agenthealth-tiles {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: var(--space-2);
+}
+.agenthealth-tile {
+  display: flex; flex-direction: column; gap: var(--space-1);
+  padding: var(--space-2-5) var(--space-3);
+  border: 1px solid var(--color-border); border-radius: var(--radius-lg);
+  background: var(--color-surface-2);
+}
+.agenthealth-tile-l {
+  display: inline-flex; align-items: center; gap: var(--space-1);
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3);
+}
+.agenthealth-tile-l svg { color: var(--ink-3); flex-shrink: 0; }
+.agenthealth-n {
+  font-family: var(--serif); font-size: 1.9rem; line-height: 1;
+  color: var(--ink); font-variant-numeric: tabular-nums;
+}
+.agenthealth-tile--danger { border-color: color-mix(in oklch, var(--color-danger) 40%, var(--color-border)); }
+.agenthealth-tile--danger .agenthealth-n { color: var(--color-danger-text); }
+.agenthealth-tile--warn { border-color: color-mix(in oklch, var(--color-warning) 40%, var(--color-border)); }
+.agenthealth-tile--warn .agenthealth-n { color: var(--color-warning-text); }
+/* Accent = "needs you" (pending approval) — an attention cue, not an alarm, so
+   the border lifts but the numeral stays ink. */
+.agenthealth-tile--accent { border-color: color-mix(in oklch, var(--color-accent) 45%, var(--color-border)); }
+.agenthealth-rates {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--space-2) var(--space-4);
+}
+.agenthealth-rate { display: grid; gap: var(--space-1); }
+.agenthealth-rate-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); }
+.agenthealth-rate-l {
+  display: inline-flex; align-items: center; gap: var(--space-1-5);
+  font-size: 12.5px; color: var(--ink-2);
+}
+.agenthealth-rate-l svg { color: var(--ink-3); flex-shrink: 0; }
+.agenthealth-rate-v { font-size: 13px; font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; }
+.agenthealth-meter {
+  display: block; height: 5px; border-radius: 999px;
+  background: var(--color-surface-2); overflow: hidden;
+}
+.agenthealth-meter-fill {
+  display: block; height: 100%; border-radius: 999px;
+  background: var(--color-accent); transition: width 240ms ease;
+  transform-origin: left center; animation: agenthealth-grow 560ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+}
+@keyframes agenthealth-grow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.agenthealth-hint {
+  display: inline-flex; align-items: center; gap: var(--space-1-5);
+  margin: 0; font-size: 12.5px;
+}
+.agenthealth-hint svg { color: var(--ink-3); flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .agenthealth-meter-fill { transition: none; animation: none; }
+  .agenthealth-gauge-fill { transition: none; }
+}
+
 /* AvatarEditor.tsx */
 .avatared-backdrop { z-index: 1000; }
 .avatared-dialog { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; z-index: 1001; padding: var(--space-4); pointer-events: none; }
@@ -6008,6 +6120,27 @@ button.figure-tile.figure-tile--active:hover { background: var(--clay-soft); }
 .agentinstr-saved { margin-top: 0.6rem; }
 .agentinstr-saved-card { padding: 0.5rem 0.7rem; margin-top: 4px; }
 .agentinstr-readonly { border: 1px solid var(--color-border); border-radius: 10px; padding: 0.7rem; background: var(--color-surface-2); }
+
+/* AgentProfilePanel.tsx (ADR 0031 §1d) — the rich agentProfile view/edit. */
+.agentprofile-root { max-width: 760px; }
+.agentprofile-card { padding: var(--space-3) var(--space-4); }
+.agentprofile-section-head { display: flex; align-items: flex-start; gap: var(--space-2); margin-bottom: var(--space-3); }
+.agentprofile-section-icon { display: inline-flex; margin-top: 1px; }
+.agentprofile-row { display: grid; grid-template-columns: minmax(140px, 200px) 1fr; gap: var(--space-3); padding: var(--space-2) 0; align-items: start; border-top: 1px solid var(--color-border); }
+.agentprofile-row:first-of-type { border-top: none; }
+.agentprofile-row-label { padding-top: 2px; }
+.agentprofile-derived { display: flex; align-items: center; gap: var(--space-2); margin: var(--space-2) 0 var(--space-3); }
+.agentprofile-json { font-family: var(--font-mono); font-size: 12px; }
+.agentprofile-kv { display: grid; gap: var(--space-2); margin: 0; }
+.agentprofile-kv-row { display: grid; grid-template-columns: minmax(140px, 200px) 1fr; gap: var(--space-3); }
+.agentprofile-modal { width: min(720px, 92vw); max-height: 88vh; overflow-y: auto; }
+
+/* AgentKnowledgePanel.tsx (ADR 0038) */
+.agentknowledge-card { padding: var(--space-3) var(--space-4); }
+.agentknowledge-section-head { display: flex; align-items: flex-start; gap: var(--space-2); }
+.agentknowledge-section-head > span[aria-hidden] { display: inline-flex; margin-top: 1px; }
+.agentknowledge-inset { padding: var(--space-3); background: var(--color-surface-2); }
+.agentknowledge-collection { display: block; }
 
 /* RosterPage.tsx */
 .roster-card { border: 1px solid var(--color-border); background: var(--color-surface); border-radius: 10px; padding: 0.7rem 0.8rem; margin-bottom: 0.5rem; }
@@ -6124,6 +6257,26 @@ button.figure-tile.figure-tile--active:hover { background: var(--clay-soft); }
 
 /* CsmPage.tsx */
 .csm-score-input { width: 100px; }
+
+/* MarketplacePage.tsx (ADR 0022) */
+.mkt-search { display: flex; align-items: center; gap: var(--space-2); }
+.mkt-search input { flex: 1 1 auto; border: none; background: transparent; color: var(--color-text); font-size: var(--text-body); }
+.mkt-search input:focus { outline: none; }
+.mkt-list { list-style: none; margin: 0; padding: 0; } /* reuses .card-grid for the responsive grid (incl. the 1-col mobile fallback) */
+.mkt-card { display: flex; flex-direction: column; gap: var(--space-2); }
+.mkt-card-head { display: flex; align-items: flex-start; gap: var(--space-2); }
+.mkt-card-head > .u-grid { flex: 1 1 auto; min-width: 0; }
+.mkt-card-title { font-size: var(--text-lg); font-weight: 600; word-break: break-word; }
+.mkt-card-desc { margin: 0; color: var(--color-text); font-size: var(--text-sm); }
+.mkt-card-meta { margin: 0; font-size: var(--text-sm); }
+.mkt-card .action-bar { margin-top: auto; }
+.mkt-stars { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--star-glow); }
+.mkt-star-btn { padding: 0; color: var(--star-glow); }
+.mkt-summary { display: inline-flex; align-items: center; gap: var(--space-2); }
+.mkt-reviews { list-style: none; margin: 0; padding: 0; }
+.mkt-review-head { display: flex; align-items: center; gap: var(--space-2); }
+.mkt-review-head > .u-text-muted { flex: 1 1 auto; font-size: var(--text-sm); }
+.mkt-review-body { margin: var(--space-1) 0 0; font-size: var(--text-sm); }
 
 /* WorkforceOverviewPage.tsx — (.wforce-metric-val + .wforce-telemetry-grid removed
  * 2026-06-11: the telemetry band is now <KeyFigureBand>.) */

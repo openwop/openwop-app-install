@@ -11,7 +11,7 @@
  * The verifyPackSignature helper takes a tarball path + public key
  * and asserts SRI + Ed25519 in the way real registries serve packs.
  * The bootstrap path uses loadPackFromManifest, which trusts on-disk
- * packs (sample-grade — real impls require signed tarballs).
+ * packs (best-effort — real impls require signed tarballs).
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -96,7 +96,7 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
   const entryPath = join(packDir, entry);
   const moduleUrl = pathToFileURL(entryPath).toString();
 
-  // Dynamic import. Sample-grade — no sandbox. Real hosts run packs
+  // Dynamic import. Best-effort — no sandbox. Real hosts run packs
   // in a worker_threads sandbox or wasm runtime per RFC 0008.
   const loaded = (await import(moduleUrl)) as { nodes?: Record<string, unknown> };
   if (!loaded.nodes || typeof loaded.nodes !== 'object') {

@@ -80,7 +80,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam. Pass a shared `tenantId` to make co-tenant users.
 async function signup(c: ReturnType<typeof client>, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('p'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('p'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -119,18 +119,18 @@ describe('profiles Phase 1 — always-on (graduated off its toggle)', () => {
     await enableProfiles('off');
     const c = client();
     await signup(c);
-    const r = await c.get('/v1/host/sample/profiles/me');
+    const r = await c.get('/v1/host/openwop-app/profiles/me');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
   });
 
   it('self-serve display name: PATCH /users/me sets it; the profile surfaces it', async () => {
     const c = client();
     await signup(c);
-    const set = await c.patch('/v1/host/sample/users/me', { displayName: 'Jordan Rivera' });
+    const set = await c.patch('/v1/host/openwop-app/users/me', { displayName: 'Jordan Rivera' });
     expect(set.status, JSON.stringify(set.body)).toBe(200);
     expect(set.body.displayName).toBe('Jordan Rivera');
     // The profile view surfaces the user's display name (read from identity).
-    const prof = await c.get('/v1/host/sample/profiles/me');
+    const prof = await c.get('/v1/host/openwop-app/profiles/me');
     expect(prof.body.displayName).toBe('Jordan Rivera');
   });
 });
@@ -141,25 +141,25 @@ describe('profiles — agent pinning (ADR 0023)', () => {
     const c = client();
     await signup(c);
     // Seed the tenant's roster so there's a real agent to pin.
-    const seeded = await c.post('/v1/host/sample/demo/seed', {});
+    const seeded = await c.post('/v1/host/openwop-app/example-data/seed', {});
     expect(seeded.status).toBe(200);
-    const roster = await c.get('/v1/host/sample/roster');
+    const roster = await c.get('/v1/host/openwop-app/roster');
     const agent = (roster.body.roster as Array<{ rosterId: string }>)[0]!;
     expect(agent?.rosterId).toBeTruthy();
 
     // Pin → appears in pinnedAgentIds; idempotent.
-    const p1 = await c.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    const p1 = await c.put(`/v1/host/openwop-app/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
     expect(p1.status, JSON.stringify(p1.body)).toBe(200);
     expect(p1.body.pinnedAgentIds).toContain(agent.rosterId);
-    const p2 = await c.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    const p2 = await c.put(`/v1/host/openwop-app/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
     expect(p2.body.pinnedAgentIds.filter((id: string) => id === agent.rosterId)).toHaveLength(1);
 
     // Unknown agent → 404 (fail-closed, no phantom pins).
-    const bad = await c.put('/v1/host/sample/profiles/me/pinned-agents/host:does-not-exist');
+    const bad = await c.put('/v1/host/openwop-app/profiles/me/pinned-agents/host:does-not-exist');
     expect(bad.status).toBe(404);
 
     // Unpin → removed.
-    const u = await c.del(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    const u = await c.del(`/v1/host/openwop-app/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
     expect(u.status).toBe(200);
     expect(u.body.pinnedAgentIds).not.toContain(agent.rosterId);
   });
@@ -170,7 +170,7 @@ describe('profiles — agent pinning (ADR 0023)', () => {
     await signup(c);
     // Pinning an unknown agent 404s; UN-pinning one is always safe (you're
     // removing an id from your OWN list) — this is how the sidebar self-heals.
-    const unpin = await c.del('/v1/host/sample/profiles/me/pinned-agents/host:never-existed');
+    const unpin = await c.del('/v1/host/openwop-app/profiles/me/pinned-agents/host:never-existed');
     expect(unpin.status, JSON.stringify(unpin.body)).toBe(200);
   });
 
@@ -178,16 +178,16 @@ describe('profiles — agent pinning (ADR 0023)', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    await c.post('/v1/host/sample/demo/seed', {});
-    const roster = await c.get('/v1/host/sample/roster');
+    await c.post('/v1/host/openwop-app/example-data/seed', {});
+    const roster = await c.get('/v1/host/openwop-app/roster');
     const agent = (roster.body.roster as Array<{ rosterId: string }>)[0]!;
-    await c.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
-    expect((await c.get('/v1/host/sample/profiles/me')).body.pinnedAgentIds).toContain(agent.rosterId);
+    await c.put(`/v1/host/openwop-app/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
+    expect((await c.get('/v1/host/openwop-app/profiles/me')).body.pinnedAgentIds).toContain(agent.rosterId);
 
     // Clearing the agents step deletes the roster members AND cascades the unpin.
-    const cleared = await c.post('/v1/host/sample/demo/clear', { steps: ['agents'] });
+    const cleared = await c.post('/v1/host/openwop-app/example-data/clear', { steps: ['agents'] });
     expect(cleared.status).toBe(200);
-    const me = await c.get('/v1/host/sample/profiles/me');
+    const me = await c.get('/v1/host/openwop-app/profiles/me');
     expect(me.body.pinnedAgentIds).not.toContain(agent.rosterId);
   });
 
@@ -197,11 +197,11 @@ describe('profiles — agent pinning (ADR 0023)', () => {
     // Give bob's DIFFERENT tenant an agent; alice must not be able to pin it.
     const other = client();
     await signup(other, { tenantId: `user:other-${Date.now()}` });
-    await other.post('/v1/host/sample/demo/seed', {});
-    const otherRoster = await other.get('/v1/host/sample/roster');
+    await other.post('/v1/host/openwop-app/example-data/seed', {});
+    const otherRoster = await other.get('/v1/host/openwop-app/roster');
     const foreign = (otherRoster.body.roster as Array<{ rosterId: string }>)[0]!;
     void bob;
-    const r = await alice.put(`/v1/host/sample/profiles/me/pinned-agents/${encodeURIComponent(foreign.rosterId)}`);
+    const r = await alice.put(`/v1/host/openwop-app/profiles/me/pinned-agents/${encodeURIComponent(foreign.rosterId)}`);
     expect(r.status).toBe(404);
   });
 });
@@ -211,7 +211,7 @@ describe('profiles Phase 1 — self-service CRUD', () => {
     await enableProfiles('on');
     const c = client();
     const me = await signup(c);
-    const r = await c.get('/v1/host/sample/profiles/me');
+    const r = await c.get('/v1/host/openwop-app/profiles/me');
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.userId).toBe(me.userId);
     expect(r.body.completeness).toBe(0);
@@ -224,7 +224,7 @@ describe('profiles Phase 1 — self-service CRUD', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    const patch = await c.patch('/v1/host/sample/profiles/me', {
+    const patch = await c.patch('/v1/host/openwop-app/profiles/me', {
       jobTitle: 'Staff Engineer',
       department: 'Platform',
       bio: 'I build reference hosts.',
@@ -237,7 +237,7 @@ describe('profiles Phase 1 — self-service CRUD', () => {
     // 10 (job) + 10 (dept) + 15 (bio) + 5 (equip) + 10 (interests) + 10 (avail) = 60
     expect(patch.body.completeness).toBe(60);
     // Persisted: a fresh read reflects it.
-    const after = await c.get('/v1/host/sample/profiles/me');
+    const after = await c.get('/v1/host/openwop-app/profiles/me');
     expect(after.body.department).toBe('Platform');
     expect(after.body.availability.status).toBe('available');
   });
@@ -246,11 +246,11 @@ describe('profiles Phase 1 — self-service CRUD', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    await c.patch('/v1/host/sample/profiles/me', { bio: 'temporary' });
-    const before = await c.get('/v1/host/sample/profiles/me');
+    await c.patch('/v1/host/openwop-app/profiles/me', { bio: 'temporary' });
+    const before = await c.get('/v1/host/openwop-app/profiles/me');
     expect(before.body.bio).toBe('temporary');
     expect(before.body.completeness).toBe(15);
-    const cleared = await c.patch('/v1/host/sample/profiles/me', { bio: null });
+    const cleared = await c.patch('/v1/host/openwop-app/profiles/me', { bio: null });
     expect(cleared.body.bio).toBeUndefined();
     expect(cleared.body.completeness).toBe(0);
   });
@@ -259,7 +259,7 @@ describe('profiles Phase 1 — self-service CRUD', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    const r = await c.patch('/v1/host/sample/profiles/me', { availability: { status: 'vacationing' } });
+    const r = await c.patch('/v1/host/openwop-app/profiles/me', { availability: { status: 'vacationing' } });
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('validation_error');
   });
@@ -268,7 +268,7 @@ describe('profiles Phase 1 — self-service CRUD', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    const r = await c.patch('/v1/host/sample/profiles/me', { bio: 'my key is sk-abcdefghijklmnop please ignore' });
+    const r = await c.patch('/v1/host/openwop-app/profiles/me', { bio: 'my key is sk-abcdefghijklmnop please ignore' });
     expect(r.body.bio).toContain('[REDACTED:secret-shaped]');
     expect(r.body.bio).not.toContain('sk-abcdefghijklmnop');
   });
@@ -279,35 +279,35 @@ describe('profiles Phase 1 — directory + team-read + IDOR', () => {
     await enableProfiles('on');
     const alice = client();
     const a = await signup(alice);
-    await alice.get('/v1/host/sample/profiles/me'); // materialize
+    await alice.get('/v1/host/openwop-app/profiles/me'); // materialize
 
     // Directory (tenant-scoped) contains alice's own profile.
-    const dir = await alice.get('/v1/host/sample/profiles');
+    const dir = await alice.get('/v1/host/openwop-app/profiles');
     expect(dir.status).toBe(200);
     expect(dir.body.profiles.some((p: { userId: string }) => p.userId === a.userId)).toBe(true);
 
     // By-id read of self (the team-visible path).
-    const self = await alice.get(`/v1/host/sample/profiles/${encodeURIComponent(a.userId)}`);
+    const self = await alice.get(`/v1/host/openwop-app/profiles/${encodeURIComponent(a.userId)}`);
     expect(self.status).toBe(200);
     expect(self.body.userId).toBe(a.userId);
 
     // A second user in a DIFFERENT (anon-derived) tenant.
     const bob = client();
     const b = await signup(bob);
-    await bob.get('/v1/host/sample/profiles/me');
+    await bob.get('/v1/host/openwop-app/profiles/me');
 
     // Cross-tenant IDOR guard: alice cannot read bob's profile by id (404, no leak).
-    const foreign = await alice.get(`/v1/host/sample/profiles/${encodeURIComponent(b.userId)}`);
+    const foreign = await alice.get(`/v1/host/openwop-app/profiles/${encodeURIComponent(b.userId)}`);
     expect(foreign.status).toBe(404);
     // And alice's directory does not contain bob.
-    const dir2 = await alice.get('/v1/host/sample/profiles');
+    const dir2 = await alice.get('/v1/host/openwop-app/profiles');
     expect(dir2.body.profiles.some((p: { userId: string }) => p.userId === b.userId)).toBe(false);
   });
 
   it('anonymous (not signed in) is refused', async () => {
     await enableProfiles('on');
     const anon = client(); // no signup → anonymous session
-    const r = await anon.get('/v1/host/sample/profiles/me');
+    const r = await anon.get('/v1/host/openwop-app/profiles/me');
     expect(r.status).toBe(401);
   });
 });
@@ -315,7 +315,7 @@ describe('profiles Phase 1 — directory + team-read + IDOR', () => {
 // A 1×1 transparent PNG.
 const PNG_1x1 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 async function upload(c: ReturnType<typeof client>, contentType: string, contentBase64: string): Promise<string> {
-  const r = await c.post('/v1/host/sample/media/upload', { contentBase64, contentType, name: 'a' });
+  const r = await c.post('/v1/host/openwop-app/media/upload', { contentBase64, contentType, name: 'a' });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.token;
 }
@@ -327,12 +327,12 @@ describe('profiles Phase 2 — avatar + portfolio (media-asset refs)', () => {
     await signup(c);
     const token = await upload(c, 'image/png', PNG_1x1);
 
-    const resp = await c.put('/v1/host/sample/profiles/me/avatar', { token });
+    const resp = await c.put('/v1/host/openwop-app/profiles/me/avatar', { token });
     expect(resp.status, JSON.stringify(resp.body)).toBe(200);
     expect(resp.body.avatarAssetToken).toBe(token);
     expect(resp.body.completeness).toBe(15);
 
-    const del = await c.del('/v1/host/sample/profiles/me/avatar');
+    const del = await c.del('/v1/host/openwop-app/profiles/me/avatar');
     expect(del.status).toBe(200);
     expect(del.body.avatarAssetToken).toBeUndefined();
     expect(del.body.completeness).toBe(0);
@@ -347,12 +347,12 @@ describe('profiles Phase 2 — avatar + portfolio (media-asset refs)', () => {
 
     // Bob's token cannot be used by Alice (different tenant) → 404.
     const bobToken = await upload(bob, 'image/png', PNG_1x1);
-    const foreign = await alice.put('/v1/host/sample/profiles/me/avatar', { token: bobToken });
+    const foreign = await alice.put('/v1/host/openwop-app/profiles/me/avatar', { token: bobToken });
     expect(foreign.status).toBe(404);
 
     // A non-image asset in Alice's own tenant → 400.
     const textToken = await upload(alice, 'text/plain', Buffer.from('hello').toString('base64'));
-    const notImage = await alice.put('/v1/host/sample/profiles/me/avatar', { token: textToken });
+    const notImage = await alice.put('/v1/host/openwop-app/profiles/me/avatar', { token: textToken });
     expect(notImage.status).toBe(400);
   });
 
@@ -362,20 +362,20 @@ describe('profiles Phase 2 — avatar + portfolio (media-asset refs)', () => {
     await signup(c);
     const token = await upload(c, 'image/png', PNG_1x1);
 
-    const add = await c.post('/v1/host/sample/profiles/me/portfolio', { token });
+    const add = await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token });
     expect(add.status, JSON.stringify(add.body)).toBe(201);
     expect(add.body.portfolioAssetTokens).toContain(token);
     expect(add.body.completeness).toBe(10);
 
     // Idempotent re-add (still one entry).
-    const again = await c.post('/v1/host/sample/profiles/me/portfolio', { token });
+    const again = await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token });
     expect(again.body.portfolioAssetTokens.filter((t: string) => t === token)).toHaveLength(1);
 
-    const del = await c.del(`/v1/host/sample/profiles/me/portfolio/${encodeURIComponent(token)}`);
+    const del = await c.del(`/v1/host/openwop-app/profiles/me/portfolio/${encodeURIComponent(token)}`);
     expect(del.status).toBe(200);
     expect(del.body.portfolioAssetTokens).not.toContain(token);
 
-    const delMissing = await c.del(`/v1/host/sample/profiles/me/portfolio/${encodeURIComponent(token)}`);
+    const delMissing = await c.del(`/v1/host/openwop-app/profiles/me/portfolio/${encodeURIComponent(token)}`);
     expect(delMissing.status).toBe(404);
   });
 });
@@ -387,7 +387,7 @@ describe('profiles Phase 3 — skills + endorsements', () => {
     const aliceSkill = (body: any, name: string): any => body.skills.find((s: { name: string }) => s.name === name);
 
     // Alice declares skills.
-    const sk = await alice.put('/v1/host/sample/profiles/me/skills', {
+    const sk = await alice.put('/v1/host/openwop-app/profiles/me/skills', {
       skills: [{ name: 'TypeScript', proficiency: 5 }, { name: 'Rust', proficiency: 3 }],
     });
     expect(sk.status, JSON.stringify(sk.body)).toBe(200);
@@ -395,16 +395,16 @@ describe('profiles Phase 3 — skills + endorsements', () => {
     expect(sk.body.completeness).toBe(15); // skills present
 
     // Bob endorses Alice's TypeScript.
-    const end = await bob.post(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
+    const end = await bob.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
     expect(end.status, JSON.stringify(end.body)).toBe(200);
     expect(aliceSkill(end.body, 'TypeScript').endorsements).toContain(bobId);
 
     // Idempotent re-endorse (still one).
-    const again = await bob.post(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
+    const again = await bob.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
     expect(aliceSkill(again.body, 'TypeScript').endorsements.filter((e: string) => e === bobId)).toHaveLength(1);
 
     // Editing the skill list PRESERVES endorsements on a surviving skill and drops a removed one.
-    const edited = await alice.put('/v1/host/sample/profiles/me/skills', {
+    const edited = await alice.put('/v1/host/openwop-app/profiles/me/skills', {
       skills: [{ name: 'TypeScript', proficiency: 4 }, { name: 'Go', proficiency: 2 }],
     });
     expect(aliceSkill(edited.body, 'TypeScript').endorsements).toContain(bobId); // preserved
@@ -412,25 +412,25 @@ describe('profiles Phase 3 — skills + endorsements', () => {
     expect(aliceSkill(edited.body, 'Rust')).toBeUndefined(); // removed
 
     // Un-endorse.
-    const un = await bob.del(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
+    const un = await bob.del(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
     expect(aliceSkill(un.body, 'TypeScript').endorsements).not.toContain(bobId);
 
     // Self-endorsement is forbidden.
-    const selfEnd = await alice.post(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
+    const selfEnd = await alice.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
     expect(selfEnd.status).toBe(403);
 
     // A non-existent skill → 404.
-    const noSkill = await bob.post(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}/skills/COBOL/endorse`);
+    const noSkill = await bob.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/COBOL/endorse`);
     expect(noSkill.status).toBe(404);
 
     // A cross-tenant endorser can't even see Alice → 404 (IDOR guard).
     const stranger = client();
     await signup(stranger);
-    const xt = await stranger.post(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
+    const xt = await stranger.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
     expect(xt.status).toBe(404);
 
     // Malformed skills payload → 400.
-    const bad = await alice.put('/v1/host/sample/profiles/me/skills', { skills: [{ name: 'X' }] });
+    const bad = await alice.put('/v1/host/openwop-app/profiles/me/skills', { skills: [{ name: 'X' }] });
     expect(bad.status).toBe(400);
   });
 });
@@ -442,23 +442,23 @@ describe('ADR 0025 — personal activity feed', () => {
     await signup(c);
 
     // Empty for a fresh user (no orchestrated runs yet).
-    const empty = await c.get('/v1/host/sample/profiles/me/activity');
+    const empty = await c.get('/v1/host/openwop-app/profiles/me/activity');
     expect(empty.status, JSON.stringify(empty.body)).toBe(200);
     expect(empty.body.items).toEqual([]);
     expect(empty.body.truncated).toBe(false);
 
     // Register a workflow, schedule it for me, and fire it.
     const wfId = 'wf.activity-e2e';
-    const reg = await c.post('/v1/host/sample/workflows', { workflowId: wfId, nodes: [{ nodeId: 'op', typeId: 'test.passthrough', config: {} }], edges: [] });
+    const reg = await c.post('/v1/host/openwop-app/workflows', { workflowId: wfId, nodes: [{ nodeId: 'op', typeId: 'test.passthrough', config: {} }], edges: [] });
     expect(reg.status, JSON.stringify(reg.body)).toBe(201);
-    const job = await c.post('/v1/host/sample/scheduler/jobs', { owner: 'me', cronExpr: '0 9 * * *', workflowId: wfId });
+    const job = await c.post('/v1/host/openwop-app/scheduler/jobs', { owner: 'me', cronExpr: '0 9 * * *', workflowId: wfId });
     expect(job.status, JSON.stringify(job.body)).toBe(201);
-    const trig = await c.post(`/v1/host/sample/scheduler/jobs/${encodeURIComponent(job.body.jobId)}/trigger`, {});
+    const trig = await c.post(`/v1/host/openwop-app/scheduler/jobs/${encodeURIComponent(job.body.jobId)}/trigger`, {});
     expect(trig.status, JSON.stringify(trig.body)).toBe(200);
     expect(trig.body.runId).toBeTruthy();
 
     // The fired run is attributed to the user → appears in /me/activity.
-    const act = await c.get('/v1/host/sample/profiles/me/activity');
+    const act = await c.get('/v1/host/openwop-app/profiles/me/activity');
     expect(act.status).toBe(200);
     const item = act.body.items.find((i: any) => i.runId === trig.body.runId);
     expect(item, JSON.stringify(act.body.items)).toBeTruthy();
@@ -468,7 +468,7 @@ describe('ADR 0025 — personal activity feed', () => {
 
     // Graduated to always-on — still serves with the toggle "off" (a no-op now).
     await enableProfiles('off');
-    const stillServes = await c.get('/v1/host/sample/profiles/me/activity');
+    const stillServes = await c.get('/v1/host/openwop-app/profiles/me/activity');
     expect(stillServes.status).toBe(200);
   });
 });
@@ -480,24 +480,24 @@ describe('ADR 0025 — assigned-workflow portfolio', () => {
     await signup(c);
 
     // Empty by default.
-    const fresh = await c.get('/v1/host/sample/profiles/me');
+    const fresh = await c.get('/v1/host/openwop-app/profiles/me');
     expect(fresh.body.workflows).toEqual([]);
 
     // Set a portfolio — duplicates collapse, order preserved.
-    const set = await c.put('/v1/host/sample/profiles/me/workflows', { workflows: ['wf.a', 'wf.b', 'wf.a'] });
+    const set = await c.put('/v1/host/openwop-app/profiles/me/workflows', { workflows: ['wf.a', 'wf.b', 'wf.a'] });
     expect(set.status, JSON.stringify(set.body)).toBe(200);
     expect(set.body.workflows).toEqual(['wf.a', 'wf.b']);
 
     // Persists across reads.
-    const after = await c.get('/v1/host/sample/profiles/me');
+    const after = await c.get('/v1/host/openwop-app/profiles/me');
     expect(after.body.workflows).toEqual(['wf.a', 'wf.b']);
 
     // Replace (not merge).
-    const replaced = await c.put('/v1/host/sample/profiles/me/workflows', { workflows: ['wf.c'] });
+    const replaced = await c.put('/v1/host/openwop-app/profiles/me/workflows', { workflows: ['wf.c'] });
     expect(replaced.body.workflows).toEqual(['wf.c']);
 
     // Malformed payload → 400.
-    const bad = await c.put('/v1/host/sample/profiles/me/workflows', { workflows: [1, 2] });
+    const bad = await c.put('/v1/host/openwop-app/profiles/me/workflows', { workflows: [1, 2] });
     expect(bad.status).toBe(400);
   });
 });
@@ -510,7 +510,7 @@ describe('profiles Phase 4 — email-verification surfacing', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    const me = await c.get('/v1/host/sample/profiles/me');
+    const me = await c.get('/v1/host/openwop-app/profiles/me');
     expect(me.status, JSON.stringify(me.body)).toBe(200);
     expect(me.body.emailVerified).toBe(true);
   });
@@ -521,7 +521,7 @@ describe('profiles followup — review hardening', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    const r = await c.patch('/v1/host/sample/profiles/me', {
+    const r = await c.patch('/v1/host/openwop-app/profiles/me', {
       contact: {
         location: 'NYC',
         links: [
@@ -547,11 +547,11 @@ describe('profiles followup — review hardening', () => {
     await signup(c);
     for (let i = 0; i < 24; i++) {
       const t = await upload(c, 'image/png', PNG_1x1);
-      const add = await c.post('/v1/host/sample/profiles/me/portfolio', { token: t });
+      const add = await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token: t });
       expect(add.status, JSON.stringify(add.body)).toBe(201);
     }
     const t25 = await upload(c, 'image/png', PNG_1x1);
-    const over = await c.post('/v1/host/sample/profiles/me/portfolio', { token: t25 });
+    const over = await c.post('/v1/host/openwop-app/profiles/me/portfolio', { token: t25 });
     expect(over.status).toBe(409);
     expect(over.body.error).toBe('validation_error');
   });
@@ -560,7 +560,7 @@ describe('profiles followup — review hardening', () => {
     await enableProfiles('on');
     const c = client();
     await signup(c);
-    const r = await c.put('/v1/host/sample/profiles/me/skills', { skills: [{ name: 'X', proficiency: 'high' }] });
+    const r = await c.put('/v1/host/openwop-app/profiles/me/skills', { skills: [{ name: 'X', proficiency: 'high' }] });
     expect(r.status).toBe(400);
     expect(r.body.error).toBe('validation_error');
   });
@@ -568,8 +568,8 @@ describe('profiles followup — review hardening', () => {
   it('GET /:userId surfaces emailVerified for a peer (same tenant)', async () => {
     await enableProfiles('on');
     const { alice, aliceId, bob } = await sameTenantPair();
-    await alice.get('/v1/host/sample/profiles/me'); // materialize
-    const read = await bob.get(`/v1/host/sample/profiles/${encodeURIComponent(aliceId)}`);
+    await alice.get('/v1/host/openwop-app/profiles/me'); // materialize
+    const read = await bob.get(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}`);
     expect(read.status, JSON.stringify(read.body)).toBe(200);
     expect(read.body.userId).toBe(aliceId);
     // A federated (OIDC/SAML/SCIM) identity's email is IdP-verified (ADR 0026 —
@@ -580,10 +580,10 @@ describe('profiles followup — review hardening', () => {
   it('directory omits orphan profiles whose owning user was deleted', async () => {
     await enableProfiles('on');
     const { alice, aliceId, bob } = await sameTenantPair();
-    await alice.get('/v1/host/sample/profiles/me'); // materialize alice's profile
-    const del = await bob.del(`/v1/host/sample/users/users/${encodeURIComponent(aliceId)}`);
+    await alice.get('/v1/host/openwop-app/profiles/me'); // materialize alice's profile
+    const del = await bob.del(`/v1/host/openwop-app/users/users/${encodeURIComponent(aliceId)}`);
     expect(del.status, JSON.stringify(del.body)).toBe(204);
-    const dir = await bob.get('/v1/host/sample/profiles');
+    const dir = await bob.get('/v1/host/openwop-app/profiles');
     expect(dir.status).toBe(200);
     expect(dir.body.profiles.some((p: { userId: string }) => p.userId === aliceId)).toBe(false);
   });

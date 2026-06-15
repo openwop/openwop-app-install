@@ -17,7 +17,7 @@ import {
 import { emitCommentNotification } from './notifications.js';
 
 const FEATURE = { toggleId: 'comments', label: 'Collaboration / Comments' };
-const ORG = '/v1/host/sample/comments/orgs/:orgId';
+const ORG = '/v1/host/openwop-app/comments/orgs/:orgId';
 type Scope = 'workspace:read' | 'workspace:write';
 
 export function registerCommentsRoutes(deps: RouteDeps): void {

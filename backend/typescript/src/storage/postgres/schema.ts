@@ -198,8 +198,8 @@ const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
     `);
   },
   5: async (client) => {
-    // Sample-extension chat-session history backing the new
-    // `/v1/host/sample/chat/sessions/*` routes (chat improvements
+    // Host-extension chat-session history backing the new
+    // `/v1/host/openwop-app/chat/sessions/*` routes (chat improvements
     // plan §2C.1). Mirrors `sqlite/schema.ts` v7 — two tables,
     // tenant-scoped index, cascade-on-delete from sessions to
     // messages. TIMESTAMPTZ columns round-trip ISO-8601-Z strings.
@@ -455,7 +455,7 @@ const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
   },
   14: async (client) => {
     // User-authored agents — mirrors sqlite mig 16. Backs
-    // `POST /v1/host/sample/agents` (Agents-tab authoring form,
+    // `POST /v1/host/openwop-app/agents` (Agents-tab authoring form,
     // 2026-05-28). Shape parity with sqlite: `tool_allowlist` is
     // JSONB (postgres prefers it over text); booleans are
     // bool-typed; `confidence_threshold` is double-precision.
@@ -480,7 +480,7 @@ const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
     `);
   },
   15: async (client) => {
-    // Generic key→JSON store backing the sample host-extension stores (Kanban
+    // Generic key→JSON store backing the reference app-extension stores (Kanban
     // boards, agent roster, org-chart) so they survive a restart. Coarse by
     // design — each service serializes its whole collection to one key.
     await client.query(`

@@ -11,7 +11,7 @@ dead (the OIDC tenant derivation now covers every auth method) and makes **Phase
 
 ADR 0002 Phase 2 shipped a **server-side** email/password system in
 `credentialsService.ts` (scrypt hashes, reset/verify tokens) behind
-`/v1/host/sample/users/auth/{signup,login,password/*,email/*}`, plus a host TOTP
+`/v1/host/openwop-app/users/auth/{signup,login,password/*,email/*}`, plus a host TOTP
 MFA (Phase 5). The SPA's social logins (Google/GitHub) already run through
 **Firebase Authentication**, whose ID tokens the host verifies on the OIDC bearer
 path (`middleware/auth.ts`) — minting `oidc:<sub>` → a durable `User`.
@@ -68,7 +68,7 @@ capability advertises host password auth (it was never on the wire). SAML/SCIM
 | Phase | Scope | Status |
 |---|---|---|
 | **1 — Frontend** | `AuthCard` calls Firebase email/password (signup/login/reset/verify) instead of the host routes; a shared `finalizeFirebaseSession()` runs migrate+bind for the in-page (non-redirect) email/password flow; drop the host-route client calls. **Backend untouched** — email/password users ride the existing OIDC path. | **implemented 2026-06-11** |
-| **2 — Backend removal** | **DONE.** Deleted `credentialsService.ts`, `mfaService.ts`, `mfaRoutes.ts`; slimmed `authRoutes.ts` to `logout` + `oidc/bind`; un-registered MFA in `feature.ts`; `profiles` `resolveEmailVerified` now derives from `source` only (federated ⇒ verified) — no credentialsService. Frontend: removed `MfaPanel.tsx` + the dead `usersClient` password/MFA fns + the UsersPage password-signup form. `personalTenantForPassword` went with `credentialsService`. **Test migration:** the 11 route suites that minted users via `POST /users/auth/signup` now use a new **env-gated auth test seam** (`POST /v1/host/sample/test/login`, `OPENWOP_TEST_AUTH_ENABLED=true`, `src/routes/authTestSeam.ts`) — it mints a session for a synthetic durable User and takes an explicit `tenantId` so the org-RBAC suites get co-tenant users (the old "second-signup-inherits-tenant" quirk is gone; Firebase users are each their own tenant). Deleted `users-credentials`/`users-mfa`/`auth-anon-adopt` tests. | implemented 2026-06-11 |
+| **2 — Backend removal** | **DONE.** Deleted `credentialsService.ts`, `mfaService.ts`, `mfaRoutes.ts`; slimmed `authRoutes.ts` to `logout` + `oidc/bind`; un-registered MFA in `feature.ts`; `profiles` `resolveEmailVerified` now derives from `source` only (federated ⇒ verified) — no credentialsService. Frontend: removed `MfaPanel.tsx` + the dead `usersClient` password/MFA fns + the UsersPage password-signup form. `personalTenantForPassword` went with `credentialsService`. **Test migration:** the 11 route suites that minted users via `POST /users/auth/signup` now use a new **env-gated auth test seam** (`POST /v1/host/openwop-app/test/login`, `OPENWOP_TEST_AUTH_ENABLED=true`, `src/routes/authTestSeam.ts`) — it mints a session for a synthetic durable User and takes an explicit `tenantId` so the org-RBAC suites get co-tenant users (the old "second-signup-inherits-tenant" quirk is gone; Firebase users are each their own tenant). Deleted `users-credentials`/`users-mfa`/`auth-anon-adopt` tests. | implemented 2026-06-11 |
 | **3 — Docs** | Supersede notes on ADR 0002 §2/§5; ADR 0003 §4c dead-code note. | this ADR + the notes below |
 
 **Why Phase 1 ships alone:** it *is* the product goal ("use the Firebase

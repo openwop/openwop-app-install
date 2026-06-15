@@ -1,7 +1,7 @@
 /**
  * CLI-friendly daemon-status endpoint.
  *
- * Namespace: sample-extension under `/v1/host/sample/*`; this is not
+ * Namespace: host-extension under `/v1/host/openwop-app/*`; this is not
  * part of the normative OpenWOP wire contract. It gives the CLI's
  * `demo {status,stop,restart}` commands and `doctor` a real readiness
  * signal for the running demo backend: process id, when it started, how
@@ -19,7 +19,7 @@ interface Deps {
 }
 
 export function registerDaemonStatusRoutes(app: Express, deps: Deps): void {
-  app.get('/v1/host/sample/daemon-status', (_req, res) => {
+  app.get('/v1/host/openwop-app/daemon-status', (_req, res) => {
     res.json(buildDaemonStatus(deps));
   });
 }

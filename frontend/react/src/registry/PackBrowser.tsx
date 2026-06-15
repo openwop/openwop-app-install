@@ -298,7 +298,7 @@ function InstallGuidance({
         </button>
       </div>
       <p className="muted u-fs-11 u-mt-1">
-        On-demand install from the browser is deferred behind a trust-tier + auth model (RFC 0043).
+        On-demand install from the browser is deferred behind a trust-tier + auth model.
       </p>
     </div>
   );

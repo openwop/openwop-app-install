@@ -12,9 +12,13 @@ import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { makeMcpClient, McpError } from '../src/host/mcpClient.js';
-import { registerProvider } from '../src/features/connections/providerRegistry.js';
+import { getProvider, registerProvider } from '../src/features/connections/providerRegistry.js';
+import { loadConnectionPacks } from '../src/features/connections/connectionPackLoader.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
 import { setGovernancePolicy, __resetGovernanceStore } from '../src/host/governanceService.js';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 describe('Outbound MCP client (ADR 0030)', () => {
   let srv: http.Server;
@@ -188,6 +192,167 @@ describe('Outbound MCP client (ADR 0030)', () => {
     await expect(client('u1').subscribeResource({ serverId: 'nope', uri: 'res://x' }, () => {}, { durationMs: 200, pollIntervalMs: 50 }))
       .rejects.toMatchObject({ code: 'server_not_found' });
     await expect(client('u-no-conn').subscribeResource({ serverId: 'testmcp', uri: 'res://x' }, () => {}, { durationMs: 200, pollIntervalMs: 50 }))
+      .rejects.toMatchObject({ code: 'mcp_not_connected' });
+  });
+});
+
+/**
+ * Work-twin connector reachability for the NAMED `reach:'mcp'` providers
+ * (ADR 0033 §3.1 / Phase 3.1). The existing tests above prove the outbound MCP
+ * path end-to-end against a synthetic `testmcp` provider; this block locks the
+ * *actual* contract for the named day-1 providers google/slack, per ADR 0033's
+ * Correction (2026-06-13):
+ *
+ *  (a) The built-in `google`/`slack` manifests are `reach:'mcp'` but ship NO
+ *      `mcpServer` URL — there is no host-curated Google/Slack MCP endpoint baked
+ *      in. So `ctx.mcp.invokeTool('google', …)` fails CLOSED with
+ *      `server_not_found` today. This is the honest ARCHITECTURE.md "advertise
+ *      only honored behavior" posture, NOT a bug: a `reach:'mcp'` tag without an
+ *      endpoint is correctly un-invocable via the MCP client. (Google/Slack reach
+ *      external APIs via brokered HTTP egress over `apiHosts` instead — see
+ *      `connectionInjection.ts` — which is the "LIVE via brokered HTTP" day-1
+ *      path the ADR Correction records.) This is the "confirm google/slack are
+ *      not MCP-reachable today" half of the corrected T3.1.
+ *  (b) ADR 0033 §1.2 + the Correction say the MCP endpoint arrives via a
+ *      connection pack (RFC 0095) in T3.2, which `toProviderManifest` maps to
+ *      `mcpServer.url`. This locks that forward path: once such a pack is
+ *      installed (overriding the built-in) AND a per-user Connection exists, the
+ *      exact call a `core.openwop.mcp.invoke-tool` node makes — `ctx.mcp.
+ *      invokeTool('google', …)` — resolves the NAMED provider and dispatches the
+ *      JSON-RPC call end-to-end (per-user Bearer, governance gate, untrusted
+ *      output, provenance) with NO new client plumbing. So T3.2 is a pack +
+ *      manifest change, never a client rebuild.
+ */
+describe('Work-twin reach:mcp providers — google/slack (ADR 0033 §3.1 + Correction)', () => {
+  let srv: http.Server;
+  let storage: Storage;
+  let packRoot: string;
+  let packLoopbackUrl: string;
+  let last: { auth?: string; method?: string; params?: Record<string, unknown> } = {};
+
+  beforeAll(async () => {
+    process.env.OPENWOP_STORAGE_DSN = 'memory://';
+    process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
+    const app = await createApp({ port: 18949, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    storage = app.locals.storage;
+    await __resetConnectionsStore();
+    await __resetGovernanceStore();
+
+    srv = http.createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        const rpc = JSON.parse(raw) as { id: number; method: string; params: Record<string, unknown> };
+        last = { auth: req.headers.authorization, method: rpc.method, params: rpc.params };
+        const result = rpc.method === 'tools/call' ? { content: [{ type: 'text', text: 'gmail draft created' }], isError: false } : {};
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, r));
+    const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/mcp`;
+
+    // (b) A connection pack (RFC 0095) supplies the Google MCP server URL,
+    // overriding the built-in `google` manifest — exactly the day-1 path ADR 0033
+    // §1.2 prescribes (provider added as a pack, no host code). The pack loader
+    // enforces an `https://` endpoint (schema), so the pack-MAPS-to-mcpServer leg
+    // is asserted with a real https URL; the JSON-RPC DISPATCH leg below runs the
+    // resolved provider against an http loopback mock via `registerProvider`
+    // (the runtime client permits http only under OPENWOP_WEBHOOK_ALLOW_PRIVATE).
+    packLoopbackUrl = url;
+    packRoot = mkdtempSync(join(tmpdir(), 'owp-twin-mcp-'));
+    const dir = join(packRoot, 'google-mcp');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'pack.json'), JSON.stringify({
+      name: 'core.openwop.connections.google-mcp',
+      version: '1.0.0',
+      kind: 'connection',
+      engines: { openwop: '>=1.0.0' },
+      provider: {
+        id: 'google',
+        displayName: 'Google Workspace (MCP)',
+        category: 'email-calendar',
+        auth: {
+          kind: 'oauth2', authFlow: 'pkce', scopeModel: 'groups',
+          endpoints: { authorize: 'https://accounts.google.com/o/oauth2/v2/auth', token: 'https://oauth2.googleapis.com/token' },
+          scopes: { read: [{ key: 'gmail.readonly', label: 'Gmail (read)', scopes: ['https://www.googleapis.com/auth/gmail.readonly'] }] },
+        },
+        reach: { mcp: { server: { url: 'https://google-workspace.mcp.example.com/', transport: 'http' } } },
+        consumerNodes: ['core.openwop.mcp.invoke-tool'],
+      },
+    }));
+
+    await storage.insertRun({ runId: 'run-twin', workflowId: 'w', tenantId: 'ttwin', status: 'pending', inputs: null, metadata: {}, configurable: {}, createdAt: 'x', updatedAt: 'x' });
+  });
+
+  afterAll(async () => {
+    await __resetGovernanceStore();
+    rmSync(packRoot, { recursive: true, force: true });
+    await new Promise<void>((r) => srv.close(() => r()));
+  });
+
+  const twinClient = (): ReturnType<typeof makeMcpClient> =>
+    makeMcpClient({ storage, tenantId: 'ttwin', runId: 'run-twin', actingUserId: 'twin-user', orgId: 'ttwin' });
+
+  it('(a) built-in google/slack are reach:mcp but ship no MCP endpoint → not MCP-reachable today (fail-closed)', async () => {
+    // The honest posture: the tag exists, but a bare `reach:'mcp'` with no
+    // `mcpServer` URL is correctly un-invocable via the MCP client (no fabricated
+    // capability). google/slack instead reach via brokered HTTP egress (apiHosts).
+    expect(getProvider('google')?.reach).toBe('mcp');
+    expect(getProvider('slack')?.reach).toBe('mcp');
+    expect(getProvider('google')?.mcpServer?.url).toBeUndefined(); // no built-in MCP endpoint
+    expect(getProvider('slack')?.mcpServer?.url).toBeUndefined();
+    expect(getProvider('google')?.apiHosts).toContain('googleapis.com'); // brokered-HTTP path instead
+    // (this runs BEFORE the pack-install test below mutates the `google` registry entry)
+    await expect(twinClient().invokeTool('google', 'gmail.create_draft', { to: 'x' }))
+      .rejects.toMatchObject({ code: 'server_not_found' });
+    await expect(twinClient().invokeTool('slack', 'chat.postMessage', { text: 'hi' }))
+      .rejects.toMatchObject({ code: 'server_not_found' });
+  });
+
+  it('(b) connection pack supplies the MCP endpoint → google resolves with mcpServer.url', () => {
+    // The day-1 path: install the pack → the built-in `google` is overridden and
+    // now carries a (host-curated, https) MCP server URL. This is the leg that
+    // turns a bare `reach:'mcp'` tag into an invocable provider.
+    const { installed } = loadConnectionPacks({ roots: [packRoot] });
+    expect(installed.find((r) => r.providerId === 'google')?.overrodeBuiltin).toBe(true);
+    expect(getProvider('google')?.reach).toBe('mcp');
+    expect(getProvider('google')?.mcpServer?.url).toBe('https://google-workspace.mcp.example.com/');
+  });
+
+  it('(b) invokeTool(google) dispatches end-to-end once the endpoint resolves', async () => {
+    // Point the resolved `google` provider at the loopback mock (the pack loader
+    // demands https; the runtime client permits http only under
+    // OPENWOP_WEBHOOK_ALLOW_PRIVATE — set in beforeAll). registerProvider mirrors
+    // the post-pack registry state so the JSON-RPC round-trip is observable.
+    const g = getProvider('google');
+    if (!g) throw new Error('google manifest missing');
+    registerProvider({ ...g, mcpServer: { url: packLoopbackUrl, transport: 'http' } });
+
+    // The per-user Connection (ADR 0024) the work twin's acting human owns.
+    await createSecretConnection({ tenantId: 'ttwin', provider: 'google', kind: 'bearer', secret: 'google-user-token', scope: 'user', userId: 'twin-user' });
+
+    // ctx.mcp.invokeTool('google', …) — the exact call a `core.openwop.mcp.invoke-tool`
+    // node makes — resolves the NAMED provider and dispatches.
+    const out = await twinClient().invokeTool('google', 'gmail.create_draft', { to: 'x@y.z' });
+    expect(out).toEqual({ result: [{ type: 'text', text: 'gmail draft created' }], isError: false, untrustedContent: true });
+    expect(last.auth).toBe('Bearer google-user-token'); // per-user token, host-side only
+    expect(last.method).toBe('tools/call');
+    expect(last.params).toEqual({ name: 'gmail.create_draft', arguments: { to: 'x@y.z' } });
+    // Provenance stamped for the named provider (RFC 0079).
+    const meta = (await storage.getRun('run-twin'))?.metadata as Record<string, unknown> | undefined;
+    expect((meta?.connectionUse as Array<{ provider?: string }> | undefined)?.some((u) => u.provider === 'google')).toBe(true);
+  });
+
+  it('(b) endpoint resolves but no per-user Connection → mcp_not_connected (gate order)', async () => {
+    // After (b) above, `google` has an endpoint AND a Connection for `twin-user`.
+    // A DIFFERENT acting user has no Connection: the endpoint resolves, so the
+    // failure is the per-user credential gate, not `server_not_found` — proving
+    // the named provider clears resolution + governance and fails closed precisely
+    // at auth (ADR 0030 step 3).
+    const otherUser = (): ReturnType<typeof makeMcpClient> =>
+      makeMcpClient({ storage, tenantId: 'ttwin', runId: 'run-twin', actingUserId: 'no-conn-user', orgId: 'ttwin' });
+    await expect(otherUser().invokeTool('google', 'gmail.create_draft', { to: 'x@y.z' }))
       .rejects.toMatchObject({ code: 'mcp_not_connected' });
   });
 });

@@ -50,9 +50,9 @@ const pub = client();
 let n = 0;
 async function ownerWithOrg(): Promise<{ owner: ReturnType<typeof client>; orgId: string }> {
   const owner = client();
-  const su = await owner.post('/v1/host/sample/test/login', { email: `an-${Date.now()}-${n++}@acme.test` });
+  const su = await owner.post('/v1/host/openwop-app/test/login', { email: `an-${Date.now()}-${n++}@acme.test` });
   expect(su.status, JSON.stringify(su.body)).toBe(201);
-  const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+  const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status, JSON.stringify(org.body)).toBe(201);
   return { owner, orgId: org.body.orgId };
 }
@@ -68,16 +68,16 @@ describe('Analytics: beacon + reporting', () => {
 
   it('public beacon records (consent off ⇒ permissive); reporting aggregates it', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    expect((await pub.post(`/v1/host/sample/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/home', sessionKey: 's1', utm: { source: 'google' } })).status).toBe(201);
-    expect((await pub.post(`/v1/host/sample/public-analytics/${orgId}/collect`, { type: 'conversion', sessionKey: 's1' })).status).toBe(201);
+    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', path: '/home', sessionKey: 's1', utm: { source: 'google' } })).status).toBe(201);
+    expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'conversion', sessionKey: 's1' })).status).toBe(201);
 
-    const sum = await owner.get(`/v1/host/sample/analytics/orgs/${orgId}/summary`);
+    const sum = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`);
     expect(sum.body.summary.total).toBe(2);
     expect(sum.body.summary.byType).toMatchObject({ pageview: 1, conversion: 1 });
     expect(sum.body.summary.sessions).toBe(1);
     expect(sum.body.summary.topPaths).toContainEqual({ path: '/home', count: 1 });
     expect(sum.body.summary.utmSources).toContainEqual({ source: 'google', count: 1 });
-    const evs = await owner.get(`/v1/host/sample/analytics/orgs/${orgId}/events`);
+    const evs = await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/events`);
     expect(evs.body.events).toHaveLength(2);
   });
 });
@@ -87,12 +87,12 @@ describe('Analytics: consent gate (ADR 0020 pairing) + toggle gating', () => {
     const { orgId } = await ownerWithOrg();
     try {
       await enable('consent', 'on'); // now isAllowed enforces; no record + opt-in default ⇒ deny
-      const denied = await pub.post(`/v1/host/sample/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' });
+      const denied = await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' });
       expect(denied.status).toBe(202);
       expect(denied.body.recorded).toBe(false);
       // grant analytics consent for s2, then the beacon records
-      await pub.post(`/v1/host/sample/public-consent/${orgId}`, { subjectKey: 's2', categories: { analytics: true } });
-      expect((await pub.post(`/v1/host/sample/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' })).status).toBe(201);
+      await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { subjectKey: 's2', categories: { analytics: true } });
+      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview', sessionKey: 's2' })).status).toBe(201);
     } finally {
       await enable('consent', 'off');
     }
@@ -102,8 +102,8 @@ describe('Analytics: consent gate (ADR 0020 pairing) + toggle gating', () => {
     const { owner, orgId } = await ownerWithOrg();
     try {
       await enable('analytics', 'off');
-      expect((await pub.post(`/v1/host/sample/public-analytics/${orgId}/collect`, { type: 'pageview' })).status).toBe(404);
-      expect((await owner.get(`/v1/host/sample/analytics/orgs/${orgId}/summary`)).status).toBe(404);
+      expect((await pub.post(`/v1/host/openwop-app/public-analytics/${orgId}/collect`, { type: 'pageview' })).status).toBe(404);
+      expect((await owner.get(`/v1/host/openwop-app/analytics/orgs/${orgId}/summary`)).status).toBe(404);
     } finally {
       await enable('analytics', 'on');
     }

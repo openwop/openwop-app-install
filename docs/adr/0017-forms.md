@@ -5,8 +5,8 @@
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC scopes), ADR 0008 (CRM — the contact rolodex this feeds),
 ADR 0012/0013 (the public-surface pattern this reuses)
-**Toggle:** `forms` · **Surfaces:** authed `/v1/host/sample/forms/orgs/:orgId/*`
-+ **public (unauthed)** `/v1/host/sample/public-forms/:formId[/submit]`
+**Toggle:** `forms` · **Surfaces:** authed `/v1/host/openwop-app/forms/orgs/:orgId/*`
++ **public (unauthed)** `/v1/host/openwop-app/public-forms/:formId[/submit]`
 (host-extension, NON-NORMATIVE — no RFC)
 **MyndHyve §:** Forms · **Baseline:** `functions/src/formApi.ts` (live submission
 API) + the orphaned builder under `src/canvas-types/campaign-studio/forms`
@@ -27,7 +27,7 @@ a public form a visitor fills in, whose submission becomes a CRM contact.
 - **Namespace `forms` is free.** `grep -rn` for `forms`/`/form` across
   `backend/typescript/src` hits only unrelated code (`envelopeAcceptor.ts`,
   `cronSchedule.ts`, `textRedaction.ts`) — no module registers a
-  `/v1/host/sample/forms` route. No collision; this is genuinely new.
+  `/v1/host/openwop-app/forms` route. No collision; this is genuinely new.
 - **The contact rolodex already exists and MUST own contact creation.**
   `src/features/crm/contactsService.ts` exports `createContact({ tenantId, name,
   email?, company? })` (the tenant-scoped rolodex, ADR 0008). The CRM **import**
@@ -56,13 +56,13 @@ A `forms` feature-package (toggle `forms`, default **OFF**, `bucketUnit:
 tenant` — a shared B2B surface, consistent with CRM/CMS) with **two faces**:
 
 1. **An authed, org-scoped, RBAC-native management surface** under
-   `/v1/host/sample/forms/orgs/:orgId/*` — build/publish forms, read submissions.
+   `/v1/host/openwop-app/forms/orgs/:orgId/*` — build/publish forms, read submissions.
    Gated by the media-style `authorizeOrgScope` (`getOrg` + effective access):
    **read → `workspace:read`, write → `workspace:write`**; a non-member fails
    closed (403); an org outside the caller's tenant 404s.
 
 2. **A public, unauthenticated render + submit surface** under
-   `/v1/host/sample/public-forms/:formId` — gated on **(a)** the form existing
+   `/v1/host/openwop-app/public-forms/:formId` — gated on **(a)** the form existing
    and being `published`, and **(b)** the form-tenant's `forms` toggle being on.
    Tenant is derived **from the stored form**, never the request. A submission is
    persisted first, then **best-effort** creates a CRM contact via `createContact`.
@@ -100,7 +100,7 @@ belongs to one tenant (`getOrg` resolves it), so the composition is clean.
 ### Phase 1 — form store + authed org-scoped builder/CRUD (backend, RBAC)
 
 `formsService` + `DurableCollection<FormDef>('forms:def')`, org-scoped + tenant/org
-IDOR-guarded. Routes under `/v1/host/sample/forms/orgs/:orgId/forms`:
+IDOR-guarded. Routes under `/v1/host/openwop-app/forms/orgs/:orgId/forms`:
 - `POST` (`workspace:write`) — create a `draft` form (title + fields).
 - `GET` / `GET …/:formId` (`workspace:read`) — list / read the org's forms.
 - `PATCH …/:formId` (`workspace:write`) — edit fields / `submitMessage` /
@@ -112,14 +112,14 @@ toggle-off 404.
 
 ### Phase 2 — public render + submit + best-effort contact (backend, unauthed)
 
-Add `'/v1/host/sample/public-forms'` to `PUBLIC_PATH_PREFIXES` (distinct from the
+Add `'/v1/host/openwop-app/public-forms'` to `PUBLIC_PATH_PREFIXES` (distinct from the
 authed `…/forms/*` — `public-forms` ≠ `forms`, verified non-shadowing). Routes
 (no auth; tenant from the stored form; gated on the form-tenant's `forms` toggle;
 uniform 404 on missing / unpublished / feature-off):
-- `GET /v1/host/sample/public-forms/:formId` → the published render schema
+- `GET /v1/host/openwop-app/public-forms/:formId` → the published render schema
   (title, fields, `submitMessage`) — **never** the honeypot field name or owner
   metadata.
-- `POST /v1/host/sample/public-forms/:formId/submit` `{ values }`:
+- `POST /v1/host/openwop-app/public-forms/:formId/submit` `{ values }`:
   1. **Abuse controls** — reuse the host per-IP rate-limit middleware; reject if
      the **honeypot** field is non-empty (silent 200, no row); enforce per-field
      max length + max field count + a total-payload cap; validate required fields
@@ -130,7 +130,7 @@ uniform 404 on missing / unpublished / feature-off):
      tenantId, name, email, company })`; on success record `contactId`, on failure
      record `error` and keep the submission (the **primary capture never fails on a
      secondary CRM hiccup**).
-- `GET /v1/host/sample/forms/orgs/:orgId/forms/:formId/submissions`
+- `GET /v1/host/openwop-app/forms/orgs/:orgId/forms/:formId/submissions`
   (`workspace:read`) — the authed owner reads its submissions.
 
 Tests: unauthed submit creates a contact **via `contactsService`** (asserted
@@ -190,7 +190,7 @@ packs published to `packs.openwop.dev` (decoupled from toggle state for replay).
   write; a CRM failure degrades to `error` on the kept submission — no lost lead.
 - **Abuse-resistant without a dep:** honeypot + per-IP rate-limit + payload caps;
   no CAPTCHA/third-party dep (zero-runtime-dep host).
-- **No wire surface → no RFC:** entirely under `/v1/host/sample/*` (non-normative).
+- **No wire surface → no RFC:** entirely under `/v1/host/openwop-app/*` (non-normative).
 
 ## Alternatives considered
 

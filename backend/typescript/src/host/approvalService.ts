@@ -1,5 +1,5 @@
 /**
- * Pending-approval queue — host extension (sample-grade, non-normative).
+ * Pending-approval queue — host extension (non-normative).
  *
  * The reference implementation of the "agents propose, humans dispose" gate.
  * When a roster member runs at `autonomyLevel: 'review'` (host/rosterService.ts)
@@ -299,6 +299,23 @@ export async function attachRunId(approvalId: string, runId: string): Promise<vo
   if (!approval) return;
   approval.runId = runId;
   await approvals.put(approval);
+}
+
+/** Cascade: remove every approval (pending OR resolved) proposed for a roster
+ *  member, plus its (tenant, status) index row. Called when the member is
+ *  deleted so a now-gone agent leaves no ghost proposal in the inbox and no
+ *  stale row in the idempotency index (`hasPendingApprovalForCard`). Returns
+ *  the count removed. */
+export async function deleteApprovalsForRoster(tenantId: string, rosterId: string): Promise<number> {
+  const all = await listApprovals(tenantId);
+  let removed = 0;
+  for (const a of all) {
+    if (a.rosterId !== rosterId) continue;
+    await approvals.delete(a.approvalId);
+    await approvalsByTenantStatus.delete(approvalIxId(tenantId, a.status, a.approvalId));
+    removed += 1;
+  }
+  return removed;
 }
 
 const RESOLVED_RETENTION = 100;

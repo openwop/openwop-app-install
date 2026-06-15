@@ -19,7 +19,7 @@ export const consentFeature: BackendFeature = {
   toggleDefault: {
     id: 'consent',
     label: 'Consent',
-    description: 'Region-aware consent + the enforcement gate for Analytics / Email — product feature (ADR 0020).',
+    description: 'Region-aware consent + the enforcement gate for Analytics / Email — product feature.',
     category: 'Business Tools',
     status: 'off',
     bucketUnit: 'tenant',

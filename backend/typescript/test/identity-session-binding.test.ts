@@ -31,7 +31,7 @@ process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-chars-long
 async function roundTripSession(setCookieHeader: string): Promise<{ userId?: string; principalId?: string; tenantId?: string }> {
   // Set-Cookie: __session=<value>; Path=/; ...   -> extract the value.
   const value = /__session=([^;]+)/.exec(setCookieHeader)?.[1] ?? '';
-  const req: any = { method: 'GET', path: '/v1/host/sample/users/me', query: {}, header: (h: string) => (h.toLowerCase() === 'cookie' ? `__session=${value}` : undefined) };
+  const req: any = { method: 'GET', path: '/v1/host/openwop-app/users/me', query: {}, header: (h: string) => (h.toLowerCase() === 'cookie' ? `__session=${value}` : undefined) };
   const res: any = { append() {}, setHeader() {}, getHeader() {}, status() { return res; }, json() {}, end() {} };
   let nexted = false;
   await new Promise<void>((resolve) => {

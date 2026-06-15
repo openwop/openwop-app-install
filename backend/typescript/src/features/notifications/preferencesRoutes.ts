@@ -4,8 +4,8 @@
  * (per-device, lost on clear, invisible to the server); this promotes them to a
  * durable store so preferences are cross-device and authoritative.
  *
- *   GET  /v1/host/sample/notifications/preferences  — the caller's prefs (or defaults)
- *   PUT  /v1/host/sample/notifications/preferences  — replace the caller's prefs
+ *   GET  /v1/host/openwop-app/notifications/preferences  — the caller's prefs (or defaults)
+ *   PUT  /v1/host/openwop-app/notifications/preferences  — replace the caller's prefs
  *
  * Both are signed-in gated (anonymous demo sessions have no durable identity to
  * key on) and mounted UNDER the feature's toggle-gate middleware, so a tenant
@@ -105,7 +105,7 @@ function defaultPreferences(tenantId: string, userId: string, now: string): Noti
 }
 
 export function registerNotificationPreferenceRoutes(app: Express): void {
-  const BASE = '/v1/host/sample/notifications/preferences';
+  const BASE = '/v1/host/openwop-app/notifications/preferences';
 
   app.get(BASE, async (req, res, next) => {
     try {

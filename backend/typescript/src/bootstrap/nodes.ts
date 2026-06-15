@@ -2,7 +2,7 @@
  * NodeModule registration. One-shot at boot.
  *
  * Registers the minimal set of `core.*` node types the sample executor
- * dispatches inline + the demo pack's `local.sample.demo.uppercase`.
+ * dispatches inline + the demo pack's `local.openwop-app.uppercase`.
  *
  * Sample-grade — no MCP, no AI providers (those would require external
  * accounts). Real deployers wire `core.openwop.ai`, `core.openwop.mcp`,
@@ -14,6 +14,10 @@ import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
 import type { NodeContext, NodeModule } from '../executor/types.js';
 import { emitCost } from '../observability/costEmitter.js';
+import { composeAgentSystemPrompt } from '../host/agentPromptScaffold.js';
+import { conversationIdFor, makeTurn } from '../host/conversation.js';
+import { appendChannelMessage } from '../host/channelsRuntime.js';
+import { getUser } from '../features/users/usersService.js';
 import { composePromptTemplate } from '../host/promptCompose.js';
 import { resolvePromptRef, type PromptKind } from '../host/promptResolve.js';
 import { getTemplate } from '../host/promptStore.js';
@@ -756,6 +760,82 @@ const interruptNode: NodeModule = {
   },
 };
 
+// Multi-turn conversation primitive (RFC 0005, MAS Phase 4). Gated on
+// `capabilities.conversationPrimitive: true` (see routes/discovery.ts +
+// routes/runs.ts refusal). The node only OPENS the conversation: it mints a
+// deterministic `conversationId`, emits `conversation.opened` (turnIndex 0), and
+// SUSPENDS. Per RFC 0005 §D, each `exchange` round-trips through the resolve
+// endpoint WITHOUT resuming the node (it appends the user turn, dispatches the
+// addressed agent, emits `conversation.exchanged`, and leaves the node
+// suspended); only `operation: 'close'` resumes the node. Exchange handling
+// lives in routes/interrupts.ts so it has the storage + dispatch surface.
+export const conversationGateNode: NodeModule = {
+  typeId: 'core.conversationGate',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as { prompt?: unknown; schema?: unknown; mockAutoResume?: unknown; turnCount?: unknown };
+    const conversationId = conversationIdFor(ctx.runId, ctx.nodeId);
+
+    // Conformance / replay-determinism mode (RFC 0005 §G). When
+    // `mockAutoResume: true`, self-drive the whole conversation to COMPLETION in
+    // one execution — open → N exchanges → close — with NO human resume and NO
+    // LLM. Every channel id + timestamp is runId-INDEPENDENT (keyed on nodeId +
+    // turnIndex), so a `:fork` (mode: replay, different runId) re-executes to a
+    // BYTE-EQUAL `conversation` channel projection — the conversationReplayDeterminism
+    // contract. The `conversation.*` event payloads carry the per-run
+    // conversationId (events aren't byte-compared; only the channel is).
+    if (cfg.mockAutoResume === true) {
+      const turnCount = typeof cfg.turnCount === 'number' && cfg.turnCount > 0 ? Math.floor(cfg.turnCount) : 1;
+      const CH = 'conversation';
+      const detTs = (i: number): string => new Date(i * 1000).toISOString(); // fork-stable
+      const detId = (i: number, role: string): string => `${ctx.nodeId}:${i}:${role}`;
+      const writeTurn = async (idx: number, role: 'system' | 'user' | 'agent', from: string, content: string): Promise<void> => {
+        const turn = makeTurn({ conversationId, turnIndex: idx, role, from, content, ts: idx, groupId: conversationId });
+        const evt = idx === 0 ? 'conversation.opened' : 'conversation.exchanged';
+        await ctx.emit(evt, idx === 0 ? { conversationId, initialTurn: turn, capabilities: ['multi-turn'] } : { conversationId, turnIndex: idx, turn });
+        appendChannelMessage(ctx.runId, CH, { messageId: detId(idx, role), role: role === 'agent' ? 'assistant' : role, content, timestamp: detTs(idx) });
+      };
+      await writeTurn(0, 'system', 'system', 'Conversation started.');
+      let idx = 1;
+      for (let t = 0; t < turnCount; t++) {
+        await writeTurn(idx++, 'user', 'user', `Turn ${t + 1} from the user.`);
+        await writeTurn(idx++, 'agent', 'assistant', `Acknowledged turn ${t + 1}.`);
+      }
+      const finalTurn = makeTurn({ conversationId, turnIndex: idx, role: 'system', from: 'system', content: 'Conversation closed.', ts: idx, groupId: conversationId });
+      await ctx.emit('conversation.closed', { conversationId, turnIndex: idx, finalTurn });
+      appendChannelMessage(ctx.runId, CH, { messageId: detId(idx, 'system'), role: 'system', content: 'Conversation closed.', timestamp: detTs(idx) });
+      return { status: 'success', outputs: { conversationId, turns: idx + 1 } };
+    }
+
+    // Sample-grade: ts is the host wall clock (the existing chat path does the
+    // same). Replay re-folds `conversation.*` from the log (RFC 0005 §G), so the
+    // exchange turns are never re-dispatched; the open turn's ts is advisory.
+    const initialTurn = makeTurn({
+      conversationId,
+      turnIndex: 0,
+      role: 'system',
+      from: 'system',
+      content: typeof cfg.prompt === 'string' ? cfg.prompt : 'Conversation opened.',
+      ts: Date.now(),
+    });
+    const schema = cfg.schema && typeof cfg.schema === 'object' ? (cfg.schema as Record<string, unknown>) : undefined;
+    await ctx.emit('conversation.opened', {
+      conversationId,
+      initialTurn,
+      ...(schema ? { schema } : {}),
+      capabilities: ['multi-turn'],
+    });
+    return {
+      status: 'suspended',
+      interrupt: {
+        kind: 'conversation',
+        data: { conversationId, turnIndex: 0 },
+        ...(schema ? { resumeSchema: schema } : {}),
+      },
+    };
+  },
+};
+
 // Mock AI node — demonstrates the cost-attribution pattern. Real
 // deployers wire core.openwop.ai (published pack) which calls actual
 // providers and records real token counts + USD via emitCost().
@@ -769,7 +849,7 @@ const interruptNode: NodeModule = {
 // composition pipeline and emits one `prompt.composed` event per
 // composition. The composed bodies are concatenated into the prompt
 // the mock LLM responds to.
-const sampleMockAiNode: NodeModule = {
+const mockAiNode: NodeModule = {
   typeId: 'local.sample.demo.mock-ai',
   version: '0.1.0',
   async execute(ctx) {
@@ -1070,7 +1150,7 @@ async function emitChatEnvelopeSignals(
 }
 
 /**
- * Sample chat-responder. Sits in the `vendor.openwop-sample.*` namespace
+ * Sample chat-responder. Sits in the `vendor.openwop-app.*` namespace
  * per `spec/v1/node-packs.md` §"Reserved-typeIds" (the unrestricted
  * carve-out), which puts it inside RFC 0023 §A's authorized-emitter
  * scope for `agent.reasoned` events.
@@ -1145,6 +1225,23 @@ function lastIndexOfRole(messages: readonly ChatMessage[], role: ChatMessage['ro
   return -1;
 }
 
+/** The acting human's display name for the persona scaffold — tenant-scoped
+ *  (CTI-1) and fail-soft: any miss/error ⇒ null, so the scaffold addresses the
+ *  user neutrally rather than risk a wrong name. Anonymous callers carry no
+ *  `actingUserId` and so take the neutral path by construction. */
+async function resolveActingUserName(ctx: { actingUserId?: string; tenantId: string }): Promise<string | null> {
+  if (!ctx.actingUserId) return null;
+  try {
+    const user = await getUser(ctx.actingUserId);
+    if (!user) return null;
+    if (user.tenantId && user.tenantId !== ctx.tenantId) return null; // never borrow a name across tenants
+    const name = user.displayName?.trim();
+    return name && name.length > 0 ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Replace the TEXT of a (possibly multi-modal) user turn with `text` while
  *  PRESERVING any non-text attachment parts. A `userPromptRef` that resolves
  *  to a string must not silently drop the image/file the user attached. */
@@ -1157,7 +1254,7 @@ function withUserText(original: ChatMessage['content'], text: string): ChatMessa
 
 /** Extract the capability token from a host media-asset serve URL, or null. */
 function tokenFromAssetUrl(url: string): string | null {
-  const m = /\/v1\/host\/sample\/assets\/([^/?#]+)/.exec(url);
+  const m = /\/v1\/host\/openwop-app\/assets\/([^/?#]+)/.exec(url);
   return m ? decodeURIComponent(m[1]!) : null;
 }
 
@@ -1210,8 +1307,8 @@ export function _setManagedChatTimeoutMs(ms: number): void {
 }
 
 // Exported for test access; production callers wire via the registry
-// in `registerSampleNodes` below.
-export const sampleChatResponderNode: NodeModule = {
+// in `registerExampleNodes` below.
+export const chatResponderNode: NodeModule = {
   typeId: CHAT_RESPONDER_TYPE_ID,
   version: '0.2.0',
   async execute(ctx) {
@@ -1308,8 +1405,20 @@ export const sampleChatResponderNode: NodeModule = {
       // another tenant.
       const tenantOk = !agent || !agent.ownerTenant || agent.ownerTenant === ctx.tenantId;
       if (agent && agent.systemPrompt && tenantOk) {
-        systemBody = agent.systemPrompt;
-        // `vendor.openwop-sample.agent.routed` — vendor-namespaced
+        // Wrap the persona prompt with the multi-agent persona-preservation
+        // scaffold (user identity + narrative-casting framing + recency
+        // re-anchor) so the agent doesn't (a) treat a prior agent's name as the
+        // user's, or (b) impersonate another agent whose turns are in the shared
+        // history. The user's display name is resolved from the durable acting
+        // user, tenant-scoped (CTI-1); absent (anonymous) ⇒ neutral fallback.
+        const userName = await resolveActingUserName(ctx);
+        systemBody = composeAgentSystemPrompt({
+          persona: agent.persona,
+          role: agent.label,
+          systemPrompt: agent.systemPrompt,
+          userName,
+        });
+        // `vendor.openwop-app.agent.routed` — vendor-namespaced
         // per host-extensions.md §"Canonical prefixes" so a future
         // RFC 0024 `agent.*` event can't collide.
         //
@@ -1327,7 +1436,7 @@ export const sampleChatResponderNode: NodeModule = {
           .update(agent.systemPrompt)
           .digest('hex')
           .slice(0, 16);
-        await ctx.emit('vendor.openwop-sample.agent.routed', {
+        await ctx.emit('vendor.openwop-app.agent.routed', {
           agentId: agent.agentId,
           persona: agent.persona,
           modelClass: agent.modelClass,
@@ -1674,15 +1783,15 @@ const DEMO_PNG_1x1_BASE64 =
  * event referencing it BY URL — never inlining the binary. This is the
  * "producer" the §C serving + §B rendering rails were built to carry: a
  * run now has a `media.image` in its event log + debug bundle, served
- * from `GET /v1/host/sample/assets/{token}`.
+ * from `GET /v1/host/openwop-app/assets/{token}`.
  *
  * Inputs (all optional): `contentBase64` + `mimeType` to emit a
  * caller-supplied image; otherwise a 1×1 PNG. The emitted payload conforms
  * to `schemas/envelopes/media.image.schema.json` (`{ url, bytes, mimeType,
  * alt }`) — `alt` carries the accessibility text a consumer renders.
  */
-const sampleImageEmitNode: NodeModule = {
-  typeId: 'local.sample.demo.image-emit',
+const imageEmitNode: NodeModule = {
+  typeId: 'local.openwop-app.image-emit',
   version: '0.1.0',
   async execute(ctx) {
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object') ? (ctx.inputs as Record<string, unknown>) : {};
@@ -1717,7 +1826,7 @@ const sampleImageEmitNode: NodeModule = {
  * the write — turning the flat memory ledger (app-ux §A3) into a per-node
  * memory trail. It gives the RunTimeline memory-write markers (#192, which
  * read `memory.written`) a node-attributed event to render, and mirrors
- * `local.sample.demo.image-emit` (the RFC 0055 §C "close the loop" node).
+ * `local.openwop-app.image-emit` (the RFC 0055 §C "close the loop" node).
  *
  * `ctx.emit` stamps the envelope `nodeId`; we ALSO put `nodeId` in the
  * payload per RFC 0057 §B (SHOULD) so a consumer reading the canonical
@@ -1729,8 +1838,8 @@ const sampleImageEmitNode: NodeModule = {
  *
  * Input (optional): `note` — the text to store. Defaults to a demo string.
  */
-const sampleMemoryWriteNode: NodeModule = {
-  typeId: 'local.sample.demo.memory-write',
+const memoryWriteNode: NodeModule = {
+  typeId: 'local.openwop-app.memory-write',
   version: '0.1.0',
   async execute(ctx) {
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object') ? (ctx.inputs as Record<string, unknown>) : {};
@@ -1763,7 +1872,7 @@ const sampleMemoryWriteNode: NodeModule = {
  * `host.webSearch` (see routes/discovery.ts), so this in-process
  * registration mirrors the pack's stub branch: it returns a DETERMINISTIC
  * fixture result derived purely from the query, tagged `stub: true`, so
- * `sample.web.research` runs end-to-end and replays deterministically
+ * `openwop-app.web.research` runs end-to-end and replays deterministically
  * without provisioning a real search provider. A production deployer wires
  * a real `host.webSearch` and ships the published pack instead.
  */
@@ -1786,7 +1895,7 @@ const webSearchNode: NodeModule = {
     const results = Array.from({ length: n }, (_unused, i) => ({
       url: `https://example.com/${slug}/result-${i + 1}`,
       title: `${query} — reference result ${i + 1}`,
-      snippet: `Deterministic demo snippet ${i + 1} for "${query}". The demo backend stubs live web search so replays stay deterministic.`,
+      snippet: `Deterministic example snippet ${i + 1} for "${query}". The demo backend stubs live web search so replays stay deterministic.`,
       rank: i + 1,
     }));
     return {
@@ -1796,8 +1905,8 @@ const webSearchNode: NodeModule = {
   },
 };
 
-const sampleUppercaseNode: NodeModule = {
-  typeId: 'local.sample.demo.uppercase',
+const uppercaseNode: NodeModule = {
+  typeId: 'local.openwop-app.uppercase',
   version: '0.1.0',
   async execute(ctx) {
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object') ? (ctx.inputs as Record<string, unknown>) : {};
@@ -1962,12 +2071,13 @@ export function ensureNodesRegistered(): void {
   registry.register(approvalGateNode);
   registry.register(clarificationGateNode);
   registry.register(interruptNode);
+  registry.register(conversationGateNode);
   registry.register(webSearchNode);
-  registry.register(sampleUppercaseNode);
-  registry.register(sampleImageEmitNode);
-  registry.register(sampleMemoryWriteNode);
-  registry.register(sampleMockAiNode);
-  registry.register(sampleChatResponderNode);
+  registry.register(uppercaseNode);
+  registry.register(imageEmitNode);
+  registry.register(memoryWriteNode);
+  registry.register(mockAiNode);
+  registry.register(chatResponderNode);
   // RFC 0023 — conformance-only typeId for agent-event emission hooks.
   // Reference host always registers it; production deployments of this
   // codebase SHOULD remove this call + drop the

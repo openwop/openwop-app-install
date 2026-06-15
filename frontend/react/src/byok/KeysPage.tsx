@@ -66,7 +66,7 @@ export function KeysPage(): JSX.Element {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   // Most-recently-stored masked view, keyed by credentialRef. The BE's
-  // POST /v1/host/sample/byok/secrets returns `{ credentialRef, masked }`
+  // POST /v1/host/openwop-app/byok/secrets returns `{ credentialRef, masked }`
   // but the LIST endpoint only returns refs. Persisting the masked
   // value in component state lets the user visually confirm "this is
   // the sk-ant-...e4f7 I just added" until they reload the page.

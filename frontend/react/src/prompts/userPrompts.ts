@@ -1,10 +1,10 @@
 /**
  * User-authored prompt store (localStorage).
  *
- * Sits alongside the bundled `SAMPLE_PROMPTS` library:
+ * Sits alongside the bundled `BUNDLED_PROMPTS` library:
  * - Bundled samples are read-only (versioned with the app).
  * - User prompts persist per-browser under
- *   `openwop.sample.prompts.user` and are CRUD-able from
+ *   `openwop-app.prompts.user` and are CRUD-able from
  *   `/prompts`. New prompts get a `user:` prefix in their
  *   templateId so they're distinguishable from samples and don't
  *   collide with a future BE-side canonical store.
@@ -17,7 +17,7 @@
 
 import type { PromptTemplate } from './types.js';
 
-const LS_KEY = 'openwop.sample.prompts.user';
+const LS_KEY = 'openwop-app.prompts.user';
 const LS_VERSION = 1;
 
 interface Envelope {

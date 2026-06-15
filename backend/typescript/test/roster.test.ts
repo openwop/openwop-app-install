@@ -4,7 +4,7 @@
  * Covers:
  *   1. The pure service (host/rosterService.ts): create/list/get/update/
  *      delete + tenant scoping + the host:<id> rosterId form.
- *   2. The REST routes (`/v1/host/sample/roster/*`) + the §C
+ *   2. The REST routes (`/v1/host/openwop-app/roster/*`) + the §C
  *      attribution path: a board bound to a roster member defaults its To
  *      Do column to the member's first portfolio workflow, and a card
  *      moved into it starts a run attributed to the member (persona +
@@ -87,7 +87,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
   let server: http.Server;
   const PORT = 18733;
   const BASE = `http://127.0.0.1:${PORT}`;
-  const TOKEN = 'sample-token';
+  const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -129,7 +129,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     expect(typeof triggerWorkflowId).toBe('string');
 
     // Create "Sally" who owns that workflow.
-    const sally = await jsonFetch<{ rosterId: string; persona: string }>('/v1/host/sample/roster', {
+    const sally = await jsonFetch<{ rosterId: string; persona: string }>('/v1/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Sally',
@@ -141,12 +141,12 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     expect(sally.body.rosterId.startsWith('host:')).toBe(true);
 
     // She shows up in the tenant roster.
-    const roster = await jsonFetch<{ roster: { rosterId: string }[] }>('/v1/host/sample/roster');
+    const roster = await jsonFetch<{ roster: { rosterId: string }[] }>('/v1/host/openwop-app/roster');
     expect(roster.body.roster.some((e) => e.rosterId === sally.body.rosterId)).toBe(true);
 
     // A board bound to Sally defaults its To Do column to her first workflow.
     const board = await jsonFetch<{ id: string; rosterId?: string; columns: { id: string; triggerWorkflowId?: string }[] }>(
-      '/v1/host/sample/kanban/boards',
+      '/v1/host/openwop-app/kanban/boards',
       { method: 'POST', body: JSON.stringify({ name: "Sally's board", rosterId: sally.body.rosterId }) },
     );
     expect(board.status).toBe(201);
@@ -154,14 +154,14 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     expect(board.body.columns.find((c) => c.id === 'todo')?.triggerWorkflowId).toBe(triggerWorkflowId);
 
     // Card in Doing → move to To Do → run starts, attributed to Sally.
-    const card = await jsonFetch<{ id: string }>(`/v1/host/sample/kanban/boards/${board.body.id}/cards`, {
+    const card = await jsonFetch<{ id: string }>(`/v1/host/openwop-app/kanban/boards/${board.body.id}/cards`, {
       method: 'POST',
       body: JSON.stringify({ title: 'Spring campaign', columnId: 'doing' }),
     });
     const moved = await jsonFetch<{
       triggeredRunId: string | null;
       attribution: { persona?: string; rosterId?: string; agentId?: string } | null;
-    }>(`/v1/host/sample/kanban/cards/${card.body.id}`, {
+    }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });
@@ -175,7 +175,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
   });
 
   it('rejects binding a board to an unknown roster member', async () => {
-    const res = await jsonFetch('/v1/host/sample/kanban/boards', {
+    const res = await jsonFetch('/v1/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({ name: 'x', rosterId: 'host:nope-00000000' }),
     });
@@ -183,13 +183,13 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
   });
 
   it('validates roster create + 404s a foreign entry', async () => {
-    expect((await jsonFetch('/v1/host/sample/roster', { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
-    expect((await jsonFetch('/v1/host/sample/roster/host:does-not-exist')).status).toBe(404);
+    expect((await jsonFetch('/v1/host/openwop-app/roster', { method: 'POST', body: JSON.stringify({}) })).status).toBe(400);
+    expect((await jsonFetch('/v1/host/openwop-app/roster/host:does-not-exist')).status).toBe(404);
   });
 
   it('validates avatarUrl and round-trips a valid data URI through PATCH→GET', async () => {
     const goodUri = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-    const created = await jsonFetch<{ rosterId: string }>('/v1/host/sample/roster', {
+    const created = await jsonFetch<{ rosterId: string }>('/v1/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({ persona: 'Pia', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
     });
@@ -198,32 +198,32 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
 
     // A non-data: URL (would invite SSRF / off-row bytes) is refused.
     expect(
-      (await jsonFetch(`/v1/host/sample/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'https://evil.example/x.png' }) })).status,
+      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'https://evil.example/x.png' }) })).status,
     ).toBe(400);
     // A non-image data URI is refused.
     expect(
-      (await jsonFetch(`/v1/host/sample/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'data:text/html;base64,YQ==' }) })).status,
+      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: 'data:text/html;base64,YQ==' }) })).status,
     ).toBe(400);
     // An oversized payload is refused (413-class validation, surfaced as 400).
     const huge = `data:image/png;base64,${'A'.repeat(700_001)}`;
     expect(
-      (await jsonFetch(`/v1/host/sample/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: huge }) })).status,
+      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: huge }) })).status,
     ).toBe(400);
 
     // A valid small data URI is accepted and round-trips on the next GET.
-    const ok = await jsonFetch(`/v1/host/sample/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: goodUri }) });
+    const ok = await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: goodUri }) });
     expect(ok.status).toBe(200);
-    expect((await jsonFetch<{ avatarUrl?: string }>(`/v1/host/sample/roster/${id}`)).body.avatarUrl).toBe(goodUri);
+    expect((await jsonFetch<{ avatarUrl?: string }>(`/v1/host/openwop-app/roster/${id}`)).body.avatarUrl).toBe(goodUri);
 
     // null clears it.
-    await jsonFetch(`/v1/host/sample/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: null }) });
-    expect((await jsonFetch<{ avatarUrl?: string }>(`/v1/host/sample/roster/${id}`)).body.avatarUrl).toBeUndefined();
+    await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: null }) });
+    expect((await jsonFetch<{ avatarUrl?: string }>(`/v1/host/openwop-app/roster/${id}`)).body.avatarUrl).toBeUndefined();
   });
 
   it('does NOT fire the trigger when the bound roster member is disabled (RFC 0086 §A)', async () => {
     const triggerWorkflowId = (await jsonFetch<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0];
     // A disabled member.
-    const sam = await jsonFetch<{ rosterId: string }>('/v1/host/sample/roster', {
+    const sam = await jsonFetch<{ rosterId: string }>('/v1/host/openwop-app/roster', {
       method: 'POST',
       body: JSON.stringify({
         persona: 'Sam',
@@ -232,15 +232,15 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
         enabled: false,
       }),
     });
-    const board = await jsonFetch<{ id: string }>('/v1/host/sample/kanban/boards', {
+    const board = await jsonFetch<{ id: string }>('/v1/host/openwop-app/kanban/boards', {
       method: 'POST',
       body: JSON.stringify({ name: "Sam's board", rosterId: sam.body.rosterId }),
     });
-    const card = await jsonFetch<{ id: string }>(`/v1/host/sample/kanban/boards/${board.body.id}/cards`, {
+    const card = await jsonFetch<{ id: string }>(`/v1/host/openwop-app/kanban/boards/${board.body.id}/cards`, {
       method: 'POST',
       body: JSON.stringify({ title: 'x', columnId: 'doing' }),
     });
-    const moved = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/sample/kanban/cards/${card.body.id}`, {
+    const moved = await jsonFetch<{ triggeredRunId: string | null }>(`/v1/host/openwop-app/kanban/cards/${card.body.id}`, {
       method: 'PATCH',
       body: JSON.stringify({ columnId: 'todo' }),
     });

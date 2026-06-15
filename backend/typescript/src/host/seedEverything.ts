@@ -14,14 +14,18 @@
  * test asserting the full list actually proves per-domain coverage.
  */
 
-import { seedDemoAgents, type SeedOptions, type SeedResult } from './demoSeed.js';
+import { seedExampleAgents, type SeedOptions, type SeedResult } from './exampleDataSeed.js';
+import { seedAdvisoryBoards } from './advisoryBoardSeed.js';
 import { listRoster } from './rosterService.js';
 import { listBoardsWithCards } from './kanbanService.js';
 import { listJobs } from './schedulingService.js';
 import { getChart } from './orgChartService.js';
+import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 
-export const DEMO_SEED_DOMAINS = [
+const log = createLogger('seed-everything');
+
+export const EXAMPLE_SEED_DOMAINS = [
   'user-agents',
   'roster',
   'boards',
@@ -30,18 +34,18 @@ export const DEMO_SEED_DOMAINS = [
   'org-chart',
 ] as const;
 
-export type DemoSeedDomain = (typeof DEMO_SEED_DOMAINS)[number];
+export type ExampleSeedDomain = (typeof EXAMPLE_SEED_DOMAINS)[number];
 
 export interface SeedEverythingResult extends SeedResult {
   /** Domains verified non-empty in the durable stores after this call. */
-  domains: DemoSeedDomain[];
+  domains: ExampleSeedDomain[];
 }
 
-/** Read-through verification per domain. Listed in DEMO_SEED_DOMAINS order so
+/** Read-through verification per domain. Listed in EXAMPLE_SEED_DOMAINS order so
  *  the response (and the test asserting it) stays stable. */
-async function verifyDomains(tenantId: string, storage: Storage): Promise<DemoSeedDomain[]> {
+async function verifyDomains(tenantId: string, storage: Storage): Promise<ExampleSeedDomain[]> {
   const boards = await listBoardsWithCards(tenantId);
-  const checks: Record<DemoSeedDomain, boolean> = {
+  const checks: Record<ExampleSeedDomain, boolean> = {
     'user-agents': (await storage.listUserAgents(tenantId)).length > 0,
     roster: (await listRoster(tenantId)).length > 0,
     boards: boards.length > 0,
@@ -49,7 +53,7 @@ async function verifyDomains(tenantId: string, storage: Storage): Promise<DemoSe
     schedules: (await listJobs(tenantId)).length > 0,
     'org-chart': (await getChart(tenantId)) !== null,
   };
-  return DEMO_SEED_DOMAINS.filter((d) => checks[d]);
+  return EXAMPLE_SEED_DOMAINS.filter((d) => checks[d]);
 }
 
 export async function seedEverything(
@@ -57,7 +61,12 @@ export async function seedEverything(
   storage: Storage,
   opts: SeedOptions = {},
 ): Promise<SeedEverythingResult> {
-  const result = await seedDemoAgents(tenantId, storage, opts);
+  const result = await seedExampleAgents(tenantId, storage, opts);
+  // Board of Advisors (ADR 0040) — best-effort + gated on the `advisory-board`
+  // toggle. A failure here (e.g. no org yet) must NOT break the core demo seed.
+  await seedAdvisoryBoards(tenantId, storage, opts).catch((err) =>
+    log.warn('advisory_seed_failed', { tenantId, error: String(err) }),
+  );
   return {
     ...result,
     domains: await verifyDomains(tenantId, storage),

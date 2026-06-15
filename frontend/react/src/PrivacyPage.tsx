@@ -3,7 +3,7 @@
  * Plain-prose page — no marketing copy, just an honest accounting of
  * what gets stored, where, for how long, and how to delete it.
  *
- * Linked from the DemoHostBanner. If/when Phase 3 (Firebase Auth +
+ * Linked from the InMemoryHostBanner. If/when Phase 3 (Firebase Auth +
  * persistent Cloud SQL backend) lands, this page expands with the
  * signed-in retention rules.
  *

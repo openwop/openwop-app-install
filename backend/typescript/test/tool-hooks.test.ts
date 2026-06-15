@@ -2,7 +2,7 @@
  * RFC 0064 — tool-invocation hooks + per-tool authorization/rate-limit.
  *
  * Unit-tests the host evaluator that backs both the live MCP path and the
- * `POST /v1/host/sample/toolhooks/invoke` conformance seam:
+ * `POST /v1/host/openwop-app/toolhooks/invoke` conformance seam:
  *   - ok path: status 'ok', argsHash is a 64-char hex digest
  *   - authorization fail-closed: missing/short scopes → 'forbidden' (403)
  *   - rate limit: bucket exhaustion / simulate flag → 'rate_limited' (429)

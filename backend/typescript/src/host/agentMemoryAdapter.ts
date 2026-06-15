@@ -26,8 +26,10 @@
 
 import { randomUUID } from 'node:crypto';
 import type { AgentMemoryPort } from './agentDispatch.js';
+import { MEMORY_UNTRUSTED_TAG } from './agentDispatch.js';
 import { writeMemoryEntry, listMemoryEntries, buildHostSurfaceBundle } from './inMemorySurfaces.js';
 import { embedText, DEFAULT_EMBEDDING_DIMS } from '../aiProviders/localEmbedding.js';
+import { scrubSecretShaped } from './redactSecrets.js';
 
 /** Top-K entries a RAG recall returns into the turn's context. */
 const RAG_TOP_K = 8;
@@ -37,6 +39,15 @@ const RAG_TOP_K = 8;
  *  other agents in the same tenant. */
 export function agentMemoryScope(agentId: string): string {
   return `agent:${agentId}`;
+}
+
+/** Count entries in a scope carrying `tag`. Used to count user-curated notes
+ *  (ADR 0038) distinctly from dispatch turn summaries that share the same
+ *  namespace — the `AgentMemoryPort.read` projection drops tags, so callers that
+ *  need a by-tag count read the store's tag-aware list directly here (the per-agent
+ *  memory module stays the single owner of namespace access). Tenant-scoped. */
+export function countAgentMemoryByTag(tenantId: string, scope: string, tag: string): number {
+  return listMemoryEntries(tenantId, scope, { tag }).length;
 }
 
 /**
@@ -51,11 +62,19 @@ export function createAgentMemoryPort(tenantId: string): AgentMemoryPort {
   // port; the underlying state is process-global so writes persist across ports.
   const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
 
-  const recency = (scope: string): Array<{ content: string }> =>
-    listMemoryEntries(tenantId, scope).map((e) => ({ content: e.content }));
+  // Content-trust (ADR 0038 §C) rides the `MEMORY_UNTRUSTED_TAG` tag: a turn
+  // summary derived from untrusted knowledge is tagged on write → surfaced as
+  // `contentTrust:'untrusted'` on read so dispatch FENCES it (never recalls it as
+  // trusted). Carried on BOTH read paths: recency reads the durable tag; RAG reads
+  // a mirrored `metadata.contentTrust` on the vector (the query path drops tags).
+  const trustOf = (tags: readonly string[]): 'trusted' | 'untrusted' =>
+    tags.includes(MEMORY_UNTRUSTED_TAG) ? 'untrusted' : 'trusted';
+
+  const recency = (scope: string): Array<{ content: string; contentTrust: 'trusted' | 'untrusted' }> =>
+    listMemoryEntries(tenantId, scope).map((e) => ({ content: e.content, contentTrust: trustOf(e.tags) }));
 
   return {
-    async read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string }>> {
+    async read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }>> {
       // RAG path: rank by embedding cosine similarity to the query. Embed at the
       // SAME dimension used on write (DEFAULT_EMBEDDING_DIMS) so cosine is valid.
       if (query && query.trim().length > 0) {
@@ -65,11 +84,12 @@ export function createAgentMemoryPort(tenantId: string): AgentMemoryPort {
             vector: embedText(query, DEFAULT_EMBEDDING_DIMS),
             topK: RAG_TOP_K,
           });
-          const matches = (res.matches ?? []) as Array<{ metadata?: { content?: unknown } }>;
+          const matches = (res.matches ?? []) as Array<{ metadata?: { content?: unknown; contentTrust?: unknown } }>;
           const ranked = matches
-            .map((m) => m.metadata?.content)
-            .filter((c): c is string => typeof c === 'string');
-          if (ranked.length > 0) return ranked.map((content) => ({ content }));
+            .map((m) => m.metadata)
+            .filter((md): md is { content: string; contentTrust?: unknown } => typeof md?.content === 'string')
+            .map((md) => ({ content: md.content, contentTrust: md.contentTrust === 'untrusted' ? ('untrusted' as const) : ('trusted' as const) }));
+          if (ranked.length > 0) return ranked;
           // Vector store empty for this scope (e.g. entries seeded pre-A5) → recency.
         } catch {
           /* fall through to recency on any vector-store error */
@@ -78,19 +98,27 @@ export function createAgentMemoryPort(tenantId: string): AgentMemoryPort {
       return recency(scope);
     },
     async write(scope: string, entry: { content: string; tags?: string[] }): Promise<void> {
+      // SR-1 (RFC 0004): scrub secret-shaped tokens BEFORE the durable write + the
+      // embed — a turn summary or curated note may echo a credential/API key the
+      // turn handled. This is the single chokepoint for every per-agent memory write
+      // (turn summaries via persistTurnSummary + notes via addNote), so the
+      // no-credentials-in-memory invariant holds without relying on each caller.
+      const content = scrubSecretShaped(entry.content);
       const row = writeMemoryEntry(tenantId, scope, {
-        content: entry.content,
+        content,
         ...(entry.tags ? { tags: entry.tags } : {}),
       });
       // Index for RAG recall — best-effort; a vector-store failure never loses the
       // durable write above. id mirrors the memory-store row id when present.
+      // Mirror content-trust onto the vector metadata so the RAG read path (which
+      // can't see durable tags) can still fence untrusted-derived entries.
       try {
         await vector.upsert({
           namespace: scope,
           items: [{
             id: row?.id ?? `mem_${randomUUID().slice(0, 12)}`,
-            vector: embedText(entry.content, DEFAULT_EMBEDDING_DIMS),
-            metadata: { content: entry.content },
+            vector: embedText(content, DEFAULT_EMBEDDING_DIMS),
+            metadata: { content, contentTrust: trustOf(entry.tags ?? []) },
           }],
         });
       } catch {

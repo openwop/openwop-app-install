@@ -1,5 +1,5 @@
 /**
- * User profiles (ADR 0005) — host-extension, sample-grade. One descriptive
+ * User profiles (ADR 0005) — host-extension, best-effort. One descriptive
  * `Profile` per `User.userId`, tenant-scoped, backed by the same read-through
  * `DurableCollection` the other host-ext stores use.
  *

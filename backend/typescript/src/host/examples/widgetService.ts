@@ -14,7 +14,7 @@
  *      key-construction bug).
  *   2. DURABLE, READ-THROUGH — a `DurableCollection` over the host kv store:
  *      no in-memory cache to drift, multi-instance safe.
- *   3. IDEMPOTENT SEED — `seedDemoWidgets` inserts only what is missing
+ *   3. IDEMPOTENT SEED — `seedExampleWidgets` inserts only what is missing
  *      (per-entity, so it also self-heals a partial seed) and never clobbers
  *      user edits.
  *   4. FAIL-CLOSED MUTATION — `archiveWidget` returns a discriminated
@@ -107,7 +107,7 @@ export async function archiveWidget(tenantId: string, widgetId: string): Promise
 
 const DEMO_WIDGET_NAMES = ['Flux capacitor', 'Turbo encabulator'] as const;
 
-export async function seedDemoWidgets(tenantId: string): Promise<{ seeded: boolean; widgets: number }> {
+export async function seedExampleWidgets(tenantId: string): Promise<{ seeded: boolean; widgets: number }> {
   const existing = await listWidgets(tenantId);
   const byName = new Set(existing.map((w) => w.name));
   let created = 0;

@@ -16,12 +16,12 @@ function send(method: string, params?: Record<string, unknown>): A2aJsonRpcReque
 afterEach(() => getAgentRegistry()._resetForTest());
 
 describe('A2A server (A7 / RFC 0076)', () => {
-  it('serves the agent card on agent/getCard', () => {
-    const res = handleA2aRequest(send('agent/getCard'), { agentCard: CARD });
+  it('serves the agent card on agent/getCard', async () => {
+    const res = await handleA2aRequest(send('agent/getCard'), { agentCard: CARD });
     expect(res.result).toEqual(CARD);
   });
 
-  it('routes message/send to a real manifest-agent dispatch', () => {
+  it('routes message/send to a real manifest-agent dispatch', async () => {
     getAgentRegistry().register({
       agentId: 'peer.agent',
       persona: 'Peer',
@@ -32,7 +32,7 @@ describe('A2A server (A7 / RFC 0076)', () => {
       toolAllowlist: [],
       confidence: { defaultThreshold: 0.5 },
     });
-    const res = handleA2aRequest(
+    const res = await handleA2aRequest(
       send('message/send', { agentId: 'peer.agent', message: { parts: [{ kind: 'text', text: 'hello' }] } }),
       { agentCard: CARD },
     );
@@ -42,13 +42,20 @@ describe('A2A server (A7 / RFC 0076)', () => {
     expect(task.agentId).toBe('peer.agent');
   });
 
-  it('maps an unknown agent to a JSON-RPC error', () => {
-    const res = handleA2aRequest(send('message/send', { agentId: 'nope.absent', message: { parts: [] } }), { agentCard: CARD });
+  it('maps an unknown agent to a JSON-RPC error', async () => {
+    const res = await handleA2aRequest(send('message/send', { agentId: 'nope.absent', message: { parts: [] } }), { agentCard: CARD });
     expect(res.error?.code).toBe(-32001);
   });
 
-  it('rejects an unknown method and a missing agentId', () => {
-    expect(handleA2aRequest(send('frobnicate'), { agentCard: CARD }).error?.code).toBe(-32601);
-    expect(handleA2aRequest(send('message/send', { message: { parts: [] } }), { agentCard: CARD }).error?.code).toBe(-32602);
+  it('rejects an unknown method and a missing agentId', async () => {
+    expect((await handleA2aRequest(send('frobnicate'), { agentCard: CARD })).error?.code).toBe(-32601);
+    expect((await handleA2aRequest(send('message/send', { message: { parts: [] } }), { agentCard: CARD })).error?.code).toBe(-32602);
+  });
+
+  // ADR 0035 / RFC 0100 — back-compat: with NO task store (durableTasks absent),
+  // tasks/get is still not-found (the synchronous core, today's behavior).
+  it('keeps tasks/get not-found in the synchronous core (no regression)', async () => {
+    const res = await handleA2aRequest(send('tasks/get', { id: 'a2a:peer.agent' }), { agentCard: CARD });
+    expect(res.error?.code).toBe(-32001);
   });
 });

@@ -1,5 +1,5 @@
 /**
- * CSM accounts store (host-extension, sample-grade — ADR 0001 §6 Phase 6).
+ * CSM accounts store (host-extension, best-effort — ADR 0001 §6 Phase 6).
  *
  * The second feature, added as a PURE addition (zero core edits) to prove the
  * feature-package contract. Tenant-scoped accounts with a health score, backed

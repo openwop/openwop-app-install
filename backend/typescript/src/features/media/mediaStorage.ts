@@ -6,7 +6,7 @@
  *
  * The in-memory reference impl delegates to the RFC 0055 media-asset surface
  * (`storeMediaAsset` / `deleteMediaAsset`), which already gives tenant-scoped
- * byte storage + capability-token serving via `GET /v1/host/sample/assets/
+ * byte storage + capability-token serving via `GET /v1/host/openwop-app/assets/
  * {token}` (the same path avatars use, so a library thumbnail renders in a plain
  * `<img>`). The library is durable, so bytes are stored with a long retention
  * horizon rather than the 7-day scratch TTL.
@@ -43,7 +43,7 @@ export async function put(
 
 /** The relative serve URL for a stored asset's capability token. */
 export function serveUrl(serveToken: string): string {
-  return `/v1/host/sample/assets/${serveToken}`;
+  return `/v1/host/openwop-app/assets/${serveToken}`;
 }
 
 /** Free an asset's bytes (tenant-checked). Best-effort — a missing ref is a no-op. */

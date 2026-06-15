@@ -1,12 +1,12 @@
 /**
- * Org invitations routes (host-extension, sample-grade — ADR 0004, reconciled).
+ * Org invitations routes (host-extension, best-effort — ADR 0004, reconciled).
  *
  * Surface (toggle-gated on `orgs`; signed-in only) — these paths are ADDITIVE
  * to the `accessControl` org surface, NOT a duplicate of it:
- *   POST   /v1/host/sample/orgs/:orgId/invites          invite { email, role }   [host:members:manage]
- *   GET    /v1/host/sample/orgs/:orgId/invites          list pending invites     [host:members:manage]
- *   DELETE /v1/host/sample/orgs/:orgId/invites/:id      revoke                   [host:members:manage]
- *   POST   /v1/host/sample/orgs/invitations/accept      accept { token }
+ *   POST   /v1/host/openwop-app/orgs/:orgId/invites          invite { email, role }   [host:members:manage]
+ *   GET    /v1/host/openwop-app/orgs/:orgId/invites          list pending invites     [host:members:manage]
+ *   DELETE /v1/host/openwop-app/orgs/:orgId/invites/:id      revoke                   [host:members:manage]
+ *   POST   /v1/host/openwop-app/orgs/invitations/accept      accept { token }
  *
  * Orgs / members / roles themselves live in `accessControl` (the single owner).
  * AUTHORIZATION delegates to accessControl's RFC 0049 scope model
@@ -91,7 +91,7 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
     }
   };
 
-  app.post('/v1/host/sample/orgs/:orgId/invites', h(async (req, res, _user) => {
+  app.post('/v1/host/openwop-app/orgs/:orgId/invites', h(async (req, res, _user) => {
     await requireMemberManage(req);
     const body = (req.body ?? {}) as Record<string, unknown>;
     const { invite, token } = await createInvitation({
@@ -103,12 +103,12 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
     res.status(201).json({ invite, ...(EXPOSE_TOKENS ? { token } : {}) });
   }));
 
-  app.get('/v1/host/sample/orgs/:orgId/invites', h(async (req, res, _user) => {
+  app.get('/v1/host/openwop-app/orgs/:orgId/invites', h(async (req, res, _user) => {
     await requireMemberManage(req);
     res.json({ invites: await listInvitations(tenantOf(req), req.params.orgId).catch(asHttp) });
   }));
 
-  app.delete('/v1/host/sample/orgs/:orgId/invites/:inviteId', h(async (req, res, _user) => {
+  app.delete('/v1/host/openwop-app/orgs/:orgId/invites/:inviteId', h(async (req, res, _user) => {
     await requireMemberManage(req);
     await revokeInvitation(tenantOf(req), req.params.orgId, req.params.inviteId).catch(asHttp);
     res.status(204).end();
@@ -117,7 +117,7 @@ export function registerOrgsRoutes(deps: RouteDeps): void {
   // Accept is NOT scope-gated — any signed-in user may accept an invite issued
   // to THEIR email (the email-ownership check is the gate). Path is unambiguous
   // (not `/orgs/:orgId`) so it can't collide with accessControl's org routes.
-  app.post('/v1/host/sample/orgs/invitations/accept', h(async (req, res, user) => {
+  app.post('/v1/host/openwop-app/orgs/invitations/accept', h(async (req, res, user) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const member = await acceptInvitation(requireString(body.token, 'token'), user).catch(asHttp);
     log.info('org_invite_accepted', { orgId: member.orgId, memberId: member.memberId });

@@ -29,6 +29,7 @@ const KIND_LABEL: Record<InterruptRecord['kind'], string> = {
   refinement: 'Refinement requested',
   cancellation: 'Cancellation confirmation needed',
   'external-event': 'Waiting on external event',
+  conversation: 'Conversation in progress',
 };
 
 const KIND_TYPE: Record<InterruptRecord['kind'], NotificationRecord['type']> = {
@@ -37,6 +38,7 @@ const KIND_TYPE: Record<InterruptRecord['kind'], NotificationRecord['type']> = {
   refinement: 'workflow.input_needed',
   cancellation: 'workflow.approval_needed',
   'external-event': 'workflow.input_needed',
+  conversation: 'workflow.input_needed',
 };
 
 export async function emitInterruptNotification(

@@ -11,7 +11,7 @@
  * string; the canvas's onDrop creates a node at the drop point.
  *
  * The palette merges the local static catalog with whatever the backend's
- * `/v1/host/sample/node-catalog` endpoint advertises — that pulls in registry
+ * `/v1/host/openwop-app/node-catalog` endpoint advertises — that pulls in registry
  * packs (core.openwop.ai, core.openwop.http, …) installed at boot. The
  * "Registry" button opens the live pack browser (all published packs).
  */

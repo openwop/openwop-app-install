@@ -50,19 +50,59 @@ export const STORAGE_KEYS = {
   appGateUnlocked: { key: 'openwop.appGate.unlocked', area: 'local', cls: 'pref', note: 'demo gate unlocked flag' },
   thoughtsAnim: { key: 'openwop-thoughts-anim', area: 'local', cls: 'pref', note: 'reasoning animation pref' },
 
-  byokActiveConfig: { key: 'openwop.sample.byok.activeConfig', area: 'local', cls: 'ref', note: 'provider/model/credentialRef NAME only — never the key value' },
-  byokPendingManaged: { key: 'openwop.sample.byok.pendingManaged', area: 'local', cls: 'ref', note: 'pending managed-provider id' },
+  byokActiveConfig: { key: 'openwop-app.byok.activeConfig', area: 'local', cls: 'ref', note: 'provider/model/credentialRef NAME only — never the key value' },
+  byokPendingManaged: { key: 'openwop-app.byok.pendingManaged', area: 'local', cls: 'ref', note: 'pending managed-provider id' },
 
-  chatSession: { key: 'openwop.sample.chat.session', area: 'local', cls: 'content', note: 'current chat thread (cold-start cache)' },
-  chatSessionsIndex: { key: 'openwop.sample.chat.sessions-index', area: 'local', cls: 'content', note: 'session header index for History drawer' },
-  promptsUser: { key: 'openwop.sample.prompts.user', area: 'local', cls: 'content', note: 'user-authored prompts' },
-  builderWorkflows: { key: 'openwop.sample.builder.workflows', area: 'local', cls: 'content', note: 'draft workflows' },
+  chatSession: { key: 'openwop-app.chat.session', area: 'local', cls: 'content', note: 'current chat thread (cold-start cache)' },
+  chatSessionsIndex: { key: 'openwop-app.chat.sessions-index', area: 'local', cls: 'content', note: 'session header index for History drawer' },
+  promptsUser: { key: 'openwop-app.prompts.user', area: 'local', cls: 'content', note: 'user-authored prompts' },
+  builderWorkflows: { key: 'openwop-app.builder.workflows', area: 'local', cls: 'content', note: 'draft workflows' },
 
   networkRecorder: { key: 'openwop.networkRecorder.v1', area: 'session', cls: 'diag', note: 'credential-redacted traffic mirror; tab-scoped; prod-default-off' },
-  lastSuccessAt: { key: 'openwop.sample.lastSuccessAt', area: 'local', cls: 'diag', note: 'cold-start warm-window hint (timestamp)' },
+  lastSuccessAt: { key: 'openwop-app.lastSuccessAt', area: 'local', cls: 'diag', note: 'cold-start warm-window hint (timestamp)' },
 } as const satisfies Record<string, StorageKeySpec>;
 
 export type StorageKeyName = keyof typeof STORAGE_KEYS;
+
+/**
+ * One-time localStorage namespace migration: `openwop.sample.*` → `openwop-app.*`.
+ *
+ * The legacy `openwop.sample.` prefix was renamed during white-label
+ * productionization. This re-homes any pre-existing keys (static registry keys
+ * AND dynamic per-tenant keys like chat panel state / builder migration flags)
+ * so returning users keep their chat sessions, prompts, and draft workflows.
+ * Idempotent and never throws; safe to call on every boot. Call once at startup.
+ */
+const LEGACY_NS = 'openwop.sample.';
+const NEW_NS = 'openwop-app.';
+export function migrateSampleNamespace(): void {
+  if (typeof window === 'undefined') return;
+  let store: Storage;
+  try {
+    store = window.localStorage;
+  } catch {
+    return; // privacy mode
+  }
+  try {
+    const legacyKeys: string[] = [];
+    for (let i = 0; i < store.length; i++) {
+      const k = store.key(i);
+      if (k && k.startsWith(LEGACY_NS)) legacyKeys.push(k);
+    }
+    for (const oldKey of legacyKeys) {
+      const newKey = NEW_NS + oldKey.slice(LEGACY_NS.length);
+      try {
+        const val = store.getItem(oldKey);
+        if (val !== null && store.getItem(newKey) === null) store.setItem(newKey, val);
+        store.removeItem(oldKey);
+      } catch {
+        /* quota/privacy — skip this key */
+      }
+    }
+  } catch {
+    /* ignore — migration is best-effort */
+  }
+}
 
 function area(a: StorageArea): Storage | null {
   if (typeof window === 'undefined') return null;

@@ -81,7 +81,7 @@ const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.tes
 // ADR 0026: real sign-in is Firebase OIDC; tests mint an authenticated user via
 // the env-gated auth test seam.
 async function signup(c: ReturnType<typeof client>): Promise<{ userId: string; email: string }> {
-  const r = await c.post('/v1/host/sample/test/login', { email: uniqEmail('u') });
+  const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('u') });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
@@ -95,7 +95,7 @@ describe('RBAC Phase 3 — enforcement OFF (default, back-compat)', () => {
   });
 
   it('the decision seam 404s — the conformance probe soft-skips', async () => {
-    const r = await client().post('/v1/host/sample/authorization/decide', {
+    const r = await client().post('/v1/host/openwop-app/authorization/decide', {
       principal: 'conformance-unseeded-principal',
       action: 'runs:cancel',
       resource: 'run-conformance-probe',
@@ -128,7 +128,7 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
 
   it('decision seam: an absent/unseeded principal MUST deny (fail-closed, RFC 0049 §C)', async () => {
     ENFORCE();
-    const r = await client().post('/v1/host/sample/authorization/decide', {
+    const r = await client().post('/v1/host/openwop-app/authorization/decide', {
       principal: 'conformance-unseeded-principal',
       action: 'runs:cancel',
       resource: 'run-conformance-probe',
@@ -146,13 +146,13 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     const owner = client();
     const me = await signup(owner);
     // Creating an org seeds an explicit owner member bound to me.userId (Phase 1).
-    const org = await owner.post('/v1/host/sample/orgs', { name: 'Acme' });
+    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
     expect(org.status).toBe(201);
     // Decide from the owner's own client so tenantOf(req) matches the member's tenant.
-    const allow = await owner.post('/v1/host/sample/authorization/decide', { principal: me.userId, action: 'runs:create', resource: 'r' });
+    const allow = await owner.post('/v1/host/openwop-app/authorization/decide', { principal: me.userId, action: 'runs:create', resource: 'r' });
     expect(allow.body.allowed).toBe(true);
     // Same tenant, a principal that isn't a member ⇒ deny (fail-closed).
-    const deny = await owner.post('/v1/host/sample/authorization/decide', { principal: 'not-a-member', action: 'runs:create', resource: 'r' });
+    const deny = await owner.post('/v1/host/openwop-app/authorization/decide', { principal: 'not-a-member', action: 'runs:create', resource: 'r' });
     expect(deny.body.allowed).toBe(false);
   });
 
@@ -163,16 +163,16 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
   it('protocol surface (shared workspace): owner allowed (200), zero-scope member denied (403)', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'TeamCo' })).body;
+    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'TeamCo' })).body;
     expect(ws.workspaceId).toMatch(/^ws:/);
     // Owner switches into the shared workspace to administer + act in it.
-    const sw = await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`);
+    const sw = await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`);
     expect(sw.status, JSON.stringify(sw.body)).toBe(200);
     // Seed a ZERO-scope member bound to a stranger's subject.
     const stranger = client();
     const sUser = await signup(stranger);
     const add = await owner.post(
-      `/v1/host/sample/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
+      `/v1/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
       { displayName: 'S', subject: sUser.userId, roles: [] },
     );
     expect(add.status, JSON.stringify(add.body)).toBe(201);
@@ -182,7 +182,7 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     const ok = await owner.get('/v1/runs');
     expect(ok.status, JSON.stringify(ok.body)).toBe(200);
     // The zero-scope member switches in, then is fail-closed denied.
-    expect((await stranger.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
+    expect((await stranger.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
     const forbidden = await stranger.get('/v1/runs');
     expect(forbidden.status).toBe(403);
     expect(forbidden.body.error ?? forbidden.body.code).toBe('forbidden');
@@ -191,10 +191,10 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
   it('switch is membership-gated: a non-member cannot enter a shared workspace (403)', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'PrivateCo' })).body;
+    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'PrivateCo' })).body;
     const outsider = client();
     await signup(outsider);
-    const denied = await outsider.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`);
+    const denied = await outsider.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`);
     expect(denied.status).toBe(403);
     expect(denied.body.error ?? denied.body.code).toBe('forbidden');
   });
@@ -207,35 +207,35 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     // granted via the editor membership regardless of store iteration order.
     const owner = client();
     await signup(owner);
-    const orgA = (await owner.post('/v1/host/sample/orgs', { name: 'OrgA' })).body;
-    const orgB = (await owner.post('/v1/host/sample/orgs', { name: 'OrgB' })).body;
+    const orgA = (await owner.post('/v1/host/openwop-app/orgs', { name: 'OrgA' })).body;
+    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'OrgB' })).body;
     const subject = 'multi-org-subject';
-    const mA = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgA.orgId)}/members`, { displayName: 'Multi', subject, roles: ['viewer'] });
+    const mA = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA.orgId)}/members`, { displayName: 'Multi', subject, roles: ['viewer'] });
     expect(mA.status, JSON.stringify(mA.body)).toBe(201);
-    const mB = await owner.post(`/v1/host/sample/orgs/${encodeURIComponent(orgB.orgId)}/members`, { displayName: 'Multi', subject, roles: ['editor'] });
+    const mB = await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgB.orgId)}/members`, { displayName: 'Multi', subject, roles: ['editor'] });
     expect(mB.status, JSON.stringify(mB.body)).toBe(201);
 
-    const create = await owner.post('/v1/host/sample/authorization/decide', { principal: subject, action: 'runs:create', resource: 'r' });
+    const create = await owner.post('/v1/host/openwop-app/authorization/decide', { principal: subject, action: 'runs:create', resource: 'r' });
     expect(create.body.allowed, 'union must grant runs:create from the editor-in-B membership').toBe(true);
-    const read = await owner.post('/v1/host/sample/authorization/decide', { principal: subject, action: 'runs:read', resource: 'r' });
+    const read = await owner.post('/v1/host/openwop-app/authorization/decide', { principal: subject, action: 'runs:read', resource: 'r' });
     expect(read.body.allowed).toBe(true);
     // A scope NEITHER membership grants is still denied (the union isn't a blanket allow).
-    const manage = await owner.post('/v1/host/sample/authorization/decide', { principal: subject, action: 'host:org:manage', resource: 'r' });
+    const manage = await owner.post('/v1/host/openwop-app/authorization/decide', { principal: subject, action: 'host:org:manage', resource: 'r' });
     expect(manage.body.allowed).toBe(false);
   });
 
   it('every gated run route denies a zero-scope member of a shared workspace: bulk-cancel, events/poll, debug-bundle', async () => {
     const owner = client();
     await signup(owner);
-    const ws = (await owner.post('/v1/host/sample/workspaces', { name: 'GateCo' })).body;
-    expect((await owner.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
+    const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'GateCo' })).body;
+    expect((await owner.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
     const member = client();
     const mUser = await signup(member);
     expect((await owner.post(
-      `/v1/host/sample/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
+      `/v1/host/openwop-app/orgs/${encodeURIComponent(ws.workspaceId)}/members`,
       { displayName: 'M', subject: mUser.userId, roles: [] },
     )).status).toBe(201);
-    expect((await member.post(`/v1/host/sample/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
+    expect((await member.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws.workspaceId)}/switch`)).status).toBe(200);
 
     ENFORCE();
     // Scope check runs BEFORE the run lookup, so a zero-scope member is 403'd even

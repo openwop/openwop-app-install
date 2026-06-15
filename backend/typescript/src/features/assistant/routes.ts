@@ -1,7 +1,7 @@
 /**
- * Executive-Assistant feature routes (host-extension, sample-grade — ADR 0023).
+ * Executive-Assistant feature routes (host-extension, best-effort — ADR 0023).
  *
- * Surface under /v1/host/sample/assistant. Toggle-gated on `assistant` (backend
+ * Surface under /v1/host/openwop-app/assistant. Toggle-gated on `assistant` (backend
  * authority — 404 when off), scoped to the caller's active workspace (tenantId).
  * Exposes the memory graph: projects, commitments, decisions, meetings,
  * stakeholders, and the pending-action approval queue.
@@ -68,10 +68,10 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
     };
 
   // ── Projects ──
-  app.get('/v1/host/sample/assistant/projects', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/projects', wrap(async (req, res) => {
     res.json({ projects: await listProjects(tenantOf(req)) });
   }));
-  app.post('/v1/host/sample/assistant/projects', wrap(async (req, res) => {
+  app.post('/v1/host/openwop-app/assistant/projects', wrap(async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const project = await createProject(tenantOf(req), {
       name: requireString(body.name, 'name'),
@@ -81,12 +81,12 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
     });
     res.status(201).json(project);
   }));
-  app.get('/v1/host/sample/assistant/projects/:id', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/projects/:id', wrap(async (req, res) => {
     const p = await getProject(tenantOf(req), req.params.id);
     if (!p) throw new OpenwopError('not_found', 'Project not found.', 404, { projectId: req.params.id });
     res.json(p);
   }));
-  app.patch('/v1/host/sample/assistant/projects/:id', wrap(async (req, res) => {
+  app.patch('/v1/host/openwop-app/assistant/projects/:id', wrap(async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const updated = await updateProject(tenantOf(req), req.params.id, {
       ...(typeof body.name === 'string' ? { name: body.name } : {}),
@@ -97,7 +97,7 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
     if (!updated) throw new OpenwopError('not_found', 'Project not found.', 404, { projectId: req.params.id });
     res.json(updated);
   }));
-  app.delete('/v1/host/sample/assistant/projects/:id', wrap(async (req, res) => {
+  app.delete('/v1/host/openwop-app/assistant/projects/:id', wrap(async (req, res) => {
     if (!(await deleteProject(tenantOf(req), req.params.id))) {
       throw new OpenwopError('not_found', 'Project not found.', 404, { projectId: req.params.id });
     }
@@ -105,18 +105,18 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
   }));
 
   // ── Commitments ──
-  app.get('/v1/host/sample/assistant/commitments', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/commitments', wrap(async (req, res) => {
     const filter: { status?: CommitmentStatus; projectId?: string } = {};
     if (typeof req.query.status === 'string') filter.status = req.query.status as CommitmentStatus;
     if (typeof req.query.projectId === 'string') filter.projectId = req.query.projectId;
     res.json({ commitments: await listCommitments(tenantOf(req), filter) });
   }));
-  app.get('/v1/host/sample/assistant/commitments/:id', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/commitments/:id', wrap(async (req, res) => {
     const c = await getCommitment(tenantOf(req), req.params.id);
     if (!c) throw new OpenwopError('not_found', 'Commitment not found.', 404, { commitmentId: req.params.id });
     res.json(c);
   }));
-  app.patch('/v1/host/sample/assistant/commitments/:id', wrap(async (req, res) => {
+  app.patch('/v1/host/openwop-app/assistant/commitments/:id', wrap(async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const updated = await updateCommitment(tenantOf(req), req.params.id, {
       ...(typeof body.status === 'string' ? { status: body.status as CommitmentStatus } : {}),
@@ -126,7 +126,7 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
     if (!updated) throw new OpenwopError('not_found', 'Commitment not found.', 404, { commitmentId: req.params.id });
     res.json(updated);
   }));
-  app.delete('/v1/host/sample/assistant/commitments/:id', wrap(async (req, res) => {
+  app.delete('/v1/host/openwop-app/assistant/commitments/:id', wrap(async (req, res) => {
     if (!(await deleteCommitment(tenantOf(req), req.params.id))) {
       throw new OpenwopError('not_found', 'Commitment not found.', 404, { commitmentId: req.params.id });
     }
@@ -134,27 +134,27 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
   }));
 
   // ── Decisions (read; writes happen via ctx.features.assistant from loops) ──
-  app.get('/v1/host/sample/assistant/decisions', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/decisions', wrap(async (req, res) => {
     res.json({ decisions: await listDecisions(tenantOf(req), typeof req.query.projectId === 'string' ? req.query.projectId : undefined) });
   }));
 
   // ── Meetings ──
-  app.get('/v1/host/sample/assistant/meetings', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/meetings', wrap(async (req, res) => {
     res.json({ meetings: await listMeetings(tenantOf(req)) });
   }));
-  app.get('/v1/host/sample/assistant/meetings/:id', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/meetings/:id', wrap(async (req, res) => {
     const m = await getMeeting(tenantOf(req), req.params.id);
     if (!m) throw new OpenwopError('not_found', 'Meeting not found.', 404, { meetingId: req.params.id });
     res.json(m);
   }));
 
   // ── Stakeholders ──
-  app.get('/v1/host/sample/assistant/stakeholders', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/stakeholders', wrap(async (req, res) => {
     res.json({ stakeholders: await listStakeholders(tenantOf(req)) });
   }));
 
   // ── Pending actions (the approval queue surface) ──
-  app.get('/v1/host/sample/assistant/pending-actions', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/pending-actions', wrap(async (req, res) => {
     const status = typeof req.query.status === 'string' ? (req.query.status as 'pending') : undefined;
     res.json({ pendingActions: await listPendingActions(tenantOf(req), status) });
   }));
@@ -194,12 +194,12 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
         .catch(() => {});
       res.json(decided.action);
     });
-  app.post('/v1/host/sample/assistant/pending-actions/:id/approve', decideRoute('approved'));
-  app.post('/v1/host/sample/assistant/pending-actions/:id/reject', decideRoute('rejected'));
+  app.post('/v1/host/openwop-app/assistant/pending-actions/:id/approve', decideRoute('approved'));
+  app.post('/v1/host/openwop-app/assistant/pending-actions/:id/reject', decideRoute('rejected'));
 
   // §12 T4 — edit a still-pending draft. Kind/sources/taint are immutable;
   // the card surfaces `editedAt` so the approver knows they approve an edit.
-  app.patch('/v1/host/sample/assistant/pending-actions/:id', wrap(async (req, res) => {
+  app.patch('/v1/host/openwop-app/assistant/pending-actions/:id', wrap(async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     const editedByUserId = req.userId ?? req.principal?.principalId;
     const recipientDiff =
@@ -223,21 +223,21 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
   // ── Briefing (ADR 0023 §12 T3 — loop 5's read surface) ──
   // ONE batched read (commitments + meetings + approvals composed server-side)
   // so the page never fans out per-row requests into the per-IP rate budget.
-  app.get('/v1/host/sample/assistant/briefing', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/briefing', wrap(async (req, res) => {
     res.json({ brief: await composeBriefing(tenantOf(req)) });
   }));
 
   // ── Health (ADR 0029 / §12 T8 — admin/debug operating metrics) ──
-  app.get('/v1/host/sample/assistant/health', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/health', wrap(async (req, res) => {
     requireSuperadmin(req, 'Assistant health');
     res.json({ health: await buildAssistantHealth(tenantOf(req)) });
   }));
 
   // ── Perception loops (ADR 0023 §12 T2 — RFC 0052 jobs + status) ──
-  app.get('/v1/host/sample/assistant/loops', wrap(async (req, res) => {
+  app.get('/v1/host/openwop-app/assistant/loops', wrap(async (req, res) => {
     res.json({ loops: await listLoopStatuses(tenantOf(req)) });
   }));
-  app.post('/v1/host/sample/assistant/loops/:loopId/enable', wrap(async (req, res) => {
+  app.post('/v1/host/openwop-app/assistant/loops/:loopId/enable', wrap(async (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     // D2 — the loop acts AS the enabling human (per-user credential axis);
     // stamped server-side, same discipline as POST /v1/runs.
@@ -249,7 +249,7 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
     if (!job) throw new OpenwopError('not_found', 'Unknown assistant loop.', 404, { loopId: req.params.loopId });
     res.json({ loop: req.params.loopId, jobId: job.jobId, enabled: job.enabled });
   }));
-  app.post('/v1/host/sample/assistant/loops/:loopId/disable', wrap(async (req, res) => {
+  app.post('/v1/host/openwop-app/assistant/loops/:loopId/disable', wrap(async (req, res) => {
     const job = await disableLoop(tenantOf(req), req.params.loopId);
     if (!job) throw new OpenwopError('not_found', 'Unknown or never-enabled assistant loop.', 404, { loopId: req.params.loopId });
     res.json({ loop: req.params.loopId, jobId: job.jobId, enabled: job.enabled });

@@ -93,7 +93,7 @@ export interface InterruptRecord {
   interruptId: string;
   runId: string;
   nodeId: string;
-  kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event';
+  kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation';
   /** Signed token usable via POST /v1/interrupts/{token}. */
   token: string;
   data: unknown;
@@ -168,7 +168,7 @@ export interface IdempotencyRecord {
 
 /** Persisted chat-session header. Mirrors the FE `ChatSession` minus
  *  the messages array (kept in a separate table for unbounded growth +
- *  paged loads). Tied to a tenantId so the sample-extension routes
+ *  paged loads). Tied to a tenantId so the host-extension routes
  *  can scope listings by tenant. Sample-grade: no per-user concept;
  *  all sessions for a tenant are visible to that tenant's principal. */
 export interface ChatSessionRecord {
@@ -276,7 +276,7 @@ export interface PushSubscriptionRecord {
 /**
  * User-authored agent record (phase E1, 2026-05-28).
  *
- * Persisted shape backing `POST /v1/host/sample/agents`. On boot the
+ * Persisted shape backing `POST /v1/host/openwop-app/agents`. On boot the
  * app reads every row and registers it with the in-process
  * `AgentRegistry` (RFC 0070); the existing `GET /v1/agents` /
  * `/v1/agents/:agentId` inventory routes then project both
@@ -303,6 +303,87 @@ export interface UserAgentRecord {
   };
   confidenceThreshold?: number;
   createdAt: string;
+}
+
+/**
+ * Rich, host-local product configuration attached to a standing agent —
+ * the "enterprise digital work twin" property set (ADR 0031). NON-NORMATIVE:
+ * this is host-extension config under `/v1/host/openwop-app/agents/:id/profile`; it
+ * is explicitly NOT a field on the RFC 0003 agent manifest wire shape, and no
+ * OpenWOP client consumes it. `GET /v1/agents` keeps returning the normative
+ * manifest projection unchanged — the profile is a separate, additive read.
+ *
+ * Single-source-of-truth discipline (ADR 0031 §Decision): `workflows[]` and
+ * `schedules[]` are NOT duplicated here — they remain owned by
+ * `RosterEntry.workflows` and the scheduler. The profile carries role/behavior
+ * config only.
+ *
+ * @see docs/adr/0031-agent-profile-and-seeding.md
+ * @see src/host/agentProfileService.ts
+ */
+/**
+ * Core agent capabilities that any named agent may ACTIVATE via its profile
+ * (David's architecture law, 2026-06-13): every capability lives at the
+ * core-agent level and is turned on per named agent — never hardcoded to one
+ * `roleKey`. `assistant` is the operating-rhythm capability (structured memory
+ * graph + perception loops + action drafting/approval, ADR 0023) that the
+ * Chief of Staff (Iris) historically embodied; it is now activatable on ANY
+ * agent (e.g. Executive Operations). `knowledge` (ADR 0038) is the per-agent
+ * knowledge & memory capability — bound KB collections (cited) + the agent's
+ * private RFC-0004 memory namespace, composed into dispatch retrieval. The union
+ * grows as new capabilities are extracted to the core level.
+ */
+export type AgentCapabilityId = 'assistant' | 'knowledge';
+
+export interface AgentProfile {
+  /** The owning agent's id — `rosterId` (preferred, for standing agents) or
+   *  the definition-level `agentId`. Also the `DurableCollection` key. */
+  profileId: string;
+  tenantId: string;
+  /** Role template key, e.g. `finance-close`. Mirrors `RosterEntry.roleKey`. */
+  roleKey: string;
+  /** Core agent capabilities this named agent has ACTIVATED. The runtime gates
+   *  capability behavior (e.g. the assistant loops/approvals) on this list —
+   *  NEVER on `roleKey`. Absent/empty ⇒ no core capabilities activated. */
+  capabilities?: AgentCapabilityId[];
+  department?: { departmentId: string; name: string; roleId?: string; roleName?: string };
+  /** Free-form per-twin config (thresholds, calendars, approval matrices). */
+  configParameters?: Record<string, unknown>;
+  /** Advisory access controls (day-1: metadata only; ADR 0031 open-question 1). */
+  permissions?: { read: string[]; write: string[]; never: string[] };
+  /** Action types that always require human approval. */
+  hitl?: string[];
+  escalation?: { contacts: string[]; triggers: string[] };
+  channels?: { approval?: string; delivery?: string };
+  adminControls?: string[];
+  riskCompliance?: string[];
+  /** Connections provider ids that gate activation (ADR 0033). */
+  requiredConnections?: string[];
+  /** Per-agent knowledge & memory bindings (ADR 0038 — additive). Present only
+   *  when the agent has the `knowledge` capability activated + a user has bound a
+   *  source. `collectionIds` references EXISTING KB collections (cited docs,
+   *  ADR 0011 — no new collection type); `memoryWritable` allows user-curated
+   *  notes to flow into the agent's RFC-0004 memory namespace (`agent:<id>`);
+   *  `retrieval` tunes how bound knowledge is composed into dispatch. */
+  knowledge?: {
+    collectionIds?: string[];
+    memoryWritable?: boolean;
+    retrieval?: { topK?: number; sources?: ('kb' | 'memory')[] };
+  };
+  /** Success/analytics metric keys. */
+  metrics?: string[];
+  autonomy: {
+    /** The enforced roster level — may be derived from `specLevel` via the
+     *  ADR 0031 mapping table when not explicitly set. */
+    level: 'auto' | 'guided' | 'review';
+    /** The spec's four-level model — kept for provenance/display. */
+    specLevel: 'draft-only' | 'recommend' | 'execute-with-approval' | 'autonomous-within-policy';
+    /** Allowlisted actions when `level === 'auto'` — makes "autonomous within
+     *  policy" honest (anything off-list falls back to review). */
+    withinPolicyActions?: string[];
+  };
+  createdAt: string;
+  updatedAt: string;
 }
 
 /**

@@ -87,6 +87,12 @@ export interface KnowledgeDocument {
   orgId: string;
   title: string;
   source: DocSource;
+  /** Content-trust provenance (RFC 0021 / ADR 0038 §C). `'untrusted'` for
+   *  provider/trigger-derived content (Google Drive import, webhook/email/form
+   *  auto-ingest); `'trusted'` for manual paste/upload. Absent on docs stored
+   *  before this field ⇒ treated as `'trusted'`. Carried onto every chunk so
+   *  dispatch can fence untrusted content (never inject it as agent-trusted). */
+  contentTrust?: 'trusted' | 'untrusted';
   /** The durable source of truth; chunks are re-derived from this. */
   text: string;
   chunkCount: number;
@@ -101,6 +107,7 @@ export interface SearchHit {
   chunkIndex: number;
   text: string;
   score: number;
+  contentTrust: 'trusted' | 'untrusted';
 }
 
 const collections = new DurableCollection<KnowledgeCollection>('kb:collection', (c) => `${c.tenantId}:${c.orgId}:${c.collectionId}`);
@@ -146,14 +153,17 @@ function vectorSurface(tenantId: string) {
   return buildHostSurfaceBundle({ tenantId }).db.vector;
 }
 
-interface ChunkRow { id: string; vector: number[]; metadata: { documentId: string; chunkIndex: number; title: string; text: string } }
+interface ChunkRow { id: string; vector: number[]; metadata: { documentId: string; chunkIndex: number; title: string; text: string; contentTrust: 'trusted' | 'untrusted' } }
 
-/** Build the chunk rows for one document (deterministic ids + vectors). */
+/** Build the chunk rows for one document (deterministic ids + vectors). Carries
+ *  the document's content-trust onto every chunk (ADR 0038 §C) so retrieval +
+ *  dispatch can fence untrusted content. */
 function chunkRows(doc: KnowledgeDocument): ChunkRow[] {
+  const contentTrust = doc.contentTrust === 'untrusted' ? 'untrusted' : 'trusted';
   return chunkText(doc.text).map((text, chunkIndex) => ({
     id: `${doc.documentId}:${chunkIndex}`,
     vector: embedText(text, DEFAULT_EMBEDDING_DIMS),
-    metadata: { documentId: doc.documentId, chunkIndex, title: doc.title, text },
+    metadata: { documentId: doc.documentId, chunkIndex, title: doc.title, text, contentTrust },
   }));
 }
 
@@ -181,6 +191,16 @@ async function hydrate(tenantId: string, orgId: string, collectionId: string): P
 export async function listCollections(tenantId: string, orgId: string): Promise<KnowledgeCollection[]> {
   return (await collections.list())
     .filter((c) => c.tenantId === tenantId && c.orgId === orgId)
+    .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+}
+
+/** Every collection in a tenant, ACROSS its orgs (newest-first). Used by the
+ *  `agent-knowledge` feature (ADR 0038) to resolve a bound collectionId back to
+ *  its owning org — bindings store only the id (the ADR data model), and KB keys
+ *  are tenant+org+collection. Tenant-scoped (CTI-1); no org filter. */
+export async function listAllTenantCollections(tenantId: string): Promise<KnowledgeCollection[]> {
+  return (await collections.list())
+    .filter((c) => c.tenantId === tenantId)
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
 }
 
@@ -256,7 +276,7 @@ export async function ingestDocument(
   orgId: string,
   actor: string,
   collectionId: string,
-  input: { title?: unknown; text?: unknown; mediaToken?: unknown },
+  input: { title?: unknown; text?: unknown; mediaToken?: unknown; contentTrust?: 'trusted' | 'untrusted' },
 ): Promise<Omit<KnowledgeDocument, 'text'>> {
   const col = await mustGetCollection(tenantId, orgId, collectionId);
   const docCount = (await documents.list()).filter((d) => d.tenantId === tenantId && d.orgId === orgId && d.collectionId === collectionId).length;
@@ -274,6 +294,7 @@ export async function ingestDocument(
     orgId,
     title,
     source,
+    contentTrust: input.contentTrust === 'untrusted' ? 'untrusted' : 'trusted',
     text,
     chunkCount: 0,
     createdBy: actor,
@@ -339,6 +360,7 @@ export async function search(tenantId: string, orgId: string, collectionId: stri
     chunkIndex: m.metadata?.chunkIndex ?? 0,
     text: m.metadata?.text ?? '',
     score: m.score,
+    contentTrust: m.metadata?.contentTrust === 'untrusted' ? 'untrusted' : 'trusted',
   }));
 }
 
@@ -394,6 +416,7 @@ export async function tenantRetrieve(tenantId: string, args: KnowledgeRetrieveAr
       assetId: hit.documentId,
       collectionId,
       relevanceScore: hit.score,
+      contentTrust: hit.contentTrust,
     }));
 
   const sources: KnowledgeResult['sources'] = [];

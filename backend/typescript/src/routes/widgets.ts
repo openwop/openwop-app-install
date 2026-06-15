@@ -4,7 +4,7 @@
  * and HOST-EXTENSIONS.md).
  *
  * Demonstrates the route-layer conventions a real domain copies:
- *   - vendor-prefixed, non-normative namespace (`/v1/host/sample/...`),
+ *   - vendor-prefixed, non-normative namespace (`/v1/host/openwop-app/...`),
  *   - the `tenantOf(req)` accessor (cookie-anon / OIDC tenant, or the shared
  *     `default` tenant for bearer-shared demo callers),
  *   - the fail-closed mutation mapping: a discriminated `{ ok: false, reason }`
@@ -23,7 +23,7 @@ import {
   archiveWidget,
   createWidget,
   listWidgets,
-  seedDemoWidgets,
+  seedExampleWidgets,
   widgetSummary,
   type WidgetMutation,
 } from '../host/examples/widgetService.js';
@@ -56,7 +56,7 @@ function respondMutation(res: Response, result: WidgetMutation): void {
 export function registerWidgetRoutes(app: Express): void {
   if (process.env.OPENWOP_EXAMPLE_WIDGETS_ENABLED !== 'true') return;
 
-  app.get('/v1/host/sample/widgets', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/widgets', async (req, res, next) => {
     try {
       const items = await listWidgets(tenantOf(req));
       res.json({ widgets: items, total: items.length });
@@ -67,7 +67,7 @@ export function registerWidgetRoutes(app: Express): void {
 
   // Derived read-through projection — computed from the live store per
   // request; there is no stored summary row to drift.
-  app.get('/v1/host/sample/widgets/summary', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/widgets/summary', async (req, res, next) => {
     try {
       res.json(await widgetSummary(tenantOf(req)));
     } catch (err) {
@@ -75,7 +75,7 @@ export function registerWidgetRoutes(app: Express): void {
     }
   });
 
-  app.post('/v1/host/sample/widgets', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/widgets', async (req, res, next) => {
     try {
       const name = (req.body as { name?: unknown })?.name;
       if (typeof name !== 'string' || name.trim().length === 0 || name.length > 80) {
@@ -88,9 +88,9 @@ export function registerWidgetRoutes(app: Express): void {
   });
 
   // Idempotent demo seed — re-running is a no-op (`seeded: false`).
-  app.post('/v1/host/sample/widgets/seed', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/widgets/seed', async (req, res, next) => {
     try {
-      res.json(await seedDemoWidgets(tenantOf(req)));
+      res.json(await seedExampleWidgets(tenantOf(req)));
     } catch (err) {
       next(err);
     }
@@ -98,7 +98,7 @@ export function registerWidgetRoutes(app: Express): void {
 
   // The fail-closed mutation: archiving an archived widget is a 409 with
   // reason 'already_archived', not an error throw and not a silent success.
-  app.post('/v1/host/sample/widgets/:widgetId/archive', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/widgets/:widgetId/archive', async (req, res, next) => {
     try {
       respondMutation(res, await archiveWidget(tenantOf(req), req.params.widgetId));
     } catch (err) {

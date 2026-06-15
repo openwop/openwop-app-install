@@ -36,7 +36,7 @@ const log = createLogger('bootstrap.mountLocalPacks');
 
 // Pack-name prefixes the dev mount surfaces from the workspace `packs/` tree.
 // `core.openwop.*` are the protocol's own packs; `vendor.myndhyve.*` are the
-// reference vendor packs whose host surfaces the sample host implements
+// reference vendor packs whose host surfaces the reference app implements
 // (host.kanban/chat/canvas/knowledge/launchStudio/webResearch) — mounting them
 // makes those nodes available in the builder so the wired surfaces are runnable.
 // `feature.*` are feature-package packs (ADR 0001 §2.3/§3 Phase 3) so a
@@ -196,7 +196,7 @@ function readManifestVersion(packDir: string): string | null {
 }
 
 /** Returns >0 if a > b, <0 if a < b, 0 if equal. Pre-release / build
- *  metadata is ignored — sample-grade semver compare only. */
+ *  metadata is ignored — best-effort semver compare only. */
 function compareSemver(a: string, b: string): number {
   const pa = a.split('.').map((n) => Number(n.split('-')[0]) || 0);
   const pb = b.split('.').map((n) => Number(n.split('-')[0]) || 0);

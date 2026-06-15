@@ -29,14 +29,14 @@ curl -s "$BASE/.well-known/openwop" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); print('protocol:', d['protocolVersion']); print('surfaces:', len(d['capabilities']['hostSurfaces'])); print('aiProviders:', d['capabilities']['aiProviders']['supported'])"
 
 # 2. Catalog (mints openwop.session cookie)
-curl -s -c $CJAR -i "$BASE/v1/host/sample/node-catalog" | grep -i set-cookie | head -1
-curl -s -b $CJAR "$BASE/v1/host/sample/node-catalog" | \
+curl -s -c $CJAR -i "$BASE/v1/host/openwop-app/node-catalog" | grep -i set-cookie | head -1
+curl -s -b $CJAR "$BASE/v1/host/openwop-app/node-catalog" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); print('nodes:', len(d['nodes']), 'runnable:', sum(1 for n in d['nodes'] if not n.get('missingHostSurfaces')))"
 
 # 3. Register a sample workflow under the cookie's tenant
 curl -s -b $CJAR -c $CJAR -X POST -H 'content-type: application/json' \
-  "$BASE/v1/host/sample/workflows" \
-  -d '{"workflowId":"smoke-uppercase","nodes":[{"nodeId":"shout","typeId":"local.sample.demo.uppercase"}]}'
+  "$BASE/v1/host/openwop-app/workflows" \
+  -d '{"workflowId":"smoke-uppercase","nodes":[{"nodeId":"shout","typeId":"local.openwop-app.uppercase"}]}'
 
 # 4. Create a run — body omits tenantId, cookie provides it
 RUNID=$(curl -s -b $CJAR -c $CJAR -X POST -H 'content-type: application/json' \
@@ -52,7 +52,7 @@ curl -s -b $CJAR "$BASE/v1/runs/$RUNID" | \
 # 6. Admin cleanup (Bearer the OPENWOP_ADMIN_TOKEN from Secret Manager)
 ADMIN=$(gcloud secrets versions access latest --secret=openwop-admin-token)
 curl -s -X POST -H "Authorization: Bearer $ADMIN" \
-  "$BASE/v1/host/sample/admin/cleanup" | python3 -m json.tool
+  "$BASE/v1/host/openwop-app/admin/cleanup" | python3 -m json.tool
 
 # 7. /privacy page reachable
 curl -sI https://app.openwop.dev/privacy | head -1
@@ -99,18 +99,18 @@ curl -sI https://app.openwop.dev/privacy | head -1
 A deploy that selects real backends (`OPENWOP_SURFACE_KV=durable`,
 `OPENWOP_SURFACE_BLOB=s3`, `OPENWOP_SURFACE_SQL=postgres`, …) should advertise
 them honestly. `/.well-known/openwop` reports the *effective* backend per
-surface, so the demo-grade badge clears only when a real backend is actually
+surface, so the non-durable badge clears only when a real backend is actually
 wired:
 
 ```bash
-# Each selected surface should report its backend id, NOT a demo tag
+# Each selected surface should report its backend id, NOT a non-durable tag
 # (in-memory / sandboxed-local-fs / brute-force-cosine / …).
 curl -s https://<host>/.well-known/openwop \
   | jq '.hostSurfaces[] | {name, implementation}'
 ```
 
 Expect e.g. `host.kvStorage → "durable"`, `host.blobStorage → "s3"`,
-`host.db.sql → "postgres"`. A surface still showing a demo tag means its
+`host.db.sql → "postgres"`. A surface still showing a non-durable tag means its
 `OPENWOP_SURFACE_*` env didn't reach the runtime. The boot itself fails closed
 if a selected backend has no adapter (or, in the `auth` posture, if
 `OPENWOP_BYOK_KMS_KEY` is unset), so a running service already implies a valid

@@ -1,5 +1,27 @@
 # ADR 0023 — Executive Assistant / Chief-of-Staff Agent
 
+> **⚠ CORRECTION (David, 2026-06-13) — the assistant is a CAPABILITY, not a
+> special named agent.** This ADR's framing ("the assistant **is** the named
+> roster agent Iris", roleKey `chief-of-staff`) fused the operating-rhythm
+> capability — the structured memory graph + perception loops + action
+> drafting/approval — to one hardcoded `roleKey`. Per David's architecture law
+> (*nothing may be unique to a named agent in source; every capability lives at
+> the CORE agent level and is ACTIVATED per named agent*), that hardcoding was a
+> violation. **Decoupled (T2.C):** the capability is now activated via
+> **`AgentProfile.capabilities` (ADR 0031)** — `['assistant']` — and the runtime
+> (`features/assistant/capability.ts ensureAssistantAgent`, the loops, the
+> action-approval attribution) resolves the acting/writing agent **by that
+> capability, never by `roleKey`** (the `chiefOfStaff.ts` `ensureChiefOfStaff` /
+> `isChiefOfStaff` / `CHIEF_OF_STAFF_ROLE_KEY` gate is removed; `chiefOfStaff.ts`
+> is now a thin deprecated shim). **Iris is just an agent with the `assistant`
+> capability activated; Executive Operations is another. There is no "Iris's
+> graph" — only the tenant work-graph any capability-activated agent operates
+> on.** A single documented `DEFAULT_ASSISTANT_SEED_ROLE` constant survives only
+> as a back-compat bootstrap (self-heals the capability flag onto a tenant that
+> predates it), not a runtime gate. Everything below stands as the capability's
+> *implementation*; read "the Chief of Staff" as "an agent with the `assistant`
+> capability." See [[agent-capability-core-not-named]].
+
 **Status:** Accepted — Phase 0 (memory graph + `ctx.features.assistant`) + the loop layer (node/agent packs, prioritization, idempotent board projection) + the frontend **implemented + tested** (`d89505b`, `2c3be99`, `1f78423`). **§12 activation tranches T1–T8 implemented + tested** (2026-06-11 gap-closure plan — see §12 + the Phase ledger): Connections injection (ADR 0024 Phase D), Calendar/Drive ingestion + morning-briefing loops on RFC 0052, action cards on the single approval loop, taint gating (ADR 0027), execute-on-approve, governance (ADR 0028), evals/health + indexes (ADR 0029). **Live Google reads/writes remain deploy-gated** on OAuth client config + (for MCP-reach providers) a registered Google MCP server; the LLM extractor/drafter agents ride agent dispatch on the same gate.
 **Date:** 2026-06-10 (implemented 2026-06-11)
 **Depends on (hard):** ADR 0024 (Connections broker — per-user/org credentials)
@@ -17,7 +39,7 @@ surfaces); ADR 0001 (feature-package); ADR 0015 (workspace = tenant); ADR 0006
 (ADR 0010), RFC 0052 scheduler, RFC 0083 trigger bridge, RFC 0086
 roster + heartbeat, `ctx.memory` (agent scratchpad), `ctx.http.safeFetch`
 (RFC 0076 egress), the human-in-the-loop interrupt seam.
-**Surface:** `/v1/host/sample/assistant/*` + `ctx.features.assistant`
+**Surface:** `/v1/host/openwop-app/assistant/*` + `ctx.features.assistant`
 (host-extension, **NON-NORMATIVE — no RFC**).
 **Toggle:** `assistant` · category `Workspace` · default OFF · `bucketUnit: 'tenant'`
 · variants = the **prioritization profiles** (`conservative` / `balanced` /
@@ -42,7 +64,7 @@ roster + heartbeat, `ctx.memory` (agent scratchpad), `ctx.http.safeFetch`
 > page. See [[no-parallel-architecture]] for the standing rule this enforces.
 >
 > **Consolidation (2026-06-11, follow-up).** The Chief of Staff is created
-> through the ONE seeder path (`demoAgents.json` → `ensureSeededAgentByRole`),
+> through the ONE seeder path (`exampleAgents.json` → `ensureSeededAgentByRole`),
 > never feature code. The `assistant` feature toggle is removed (graduated,
 > like Connections/Users); the `/assistant` page is deleted; the loop manager
 > is the **"Recurring tasks"** panel at the bottom of the Chief-of-Staff
@@ -430,7 +452,7 @@ handle / defer**.
 ## 8. RFC gate — determination
 
 **Host work — NO new RFC required.** Every surface is under
-`/v1/host/sample/assistant/*` (non-normative) and the feature rides **already-
+`/v1/host/openwop-app/assistant/*` (non-normative) and the feature rides **already-
 Accepted** RFCs: 0052 (scheduler), 0083 (trigger bridge), 0086 (roster/heartbeat),
 0050 (auth), 0079 (credential provenance, via 0024), and the ADR 0014 surface
 pattern. The multi-sub-agent perception/drafting orchestration stays **host-local**
@@ -455,8 +477,8 @@ before/with the work. Not needed for the phases above.
 | Per-user Google credentials | **`connectors`** (ADR 0024) | consumes; never stores tokens |
 | The **structured entity graph** | **`assistant` (this ADR)** | the one new owner |
 
-Route check: `grep -rn "/v1/host/sample/assistant" backend/typescript/src` → no
-prior registrant. The pre-existing `/v1/host/sample/memory` surface is **agent
+Route check: `grep -rn "/v1/host/openwop-app/assistant" backend/typescript/src` → no
+prior registrant. The pre-existing `/v1/host/openwop-app/memory` surface is **agent
 scratchpad memory**, a different concept and a different namespace — **no
 collision**, deliberately not reused as the graph's home.
 

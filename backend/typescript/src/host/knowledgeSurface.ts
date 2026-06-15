@@ -62,6 +62,9 @@ export interface KnowledgeResultChunk {
   assetId: string;
   collectionId: string;
   relevanceScore: number;
+  /** Content-trust provenance (RFC 0021 / ADR 0038 §C). `'untrusted'` ⇒ the
+   *  consumer MUST fence it (never inject as agent-trusted). Absent ⇒ trusted. */
+  contentTrust?: 'trusted' | 'untrusted';
 }
 export interface KnowledgeSource { sourceId: string; assetId: string; title: string; headingPath: string[]; pageNumber: number | null }
 export interface KnowledgeResult { chunks: KnowledgeResultChunk[]; sources: KnowledgeSource[]; latencyMs: number; hasResults: boolean }
@@ -86,6 +89,14 @@ let backend: KnowledgeBackend | null = null;
  *  feature calls this at boot (ADR 0014 Phase 0), mirroring setNotificationBackend. */
 export function setKnowledgeBackend(b: KnowledgeBackend | null): void {
   backend = b;
+}
+
+/** The installed knowledge backend (or `null` when no feature wired one). The
+ *  host route layer reads this to COMPOSE per-agent knowledge retrieval (ADR 0038
+ *  Phase 3) from host-owned primitives WITHOUT importing the `kb` feature — so
+ *  dispatch composition needs no core→feature import. */
+export function getKnowledgeBackend(): KnowledgeBackend | null {
+  return backend;
 }
 
 const QUERY_MAX = 4000;

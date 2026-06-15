@@ -6,7 +6,7 @@ chat envelope is deferred — see the port corrections + implementation record b
 **Depends on:** ADR 0001 (feature-package), ADR 0006 (RBAC), ADR 0009 (CMS — a
 commentable resource), ADR 0011 (KB — a commentable resource), ADR 0010
 (Notifications — the emit seam + SSE this reuses)
-**Toggle:** `comments` · **Surface:** authed `/v1/host/sample/comments/orgs/:orgId/*`
+**Toggle:** `comments` · **Surface:** authed `/v1/host/openwop-app/comments/orgs/:orgId/*`
 (host-extension, NON-NORMATIVE — no RFC)
 **MyndHyve §:** Collaboration & Presence · **Baseline:**
 `src/core/collaboration/{services,collaborationStore.ts,components/CommentsPanel.tsx,
@@ -66,7 +66,7 @@ resourceType, resourceId, commentId)` — so a thread is a prefix scan.
 
 ### Phase 1 — comment store + resolver registry + CRUD (RBAC)
 
-Routes under `/v1/host/sample/comments/orgs/:orgId`, `authorizeOrgScope`-gated:
+Routes under `/v1/host/openwop-app/comments/orgs/:orgId`, `authorizeOrgScope`-gated:
 - `POST .../comments` `{ resourceType, resourceId, body, parentId? }`
   (`workspace:write`) — reject unknown `resourceType`; `resolver.validate` asserts
   the target is in this org (cross-org/tenant 404); append.

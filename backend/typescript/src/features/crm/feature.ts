@@ -28,7 +28,7 @@ export const crmFeature: BackendFeature = {
   toggleDefault: {
     id: 'crm',
     label: 'CRM',
-    description: 'Contacts + contact triage — sample product feature (ADR 0001 §4).',
+    description: 'Contacts + contact triage — sample product feature.',
     category: 'Business Tools',
     status: 'off',
     bucketUnit: 'tenant',

@@ -531,7 +531,7 @@ function PromptDetailModal({ prompt, onClose }: { prompt: PromptTemplate; onClos
         <p className="muted">
           This is a local Mustache-style render. Once the host advertises{' '}
           <code>capabilities.prompts.supported</code>, the preview will route through{' '}
-          <code>POST /v1/prompts:render</code> for the deterministic-hash invariant per RFC 0028 §A.
+          <code>POST /v1/prompts:render</code> for the deterministic-hash invariant.
         </p>
       </div>
     </Modal>

@@ -3,7 +3,7 @@
 **Status:** implemented (retroactive — documents a feature that shipped 2026-06-08 before its ADR existed); **extended 2026-06-10** with the core-app extension surface (see § Correction).
 **Date:** 2026-06-10 (retroactive record; extended same day)
 **Depends on:** ADR 0001 (feature-first package architecture), ADR 0014 (feature workflow surfaces — the extension). Tenant scoping per ADR 0015 (tenant = workspace).
-**Surface:** `/v1/host/sample/csm/*` + `ctx.features.csm` (host-extension, NON-NORMATIVE — no RFC).
+**Surface:** `/v1/host/openwop-app/csm/*` + `ctx.features.csm` (host-extension, NON-NORMATIVE — no RFC).
 **Toggle:** `csm` · category `Business Tools` · default OFF · `bucketUnit: 'tenant'` · no variants · ~~no packs~~ ships `feature.csm.{nodes,agents}` (corrected 2026-06-10).
 
 > **Why this ADR exists.** The `csm` feature shipped as a `BackendFeature` +
@@ -36,7 +36,7 @@ responsibility; the two compose at the UI layer, not in one store).
 - **Model** (`src/features/csm/accountsService.ts`):
   `Account { accountId, tenantId, name, healthScore /* 0..100 */, createdAt, updatedAt }`.
 - **Surface** (`routes.ts`): tenant-scoped CRUD —
-  `GET/POST /v1/host/sample/csm/accounts`, `GET/PATCH/DELETE /…/accounts/:id`,
+  `GET/POST /v1/host/openwop-app/csm/accounts`, `GET/PATCH/DELETE /…/accounts/:id`,
   each gated by `resolveOne('csm', subject).enabled` (backend authority) and
   scoped to the caller's active workspace (`tenantId`).
 - **Toggle** (`feature.ts`): plain on/off, default OFF, `bucketUnit: 'tenant'`,
@@ -100,7 +100,7 @@ probe another workspace's accounts (CTI-1). Mirrors `crm/surface.ts`.
   to `feature.csm.nodes.health-read` **only** (read-only — it reports at-risk
   accounts + save-plays, it never mutates health).
 
-**Replay / RFC / boundaries:** no wire change (all `/v1/host/sample/*` +
+**Replay / RFC / boundaries:** no wire change (all `/v1/host/openwop-app/*` +
 `ctx.features.*`, riding ADR 0014's already-accepted agent/manifestRuntime RFCs) →
 no RFC. Idempotent-by-id write → replay-safe, no `run.metadata` stamp (no variant).
 No collision — `csm` namespace + `feature.csm.*` pack names free; `accountsService`
@@ -120,7 +120,7 @@ signals needs a CRM cross-link (`ctx.features.crm`) and stays a follow-on (below
   entry only *hides* the link, it is not the access control.
 - **Tenant isolation (RFC 0048 §D / ADR 0015):** every read/write is scoped to the
   active workspace; no cross-workspace leakage.
-- **No wire change:** host-extension under `/v1/host/sample/*`; non-normative; no
+- **No wire change:** host-extension under `/v1/host/openwop-app/*`; non-normative; no
   RFC required (per `CLAUDE.md` governance).
 
 ## Alternatives considered

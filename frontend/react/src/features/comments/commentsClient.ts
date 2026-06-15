@@ -1,6 +1,6 @@
 /**
  * Collaboration / Comments API client (ADR 0021). Authed org-scoped threads under
- * /v1/host/sample/comments/orgs/:orgId. No public surface. The resource picker
+ * /v1/host/openwop-app/comments/orgs/:orgId. No public surface. The resource picker
  * composes the CMS + KB clients (listPages / listCollections) — comments reference
  * those resources, they never copy their data.
  */
@@ -25,7 +25,7 @@ export interface Comment {
   updatedAt: string;
 }
 
-const root = `${config.baseUrl}/v1/host/sample`;
+const root = `${config.baseUrl}/v1/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

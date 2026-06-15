@@ -16,7 +16,7 @@ import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 let server: http.Server;
 const PORT = 18209;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -32,7 +32,7 @@ async function jsonFetch<T = unknown>(path: string, init: RequestInit = {}): Pro
 }
 
 async function registerWorkflow(workflowId: string, nodes: unknown[]): Promise<void> {
-  const r = await jsonFetch('/v1/host/sample/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes, edges: [] }) });
+  const r = await jsonFetch('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes, edges: [] }) });
   expect([200, 201]).toContain(r.status);
 }
 

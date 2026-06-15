@@ -1,7 +1,7 @@
 /**
  * Anon → user migration route (P3.5).
  *
- *   POST /v1/host/sample/migrate-tenant
+ *   POST /v1/host/openwop-app/migrate-tenant
  *
  * Called by the SPA immediately after Firebase Auth sign-in to
  * reassign every artifact owned by the visitor's anonymous session to
@@ -106,7 +106,7 @@ function verifyAnonSessionCookie(req: Request): SessionPayload | null {
 }
 
 export function registerMigrateRoute(app: Express, deps: { storage: Storage }): void {
-  app.post('/v1/host/sample/migrate-tenant', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/migrate-tenant', async (req, res, next) => {
     try {
       // ADR 0015: migrate the anon sandbox into the caller's PERSONAL tenant —
       // NOT `req.tenantId`, which is the active workspace and may be a shared

@@ -82,7 +82,7 @@ This is a good safety posture, but still a thin user experience relative to the 
 | Governance/admin controls | B- | Feature toggles, tenant scoping, BYOK, RBAC, and provenance shape are good. Missing admin-grade connector/action policy UI and audit surface. |
 | UX/product depth | C | The Assistant page is useful but thin: tables for commitments and approvals. A chief-of-staff experience needs briefings, explanations, source citations, cadence settings, and triage. |
 | Observability/evals | D+ | OpenWOP run events help, but there is no assistant-specific eval harness or operating dashboard for quality, safety, latency, cost, and action outcomes. |
-| Scale/performance | C | DurableCollection scans are acceptable sample-grade, but not sufficient for large inbox/calendar/document workloads. |
+| Scale/performance | C | DurableCollection scans are acceptable in-memory tier, but not sufficient for large inbox/calendar/document workloads. |
 | Commercial readiness | C+ | The architecture is credible; the demo needs live connected loops and polished chief-of-staff surfaces to feel market-comparable. |
 
 ## Gap Analysis
@@ -225,7 +225,7 @@ OpenWOP has run events, but the assistant needs product-specific quality and saf
 
 **Rating: C**
 
-The service uses `DurableCollection.list()` scans for many list and lookup paths. That matches sample-grade storage but will struggle with real email/calendar/document volumes.
+The service uses `DurableCollection.list()` scans for many list and lookup paths. That matches an in-memory tier but will struggle with real email/calendar/document volumes.
 
 **Impact:** A connected executive assistant can generate high-cardinality data quickly.
 
@@ -268,5 +268,5 @@ The service uses `DurableCollection.list()` scans for many list and lookup paths
 
 The OpenWOP design is unusually well aligned with where the industry is heading. The strongest idea is that the assistant is a chief-of-staff agent operating over the same rails as other agents: identity, work graph, schedules, tools, approvals, and observable runs. That is the right long-term architecture.
 
-The weak spot is that the compelling behavior is still mostly latent. To move from **B- architecture demo** to **A- product direction**, the next tranche should focus less on expanding the model and more on closing the loop: real connected data in, source-grounded commitments and briefings out, approval-gated actions, and admin-visible safety controls.
+The weak spot is that the compelling behavior is still mostly latent. To move from **B- architecture preview** to **A- product direction**, the next tranche should focus less on expanding the model and more on closing the loop: real connected data in, source-grounded commitments and briefings out, approval-gated actions, and admin-visible safety controls.
 

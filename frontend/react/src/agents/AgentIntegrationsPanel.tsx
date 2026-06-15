@@ -1,6 +1,6 @@
 /**
  * Agent integrations panel (PRD §9 Integrations + §15) — task sources, real and
- * simulated. The Discord demo shows the example command and creates a simulated
+ * simulated. The Discord preview shows the example command and creates a simulated
  * Discord task on the agent's board so the source taxonomy is demonstrable
  * without a real integration. Future sources are clearly labeled.
  */
@@ -64,7 +64,7 @@ export function AgentIntegrationsPanel({ boardId, persona, onChanged }: { boardI
       <div className="agentintg-card">
         <div className="u-flex u-items-center u-gap-2">
           <strong className="u-iflex u-items-center u-gap-1"><MessageCircleIcon size={16} /> Discord</strong>
-          <span className="chip chip--warning">Demo simulation</span>
+          <span className="chip chip--warning">Simulated</span>
         </div>
         <p className="u-fs-14">
           In Discord, <code>/assign @{handle} "Follow up with ACME on renewal"</code> creates a To Do card on {persona}'s board.
@@ -93,7 +93,7 @@ export function AgentIntegrationsPanel({ boardId, persona, onChanged }: { boardI
             <span className="agentintg-source-name">{s.name}</span>
             <span className="muted u-fs-13 u-flex-1">{s.blurb}</span>
             <span className={`chip ${s.status === 'demo' ? 'chip--success' : 'chip--muted'}`}>
-              {s.status === 'demo' ? 'Demo' : 'Planned'}
+              {s.status === 'demo' ? 'Preview' : 'Planned'}
             </span>
           </li>
         ))}

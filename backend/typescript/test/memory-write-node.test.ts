@@ -1,5 +1,5 @@
 /**
- * RFC 0057 node-attributed producer — `local.sample.demo.memory-write`.
+ * RFC 0057 node-attributed producer — `local.openwop-app.memory-write`.
  *
  * Runs a workflow whose single node writes a tenant memory entry mid-run,
  * then verifies the run emits a `memory.written` event attributed to that
@@ -18,7 +18,7 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 const PORT = 18189;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -60,11 +60,11 @@ interface MemoryListBody { memoryRef: string; entries: MemoryEntry[] }
 
 describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
   it('emits a node-attributed, content-free memory.written whose memoryId resolves in the ledger', async () => {
-    const reg = await jsonFetch('/v1/host/sample/workflows', {
+    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
-        workflowId: 'sample.demo.memwrite',
-        nodes: [{ nodeId: 'mem', typeId: 'local.sample.demo.memory-write' }],
+        workflowId: 'openwop-app.memwrite',
+        nodes: [{ nodeId: 'mem', typeId: 'local.openwop-app.memory-write' }],
         edges: [],
       }),
     });
@@ -72,7 +72,7 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
 
     const create = await jsonFetch<{ runId: string }>('/v1/runs', {
       method: 'POST',
-      body: JSON.stringify({ workflowId: 'sample.demo.memwrite', inputs: {} }),
+      body: JSON.stringify({ workflowId: 'openwop-app.memwrite', inputs: {} }),
     });
     expect(create.status).toBe(201);
     const { runId } = create.body;
@@ -97,7 +97,7 @@ describe('memory-write demo node (RFC 0057 node-attributed producer)', () => {
     expect(nodeWrite!.payload?.content, 'memory.written MUST be content-free').toBeUndefined();
 
     // The memoryId resolves via the read-side, tagged with the writing node.
-    const mem = await jsonFetch<MemoryListBody>('/v1/host/sample/memory');
+    const mem = await jsonFetch<MemoryListBody>('/v1/host/openwop-app/memory');
     expect(mem.status).toBe(200);
     const entry = mem.body.entries.find((e) => e.id === nodeWrite!.payload!.memoryId);
     expect(entry, 'the attributed memoryId MUST resolve in the ledger').toBeDefined();

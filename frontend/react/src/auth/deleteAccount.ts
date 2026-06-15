@@ -2,7 +2,7 @@
  * Account hard-delete helper (P3.6.5 client side).
  *
  * Two-step flow:
- *   1. DELETE /v1/host/sample/account — wipes backend rows + KMS-
+ *   1. DELETE /v1/host/openwop-app/account — wipes backend rows + KMS-
  *      wrapped DEKs for the signed-in tenant. Returns row counts.
  *   2. Firebase user.delete() — revokes the IdP record so the same
  *      user can't re-authenticate. Must be called while the bearer
@@ -36,7 +36,7 @@ export class RequiresRecentLoginError extends Error {
 export async function deleteAccount(): Promise<DeleteAccountResult> {
   // Step 1: backend hard-delete.
   const res = await fetch(
-    `${config.baseUrl}/v1/host/sample/account`,
+    `${config.baseUrl}/v1/host/openwop-app/account`,
     fetchOpts({
       method: 'DELETE',
       headers: authedHeaders({ accept: 'application/json' }),

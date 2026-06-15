@@ -12,7 +12,7 @@
  *      pack loader knows the manifest was verified at install-time
  *      and doesn't need to re-check the manifest signature.
  *
- * The installer is sample-grade: shells out to /usr/bin/tar (bsdtar/
+ * The installer is best-effort: shells out to /usr/bin/tar (bsdtar/
  * GNU tar both work). Real hosts use a vetted tar library + extract
  * into a sandboxed dir. The verification logic is the same.
  */

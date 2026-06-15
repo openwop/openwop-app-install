@@ -38,27 +38,27 @@ keeps the credential *ref name* (class `ref`). Two guards enforce this:
 | `openwop.sidebar.collapsed` | local | pref | nav rail collapsed |
 | `openwop.admin.railCollapsed` | local | pref | admin rail collapsed |
 | `openwop.runs.density` | local | pref | runs table density |
-| `openwop:demo-banner:dismissed` | local | pref | demo banner dismissed |
+| `openwop:demo-banner:dismissed` | local | pref | in-memory host banner dismissed |
 | `openwop:notification-prefs:v1` | local | pref | notification preferences |
 | `openwop.appGate.unlocked` | local | pref | demo gate unlocked |
 | `openwop-thoughts-anim` | local | pref | reasoning animation pref |
-| `openwop.sample.byok.activeConfig` | local | ref | provider/model/credentialRef **name** only |
-| `openwop.sample.byok.pendingManaged` | local | ref | pending managed-provider id |
-| `openwop.sample.chat.session` | local | content | current chat thread (cold-start cache) |
-| `openwop.sample.chat.sessions-index` | local | content | session header index for History drawer |
-| `openwop.sample.prompts.user` | local | content | user-authored prompts |
-| `openwop.sample.builder.workflows*` | local | content | draft workflows + migration flags |
+| `openwop-app.byok.activeConfig` | local | ref | provider/model/credentialRef **name** only |
+| `openwop-app.byok.pendingManaged` | local | ref | pending managed-provider id |
+| `openwop-app.chat.session` | local | content | current chat thread (cold-start cache) |
+| `openwop-app.chat.sessions-index` | local | content | session header index for History drawer |
+| `openwop-app.prompts.user` | local | content | user-authored prompts |
+| `openwop-app.builder.workflows*` | local | content | draft workflows + migration flags |
 | `openwop.networkRecorder.v1` | session | diag | credential-redacted traffic mirror; prod-default-off |
-| `openwop.sample.lastSuccessAt` | local | diag | cold-start warm-window timestamp hint |
+| `openwop-app.lastSuccessAt` | local | diag | cold-start warm-window timestamp hint |
 
 ### Dynamic (per-tenant) keys
 
 Some chat keys are suffixed with the tenant id and built from a static prefix
 by their owning module (all class `pref`/`content`):
 
-- `openwop.sample.chat.leftRail.activeTab.<tenant>`
-- `openwop.sample.chat.progressPanel.{open,focusedRunMsgId}.<tenant>`
-- `openwop.sample.chat.activeAgentsPanel.open.<tenant>`
+- `openwop-app.chat.leftRail.activeTab.<tenant>`
+- `openwop-app.chat.progressPanel.{open,focusedRunMsgId}.<tenant>`
+- `openwop-app.chat.activeAgentsPanel.open.<tenant>`
 - `MarkdownEditor` autosave keys (caller-supplied prefix; draft text only)
 
 ## Adding a key

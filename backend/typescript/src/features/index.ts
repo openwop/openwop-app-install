@@ -37,6 +37,12 @@ import { assistantFeature } from './assistant/feature.js';
 import { connectionsFeature } from './connections/feature.js';
 import { emailFeature } from './email/feature.js';
 import { commentsFeature } from './comments/feature.js';
+import { marketplaceFeature } from './marketplace/feature.js';
+import { agentKnowledgeFeature } from './agent-knowledge/feature.js';
+import { advisoryBoardFeature } from './advisory-board/feature.js';
+import { proposalsFeature } from './proposals/feature.js';
+import { goalsFeature } from './goals/feature.js';
+import { portabilityFeature } from './portability/feature.js';
 
 const log = createLogger('features');
 
@@ -51,7 +57,7 @@ const log = createLogger('features');
 const RETIRED_TOGGLE_IDS = ['cms', 'media', 'publishing', 'connections', 'users', 'profiles'] as const;
 
 /** Every backend feature the app composes. Append a new feature here. */
-export const BACKEND_FEATURES: BackendFeature[] = [widgetsFeature, crmFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature];
+export const BACKEND_FEATURES: BackendFeature[] = [widgetsFeature, crmFeature, csmFeature, usersFeature, orgsFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, assistantFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, proposalsFeature, goalsFeature, portabilityFeature];
 
 /** Declare toggle defaults + mount routes + register workflow surfaces for every
  *  backend feature (ADR 0014 — the composer wires all faces in one pass). */

@@ -1,7 +1,7 @@
 /**
- * Sample-extension scheduler CRUD — `/v1/host/sample/scheduler/jobs`.
+ * Host-extension scheduler CRUD — `/v1/host/openwop-app/scheduler/jobs`.
  *
- * Namespace: sample-extension under `/v1/host/sample/*`; this is NOT part of
+ * Namespace: host-extension under `/v1/host/openwop-app/*`; this is NOT part of
  * the normative OpenWOP wire contract (vendor-prefixed per
  * spec/v1/host-extensions.md). It exposes the durable host-side scheduled-job
  * store (host/schedulingService.ts) — which sits alongside the RFC 0052
@@ -10,11 +10,11 @@
  * cron jobs.
  *
  * Routes:
- *   GET    /v1/host/sample/scheduler/jobs[?rosterId=]     — list jobs (tenant-scoped; optional roster filter)
- *   POST   /v1/host/sample/scheduler/jobs                 — register a job (optional roster/agent attribution)
- *   PATCH  /v1/host/sample/scheduler/jobs/{jobId}         — enable/disable a job
- *   DELETE /v1/host/sample/scheduler/jobs/{jobId}         — remove a job
- *   POST   /v1/host/sample/scheduler/jobs/{jobId}/trigger — fire now (starts a real run)
+ *   GET    /v1/host/openwop-app/scheduler/jobs[?rosterId=]     — list jobs (tenant-scoped; optional roster filter)
+ *   POST   /v1/host/openwop-app/scheduler/jobs                 — register a job (optional roster/agent attribution)
+ *   PATCH  /v1/host/openwop-app/scheduler/jobs/{jobId}         — enable/disable a job
+ *   DELETE /v1/host/openwop-app/scheduler/jobs/{jobId}         — remove a job
+ *   POST   /v1/host/openwop-app/scheduler/jobs/{jobId}/trigger — fire now (starts a real run)
  *
  * RFC 0052 semantics:
  *   - §B.2 fire-once-per-tick: a `/trigger` advances the deterministic clock
@@ -74,7 +74,7 @@ function jobAccessible(req: Request, job: ScheduledJob): boolean {
 }
 
 export function registerSchedulerRoutes(app: Express, deps: Deps): void {
-  app.get('/v1/host/sample/scheduler/jobs', async (req, res, next) => {
+  app.get('/v1/host/openwop-app/scheduler/jobs', async (req, res, next) => {
     try {
       // ADR 0025 — `?owner=me` lists the caller's OWN user-owned schedules from
       // their personal tenant (the profile "Schedules" tab), independent of the
@@ -98,7 +98,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.post('/v1/host/sample/scheduler/jobs', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/scheduler/jobs', async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as {
         jobId?: unknown;
@@ -232,7 +232,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.patch('/v1/host/sample/scheduler/jobs/:jobId', async (req, res, next) => {
+  app.patch('/v1/host/openwop-app/scheduler/jobs/:jobId', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
       if (!job || !jobAccessible(req, job)) {
@@ -288,7 +288,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/sample/scheduler/jobs/:jobId', async (req, res, next) => {
+  app.delete('/v1/host/openwop-app/scheduler/jobs/:jobId', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
       if (!job || !jobAccessible(req, job)) {
@@ -308,7 +308,7 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
 
   // Express 4 + path-to-regexp v6 dislikes a bare `:` inside a path segment,
   // so the action verb is matched via a regex-free trailing segment.
-  app.post('/v1/host/sample/scheduler/jobs/:jobId/trigger', async (req, res, next) => {
+  app.post('/v1/host/openwop-app/scheduler/jobs/:jobId/trigger', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
       if (!job || !jobAccessible(req, job)) {

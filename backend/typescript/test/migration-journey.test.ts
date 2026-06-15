@@ -34,7 +34,7 @@ describe('migration journey', () => {
 
   it('merge-patches only the provided fields and persists', async () => {
     await patchMigrationJourney(T, WF, {
-      target: { workflowId: 'sample.agents.invoice-post', targetOutcome: 'clear exceptions in <1 day' },
+      target: { workflowId: 'openwop-app.agents.invoice-post', targetOutcome: 'clear exceptions in <1 day' },
       stageStatus: { target: 'done' },
     });
     // a second patch touches a different field; the first must survive
@@ -44,7 +44,7 @@ describe('migration journey', () => {
     });
 
     const j = await getMigrationJourney(T, WF);
-    expect(j.target?.workflowId).toBe('sample.agents.invoice-post');
+    expect(j.target?.workflowId).toBe('openwop-app.agents.invoice-post');
     expect(j.dataManifest?.sensitivity).toBe('financial PII');
     expect(j.stageStatus.target).toBe('done');
     expect(j.stageStatus['map-data']).toBe('done');

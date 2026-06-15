@@ -116,19 +116,21 @@ bearer key); `OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true` opens it for local dev only
 
 | Feature | Toggle id | Default | Bucket unit | Variants | Packs | Surface |
 |---|---|---|---|---|---|---|
-| **CRM** (full port) — contacts, companies, deals, tasks, activities + pipelines/stages; contact-triage nodes | `crm` | OFF | `tenant` | `basic` / `enriched` (50/50), bound to the triage nodes | `feature.crm.nodes` | `/crm` (workspace) + `/v1/host/sample/crm/contacts/*` + org-scoped `/crm/orgs/:orgId/*` (ADR 0008) |
-| **CSM** — customer-success accounts + health score | `csm` | OFF | `tenant` | — (plain on/off) | — | `/csm` (workspace) + `/v1/host/sample/csm/accounts/*` (ADR 0016) |
-| **Users & Authentication** — durable accounts, lifecycle, email/password, MFA (TOTP), enterprise SSO (SAML 2.0 ACS + SCIM provisioning) | — (graduated off its toggle 2026-06-11, § Correction in `features/users/feature.ts` — permanent admin surface, always on) | ALWAYS ON | — | — | — | `/users` (admin · Access & data) + `/v1/host/sample/users/*` (incl. `/users/mfa/*`) + SSO seam `/v1/host/sample/auth/{saml/validate,scim/provision}` · identity foundation (ADR 0002/0003) |
-| **Org invitations** — email-token invites to join an org as a member (orgs/members/roles owned by the `accessControl` surface, RFC 0049) | `orgs` | OFF | `tenant` | — (plain on/off) | — | `/v1/host/sample/orgs/:id/invites` + `/orgs/invitations/accept` (ADR 0004, reconciled) |
-| **User Profiles** — self-service per-user profile (avatar/portfolio via Media tokens, skills + peer endorsements, weighted completeness) + agent **pinning** (ADR 0023) + the per-user board/activity surfaces | — (graduated off its toggle 2026-06-12, § Correction in `features/profiles/feature.ts` — permanent substrate, always on: pinning + per-user surfaces ride on it) | ALWAYS ON | — | — | — | `/profile` + `/team` (workspace) + `/v1/host/sample/profiles/*` (ADR 0005) |
-| **Knowledge Base / RAG** — org-scoped document collections, ingest (pasted text or Media token) → chunk + embed, semantic search with citations | `kb` | OFF | `tenant` | — (plain on/off) | — (composes `core.openwop.rag` + host `db.vector`) | `/kb` (workspace) + `/v1/host/sample/kb/orgs/:orgId/*` · reuses the host vector store + deterministic embedder (ADR 0011) |
-| **Sharing** — unguessable public share links to a specific resource (CMS page incl. drafts, KB collection) + social-card metadata | `sharing` | OFF | `tenant` | — (plain on/off) | — (composes CMS + KB via a resolver registry) | authed `/v1/host/sample/sharing/orgs/:orgId/links` + **public** `/v1/host/sample/shared/:token` (unauthed, token-credential, toggle-gated) · admin **Content** group `/sharing` (ADR 0013) |
-| **Forms** — org-scoped form builder; public submit → CRM contact (through `crmService`); `ctx.features.forms` + node/agent packs | `forms` | OFF | `tenant` | — (plain on/off) | `feature.forms.*` | authed `/v1/host/sample/forms/orgs/:orgId/forms` + **public** `/v1/host/sample/public-forms/:formId` (unauthed, published-only, toggle-gated) · `/forms` (workspace) (ADR 0017) |
-| **Consent & Compliance** — region-aware consent policy + the centralized `isAllowed` gate (Analytics/Email call it) + data-subject GDPR erasure (cascades to feature data) | `consent` | OFF | `tenant` | — (plain on/off) | `feature.consent.*` | authed `/v1/host/sample/consent/orgs/:orgId/*` + **public** `/v1/host/sample/public-consent/:orgId` (unauthed, toggle-gated) · `/consent` (workspace) (ADR 0020) |
-| **Analytics** — public-surface measurement (page/event/conversion) via a consent-gated beacon + authed reporting (counts, sessions, top paths, UTM); `ctx.features.analytics` + node/agent packs | `analytics` | OFF | `tenant` | — (plain on/off) | `feature.analytics.*` | authed `/v1/host/sample/analytics/orgs/:orgId/{summary,events}` + **public beacon** `/v1/host/sample/public-analytics/:orgId/collect` (unauthed, toggle+consent-gated) · `/analytics` (workspace) (ADR 0018) |
-| **Email Marketing** — templates + campaigns over CRM contacts (audience resolved live), marketing-consent-gated sends through a stub provider, per-campaign stats + send log; `ctx.features.email` + node/agent packs | `email` | OFF | `tenant` | — (plain on/off) | `feature.email.*` | authed `/v1/host/sample/email/orgs/:orgId/{templates,campaigns}` (incl. `/campaigns/:id/send`) · `/email` (workspace) (ADR 0019) |
-| **Executive Assistant / Chief of Staff** — a REAL roster agent ("Iris", seeded; ADR 0023 § Correction): structured memory graph + perception/action loops as its recurring tasks + approvals on the single loop. Its UI IS the agent-workspace page (the standalone /assistant page is removed) | — (graduated off its toggle 2026-06-11 — always-on substrate, like Connections/Users) | ALWAYS ON | — | — | `feature.assistant.{nodes,agents}` | `/agents/<chief-of-staff>` + `/v1/host/sample/assistant/*` (graph/loops/briefing data routes; loops deploy-gated on Google OAuth) |
-| **Collaboration / Comments** — threaded comments on CMS pages + KB collections (resolver registry — a new commentable type is one entry); add/reply notify over the existing tenant inbox (namespaced string types, no core-union edit); `ctx.features.comments` + node/agent packs (content-reviewer) | `comments` | OFF | `tenant` | — (plain on/off) | `feature.comments.*` | `/comments` (workspace) + authed `/v1/host/sample/comments/orgs/:orgId/comments` (ADR 0021 — Phases 1–3 + extension surface; presence/cursors deferred) |
+| **CRM** (full port) — contacts, companies, deals, tasks, activities + pipelines/stages; contact-triage nodes | `crm` | OFF | `tenant` | `basic` / `enriched` (50/50), bound to the triage nodes | `feature.crm.nodes` | `/crm` (workspace) + `/v1/host/openwop-app/crm/contacts/*` + org-scoped `/crm/orgs/:orgId/*` (ADR 0008) |
+| **CSM** — customer-success accounts + health score | `csm` | OFF | `tenant` | — (plain on/off) | — | `/csm` (workspace) + `/v1/host/openwop-app/csm/accounts/*` (ADR 0016) |
+| **Users & Authentication** — durable accounts, lifecycle, email/password, MFA (TOTP), enterprise SSO (SAML 2.0 ACS + SCIM provisioning) | — (graduated off its toggle 2026-06-11, § Correction in `features/users/feature.ts` — permanent admin surface, always on) | ALWAYS ON | — | — | — | `/users` (admin · Access & data) + `/v1/host/openwop-app/users/*` (incl. `/users/mfa/*`) + SSO seam `/v1/host/openwop-app/auth/{saml/validate,scim/provision}` · identity foundation (ADR 0002/0003) |
+| **Org invitations** — email-token invites to join an org as a member (orgs/members/roles owned by the `accessControl` surface, RFC 0049) | `orgs` | OFF | `tenant` | — (plain on/off) | — | `/v1/host/openwop-app/orgs/:id/invites` + `/orgs/invitations/accept` (ADR 0004, reconciled) |
+| **User Profiles** — self-service per-user profile (avatar/portfolio via Media tokens, skills + peer endorsements, weighted completeness) + agent **pinning** (ADR 0023) + the per-user board/activity surfaces | — (graduated off its toggle 2026-06-12, § Correction in `features/profiles/feature.ts` — permanent substrate, always on: pinning + per-user surfaces ride on it) | ALWAYS ON | — | — | — | `/profile` + `/team` (workspace) + `/v1/host/openwop-app/profiles/*` (ADR 0005) |
+| **Knowledge Base / RAG** — org-scoped document collections, ingest (pasted text or Media token) → chunk + embed, semantic search with citations | `kb` | OFF | `tenant` | — (plain on/off) | — (composes `core.openwop.rag` + host `db.vector`) | `/kb` (workspace) + `/v1/host/openwop-app/kb/orgs/:orgId/*` · reuses the host vector store + deterministic embedder (ADR 0011) |
+| **Sharing** — unguessable public share links to a specific resource (CMS page incl. drafts, KB collection) + social-card metadata | `sharing` | OFF | `tenant` | — (plain on/off) | — (composes CMS + KB via a resolver registry) | authed `/v1/host/openwop-app/sharing/orgs/:orgId/links` + **public** `/v1/host/openwop-app/shared/:token` (unauthed, token-credential, toggle-gated) · admin **Content** group `/sharing` (ADR 0013) |
+| **Forms** — org-scoped form builder; public submit → CRM contact (through `crmService`); `ctx.features.forms` + node/agent packs | `forms` | OFF | `tenant` | — (plain on/off) | `feature.forms.*` | authed `/v1/host/openwop-app/forms/orgs/:orgId/forms` + **public** `/v1/host/openwop-app/public-forms/:formId` (unauthed, published-only, toggle-gated) · `/forms` (workspace) (ADR 0017) |
+| **Consent & Compliance** — region-aware consent policy + the centralized `isAllowed` gate (Analytics/Email call it) + data-subject GDPR erasure (cascades to feature data) | `consent` | OFF | `tenant` | — (plain on/off) | `feature.consent.*` | authed `/v1/host/openwop-app/consent/orgs/:orgId/*` + **public** `/v1/host/openwop-app/public-consent/:orgId` (unauthed, toggle-gated) · `/consent` (workspace) (ADR 0020) |
+| **Analytics** — public-surface measurement (page/event/conversion) via a consent-gated beacon + authed reporting (counts, sessions, top paths, UTM); `ctx.features.analytics` + node/agent packs | `analytics` | OFF | `tenant` | — (plain on/off) | `feature.analytics.*` | authed `/v1/host/openwop-app/analytics/orgs/:orgId/{summary,events}` + **public beacon** `/v1/host/openwop-app/public-analytics/:orgId/collect` (unauthed, toggle+consent-gated) · `/analytics` (workspace) (ADR 0018) |
+| **Email Marketing** — templates + campaigns over CRM contacts (audience resolved live), marketing-consent-gated sends through a stub provider, per-campaign stats + send log; `ctx.features.email` + node/agent packs | `email` | OFF | `tenant` | — (plain on/off) | `feature.email.*` | authed `/v1/host/openwop-app/email/orgs/:orgId/{templates,campaigns}` (incl. `/campaigns/:id/send`) · `/email` (workspace) (ADR 0019) |
+| **Assistant capability + Chief of Staff** — the assistant operating-rhythm (structured memory graph + perception/action loops + approvals) is now a **core, profile-activated capability** (ADR 0023 §Correction / ADR 0031): no longer fused to `roleKey 'chief-of-staff'` — any agent with `agentProfile.capabilities:['assistant']` activates it over the shared tenant work-graph. "Iris" (Chief of Staff) is the seeded default; it is the foundation of the **Enterprise Work-Twin suite** (see note below). | — (graduated off its toggle 2026-06-11 — always-on substrate) | ALWAYS ON | — | — | `feature.assistant.{nodes,agents}` | `/agents/<chief-of-staff>` + `/v1/host/openwop-app/assistant/*` (graph/loops/briefing routes; loops deploy-gated on Google OAuth) |
+| **Collaboration / Comments** — threaded comments on CMS pages + KB collections (resolver registry — a new commentable type is one entry); add/reply notify over the existing tenant inbox (namespaced string types, no core-union edit); `ctx.features.comments` + node/agent packs (content-reviewer) | `comments` | OFF | `tenant` | — (plain on/off) | `feature.comments.*` | `/comments` (workspace) + authed `/v1/host/openwop-app/comments/orgs/:orgId/comments` (ADR 0021 — Phases 1–3 + extension surface; presence/cursors deferred) |
+| **Per-agent knowledge & memory** — bind documents (cited, KB-backed via `kbService`) + private notes (recalled via the RFC-0004 memory namespace) to a specific agent; composed into the agent's dispatch retrieval each turn. Core `knowledge` capability activated per `agentProfile`; retrieval composed in the host route layer (no feature→core import). Curation gated by workspace:read/write + per-agent IDOR + ADR 0036 profile policy | `agent-knowledge` | OFF | `tenant` | — (plain on/off) | `feature.agent-knowledge.nodes` (read; no agent pack) | authed `/v1/host/openwop-app/agents/:id/knowledge/*` (view · retrieve · bindings · collections · documents · notes · memory-writable) + read-only `ctx.features.agent-knowledge` · "Agent Knowledge" panel on the agent detail page (ADR 0038) |
+| **Board of Advisors** — assemble councils of named advisor agents (digital-clone personas) + convene them together in one shared chat via `@@`: each advisor replies grounded in its OWN bound knowledge (ADR 0038, unchanged) and sees the others' turns (narrative-cast `[Name]:`), then a moderator synthesizes. Advisors are roster agents (persona = `agentProfile`, ADR 0031/0032); a new `AdvisoryBoard` grouping under `/advisors/*` — **not** `host.kanban`'s board. `private`/`shared` visibility + RBAC; simulated-persona disclaimer + living-individual ack gate. Composes the host multi-agent conversation scaffold + the assistant moderator (0023); host work riding Accepted RFC 0005/0002 §A8 (no blocking RFC). | `advisory-board` | OFF | `tenant` | — (plain on/off) | — (read-only `ctx.features.advisory-board` surface; signed node pack + `tmpl.advisors.*` seed deferred, logged in ADR 0040) | authed `/v1/host/openwop-app/advisors/*` (boards CRUD · convene · sessions) · "Board of Advisors" workspace page (ADR 0040, Phases 1–5) |
 
 > Defaults are OFF — a superadmin turns a feature on (or to BETA, or on with a
 > traffic split) per tenant from the admin screen.
@@ -141,8 +143,8 @@ bearer key); `OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true` opens it for local dev only
 >   **preferences** (mute / quiet-hours / Web-Push opt-in). See
 >   `docs/adr/0010-notifications.md` § Correction.
 > - **CMS + Page Builder** (`/cms`), **Media Library** (`/media`), **Publishing &
->   SEO** (authed `/v1/host/sample/publishing/*` + **public**
->   `/v1/host/sample/public/:orgId/*`) — made always-on 2026-06-11 (**ADR 0027**):
+>   SEO** (authed `/v1/host/openwop-app/publishing/*` + **public**
+>   `/v1/host/openwop-app/public/:orgId/*`) — made always-on 2026-06-11 (**ADR 0027**):
 >   core content tooling that powers the **public CMS-driven front page** at `/`.
 >   Their routes keep org-scoped RBAC (`requireOrgScope`); only the toggle gate is
 >   gone. Their nav moved from the main Sidebar to the admin-tier **Content** group.
@@ -170,10 +172,10 @@ bearer key); `OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true` opens it for local dev only
 > default marketing page and served at `/` to anonymous visitors via the public
 > Publishing API. A super admin edits it at **Admin → Content → "Front page"**
 > (`/front-page`) — enable/disable + the shared section editor (`SectionsEditor`) —
-> through the `requireSuperadmin`-gated `GET/PUT /v1/host/sample/site-page`, which
+> through the `requireSuperadmin`-gated `GET/PUT /v1/host/openwop-app/site-page`, which
 > drives `cmsService` on the reserved org by HOST authority (it bypasses
 > `requireOrgScope` for that one org only; every real tenant's isolation is
-> untouched). The anonymous SPA reads `GET /v1/host/sample/public-site-config`
+> untouched). The anonymous SPA reads `GET /v1/host/openwop-app/public-site-config`
 > (unauthed; `{ enabled, orgId:'host-site', slug:'home' }`) and renders the
 > published page via the shared `SectionRenderer`. Signed-in visitors still get the
 > app (Chat) at `/`. A fork that wants `/` to be the app by default sets
@@ -197,6 +199,39 @@ bearer key); `OPENWOP_FEATURE_TOGGLES_DEV_OPEN=true` opens it for local dev only
   so making them always-on does not touch any capability advertisement.) See
   `docs/adr/0014-feature-workflow-surfaces.md`.
 
+### Enterprise Work-Twin agent suite (2026-06-13)
+
+A seeded portfolio of **ten role-based "work twins"** ships in the demo (replacing
+the five earlier demo personas), all riding the existing roster/agent/workflow/
+schedule/connection seams — not a parallel system (ADR 0031/0032/0033):
+
+- **The ten twins** (`host/seed-data/exampleAgents.json`): Chief of Staff (Iris),
+  Executive Operations, Sales Execution (binds `crm`), Customer Success (binds
+  `csm`), Finance Close, IT Service Desk, Internal Communications (binds `cms`/
+  `kb`), Recruiting Coordinator, People Operations, Contract & Procurement. Each is
+  a real roster agent with a system prompt, workflow portfolio, schedules, board,
+  and autonomy. Seeded idempotently through the existing `seedDemoAgents` path; the
+  legacy 5 personas are retired with guarded migration.
+- **`agentProfile`** (ADR 0031) — a non-normative host-extension at
+  `GET/PUT /v1/host/openwop-app/agents/:id/profile` (+ view/edit UI) carrying every
+  enterprise property the thin `UserAgentRecord` could not: config parameters,
+  permissions, HITL requirements, escalation, channels, admin controls,
+  risk/compliance, `requiredConnections`, metrics, the 4-level→3-level autonomy
+  mapping, and `capabilities` (the core-capability activation flag).
+- **Shared workflow-template pack** (`host/workflowTemplates.ts`) — 44 pinned,
+  reusable `tmpl.*` workflow definitions across 11 categories (meeting-ops,
+  reporting, intake/triage, scheduling, approvals, knowledge, people, finance,
+  commercial, IT, comms), composed by the twins via `core.subWorkflow`. Every
+  side-effecting flow is `core.approvalGate`-gated (draft/recommend day-1).
+- **Connector reachability** (ADR 0033) — day-1 honesty: twins run at
+  draft/recommend over wired surfaces (internal features + google/slack via
+  brokered HTTP / the outbound MCP client). External write integrations are
+  **deploy-gated** behind a configured Connection via `requiredConnections`
+  activation gating (fail-closed, advertised `supported:false` until configured).
+  New RFC 0095 connection packs added: `microsoft365`, `jira`, `salesforce`,
+  `notion`, `workday` (under `examples/connection-packs/`). External-event triggers
+  and async A2A are deferred (RFC-gated, out of day-1 scope).
+
 ### Env-gated operational flags (not feature-toggles)
 
 Some behavior is gated by a deploy-time env var rather than the per-tenant
@@ -205,14 +240,14 @@ toggle system:
 - **`OPENWOP_AUTHORIZATION_ENFORCEMENT`** (default off) — RFC 0049 / ADR 0006
   Phase 3. When `true`, the host enforces membership-derived RBAC scopes on the
   protocol runs/artifacts surface (`runs:create` / `runs:read` / `runs:cancel` /
-  `artifacts:read`), serves the `POST /v1/host/sample/authorization/decide` seam,
+  `artifacts:read`), serves the `POST /v1/host/openwop-app/authorization/decide` seam,
   and advertises `capabilities.authorization.supported: true`. **Off (default):
   no protocol-surface enforcement, the seam 404s, and the capability advertises
   `supported: false`** — every caller authenticated by Bearer/OIDC but without an
   `accessControl` membership is unaffected. Only enable it where the caller
   population is provisioned as `accessControl` members; otherwise legitimate
   callers (incl. wildcard/conformance principals) fail closed with `403 forbidden`.
-  Management routes under `/v1/host/sample/orgs/*` enforce their `host:*` scopes
+  Management routes under `/v1/host/openwop-app/orgs/*` enforce their `host:*` scopes
   unconditionally regardless of this flag.
 
 ---
@@ -239,7 +274,7 @@ route/nav code (see ADR 0001 §2.2, §4 for the worked CRM example).
    with the `/architect` skill.
 1. **Backend** — create `backend/typescript/src/features/<id>/`:
    - `<id>Service.ts` — domain logic (durable store, tenant-scoped).
-   - `routes.ts` — routes under `/v1/host/sample/<id>/*`, each gated by
+   - `routes.ts` — routes under `/v1/host/openwop-app/<id>/*`, each gated by
      `resolveOne('<id>', subject).enabled` (backend authority).
    - `feature.ts` — a `BackendFeature` with `id`, `registerRoutes`, a
      `toggleDefault` (status `off`, category, `bucketUnit`, `salt`, optional
@@ -273,7 +308,7 @@ route/nav code (see ADR 0001 §2.2, §4 for the worked CRM example).
 > wire shape here. Features that ride on **already-Accepted** RFCs need no new RFC
 > — e.g. enterprise SSO (ADR 0002) implements the existing `openwop-auth-saml` /
 > `openwop-auth-scim` profiles from **RFC 0050**, so it is host work, not a spec
-> change. Host-extension surfaces under `/v1/host/sample/*` (like every feature
+> change. Host-extension surfaces under `/v1/host/openwop-app/*` (like every feature
 > here) are non-normative and never touch the wire, so they never need an RFC.
 
 ---
@@ -286,6 +321,10 @@ once shipped. Keep the toggle id stable across the move.
 | Feature | Proposed toggle id | Notes |
 |---|---|---|
 | **Marketplace** — browse + install signed feature packs (node/agent packs) + reviews/ratings | `marketplace` | OFF; bucketUnit `tenant`; ADR 0022. Composes the signed pack registry (Ed25519 + SRI); reviews are the only new store. |
+
+> **Board of Advisors** (ADR 0040) graduated to **Current features** above
+> (Phases 1–5 shipped 2026-06-14). Phase 6 (normative cross-host multi-party) is
+> deferred, gated on RFC 0101 (Parked).
 
 > Each batch feature also ships a **node pack + agent pack** and a `ctx.<feature>`
 > **workflow surface** (ADR 0014) behind the same toggle — see each ADR's
@@ -306,7 +345,7 @@ implementation as a _baseline reference_ — never a copy.** MyndHyve is a Fireb
 monolith (Firestore stores, Cloud Functions, canvas-type machinery); here each
 feature is rebuilt as a self-contained, toggle-gated **host-extension
 feature-package** per [ADR 0001](docs/adr/0001-feature-first-package-architecture.md):
-backend `src/features/<id>/` (routes under `/v1/host/sample/<id>/*`, gated by
+backend `src/features/<id>/` (routes under `/v1/host/openwop-app/<id>/*`, gated by
 `resolveOne('<id>', subject).enabled`) + frontend `src/features/<id>/`, appended to
 `BACKEND_FEATURES` / `FRONTEND_FEATURES`, a `tenant`-bucketed toggle that scopes to
 the active workspace (ADR 0015), and — where workflow nodes need feature data — a

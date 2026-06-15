@@ -15,7 +15,7 @@ import {
 let server: http.Server;
 const PORT = 18181;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -92,7 +92,7 @@ describe('run lifecycle', () => {
     const create = await jsonFetch<CreateRunBody>('/v1/runs', {
       method: 'POST',
       body: JSON.stringify({
-        workflowId: 'sample.demo.uppercase',
+        workflowId: 'openwop-app.uppercase',
         tenantId: 'demo',
         inputs: { text: 'hello' },
       }),
@@ -118,7 +118,7 @@ describe('run lifecycle', () => {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        workflowId: 'sample.demo.uppercase',
+        workflowId: 'openwop-app.uppercase',
         tenantId: 'demo',
         inputs: { text: 'idem' },
       }),
@@ -131,7 +131,7 @@ describe('run lifecycle', () => {
       method: 'POST',
       headers,
       body: JSON.stringify({
-        workflowId: 'sample.demo.uppercase',
+        workflowId: 'openwop-app.uppercase',
         tenantId: 'demo',
         inputs: { text: 'idem' },
       }),

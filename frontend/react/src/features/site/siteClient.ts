@@ -1,7 +1,7 @@
 /**
  * Public front-page client (ADR 0027). Reads the designated site-org's PUBLISHED
  * home page through the EXISTING unauthenticated Publishing API (ADR 0012):
- *   GET /v1/host/sample/public/:orgId/pages/:slug
+ *   GET /v1/host/openwop-app/public/:orgId/pages/:slug
  * No auth headers, no credentials — the surface is public by definition
  * (published-only; drafts/archived 404). The shape mirrors the backend
  * `PublicPage` projection (sections + merged SEO).
@@ -34,7 +34,7 @@ export interface PublicPage {
 export async function fetchPublicPage(orgId: string, slug: string): Promise<PublicPage | null> {
   if (!orgId) return null;
   try {
-    const url = `${config.baseUrl}/v1/host/sample/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`;
+    const url = `${config.baseUrl}/v1/host/openwop-app/public/${encodeURIComponent(orgId)}/pages/${encodeURIComponent(slug)}`;
     const res = await fetch(url); // public: no auth, no credentials
     if (!res.ok) return null;
     return (await res.json()) as PublicPage;

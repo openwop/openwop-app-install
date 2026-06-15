@@ -101,7 +101,7 @@ Analyze in priority order. Cite `file:line` and the dimension for every finding.
 - **Canonical envelope** — domain errors mapped to the right HTTP/error code; the mapper **exhaustive** (a new code is a compile error, not a silent 500). Graceful degradation when storage/providers are down; actionable client errors.
 
 ### MEDIUM: Pattern Compliance (openwop-app)
-- Feature-toggle gating correct (and `bucketUnit` right for cross-org features — user vs tenant). Route registration via the table. Host-extension surfaces under `/v1/host/sample/*` stay non-normative. ADR authored for non-trivial/auth/wire/replay decisions, with the no-RFC-needed vs needs-RFC call stated.
+- Feature-toggle gating correct (and `bucketUnit` right for cross-org features — user vs tenant). Route registration via the table. Host-extension surfaces under `/v1/host/openwop-app/*` stay non-normative. ADR authored for non-trivial/auth/wire/replay decisions, with the no-RFC-needed vs needs-RFC call stated.
 
 ### MEDIUM: Testability
 - **Route-level vs service-level** — authorization, session binding, toggle gating, and **namespace collisions** are only observable through the HTTP boundary. If the change touches any of those, a service-only test plan is insufficient — require a `createApp`+`app.listen`+cookie-jar route test (the existing pattern). Edge/empty/error/concurrency cases covered.
@@ -120,7 +120,7 @@ When the change touches the wire, also evaluate (cite `spec/v1/<doc>.md §headin
 - **CRITICAL Capability handshake** (`capabilities.md`): new optional surface discoverable via `/.well-known/openwop`; conformance scenarios capability-gated; **advertise only what is behaviorally honored**.
 - **CRITICAL BYOK / SECURITY invariants** (`auth-profiles.md`, `SECURITY/invariants.yaml`): credential material host-side; every protocol MUST-NOT has a public conformance test.
 - **HIGH Conformance / RFC 2119 / JSON-Schema / OpenAPI-AsyncAPI / SDK alignment** per `CONTRIBUTING.md`.
-- **Governance:** a host change that needs new wire requires a new RFC in `../openwop/`, reaching at least `Accepted` before/with the host work; a feature riding an already-Accepted RFC, and non-normative `/v1/host/sample/*` surfaces, need none.
+- **Governance:** a host change that needs new wire requires a new RFC in `../openwop/`, reaching at least `Accepted` before/with the host work; a feature riding an already-Accepted RFC, and non-normative `/v1/host/openwop-app/*` surfaces, need none.
 
 ---
 
@@ -128,7 +128,7 @@ When the change touches the wire, also evaluate (cite `spec/v1/<doc>.md §headin
 
 ```
 ## CRITICAL Issues
-1. [BOUNDARIES] **routes.ts:189 — POST /v1/host/sample/orgs collides with accessControl.ts:245**
+1. [BOUNDARIES] **routes.ts:189 — POST /v1/host/openwop-app/orgs collides with accessControl.ts:245**
    - Issue: accessControl already owns the /orgs namespace; this feature's overlapping routes are shadowed (dead).
    - Risk: the feature is non-functional in the real app; two systems model "orgs".
    - Fix: pick the single owner (reconcile into accessControl) or re-namespace; do NOT ship a parallel system.

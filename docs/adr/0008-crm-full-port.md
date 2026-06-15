@@ -5,7 +5,7 @@
 **Depends on:** ADR 0004 (Organizations), ADR 0006 (RBAC scopes)
 **Extends:** the existing `crm` feature (contacts + triage + A/B variants) — does
 NOT replace it.
-**Surface:** `/v1/host/sample/crm/*` (host-extension, NON-NORMATIVE — no RFC).
+**Surface:** `/v1/host/openwop-app/crm/*` (host-extension, NON-NORMATIVE — no RFC).
 
 ---
 
@@ -37,7 +37,7 @@ it cleanly is the whole design.
    Contacts are a tenant-wide address book, exactly as today.
 
 2. **Companies / Deals / Tasks / Activities are NEW org-scoped, RBAC-native
-   business objects** under `/v1/host/sample/crm/orgs/:orgId/*`, gated by the
+   business objects** under `/v1/host/openwop-app/crm/orgs/:orgId/*`, gated by the
    **media-style `authorize()`** (`getOrg` + `resolveEffectiveAccess(tenant,
    { subject, orgId })`): **read → `workspace:read`, write → `workspace:write`**;
    a non-member fails closed (403); an org outside the caller's tenant 404s.
@@ -115,7 +115,7 @@ methods for the org-scoped surface. The canonical `npm run build` gate must pass
   AND orgId; cross-tenant/cross-org access reads as `not_found`/`forbidden`.
 - **No e-commerce coupling:** CRM entities are self-contained (the explicit
   roadmap cut) — a Deal has an `amount`/`currency` scalar, not a commerce typeref.
-- **No wire surface → no RFC:** entirely under `/v1/host/sample/*`.
+- **No wire surface → no RFC:** entirely under `/v1/host/openwop-app/*`.
 
 ## Alternatives considered
 

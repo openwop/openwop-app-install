@@ -33,7 +33,7 @@ import { registerWebhookRoutes } from './webhooks.js';
 import { registerPackRoutes } from './packs.js';
 import { registerPackTestRoutes } from './packs-test.js';
 import { registerByokRoutes } from './byok.js';
-import { registerSampleChatRoutes } from './sampleChat.js';
+import { registerChatSessionRoutes } from './chatSessions.js';
 import { registerPromptRoutes } from './prompts.js';
 import { registerMigrateRoute } from './migrate.js';
 import { registerAccountRoutes } from './account.js';
@@ -51,13 +51,14 @@ import { registerMcpServerRoutes } from './mcp.js';
 import { registerAdminRoutes } from './admin.js';
 import { registerWorkflowRoutes } from './workflows.js';
 import { registerNodeCatalogRoute } from './nodeCatalog.js';
-import { registerDemoSummaryRoutes } from './demoSummary.js';
+import { registerExampleDataSummaryRoutes } from './exampleDataSummary.js';
 import { registerDaemonStatusRoutes } from './daemonStatus.js';
 import { registerAgentRoutes } from './agents.js';
 import { registerUserAgentRoutes, loadUserAgentsIntoRegistry } from './userAgents.js';
 import { registerAgentPackRegistryRoutes } from './agentPackRegistry.js';
 import { registerSchedulerRoutes } from './scheduler.js';
 import { registerRosterRoutes } from './roster.js';
+import { registerAgentProfileRoutes } from './agentProfile.js';
 import { registerOrgChartRoutes } from './orgChart.js';
 import { registerWorkforceRoutes } from './workforces.js';
 import { registerAccessControlRoutes } from './accessControl.js';
@@ -71,6 +72,9 @@ import { registerMessagingRoutes } from './messaging.js';
 import { createSelfHttpBridge } from '../messaging/bridge.js';
 import { resolveNotifyDelivererFromEnv } from '../messaging/notifyDeliverer.js';
 import { initHostExtPersistence } from '../host/hostExtPersistence.js';
+import { fetch as undiciFetch } from 'undici';
+import { webhookEgressDispatcher } from '../host/webhookEgressGuard.js';
+import { setA2aPushSink } from '../host/a2aTaskStore.js';
 import { registerFeatureToggleRoutes } from './featureToggles.js';
 import { registerSiteConfigRoutes } from './siteConfig.js';
 import { registerSitePageRoutes } from './sitePage.js';
@@ -109,7 +113,7 @@ const ROUTE_MODULES: RouteModule[] = [
   // env-gate is unset, so production deploys default to "off".
   { name: 'packs-test', register: ({ app }) => registerPackTestRoutes(app) },
   { name: 'byok', register: ({ app }) => registerByokRoutes(app) },
-  { name: 'sampleChat', register: ({ app, storage }) => registerSampleChatRoutes(app, { storage }) },
+  { name: 'chatSessions', register: ({ app, storage }) => registerChatSessionRoutes(app, { storage }) },
   {
     name: 'prompts',
     register: ({ app }) => registerPromptRoutes(app, {
@@ -132,7 +136,7 @@ const ROUTE_MODULES: RouteModule[] = [
   { name: 'admin', register: ({ app }) => registerAdminRoutes(app) },
   { name: 'workflows', register: ({ app, hostSuite }) => registerWorkflowRoutes(app, { hostSuite }) },
   { name: 'nodeCatalog', register: ({ app }) => registerNodeCatalogRoute(app) },
-  { name: 'demoSummary', register: ({ app, config }) => registerDemoSummaryRoutes(app, { config }) },
+  { name: 'exampleDataSummary', register: ({ app, config }) => registerExampleDataSummaryRoutes(app, { config }) },
   { name: 'daemonStatus', register: ({ app, config, startTimeMs }) => registerDaemonStatusRoutes(app, { config, startTimeMs }) },
   { name: 'agents', register: ({ app, hostSuite, storage }) => registerAgentRoutes(app, { hostSuite, storage }) },
   { name: 'userAgents', register: ({ app, storage }) => registerUserAgentRoutes(app, { storage }) },
@@ -160,6 +164,28 @@ const ROUTE_MODULES: RouteModule[] = [
     name: 'hostExt:persistence',
     register: ({ storage }) => initHostExtPersistence(storage),
   },
+  {
+    // ADR 0035 / RFC 0100 — wire the durable A2A Task push sink. A registered
+    // push-config fires a `TaskStatusUpdateEvent` to the caller's target on the
+    // terminal/blocking transitions; the default sink POSTs it through the same
+    // RFC 0093 webhook-egress-guarded dispatcher every webhook delivery uses
+    // (the URL was already SSRF-validated at register time; the dispatcher
+    // re-validates the resolved address at connect time). Only wired when
+    // durable Tasks are enabled. Best-effort — the sink never throws into the
+    // state transition (a2aTaskStore swallows sink failures).
+    name: 'a2a:pushSink',
+    register: () => {
+      if (process.env.OPENWOP_A2A_DURABLE_TASKS !== 'true') return;
+      setA2aPushSink(async (config, event) => {
+        await undiciFetch(config.url, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(event),
+          dispatcher: webhookEgressDispatcher(),
+        });
+      });
+    },
+  },
   // Feature toggles + multivariant testing — host-extension (non-normative).
   // Backend-authoritative resolution + superadmin admin surface. Stored in the
   // host-ext kv, so it must mount AFTER hostExt:persistence is wired.
@@ -175,6 +201,11 @@ const ROUTE_MODULES: RouteModule[] = [
   // workflow portfolios). Registered before Kanban so a board can bind to a
   // roster member.
   { name: 'roster', register: ({ app }) => registerRosterRoutes(app) },
+  // Rich agent profile (ADR 0031) — host-local "enterprise digital work twin"
+  // config attached to a standing roster member. Mounts after roster since it
+  // gates GET/PUT on roster-member ownership. Non-normative; never touches the
+  // RFC 0003 manifest wire shape.
+  { name: 'agentProfile', register: ({ app }) => registerAgentProfileRoutes(app) },
   // Agent org-chart — RFCS/0087 reference impl (departments/roles/reportsTo
   // over roster members; descriptive only, confers no authority).
   { name: 'orgChart', register: ({ app }) => registerOrgChartRoutes(app) },
@@ -204,13 +235,13 @@ const ROUTE_MODULES: RouteModule[] = [
   // RFC 0083 durable trigger bridge — the deferred reference durable-delivery
   // (subscription state machine + dedup/retry/dead-letter + the read surface).
   // The Kanban card→run firing routes through it.
-  { name: 'triggerBridge', register: ({ app }) => registerTriggerBridgeRoutes(app) },
+  { name: 'triggerBridge', register: ({ app, storage, hostSuite }) => registerTriggerBridgeRoutes(app, { storage, hostSuite }) },
   // NOTE: the Widgets reference domain moved to the BackendFeature contract
   // (src/features/widgets.ts) — it is now composed via registerBackendFeatures()
   // below, the first surface migrated to the feature-package seam (ADR §6).
   {
     // Inbound chat → workflow run bridge. Binds inbound messages to a workflow
-    // (default deterministic `sample.demo.uppercase`; override via
+    // (default deterministic `openwop-app.uppercase`; override via
     // OPENWOP_MESSAGING_WORKFLOW_ID) and enqueues the reply as outbound egress.
     name: 'messaging',
     register: ({ app, storage, config }) => {
@@ -230,8 +261,8 @@ const ROUTE_MODULES: RouteModule[] = [
           // the host bearer for the demo. A real multi-tenant host SHOULD set
           // OPENWOP_MESSAGING_BRIDGE_TOKEN to a scoped credential (the run's
           // tenant still comes from the registered device, not the message).
-          bearer: process.env.OPENWOP_MESSAGING_BRIDGE_TOKEN ?? process.env.OPENWOP_API_KEY ?? 'sample-token',
-          defaultWorkflowId: process.env.OPENWOP_MESSAGING_WORKFLOW_ID ?? 'sample.demo.uppercase',
+          bearer: process.env.OPENWOP_MESSAGING_BRIDGE_TOKEN ?? process.env.OPENWOP_API_KEY ?? 'dev-token',
+          defaultWorkflowId: process.env.OPENWOP_MESSAGING_WORKFLOW_ID ?? 'openwop-app.uppercase',
         }),
         // Email/SMS delivery: a real webhook (OPENWOP_NOTIFY_WEBHOOK_URL) when
         // set, else the honest synthetic fallback.

@@ -1,5 +1,5 @@
 /**
- * Agent heartbeat — shared logic + background daemon (RFC 0086, sample-grade).
+ * Agent heartbeat — shared logic + background daemon (RFC 0086, best-effort).
  *
  * The heartbeat is the agent "pull": pick the first eligible To Do card on the
  * member's board(s) and start its workflow, attributing the run to the named
@@ -21,6 +21,9 @@
 import type { StartRunDeps } from './runStarter.js';
 import { startWorkflowRun } from './runStarter.js';
 import { listRoster, recordHeartbeat, autonomyOf, type RosterEntry } from './rosterService.js';
+import { resolveConnectionReadiness } from './connectionReadiness.js';
+import { resolveAgentPolicy } from './agentPolicyResolver.js';
+import { getAgentProfile } from './agentProfileService.js';
 import { listBoards, listCards, moveCard, setCardLastRun, notifyBoardChanged } from './kanbanService.js';
 import { createApproval, hasPendingApprovalForCard } from './approvalService.js';
 import { checkAutonomousRunBudget } from './runBudgetService.js';
@@ -84,9 +87,37 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
       // picks (routine work runs itself, high-stakes work asks first —
       // architect memo 2026-06-05; the only middle level composable from
       // real fields: card.priority + the existing approval path).
-      const autonomy = autonomyOf(entry);
-      const mustPropose = autonomy === 'review'
-        || (autonomy === 'guided' && card.priority === 'high');
+      // ADR 0036 — agentProfile policy enforcement, composed with the ADR 0033
+      // §3.3 `requiredConnections` activation gate (most-restrictive wins):
+      //   - `permissions.never` ⊇ workflowId → hard-deny (skip the card; the
+      //     twin neither runs NOR proposes a forbidden action class);
+      //   - `hitl` ⊇ workflowId → force an approval regardless of level;
+      //   - un-ready required connections → force review (ADR 0033 fail-closed);
+      //   - `auto` + `withinPolicyActions` allowlist → run only listed workflow
+      //     ids; off-list (or empty/absent allowlist) → propose.
+      // The verdict's `auto` means "permitted to auto-run"; this layer then
+      // applies the existing `guided` middle-rule (run routine, propose only
+      // HIGH-priority picks) on top. The action class is the card's workflowId;
+      // profileId = rosterId (a profile-less / requirement-less agent is ungated
+      // and behaves exactly as before).
+      const readiness = await resolveConnectionReadiness(entry.tenantId, entry.rosterId);
+      const profile = await getAgentProfile(entry.tenantId, entry.rosterId);
+      const policy = resolveAgentPolicy({
+        profile,
+        actionClass: workflowId,
+        level: autonomyOf(entry),
+        readiness,
+      });
+      // permissions.never — fail-closed: this workflow is a forbidden action
+      // class for this agent. Never run it, never even queue a proposal; skip
+      // the card so a human (or another agent) handles it.
+      if (policy.verdict === 'deny') continue;
+      // `review` (hitl / un-ready connection / off-allowlist) always proposes;
+      // `guided` proposes only HIGH-priority picks (routine work runs itself);
+      // `auto` runs immediately. The guided priority split is the heartbeat's
+      // own middle-rule, layered on the resolver's per-action-class verdict.
+      const mustPropose = policy.verdict === 'review'
+        || (policy.verdict === 'guided' && card.priority === 'high');
       if (mustPropose) {
         if (await hasPendingApprovalForCard(entry.tenantId, card.id)) continue;
         const approval = await createApproval({
@@ -97,7 +128,9 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
           boardId: board.id,
           cardId: card.id,
           cardTitle: card.title,
-          proposal: `Run ${workflowId} on “${card.title}”`,
+          proposal: readiness.allConfigured
+            ? `Run ${workflowId} on “${card.title}”`
+            : `Run ${workflowId} on “${card.title}” (held for review — missing connection${readiness.missing.length > 1 ? 's' : ''}: ${readiness.missing.join(', ')})`,
         });
         return {
           picked: true,

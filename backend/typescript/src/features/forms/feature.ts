@@ -19,7 +19,7 @@ export const formsFeature: BackendFeature = {
   toggleDefault: {
     id: 'forms',
     label: 'Forms',
-    description: 'Public form builder + submissions → CRM contacts — product feature (ADR 0017).',
+    description: 'Public form builder + submissions → CRM contacts — product feature.',
     category: 'Business Tools',
     status: 'off',
     bucketUnit: 'tenant',

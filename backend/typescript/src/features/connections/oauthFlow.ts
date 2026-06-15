@@ -128,11 +128,11 @@ export function callbackBaseUrl(reqOrigin: string): string {
 /** The public URL a provider posts inbound events to for a connection (ADR 0024
  *  §6). Same browser/provider-reachable backend base as the OAuth callback. */
 export function inboundIngestUrl(connectionId: string, reqOrigin: string): string {
-  return `${callbackBaseUrl(reqOrigin)}/v1/host/sample/connections-inbound/${encodeURIComponent(connectionId)}`;
+  return `${callbackBaseUrl(reqOrigin)}/v1/host/openwop-app/connections-inbound/${encodeURIComponent(connectionId)}`;
 }
 
 export function redirectUri(provider: string, reqOrigin: string): string {
-  return `${callbackBaseUrl(reqOrigin)}/v1/host/sample/connections/${encodeURIComponent(provider)}/callback`;
+  return `${callbackBaseUrl(reqOrigin)}/v1/host/openwop-app/connections/${encodeURIComponent(provider)}/callback`;
 }
 
 /** Build the post-callback SPA redirect (success or error), preserving the

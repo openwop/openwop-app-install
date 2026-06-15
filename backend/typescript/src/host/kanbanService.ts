@@ -1,5 +1,5 @@
 /**
- * Kanban boards — host extension (sample-grade, non-normative).
+ * Kanban boards — host extension (non-normative).
  *
  * A demo work surface for the "named workflow agents" story (RFCS/0086
  * Standing Agent Roster + RFCS/0087 Agent Org-Chart): cards represent

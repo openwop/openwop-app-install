@@ -24,7 +24,7 @@ import { createApp } from '../src/index.js';
 let server: http.Server;
 const PORT = 18191;
 const BASE = `http://127.0.0.1:${PORT}`;
-const TOKEN = 'sample-token';
+const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -76,10 +76,10 @@ function nodeOutputs(events: BundleEvent[], nodeId: string): Record<string, unkn
 
 describe('host.triggers: webhook trigger surfaces ctx.triggerData', () => {
   beforeAll(async () => {
-    const reg = await jsonFetch('/v1/host/sample/workflows', {
+    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
-        workflowId: 'sample.trigger.webhook',
+        workflowId: 'openwop-app.trigger.webhook',
         nodes: [{ nodeId: 'hook', typeId: 'core.trigger.webhook' }],
         edges: [],
       }),
@@ -88,7 +88,7 @@ describe('host.triggers: webhook trigger surfaces ctx.triggerData', () => {
   });
 
   it('sources triggerData from run.metadata.triggerData', async () => {
-    const events = await runToCompletion('sample.trigger.webhook', {
+    const events = await runToCompletion('openwop-app.trigger.webhook', {
       inputs: {},
       metadata: { triggerData: { method: 'PUT', headers: { 'x-test': '1' }, body: { hello: 'world' } } },
     });
@@ -99,7 +99,7 @@ describe('host.triggers: webhook trigger surfaces ctx.triggerData', () => {
   });
 
   it('falls back to run.inputs when no metadata.triggerData is present', async () => {
-    const events = await runToCompletion('sample.trigger.webhook', {
+    const events = await runToCompletion('openwop-app.trigger.webhook', {
       inputs: { method: 'PATCH', body: { n: 1 } },
     });
     const out = nodeOutputs(events, 'hook');
@@ -112,10 +112,10 @@ describe('host.triggers: webhook trigger surfaces ctx.triggerData', () => {
 
 describe('host.triggers: webhook-respond records the reply via ctx.respondToWebhook', () => {
   beforeAll(async () => {
-    const reg = await jsonFetch('/v1/host/sample/workflows', {
+    const reg = await jsonFetch('/v1/host/openwop-app/workflows', {
       method: 'POST',
       body: JSON.stringify({
-        workflowId: 'sample.trigger.respond',
+        workflowId: 'openwop-app.trigger.respond',
         nodes: [{ nodeId: 'reply', typeId: 'core.trigger.webhook-respond', config: { status: 201, headers: { 'x-demo': 'y' } } }],
         edges: [],
       }),
@@ -124,7 +124,7 @@ describe('host.triggers: webhook-respond records the reply via ctx.respondToWebh
   });
 
   it('durably emits host.webhook.response and reports responded:true', async () => {
-    const events = await runToCompletion('sample.trigger.respond', { inputs: { body: { ok: true } } });
+    const events = await runToCompletion('openwop-app.trigger.respond', { inputs: { body: { ok: true } } });
 
     const resp = events.find((e) => e.type === 'host.webhook.response');
     expect(resp, 'host.webhook.response event must be recorded').toBeDefined();

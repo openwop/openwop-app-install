@@ -142,7 +142,7 @@ export function RunAnalyticsPanel({ events, annotations }: Props) {
         </>
       )}
       <p className="muted u-mb-0 u-fs-11">
-        Reliability metrics derive from this run's event log. Quality signals derive from RFC 0056 annotations and appear once the host advertises <code>capabilities.feedback</code>.
+        Reliability metrics derive from this run's event log. Quality signals derive from annotations and appear once the host advertises <code>capabilities.feedback</code>.
       </p>
     </div>
   );

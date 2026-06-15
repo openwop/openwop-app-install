@@ -5,15 +5,15 @@
 **Depends on:** ADR 0001 (feature-package architecture), and composes every
 shipped feature (0002–0013). **Closes:** the ADR-0011 open question "back
 `host.knowledge` with the real store" (Phase 0).
-**Surface:** host-extension, non-normative (`/v1/host/sample/*` REST +
-`host.sample.*` workflow surfaces) — no wire/RFC change.
+**Surface:** host-extension, non-normative (`/v1/host/openwop-app/*` REST +
+`host.openwop-app.*` workflow surfaces) — no wire/RFC change.
 
 ---
 
 ## Context (boundaries audit first)
 
 The ported features (CRM, CMS, KB, Media, …) are **REST + UI product surfaces**:
-`xService` → `routes` (authed `/v1/host/sample/<feature>/*`) → toggle → frontend.
+`xService` → `routes` (authed `/v1/host/openwop-app/<feature>/*`) → toggle → frontend.
 A workflow node **cannot reach them** — there is no typed `ctx.<feature>`
 surface, the one feature node pack (`feature.crm.nodes`) is a stateless
 transformer that never touches the CRM store, no feature binds an agent, and
@@ -25,7 +25,7 @@ applies to all 12 features and every future one without re-deciding per feature.
 A two-sided audit (host infra + openwop spec corpus) established:
 - **Conformant.** A typed `ctx.<feature>` surface is a sanctioned host extension
   (`spec/v1/host-extensions.md`); no new RFC is required while it stays
-  non-normative (`host.sample.*`), advertised, capability-gated, replay-safe, and
+  non-normative (`host.openwop-app.*`), advertised, capability-gated, replay-safe, and
   BYOK-clean. Promotion to normative `host.<feature>` is a future RFC, not a blocker.
 - **The seams mostly exist.** `buildHostSurfaceBundle` is the node ABI;
   `setNotificationBackend` is the precedent for a feature backing a host seam;
@@ -61,7 +61,7 @@ logic, wired by **one composer**:
 4. **Capability honesty.** Each surface is advertised at the discovery root
    (`/.well-known/openwop`, RFC 0073), gated by node `peerDependencies`, and
    **toggle-aware** (a tenant with the feature OFF refuses workflows requiring it).
-   Namespace `host.sample.<feature>` (non-normative); RFC-promotion path documented.
+   Namespace `host.openwop-app.<feature>` (non-normative); RFC-promotion path documented.
 5. **Security inherited, not reinvented.** Surface calls enforce the SAME tenant
    isolation (CTI-1), org-RBAC scope, BYOK redaction (SR-1 before any value
    reaches a node), and egress policy as the REST face — a node is lower-trust
@@ -72,7 +72,7 @@ logic, wired by **one composer**:
 ```ts
 interface FeatureModule extends BackendFeature {     // existing fields unchanged
   surface?: {                                          // Face 2 (NEW)
-    name: `host.sample.${string}`;                     // ctx binding + capability id
+    name: `host.openwop-app.${string}`;                     // ctx binding + capability id
     capability: CapabilityAdvertisement;               // {supported, methods[], tier?}
     build(scope: RunScope): Record<string, SurfaceFn>; // wrapped for replay + SR-1 + scope
     sideEffects?: Record<string, 'read' | 'write'>;
@@ -127,7 +127,7 @@ interface FeatureModule extends BackendFeature {     // existing fields unchange
    to the transport; a typed surface over the shared service is cleaner.
 3. **Promote `host.crm`/`host.cms` to normative `host.*` now.** Deferred — these
    are sample features; normative promotion needs an RFC + cross-host conformance.
-   Stay `host.sample.*` until external adoption demands it.
+   Stay `host.openwop-app.*` until external adoption demands it.
 
 ## Open questions
 
