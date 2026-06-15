@@ -20,11 +20,11 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Build the white-label bundle
         run: bash scripts/build-whitelabel-zip.sh
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist-whitelabel/openwop-demo-app.zip
       - name: Publish rolling release
