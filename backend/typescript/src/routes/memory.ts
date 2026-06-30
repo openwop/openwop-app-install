@@ -35,9 +35,16 @@ export function registerMemoryRoutes(app: Express): void {
     const tag = typeof req.query.tag === 'string' ? req.query.tag : undefined;
     const limRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
     const limit = Number.isFinite(limRaw) && limRaw > 0 ? Math.floor(limRaw) : undefined;
+    // RFC 0113 — optional injection budget (`?tokenBudget=`, unit = content
+    // chars) + `?rank=` (recency-only honored). Absent ⇒ today's full list.
+    const tbRaw = typeof req.query.tokenBudget === 'string' ? Number(req.query.tokenBudget) : NaN;
+    const tokenBudget = Number.isFinite(tbRaw) && tbRaw > 0 ? Math.floor(tbRaw) : undefined;
+    const rank = req.query.rank === 'recency' ? ('recency' as const) : undefined;
     const entries = listMemoryEntries(tenantId, memoryRef, {
       ...(tag ? { tag } : {}),
       ...(limit ? { limit } : {}),
+      ...(tokenBudget ? { tokenBudget } : {}),
+      ...(rank ? { rank } : {}),
     });
     res.status(200).json({ memoryRef, entries });
   });

@@ -18,6 +18,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -35,15 +36,12 @@ const OP: Record<string, string> = { authorization: 'Bearer dev-token', 'content
 let server: http.Server;
 let base = '';
 let app: Awaited<ReturnType<typeof createApp>>;
-let port = 19450;
 
 beforeEach(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
-  const p = port++;
-  app = await createApp({ port: p, storageDsn: 'memory://', serviceName: 'smoke', serviceVersion: '0', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(p, r); });
-  base = `http://127.0.0.1:${p}`;
+  app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'smoke', serviceVersion: '0', enableConsoleTracer: false });
+  await new Promise<void>((r) => { server = app.listen(0, () => { base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
 });
 afterEach(async () => { await new Promise<void>((r) => server.close(() => r())); });
 

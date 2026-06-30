@@ -1,0 +1,46 @@
+{
+  "name": "feature.campaign-orchestration.artifact-types",
+  "version": "1.0.0",
+  "kind": "artifact-type",
+  "description": "Campaign Studio orchestration artifact types (ADR 0158 / RFC 0075) — the finalized marketing campaign and the cross-asset consistency report produced by the parent orchestration.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["artifact-type", "campaign-studio", "marketing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "artifactTypes": [
+    {
+      "artifactTypeId": "marketing-campaign",
+      "title": "Marketing Campaign",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["name", "briefId"],
+        "properties": {
+          "name": { "type": "string" },
+          "briefId": { "type": "string" },
+          "objective": { "type": "string" },
+          "channels": { "type": "array", "items": { "type": "string" } },
+          "status": { "type": "string" }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "consistency-report",
+      "title": "Consistency Report",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["score"],
+        "properties": {
+          "score": { "type": "number" },
+          "passesThreshold": { "type": "boolean" },
+          "divergences": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    }
+  ]
+}

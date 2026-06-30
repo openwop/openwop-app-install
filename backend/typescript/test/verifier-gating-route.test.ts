@@ -12,13 +12,13 @@
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
-const PORT = 18262;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-const URL = `${BASE}/v1/host/openwop-app/agents/verify-run`;
+let URL: string;
 
 let server: http.Server;
 
@@ -29,8 +29,8 @@ beforeAll(async () => {
   process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL = 'true';
   process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_5 = 'true';
   process.env.OPENWOP_AGENT_VERIFIER_GATING = 'true';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/v1/host/openwop-app/agents/verify-run`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 

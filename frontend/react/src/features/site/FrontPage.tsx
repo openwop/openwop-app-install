@@ -8,13 +8,21 @@
  *
  * SEO is set client-side (title + meta/OG/canonical) from the page's merged SEO.
  * The server-side sitemap.xml / robots.txt / feed.rss come from Publishing.
+ *
+ * PageHeader exemption (DESIGN.md §5.5, UX AUTH-4): this surface intentionally
+ * does NOT lead with <PageHeader>. It is a public marketing page rendered through
+ * the CMS section system (hero/richText/cta/…), not a flat in-app index page — the
+ * §5.5 "every top-level nav page leads with <PageHeader>" rule explicitly exempts
+ * the public shell. The hero section carries the page's primary heading instead.
  */
 import { Suspense, useEffect, useState } from 'react';
+import i18n from '../../i18n/index.js';
 import { brand } from '../../brand/brand.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { RenderSections } from '../cms/SectionRenderer.js';
 import type { Section } from '../cms/cmsClient.js';
 import { fetchPublicPage, type PublicPage } from './siteClient.js';
+import { CatalogView, hasLargeCatalog } from './CatalogView.js';
 
 /**
  * Apply the page's SEO to the document head and return an undo function that
@@ -62,26 +70,31 @@ function applySeo(page: PublicPage): () => void {
  * marketing page shown out of the box when no CMS page is configured. Authored in
  * the same typed-section model as a CMS page, so it renders identically and a
  * superadmin can later replace it by pointing the front page at a CMS `home` page.
+ *
+ * Built per call (not a module-level const) so its localized copy resolves against
+ * the active UI locale at render time.
  */
-const DEFAULT_SECTIONS: Section[] = [
-  { sectionId: 'd-hero', type: 'hero', data: {
-    eyebrow: 'An open standard for AI agents & workflows',
-    heading: 'AI coworkers that do real work — and stay yours.',
-    subheading: 'Build AI agents and automated workflows that handle real tasks, then run them anywhere — because what you build is portable, not locked to one vendor.',
-    ctaLabel: 'Launch the app', ctaUrl: '/chat',
-    ctaLabel2: 'See the open standard', ctaUrl2: 'https://openwop.dev',
-  } },
-  { sectionId: 'd-cols', type: 'columns', data: { eyebrow: 'How it works', heading: 'Build it. Run it. Stay in control.', layout: 'steps', columns: [
-    { title: 'Build', text: 'Design an agent or a workflow on a visual canvas — or start from a ready-made template.' },
-    { title: 'Run', text: 'Watch it work in real time. Every run is repeatable and reviewable.' },
-    { title: 'Stay in control', text: 'You decide what runs on its own and what needs your sign-off — with your own keys for connected apps.' },
-  ] } },
-  { sectionId: 'd-intro', type: 'richText', data: {
-    eyebrow: 'The open standard', heading: 'Build it once. Run it anywhere.',
-    text: 'OpenWOP is an **open standard** — like email or the web — that any provider can support, so the agents and workflows you build aren’t locked to one vendor. Read the full standard at [openwop.dev](https://openwop.dev).',
-  } },
-  { sectionId: 'd-cta', type: 'cta', data: { heading: 'See it for yourself.', label: 'Open the app →', url: '/chat' } },
-];
+function buildDefaultSections(): Section[] {
+  return [
+    { sectionId: 'd-hero', type: 'hero', data: {
+      eyebrow: i18n.t('site:heroEyebrow'),
+      heading: i18n.t('site:heroHeading'),
+      subheading: i18n.t('site:heroSubheading'),
+      ctaLabel: i18n.t('site:heroCtaLabel'), ctaUrl: '/chat',
+      ctaLabel2: i18n.t('site:heroCtaLabel2'), ctaUrl2: 'https://openwop.dev',
+    } },
+    { sectionId: 'd-cols', type: 'columns', data: { eyebrow: i18n.t('site:columnsEyebrow'), heading: i18n.t('site:columnsHeading'), layout: 'steps', columns: [
+      { title: i18n.t('site:columnBuildTitle'), text: i18n.t('site:columnBuildText') },
+      { title: i18n.t('site:columnRunTitle'), text: i18n.t('site:columnRunText') },
+      { title: i18n.t('site:columnControlTitle'), text: i18n.t('site:columnControlText') },
+    ] } },
+    { sectionId: 'd-intro', type: 'richText', data: {
+      eyebrow: i18n.t('site:introEyebrow'), heading: i18n.t('site:introHeading'),
+      text: i18n.t('site:introText'),
+    } },
+    { sectionId: 'd-cta', type: 'cta', data: { heading: i18n.t('site:ctaHeading'), label: i18n.t('site:ctaLabel'), url: '/chat' } },
+  ];
+}
 
 /** Title the document for the built-in default page (no CMS SEO to apply). */
 function applyDefaultTitle(): () => void {
@@ -117,11 +130,15 @@ export function FrontPage({ orgId, slug }: { orgId: string; slug: string }): JSX
 
   if (!done) return <div className="u-p-4"><Skeleton /></div>;
 
-  const sections = page && page.sections.length > 0 ? page.sections : DEFAULT_SECTIONS;
+  const sections = page && page.sections.length > 0 ? page.sections : buildDefaultSections();
+  // A large catalog (the Features page: many card grids) gets a client-side
+  // search field; ordinary pages — including the home page — render plainly.
   return (
     <div className="cms-public-page">
       <Suspense fallback={<div className="u-p-4"><Skeleton /></div>}>
-        <RenderSections sections={sections} mode="public" />
+        {hasLargeCatalog(sections)
+          ? <CatalogView sections={sections} />
+          : <RenderSections sections={sections} mode="public" />}
       </Suspense>
     </div>
   );

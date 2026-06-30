@@ -50,7 +50,10 @@ export function registerPublishingRoutes(deps: RouteDeps): void {
 
   app.get(`${PUB}/pages/:slug`, async (req, res, next) => {
     try {
-      res.json(await publicPageBySlug(req.params.orgId, req.params.slug, publicBaseUrl(req)));
+      const { page, locale } = await publicPageBySlug(req.params.orgId, req.params.slug, publicBaseUrl(req), req.headers['accept-language']);
+      res.setHeader('Content-Language', locale);
+      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.json(page);
     } catch (err) { next(err); }
   });
 

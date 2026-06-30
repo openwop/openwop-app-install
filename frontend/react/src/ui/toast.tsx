@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import i18n from '../i18n/index.js';
 import { CheckIcon, AlertIcon, InfoIcon, XIcon } from './icons/index.js';
 
 /**
@@ -14,6 +15,7 @@ export interface ToastItem { id: number; variant: ToastVariant; message: string 
 
 let items: ToastItem[] = [];
 const listeners = new Set<() => void>();
+const dismissTimers = new Map<number, ReturnType<typeof setTimeout>>();
 let seq = 0;
 
 function emit() {
@@ -22,18 +24,35 @@ function emit() {
   listeners.forEach((l) => l());
 }
 
+function armDismiss(id: number, ttlMs: number): void {
+  if (ttlMs <= 0) return;
+  const prev = dismissTimers.get(id);
+  if (prev) clearTimeout(prev);
+  // setTimeout is non-deterministic but this is pure UI chrome.
+  dismissTimers.set(id, setTimeout(() => dismiss(id), ttlMs));
+}
+
 function push(variant: ToastVariant, message: string, ttlMs: number): number {
+  // UI-4: coalesce an identical (variant + message) toast that is already
+  // showing instead of stacking duplicates — a bulk op that fires the same
+  // "Saved"/"Failed" N times shows ONE toast, not a wall of them. Refresh the
+  // dismiss timer so a repeated toast stays visible for its full TTL rather
+  // than vanishing on the first instance's clock.
+  const existing = items.find((t) => t.variant === variant && t.message === message);
+  if (existing) {
+    armDismiss(existing.id, ttlMs);
+    return existing.id;
+  }
   const id = ++seq;
   items = [...items, { id, variant, message }];
   emit();
-  if (ttlMs > 0) {
-    // setTimeout is non-deterministic but this is pure UI chrome.
-    setTimeout(() => dismiss(id), ttlMs);
-  }
+  armDismiss(id, ttlMs);
   return id;
 }
 
 export function dismiss(id: number): void {
+  const timer = dismissTimers.get(id);
+  if (timer) { clearTimeout(timer); dismissTimers.delete(id); }
   items = items.filter((t) => t.id !== id);
   emit();
 }
@@ -65,7 +84,7 @@ export function Toaster(): JSX.Element {
         <div key={t.id} className={`toast alert ${t.variant}`} role={t.variant === 'error' ? 'alert' : 'status'}>
           <span className="toast-icon" aria-hidden><VariantIcon variant={t.variant} /></span>
           <span className="toast-message">{t.message}</span>
-          <button type="button" className="toast-close" aria-label="Dismiss" onClick={() => dismiss(t.id)}>
+          <button type="button" className="toast-close" aria-label={i18n.t('ui:toastDismiss')} onClick={() => dismiss(t.id)}>
             <XIcon size={13} />
           </button>
         </div>

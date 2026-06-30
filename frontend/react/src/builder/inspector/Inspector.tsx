@@ -9,6 +9,8 @@
  * and the shared helpers/constants in `inspectorHelpers`.
  */
 
+import { useTranslation } from 'react-i18next';
+import { Link } from 'react-router-dom';
 import { useBuilderStore } from '../store/builderStore.js';
 import { catalogEntry } from '../palette/catalogRegistry.js';
 import { ConfigInput } from './ConfigInput.js';
@@ -17,8 +19,10 @@ import { MultiSelectInspector } from './MultiSelectInspector.js';
 import { WorkflowInspector } from './WorkflowInspector.js';
 import { useHostAdvertisedModelCapabilities } from './inspectorHelpers.js';
 import { TextField, SelectField } from '../../ui/Field.js';
+import { CheckIcon } from '../../ui/icons/index.js';
 
 export function Inspector() {
+  const { t } = useTranslation('builder');
   const selectedNodeId = useBuilderStore((s) => s.selectedNodeId);
   const selectedNodeIds = useBuilderStore((s) => s.selectedNodeIds);
   const selectedEdgeId = useBuilderStore((s) => s.selectedEdgeId);
@@ -35,7 +39,7 @@ export function Inspector() {
   if (!entry) {
     return (
       <aside className="builder-inspector">
-        <div className="alert error">Unknown node kind: {node.kind}</div>
+        <div className="alert error">{t('unknownNodeKind', { kind: node.kind })}</div>
       </aside>
     );
   }
@@ -51,75 +55,82 @@ export function Inspector() {
       <h3 className="builder-inspector-title">{entry.label}</h3>
       <p className="muted builder-inspector-desc">{entry.description}</p>
 
+      {/* Type is read-only plumbing — a quiet metadata line under the title (the
+          editorial mono-uppercase register), not a prominent stacked field. */}
+      <div className="builder-inspector-meta">
+        <span>{t('fieldType')}</span>
+        <code>{entry.typeId}</code>
+      </div>
+
       {missing.length > 0 ? (
         <div
           className="alert warning builder-inspector-host-warn"
           role="status"
-          aria-label="Host capability missing"
+          aria-label={t('hostCapabilityMissingAria')}
         >
-          <strong>Needs host capability:</strong> {missing.join(', ')}.
+          <strong>{t('needsHostCapability')}</strong> {missing.join(', ')}.
           <div className="muted builder-inspector-help u-mt-1">
-            This engine doesn't advertise the required surface. The node will
-            still serialize and ship in the workflow, but running it here returns
-            <code> HOST_CAPABILITY_MISSING</code>. Wire the surface in your host,
-            or run <code>examples/hosts/postgres</code> for a host that advertises
-            every surface.
+            {t('hostCapabilityHelp')}
+            <code> HOST_CAPABILITY_MISSING</code>{t('hostCapabilityHelpAfter')}{' '}
+            <code>examples/hosts/postgres</code> {t('hostCapabilityHelpExample')}
+          </div>
+          {/* ADR 0163 Phase 5 — "invitation, not failure": link to set it up. */}
+          <div className="u-mt-2">
+            <Link to="/connections" className="linklike">{t('configureConnectionsCta')}</Link>
           </div>
         </div>
       ) : null}
 
       {requiredCaps.length > 0 ? (
-        <div
-          className={missingModelCaps.length > 0 ? 'alert warning' : 'alert info'}
-          role="status"
-          aria-label="Model capability requirements"
-          style={{ marginTop: missing.length > 0 ? 8 : 0 }}
-        >
-          <strong>Requires model capabilities:</strong>{' '}
-          {requiredCaps.map((c, i) => (
-            <span key={c}>
-              <code style={{
-                background: missingModelCaps.includes(c)
-                  ? 'color-mix(in oklch, var(--color-warning) 14%, transparent)'
-                  : undefined,
-              }}>{c}</code>
-              {i < requiredCaps.length - 1 ? ' · ' : ''}
-            </span>
-          ))}
-          .
-          <div className="muted builder-inspector-help u-mt-1">
+        missingModelCaps.length > 0 ? (
+          // A real gap — the host doesn't advertise a capability this node needs.
+          // Keep the bordered alert; this one warrants attention.
+          <div
+            className="alert warning"
+            role="status"
+            aria-label={t('modelCapabilityRequirementsAria')}
+          >
+            <strong>{t('requiresModelCapabilities')}</strong>{' '}
+            {requiredCaps.map((c, i) => (
+              <span key={c}>
+                <code className={missingModelCaps.includes(c) ? 'builder-inspector-cap-missing' : undefined}>{c}</code>
+                {i < requiredCaps.length - 1 ? ' · ' : ''}
+              </span>
+            ))}
+            .
+            <div className="muted builder-inspector-help u-mt-1">
+              {t('modelCapabilitiesGapPre')} <code>modelCapabilities.advertised[]</code> {t('modelCapabilitiesGapMid')}{' '}
+              <code>{missingModelCaps.join(', ')}</code>{t('modelCapabilitiesGapPost')}
+              {' '}(<code>model.capability.substituted</code>) {t('modelCapabilitiesGapOr')}
+              <code> capability_not_provided</code>.
+            </div>
+          </div>
+        ) : (
+          // Happy path (covered) or still discovering — a quiet, non-actionable
+          // confirmation line, NOT a full alert box that out-shouts the config.
+          <p className="builder-inspector-cap-ok" role="status" aria-label={t('modelCapabilityRequirementsAria')}>
             {advertised === null ? (
-              <>Discovering host's <code>modelCapabilities</code> advertisement…</>
-            ) : missingModelCaps.length === 0 ? (
-              <>The host advertises every required capability; this node will dispatch directly.</>
+              <span>{t('discoveringModelCapabilitiesPre')} <code>modelCapabilities</code> {t('discoveringModelCapabilitiesPost')}</span>
             ) : (
               <>
-                The host's <code>modelCapabilities.advertised[]</code> doesn't cover{' '}
-                <code>{missingModelCaps.join(', ')}</code>. At dispatch time the host will
-                either substitute a fallback model
-                (<code>model.capability.substituted</code>) or refuse with
-                <code> capability_not_provided</code>.
+                <CheckIcon size={13} aria-hidden />
+                <span><code>{requiredCaps.join(', ')}</code> {t('modelCapsCoveredNote')}</span>
               </>
             )}
-          </div>
-        </div>
+          </p>
+        )
       ) : null}
 
       <TextField
-        label="Name"
+        label={t('fieldName')}
         value={node.name}
         onChange={(e) => useBuilderStore.getState().updateNode(node.id, { name: e.target.value })}
       />
 
-      <div className="form-row">
-        <span className="builder-inspector-field-label">Type</span>
-        <code className="builder-inspector-typeid">{entry.typeId}</code>
-      </div>
-
       {entry.configFields.length > 0 && (
         <>
           <div className="builder-inspector-divider" />
-          <div className="builder-inspector-section-label">Configuration</div>
+          <div className="builder-inspector-section-label">{t('configuration')}</div>
           {entry.configFields.map((f) => (
             <ConfigInput
               key={f.key}
@@ -133,9 +144,9 @@ export function Inspector() {
       )}
 
       <div className="builder-inspector-divider" />
-      <div className="builder-inspector-section-label">Output role</div>
+      <div className="builder-inspector-section-label">{t('outputRole')}</div>
       <SelectField
-        label="Artifact"
+        label={t('outputRoleArtifact')}
         value={node.outputRole ?? ''}
         onChange={(e) => {
           const v = e.target.value;
@@ -143,16 +154,14 @@ export function Inspector() {
             outputRole: v === 'primary' || v === 'secondary' ? v : undefined,
           });
         }}
-        title="Author hint for which terminal node's output is the workflow's canonical deliverable. Advisory; engine ignores the value."
+        title={t('outputRoleTitle')}
       >
-        <option value="">(none)</option>
-        <option value="primary">Primary</option>
-        <option value="secondary">Secondary</option>
+        <option value="">{t('outputRoleNone')}</option>
+        <option value="primary">{t('outputRolePrimary')}</option>
+        <option value="secondary">{t('outputRoleSecondary')}</option>
       </SelectField>
       <p className="muted binspector-output-role-note">
-        Tag the canonical-deliverable terminal node so the chat's
-        completion card surfaces this output as the workflow's primary
-        artifact. Advisory; the engine ignores the value.
+        {t('outputRoleNote')}
       </p>
 
       <div className="builder-inspector-divider" />
@@ -160,7 +169,7 @@ export function Inspector() {
         className="secondary"
         onClick={() => useBuilderStore.getState().removeNode(node.id)}
       >
-        Delete node
+        {t('deleteNode')}
       </button>
     </aside>
   );

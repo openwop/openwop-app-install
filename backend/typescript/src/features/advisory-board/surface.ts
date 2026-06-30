@@ -9,26 +9,19 @@
  */
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { listBoards, convene } from './service.js';
+import type { FeatureSurface } from '../../host/featureSurfaces.js';
+import { listBoards } from './service.js';
 
 export function buildAdvisoryBoardSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
-    /** List the workspace's SHARED advisory boards (id, name, handle, advisor count). */
+    /** List the workspace's SHARED advisory boards (id, name, handle, advisor
+     *  rosterIds). A workflow can read the cohort; the boardroom CONVERSATION
+     *  itself runs in the AI chat over the existing chat.turn infra (ADR 0040
+     *  § Correction 2026-06-15), not a node-side convene. */
     listBoards: async () => {
       const boards = await listBoards(tenantId, undefined);
-      return { boards: boards.map((b) => ({ boardId: b.boardId, name: b.name, handle: b.handle, advisors: b.advisors.length })) };
-    },
-    /** Convene a SHARED board for a prompt and return the attributed transcript.
-     *  Node-driven: actor is the run (no user identity). `role:action` (recorded →
-     *  replay reads the persisted session). */
-    convene: async (args) => {
-      const session = await convene(tenantId, undefined, null, str(args.boardId), { prompt: str(args.prompt) });
-      return {
-        sessionId: session.sessionId,
-        turns: session.turns.map((t) => ({ speakerId: t.speakerId, speakerName: t.speakerName, role: t.role, content: t.content })),
-      };
+      return { boards: boards.map((b) => ({ boardId: b.boardId, name: b.name, handle: b.handle, advisors: b.advisors })) };
     },
   };
 }

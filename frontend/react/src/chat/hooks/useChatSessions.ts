@@ -18,12 +18,21 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import i18n from '../../i18n/index.js';
 import {
+  addConversationParticipant,
+  attachBoardToConversation,
   createChatSession,
   deleteChatSession,
   listChatSessions,
+  markConversationRead,
+  openConversation,
+  openWorkspaceConversation,
+  removeConversationParticipant,
   renameChatSession,
   type ChatSessionHeader,
+  type ConversationParticipant,
+  type ConversationType,
 } from '../../client/chatSessionsClient.js';
 import {
   LS_SESSION_INDEX_KEY,
@@ -48,8 +57,32 @@ export interface UseChatSessionsResult {
   /** Create a new session on the BE; returns the persisted header.
    *  The new session is prepended to the local list. */
   createSession: (title?: string) => Promise<ChatSessionHeader>;
+  /** Open-or-resume a typed 1:1 conversation with a subject (ADR 0043).
+   *  Idempotent — resolves to the existing conversation when one exists.
+   *  The returned header is upserted into the local list. */
+  openWith: (type: 'agent' | 'person', subjectRef: string, title?: string) => Promise<ChatSessionHeader>;
+  /** Create a typed multi-party conversation (group / workspace). The caller is
+   *  the owner; `participants` are added as members. */
+  createConversation: (init: { type: ConversationType; title?: string; participants?: string[]; boardId?: string }) => Promise<ChatSessionHeader>;
+  /** Open-or-resume the single Workspace conversation (ADR 0043 Phase 6 — the
+   *  assistant's tenant-graph chat). Returns null when no workspace assistant is
+   *  configured (the caller surfaces that, rather than opening a dead chat). */
+  openWorkspace: () => Promise<ChatSessionHeader | null>;
   rename: (sessionId: string, title: string) => Promise<void>;
   remove: (sessionId: string) => Promise<void>;
+  /** Mark a conversation read for the owner (ADR 0043 Phase 3) — clears its
+   *  unread badge. Optimistic + best-effort: the local owner read-marker is
+   *  advanced immediately; a failed write reconciles on the next refresh. */
+  markRead: (sessionId: string) => Promise<void>;
+  /** Promote a conversation to a board group chat (ADR 0043 Phase 4) — the
+   *  `@@<board>` summon stamps the current chat so the Board of Advisors shows
+   *  under Groups. Best-effort; upserts the enriched header locally. */
+  attachBoard: (sessionId: string, boardId: string, participants: string[]) => Promise<void>;
+  /** Persist an agent joining a conversation (ADR 0043) — the server-side
+   *  membership the lineup is derived from. Best-effort; syncs the local header.*/
+  addParticipant: (sessionId: string, subjectRef: string) => Promise<void>;
+  /** Persist an agent leaving a conversation. Best-effort; syncs the header. */
+  removeParticipant: (sessionId: string, subjectRef: string) => Promise<void>;
 }
 
 export function useChatSessions(): UseChatSessionsResult {
@@ -119,7 +152,7 @@ export function useChatSessions(): UseChatSessionsResult {
         return {
           sessionId: String(it.sessionId),
           tenantId: 'local',
-          title: String(it.title ?? 'Untitled'),
+          title: String(it.title ?? i18n.t('chat:untitled')),
           createdAt: String(it.createdAt ?? new Date().toISOString()),
           updatedAt: String(it.updatedAt ?? it.createdAt ?? new Date().toISOString()),
           messageCount: Number(it.messageCount ?? 0),
@@ -169,6 +202,35 @@ export function useChatSessions(): UseChatSessionsResult {
     return created;
   }, [broadcast]);
 
+  const openWith = useCallback(async (type: 'agent' | 'person', subjectRef: string, title?: string) => {
+    const opened = await openConversation({ type, subjectRef, ...(title !== undefined ? { title } : {}) });
+    // Upsert — `open` is idempotent, so a resumed conversation is moved to the
+    // top rather than duplicated.
+    setSessions((s) => [opened, ...s.filter((x) => x.sessionId !== opened.sessionId)]);
+    broadcast({ kind: 'session:created', sessionId: opened.sessionId });
+    return opened;
+  }, [broadcast]);
+
+  const createConversation = useCallback(async (init: { type: ConversationType; title?: string; participants?: string[]; boardId?: string }) => {
+    const created = await createChatSession(init);
+    setSessions((s) => [created, ...s.filter((x) => x.sessionId !== created.sessionId)]);
+    broadcast({ kind: 'session:created', sessionId: created.sessionId });
+    return created;
+  }, [broadcast]);
+
+  const openWorkspace = useCallback(async (): Promise<ChatSessionHeader | null> => {
+    let opened: ChatSessionHeader;
+    try {
+      opened = await openWorkspaceConversation();
+    } catch {
+      // No workspace assistant configured (404) — the caller surfaces it.
+      return null;
+    }
+    setSessions((s) => [opened, ...s.filter((x) => x.sessionId !== opened.sessionId)]);
+    broadcast({ kind: 'session:created', sessionId: opened.sessionId });
+    return opened;
+  }, [broadcast]);
+
   const rename = useCallback(async (sessionId: string, title: string) => {
     const updated = await renameChatSession(sessionId, title);
     setSessions((s) => s.map((x) => (x.sessionId === sessionId ? updated : x)));
@@ -176,10 +238,58 @@ export function useChatSessions(): UseChatSessionsResult {
   }, [broadcast]);
 
   const remove = useCallback(async (sessionId: string) => {
-    await deleteChatSession(sessionId);
+    try {
+      await deleteChatSession(sessionId);
+    } catch (err) {
+      // Idempotent delete: a `not_found` means the conversation is already gone
+      // server-side (deleted on another device, or a reset/re-seeded demo backend).
+      // The goal state — absent — already holds, so DON'T rethrow (an uncaught
+      // rejection) and DON'T skip the local removal below: otherwise the row the
+      // user just deleted lingers in the library/modal ("deleted conversations
+      // showing up"). Any other error still propagates.
+      if (!(err instanceof Error && err.message.startsWith('not_found:'))) throw err;
+    }
     setSessions((s) => s.filter((x) => x.sessionId !== sessionId));
     broadcast({ kind: 'session:deleted', sessionId });
   }, [broadcast]);
 
-  return { sessions, isLoading, error, refresh, createSession, rename, remove };
+  const markRead = useCallback(async (sessionId: string) => {
+    const at = new Date().toISOString();
+    // Optimistic: advance the owner's read marker locally so the unread dot
+    // clears the instant a conversation is opened, without waiting on the round
+    // trip. There is exactly one `owner` participant (the acting user).
+    setSessions((s) => s.map((c) => (c.sessionId === sessionId
+      ? { ...c, participants: (c.participants ?? []).map((p) => (p.role === 'owner' ? { ...p, lastReadAt: at } : p)) }
+      : c)));
+    try { await markConversationRead(sessionId); } catch { /* best-effort; refresh reconciles */ }
+  }, []);
+
+  const attachBoard = useCallback(async (sessionId: string, boardId: string, participants: string[]) => {
+    try {
+      const updated = await attachBoardToConversation(sessionId, { boardId, participants });
+      setSessions((s) => (s.some((x) => x.sessionId === sessionId)
+        ? s.map((x) => (x.sessionId === sessionId ? updated : x))
+        : [updated, ...s]));
+      broadcast({ kind: 'session:renamed', sessionId });
+    } catch { /* best-effort; the boardroom turn proceeds regardless */ }
+  }, [broadcast]);
+
+  // Sync the local header's participants after a membership write so the rail's
+  // participant count + the derived lineup stay consistent without a refetch.
+  const applyParticipants = useCallback((sessionId: string, participants: ConversationParticipant[]) => {
+    setSessions((s) => s.map((x) => (x.sessionId === sessionId ? { ...x, participants } : x)));
+    broadcast({ kind: 'session:renamed', sessionId });
+  }, [broadcast]);
+
+  const addParticipant = useCallback(async (sessionId: string, subjectRef: string) => {
+    try { applyParticipants(sessionId, await addConversationParticipant(sessionId, subjectRef)); }
+    catch { /* best-effort; the FE lineup still reflects the activation locally */ }
+  }, [applyParticipants]);
+
+  const removeParticipant = useCallback(async (sessionId: string, subjectRef: string) => {
+    try { applyParticipants(sessionId, await removeConversationParticipant(sessionId, subjectRef)); }
+    catch { /* best-effort */ }
+  }, [applyParticipants]);
+
+  return { sessions, isLoading, error, refresh, createSession, openWith, createConversation, openWorkspace, rename, remove, markRead, attachBoard, addParticipant, removeParticipant };
 }

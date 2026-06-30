@@ -23,6 +23,7 @@ import type { HostAdapterSuite } from '../host/index.js';
 import type { Principal } from '../types.js';
 import { dispatch } from '../host/mcpServerRouter.js';
 import { parseRequest } from '../host/mcpJsonRpc.js';
+import { enforceMcpPrincipalRateLimit } from '../middleware/rateLimit.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('routes.mcp');
@@ -46,6 +47,12 @@ export function registerMcpServerRoutes(app: Express, deps: Deps): void {
     const parsed = parseRequest(req.body);
     if ('error' in parsed) {
       res.status(200).json(parsed);
+      return;
+    }
+    // MCP-1 (ADR 0087 OQ-2) — per-principal budget on `tools/call` (which runs a
+    // workflow), layered on the per-IP floor. Reads (`tools/list`, etc.) stay on
+    // the IP floor. On exceed, a canonical 429 is already sent.
+    if (parsed.method === 'tools/call' && enforceMcpPrincipalRateLimit(res, principal.principalId)) {
       return;
     }
     const response = await dispatch(parsed, {

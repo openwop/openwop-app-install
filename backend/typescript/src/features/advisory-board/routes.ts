@@ -16,10 +16,12 @@ import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
-import { getUser } from '../users/usersService.js';
 import { requireFeatureEnabled, requireString } from '../featureRoute.js';
+import { getBoardSharedKnowledge, setBoardSharedKnowledge, isSharedKbKind, sharedKbKinds } from './advisoryBoardKnowledgeService.js';
+import { registerBoardContextResolver } from '../../host/boardContextResolver.js';
 import {
-  listBoards, getBoardView, createBoard, updateBoard, deleteBoard, getSession, convene,
+  listBoards, getBoardView, getBoardByHandle, createBoard, updateBoard, deleteBoard,
+  resolveBoardStrategyContext, previewBoardStrategyContext,
 } from './service.js';
 
 const TOGGLE_ID = 'advisory-board';
@@ -42,23 +44,14 @@ async function requireOrgScopeFor(req: Request, orgId: string, scope: Scope): Pr
   }
 }
 
-/** The acting user's display name for the scaffold (tenant-scoped, fail-soft). */
-async function userNameOf(req: Request): Promise<string | null> {
-  const uid = actingUserOf(req);
-  if (!uid) return null;
-  try {
-    const u = await getUser(uid);
-    if (!u || (u.tenantId && u.tenantId !== tenantOf(req))) return null;
-    const name = u.displayName?.trim();
-    return name && name.length > 0 ? name : null;
-  } catch {
-    return null;
-  }
-}
 
 export function registerAdvisoryBoardRoutes(deps: RouteDeps): void {
   const { app } = deps;
   const BASE = '/v1/host/openwop-app/advisors';
+
+  // ADR 0079 Phase 5 — register the board-context resolver into the core seam so
+  // a boardroom snapshots its strategy context at `@@` summon (feature→core only).
+  registerBoardContextResolver(resolveBoardStrategyContext);
 
   // ── list boards (visible to the caller) ──
   app.get(`${BASE}/boards`, async (req, res, next) => {
@@ -89,6 +82,43 @@ export function registerAdvisoryBoardRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // ── preview the board's strategy context (ADR 0079 Phase 5 — "before convening") ──
+  app.get(`${BASE}/boards/:boardId/strategy-context`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      await requireTenantScope(req, 'workspace:read');
+      res.json({ strategies: await previewBoardStrategyContext(tenantOf(req), actingUserOf(req), req.params.boardId) });
+    } catch (err) { next(err); }
+  });
+
+  // ── shared knowledge (ADR 0100 D2): bind a managed planning KB to all advisors ──
+  app.get(`${BASE}/boards/:boardId/shared-knowledge`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      const board = await getBoardView(tenantOf(req), actingUserOf(req), req.params.boardId);
+      // CHATP-2: read/write authz symmetry — the POST gates on `workspace:write`
+      // for the board's org; the GET must likewise require at least `workspace:read`
+      // org scope (not only board-access) so share STATUS isn't readable by a board
+      // member who lacks org scope.
+      await requireOrgScopeFor(req, board.orgId, 'workspace:read');
+      res.json({ items: await getBoardSharedKnowledge(tenantOf(req), board) });
+    } catch (err) { next(err); }
+  });
+
+  app.post(`${BASE}/boards/:boardId/shared-knowledge`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
+      const board = await getBoardView(tenantOf(req), actingUserOf(req), req.params.boardId);
+      await requireOrgScopeFor(req, board.orgId, 'workspace:write');
+      const body = (req.body ?? {}) as { kind?: unknown; shared?: unknown };
+      if (!isSharedKbKind(body.kind)) {
+        throw new OpenwopError('validation_error', `Field \`kind\` must be one of: ${sharedKbKinds().join(', ')}.`, 400, { field: 'kind' });
+      }
+      await setBoardSharedKnowledge(tenantOf(req), board, body.kind, body.shared === true, actingUserOf(req) ?? 'unknown');
+      res.json({ items: await getBoardSharedKnowledge(tenantOf(req), board) });
+    } catch (err) { next(err); }
+  });
+
   // ── update a board (owner-only, enforced in the service) ──
   app.patch(`${BASE}/boards/:boardId`, async (req, res, next) => {
     try {
@@ -108,28 +138,14 @@ export function registerAdvisoryBoardRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  // ── convene: run a council round (the `@@` summon) ──
-  app.post(`${BASE}/boards/:boardId/convene`, async (req, res, next) => {
+  // ── resolve a board by its `@@<handle>` summon token (for the AI chat) ──
+  // The chat expands the returned cohort into the active-agents lineup; the
+  // conversation runs on the existing chat.turn infra (ADR 0040 § Correction).
+  app.get(`${BASE}/boards/by-handle/:handle`, async (req, res, next) => {
     try {
       await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       await requireTenantScope(req, 'workspace:read');
-      const session = await convene(
-        tenantOf(req),
-        actingUserOf(req),
-        await userNameOf(req),
-        req.params.boardId,
-        req.body ?? {},
-      );
-      res.status(201).json(session);
-    } catch (err) { next(err); }
-  });
-
-  // ── read a council session transcript ──
-  app.get(`${BASE}/boards/:boardId/sessions/:sessionId`, async (req, res, next) => {
-    try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
-      await requireTenantScope(req, 'workspace:read');
-      res.json(await getSession(tenantOf(req), actingUserOf(req), req.params.boardId, req.params.sessionId));
+      res.json(await getBoardByHandle(tenantOf(req), actingUserOf(req), req.params.handle));
     } catch (err) { next(err); }
   });
 }

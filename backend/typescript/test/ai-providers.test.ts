@@ -16,28 +16,29 @@
  *      with the `core.openwop.ai` toolCalling pack expectations.
  */
 
-import { describe, expect, it, beforeAll, afterAll, vi } from 'vitest';
+import { describe, expect, it, beforeAll, afterAll, afterEach, vi } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { createAiProvidersAdapter, AiProviderError } from '../src/aiProviders/aiProvidersHost.js';
+import { programMock, resetMockPrograms } from '../src/providers/dispatchMock.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../src/host/index.js';
 
 let server: http.Server;
-const PORT = 18282;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_INSTALL_PACKS = 'none'; // skip network install during tests
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -223,6 +224,60 @@ describe('aiProviders: cache key canonicalization', () => {
 });
 
 // ── Helpers ─────────────────────────────────────────────────────────
+
+describe('aiProviders: ADR 0079 §Phase 4 — plain callAI streams ai.message.chunk', () => {
+  afterEach(() => resetMockPrograms());
+
+  it('streams chunked deltas via scope.emit for a plain reply WHEN stream:true is opted in', async () => {
+    programMock('stream-node', [{ content: 'Hello stream world' }]);
+    const emitted: Array<{ type: string; payload: unknown }> = [];
+    const scope = {
+      ...buildScope({ secrets: {} }),
+      nodeId: 'stream-node',
+      emit: async (type: string, payload: unknown) => { emitted.push({ type, payload }); return { eventId: 'e', sequence: emitted.length }; },
+    };
+    const res = await createAiProvidersAdapter(scope).callAI({ provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'hi' }], stream: true });
+    expect(res.content).toBe('Hello stream world');
+    const chunks = emitted.filter((e) => e.type === 'ai.message.chunk');
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.map((e) => (e.payload as { chunk?: string }).chunk).join('')).toBe('Hello stream world');
+  });
+
+  it('emits NO deltas by default (stream omitted) — opt-in guards against write amplification', async () => {
+    programMock('noopt-node', [{ content: 'no deltas please' }]);
+    const emitted: string[] = [];
+    const scope = {
+      ...buildScope({ secrets: {} }),
+      nodeId: 'noopt-node',
+      emit: async (type: string) => { emitted.push(type); return { eventId: 'e', sequence: emitted.length }; },
+    };
+    const res = await createAiProvidersAdapter(scope).callAI({ provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'hi' }] });
+    expect(res.content).toBe('no deltas please');
+    expect(emitted.filter((t) => t === 'ai.message.chunk')).toHaveLength(0);
+  });
+
+  it('does NOT stream a structured (responseSchema) call even with stream:true — JSON mid-parse is noise', async () => {
+    programMock('struct-node', [{ content: '{"ok":true}' }]);
+    const emitted: string[] = [];
+    const scope = {
+      ...buildScope({ secrets: {} }),
+      nodeId: 'struct-node',
+      emit: async (type: string) => { emitted.push(type); return { eventId: 'e', sequence: emitted.length }; },
+    };
+    await createAiProvidersAdapter(scope).callAI({
+      provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'hi' }], stream: true,
+      responseSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
+    });
+    expect(emitted.filter((t) => t === 'ai.message.chunk')).toHaveLength(0);
+  });
+
+  it('a scope WITHOUT emit dispatches normally (no streaming, no throw)', async () => {
+    programMock('noemit-node', [{ content: 'no stream here' }]);
+    const scope = { ...buildScope({ secrets: {} }), nodeId: 'noemit-node' };
+    const res = await createAiProvidersAdapter(scope).callAI({ provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'hi' }] });
+    expect(res.content).toBe('no stream here');
+  });
+});
 
 function buildScope(opts: {
   secrets: Record<string, string>;

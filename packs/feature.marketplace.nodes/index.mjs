@@ -28,8 +28,16 @@ export async function search(ctx) {
   return { status: 'success', outputs: { listings, total: listings.length } };
 }
 
+export async function listings(ctx) {
+  const mkt = ensureMarketplace(ctx);
+  const out = await mkt.listings({});
+  const list = Array.isArray(out.listings) ? out.listings : [];
+  return { status: 'success', outputs: { listings: list, total: list.length } };
+}
+
 export const nodes = {
   'feature.marketplace.nodes.search': search,
+  'feature.marketplace.nodes.listings': listings,
 };
 
 export default nodes;

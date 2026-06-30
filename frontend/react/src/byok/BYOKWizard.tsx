@@ -12,7 +12,8 @@
  * `useAutoRef()` for their own naming policy.
  */
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { PROVIDERS, type ProviderConfig, type ProviderModel } from './lib/providers.js';
 import { useAuth } from '../auth/useAuth.js';
 import type { BYOKActiveConfig } from './lib/useBYOKConfig.js';
@@ -39,10 +40,22 @@ function managedCredentialRef(providerId: string): string {
 }
 
 export function BYOKWizard({ onComplete, onCancel }: Props): JSX.Element {
+  const { t } = useTranslation('byok');
   const { user, signIn } = useAuth();
   const [step, setStep] = useState<'provider' | 'model' | 'key'>('provider');
   const [provider, setProvider] = useState<ProviderConfig | null>(null);
   const [model, setModel] = useState<ProviderModel | null>(null);
+
+  // On each step transition, move focus to the new step's heading so a keyboard /
+  // screen-reader user lands on the new panel instead of being stranded on the
+  // (now-removed) control they just activated (UX ADM-4). Skip the initial mount.
+  const wizardRef = useRef<HTMLDivElement>(null);
+  const firstStep = useRef(true);
+  useEffect(() => {
+    if (firstStep.current) { firstStep.current = false; return; }
+    const heading = wizardRef.current?.querySelector<HTMLElement>('h2, h3');
+    if (heading) { heading.setAttribute('tabindex', '-1'); heading.focus(); }
+  }, [step]);
 
   // After the sign-in redirect returns, auto-activate the managed
   // provider the user clicked pre-sign-in. Without this, the user
@@ -72,7 +85,7 @@ export function BYOKWizard({ onComplete, onCancel }: Props): JSX.Element {
   }
 
   return (
-    <div className="card byok-wizard">
+    <div className="card byok-wizard" ref={wizardRef}>
       {/* "Try it free" is the no-key on-ramp — render it ABOVE the
        * BYOK stepper since the stepper's three steps (Provider / Model
        * / API key) don't apply to the managed path. Only visible on
@@ -84,7 +97,7 @@ export function BYOKWizard({ onComplete, onCancel }: Props): JSX.Element {
             isAuthed={user !== null}
             onPick={(p) => { void activateManaged(p); }}
           />
-          <div className="byok-or-divider" role="separator" aria-label="or">OR</div>
+          <div className="byok-or-divider" role="separator" aria-label={t('orDivider')}>{t('orDividerText')}</div>
         </>
       )}
 

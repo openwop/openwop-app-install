@@ -7,6 +7,7 @@
  * views (e.g. the §C2 quality analytics panel). See app-ux-enhancements §C1.
  */
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   getFeedbackCapability,
   recordAnnotation,
@@ -16,6 +17,7 @@ import {
 import { ThumbsUpIcon, ThumbsDownIcon, FlagIcon } from '../ui/icons/index.js';
 
 export function RunFeedback({ runId, onRecorded }: { runId: string; onRecorded?: () => void }) {
+  const { t } = useTranslation('runs');
   const [cap, setCap] = useState<FeedbackCapability | null>(null);
   const [pending, setPending] = useState(false);
   const [sent, setSent] = useState<string | null>(null);
@@ -47,14 +49,14 @@ export function RunFeedback({ runId, onRecorded }: { runId: string; onRecorded?:
 
   return (
     <div className="card">
-      <h2 className="u-mt-0">Feedback</h2>
+      <h2 className="u-mt-0">{t('feedbackHeading')}</h2>
       {sent ? (
-        <p className="muted u-m-0">Recorded: {sent}. Thanks.</p>
+        <p className="muted u-m-0">{t('feedbackRecorded', { label: sent })}</p>
       ) : (
-        <div className="button-row" role="group" aria-label="Rate this run">
-          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 5 }, 'good')} aria-label="Good"><ThumbsUpIcon size={14} /> Good</button>
-          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 1 }, 'bad')} aria-label="Bad"><ThumbsDownIcon size={14} /> Bad</button>
-          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'flag' }, 'flagged')} aria-label="Flag for review"><FlagIcon size={14} /> Flag for review</button>
+        <div className="button-row" role="group" aria-label={t('rateThisRun')}>
+          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 5 }, t('feedbackGood'))} aria-label={t('feedbackGood')}><ThumbsUpIcon size={14} /> {t('feedbackGood')}</button>
+          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 1 }, t('feedbackBad'))} aria-label={t('feedbackBad')}><ThumbsDownIcon size={14} /> {t('feedbackBad')}</button>
+          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'flag' }, t('feedbackFlagged'))} aria-label={t('flagForReview')}><FlagIcon size={14} /> {t('flagForReview')}</button>
         </div>
       )}
       {error && <div className="alert error u-mt-2">{error}</div>}

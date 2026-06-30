@@ -1,0 +1,52 @@
+{
+  "name": "feature.podcasts.nodes",
+  "version": "1.0.0",
+  "description": "Multi-speaker podcast generation pipeline (ADR 0086) — workflow nodes that compose existing seams into the `podcasts.generate` built-in workflow. `select-content` grounds on a notebook's sources via ctx.features.notebooks; `outline` and `transcript` draft the script with ctx.callAI and persist versioned Documents (ctx.features.documents); `synthesize` voices each dialogue turn via ctx.callSpeechSynthesizer (RFC 0105) into per-turn audio clips; `mix` assembles the ordered clip list onto the episode (ctx.features.podcasts.recordEpisodeResult). The only run input is episodeId — each node resolves the episode/episodeProfile/speakerProfile config authoritatively from ctx.features.podcasts. Action nodes — outputs are recorded; replay/fork read the recorded result rather than re-calling the model/synthesizer.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "podcasts", "audio", "tts", "speech-synthesis", "notebooks"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.podcasts.nodes.select-content",
+      "version": "1.0.0",
+      "label": "Podcast Select Content",
+      "description": "Grounds the episode on its notebook's sources/notes via ctx.features.notebooks.ask (honors per-source context levels). Inputs: { episodeId }. Output: { context } — the augmented prompt fed to the outline node. Degrades to the episode briefing when notebooks isn't composed.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.podcasts.nodes.outline",
+      "version": "1.0.0",
+      "label": "Podcast Outline",
+      "description": "Drafts a segmented episode outline via ctx.callAI (outlineModel from the EpisodeProfile) and persists it as a Document owned by the notebook subject (ctx.features.documents). Inputs: { episodeId } + { context } (edge). Output: { outline }. Records outlineDocRef on the episode.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.podcasts.nodes.transcript",
+      "version": "1.0.0",
+      "label": "Podcast Transcript",
+      "description": "Scripts a multi-speaker dialogue (1–4 speakers, each with persona + voice) via ctx.callAI (transcriptModel) as a JSON array of turns, and persists a readable transcript Document. Inputs: { episodeId } + { outline } (edge). Output: { turns } — [{speaker,text}] fed to synthesize. Records transcriptDocRef.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.podcasts.nodes.synthesize",
+      "version": "1.0.0",
+      "label": "Podcast Synthesize (TTS)",
+      "description": "Voices each dialogue turn via ctx.callSpeechSynthesizer (RFC 0105), one call per turn carrying that speaker's opaque voiceId. Inputs: { episodeId } + { turns } (edge). Output: { clips } — ordered [{speaker,voiceId,url,mimeType}] (each turn's bytes are already stored as a tenant-scoped Media asset by the synth host impl).",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.podcasts.nodes.mix",
+      "version": "1.0.0",
+      "label": "Podcast Mix",
+      "description": "Assembles the ordered clip list onto the episode tracking record via ctx.features.podcasts.recordEpisodeResult (the Studio player plays the clips sequentially — the v1 mix; a single-file server-side mux is the deferred render option, ADR 0086 OQ-1). Inputs: { episodeId } + { clips } (edge). Output: { clipCount }.",
+      "category": "integration",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

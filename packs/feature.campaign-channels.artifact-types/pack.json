@@ -1,0 +1,89 @@
+{
+  "name": "feature.campaign-channels.artifact-types",
+  "version": "1.0.0",
+  "kind": "artifact-type",
+  "description": "Campaign Studio channel-draft artifact types (ADR 0157 / RFC 0075). Registers the five channel deliverable shapes produced by feature.campaign-channels.nodes.generate so each draft validates + is served at /schemas/artifacts/{id}.schema.json and bundled into a campaign (ADR 0158).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["artifact-type", "campaign-channels", "marketing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "artifactTypes": [
+    {
+      "artifactTypeId": "campaign-channel.landing-page",
+      "title": "Landing Page Draft",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["channel"],
+        "properties": {
+          "channel": { "const": "landing_page" },
+          "title": { "type": "string" },
+          "sections": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+          "citations": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "campaign-channel.ads",
+      "title": "Ad Variants Draft",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["channel"],
+        "properties": {
+          "channel": { "const": "ad_variants" },
+          "platformSets": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "campaign-channel.email",
+      "title": "Email Sequence Draft",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["channel"],
+        "properties": {
+          "channel": { "const": "email_sequence" },
+          "emails": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "campaign-channel.creative",
+      "title": "Creative Briefs Draft",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["channel"],
+        "properties": {
+          "channel": { "const": "creative_briefs" },
+          "briefs": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "campaign-channel.social",
+      "title": "Social Posts Draft",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["channel"],
+        "properties": {
+          "channel": { "const": "social_posts" },
+          "posts": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    }
+  ]
+}

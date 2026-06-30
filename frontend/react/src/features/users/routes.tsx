@@ -23,6 +23,9 @@ const routes: FeatureRoute[] = [
       icon: UserIcon,
       hint: 'Accounts + identity',
     },
+    // ADR 0144 §correction — Users/People is account & identity management, a
+    // standalone admin surface, NOT a credential tab in the Access Hub. It keeps
+    // its own `/users` nav entry (no `hubTab`, no `hiddenWhenFeature`).
   },
 ];
 

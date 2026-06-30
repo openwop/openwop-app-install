@@ -60,6 +60,37 @@ defaults. For existing Cloud Run services, the helper uses merge-style
 `--update-secrets` / `--update-env-vars`; keep using those forms for one-off
 changes and avoid `--set-*`, which replaces the whole binding set.
 
+## Upgrading (operator contract — ADR 0052)
+
+openwop-app ships as **immutable `vX.Y.Z` releases** (the `/install/` download's
+`latest` alias points at the newest). Upgrading an existing install:
+
+1. **Back up your database first.** Upgrades are **forward-only** — there are no
+   down-migrations. Rollback = redeploy the prior version's image **and** restore the
+   pre-upgrade snapshot (ADR 0052 §D3).
+2. **Check `RELEASES.md` for a required stop** between your current version and the
+   target. By default there are none — migrations replay forward on boot, so you can
+   jump several versions in one upgrade. A release flagged `requiredStop: true` in
+   `releases.json` must be landed on first (ADR 0052 §D2).
+3. **Read the release's `#### Upgrading from` block** in `CHANGELOG.md` for breaking
+   config/env changes and any manual action.
+4. **Deploy the new image** (backend first, then frontend — see §6/§7). DB **schema**
+   migrations (`__schema_version`) and **app** migrations (`__app_meta`) run
+   automatically on boot, in order, idempotently — an instance on any prior version
+   catches up in one start.
+5. **Verify:** `curl https://<host>/api/readiness` returns `200` with
+   `"version": "<the version you shipped>"`, then smoke the changed surface.
+
+**Rolling (multi-instance) deploys:** a migration in a `MINOR` release MUST be safe
+for the prior binary running concurrently (additive / expand-then-contract) — old and
+new revisions briefly serve traffic together during a Cloud Run rollout. A migration
+that can't be made rolling-safe MUST ship as a `MAJOR` and be flagged a required stop.
+
+**Versions:** the running app version is the SSoT in `/VERSION` (mirrored into
+`src/version.ts` + both `package.json`s by `/cut-app-release`), advertised as
+`service.version` at `/.well-known/openwop` and `version` at `/readiness`. Pre-1.0
+(`0.x`): a `0.MINOR` bump MAY carry breaking changes.
+
 ## From the in-memory tier to durable storage
 
 The app has two planes, and only one defaults to non-durable:
@@ -81,6 +112,48 @@ The app has two planes, and only one defaults to non-durable:
 | `OPENWOP_DEPLOY_POSTURE` | `auth` | Require sign-in for managed-tier turns. |
 | `OPENWOP_STORAGE_DSN` | `postgres://…` | Durable control plane (runs, events, secrets). |
 | `OPENWOP_BYOK_KMS_KEY` | `projects/…/cryptoKeys/…` | **Mandatory in `auth`.** Signed-in tenant secrets get KMS-envelope encryption. The backend now **refuses to boot** in the `auth` posture without it — it will not silently fall back to the ephemeral/plaintext secret store. |
+| `OPENWOP_BYOK_ENCRYPTION_KEY` | `openssl rand -hex 32` | Only needed if a deploy uses the **local-AES** BYOK path (not `OPENWOP_BYOK_EPHEMERAL=true` and not KMS). Under `NODE_ENV=production` the backend now **fails closed** rather than auto-generating a throwaway disk key (SEC-3): a freshly-minted disk key is unrecoverable across Cloud Run instances/restarts and gives false at-rest assurance. The live demo sets `OPENWOP_BYOK_EPHEMERAL=true`, so it never hits this path. |
+
+### Optional AI capabilities (off by default — honest-off until configured)
+
+These three surfaces ship **dark by default** and advertise nothing until an operator
+wires them. The code + the chat agent personas are already on the image; they just
+return a capability-missing result until the matching env is set. All are merge-updates
+(`--update-env-vars` / `--update-secrets`), never `--set-*` (see the [§ White-label] note
+about preserving live config).
+
+| Capability (ADR) | Env to enable | Notes |
+|---|---|---|
+| **Code execution** (ADR 0114 + 0146) — the *Code Interpreter* chat agent | **In-process WASI is ON BY DEFAULT** (just sync the asset). **External (upgrade):** `OPENWOP_CODE_EXEC_ENDPOINT=https://<your-code-api>` (+ `OPENWOP_CODE_EXEC_KEY`). **Opt out:** `OPENWOP_CODE_EXEC_RUNTIME=off` | **WASI** runs CPython in-process under Node's `node:wasi` — a *sound* boundary (no `js` FFI; no host fs/env/network), Python-only, ~36 ms cold start. It is **on by default whenever `backend/typescript/vendor/python-3.12.0.wasm` is present**, so the **build MUST run `bash scripts/sync-pythonwasm.sh`** (vendors the ~25 MB binary) — a host that never synced it stays honest-off → `capability_not_provided` (no false advertisement). **External** (a LibreChat-style Code API; strong isolation + polyglot) **always wins** when its endpoint is set; `=off` forces honest-off. **Memory is best-effort under WASI** (a hard cap needs the deferred ADR 0146 Phase 4b; note on Cloud Run `/tmp` is tmpfs/RAM, so guest scratch writes count against instance memory) — size the instance + keep `OPENWOP_CODE_EXEC_MAX_CONCURRENT` (default 8) modest. Captured stdout/stderr is read-capped by `OPENWOP_CODE_EXEC_MAX_OUTPUT_BYTES` (default 1 MB) so a huge print can't OOM the host. Optional: `OPENWOP_CODE_EXEC_LANGUAGES` (external default `python,javascript,typescript,bash,ruby,go`; WASI advertises `python` only), `OPENWOP_CODE_EXEC_MAX_PER_DAY` (per-tenant daily cap, default 100; `0`/unset = uncapped). Execution is gated behind a per-run HITL approval. |
+| **Image generation** (ADR 0115) — the *Image Generator* chat agent | `OPENWOP_IMAGE_PROVIDER_ENABLED=true` **and** `OPENWOP_IMAGE_PROVIDER_ENDPOINT=https://<provider>` (+ `OPENWOP_IMAGE_PROVIDER_KEY`) | Flips `imageGeneration.supported` in discovery only when enabled. Per-provider routing: `OPENWOP_IMAGE_PROVIDER_ENDPOINT_<PROVIDER>` / `_KEY_<PROVIDER>` (e.g. `_GOOGLE` for Imagen) override the generic endpoint, so `openai` and `google` can route to their own backends; the generic endpoint is the fallback. SSRF-guarded; the endpoint is never echoed (§D). Without it, `callImageGenerator` returns `host_capability_missing`. |
+| **Self-hosted / OpenAI-compatible providers** (ADR 0121 / RFC 0108) — the Keys-page connect form | `OPENWOP_COMPAT_PROVIDER_ENABLED=true` | The operator opt-in that exposes the `/compat-endpoints` config surface (the **Self-hosted / OpenAI-compatible endpoints** card on `/keys`) so tenants can add an Ollama / LM Studio / vLLM / any compat base URL. RFC 0108 is Accepted, so the `aiProviders.selfHosted[]` advertisement is honest once a reachable endpoint is configured. Per-endpoint base URL + optional key are stored via BYOK (the key never returns to the FE); declared capabilities (vision/tools/long-context) are taken from what the tenant sets (the host can't probe a black box). SSRF-guarded. |
+
+All three keep the per-tenant feature posture intact — they are **operator** opt-ins (env on
+the service), not per-user toggles. The chat agents (`Code Interpreter`, `Image Generator`)
+are already discoverable in the agent picker regardless; they simply gain a working tool once
+the capability is wired.
+
+### Headless profile — no rendering client (ADR 0168 Part A)
+
+The backend is headless-by-construction (zero browser-global runtime deps; the SPA is purely a
+view over the API), and the Bearer-token path (`OPENWOP_API_KEYS` + `OPENWOP_AUTH_DISABLE_COOKIES=true`)
+already drives it without a browser (curl / the `@openwop` SDK / the conformance harness). For a
+deployment with **no rendering client**, set the profile so `/.well-known/openwop` stays honest:
+
+```
+gcloud run services update openwop-app-backend \
+  --update-env-vars OPENWOP_PROFILE=headless \
+  --region us-central1 --project openwop-dev
+```
+
+`OPENWOP_PROFILE=headless` withholds the three **client-presentation** surfaces — `uiPlugins`
+(the RFC 0117 iframe RPC seam), `realtimeVoice` (browser mic capture), and the `chatWidget`
+public embed gateway — from BOTH the discovery advert AND their route mounts (a smaller attack
+surface; advertise only what a no-client deploy serves). **Everything else is unchanged** — runs,
+workflows, agents, the RFC 0005 conversation primitive, dispatch, storage, auth. `OPENWOP_PROFILE=full`
+(the default) is exactly today's behavior. A per-capability override `OPENWOP_PRESENTATION_<CAP>=on|off`
+(`UIPLUGINS`/`REALTIMEVOICE`/`CHATWIDGET`) beats the profile for a mixed deploy (e.g. headless but
+keep uiPlugins). All merge-updates (`--update-env-vars`), never `--set-*`.
 
 ### Making host surfaces durable (horizontal scale)
 
@@ -297,8 +370,23 @@ OPENWOP_BYOK_EPHEMERAL: "true"
 OPENWOP_COOKIE_SECURE: "true"
 OPENWOP_STRICT_REGISTRY: "true"
 OPENWOP_API_KEYS: ""
+OPENWOP_ENABLE_CONFORMANCE_NODES: "true"
 OPENWOP_INSTALL_PACKS: "$PACKS"
 EOF
+
+# Two production-behavior knobs to know about in the env above:
+#  - OPENWOP_ENABLE_CONFORMANCE_NODES="true" — conformance-only node typeIds
+#    (core.conformance.mock-agent, conformance.secret.echo, …) are OFF by
+#    default under NODE_ENV=production so a fork doesn't expose them; the
+#    reference deploy IS a conformance target, so it MUST opt back in here (else
+#    /.well-known/openwop stops advertising capabilities.conformance.mockAgent
+#    and black-box conformance runs fail).
+#  - OPENWOP_API_KEYS: "" is correct for this cookie-per-visitor posture — the
+#    API-key path (a wildcard-tenant admin credential) stays disabled and the
+#    built-in dev-token is withdrawn in prod. /readiness stays green because the
+#    deploy is NOT bearer-enforced (no OPENWOP_AUTH_ENFORCE_BEARER). A deploy
+#    that DOES set OPENWOP_AUTH_ENFORCE_BEARER=true MUST also provide a bearer
+#    path (OPENWOP_API_KEYS or OIDC) + an OPENWOP_INTERNAL_TOKEN for sub-runs.
 
 # Multi-instance is safe: the host-extension stores (Kanban / roster /
 # org-chart / RFC 0083 trigger bridge) are READ-THROUGH on the durable kv
@@ -335,6 +423,7 @@ so pass **no** `--env-vars-file`, `--set-env-vars`, or `--set-secrets`.
 | `schemas/`           | `schemas/`              | `bash scripts/sync-schemas.sh`  |
 | `conformance/fixtures/` | `conformance-fixtures/` | `bash scripts/sync-fixtures.sh` |
 | `packs/`             | `packs/`                | `bash scripts/sync-packs.sh`    |
+| CPython-WASI runtime (pinned download) | `backend/typescript/vendor/python-3.12.0.wasm` | `bash scripts/sync-pythonwasm.sh` — **only when** enabling `OPENWOP_CODE_EXEC_RUNTIME=wasi` (ADR 0146 Phase 4a; ~25 MB, SHA-256-pinned, gitignored) |
 
 The vendored copies are committed to git, so a clean checkout of `origin/main`
 already has them. Re-run the relevant sync script only when the canonical
@@ -362,6 +451,20 @@ how `MINIMAX_API_KEY` and `OPENWOP_MESSAGING_BRIDGE_TOKEN` were added after
 §14 without a full re-spec. (The §14 `--set-secrets` list is itself now a
 partial snapshot — it predates those two bindings, so re-running §14
 verbatim would also drop them.)
+
+> **REQUIRED in production: `OPENWOP_BYOK_ENCRYPTION_KEY`.** A SEC-3 boot guard
+> (`byok/encryption.ts`) **refuses to start** under `NODE_ENV=production` if no
+> stable BYOK local-AES master key is configured — it will not auto-generate a
+> throwaway disk key. The managed-provider bootstrap (encrypting `MINIMAX_API_KEY`
+> at rest) needs this key, so a deploy **boot-fails** without it:
+> `fatal startup error … BYOK local-AES master key is not configured in production`
+> → the revision never serves traffic (prod stays on the prior revision). Note
+> this is **separate from `OPENWOP_BYOK_KMS_KEY`**, which only covers signed-in
+> (`user:*`) tenant secrets — it does not satisfy this local-AES path. The key
+> lives in the `openwop-byok-encryption-key` Secret Manager secret (a 64-hex /
+> 32-byte value, `openssl rand -hex 32`); it is now bound on the service. If a
+> future deploy ever drops it, re-add with the merge flag:
+> `--update-secrets OPENWOP_BYOK_ENCRYPTION_KEY=openwop-byok-encryption-key:latest`.
 
 After any deploy, confirm the binding set survived and the managed tier is
 healthy:
@@ -438,6 +541,50 @@ The FE's cold-start UX gracefully handles both postures — it
 adapts based on `lastSuccessAt` in localStorage rather than
 hard-coding cold-start assumptions. So you can flip the toggle
 either way without coordinating a FE redeploy.
+
+### Insights Suite — Workday connector (stage before enabling in prod)
+
+The **Insights & Drafting Suite** (toggle `insights-suite`, ADR 0082) drives two of its
+three workflows off a `core.workday.query` connector node. That node and the `workday`
+builtin provider ship with **mock-broker tests only** — there is no automated coverage of a
+real Workday tenant, so **the first production deploy is the first real exercise** of the
+integration-system-user (ISU) auth + per-tenant URL construction (`{instance}.workday.com/{tenant}`).
+
+Before flipping the `insights-suite` toggle ON for a real tenant:
+
+1. Stand up a Workday **sandbox** tenant + API Client (ISU) and mint a refresh token (the
+   unattended/scheduled path rides a refreshable OAuth connection; interactive chat runs use
+   OAuth2 PKCE).
+2. Create the connection and run the `anniversary-draft` / `talent-prep` workflows once
+   against the sandbox; confirm the `core.workday.query` node returns rows (not a 401/URL error).
+3. Only then enable the toggle in production.
+
+The suite is **OFF by default**, so a deploy that skips this is safe — the connector simply
+isn't reached until an operator opts a tenant in. See ADR 0082 § "Live-creds caveat".
+
+### Optional: media → text for RAG (OCR + transcription) — ADR 0108/0110/0111
+
+KB ingest can turn **images** (OCR) and **audio** (transcription) into searchable RAG text —
+for manual uploads AND drive-synced files (knowledge-sync, ADR 0107). It's **OFF by default**
+(it bills provider tokens), gated by two env vars. Enable WITHOUT a rebuild (incremental
+update preserves all other config):
+
+```
+gcloud run services update openwop-app-backend \
+  --update-env-vars OPENWOP_KB_OCR_ENABLED=true,OPENWOP_KB_TRANSCRIBE_ENABLED=true \
+  --region us-central1 --project openwop-dev
+```
+
+- **Needs a multimodal model.** The managed reference target is **MiniMax (text-only)**, so
+  media routes to the tenant's **Default AI provider** — a BYOK binding `{provider, model,
+  credentialRef}` set on the SPA's **`/keys` page** ("Default AI provider for media"). Use a
+  vision/audio-capable model — **`gemini-3.1-flash-lite`** is the recommended Gemini default
+  (audio needs Google; Anthropic/OpenAI are vision-only). Without a capable provider, media
+  ingest returns an honest `422` (text/PDF/Office ingest is unaffected).
+- **Cost is governed** — audio pre-flights the per-org `mediaBudget('stt')` byte budget; a
+  per-sync-source "include media" toggle bounds drive-sync blast (`PATCH …/knowledge-sync/:id`).
+- **Long audio** (> ~15 MiB) auto-uploads via the Gemini File API; manual upload caps at
+  200 MiB, drive-sync the same. Synced content is fenced **untrusted**.
 
 ## 7. Firebase Hosting + custom domain
 
@@ -790,6 +937,22 @@ gcloud run services update-traffic openwop-app-backend \
 # Firebase Hosting keeps prior versions too:
 firebase hosting:rollback --site=app-openwop-dev --project openwop-dev
 ```
+
+> **Traffic follows latest — and a `--to-revisions` rollback PINS it.** The service's
+> traffic is configured `--to-latest` (`spec.traffic: {latestRevision: true, percent: 100}`),
+> so a bare `gcloud run deploy` auto-migrates 100% to the new revision (as the deploy
+> steps above assume). **But the rollback command pins traffic to a *specific* revision** —
+> once pinned, the service stops following latest, and every subsequent bare deploy
+> **builds a new revision that comes up at 0%** (a "successful" deploy that silently ships
+> nothing; prod stays on the pinned revision). After a rollback, **restore auto-migrate**
+> once the fix is out, or the next deploy won't serve:
+> ```bash
+> gcloud run services update-traffic openwop-app-backend \
+>   --region=us-central1 --project openwop-dev --to-latest
+> ```
+> To smoke a revision *before* it serves prod, deploy it dark and verify a tag URL first:
+> `gcloud run deploy … --no-traffic`, then `--update-tags verify=<rev>`, smoke the
+> `verify---…run.app` URL, then `--to-revisions=<rev>=100` (and `--to-latest` to un-pin).
 
 ## Decommissioning
 

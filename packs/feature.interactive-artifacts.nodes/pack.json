@@ -1,0 +1,20 @@
+{
+  "name": "feature.interactive-artifacts.nodes",
+  "version": "1.0.0",
+  "description": "Interactive-artifacts producer node pack (ADR 0128). The `render` node emits a typed `interactive.{mermaid,chart,html,react}` artifact whose content is the raw source (mermaid text / chart spec / HTML), so it flows through the existing run-output producer (ADR 0083) and renders in the chat artifact workbench's sandboxed canvas. Pure transform — no host capability required; replay-safe (output recorded, never re-derived).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "interactive-artifacts", "mermaid", "chart", "canvas"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.interactive-artifacts.nodes.render",
+      "version": "1.0.0",
+      "label": "Render interactive artifact",
+      "description": "Emit an interactive.{mermaid|chart|html|react} artifact for the workbench canvas. Inputs: { kind, source | chart, title? } — `source` is the raw mermaid/HTML/JSX text; `chart` is a {chartType,data,options} object. Output: a typed artifact (contentTrust: untrusted). Pure transform.",
+      "category": "transform",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

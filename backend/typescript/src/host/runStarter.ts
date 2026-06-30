@@ -21,6 +21,7 @@ import type { HostAdapterSuite } from './index.js';
 import type { Storage } from '../storage/storage.js';
 import { executeRun } from '../executor/executor.js';
 import { recordRunAttribution } from './agentRunActivityIndex.js';
+import { insertRunWithStartContext } from './runInsert.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('host.runStarter');
@@ -69,7 +70,11 @@ export async function startWorkflowRun(
     createdAt: now,
     updatedAt: now,
   };
-  await storage.insertRun(run);
+  // ADR 0099 — the single run-insert seam freezes cross-cutting run-start
+  // decisions (tool-output compaction) into run.metadata at creation. Covers
+  // every startWorkflowRun caller (scheduled / trigger / heartbeat / approval /
+  // agent / webhook).
+  await insertRunWithStartContext(storage, run);
   // Index the agent attribution (if any) so fleet/per-agent activity queries
   // hit an index instead of scanning recent runs. Best-effort — never blocks.
   await recordRunAttribution(storage, run);

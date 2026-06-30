@@ -53,9 +53,17 @@ export async function rag(ctx) {
   };
 }
 
+export async function listCollections(ctx) {
+  const kb = ensureKb(ctx);
+  const { orgId } = inputs(ctx);
+  const out = await kb.listCollections({ orgId });
+  return { status: 'success', outputs: { collections: out.collections ?? [] } };
+}
+
 export const nodes = {
   'feature.kb.nodes.search': search,
   'feature.kb.nodes.rag': rag,
+  'feature.kb.nodes.list-collections': listCollections,
 };
 
 export default nodes;

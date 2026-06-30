@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
@@ -12,10 +13,20 @@ const OP = { authorization: 'Bearer dev-token', 'content-type': 'application/jso
 
 let server: http.Server;
 let BASE = '';
-// Unique port per test: the self-HTTP bridge captures config.port, so it must
-// match the listening port; a distinct port per test also avoids close/
-// re-listen races and stale detached pollers hitting a reused port.
-let portCounter = 18290;
+// The self-HTTP bridge captures config.port, so createApp's port MUST equal the
+// listening port. We can't use `listen(0)` here (the OS-assigned port wouldn't
+// match config.port), so grab a guaranteed-free port up front and use it for
+// both. A fresh free port per test also avoids close/re-listen races and stale
+// detached pollers hitting a reused port.
+async function freePort(): Promise<number> {
+  return new Promise((resolve) => {
+    const probe = http.createServer();
+    probe.listen(0, () => {
+      const { port } = probe.address() as AddressInfo;
+      probe.close(() => resolve(port));
+    });
+  });
+}
 
 // Fresh in-memory SQLite per test → durable-but-isolated relay state (replaces
 // the old module-Map reset; the gateway is now Storage-backed).
@@ -25,7 +36,7 @@ beforeEach(async () => {
   // The bridge self-polls /v1/runs and the test polls /device/outbound; both
   // share the per-IP (127.0.0.1) sliding window. Disable for the suite.
   process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
-  const port = portCounter++;
+  const port = await freePort();
   const app = await createApp({
     port,
     storageDsn: 'memory://',

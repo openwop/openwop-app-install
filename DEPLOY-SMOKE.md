@@ -1,6 +1,7 @@
 # Live-deploy smoke test — app.openwop.dev
 
-**Last run:** 2026-05-17 ~16:55 UTC, against the live deploy.
+**Last run:** 2026-06-18 ~13:09 UTC, against the live deploy (backend revision
+`openwop-app-backend-00237-q7c`, frontend `index-Bpb7wcQ8.js`).
 
 Repeat this whenever the backend redeploys to confirm the full
 cookie-auth + cookie-scoped-state + admin-cleanup loop works
@@ -28,7 +29,28 @@ python3 -c "import json; d=json.load(open('/tmp/readiness.json')); print('status
 curl -s "$BASE/.well-known/openwop" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); print('protocol:', d['protocolVersion']); print('surfaces:', len(d['capabilities']['hostSurfaces'])); print('aiProviders:', d['capabilities']['aiProviders']['supported'])"
 
-# 2. Catalog (mints openwop.session cookie)
+# 1.5 RFC 0101 multi-party group conversation — the LIVE CONFORMANCE WITNESS
+#     (ADR 0040 Phase 6 / openwop #738+#739). Folds the INTEROP-MATRIX
+#     "live + strict-verified" flip into the deploy: first assert the capability is
+#     advertised on the live discovery doc, THEN run RFC 0101's gated conformance leg
+#     NON-VACUOUSLY against this deployed host (the black-box path RFC 0095's
+#     connection-packs witness used).
+curl -s "$BASE/.well-known/openwop" | \
+  python3 -c "import json,sys; m=json.load(sys.stdin)['capabilities'].get('multiPartyConversation',{}); print('multiPartyConversation:', m.get('supported'), '· maxParticipants:', m.get('maxParticipants'))"
+# Expected: multiPartyConversation: True · maxParticipants: 8
+#
+# Then, from a clean openwop spec checkout, run the gated leg against THIS host:
+#   ( cd ../openwop/conformance && \
+#       OPENWOP_BASE_URL="$BASE" OPENWOP_REQUIRE_BEHAVIOR=true \
+#       npx vitest run src/scenarios/multi-party-conversation-shape.test.ts )
+# A NON-VACUOUS pass (the capability-gated behavioral leg runs, not skips) is the
+# RFC 0101 `Active → Accepted` behavioral evidence. On success:
+#   1) flip the INTEROP-MATRIX § "Multi-party group conversation" openwop-app row from
+#      "implemented — live strict-verification pending deploy" → "live + strict-verified",
+#      citing this deployed Cloud Run revision + suite version (openwop PR);
+#   2) tick RFC 0101's behavioral-evidence acceptance box [~] → [x].
+
+# 2. Catalog (mints the __session cookie)
 curl -s -c $CJAR -i "$BASE/v1/host/openwop-app/node-catalog" | grep -i set-cookie | head -1
 curl -s -b $CJAR "$BASE/v1/host/openwop-app/node-catalog" | \
   python3 -c "import json,sys; d=json.load(sys.stdin); print('nodes:', len(d['nodes']), 'runnable:', sum(1 for n in d['nodes'] if not n.get('missingHostSurfaces')))"
@@ -58,24 +80,32 @@ curl -s -X POST -H "Authorization: Bearer $ADMIN" \
 curl -sI https://app.openwop.dev/privacy | head -1
 ```
 
-## Expected vs. actual (2026-05-17)
+## Expected vs. actual (2026-06-18)
 
 | Step | Expected | Actual |
 |---|---|---|
-| 1 | protocol 1.1, 17 surfaces, 3 providers | ✓ matches |
-| 2 | Set-Cookie + nodes ≥ 270 + runnable ≥ 220 | ✓ 279 nodes / 226 runnable |
+| 0 | HTTP 200 | ✓ `HTTP/2 200` |
+| 0.5 | `status: ready`, every managed tier ready | ✓ `ready` · `openwop-free` ready |
+| 1 | protocol 1.1, ≥ 17 surfaces, 3 providers | ✓ 26 surfaces · `anthropic/openai/google` |
+| 1.5 | `multiPartyConversation: True · maxParticipants: 8`; then the gated RFC 0101 leg passes NON-VACUOUSLY → flip INTEROP-MATRIX row + tick the acceptance box | _(record on the next deploy)_ |
+| 2 | Set-Cookie + nodes ≥ 270 + runnable ≥ 220 | ✓ 441 nodes / 419 runnable |
 | 3 | `{"workflowId":"smoke-uppercase","nodeCount":1}` | ✓ |
-| 4 | runId UUID returned | ✓ `64eca91c-2be1-...` |
+| 4 | runId UUID returned | ✓ `e471f526-a6e4-...` |
 | 5 | `status: completed` (or `running`/`waiting-*` if HITL) | ✓ `completed` |
-| 6 | `{ok:true, activeTenants:N, wipedSecrets:M}` | ✓ `ok:true, active:15` |
+| 6 | `{ok:true, activeTenants:N, wipedSecrets:M}` | ✓ `ok:true, active:5` |
 | 7 | HTTP 200 | ✓ `HTTP/2 200` |
+
+Surface/node counts grow over time (more published packs — e.g. the ADR 0064
+CMS Phase-3 nodes landed since the prior run); the `≥` floors are what matter.
 
 ## What this proves
 
 - Firebase Hosting → Cloud Run `/api/**` rewrite working end-to-end.
 - Backend `/api` prefix strip correct (`/api/v1/...` → `/v1/...`).
-- Session cookie minted with the right attributes (HttpOnly, Secure,
-  SameSite=Lax, Max-Age=86400, HS256 signature).
+- Session cookie minted with the right attributes: name `__session` (the only
+  cookie name Firebase Hosting forwards through its CDN), HttpOnly, Secure,
+  SameSite=None (required for the `/api` rewrite path), Max-Age=86400, HS256
+  signature. Decoded payload carries `tenantId: anon:<sid>`, `tier: anon`.
 - Cookie-scoped tenant isolation working — body omits `tenantId`,
   cookie's `anon:<sid>` is used.
 - 17 published packs install + register cleanly at backend cold start

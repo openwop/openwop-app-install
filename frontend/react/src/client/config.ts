@@ -19,6 +19,7 @@
  */
 
 import { DEV_FALLBACK_BASE_URL } from './baseUrlDefault';
+import { getRequestLocale } from '../i18n/requestLocale.js';
 
 export type AuthMode = 'bearer' | 'cookie';
 
@@ -112,8 +113,13 @@ export function authedHeaders(extra?: Record<string, string>): Record<string, st
   // a host MAY return localized interrupt / error copy. Every REST call routes
   // through this helper (raw fetches + the SDK fetch wrapper), so one line
   // covers the app. Harmless when the host doesn't localize.
-  if (typeof navigator !== 'undefined' && navigator.language) {
-    base['accept-language'] = navigator.language;
+  // The user's CONTENT-language preference (explicit UI choice, else raw
+  // navigator.language) — NOT collapsed to a supported UI locale, so content
+  // negotiation (ADR 0064) is unchanged for non-en browsers. Byte-identical
+  // to the prior navigator.language send until a user picks a UI locale.
+  const requestLocale = getRequestLocale();
+  if (requestLocale) {
+    base['accept-language'] = requestLocale;
   }
   if (cachedIdToken) {
     base['authorization'] = `Bearer ${cachedIdToken}`;

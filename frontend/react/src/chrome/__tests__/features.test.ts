@@ -59,19 +59,38 @@ describe('nav registry — category + position ordering', () => {
     for (const g of WORKSPACE_NAV) expect(GROUP_ORDER).toContain(g.label);
   });
 
+  it('advisory / prioritization / strategy items live under the Leadership group, ordered after Workspace', () => {
+    const leadership = labels('Leadership');
+    expect(leadership).toEqual(expect.arrayContaining(['Board of Advisors', 'Priority Matrix', 'Strategy']));
+    // and NOT left behind in Workspace
+    expect(labels('Workspace')).not.toContain('Strategy');
+    const order = WORKSPACE_NAV.map((g) => g.label);
+    expect(order.indexOf('Workspace')).toBeLessThan(order.indexOf('Leadership'));
+    expect(order.indexOf('Leadership')).toBeLessThan(order.indexOf('Author'));
+  });
+
   it('items sort by nav.order ascending within a group', () => {
     const ws = labels('Workspace');
-    // Chat(10) · Agents(20) · Boards(30) are the explicitly-ordered core items.
+    // Chat(10) · Agents(20) are the explicitly-ordered core workspace items.
+    // (Boards@30 moved to the admin "Operations" group, 2026-06-17.)
     expect(ws.indexOf('Chat')).toBeLessThan(ws.indexOf('Agents'));
-    expect(ws.indexOf('Agents')).toBeLessThan(ws.indexOf('Boards'));
+  });
+
+  it('Boards + Knowledge Base live in the admin tier, not the workspace rail (2026-06-17 move)', () => {
+    expect(isAdminPath('/boards')).toBe(true);
+    expect(isAdminPath('/kb')).toBe(true);
+    const ws = labels('Workspace');
+    expect(ws).not.toContain('Boards');
+    expect(ws).not.toContain('Knowledge Base');
   });
 
   it('feature items slot into their declared group + order (CRM→Workspace@40, CMS→Content)', () => {
     // NAV includes feature-gated items regardless of resolved enablement (the
     // catalog; the Sidebar/⌘K filter visibility separately). The CRM feature
-    // package declares Workspace@40, so it slots after the core Boards@30 item.
+    // package declares Workspace@40, so it slots after the core Agents@20 item
+    // (Boards@30 moved to the admin tier, 2026-06-17).
     const ws = NAV.find((g) => g.label === 'Workspace')?.items.map((i) => i.label) ?? [];
-    expect(ws.indexOf('Boards')).toBeLessThan(ws.indexOf('CRM'));
+    expect(ws.indexOf('Agents')).toBeLessThan(ws.indexOf('CRM'));
     // CMS moved to the 'Content' group in the 2026-06-04 IA rename (alongside
     // Media / Publishing / Sharing), so it lands there rather than in Workspace.
     const content = NAV.find((g) => g.label === 'Content')?.items.map((i) => i.label) ?? [];

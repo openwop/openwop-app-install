@@ -20,6 +20,7 @@
  * role="alert" so screen readers announce the failure on first paint.
  */
 
+import i18n from '../i18n/index.js';
 import { classifyChatError, type KnownError } from './lib/errorClassify.js';
 import type { ChatMessage } from './types.js';
 
@@ -38,8 +39,8 @@ interface Props {
  *  ErrorCard can wire callbacks to. Unmapped actions surface as a plain
  *  card without a button. */
 function actionFromBE(envelope: ErrorEnvelope): KnownError['action'] {
-  if (envelope.action === 'reconfigure') return { kind: 'reconfigure-byok', label: 'Open BYOK settings' };
-  if (envelope.action === 'retry' || envelope.action === 'wait') return { kind: 'retry', label: 'Retry' };
+  if (envelope.action === 'reconfigure') return { kind: 'reconfigure-byok', label: i18n.t('chat:openByokSettings') };
+  if (envelope.action === 'retry' || envelope.action === 'wait') return { kind: 'retry', label: i18n.t('common:retry') };
   // 'regenerate' / 'abort' have no FE button affordance in this card.
   return undefined;
 }

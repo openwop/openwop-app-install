@@ -1,0 +1,48 @@
+{
+  "name": "feature.brand.nodes",
+  "version": "1.1.0",
+  "description": "Brand & Guardrails feature node pack (ADR 0155 / ADR 0014 / ADR 0170) — read + enforce nodes over the ctx.features.brand surface shipped by the Brand feature package. Lets a workflow (or a chat agent via the agent pack) read the app's white-label identity, resolve a brand's voice into a prompt block, and score generated content for compliance (deterministic banned-phrase / formality / per-channel length blended with an LLM tone judgement).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "brand", "guardrails", "compliance", "voice", "marketing"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.brand.nodes.list-brands",
+      "version": "1.0.0",
+      "label": "Brand: List Brands",
+      "description": "Lists the workspace's brands (optionally one org) over ctx.features.brand. Tenant-guarded. Inputs: { orgId? }. Output: { brands }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.brand.nodes.get-app-identity",
+      "version": "1.0.0",
+      "label": "Brand: Get App Identity",
+      "description": "Reads the installation's white-label app identity (ADR 0170) — logo, colors, typography, name, theme — over ctx.features.brand. Host-global (the reserved app brand). No inputs. Output: { identity }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.brand.nodes.resolve-voice",
+      "version": "1.0.0",
+      "label": "Brand: Resolve Voice",
+      "description": "Renders a brand's voice (formality, channel rules, approved + banned phrases) into a prompt-injectable text block downstream generators prepend. Inputs: { brandId, channel?, register? }. Output: { voice }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.brand.nodes.compliance-check",
+      "version": "1.0.0",
+      "label": "Brand: Compliance Check",
+      "description": "Scores content against a brand's guardrails — the pure deterministic leg (banned-phrase caps ≤30, formality register, per-channel length) blended 60/40 with an LLM tone judgement when ctx.callAI is available. Inputs: { brandId, content, channel?, provider?, model? }. Output: { report }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

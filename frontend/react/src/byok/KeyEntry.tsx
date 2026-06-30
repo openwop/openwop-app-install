@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ProviderConfig, ProviderModel } from './lib/providers.js';
 import { ShieldIcon } from '../ui/icons/index.js';
 import { storeKey } from './lib/byokClient.js';
@@ -17,6 +18,7 @@ export function KeyEntry({
   onBack: () => void;
   onStored: (credentialRef: string) => void | Promise<void>;
 }): JSX.Element {
+  const { t } = useTranslation('byok');
   const [key, setKey] = useState('');
   const [show, setShow] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -25,7 +27,7 @@ export function KeyEntry({
   // Soft validation: warn (not block) if the key doesn't match the
   // provider's expected prefix.
   const prefixWarning = provider.apiKeyPrefix && key.length > 0 && !key.startsWith(provider.apiKeyPrefix)
-    ? `Anthropic keys usually start with "${provider.apiKeyPrefix}". Continuing anyway.`
+    ? t('prefixWarning', { prefix: provider.apiKeyPrefix })
     : null;
 
   async function submit(e: React.FormEvent): Promise<void> {
@@ -48,21 +50,21 @@ export function KeyEntry({
 
   return (
     <form onSubmit={submit}>
-      <h2 className="u-m-0 u-fs-14">Add your {provider.label} API key</h2>
+      <h2 className="u-m-0 u-fs-14">{t('addYourKeyTitle', { provider: provider.label })}</h2>
       <p className="muted u-mt-1 u-fs-12">
-        Using <strong>{model.label}</strong>.{' '}
-        <a href={provider.apiKeyConsoleUrl} target="_blank" rel="noopener noreferrer">Get a key →</a>
+        {t('usingModel')} <strong>{model.label}</strong>.{' '}
+        <a href={provider.apiKeyConsoleUrl} target="_blank" rel="noopener noreferrer">{t('getAKey')}</a>
       </p>
 
       <div className="alert info u-flex u-items-start u-gap-2">
         <ShieldIcon size={16} style={{ flexShrink: 0, marginTop: 1, color: 'var(--color-accent)' }} />
         <span className="u-fs-12">
-          {provider.apiKeyHelpText} You pay {provider.label} directly for usage.
+          {provider.apiKeyHelpText} {t('payProviderDirectly', { provider: provider.label })}
         </span>
       </div>
 
       <Field
-        label="API key"
+        label={t('apiKeyLabel')}
         containerStyle={{ marginTop: 12 }}
         {...(prefixWarning ? { help: prefixWarning } : {})}
       >
@@ -81,9 +83,9 @@ export function KeyEntry({
               type="button"
               className="secondary keyentry-show-btn"
               onClick={() => setShow((s) => !s)}
-              aria-label={show ? 'Hide key' : 'Show key'}
+              aria-label={show ? t('hideKey') : t('showKey')}
             >
-              {show ? 'Hide' : 'Show'}
+              {show ? t('hide') : t('show')}
             </button>
           </div>
         )}
@@ -93,9 +95,9 @@ export function KeyEntry({
 
       <div className="button-row">
         <button type="submit" disabled={submitting || !key.trim()}>
-          {submitting ? 'Storing…' : 'Store key'}
+          {submitting ? t('storing') : t('storeKey')}
         </button>
-        <button type="button" className="secondary" onClick={onBack} disabled={submitting}>Back</button>
+        <button type="button" className="secondary" onClick={onBack} disabled={submitting}>{t('back')}</button>
       </div>
     </form>
   );

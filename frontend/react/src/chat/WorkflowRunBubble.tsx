@@ -13,9 +13,11 @@
  * `@mention` direct-dispatch path (`useChatSession.runWorkflowMention`).
  */
 
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { STATUS_COLORS, STATUS_LABELS } from './workflowProgress/StepList.js';
+import { STATUS_COLORS, STATUS_LABEL_KEYS } from './workflowProgress/StepList.js';
 import { formatElapsed } from './workflowProgress/formatters.js';
+import { formatNumber } from '../i18n/format.js';
 import type { ChatMessage } from './hooks/useChatSession.js';
 
 interface Props {
@@ -31,15 +33,16 @@ interface Props {
 }
 
 export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }: Props): JSX.Element | null {
+  const { t } = useTranslation('chat');
   const run = message.workflowRun;
   if (!run) return null;
 
   const completed = run.completedNodeIds.length;
   const total = run.totalNodes;
   const progressHint = total > 0
-    ? `${completed}/${total}`
-    : `${completed} step${completed === 1 ? '' : 's'}`;
-  const isSuspended = !!message.activeInterrupt;
+    ? `${formatNumber(completed)}/${formatNumber(total)}`
+    : t('steps', { count: completed });
+  const isSuspended = (message.activeInterrupts?.length ?? 0) > 0;
 
   return (
     <div className="u-flex u-justify-start u-mb-3">
@@ -56,12 +59,12 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
               ? { animation: 'openwop-stamp-in 280ms cubic-bezier(0.34, 1.56, 0.64, 1) 1' }
               : {}),
           }}>
-            {STATUS_LABELS[run.status]}
+            {t(STATUS_LABEL_KEYS[run.status])}
           </span>
           <span className="muted u-fs-11">{progressHint}</span>
           {isSuspended && (
             <span className="wfrunbubble-awaiting">
-              Awaiting your input
+              {t('awaitingYourInput')}
             </span>
           )}
           <span className="u-ml-auto">
@@ -71,12 +74,12 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
                 onClick={() => onOpenProgress(message.id)}
                 className="wfrunbubble-progress-link"
                 aria-pressed={isFocusedInPanel}
-                title={isFocusedInPanel ? 'Already showing in the side panel' : 'Open the progress panel'}
+                title={isFocusedInPanel ? t('alreadyShowingInPanel') : t('openProgressPanel')}
               >
-                {isFocusedInPanel ? 'Showing in panel →' : 'View progress →'}
+                {isFocusedInPanel ? t('showingInPanel') : t('viewProgress')}
               </button>
             ) : (
-              <span className="muted u-fs-12">View progress →</span>
+              <span className="muted u-fs-12">{t('viewProgress')}</span>
             )}
           </span>
         </div>
@@ -86,7 +89,7 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
           {run.runId && !run.runUnavailable && (
             <>
               <span>·</span>
-              <Link to={`/runs/${run.runId}`} title="Open run detail">
+              <Link to={`/runs/${run.runId}`} title={t('openRunDetail')}>
                 run {run.runId.slice(0, 12)}
               </Link>
             </>
@@ -97,7 +100,7 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
               {/* Run record gone — render the id without a link + a
                   muted hint so the user understands why action buttons
                   below are disabled. */}
-              <span title="Run record no longer available on the server">
+              <span title={t('runRecordUnavailableTitle')}>
                 run {run.runId.slice(0, 12)}
               </span>
             </>
@@ -105,7 +108,7 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
           {run.workflowId && run.workflowId.startsWith('wf_') && (
             <>
               <span>·</span>
-              <Link to={`/builder/${run.workflowId}`} title="Open this workflow in the builder">
+              <Link to={`/builder/${run.workflowId}`} title={t('openWorkflowInBuilder')}>
                 open in builder →
               </Link>
             </>
@@ -119,9 +122,7 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
             className="muted u-mt-1-5 u-fs-11 u-italic"
             role="note"
           >
-            Run record no longer available on the server — action links below
-            are disabled. The decision + completion cards still render from
-            local history.
+            {t('runRecordUnavailableNote')}
           </div>
         )}
       </div>

@@ -26,7 +26,7 @@ export const emailFeature: BackendFeature = {
     salt: 'email',
   },
   requiredPacks: [
-    { name: 'feature.email.nodes', version: '1.0.0' },
+    { name: 'feature.email.nodes', version: '1.1.0' },
     { name: 'feature.email.agents', version: '1.0.0' },
   ],
 };

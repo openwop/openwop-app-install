@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Pre-push gate — runs the local CI mirror before every push.
+# Enable (per clone): npm run hooks:install   (sets core.hooksPath=scripts/git-hooks)
+# Bypass once:        git push --no-verify
+exec "$(git rev-parse --show-toplevel)/scripts/ci.sh"

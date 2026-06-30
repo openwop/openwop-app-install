@@ -121,6 +121,10 @@ New work should normally enter through one of these seams:
 | Human approvals | approval service/routes and interrupt/approval-gate primitives |
 | Credentials and third-party app auth | BYOK secret resolver + Connections broker |
 | Durable feature data | `Storage`, `DurableCollection`, or the owning feature service |
+| Org-scoping a Subject's work surface (board visibility) | `host/subjectOrgScope.ts` (`setSubjectOrgResolver` / `resolveSubjectOrg`) — the owning feature derives the org from the `ownerSubject` (ADR 0046) |
+| Member/visibility-scoping a Subject's surfaces (resolve a caller's read/write level) | `host/subjectAccess.ts` (`setSubjectAccessResolver` / `resolveSubjectAccess` → `'none'\|'read'\|'write'`) — the owning feature composes org authority with the subject's visibility + members; WRITE stays org-scoped, READ gains a membership dimension (ADR 0054 D5). Orthogonal to `subjectOrgScope` (org-derivation). |
+| Resolve a cross-cutting decision **once per run** and replay it verbatim (e.g. tool-output-compaction mode) | _implemented, ADR 0099_ — `host/runStartContext.ts` (`registerRunStartContributor`), applied where runs are created (`runDispatch.ts`/`runStarter.ts`): a contributor resolves once at creation and freezes into `run.metadata`, read verbatim on `:fork`. Generalizes the `trustBoundary` read-side precedent to a write-side resolver, for features that own no run-creation route. |
+| Transform tool output at the typed tool-result boundary (e.g. compaction) without editing core | _implemented, ADR 0099_ — `host/toolResultTransform.ts` (`registerToolResultTransform`), applied by the tool-result **builder** — the `agentDispatch` host-driven loop (`agentDispatch.ts:832`) and the workflow tool-loop node's `onToolUse` return (`bootstrap/nodes.ts:1726`), where a string is first known to be tool output and about to enter the model context. The provider dispatchers (`dispatchAnthropicWithTools`/`dispatchMiniMaxWithTools`) **relay** the builder's already-compacted `content` verbatim into the wire `tool_result` — they do **not** transform it (that would double-compact). Covers chat + pack-nodes + manifest dispatch with no `'tool'` message role needed (the AI-adapter message array is type-blind: `AiCallMessage.role` = `user\|assistant\|system`). Relay pinned by `tool-output-compaction-relay.test.ts`. |
 | Host capabilities for pack nodes | host-surface registry and selected surface adapters |
 | Public content | CMS, Media, Publishing, Sharing, Forms, Consent, and Analytics public-route patterns |
 | Governance / policy / audit | governance service and `storage.listAudit` |
@@ -352,10 +356,45 @@ A vertical slice from chat input → real provider dispatch → streamed tokens 
 
 - `ChatTab.tsx` — state machine that routes between BYOK wizard (no key) and `ChatSidebar` (key present).
 - `ChatSidebar.tsx` + `ChatHeader` + `MessageFeed` + `MessageBubble` + `ChatInput` + `WelcomeCard` — the sidebar UI.
-- `useChatSession.ts` — message thread state + per-turn dispatch. Each turn = one `POST /v1/runs` with `workflowId: 'openwop-app.chat.turn'`. Subscribes to SSE; appends `node.message` deltas to the in-flight assistant bubble; on `node.suspended` fetches the open interrupt and renders the matching card via the registry.
+- `useChatSession.ts` — message thread state + per-turn dispatch. Each turn = one `POST /v1/runs` with `workflowId: 'openwop-app.chat.turn'`. Subscribes to SSE; appends `ai.message.chunk` deltas to the in-flight assistant bubble; on `node.suspended` fetches the open interrupt and renders the matching card via the registry.
 - **Card registry** (`chat/registry/`) is the extensibility seam. Adopters call `registerCard({cardType, Component, ...})` from any module to add their own card type. Built-in registrations cover the 4 interrupt kinds (approval / clarification / refinement / cancellation). Cards wrap in `CardErrorBoundary` so a broken third-party card doesn't crash the panel.
 
-BE-side: `vendor.openwop-app.chat-responder` node calls Anthropic / OpenAI / Google providers via raw `fetch` (no SDK deps). Each token delta becomes a `node.message` event through `ctx.emit()` — strip-on-persist applies automatically.
+BE-side: `vendor.openwop-app.chat-responder` node calls Anthropic / OpenAI / Google providers via raw `fetch` (no SDK deps). Each token delta becomes an `ai.message.chunk` event through `ctx.emit()` — strip-on-persist applies automatically.
+
+#### Streaming contract for LLM interactions (ADR 0079)
+
+Every LLM dispatch in this host streams its reply token-by-token through ONE
+convention — new "talk to AI" code inherits it by reusing the seams below, not by
+inventing a parallel stream:
+
+- **Producer.** Pass an `onDelta(delta)` to the provider dispatch (`dispatchChat`
+  in `providers/dispatch.ts` — every real provider streams via Web
+  `ReadableStream` async-iteration; the conformance `mock` streams a chunked
+  canned reply) and emit each delta as a single canonical event:
+  `ctx.emit('ai.message.chunk', { chunk, isLast: false })` (or `log.append(...)`
+  from a host route). It is **transient** — stream-only, NO channel reducer folds
+  it — so the authoritative turn (`conversation.exchanged`) / node result stays
+  the source of truth on reload and `:fork`. Each delta MUST be
+  `stripSecretsFromPersisted`'d before persist (SR-1 parity — the chunk lands in
+  the durable event log too, so it can't leak a secret ahead of the sanitized
+  turn). The two producers today are the chat-responder node
+  (`bootstrap/nodes.ts`, always streams — it only runs for chat) and
+  `aiProvidersHost.callAI`'s plain-text branch, which is **opt-in per call**
+  (`req.stream === true`) so non-interactive batch/agent nodes don't append one
+  durable event per token for no consumer; structured/JSON calls never stream.
+  `node.message` was the transitional dual-emit and was **retired in ADR 0079
+  Phase 5** — do not reintroduce it.
+- **Consumer.** Tail the run SSE on the direct `*.run.app` URL (`subscribeToRun`,
+  CDN-bypassing) and feed each `ai.message.chunk` `chunk` through the
+  `useApplyAnimation` batcher into the in-flight bubble. Both chat SSE handlers
+  (`chatTurnSubscription.ts`, `useChatSession.ts`) already do this; guard against
+  the SSE's replay-from-seq-0 with a subscribe-time cursor
+  (`streamDeltaFromEvent`).
+- **Async exchange (optional).** The conversation `exchange` can ack early and
+  finish generation in the background so a long reply rides the SSE past the ~60s
+  CDN POST ceiling — flag `OPENWOP_CONVERSATION_EXCHANGE_ASYNC` (default OFF). A
+  post-ack failure surfaces as a terminal `ai.message.error` event, not a POST
+  4xx. See ADR 0079 §Phase 3.
 
 ### Host-extension HTTP routes (vendor-prefixed)
 

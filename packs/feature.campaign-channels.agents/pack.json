@@ -1,0 +1,30 @@
+{
+  "name": "feature.campaign-channels.agents",
+  "version": "1.0.0",
+  "description": "Campaign Studio channel-generation agent pack (ADR 0157 / ADR 0014) — the Channel Generator, a manifest agent whose tools are feature.campaign-channels.nodes over the brief/kernel surfaces. Generates a single channel deliverable (landing page / ads / email / creative / social) grounded in the brief, from the AI chat. Tool-allowlisted to the channel-generation nodes only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-channels", "agent", "generation", "marketing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.campaign-channels.agents.channel-generator",
+      "persona": "RESEARCH",
+      "label": "Channel Generator",
+      "description": "Generates a single channel deliverable (landing page, ad variants, email sequence, creative briefs, or social posts) from a brief's messaging kernel — grounded in the KB and brand voice — and runs a content-quality check, via feature.campaign-channels.nodes. The human approves each draft.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/channel-generator.md",
+      "toolAllowlist": [
+        "openwop:feature.campaign-channels.nodes.generate",
+        "openwop:feature.campaign-channels.nodes.content-quality-check"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

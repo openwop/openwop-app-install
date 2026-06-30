@@ -5,6 +5,7 @@
  * and that the discovery doc advertises capabilities.connections.packsSupported.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -135,9 +136,9 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
   it('discovery doc advertises capabilities.connections.packsSupported (§C)', async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const PORT = 18977;
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const server: http.Server = await new Promise((res) => { const s = app.listen(PORT, () => res(s)); });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const server: http.Server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+    const PORT = (server.address() as AddressInfo).port;
     try {
       const r = await fetch(`http://127.0.0.1:${PORT}/.well-known/openwop`);
       const doc = await r.json() as { capabilities?: { connections?: { packsSupported?: boolean } } };
@@ -150,9 +151,9 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
   it('the in-tree example pack auto-loads at boot, and an unknown provider → connection_provider_unresolved (§B.6, Option C)', async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const PORT = 18978;
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const server: http.Server = await new Promise((res) => { const s = app.listen(PORT, () => res(s)); });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const server: http.Server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+    const PORT = (server.address() as AddressInfo).port;
     const hdrs = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
     try {
       // examples/connection-packs/github auto-loaded → `github` resolvable, honest oauthConfigured:false (no host creds).
@@ -160,6 +161,14 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
       const gh = provs.providers.find((p) => p.id === 'github');
       expect(gh?.reach).toBe('mcp');
       expect(gh?.oauthConfigured).toBe(false);
+      // ADR 0149 Phase 4: the new connection packs auto-load + resolve (schema-valid),
+      // honest oauthConfigured:false (no host creds in CI).
+      for (const id of ['google-ads', 'meta-ads', 'netsuite']) {
+        const p = provs.providers.find((x) => x.id === id);
+        expect(p, `provider ${id} should resolve`).toBeTruthy();
+        expect(p?.reach).toBe('openapi');
+        expect(p?.oauthConfigured).toBe(false);
+      }
       // Option C: an unknown provider at the create seam → the spec code, 404.
       const res = await fetch(`http://127.0.0.1:${PORT}/v1/host/openwop-app/connections`, {
         method: 'POST', headers: hdrs,

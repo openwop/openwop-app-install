@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { PROVIDERS, type ProviderConfig } from './lib/providers.js';
 
 // ── Step 1: provider grid ──────────────────────────────────────────────
@@ -15,6 +16,7 @@ export function TryItFreeCard({
   onPick: (p: ProviderConfig) => void;
   isAuthed: boolean;
 }): JSX.Element | null {
+  const { t } = useTranslation('byok');
   const managed = PROVIDERS.filter((p) => p.managed);
   if (managed.length === 0) return null;
   // The reference app ships a single managed provider. If a future fork
@@ -30,16 +32,14 @@ export function TryItFreeCard({
         >
           <div className="byok-try-free-body">
             <div className="byok-try-free-headline">
-              <span className="byok-try-free-title">Try it free</span>
-              <span className="byok-try-free-suffix">by creating an account</span>
+              <span className="byok-try-free-title">{t('tryItFreeTitle')}</span>
+              <span className="byok-try-free-suffix">{t('tryItFreeSuffix')}</span>
             </div>
             <div className="byok-try-free-desc">
-              No API key needed. Sign in and start chatting — the server
-              uses a host-managed key with reasonable per-account
-              limits.
+              {t('tryItFreeDesc')}
             </div>
             {!isAuthed && p.signedInHint && (
-              <div className="byok-try-free-hint">{p.signedInHint} →</div>
+              <div className="byok-try-free-hint">{t('tryItFreeHint', { hint: p.signedInHint })}</div>
             )}
           </div>
           <span className="byok-try-free-arrow" aria-hidden="true">→</span>
@@ -57,6 +57,7 @@ export function ProviderGrid({
   onCancel?: (() => void) | undefined;
   isAuthed: boolean;
 }): JSX.Element {
+  const { t } = useTranslation('byok');
   // BYOK-only — the managed "Try it free" path renders above the
   // stepper in BYOKWizard via <TryItFreeCard>. `hidden` providers
   // (e.g., MiniMax sitting behind the managed openwop-free entry)
@@ -65,23 +66,17 @@ export function ProviderGrid({
 
   return (
     <div className="byok-section">
-      <h2 className="byok-section-title">Bring your own key (BYOK)</h2>
+      <h2 className="byok-section-title">{t('byokTitle')}</h2>
       <p className="byok-section-lede">
-        <abbr title="Bring Your Own Key"><strong>BYOK</strong></abbr> means
-        you supply the API key for the model provider you pick below. The
-        provider bills you directly for your usage; OpenWOP doesn't bill you
-        or take a cut. The server forwards each request to the
-        provider using your key, then streams the response back.
+        <abbr title={t('byokAbbrTitle')}><strong>BYOK</strong></abbr>{' '}
+        {t('byokLedeBefore')}
       </p>
       <p className="byok-section-fineprint">
-        Your key is stored on the server (sqlite-backed, AES-256-GCM
-        encrypted at rest) and sent only to the provider you picked. Set
-        <code className="providergrid-inline-code">OPENWOP_BYOK_EPHEMERAL=true</code> on
-        the server to switch to in-memory-only mode that wipes on restart.
-        Production hosts swap this storage for a managed key-management
-        service (KMS) like AWS KMS, GCP KMS, or HashiCorp Vault — see
-        <code className="providergrid-inline-code">src/byok/secretResolver.ts</code> for
-        the adapter pattern.
+        {t('byokFineprintBefore')}{' '}
+        <code className="providergrid-inline-code">OPENWOP_BYOK_EPHEMERAL=true</code>{' '}
+        {t('byokFineprintMid')}{' '}
+        <code className="providergrid-inline-code">src/byok/secretResolver.ts</code>{' '}
+        {t('byokFineprintAfter')}
       </p>
       <div
         className="byok-grid providergrid-grid"
@@ -127,7 +122,7 @@ export function ProviderGrid({
 
 function ProviderBadge({ provider }: { provider: ProviderConfig }): JSX.Element {
   return (
-    <span className="providergrid-badge" style={{ background: provider.badgeColor }}>
+    <span className="providergrid-badge">
       {provider.label.charAt(0)}
     </span>
   );

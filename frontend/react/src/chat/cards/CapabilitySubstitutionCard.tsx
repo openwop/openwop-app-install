@@ -7,6 +7,7 @@
  * user-relevant cause — the swap is the mechanism.
  */
 
+import { useTranslation } from 'react-i18next';
 import type { ModelCapabilitySubstitution } from '../types.js';
 
 interface Props {
@@ -14,11 +15,12 @@ interface Props {
 }
 
 export function CapabilitySubstitutionCard({ sub }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   return (
-    <div className="env-chip env-chip-info" role="status" aria-label="Model capability substitution">
-      <span className="env-chip-tag">MODEL SUBSTITUTED</span>
+    <div className="env-chip env-chip-info" role="status" aria-label={t('capSubstitutionTitle')}>
+      <span className="env-chip-tag">{t('capSubstitutionBadge')}</span>
       <span className="env-chip-text">
-        Routed around missing{' '}
+        {t('routedAroundMissing')}{' '}
         {sub.missingCapabilities.map((c, i) => (
           <span key={c}>
             <span className="env-chip-pill">{c}</span>

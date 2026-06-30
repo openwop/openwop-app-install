@@ -50,10 +50,17 @@ import type { Storage } from '../storage/storage.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
 import { listManagedProviderIds } from './catalog.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from './dispatch.js';
+import { dispatchMiniMaxToolsRound } from './dispatchProviderTools.js';
+import type { ToolDef, ToolUseBlock } from './dispatchAnthropicTools.js';
 
 const log = createLogger('providers.managed');
 
 export const MANAGED_REF_PREFIX = 'managed:';
+/** The well-known default managed credential ref (`managed:openwop-free`) — the one
+ *  canonical managed provider the host configures. Use this instead of re-deriving the
+ *  literal at call sites (the host-side in-service dispatch pattern: cms/translate, KB
+ *  media→text). */
+export const MANAGED_FREE_REF = `${MANAGED_REF_PREFIX}openwop-free`;
 
 /** Canonical typeId for the sample chat-responder node. Exported here
  *  (rather than left as a literal at the node-module declaration site)
@@ -118,7 +125,7 @@ function getTargets(): Record<string, ManagedTarget> {
   return {
     'openwop-free': {
       provider: 'minimax',
-      model: process.env.MINIMAX_MODEL ?? 'MiniMax-M2.7',
+      model: process.env.MINIMAX_MODEL ?? 'MiniMax-M3',
       storageRef: `${MANAGED_REF_PREFIX}openwop-free`,
       envKeyName: 'MINIMAX_API_KEY',
       dailyTokenCap: cap,
@@ -134,6 +141,14 @@ export function isManagedCredentialRef(ref: string | undefined | null): boolean 
 /** Convert a managed credentialRef back to its user-facing provider id. */
 export function managedProviderIdFromRef(ref: string): string {
   return ref.slice(MANAGED_REF_PREFIX.length);
+}
+
+/** The UNDERLYING dispatch provider a managed ref resolves to (e.g. `managed:openwop-free`
+ *  → `'minimax'`), or null if the ref maps to no configured managed target. Lets callers
+ *  reason about the managed model's capabilities (ADR 0110 media-modality check). */
+export function managedUnderlyingProvider(ref: string): string | null {
+  const target = getTargets()[managedProviderIdFromRef(ref)];
+  return target ? target.provider : null;
 }
 
 export type ManagedErrorCode =
@@ -270,74 +285,104 @@ export interface ManagedDispatchResult {
   finishReason?: string;
 }
 
+/** Shared managed-tier preamble: validate the target, enforce sign-in + the
+ *  per-tenant and global daily token caps, resolve the server key, and inject
+ *  the default system prompt. Throws ManagedProviderError on any gate. Used by
+ *  BOTH the chat path and the tools-round path so the free-tier caps + provider
+ *  hiding can't drift between them. */
+async function prepareManagedDispatch(
+  userFacingProvider: string,
+  tenantId: string,
+  reqMessages: readonly ChatMessage[],
+): Promise<{ target: ManagedTarget; apiKey: string; messages: readonly ChatMessage[]; date: string }> {
+  const target = getTargets()[userFacingProvider];
+  if (!target) throw new ManagedProviderError('managed_unknown', `No managed target configured for provider "${userFacingProvider}".`);
+  if (managedAnonSignInRequired() && tenantId.startsWith('anon:')) throw new ManagedProviderError('sign_in_required', 'Sign in to use the free tier.');
+  if (!storageRef) throw new ManagedProviderError('managed_unavailable', 'Free tier not configured on this server.');
+
+  const date = todayUtc();
+  const usage = await storageRef.getManagedUsage(tenantId, userFacingProvider, date);
+  if (usage.inputTokens + usage.outputTokens >= target.dailyTokenCap) {
+    throw new ManagedProviderError('daily_limit_reached', `Daily limit reached (${target.dailyTokenCap} tokens). Resets at 00:00 UTC.`);
+  }
+  // Global ceiling — the operator's spend backstop across ALL tenants (checked
+  // after the per-tenant cap so an over-cap caller gets the actionable message).
+  const globalCap = globalDailyTokenCap();
+  if (globalCap > 0) {
+    const g = await storageRef.getManagedUsage(GLOBAL_USAGE_TENANT, userFacingProvider, date);
+    if (g.inputTokens + g.outputTokens >= globalCap) {
+      throw new ManagedProviderError('daily_limit_reached', 'The free tier is at capacity for today. Resets at 00:00 UTC — or bring your own key.');
+    }
+  }
+  const apiKey = await resolveManagedKey(target.storageRef);
+  if (!apiKey) throw new ManagedProviderError('managed_unavailable', 'Free tier is temporarily unavailable. Try again later or bring your own key.');
+
+  // Inject the default system prompt when the caller didn't supply one (grounds
+  // the model in OpenWOP context). Callers who DO supply one keep full control.
+  const hasSystem = reqMessages.some((m) => m.role === 'system');
+  const messages = hasSystem ? reqMessages : [{ role: 'system' as const, content: target.defaultSystemPrompt }, ...reqMessages];
+  return { target, apiKey, messages, date };
+}
+
+/** Best-effort managed usage increment (per-tenant + reserved global bucket) —
+ *  never fails the call on a write error (the safer skew is a free turn). */
+async function recordManagedUsage(tenantId: string, userFacingProvider: string, date: string, inTok: number, outTok: number): Promise<void> {
+  if (!storageRef || (inTok <= 0 && outTok <= 0)) return;
+  try {
+    await storageRef.incrementManagedUsage(tenantId, userFacingProvider, date, inTok, outTok);
+    await storageRef.incrementManagedUsage(GLOBAL_USAGE_TENANT, userFacingProvider, date, inTok, outTok);
+  } catch (err) {
+    log.warn('failed to increment managed usage', { tenantId, provider: userFacingProvider, error: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export interface ManagedToolsRoundRequest {
+  userFacingProvider: string;
+  tenantId: string;
+  messages: readonly ChatMessage[];
+  tools: readonly ToolDef[];
+  maxTokens?: number;
+  signal?: AbortSignal;
+}
+export interface ManagedToolsRoundResult {
+  text: string;
+  toolUses: ToolUseBlock[];
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
+/** ONE managed (free-tier) tool-calling round — the same caps + server key +
+ *  provider hiding as `dispatchManagedChat`, but a single tool round (the
+ *  observe→act loop is the caller's). The underlying provider is never exposed.
+ *  Only the MiniMax-backed managed tier supports tools here. */
+export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): Promise<ManagedToolsRoundResult> {
+  const { target, apiKey, messages, date } = await prepareManagedDispatch(req.userFacingProvider, req.tenantId, req.messages);
+  if (target.provider !== 'minimax') {
+    throw new ManagedProviderError('managed_unavailable', 'Tool calling is not available on this managed tier.');
+  }
+  const round = await dispatchMiniMaxToolsRound({
+    model: target.model,
+    apiKey,
+    messages,
+    tools: req.tools,
+    ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+    ...(req.signal ? { signal: req.signal } : {}),
+  });
+  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, round.inputTokens ?? 0, round.outputTokens ?? 0);
+  return {
+    text: round.text,
+    toolUses: round.toolUses,
+    ...(round.inputTokens != null ? { inputTokens: round.inputTokens } : {}),
+    ...(round.outputTokens != null ? { outputTokens: round.outputTokens } : {}),
+  };
+}
+
 export async function dispatchManagedChat(
   req: ManagedDispatchRequest,
 ): Promise<ManagedDispatchResult> {
-  const target = getTargets()[req.userFacingProvider];
-  if (!target) {
-    throw new ManagedProviderError(
-      'managed_unknown',
-      `No managed target configured for provider "${req.userFacingProvider}".`,
-    );
-  }
-  if (managedAnonSignInRequired() && req.tenantId.startsWith('anon:')) {
-    throw new ManagedProviderError('sign_in_required', 'Sign in to use the free tier.');
-  }
-  if (!storageRef) {
-    throw new ManagedProviderError(
-      'managed_unavailable',
-      'Free tier not configured on this server.',
-    );
-  }
-
-  const date = todayUtc();
-  const usage = await storageRef.getManagedUsage(req.tenantId, req.userFacingProvider, date);
-  const totalUsed = usage.inputTokens + usage.outputTokens;
-  if (totalUsed >= target.dailyTokenCap) {
-    throw new ManagedProviderError(
-      'daily_limit_reached',
-      `Daily limit reached (${target.dailyTokenCap} tokens). Resets at 00:00 UTC.`,
-    );
-  }
-
-  // Global ceiling — the operator's spend backstop across ALL tenants.
-  // Checked after the per-tenant cap so an over-cap caller gets the more
-  // actionable per-tenant message.
-  const globalCap = globalDailyTokenCap();
-  if (globalCap > 0) {
-    const globalUsage = await storageRef.getManagedUsage(
-      GLOBAL_USAGE_TENANT,
-      req.userFacingProvider,
-      date,
-    );
-    if (globalUsage.inputTokens + globalUsage.outputTokens >= globalCap) {
-      throw new ManagedProviderError(
-        'daily_limit_reached',
-        'The free tier is at capacity for today. Resets at 00:00 UTC — or bring your own key.',
-      );
-    }
-  }
-
-  const apiKey = await resolveManagedKey(target.storageRef);
-  if (!apiKey) {
-    throw new ManagedProviderError(
-      'managed_unavailable',
-      'Free tier is temporarily unavailable. Try again later or bring your own key.',
-    );
-  }
-
-  // Inject the default system prompt when the caller didn't supply one.
-  // Grounds the model in OpenWOP context so the "what is openwop?"
-  // hallucination from a stock chat model doesn't reach end users.
-  // Callers who DO supply a system message (workflow authors, packs)
-  // keep full control.
-  const hasSystem = req.messages.some((m) => m.role === 'system');
-  const messages = hasSystem
-    ? req.messages
-    : [
-        { role: 'system' as const, content: target.defaultSystemPrompt },
-        ...req.messages,
-      ];
+  const { target, apiKey, messages, date } = await prepareManagedDispatch(
+    req.userFacingProvider, req.tenantId, req.messages,
+  );
 
   const result = await dispatchChat({
     provider: target.provider,
@@ -351,38 +396,7 @@ export async function dispatchManagedChat(
     ...(req.signal ? { signal: req.signal } : {}),
   });
 
-  // Best-effort usage increment — never fail the call on a write error
-  // (a failed write means this turn is effectively free for the user,
-  // which is the safer skew vs. blocking the response).
-  const inTok = result.usage?.inputTokens ?? 0;
-  const outTok = result.usage?.outputTokens ?? 0;
-  if (inTok > 0 || outTok > 0) {
-    try {
-      await storageRef.incrementManagedUsage(
-        req.tenantId,
-        req.userFacingProvider,
-        date,
-        inTok,
-        outTok,
-      );
-      // Always also accrue the reserved global bucket (cheap upsert), so
-      // enabling OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP later still sees
-      // today's full history.
-      await storageRef.incrementManagedUsage(
-        GLOBAL_USAGE_TENANT,
-        req.userFacingProvider,
-        date,
-        inTok,
-        outTok,
-      );
-    } catch (err) {
-      log.warn('failed to increment managed usage', {
-        tenantId: req.tenantId,
-        provider: req.userFacingProvider,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
 
   return {
     provider: req.userFacingProvider,
@@ -455,6 +469,25 @@ export async function getManagedProviderStatuses(): Promise<ManagedProviderStatu
     );
   }
   return statuses;
+}
+
+/**
+ * Resolve the cleartext managed key for the speech path (RFC 0105).
+ *
+ * The managed MiniMax credential that backs the free chat tier
+ * (`managed:openwop-free`, seeded from `MINIMAX_API_KEY`) is the same
+ * key the T2A speech endpoint authenticates with. Reuse the EXACT
+ * resolution the chat path uses (`getTargets()` → `resolveManagedKey()`)
+ * rather than re-reading the raw env var — so the speech path inherits
+ * the same encrypt-at-rest / decrypt-in-process discipline and never
+ * bypasses BYOK with a raw key. Returns null when no managed key is
+ * seeded/decryptable (caller falls back to the deterministic stub).
+ */
+export async function resolveManagedSpeechKey(): Promise<string | null> {
+  const target = getTargets()['openwop-free'];
+  if (!target) return null;
+  if (!storageRef || !masterKeyPathRef) return null;
+  return resolveManagedKey(target.storageRef);
 }
 
 /** Test affordance — drop in-process caches without touching storage. */

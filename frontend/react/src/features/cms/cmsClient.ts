@@ -9,7 +9,20 @@ export interface Org { orgId: string; name: string }
 export type PageStatus = 'draft' | 'in_review' | 'published' | 'archived';
 export type SectionType = 'hero' | 'richText' | 'image' | 'cta' | 'columns';
 export const SECTION_TYPES: readonly SectionType[] = ['hero', 'richText', 'image', 'cta', 'columns'];
-export interface Section { sectionId: string; type: SectionType; data: Record<string, unknown> }
+export interface Section {
+  sectionId: string;
+  type: SectionType;
+  data: Record<string, unknown>;
+  /** Sparse per-locale overrides (RFC 0103 / ADR 0064); absent on non-localized sections. */
+  localizations?: Record<string, Record<string, unknown>>;
+}
+
+/** Per-org content-locale settings (ADR 0064). Invariant: baseLocale ∉ supportedLocales. */
+export interface LanguageSettings {
+  baseLocale: string;
+  supportedLocales: string[];
+  autoTranslateOnPublish: boolean;
+}
 export interface Page {
   pageId: string;
   title: string;
@@ -74,6 +87,33 @@ export async function listVersions(orgId: string, pageId: string): Promise<PageV
 export async function restoreVersion(orgId: string, pageId: string, versionId: string): Promise<Page> {
   const res = await fetch(`${base(orgId)}/pages/${encodeURIComponent(pageId)}/restore/${encodeURIComponent(versionId)}`, fetchOpts({ method: 'POST', headers: authedHeaders() }));
   return asJson<Page>(res, 'restoreVersion');
+}
+
+/** Translate a section's base data into a target locale (ADR 0064 Phase 3) via
+ *  the managed provider. Returns the sanitized draft overlay to review before
+ *  saving. Throws if translation is unavailable (managed provider not
+ *  configured / capped) — the caller degrades to manual editing. */
+export async function translateSection(
+  orgId: string,
+  input: { sectionType: SectionType; data: Record<string, unknown>; targetLocale: string },
+): Promise<Record<string, unknown>> {
+  const res = await fetch(`${base(orgId)}/translate-section`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return (await asJson<{ overlay: Record<string, unknown> }>(res, 'translateSection')).overlay;
+}
+
+/** Content-locale settings for the org (ADR 0064). GET is always available
+ *  (returns a default skeleton); PUT requires the `cms-localization` toggle +
+ *  the admin tier. */
+export async function getLanguageSettings(orgId: string): Promise<LanguageSettings> {
+  const res = await fetch(`${base(orgId)}/language-settings`, fetchOpts({ headers: authedHeaders() }));
+  return asJson<LanguageSettings>(res, 'getLanguageSettings');
+}
+export async function putLanguageSettings(
+  orgId: string,
+  patch: { baseLocale?: string; supportedLocales?: string[]; autoTranslateOnPublish?: boolean },
+): Promise<LanguageSettings> {
+  const res = await fetch(`${base(orgId)}/language-settings`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(patch) }));
+  return asJson<LanguageSettings>(res, 'putLanguageSettings');
 }
 
 /** The org's media assets, for the section image/hero token picker (best-effort —

@@ -8,6 +8,7 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
@@ -16,16 +17,15 @@ import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let server: http.Server;
-const PORT = 18202;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 
 const setCrm = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('crm'); if (d) await saveConfig({ ...d, status }, 'test'); };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await setCrm('on'); // surfaces are toggle-gated — a node reads CRM only when enabled
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

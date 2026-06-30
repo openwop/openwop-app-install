@@ -10,9 +10,11 @@
  */
 
 import { useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { slugify } from './agentUi.js';
 import { Link, useNavigate } from 'react-router-dom';
 import { listAgents, type AgentEntry } from '../client/agentsClient.js';
+import { listRoster } from './rosterClient.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { DataTable, DensityToggle, type DataColumn } from '../ui/DataTable.js';
 import { StateCard } from '../ui/StateCard.js';
@@ -20,6 +22,7 @@ import { SkeletonRows } from '../ui/Skeleton.js';
 import { TextField } from '../ui/Field.js';
 import { Notice } from '../ui/Notice.js';
 import { PackageIcon, SearchIcon } from '../ui/icons/index.js';
+import { formatNumber } from '../i18n/format.js';
 
 interface State {
   agents: readonly AgentEntry[];
@@ -28,6 +31,7 @@ interface State {
 }
 
 export function AgentsPage(): JSX.Element {
+  const { t } = useTranslation('agents');
   const [state, setState] = useState<State>({ agents: [], isLoading: true, error: null });
   const [query, setQuery] = useState('');
   const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
@@ -37,9 +41,22 @@ export function AgentsPage(): JSX.Element {
     let cancelled = false;
     void (async () => {
       try {
-        const agents = await listAgents();
+        // Advisor-subject agents (ADR 0040) are backed by user-agents, so they
+        // surface in the `/v1/agents` inventory (and stay @-mentionable in chat) —
+        // but they live ONLY in the Board of Advisors feature and MUST NOT appear
+        // as reusable templates here. Cross-reference the roster (the single
+        // source of the `roleKey:'advisor'` marker) and drop their backing agents.
+        // Best-effort: a roster failure must not blank the templates list.
+        const [agents, advisorRoster] = await Promise.all([
+          listAgents(),
+          listRoster({ includeAdvisors: true })
+            .then((r) => r.filter((e) => e.roleKey === 'advisor'))
+            .catch(() => []),
+        ]);
         if (cancelled) return;
-        setState({ agents, isLoading: false, error: null });
+        const advisorAgentIds = new Set(advisorRoster.map((e) => e.agentRef.agentId));
+        const visible = agents.filter((a) => !advisorAgentIds.has(a.agentId));
+        setState({ agents: visible, isLoading: false, error: null });
       } catch (err) {
         if (cancelled) return;
         setState({
@@ -66,7 +83,7 @@ export function AgentsPage(): JSX.Element {
   const columns: DataColumn<AgentEntry>[] = [
     {
       key: 'template',
-      header: 'Template',
+      header: t('templatesColTemplate'),
       width: '2fr',
       sortValue: (a) => (a.label || a.persona).toLowerCase(),
       render: (a) => (
@@ -81,20 +98,20 @@ export function AgentsPage(): JSX.Element {
     },
     {
       key: 'modelClass',
-      header: 'Model class',
+      header: t('templatesColModelClass'),
       sortValue: (a) => a.modelClass,
       render: (a) => <span className="chip chip--muted">{a.modelClass}</span>,
     },
     {
       key: 'pack',
-      header: 'Pack',
+      header: t('templatesColPack'),
       cellClassName: 'muted',
       sortValue: (a) => `${a.packName}@${a.packVersion}`,
       render: (a) => <code className="u-fs-11">{a.packName}@{a.packVersion}</code>,
     },
     {
       key: 'tools',
-      header: 'Tools',
+      header: t('templatesColTools'),
       align: 'right',
       cellClassName: 'muted',
       sortValue: (a) => a.toolAllowlist.length,
@@ -102,20 +119,20 @@ export function AgentsPage(): JSX.Element {
     },
     {
       key: 'signals',
-      header: 'Signals',
+      header: t('templatesColSignals'),
       render: (a) => (
         <div className="u-flex u-gap-2 u-wrap u-items-center">
           {a.degraded && a.degraded.length > 0 ? (
             <span
               className="chip chip--warning"
-              title={`${a.degraded.length} declared capability tier${a.degraded.length === 1 ? '' : 's'} this host does not satisfy — see agent detail.`}
+              title={t('templatesDegradedTitle', { count: a.degraded.length })}
             >
-              degraded ×{a.degraded.length}
+              {t('templatesDegraded', { count: a.degraded.length })}
             </span>
           ) : null}
-          {a.hasHandoffSchemas ? <span className="chip chip--muted">handoff</span> : null}
+          {a.hasHandoffSchemas ? <span className="chip chip--muted">{t('templatesHandoff')}</span> : null}
           {a.confidenceThreshold !== undefined ? (
-            <span className="chip chip--muted">conf ≥ {a.confidenceThreshold.toFixed(2)}</span>
+            <span className="chip chip--muted">{t('templatesConfidence', { value: formatNumber(a.confidenceThreshold, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) })}</span>
           ) : null}
         </div>
       ),
@@ -125,16 +142,16 @@ export function AgentsPage(): JSX.Element {
   return (
     <section className="page-stack">
       <PageHeader
-        eyebrow="Agents"
-        title="Agent templates"
-        lede={<>Reusable persona-driven LLM workers. A named coworker on the <Link to="/agents">Agents</Link> page instantiates a template; mention one in chat with <code>@</code> to add it to your active-agents lineup.</>}
+        eyebrow={t('templatesEyebrow')}
+        title={t('templatesTitle')}
+        lede={<Trans t={t} i18nKey="templatesLede" components={{ 0: <Link to="/agents" />, 1: <code /> }} />}
         actions={
           <>
             <button type="button" className="secondary" onClick={() => navigate('/agents/install')}>
-              Install from registry
+              {t('templatesInstallFromRegistry')}
             </button>
             <button type="button" className="primary" onClick={() => navigate('/agents/new')}>
-              + Author new
+              {t('templatesAuthorNew')}
             </button>
           </>
         }
@@ -143,7 +160,7 @@ export function AgentsPage(): JSX.Element {
       {state.error ? (
         <StateCard
           icon={<PackageIcon size={26} />}
-          title="Couldn’t load agent templates"
+          title={t('templatesLoadErrorTitle')}
           body={state.error}
           action={
             <button
@@ -151,44 +168,44 @@ export function AgentsPage(): JSX.Element {
               className="secondary"
               onClick={() => setState({ agents: [], isLoading: true, error: null })}
             >
-              Retry
+              {t('templatesRetry')}
             </button>
           }
         />
       ) : state.isLoading ? (
         <div aria-busy="true">
-          <StateCard loading title="Loading agent templates…" />
+          <StateCard loading title={t('templatesLoading')} />
           <SkeletonRows rows={4} columns={['2fr', '88px', '140px', '40px', '120px']} />
         </div>
       ) : state.agents.length === 0 ? (
         <StateCard
           icon={<PackageIcon size={26} />}
-          title="No agent templates installed yet"
-          body="Install a template from the registry, or author one from scratch, to start building reusable AI coworkers."
+          title={t('templatesEmptyTitle')}
+          body={t('templatesEmptyBody')}
           action={
             <>
               <button type="button" className="secondary" onClick={() => navigate('/agents/install')}>
-                Install from registry
+                {t('templatesInstallFromRegistry')}
               </button>
               <button type="button" className="primary" onClick={() => navigate('/agents/new')}>
-                + Author new
+                {t('templatesAuthorNew')}
               </button>
             </>
           }
         />
       ) : (
         <>
-          <div className="filterbar" role="group" aria-label="Filter agent templates">
+          <div className="filterbar" role="group" aria-label={t('templatesFilterGroup')}>
             <TextField
-              label="Filter templates"
+              label={t('templatesFilterLabel')}
               className="filterbar-search"
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Filter by name, description, or pack…"
+              placeholder={t('templatesFilterPlaceholder')}
             />
             <span className="muted u-fs-12">
-              {filtered.length} of {state.agents.length} template{state.agents.length === 1 ? '' : 's'}
+              {t('templatesCountLabel', { count: state.agents.length, filtered: filtered.length, total: state.agents.length })}
             </span>
             <DensityToggle value={density} onChange={setDensity} />
           </div>
@@ -198,14 +215,14 @@ export function AgentsPage(): JSX.Element {
             rows={[...filtered]}
             rowKey={(a) => a.agentId}
             density={density}
-            caption="Installed agent templates"
+            caption={t('templatesCaption')}
             initialSort={{ key: 'template', dir: 'asc' }}
             onRowClick={(a) => navigate(`/agents/templates/${encodeURIComponent(a.agentId)}`)}
             empty={
               <Notice variant="info">
                 <span className="u-flex u-gap-2 u-items-center">
                   <SearchIcon size={15} aria-hidden />
-                  No agents match <code>{query}</code>.
+                  <Trans t={t} i18nKey="templatesNoMatchQuery" values={{ query }} components={{ 0: <code /> }} />
                 </span>
               </Notice>
             }

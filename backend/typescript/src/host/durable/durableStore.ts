@@ -12,6 +12,9 @@
 
 import type { Storage } from '../../storage/storage.js';
 import type { BundleScope, KvSurface } from '../inMemorySurfaces.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('host.durable');
 
 let storageRef: Storage | null = null;
 
@@ -25,6 +28,13 @@ export function requireDurableStorage(): Storage {
       'Durable host surface used before initDurableSurfaces() wired the Storage backend at boot.',
     );
   }
+  return storageRef;
+}
+
+/** Non-throwing variant: the durable Storage handle, or null when boot hasn't
+ *  wired it (e.g. a unit test that doesn't init host-ext). Lets write-through
+ *  caches degrade gracefully to in-memory-only instead of crashing. */
+export function tryDurableStorage(): Storage | null {
   return storageRef;
 }
 
@@ -55,7 +65,10 @@ export function decodeEnvelope(
   try {
     env = JSON.parse(raw) as Envelope;
   } catch {
-    return { raw, value: null, expired: false, expiresAtMs: null }; // corrupt → absent value
+    // Corrupt persisted record — surface it instead of silently dropping the
+    // value (ENG-4); the caller still sees `value: null` (absent).
+    log.warn('durable_corrupt_record', { bytes: raw.length });
+    return { raw, value: null, expired: false, expiresAtMs: null };
   }
   const expiresAtMs = typeof env.e === 'number' ? env.e : null;
   if (expiresAtMs !== null && expiresAtMs <= now()) {

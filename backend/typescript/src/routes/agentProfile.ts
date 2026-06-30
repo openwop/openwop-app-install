@@ -20,10 +20,11 @@
 
 import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
-import { getRosterEntry } from '../host/rosterService.js';
+import { getRosterEntry, autonomyOf, type RosterEntry } from '../host/rosterService.js';
 import {
   getAgentProfile,
   upsertAgentProfile,
+  specLevelForLevel,
   type AgentProfileInput,
 } from '../host/agentProfileService.js';
 import { resolveConnectionReadiness, gateAutonomyByReadiness } from '../host/connectionReadiness.js';
@@ -44,14 +45,15 @@ const SPEC_LEVELS = new Set<SpecLevel>([
 const ROSTER_LEVELS = new Set<RosterLevel>(['auto', 'guided', 'review']);
 
 /** Resolve the owning agent, fail-closed: a missing OR cross-tenant agent
- *  yields a generic 404 (never leaks that the id exists in another tenant). */
-async function requireOwnedAgent(req: Request): Promise<string> {
+ *  yields a generic 404 (never leaks that the id exists in another tenant).
+ *  Returns the entry so callers can read `autonomyLevel` (ADR 0101 SSoT). */
+async function requireOwnedAgent(req: Request): Promise<RosterEntry> {
   const id = req.params.id;
   const entry = await getRosterEntry(id);
   if (!entry || entry.tenantId !== tenantOf(req)) {
     throw new OpenwopError('not_found', 'Agent not found.', 404, { id });
   }
-  return id;
+  return entry;
 }
 
 function optStringArray(value: unknown, field: string): string[] | undefined {
@@ -252,10 +254,10 @@ function parseProfileBody(raw: unknown): AgentProfileInput {
 export function registerAgentProfileRoutes(app: Express): void {
   app.get('/v1/host/openwop-app/agents/:id/profile', async (req, res, next) => {
     try {
-      const id = await requireOwnedAgent(req);
-      const profile = await getAgentProfile(tenantOf(req), id);
+      const entry = await requireOwnedAgent(req);
+      const profile = await getAgentProfile(tenantOf(req), entry.rosterId);
       if (!profile) {
-        throw new OpenwopError('not_found', 'Agent profile not found.', 404, { id });
+        throw new OpenwopError('not_found', 'Agent profile not found.', 404, { id: entry.rosterId });
       }
       res.json(profile);
     } catch (err) {
@@ -265,9 +267,24 @@ export function registerAgentProfileRoutes(app: Express): void {
 
   app.put('/v1/host/openwop-app/agents/:id/profile', async (req, res, next) => {
     try {
-      const id = await requireOwnedAgent(req);
+      const entry = await requireOwnedAgent(req);
       const input = parseProfileBody(req.body);
-      const profile = await upsertAgentProfile(tenantOf(req), id, input);
+      // ADR 0101 — `roster.autonomyLevel` is the single autonomy source of truth
+      // (owned by the Edit-details modal). Derive the profile's enforced `level`
+      // + provenance `specLevel` from it, never from the request body, so the two
+      // can't disagree. `withinPolicyActions` (the auto allowlist) is preserved.
+      const level = autonomyOf(entry);
+      const derived: AgentProfileInput = {
+        ...input,
+        autonomy: {
+          level,
+          specLevel: specLevelForLevel(level, input.autonomy.specLevel),
+          ...(input.autonomy.withinPolicyActions !== undefined
+            ? { withinPolicyActions: input.autonomy.withinPolicyActions }
+            : {}),
+        },
+      };
+      const profile = await upsertAgentProfile(tenantOf(req), entry.rosterId, derived);
       res.json(profile);
     } catch (err) {
       next(err);
@@ -282,7 +299,8 @@ export function registerAgentProfileRoutes(app: Express): void {
   // connection-status surface renders. Same fail-closed tenant gate as /profile.
   app.get('/v1/host/openwop-app/agents/:id/connection-readiness', async (req, res, next) => {
     try {
-      const id = await requireOwnedAgent(req);
+      const entry = await requireOwnedAgent(req);
+      const id = entry.rosterId;
       const profile = await getAgentProfile(tenantOf(req), id);
       const actingUserId = (req as Request & { userId?: string }).userId;
       const readiness = await resolveConnectionReadiness(tenantOf(req), id, actingUserId);

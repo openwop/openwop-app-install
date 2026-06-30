@@ -22,6 +22,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   DndContext,
   KeyboardSensor,
@@ -38,25 +39,18 @@ import { workflowName } from '../agents/roleTemplates.js';
 import { AlertIcon, CheckIcon, GripVerticalIcon, PlayIcon, RotateCwIcon, UserIcon, WorkflowIcon, XIcon, ZapIcon } from '../ui/icons/index.js';
 import { Markdown } from '../ui/Markdown.js';
 import { MarkdownEditor } from '../ui/MarkdownEditor.js';
+import { AssigneeControl } from './AssigneeControl.js';
 import type { KanbanBoard, KanbanCard, KanbanColumn, KanbanCardSource } from './kanbanClient.js';
+import { columnLaneKind, type LaneKind } from './laneKind.js';
 
 const muted: React.CSSProperties = { color: 'var(--color-text-muted)' };
 
-type LaneKind = 'todo' | 'working' | 'waiting' | 'done';
 type MoveKind = 'todo' | 'working' | 'waiting' | 'done';
 
-/** Match a column to a canonical lane by id or display name (mirrors
- *  agentViewModel.laneOf) so the non-drag quick-actions know where "Start" /
- *  "Waiting" / "Done" point on boards that use either id or label conventions. */
-function laneKindOf(col: KanbanColumn): LaneKind | null {
-  const id = col.id.toLowerCase();
-  const name = col.name.toLowerCase();
-  if (id === 'todo' || name === 'to do') return 'todo';
-  if (id === 'working' || id === 'doing' || name === 'working' || name === 'doing') return 'working';
-  if (id === 'waiting' || name.startsWith('waiting')) return 'waiting';
-  if (id === 'done' || name === 'done') return 'done';
-  return null;
-}
+/** Match a column to a canonical lane by id or display name (BLD-8: shared with
+ *  agentViewModel via `columnLaneKind`) so the non-drag quick-actions know where
+ *  "Start" / "Waiting" / "Done" point on boards using either convention. */
+const laneKindOf = (col: KanbanColumn): LaneKind | null => columnLaneKind(col);
 
 /** The full create-card payload the add-card form can produce. */
 export interface NewCardInput {
@@ -70,11 +64,11 @@ export interface NewCardInput {
   blockerNote?: string;
 }
 
-const SOURCE_OPTIONS: ReadonlyArray<{ value: KanbanCardSource; label: string }> = [
-  { value: 'human', label: 'From a human' },
-  { value: 'discord', label: 'Simulated Discord' },
-  { value: 'agent', label: 'From another agent' },
-  { value: 'api', label: 'From an API' },
+const SOURCE_OPTIONS: ReadonlyArray<{ value: KanbanCardSource; labelKey: string }> = [
+  { value: 'human', labelKey: 'sourceHuman' },
+  { value: 'discord', labelKey: 'sourceDiscord' },
+  { value: 'agent', labelKey: 'sourceAgent' },
+  { value: 'api', labelKey: 'sourceApi' },
 ];
 
 function DraggableCard({
@@ -92,6 +86,7 @@ function DraggableCard({
   onDelete?: ((cardId: string) => void) | undefined;
   onMove?: ((cardId: string, toColumnId: string) => void) | undefined;
 }): JSX.Element {
+  const { t } = useTranslation('kanban');
   // Drag activates from a dedicated grip handle, NOT the whole card: dnd-kit's
   // listeners/attributes set role="button"+tabindex on their element, and the
   // card body holds real interactive controls (delete, run link, move buttons)
@@ -109,7 +104,7 @@ function DraggableCard({
       <div className="u-flex u-items-center u-gap-2">
         <span
           ref={setActivatorNodeRef}
-          aria-label={`Drag ${card.title} to another lane`}
+          aria-label={t('dragCardToLane', { title: card.title })}
           // ≥24px hit area (WCAG 2.5.8): 14px glyph + 5px padding; negative
           // margin keeps the row layout from growing. Rounded so the focus
           // ring (global [role=button]:focus-visible) reads cleanly.
@@ -124,8 +119,8 @@ function DraggableCard({
           <button
             type="button"
             className="icon-button kb-card-delete"
-            aria-label={`Delete ${card.title}`}
-            title={`Delete ${card.title}`}
+            aria-label={t('deleteCard', { title: card.title })}
+            title={t('deleteCard', { title: card.title })}
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); onDelete(card.id); }}
           >
@@ -141,15 +136,18 @@ function DraggableCard({
             <WorkflowIcon size={12} /> {workflowName(card.workflowId)}
           </span>
         ) : null}
-        {card.priority === 'high' ? <span className="chip chip--danger kb-prio">HIGH</span> : null}
-        {card.priority === 'low' ? <span className="chip chip--muted kb-prio">LOW</span> : null}
+        {card.priority === 'high' ? <span className="chip chip--danger kb-prio">{t('priorityHigh')}</span> : null}
+        {card.priority === 'low' ? <span className="chip chip--muted kb-prio">{t('priorityLow')}</span> : null}
         {card.createdBy ? (
           <span className="kb-person"><UserIcon size={12} aria-hidden /> {card.createdBy}</span>
         ) : null}
-        {card.dueAt ? <span className="muted u-fs-12">due {card.dueAt.slice(0, 10)}</span> : null}
+        {card.dueAt ? <span className="muted u-fs-12">{t('dueDate', { date: card.dueAt.slice(0, 10) })}</span> : null}
+        {/* ADR 0049 — assign this card to a workspace member (notifies them + */}
+        {/* surfaces it on their "My Work" mirror). */}
+        <AssigneeControl cardId={card.id} assigneeId={card.assigneeId} />
       </div>
-      {card.assignmentReason ? <div className="muted u-fs-12">Why assigned: {card.assignmentReason}</div> : null}
-      {card.blockerNote ? <div className="kanban-blocker"><AlertIcon size={12} /> Blocked: {card.blockerNote}</div> : null}
+      {card.assignmentReason ? <div className="muted u-fs-12">{t('whyAssigned', { reason: card.assignmentReason })}</div> : null}
+      {card.blockerNote ? <div className="kanban-blocker"><AlertIcon size={12} /> {t('blocked', { note: card.blockerNote })}</div> : null}
       <div className="kb-card-foot">
         {action && actionTarget && onMove ? (
           // The lane's ONE next action — the non-drag path (a11y + touch).
@@ -160,7 +158,7 @@ function DraggableCard({
             onPointerDown={(e) => e.stopPropagation()}
             onClick={(e) => { e.stopPropagation(); onMove(card.id, actionTarget); }}
           >
-            {action.icon} {action.label}
+            {action.icon} {t(action.labelKey)}
           </button>
         ) : null}
         <span className="kb-card-foot-spacer" />
@@ -169,9 +167,9 @@ function DraggableCard({
             to={`/runs/${card.lastRunId}`}
             onPointerDown={(e) => e.stopPropagation()}
             className="kb-run-link"
-            title="View the triggered run"
+            title={t('viewRunTitle')}
           >
-            <PlayIcon size={12} aria-hidden /> View run
+            <PlayIcon size={12} aria-hidden /> {t('viewRun')}
           </Link>
         ) : null}
       </div>
@@ -182,11 +180,11 @@ function DraggableCard({
 /** The ONE contextual action per lane (boards redesign): what a human most
  *  plausibly does next with a card in that lane. Everything else stays
  *  drag-and-drop. */
-const LANE_ACTION: Record<LaneKind, { label: string; to: MoveKind; icon: JSX.Element; accent?: boolean } | null> = {
-  todo: { label: 'Start work', to: 'working', icon: <PlayIcon size={12} /> },
-  working: { label: 'Mark done', to: 'done', icon: <CheckIcon size={12} /> },
-  waiting: { label: 'Resolve', to: 'working', icon: <CheckIcon size={12} />, accent: true },
-  done: { label: 'Reopen', to: 'todo', icon: <RotateCwIcon size={12} /> },
+const LANE_ACTION: Record<LaneKind, { labelKey: string; to: MoveKind; icon: JSX.Element; accent?: boolean } | null> = {
+  todo: { labelKey: 'startWork', to: 'working', icon: <PlayIcon size={12} /> },
+  working: { labelKey: 'markDone', to: 'done', icon: <CheckIcon size={12} /> },
+  waiting: { labelKey: 'resolve', to: 'working', icon: <CheckIcon size={12} />, accent: true },
+  done: { labelKey: 'reopen', to: 'todo', icon: <RotateCwIcon size={12} /> },
 };
 
 function DroppableColumn({
@@ -209,6 +207,7 @@ function DroppableColumn({
   laneTargets: ReadonlyMap<MoveKind, string>;
   onMove?: ((cardId: string, toColumnId: string) => void) | undefined;
 }): JSX.Element {
+  const { t } = useTranslation('kanban');
   const { setNodeRef, isOver } = useDroppable({ id: column.id });
   const [adding, setAdding] = useState(false);
   const [title, setTitle] = useState('');
@@ -255,38 +254,42 @@ function DroppableColumn({
             });
             resetForm();
           }}
-          className="u-flex u-flex-col u-gap-1"
+          className="surface-form"
         >
-          <input autoFocus className="ui-input u-w-full" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Task title…" />
-          <MarkdownEditor value={description} onChange={setDescription} placeholder="Description (optional) — Markdown supported" rows={2} compact ariaLabel="Task description" />
+          <div className="field"><input autoFocus className="ui-input u-w-full" value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('taskTitlePlaceholder')} /></div>
+          <div className="field"><MarkdownEditor value={description} onChange={setDescription} placeholder={t('taskDescriptionPlaceholder')} rows={2} compact ariaLabel={t('taskDescriptionAria')} /></div>
           {enableSources ? (
-            <select className="ui-input u-w-full" value={source} onChange={(e) => setSource(e.target.value as KanbanCardSource)} aria-label="Task source">
-              {SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
+            <div className="field">
+              <select className="ui-input u-w-full" value={source} onChange={(e) => setSource(e.target.value as KanbanCardSource)} aria-label={t('taskSourceAria')}>
+                {SOURCE_OPTIONS.map((o) => <option key={o.value} value={o.value}>{t(o.labelKey)}</option>)}
+              </select>
+            </div>
           ) : null}
           {workflowOptions && workflowOptions.length > 0 ? (
-            <select className="ui-input u-w-full" value={workflowId} onChange={(e) => setWorkflowId(e.target.value)} aria-label="Workflow">
-              <option value="">No workflow</option>
-              {workflowOptions.map((w) => <option key={w} value={w}>{workflowName(w)}</option>)}
-            </select>
+            <div className="field">
+              <select className="ui-input u-w-full" value={workflowId} onChange={(e) => setWorkflowId(e.target.value)} aria-label={t('workflowAria')}>
+                <option value="">{t('noWorkflowOptionShort')}</option>
+                {workflowOptions.map((w) => <option key={w} value={w}>{workflowName(w)}</option>)}
+              </select>
+            </div>
           ) : null}
-          <div className="u-flex u-gap-1">
-            <select className="ui-input u-flex-1" value={priority} onChange={(e) => setPriority(e.target.value as 'low' | 'normal' | 'high')} aria-label="Priority">
-              <option value="low">Low</option>
-              <option value="normal">Normal</option>
-              <option value="high">High</option>
+          <div className="field">
+            <select className="ui-input u-w-full" value={priority} onChange={(e) => setPriority(e.target.value as 'low' | 'normal' | 'high')} aria-label={t('priorityAria')}>
+              <option value="low">{t('priorityLowOption')}</option>
+              <option value="normal">{t('priorityNormalOption')}</option>
+              <option value="high">{t('priorityHighOption')}</option>
             </select>
-            <input className="ui-input u-flex-1" type="date" value={dueAt} onChange={(e) => setDueAt(e.target.value)} aria-label="Due date" />
           </div>
-          <input className="ui-input u-w-full" value={assignmentReason} onChange={(e) => setAssignmentReason(e.target.value)} placeholder="Why assigned (optional)" aria-label="Why assigned" />
-          <input className="ui-input u-w-full" value={blockerNote} onChange={(e) => setBlockerNote(e.target.value)} placeholder="Blocker, if any (optional)" aria-label="Blocker note" />
+          <div className="field"><input className="ui-input u-w-full" type="date" value={dueAt} onChange={(e) => setDueAt(e.target.value)} aria-label={t('dueDateAria')} /></div>
+          <div className="field"><input className="ui-input u-w-full" value={assignmentReason} onChange={(e) => setAssignmentReason(e.target.value)} placeholder={t('whyAssignedPlaceholder')} aria-label={t('whyAssignedAria')} /></div>
+          <div className="field"><input className="ui-input u-w-full" value={blockerNote} onChange={(e) => setBlockerNote(e.target.value)} placeholder={t('blockerPlaceholder')} aria-label={t('blockerAria')} /></div>
           <div className="action-bar">
-            <button type="submit" className="primary btn-sm">Add</button>
-            <button type="button" className="secondary btn-sm" onClick={resetForm}>Cancel</button>
+            <button type="submit" className="primary btn-sm">{t('addCardButton')}</button>
+            <button type="button" className="secondary btn-sm" onClick={resetForm}>{t('common:cancel')}</button>
           </div>
         </form>
       ) : (
-        <button type="button" className="kb-add" onClick={() => setAdding(true)}>+ Add card</button>
+        <button type="button" className="kb-add" onClick={() => setAdding(true)}>{t('addCard')}</button>
       )}
     </div>
   );
@@ -300,6 +303,7 @@ export function KanbanBoardView({
   onMoveCard,
   onCreateCard,
   onDeleteCard,
+  leadingColumn,
 }: {
   board: KanbanBoard;
   cards: KanbanCard[];
@@ -311,6 +315,11 @@ export function KanbanBoardView({
   onMoveCard: (cardId: string, toColumnId: string) => void;
   onCreateCard: (columnId: string, input: NewCardInput) => void;
   onDeleteCard?: ((cardId: string) => void) | undefined;
+  /** ADR 0049 — an optional synthetic column rendered FIRST (leftmost), OUTSIDE
+   *  the DnD droppables: the personal board's "Assigned to me" rail. Its cards
+   *  are foreign (they live on other boards) so it is deliberately not a drop
+   *  target — never wire it through DroppableColumn. */
+  leadingColumn?: React.ReactNode;
 }): JSX.Element {
   // Mirror props into local state for an optimistic move; re-sync when the
   // parent refetches (SSE / poll / mutation).
@@ -345,6 +354,7 @@ export function KanbanBoardView({
   return (
     <DndContext sensors={sensors} onDragEnd={onDragEnd}>
       <div className="kanban-board-scroll">
+        {leadingColumn}
         {board.columns.map((col) => (
           <DroppableColumn
             key={col.id}

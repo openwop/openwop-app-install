@@ -102,6 +102,21 @@ export async function addNote(agentId: string, content: string): Promise<AgentKn
   return asJson<AgentKnowledgeView>(res, 'addNote');
 }
 
+/** A curated memory entry (ADR 0041) — the row the Memory tab lists. */
+export interface MemoryNote { id: string; content: string; contentTrust: 'trusted' | 'untrusted'; createdAt: string }
+
+/** List the agent's curated memories (newest first) for the Memory tab. */
+export async function listNotes(agentId: string): Promise<MemoryNote[]> {
+  const res = await fetch(`${base(agentId)}/notes`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ notes: MemoryNote[] }>(res, 'listNotes')).notes;
+}
+
+/** Delete a curated memory by id. */
+export async function deleteNote(agentId: string, noteId: string): Promise<void> {
+  const res = await fetch(`${base(agentId)}/notes/${encodeURIComponent(noteId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok) throw new Error(`deleteNote failed (${res.status})`);
+}
+
 export async function retrieve(agentId: string, query: string): Promise<RetrieveResult> {
   const res = await fetch(`${base(agentId)}/retrieve`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ query }) }));
   return asJson<RetrieveResult>(res, 'retrieve');

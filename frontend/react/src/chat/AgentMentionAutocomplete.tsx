@@ -25,6 +25,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import {
   filterAgentMentions,
   useAgentMentions,
@@ -72,6 +73,7 @@ export function AgentMentionAutocomplete({
   onPick,
   onDismiss,
 }: Props): JSX.Element | null {
+  const { t } = useTranslation('chat');
   const { entries, isLoading, error } = useAgentMentions();
   const mention = detectMentionState(text, cursorPos);
   const query = mention?.query ?? '';
@@ -146,29 +148,28 @@ export function AgentMentionAutocomplete({
   if (isLoading && entries.length === 0) {
     return (
       <EmptyPanel listRef={listRef}>
-        Loading agents…
+        {t('loadingAgents')}
       </EmptyPanel>
     );
   }
   if (error) {
     return (
       <EmptyPanel listRef={listRef} tone="error">
-        Couldn't load agents: {error}.
+        {t('couldNotLoadAgents', { error })}
       </EmptyPanel>
     );
   }
   if (entries.length === 0) {
     return (
       <EmptyPanel listRef={listRef}>
-        No agents installed yet. Visit the <strong>Agents</strong> tab to
-        install one from the registry or author your own.
+        <Trans i18nKey="noAgentsInstalled" ns="chat" components={{ 1: <strong /> }} />
       </EmptyPanel>
     );
   }
   if (matches.length === 0) {
     return (
       <EmptyPanel listRef={listRef}>
-        No agents match <code>@{query}</code>.
+        <Trans i18nKey="noAgentsMatch" ns="chat" values={{ query }} components={{ 1: <code /> }} />
       </EmptyPanel>
     );
   }
@@ -177,7 +178,7 @@ export function AgentMentionAutocomplete({
     <div
       ref={listRef}
       role="listbox"
-      aria-label="Agent mentions"
+      aria-label={t('agentMentionsAria')}
       className="mentionac-listbox"
     >
       {matches.map((entry, i) => (
@@ -190,8 +191,7 @@ export function AgentMentionAutocomplete({
         />
       ))}
       <div className="mentionac-tip">
-        Tip: @-mentioning an agent adds it to your active-agents lineup and
-        switches the conversation through it.
+        {t('agentMentionTip')}
       </div>
     </div>
   );

@@ -13,12 +13,18 @@
  * inline-edit pattern.
  */
 
+import { useTranslation } from 'react-i18next';
 import { useNotificationStore } from './notificationStore.js';
-import { KNOWN_TYPES, TYPE_LABELS, type NotificationPreferences } from './types.js';
+import { KNOWN_TYPES, TYPE_LABEL_KEYS, type NotificationPreferences } from './types.js';
+import { ArrowLeftIcon } from '../ui/icons/index.js';
 
-const DAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'] as const;
+/** Sunday-first day-of-week i18n keys (Date.prototype.getDay() index → key). */
+const DAY_LABEL_KEYS = [
+  'dayShortSun', 'dayShortMon', 'dayShortTue', 'dayShortWed', 'dayShortThu', 'dayShortFri', 'dayShortSat',
+] as const;
 
 export function NotificationPreferencesPanel(): JSX.Element {
+  const { t } = useTranslation('notifications');
   const prefs = useNotificationStore((s) => s.preferences);
   const updatePreferences = useNotificationStore((s) => s.updatePreferences);
   const closePreferences = useNotificationStore((s) => s.closePreferences);
@@ -56,17 +62,17 @@ export function NotificationPreferencesPanel(): JSX.Element {
           type="button"
           className="secondary u-fs-12"
           onClick={closePreferences}
-          aria-label="Back to notifications"
+          aria-label={t('prefsBackLabel')}
         >
-          ← Back
+          <ArrowLeftIcon size={13} /> {t('prefsBack')}
         </button>
-        <h3 className="u-m-0 u-fs-14">Preferences</h3>
+        <h3 className="u-m-0 u-fs-14">{t('prefsHeading')}</h3>
       </header>
 
       {/* Global mute */}
-      <Section title="Global">
+      <Section title={t('prefsSectionGlobal')}>
         <Row>
-          <Label htmlFor="prefs-globalMute">Mute all notifications</Label>
+          <Label htmlFor="prefs-globalMute">{t('prefsMuteAll')}</Label>
           <input
             id="prefs-globalMute"
             type="checkbox"
@@ -75,35 +81,35 @@ export function NotificationPreferencesPanel(): JSX.Element {
           />
         </Row>
         <p className="muted u-fs-11 u-mbox-t1">
-          Suppresses the bell badge + every desktop toast. Notifications still
-          arrive and appear in the panel so you can clear them later.
+          {t('prefsGlobalHelp')}
         </p>
       </Section>
 
       {/* Per-type */}
-      <Section title="Types">
+      <Section title={t('prefsSectionTypes')}>
         <table className="notifprefs-table">
           <thead>
             <tr className="u-text-left">
-              <th className="u-pad-4x0 u-fw-600">Type</th>
-              <th className="notifprefs-th-mute">Mute</th>
-              <th className="notifprefs-th-desktop">Desktop</th>
+              <th className="u-pad-4x0 u-fw-600">{t('prefsColType')}</th>
+              <th className="notifprefs-th-mute">{t('prefsColMute')}</th>
+              <th className="notifprefs-th-desktop">{t('prefsColDesktop')}</th>
             </tr>
           </thead>
           <tbody>
             {KNOWN_TYPES.map((type) => {
-              const t = prefs.types.find((x) => x.type === type);
-              const muted = t?.muted ?? false;
-              const desktop = t?.desktop ?? true;
+              const typePref = prefs.types.find((x) => x.type === type);
+              const muted = typePref?.muted ?? false;
+              const desktop = typePref?.desktop ?? true;
+              const label = t(TYPE_LABEL_KEYS[type] ?? type);
               return (
                 <tr key={type} className="u-border-t">
-                  <td className="notifprefs-td-type">{TYPE_LABELS[type] ?? type}</td>
+                  <td className="notifprefs-td-type">{label}</td>
                   <td className="u-text-center">
                     <input
                       type="checkbox"
                       checked={muted}
                       onChange={(e) => setTypePref(type, { muted: e.target.checked })}
-                      aria-label={`Mute ${TYPE_LABELS[type] ?? type}`}
+                      aria-label={t('prefsMuteTypeLabel', { label })}
                     />
                   </td>
                   <td className="u-text-center">
@@ -111,7 +117,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
                       type="checkbox"
                       checked={desktop}
                       onChange={(e) => setTypePref(type, { desktop: e.target.checked })}
-                      aria-label={`Desktop toast for ${TYPE_LABELS[type] ?? type}`}
+                      aria-label={t('prefsDesktopTypeLabel', { label })}
                       disabled={muted}
                     />
                   </td>
@@ -121,16 +127,15 @@ export function NotificationPreferencesPanel(): JSX.Element {
           </tbody>
         </table>
         <p className="muted u-fs-11 u-mbox-t2">
-          <strong>Mute</strong> hides the row from the badge count (still appears in the panel).{' '}
-          <strong>Desktop</strong> controls the OS-level toast (no effect when mute is on or
-          permission isn't granted).
+          <strong>{t('prefsTypesHelpMute')}</strong>{t('prefsTypesHelpMuteRest')}
+          <strong>{t('prefsTypesHelpDesktop')}</strong>{t('prefsTypesHelpDesktopRest')}
         </p>
       </Section>
 
       {/* Quiet hours */}
-      <Section title="Quiet hours">
+      <Section title={t('prefsSectionQuietHours')}>
         <Row>
-          <Label htmlFor="prefs-quiet-enabled">Enable quiet hours</Label>
+          <Label htmlFor="prefs-quiet-enabled">{t('prefsEnableQuietHours')}</Label>
           <input
             id="prefs-quiet-enabled"
             type="checkbox"
@@ -141,7 +146,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
 
         <div className="notifprefs-quiet-times" style={{ opacity: prefs.quietHours.enabled ? 1 : 0.4 }}>
           <label className="u-flex-1 u-flex u-flex-col u-gap-1 u-fs-11">
-            Start
+            {t('prefsQuietStart')}
             <input
               type="time"
               value={prefs.quietHours.start}
@@ -151,7 +156,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
             />
           </label>
           <label className="u-flex-1 u-flex u-flex-col u-gap-1 u-fs-11">
-            End
+            {t('prefsQuietEnd')}
             <input
               type="time"
               value={prefs.quietHours.end}
@@ -163,9 +168,9 @@ export function NotificationPreferencesPanel(): JSX.Element {
         </div>
 
         <div className="u-mt-2">
-          <div className="muted u-fs-11 u-mb-1">Days</div>
+          <div className="muted u-fs-11 u-mb-1">{t('prefsQuietDays')}</div>
           <div className="u-flex u-gap-1 u-wrap">
-            {DAY_LABELS.map((label, day) => {
+            {DAY_LABEL_KEYS.map((labelKey, day) => {
               const active = prefs.quietHours.days.includes(day);
               return (
                 <button
@@ -182,7 +187,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
                     cursor: prefs.quietHours.enabled ? 'pointer' : 'not-allowed',
                   }}
                 >
-                  {label}
+                  {t(labelKey)}
                 </button>
               );
             })}
@@ -190,7 +195,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
         </div>
 
         <Row style={{ marginTop: 8, opacity: prefs.quietHours.enabled ? 1 : 0.4 }}>
-          <Label htmlFor="prefs-quiet-allowUrgent">Allow urgent during quiet hours</Label>
+          <Label htmlFor="prefs-quiet-allowUrgent">{t('prefsAllowUrgent')}</Label>
           <input
             id="prefs-quiet-allowUrgent"
             type="checkbox"
@@ -200,9 +205,9 @@ export function NotificationPreferencesPanel(): JSX.Element {
           />
         </Row>
         <p className="muted u-fs-11 u-mbox-t1">
-          Crosses midnight when end &lt; start (e.g., 22:00 → 08:00). During the window,
-          desktop toasts are suppressed unless the row's priority is <code>urgent</code> and
-          this toggle is on.
+          {t('prefsQuietHelpStart')}
+          <code>{t('prefsQuietHelpUrgentToken')}</code>
+          {t('prefsQuietHelpEnd')}
         </p>
       </Section>
     </div>

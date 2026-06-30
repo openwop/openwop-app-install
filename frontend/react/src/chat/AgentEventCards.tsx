@@ -12,20 +12,18 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type {
   AgentDecision,
   AgentHandoff,
   AgentToolCall,
   AgentVerified,
 } from './hooks/useChatSession.js';
+import { formatDurationMs, formatPercent } from '../i18n/format.js';
 import { ScaleIcon, ShieldIcon, WrenchIcon } from '../ui/icons/index.js';
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const mins = Math.floor(ms / 60_000);
-  const secs = Math.floor((ms % 60_000) / 1000);
-  return `${mins}m ${secs}s`;
+  return formatDurationMs(ms);
 }
 
 function jsonPreview(value: unknown, max = 200): string {
@@ -41,6 +39,7 @@ function jsonPreview(value: unknown, max = 200): string {
 // ── Tool call card ─────────────────────────────────────────────────
 
 export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
+  const { t } = useTranslation('chat');
   const [open, setOpen] = useState(false);
   const inFlight = call.finishedAt == null;
   const durationMs = call.finishedAt
@@ -71,22 +70,31 @@ export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
           // call. Mono-font chip matches the HandoffIndicator idiom.
           <span
             className="muted u-mono u-fs-10"
-            title={`Called by ${call.agentId}`}
+            title={t('calledBy', { agentId: call.agentId })}
           >
             @{call.agentId}
           </span>
         )}
         <span
-          className="muted u-ml-auto u-tabular u-fs-11"
+          className="muted u-ml-auto u-tabular u-fs-11 u-iflex u-items-center u-gap-1-5"
         >
-          {inFlight ? 'running…' : isError ? 'failed' : formatDuration(durationMs)}
+          {inFlight ? (
+            <>
+              {t('running')}
+              <span className="think-dots u-gap-0-5" aria-hidden>
+                <span className="think-dot" />
+                <span className="think-dot" />
+                <span className="think-dot" />
+              </span>
+            </>
+          ) : isError ? t('failed') : formatDuration(durationMs)}
         </span>
       </button>
       {open && (
         <div className="u-mt-1-5 u-flex u-flex-col u-gap-1-5">
           {call.inputs !== undefined && (
             <details>
-              <summary className="muted u-cursor-pointer u-fs-11">Inputs</summary>
+              <summary className="muted u-cursor-pointer u-fs-11">{t('inputs')}</summary>
               <pre className="agentevt-pre">
                 {jsonPreview(call.inputs, 2000)}
               </pre>
@@ -94,7 +102,7 @@ export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
           )}
           {call.outcome !== undefined && !isError && (
             <details>
-              <summary className="muted u-cursor-pointer u-fs-11">Result</summary>
+              <summary className="muted u-cursor-pointer u-fs-11">{t('result')}</summary>
               <pre className="agentevt-pre">
                 {jsonPreview(call.outcome, 2000)}
               </pre>
@@ -134,6 +142,7 @@ export function HandoffIndicator({ handoff }: { handoff: AgentHandoff }): JSX.El
 // ── Decision badge ──────────────────────────────────────────────────
 
 export function DecisionBadge({ decision }: { decision: AgentDecision }): JSX.Element {
+  const { t } = useTranslation('chat');
   const [open, setOpen] = useState(false);
   const conf = decision.confidence;
   const confColor =
@@ -156,7 +165,7 @@ export function DecisionBadge({ decision }: { decision: AgentDecision }): JSX.El
         className="agentevt-toggle-btn"
       >
         <span className="muted u-iflex" aria-hidden><ScaleIcon size={12} /></span>
-        <span className="u-fw-600">Decision: {decisionLabel}</span>
+        <span className="u-fw-600">{t('decisionLabel', { decision: decisionLabel })}</span>
         {conf != null && (
           <span
             className="agentevt-conf-chip"
@@ -165,13 +174,13 @@ export function DecisionBadge({ decision }: { decision: AgentDecision }): JSX.El
               color: confColor,
             }}
           >
-            {Math.round(conf * 100)}%
+            {formatPercent(conf, { maximumFractionDigits: 0 })}
           </span>
         )}
       </button>
       {open && (
         <details open className="u-mt-1-5">
-          <summary className="muted u-cursor-pointer u-fs-11">Raw decision</summary>
+          <summary className="muted u-cursor-pointer u-fs-11">{t('rawDecision')}</summary>
           <pre className="agentevt-pre">
             {jsonPreview(decision.decision, 2000)}
           </pre>
@@ -188,15 +197,16 @@ export function DecisionBadge({ decision }: { decision: AgentDecision }): JSX.El
 // DecisionBadge idiom (token-styled box, ui/icons, color + label — never
 // color alone, per DESIGN.md §5.3).
 export function VerificationCard({ verified }: { verified: AgentVerified }): JSX.Element {
+  const { t } = useTranslation('chat');
   const { verdict, confidence: conf, criteria, target } = verified;
   const tone =
     verdict === 'pass' ? 'var(--color-success)' :
     verdict === 'fail' ? 'var(--color-danger)' :
                          'var(--color-warning)';
   const label =
-    verdict === 'pass' ? 'Verified' :
-    verdict === 'fail' ? 'Verification failed' :
-                         'Revision requested';
+    verdict === 'pass' ? t('verified') :
+    verdict === 'fail' ? t('verificationFailed') :
+                         t('revisionRequested');
   return (
     <div
       className="agentevt-card"
@@ -207,7 +217,7 @@ export function VerificationCard({ verified }: { verified: AgentVerified }): JSX
       <div className="u-iflex u-items-center u-gap-1-5 u-w-full">
         <span className="agentevt-icon" style={{ color: tone }} aria-hidden><ShieldIcon size={12} /></span>
         <span className="agentevt-verdict-label" style={{ color: tone }}>{label}</span>
-        <span className="muted u-fs-11">· {target}</span>
+        <span className="muted u-fs-11">{t('verificationTarget', { target })}</span>
         {conf != null && (
           <span
             className="agentevt-conf-chip"
@@ -216,7 +226,7 @@ export function VerificationCard({ verified }: { verified: AgentVerified }): JSX
               color: tone,
             }}
           >
-            {Math.round(conf * 100)}%
+            {formatPercent(conf, { maximumFractionDigits: 0 })}
           </span>
         )}
       </div>

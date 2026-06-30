@@ -11,6 +11,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,8 +24,7 @@ const PACK_DIR = join(__dirname, '..', '..', '..', 'packs', 'feature.crm.nodes')
 
 describe('CRM feature (sqlite memory app)', () => {
   let server: http.Server;
-  const PORT = 18877;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
   const TOKEN = 'dev-token'; // wildcard bearer ⇒ superadmin
   let workflowId: string;
 
@@ -32,7 +32,7 @@ describe('CRM feature (sqlite memory app)', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({
-      port: PORT,
+      port: 0,
       storageDsn: 'memory://',
       serviceName: 'test',
       serviceVersion: '0.0.1',
@@ -41,7 +41,7 @@ describe('CRM feature (sqlite memory app)', () => {
     await __clearToggleStore();
     await __resetCrmStore();
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
     // A real catalog workflow — triage 422s on an unresolvable workflow.
     workflowId = (await jf<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0] ?? 'openwop-app.uppercase';

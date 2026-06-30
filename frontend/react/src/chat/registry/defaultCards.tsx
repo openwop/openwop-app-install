@@ -6,11 +6,20 @@
  * console.warn).
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../../client/interruptsClient.js';
 import { registerCard } from './CardRegistry.js';
 import type { CardProps } from './types.js';
 import { TextField } from '../../ui/Field.js';
+import { AssetPreview } from '../reviews/AssetPreview.js';
+import { AssetPreviewModal } from '../reviews/AssetPreviewModal.js';
+import type { ReviewAsset } from '../reviews/reviewClient.js';
+import { getArtifactRevision } from '../artifacts/artifactClient.js';
+import { FileTextIcon, SearchIcon } from '../../ui/icons/index.js';
+import { Notice } from '../../ui/index.js';
+import { useReviewStatusByRunNode } from '../reviews/reviewStatusStore.js';
+import i18n from '../../i18n/index.js';
 
 interface ApprovalOption {
   key: string;
@@ -39,16 +48,34 @@ interface InterruptPayload {
      *  shape changes — there's no spec/v1 schema for this field yet
      *  (sample-app contract; spec promotion is a follow-up). */
     options?: readonly ApprovalOption[];
+    /** ADR 0083 — the durable run-artifact the gate persisted for THIS suspend
+     *  (the upstream output being approved). Lets the card preview ANY content
+     *  type (object outputs like an email draft / variance result that aren't a
+     *  string `option`) by fetching the artifact revision on demand. */
+    artifactId?: string;
+    revisionId?: string;
   };
+}
+
+/** The gate's friendly name (builder label, e.g. "Legal review") as a card
+ *  eyebrow — so a reviewer always knows WHICH gate a card is, even for a single
+ *  gate (the prior per-stack chip only showed when ≥2 gates were open). */
+function GateEyebrow({ name }: { name?: string | undefined }): JSX.Element | null {
+  if (!name) return null;
+  return <div className="approval-card-eyebrow">{name}</div>;
 }
 
 // ── interrupt.approval ─────────────────────────────────────────────────
 
-function ApprovalCard({ payload, onAction, isLoading }: CardProps): JSX.Element {
+function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
+  const { t } = useTranslation('chat');
   const data = (payload as InterruptPayload).data ?? {};
   const [comment, setComment] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const prompt = data.prompt ?? 'Please approve to continue.';
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [artifactAssets, setArtifactAssets] = useState<ReviewAsset[] | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const prompt = data.prompt ?? t('pleaseApprove');
   const actions = (data.actions ?? ['approve', 'reject', 'request-changes', 'defer', 'escalate']);
   const options = data.options ?? [];
   // Picker only makes sense when there are ≥2 alternatives to choose
@@ -56,11 +83,88 @@ function ApprovalCard({ payload, onAction, isLoading }: CardProps): JSX.Element 
   // to the plain approve/reject path — the approver has nothing to
   // *pick* among, just to approve or reject the run continuing.
   const hasOptions = options.length >= 2;
+  // ADR 0083 — the concrete content under review. String input ports arrive inline as
+  // `options`; everything else (an email-draft object, a variance result, an LLM draft) is
+  // fetched on demand from the durable run-artifact the gate persisted (`data.artifactId`),
+  // so the approver ALWAYS sees what they're approving — never a dead-end card.
+  const inlineAssets: ReviewAsset[] = options.map((o) => ({ label: o.label, content: o.content }));
+  const artifactId = typeof data.artifactId === 'string' ? data.artifactId : undefined;
+  const revisionId = typeof data.revisionId === 'string' ? data.revisionId : undefined;
+  const canPreview = inlineAssets.length > 0 || !!artifactId;
+  const previewAssets: ReviewAsset[] = inlineAssets.length > 0 ? inlineAssets : (artifactAssets ?? []);
+  // The single-content approve/reject case shows the content INLINE (auto-loaded)
+  // so the reviewer never has to click into a modal just to see what they're
+  // approving. The ≥2-options case keeps the per-option picker below instead.
+  const showInlinePreview = !hasOptions && canPreview;
+  const inlinePreviewAsset = previewAssets[0];
+
+  async function loadArtifact(): Promise<void> {
+    if (inlineAssets.length === 0 && artifactId && revisionId && artifactAssets === null) {
+      setPreviewLoading(true);
+      try {
+        const rev = await getArtifactRevision(artifactId, revisionId);
+        setArtifactAssets([{ label: prompt, content: rev.content ?? '', artifactId, revisionId }]);
+      } catch {
+        setArtifactAssets([]); // surface the empty-state inline rather than failing
+      } finally {
+        setPreviewLoading(false);
+      }
+    }
+  }
+
+  // Auto-load the artifact-backed content for the inline preview on mount, so the
+  // approver sees the draft without a click. Inline `options` are already present.
+  useEffect(() => {
+    if (showInlinePreview) void loadArtifact();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showInlinePreview, artifactId, revisionId]);
+
+  // ADR 0074 — if this review was decided on ANOTHER surface (Reviews tab, Runs
+  // screen, another client), the shared store knows before this run's SSE swaps
+  // the card for the resolved decision. Disable the now-stale actions and say so,
+  // so a click can't 409. Matched by the run/node index the broadcast carries.
+  const liveStatus = useReviewStatusByRunNode(context.runId, context.nodeId);
+  const resolvedElsewhere = liveStatus !== undefined && liveStatus !== 'pending';
+  const disabled = isLoading || resolvedElsewhere;
 
   return (
-    <div className="card u-bg-surface-2">
-      <h3 className="u-mbox-b2 u-fs-13">Approval required</h3>
+    <div className="card u-bg-surface-2 approval-card">
+      <GateEyebrow name={context?.nodeName} />
+      <h3 className="u-mbox-b2 u-fs-13">{t('approvalRequired')}</h3>
+      {context?.workflowName ? (
+        <p className="muted u-fs-11 u-mbox-b1">{t('reviewFromWorkflow', { workflow: context.workflowName })}</p>
+      ) : null}
       <p className="u-mbox-b2 u-fs-13">{prompt}</p>
+      {resolvedElsewhere && <Notice variant="info">{t('reviewResolvedElsewhere')}</Notice>}
+
+      {showInlinePreview ? (
+        <div className="approval-preview u-mbox-b2">
+          <div className="approval-preview-head">
+            <span className="approval-preview-label u-iflex u-items-center u-gap-1-5">
+              <FileTextIcon size={13} aria-hidden /> {t('underReview')}
+            </span>
+            {inlinePreviewAsset?.content ? (
+              <button
+                type="button"
+                className="btn-ghost u-fs-11 u-pad-2x8 u-iflex u-items-center u-gap-1"
+                onClick={() => setPreviewOpen(true)}
+              >
+                <SearchIcon size={12} aria-hidden /> {t('viewFull')}
+              </button>
+            ) : null}
+          </div>
+          <div className="approval-preview-body">
+            {previewLoading
+              ? <p className="muted u-fs-12 u-m-0">{t('previewLoading')}</p>
+              : inlinePreviewAsset
+                ? <AssetPreview asset={inlinePreviewAsset} hideLabel />
+                : <p className="muted u-fs-12 u-m-0">{t('assetPreviewNone')}</p>}
+          </div>
+        </div>
+      ) : null}
+      {previewOpen ? (
+        <AssetPreviewModal open assets={previewAssets} title={prompt} onClose={() => setPreviewOpen(false)} />
+      ) : null}
 
       {hasOptions && (
         <div className="defcards-options">
@@ -77,12 +181,12 @@ function ApprovalCard({ payload, onAction, isLoading }: CardProps): JSX.Element 
                       onClick={() => setExpanded((s) => ({ ...s, [opt.key]: !isOpen }))}
                       aria-expanded={isOpen}
                     >
-                      {isOpen ? 'hide' : 'view'}
+                      {isOpen ? t('hide') : t('view')}
                     </button>
                     <button
                       type="button"
                       className="u-fs-11 u-pad-2x10"
-                      disabled={isLoading}
+                      disabled={disabled}
                       // Resume payload shape is wedged between two
                       // constraints:
                       //   1. BE `validateResumeValue` (routes/interrupts.ts
@@ -111,7 +215,7 @@ function ApprovalCard({ payload, onAction, isLoading }: CardProps): JSX.Element 
                         ...(comment ? { comment } : {}),
                       })}
                     >
-                      Pick this
+                      {t('pickThis')}
                     </button>
                   </div>
                 </div>
@@ -125,10 +229,10 @@ function ApprovalCard({ payload, onAction, isLoading }: CardProps): JSX.Element 
       )}
 
       <TextField
-        label="Comment (optional)"
+        label={t('commentOptional')}
         value={comment}
         onChange={(e) => setComment(e.target.value)}
-        placeholder="Visible in audit trail"
+        placeholder={t('visibleInAuditTrail')}
       />
       <div className="button-row u-wrap u-gap-1-5">
         {actions
@@ -143,7 +247,7 @@ function ApprovalCard({ payload, onAction, isLoading }: CardProps): JSX.Element 
             <button
               key={action}
               className={action === 'approve' && !hasOptions ? '' : 'secondary'}
-              disabled={isLoading}
+              disabled={disabled}
               onClick={() => onAction('resolve', { action, comment: comment || undefined })}
             >
               {action}
@@ -156,19 +260,21 @@ function ApprovalCard({ payload, onAction, isLoading }: CardProps): JSX.Element 
 
 // ── interrupt.clarification ────────────────────────────────────────────
 
-function ClarificationCard({ payload, onAction, isLoading }: CardProps): JSX.Element {
+function ClarificationCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
+  const { t } = useTranslation('chat');
   const data = (payload as InterruptPayload).data ?? {};
   const [answer, setAnswer] = useState('');
   return (
     <div className="card u-bg-surface-2">
-      <h3 className="u-mbox-b2 u-fs-13">Clarification needed</h3>
-      <p className="u-mbox-b2 u-fs-13">{data.question ?? 'Please clarify.'}</p>
+      <GateEyebrow name={context?.nodeName} />
+      <h3 className="u-mbox-b2 u-fs-13">{t('clarificationNeeded')}</h3>
+      <p className="u-mbox-b2 u-fs-13">{data.question ?? t('pleaseClarify')}</p>
       <div className="form-row">
         <textarea rows={3} value={answer} onChange={(e) => setAnswer(e.target.value)} />
       </div>
       <div className="button-row">
         <button disabled={isLoading || !answer.trim()} onClick={() => onAction('resolve', { answer })}>
-          Submit
+          {t('submit')}
         </button>
       </div>
     </div>
@@ -177,12 +283,14 @@ function ClarificationCard({ payload, onAction, isLoading }: CardProps): JSX.Ele
 
 // ── interrupt.refinement ───────────────────────────────────────────────
 
-function RefinementCard({ payload, onAction, isLoading }: CardProps): JSX.Element {
+function RefinementCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
+  const { t } = useTranslation('chat');
   const seed = (payload as InterruptPayload).data?.current ?? '';
   const [draft, setDraft] = useState(typeof seed === 'string' ? seed : JSON.stringify(seed, null, 2));
   return (
     <div className="card u-bg-surface-2">
-      <h3 className="u-mbox-b2 u-fs-13">Refinement requested</h3>
+      <GateEyebrow name={context?.nodeName} />
+      <h3 className="u-mbox-b2 u-fs-13">{t('refinementRequested')}</h3>
       <div className="form-row">
         <textarea rows={6} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} />
       </div>
@@ -195,7 +303,7 @@ function RefinementCard({ payload, onAction, isLoading }: CardProps): JSX.Elemen
             onAction('resolve', { refinement: parsed });
           }}
         >
-          Submit refinement
+          {t('submitRefinement')}
         </button>
       </div>
     </div>
@@ -204,18 +312,20 @@ function RefinementCard({ payload, onAction, isLoading }: CardProps): JSX.Elemen
 
 // ── interrupt.cancellation ─────────────────────────────────────────────
 
-function CancellationCard({ payload, onAction, isLoading }: CardProps): JSX.Element {
-  const reason = (payload as InterruptPayload).data?.reason ?? 'A cancellation has been requested.';
+function CancellationCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
+  const { t } = useTranslation('chat');
+  const reason = (payload as InterruptPayload).data?.reason ?? t('cancellationRequestedBody');
   return (
     <div className="card u-bg-surface-2">
-      <h3 className="u-mbox-b2 u-fs-13">Cancellation requested</h3>
+      <GateEyebrow name={context?.nodeName} />
+      <h3 className="u-mbox-b2 u-fs-13">{t('cancellationRequested')}</h3>
       <div className="alert warning u-mb-2">{reason}</div>
       <div className="button-row">
         <button disabled={isLoading} onClick={() => onAction('resolve', { acknowledged: true, confirm: true })}>
-          Confirm cancel
+          {t('confirmCancel')}
         </button>
         <button className="secondary" disabled={isLoading} onClick={() => onAction('resolve', { acknowledged: true, confirm: false })}>
-          Decline
+          {t('decline')}
         </button>
       </div>
     </div>
@@ -238,25 +348,25 @@ export function registerDefaultCards(): void {
   if (registered) return;
   registerCard({
     cardType: 'interrupt.approval',
-    label: 'Approval',
+    label: i18n.t('chat:cardLabelApproval'),
     Component: ApprovalCard,
     actionHandlers: { resolve: resolveInterrupt },
   });
   registerCard({
     cardType: 'interrupt.clarification',
-    label: 'Clarification',
+    label: i18n.t('chat:cardLabelClarification'),
     Component: ClarificationCard,
     actionHandlers: { resolve: resolveInterrupt },
   });
   registerCard({
     cardType: 'interrupt.refinement',
-    label: 'Refinement',
+    label: i18n.t('chat:cardLabelRefinement'),
     Component: RefinementCard,
     actionHandlers: { resolve: resolveInterrupt },
   });
   registerCard({
     cardType: 'interrupt.cancellation',
-    label: 'Cancellation',
+    label: i18n.t('chat:cardLabelCancellation'),
     Component: CancellationCard,
     actionHandlers: { resolve: resolveInterrupt },
   });

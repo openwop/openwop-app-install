@@ -7,14 +7,14 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-const PORT = 18691;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 
 beforeAll(async () => {
@@ -22,8 +22,8 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'kb']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -77,11 +77,9 @@ const FELINE = 'Feline companions: cats groom themselves with their tongue and p
 const DB = 'Relational databases use B-tree indexes to speed up SQL query execution and JOIN operations across large tables.';
 
 describe('kb — toggle gating', () => {
-  it('404s when the kb toggle is off', async () => {
-    await enableKb('off');
+  it('serves without a toggle (always-on)', async () => {
     const { owner, orgId } = await ownerWithMember('viewer');
-    expect((await owner.get(u(orgId, '/collections'))).status).toBe(404);
-    await enableKb('on');
+    expect((await owner.get(u(orgId, '/collections'))).status).toBe(200);
   });
 });
 
@@ -199,3 +197,39 @@ describe('kb — delete cascades', () => {
     expect((await owner.get(u(orgId, `/collections/${cid}/documents/${doc.body.documentId}`))).status).toBe(404);
   });
 });
+
+describe('kb — ADR 0113 per-collection retrieval config', () => {
+  it('PATCH /retrieval sets the mode (write-gated) and search honors it', async () => {
+    const { owner, member, orgId } = await ownerWithMember('viewer');
+    const cid = (await owner.post(u(orgId, '/collections'), { name: 'Retr' })).body.collectionId;
+    await owner.post(u(orgId, `/collections/${cid}/documents`), { title: 'Tickets', text: 'Reference ZX-4471 covers the migration runbook in detail.' });
+
+    // A viewer (workspace:read) cannot change retrieval config.
+    expect((await member.post(u(orgId, `/collections/${cid}/retrieval`), {})).status).not.toBe(200);
+
+    // Owner sets hybrid; config persists.
+    const patched = await fetchPatch(owner, u(orgId, `/collections/${cid}/retrieval`), { mode: 'hybrid' });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+    expect(patched.body.collection.retrievalConfig.mode).toBe('hybrid');
+
+    // The configured mode is honored by search (exact-ID recall via the lexical channel).
+    const s = await owner.post(u(orgId, `/collections/${cid}/search`), { query: 'ZX-4471' });
+    expect(s.status).toBe(200);
+    expect(s.body.results[0]?.title).toBe('Tickets');
+  });
+
+  it('rejects an invalid mode', async () => {
+    const { owner, orgId } = await ownerWithMember('viewer');
+    const cid = (await owner.post(u(orgId, '/collections'), { name: 'Bad' })).body.collectionId;
+    const r = await fetchPatch(owner, u(orgId, `/collections/${cid}/retrieval`), { mode: 'nonsense' });
+    expect(r.status).toBe(400);
+  });
+});
+
+// PATCH helper (the test Client only exposes get/post/del).
+async function fetchPatch(c: Client, path: string, body: unknown): Promise<Res> {
+  const cookie = c.snapshot();
+  const res = await fetch(`${BASE}${path}`, { method: 'PATCH', headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, body: JSON.stringify(body) });
+  const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
+  return { status: res.status, body: out };
+}

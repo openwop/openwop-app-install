@@ -180,6 +180,12 @@ export interface ChatSessionRecord {
   /** Cached count; updated on append/reset. Sample-grade — caller-
    *  authoritative count is `listChatSessionMessages(sessionId).length`. */
   messageCount: number;
+  /** ADR 0151 — title provenance, gating auto-titling so it runs ONCE and never
+   *  clobbers a manual rename. `'default'` (or absent) = the substring placeholder,
+   *  still auto-titleable; `'auto'` = an LLM title was written (don't re-run);
+   *  `'user'` = the user renamed it (never overwrite). Additive; legacy/absent ⇒
+   *  treated as `'default'`. */
+  titleSource?: 'default' | 'auto' | 'user';
 }
 
 /** One message inside a chat session. Content is a JSON string (the
@@ -194,6 +200,13 @@ export interface ChatMessageRecord {
   /** Serialized meta (provider, model, tokens, error, citations, etc.)
    *  — null when the bubble has no meta (user turns, system banners). */
   meta: string | null;
+  /** The subjectRef of the principal that AUTHORED (appended) this message —
+   *  SERVER-STAMPED from the authenticated caller, never client-supplied (ADR
+   *  0102 Phase 2). Authorizes in-place edits: only the author or the session
+   *  owner/manager may UPDATE a message, so a member of a shared chat can't
+   *  overwrite another's. `null` for legacy rows (pre-migration) + anon appends
+   *  ⇒ owner-writable. */
+  authorSubject: string | null;
   createdAt: string;
 }
 
@@ -223,7 +236,15 @@ export type NotificationType =
   | 'workflow.input_needed'
   | 'workflow.failed'
   | 'workflow.completed'
-  | 'system.alert';
+  | 'system.alert'
+  // ADR 0049 — a kanban card was assigned to a person (addressed notification,
+  // delivered via the ADR 0050 `recipientUserId` channel).
+  | 'task.assigned'
+  // ADR 0074 — a review (interrupt/approval) changed state. NOT an inbox
+  // notification: emitted via the emitter's non-persisted `signal()` path as a
+  // tenant-broadcast cache hint for the live review-status store. Never
+  // inserted into Storage, never web-pushed, excluded from action-needed.
+  | 'review.updated';
 
 export type NotificationPriority = 'low' | 'normal' | 'high' | 'urgent';
 
@@ -232,6 +253,22 @@ export type NotificationStatus = 'unread' | 'read' | 'archived';
 export interface NotificationRecord {
   notificationId: string;
   tenantId: string;
+  /**
+   * ADR 0050 — per-recipient targeting. When set, this is an **addressed**
+   * notification visible only to that user (within `tenantId`); when absent
+   * it is a **broadcast** notification visible to the whole tenant/workspace
+   * (the pre-0050 behavior, unchanged). The two channels coexist; this is NOT
+   * a user-only model — see ADR 0050.
+   */
+  recipientUserId?: string;
+  /**
+   * ADR 0050 Phase 3 — role-addressed broadcast. When set (and `recipientUserId`
+   * is absent) the notification is visible only to tenant members who HOLD this
+   * RBAC role (ADR 0006/0015 workspace-root roles), resolved at read time. A row
+   * with `recipientRole` set is NEVER a plain broadcast — a member lacking the
+   * role does not see it (default-deny). Examples: billing/quota → `admin`/`owner`.
+   */
+  recipientRole?: string;
   type: NotificationType | string;
   priority: NotificationPriority;
   status: NotificationStatus;
@@ -265,6 +302,11 @@ export interface NotificationRecord {
 export interface PushSubscriptionRecord {
   subscriptionId: string;
   tenantId: string;
+  /** ADR 0050 — the user who registered this device. Lets addressed
+   *  notifications push only to their recipient's devices. Absent on rows
+   *  registered before the migration (legacy) — those receive broadcasts only,
+   *  never addressed notifications (a null owner can't be safely matched). */
+  userId?: string;
   endpoint: string;
   p256dhKey: string;
   authKey: string;
@@ -332,8 +374,15 @@ export interface UserAgentRecord {
  * knowledge & memory capability — bound KB collections (cited) + the agent's
  * private RFC-0004 memory namespace, composed into dispatch retrieval. The union
  * grows as new capabilities are extracted to the core level.
+ *
+ * ADR 0045/0048 — `capabilities[]` is the "what a subject can DO" axis, ORTHOGONAL
+ * to the subject `kind` ("what it IS", `host/subject.ts`). `cognition` names the
+ * agent's inherent ability to take model turns (dispatch) — implied by an agent's
+ * `kind:'agent'` projection (gating dispatch on the flag is a deferred follow-on,
+ * ADR 0048, to avoid regressing existing agents). `advisor` names eligibility for
+ * an advisory board (ADR 0040) — a capability, NOT a kind (an advisor is an agent).
  */
-export type AgentCapabilityId = 'assistant' | 'knowledge';
+export type AgentCapabilityId = 'assistant' | 'knowledge' | 'cognition' | 'advisor';
 
 export interface AgentProfile {
   /** The owning agent's id — `rosterId` (preferred, for standing agents) or
@@ -370,6 +419,13 @@ export interface AgentProfile {
     memoryWritable?: boolean;
     retrieval?: { topK?: number; sources?: ('kb' | 'memory')[] };
   };
+  /** ADR 0044 — the digital-twin LINK: this agent is a twin of `userId` (an
+   *  opaque `user:<id>` principal). Set by an admin/owner; grants NO memory access
+   *  by itself. Cross-subject recall additionally requires a user-issued
+   *  `TwinGrant` (host-owned, `twinService`) — the link is configuration, the
+   *  grant is authorization. Phase 1 (ADR 0044) stores the link + grant only; the
+   *  fenced recall composition is Phase 2. */
+  twin?: { userId: string; linkedBy: string; linkedAt: string };
   /** Success/analytics metric keys. */
   metrics?: string[];
   autonomy: {

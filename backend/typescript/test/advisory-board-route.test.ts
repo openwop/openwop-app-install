@@ -1,30 +1,25 @@
 /**
- * Board of Advisors (ADR 0040) — ROUTE + orchestration harness. Boots the real
- * app and drives the advisory-board surface over HTTP, plus exercises the convene
- * orchestration directly with an injected reply stub (deterministic, no model):
+ * Board of Advisors (ADR 0040) — ROUTE harness. Boots the real app and drives the
+ * advisory-board ENTITY surface over HTTP (the boardroom conversation itself runs
+ * in the AI chat over chat.turn — ADR 0040 § Correction 2026-06-15 — not here):
  *   - toggle gating (404 when `advisory-board` is off)
  *   - create/list/get a board; cohort validation (empty / cross-tenant advisor)
  *   - living-persona ack gate (422 without the acknowledgement)
  *   - visibility: a `private` board is invisible to a co-tenant member (404),
  *     a `shared` board is visible; cross-tenant IDOR is fail-closed (404)
  *   - owner-only update/delete
- *   - convene: one user turn + one attributed turn per advisor + a moderator turn;
- *     resolved cohort stamped; a 2nd advisor sees the 1st narrative-cast `[Name]:`
- *     (cross-talk); continuing a session appends turns
+ *   - `@@<handle>` resolution: by-handle → cohort, visibility-gated, 404 unknown
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
-import { convene } from '../src/features/advisory-board/service.js';
-import { createBoundCollection, ingestDocToAgent } from '../src/features/agent-knowledge/service.js';
-import type { ChatMessage } from '../src/providers/dispatch.js';
 
-const PORT = 18761;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 let n = 0;
 
@@ -33,9 +28,9 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
-  for (const id of ['users', 'kb', 'agent-knowledge', 'advisory-board']) {
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  for (const id of ['users', 'kb', 'advisory-board']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -177,63 +172,93 @@ describe('advisory-board — visibility + IDOR', () => {
   });
 });
 
-describe('advisory-board — convene orchestration (injected reply)', () => {
-  it('fans the prompt to each advisor + a moderator, attributes turns, and narrative-casts cross-talk', async () => {
-    const { owner, userId, advisors, orgId } = await ownerWithAdvisors();
-    const created = await owner.post(B, { orgId, name: 'Council', advisors });
-    const board = created.body;
+describe('advisory-board — @@<handle> resolution (for the AI chat)', () => {
+  it('resolves a board by its handle → cohort; 404s an unknown handle; private board hidden from a co-tenant member', async () => {
+    const tenantId = `org:ab-${Date.now()}-${n++}`;
+    const owner = client();
+    await signup(owner, { tenantId });
+    const member = client();
+    const memberUser = await signup(member, { tenantId });
+    const a = await makeAdvisor(owner, 'Ada');
+    const b = await makeAdvisor(owner, 'Boaz');
+    const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const orgId = org.body.orgId;
+    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
 
-    // A reply stub: echo who's answering (the LAST system line names the persona
-    // via the scaffold) and record the messages so we can assert cross-talk casting.
-    const seen: ChatMessage[][] = [];
-    let call = 0;
-    const reply = async ({ messages }: { messages: ChatMessage[] }): Promise<string> => {
-      seen.push(messages);
-      return `reply-${call++}`;
-    };
+    const shared = await owner.post(B, { orgId, name: 'Council', advisors: [a, b], visibility: 'shared' });
+    const priv = await owner.post(B, { orgId, name: 'Private', advisors: [a], visibility: 'private' });
+    expect(shared.status).toBe(201);
 
-    const session = await convene(board.tenantId, userId, 'Dana', board.boardId, { prompt: 'How do we grow?' }, reply);
+    // Owner resolves the shared board by handle → the advisor cohort.
+    const r = await owner.get(`${B}/by-handle/${encodeURIComponent(shared.body.handle)}`);
+    expect(r.status, JSON.stringify(r.body)).toBe(200);
+    expect(r.body.advisors).toEqual([a, b]);
+    expect(r.body.disclaimer).toMatch(/simulated/i);
 
-    // 1 user + 2 advisors + 1 moderator (synthesize defaults true).
-    expect(session.turns).toHaveLength(4);
-    expect(session.turns[0]).toMatchObject({ role: 'user', speakerId: 'user', speakerName: 'Dana', content: 'How do we grow?' });
-    expect(session.turns[1]).toMatchObject({ role: 'advisor', speakerId: advisors[0], speakerName: 'Ada' });
-    expect(session.turns[2]).toMatchObject({ role: 'advisor', speakerId: advisors[1], speakerName: 'Boaz' });
-    expect(session.turns[3]).toMatchObject({ role: 'moderator', speakerName: 'Moderator' });
-    // Cohort stamped at first convene.
-    expect(session.resolvedCohort.advisors).toEqual(advisors);
+    // Unknown handle → 404.
+    expect((await owner.get(`${B}/by-handle/does-not-exist`)).status).toBe(404);
 
-    // The 2nd advisor (Boaz) saw Ada's prior turn narrative-cast as `[Ada]: …`.
-    const boazMessages = seen[1];
-    const hasAdaCast = boazMessages.some((m) => typeof m.content === 'string' && m.content.startsWith('[Ada]: '));
-    expect(hasAdaCast).toBe(true);
+    // A co-tenant member resolves the SHARED board but not the PRIVATE one.
+    expect((await member.get(`${B}/by-handle/${encodeURIComponent(shared.body.handle)}`)).status).toBe(200);
+    expect((await member.get(`${B}/by-handle/${encodeURIComponent(priv.body.handle)}`)).status).toBe(404);
+  });
+});
 
-    // Continuing the session appends (does not replace) turns.
-    const session2 = await convene(board.tenantId, userId, 'Dana', board.boardId, { prompt: 'And costs?', sessionId: session.sessionId }, reply);
-    expect(session2.sessionId).toBe(session.sessionId);
-    expect(session2.turns).toHaveLength(8);
-    expect(session2.turns[4]).toMatchObject({ role: 'user', content: 'And costs?' });
+describe('advisory-board — strategy context (ADR 0079 Phase 5)', () => {
+  const S = '/v1/host/openwop-app/strategy';
+  it('carries readable strategy contextRefs, rejects unreadable, and previews them', async () => {
+    await enable('advisory-board', 'on');
+    await enable('strategy', 'on');
+    const { owner, advisors, orgId } = await ownerWithAdvisors();
+    const s = (await owner.post(S, { orgId, title: 'Win FY26', scope: 'org', summary: 'Grow ARR' })).body;
+    expect(s.id).toBeTruthy();
+
+    // a board carrying the strategy as context
+    const board = (await owner.post(B, { name: 'Founders', orgId, advisors, contextRefs: [{ kind: 'strategy', strategyId: s.id }] })).body;
+    expect(board.contextRefs).toHaveLength(1);
+
+    // preview resolves the strategy (RBAC-filtered for the caller)
+    const preview = await owner.get(`${B}/${encodeURIComponent(board.boardId)}/strategy-context`);
+    expect(preview.status, JSON.stringify(preview.body)).toBe(200);
+    expect(preview.body.strategies.map((x: any) => x.id)).toContain(s.id);
+    expect(preview.body.strategies[0].title).toBe('Win FY26');
+
+    // an unreadable / absent strategy ref is rejected at board-save (404)
+    const bad = await owner.post(B, { name: 'Bad', orgId, advisors, contextRefs: [{ kind: 'strategy', strategyId: 'strategy-does-not-exist' }] });
+    expect(bad.status).toBe(404);
+
+    // an UNKNOWN ref kind is rejected (400); a valid 'project' kind with a bogus id
+    // is not-found (404) — project context is now a supported kind (ADR 0100).
+    const badKind = await owner.post(B, { name: 'Bad2', orgId, advisors, contextRefs: [{ kind: 'banana', strategyId: 'x' }] });
+    expect(badKind.status).toBe(400);
+    const badProject = await owner.post(B, { name: 'Bad3', orgId, advisors, contextRefs: [{ kind: 'project', projectId: 'project-does-not-exist' }] });
+    expect(badProject.status).toBe(404);
   });
 
-  it('grounds an advisor from its OWN bound corpus, keyed by rosterId (regression: not the shared manifest id)', async () => {
-    const { owner, userId, advisors, orgId } = await ownerWithAdvisors();
-    const created = await owner.post(B, { orgId, name: 'Council', advisors });
-    const board = created.body;
+  it('carries readable PROJECT contextRefs (ADR 0100 — project context parity)', async () => {
+    await enable('advisory-board', 'on');
+    await enable('projects', 'on');
+    const { owner, advisors, orgId } = await ownerWithAdvisors();
+    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Launch Q3' })).body;
+    expect(proj.id).toBeTruthy();
+    const board = (await owner.post(B, { name: 'PMO Board', orgId, advisors, contextRefs: [{ kind: 'project', projectId: proj.id }] })).body;
+    expect(board.contextRefs).toEqual([{ kind: 'project', projectId: proj.id }]);
+  });
 
-    // Bind a KB collection + a relevant doc to the FIRST advisor ONLY, keyed by
-    // its rosterId (the agentProfile.profileId), exactly as ADR 0038 binds.
-    const col = await createBoundCollection(board.tenantId, orgId, userId, advisors[0], { name: 'Ada corpus' });
-    await ingestDocToAgent(board.tenantId, orgId, userId, advisors[0], col.collectionId, {
-      title: 'Growth playbook',
-      text: 'To grow the company, expand into adjacent markets and double down on the highest-retention customer segment.',
-    });
-
-    const reply = async (): Promise<string> => 'noted';
-    const session = await convene(board.tenantId, userId, 'Dana', board.boardId, { prompt: 'How should we grow the company?' }, reply);
-
-    // The bound advisor's turn resolves grounding; the unbound advisor's does not.
-    // Before the fix (keyed by the shared agentRef.agentId), NEITHER resolved.
-    expect(session.turns[1]).toMatchObject({ role: 'advisor', speakerId: advisors[0], grounded: true });
-    expect(session.turns[2].grounded ?? false).toBe(false);
+  it('cross-org: a board owner cannot attach a strategy they cannot read', async () => {
+    await enable('advisory-board', 'on');
+    await enable('strategy', 'on');
+    const tenantId = `org:abs-${Date.now()}-${n++}`;
+    const owner = client(); await signup(owner, { tenantId });
+    const member = client(); const memberUser = await signup(member, { tenantId });
+    const orgA = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Alpha' })).body.orgId;
+    const orgB = (await owner.post('/v1/host/openwop-app/orgs', { name: 'Bravo' })).body.orgId;
+    await owner.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(orgA)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    const adv = await makeAdvisor(member, 'Cleo');
+    // an org-scoped strategy in org B (the member can't read it)
+    const sB = (await owner.post(S, { orgId: orgB, title: 'Secret plan', scope: 'org' })).body;
+    // the member builds a board in org A but tries to attach the org-B strategy → 404
+    const res = await member.post(B, { name: 'Member board', orgId: orgA, advisors: [adv], contextRefs: [{ kind: 'strategy', strategyId: sB.id }] });
+    expect(res.status).toBe(404);
   });
 });

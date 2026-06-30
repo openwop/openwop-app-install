@@ -1,0 +1,73 @@
+/**
+ * `capability-firewall` namespace (ADR 0135) — pare-feu de capacités. French (fr).
+ */
+export const messages = {
+  eyebrow: 'Accès et données',
+  title: 'Pare-feu de capacités',
+  lede: 'Exiger une approbation (ou bloquer) quand une exécution d’IA combine des étapes risquées — comme lire des données puis les envoyer hors de l’hôte.',
+  org: 'Organisation',
+  usingDefault: 'valeur par défaut',
+
+  whatTitle: 'Ce que ça fait',
+  whatBody: 'Les agents IA utilisent des outils pour travailler. Lire des données, c’est bien ; les envoyer aussi — mais lire des données puis les envoyer hors de l’hôte, c’est ainsi que l’information fuit. Ce pare-feu surveille la combinaison de ce qu’une exécution a déjà fait et de ce qu’un outil s’apprête à faire, et peut suspendre pour approbation ou bloquer.',
+
+  tierPure: 'juste calculer',
+  tierRead: 'lire des données',
+  tierWrite: 'modifier des données',
+  tierExec: 'exécuter du code',
+  egrNone: 'garder les données dans l’app',
+  egrSafeFetch: 'lire le web public',
+  egrHostMediated: 'envoyer des données via une app connectée',
+  egrHostOwned: 'agir en votre nom',
+  scopeClass: 'portée : {{scope}}',
+
+  rulesHeading: 'Règles actives',
+  emptyTitle: 'Activé, mais ne surveille rien encore',
+  emptyBody: 'Sans règle, toute combinaison d’outils est autorisée. Ajoutez la règle recommandée ci-dessous, ou créez la vôtre.',
+  sentRunDid: 'Si une exécution a fait :',
+  sentAndTool: 'et un outil tente ceci :',
+  sentToolOnly: 'Si un outil tente ceci :',
+  verdictDeny: 'refuser',
+  verdictRequireApproval: 'exiger une approbation',
+  remove: 'Retirer',
+  removeRuleConfirm: 'Retirer cette règle ?',
+  removeRuleAria: 'Retirer la règle {{desc}}',
+
+  recommendedTitle: 'Règle recommandée',
+  recommendedBody: 'Demander une approbation quand une exécution lit des données et qu’un outil tente ensuite de les envoyer hors de l’hôte — la fuite la plus courante.',
+  recommendedAdd: 'Ajouter la règle recommandée',
+  recommendedDesc: 'Lire des données puis les envoyer hors de l’hôte',
+  recommendedReason: 'Cette exécution a lu des données et s’apprête à les envoyer hors de l’hôte — approuvez pour continuer.',
+
+  addHeading: 'Créer une règle',
+  anyOfLegend: 'Si une exécution a déjà…',
+  anyOfHint: 'laissez vide pour toute exécution',
+  withLegend: '…et qu’un outil tente ensuite de…',
+  groupAction: 'faire ceci :',
+  groupData: 'avec les données :',
+  verdictLabel: 'alors',
+  reasonPlaceholder: 'Motif affiché à l’utilisateur (facultatif)',
+  addRule: 'Ajouter la règle',
+  needWith: 'Choisissez au moins une action possible de l’outil.',
+  customRule: 'Règle personnalisée',
+
+  previewLabel: 'Aperçu',
+  previewWithAny: 'Si une exécution a fait : {{any}} ; et un outil tente ceci : {{next}}',
+  previewNoAny: 'Si un outil tente ceci : {{next}}',
+  previewDeny: 'la bloquer',
+  previewApproval: 'demander une approbation',
+  orJoin: ' ou ',
+
+  policyHeading: 'Outils que nous ne pouvons pas classer',
+  policyBody: 'Les outils personnalisés et tiers ne sont peut-être pas encore classés. Choisissez ce que le pare-feu suppose à leur sujet.',
+  policySkipLabel: 'Les autoriser — seuls les outils classés sont vérifiés',
+  policyRiskyLabel: 'Les traiter comme risqués — plus sûr, mais peut demander une approbation plus souvent',
+
+  loading: 'Chargement…',
+  loadOrgsFailed: 'Échec du chargement des organisations.',
+  loadFailed: 'Échec du chargement des règles.',
+  saveFailed: 'Échec de l’enregistrement des règles.',
+  saved: 'Règles du pare-feu enregistrées',
+  noOrgsTitle: 'Aucune organisation',
+  noOrgsBody: 'Créez une organisation pour configurer le pare-feu de capacités.',
+};

@@ -323,15 +323,17 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     }
   });
 
-  // PUT/DELETE /me/pinned-agents/:rosterId — pin/unpin an agent to the sidebar
-  // (ADR 0023 — pinned agents render as an indented sub-menu under "Agents").
-  const pin = (pinned: boolean) => async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  // PUT/DELETE /me/pinned-agents/:rosterId        — pin/unpin to the SIDEBAR
+  // PUT/DELETE /me/pinned-chat-agents/:rosterId   — pin/unpin to the AI-CHAT
+  //   welcome "hand it to an agent" row. Two independent pin targets (ADR 0023
+  //   sidebar pin + the chat-welcome curation); same fail-closed IDOR on pin.
+  const pin = (target: 'sidebar' | 'chat', pinned: boolean) => async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const user = await resolveCallerUser(req);
       const rosterId = req.params.rosterId ?? '';
       // PINNING is fail-closed: the agent MUST exist in the caller's tenant
       // (IDOR guard). UN-pinning never is — removing a (possibly already-deleted)
-      // id from your OWN list is always safe, and is exactly how the sidebar
+      // id from your OWN list is always safe, and is exactly how the surface
       // self-heals a stale pin after its agent was deleted.
       if (pinned) {
         const entry = await getRosterEntry(rosterId);
@@ -339,13 +341,15 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
           throw new OpenwopError('not_found', 'Agent not found.', 404, { rosterId });
         }
       }
-      res.json(viewProfile(await setAgentPinned(user.tenantId, user.userId, rosterId, pinned)));
+      res.json(viewProfile(await setAgentPinned(user.tenantId, user.userId, rosterId, pinned, target)));
     } catch (err) {
       next(err);
     }
   };
-  app.put('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin(true));
-  app.delete('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin(false));
+  app.put('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin('sidebar', true));
+  app.delete('/v1/host/openwop-app/profiles/me/pinned-agents/:rosterId', pin('sidebar', false));
+  app.put('/v1/host/openwop-app/profiles/me/pinned-chat-agents/:rosterId', pin('chat', true));
+  app.delete('/v1/host/openwop-app/profiles/me/pinned-chat-agents/:rosterId', pin('chat', false));
 
   // POST/DELETE /:userId/skills/:skill/endorse — endorse a PEER's skill.
   // Fail-closed: not your own profile; the target + skill must exist in your

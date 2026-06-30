@@ -10,6 +10,8 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
 import { Link } from 'react-router-dom';
 import { useNotificationStore } from './notificationStore.js';
 import { PageHeader } from '../ui/PageHeader.js';
@@ -32,15 +34,17 @@ import { listOpenInterrupts, type OpenInterrupt } from '../client/interruptsClie
 import { RenderInterrupt } from '../interrupts/RenderInterrupt.js';
 import { NeedsYouInbox } from './NeedsYouInbox.js';
 import { relativeTime } from '../agents/agentViewModel.js';
+import { formatDateTime } from '../i18n/format.js';
 import type { Notification, NotificationType, NotificationPriority } from './types.js';
-import { isActionNeeded, TYPE_LABELS } from './types.js';
+import { isActionNeeded, TYPE_LABEL_KEYS } from './types.js';
 
 type Tab = 'action-needed' | 'all' | 'archived';
 
-const TAB_LABELS: Record<Tab, string> = {
-  'action-needed': 'Action needed',
-  'all':           'All',
-  'archived':      'Archived',
+/** Tab → i18n key. Resolved via the page's `t()` so the strip stays localized. */
+const TAB_LABEL_KEYS: Record<Tab, string> = {
+  'action-needed': 'tabActionNeeded',
+  'all':           'tabPageAll',
+  'archived':      'tabPageArchived',
 };
 
 /** Map a notification type to its scanning glyph. Unknown (open-wire) types
@@ -61,27 +65,23 @@ function typeIcon(type: NotificationType, size = 16): JSX.Element {
   }
 }
 
-/** Human label for a (possibly open-wire) notification type. */
-function typeLabel(type: NotificationType): string {
-  return TYPE_LABELS[type] ?? type;
-}
-
 /** Priority → labeled chip tone (DESIGN §5.3 severity reuse). `normal` is the
  *  baseline and renders no chip; only the off-baseline bands earn a pill. */
-function priorityChip(priority: NotificationPriority): JSX.Element | null {
+function priorityChip(priority: NotificationPriority, t: (k: string) => string): JSX.Element | null {
   switch (priority) {
     case 'urgent':
-      return <span className="chip chip--danger">Urgent</span>;
+      return <span className="chip chip--danger">{t('priorityUrgent')}</span>;
     case 'high':
-      return <span className="chip chip--warning">High</span>;
+      return <span className="chip chip--warning">{t('priorityHigh')}</span>;
     case 'low':
-      return <span className="chip chip--muted">Low</span>;
+      return <span className="chip chip--muted">{t('priorityLow')}</span>;
     default:
       return null;
   }
 }
 
 export function NotificationsPage(): JSX.Element {
+  const { t } = useTranslation('notifications');
   const notifications = useNotificationStore((s) => s.notifications);
   const unreadCount = useNotificationStore((s) => s.unreadCount);
   const refresh = useNotificationStore((s) => s.refresh);
@@ -118,7 +118,7 @@ export function NotificationsPage(): JSX.Element {
   // amber when there's anything waiting on the human.
   const figures: KeyFigureItem[] = (['action-needed', 'all', 'archived'] as const).map((key) => ({
     key,
-    label: TAB_LABELS[key],
+    label: t(TAB_LABEL_KEYS[key]),
     value: counts[key],
     ...(key === 'action-needed' && actionNeededCount > 0 ? { tone: 'attention' as const } : {}),
     glyph:
@@ -130,16 +130,16 @@ export function NotificationsPage(): JSX.Element {
   return (
     <section className="page-stack">
       <PageHeader
-        eyebrow="Inbox"
-        title="Inbox"
-        lede="Your agents' communication portal — everything that needs you in one place: proposals to approve, drafted actions, board blockers, and workflow interrupts (resolved inline)."
+        eyebrow={t('pageEyebrow')}
+        title={t('pageTitle')}
+        lede={t('pageLede')}
         actions={
           <>
             <button type="button" className="secondary" onClick={() => void markAllRead()} disabled={unreadCount === 0}>
-              <CheckIcon size={13} /> Mark all read
+              <CheckIcon size={13} /> {t('markAllRead')}
             </button>
             <button type="button" className="secondary" onClick={() => void refresh()}>
-              <RotateCwIcon size={13} /> Refresh
+              <RotateCwIcon size={13} /> {t('common:refresh')}
             </button>
           </>
         }
@@ -152,40 +152,40 @@ export function NotificationsPage(): JSX.Element {
         figures={figures}
         activeKey={tab}
         onToggle={(key) => setTab(key as Tab)}
-        ariaLabel="Filter inbox by queue"
+        ariaLabel={t('filterAriaLabel')}
       />
 
       {loading && filtered.length === 0 && (
-        <StateCard loading icon={<InboxIcon size={28} />} title="Loading inbox…" />
+        <StateCard loading icon={<InboxIcon size={28} />} title={t('loadingInbox')} />
       )}
       {!loading && filtered.length === 0 && (
         tab === 'archived' ? (
           <StateCard
             icon={<InboxIcon size={28} />}
-            title="Nothing archived yet"
-            body="Notifications you dismiss with Archive land here — nothing's been archived so far."
+            title={t('emptyArchivedTitle')}
+            body={t('emptyArchivedBody')}
             action={
               <button type="button" className="secondary" onClick={() => setTab('action-needed')}>
-                Back to Action needed
+                {t('backToActionNeeded')}
               </button>
             }
           />
         ) : tab === 'action-needed' ? (
           <StateCard
             icon={<CheckSquareIcon size={28} />}
-            title="No approvals or input requests"
-            body="You're all clear. Workflows suspended on a human-in-the-loop interrupt show up here when they need you."
+            title={t('emptyActionNeededTitle')}
+            body={t('emptyActionNeededBody')}
             action={
-              <Link to="/runs" className="inline-link">View runs →</Link>
+              <Link to="/runs" className="inline-link">{t('viewRuns')}</Link>
             }
           />
         ) : (
           <StateCard
             icon={<InboxIcon size={28} />}
-            title="No notifications yet"
-            body="Run a workflow and its events will surface here as they happen."
+            title={t('emptyAllTitle')}
+            body={t('emptyAllBody')}
             action={
-              <Link to="/workflows" className="inline-link">Browse workflows →</Link>
+              <Link to="/workflows" className="inline-link">{t('browseWorkflows')}</Link>
             }
           />
         )
@@ -197,7 +197,7 @@ export function NotificationsPage(): JSX.Element {
             key={n.notificationId}
             notification={n}
             onArchive={() => void archive(n.notificationId)}
-            onDelete={() => { if (window.confirm("Delete this notification? This can't be undone — use Archive to dismiss without deleting.")) void deleteN(n.notificationId); }}
+            onDelete={() => { void confirm({ title: t('deleteConfirm'), danger: true, confirmLabel: t('common:delete') }).then((ok) => { if (ok) void deleteN(n.notificationId); }); }}
             onResolved={() => {
               // After an interrupt is resolved, archive the notification
               // and re-fetch — the BE may have emitted a follow-up event
@@ -226,6 +226,7 @@ function NotificationCard({
   onDelete,
   onResolved,
 }: NotificationCardProps): JSX.Element {
+  const { t } = useTranslation('notifications');
   const isUnread = notification.status === 'unread';
   const when = relativeTime(notification.createdAt);
   return (
@@ -233,18 +234,18 @@ function NotificationCard({
       <div className="u-flex u-items-center u-gap-2 u-mb-2">
         <span className="muted u-iflex" aria-hidden="true">{typeIcon(notification.type)}</span>
         <strong>{notification.title}</strong>
-        <span className="chip chip--muted">{typeLabel(notification.type)}</span>
-        {priorityChip(notification.priority)}
-        {isUnread && <span className="chip chip--accent">Unread</span>}
-        <span className="muted u-ml-auto u-fs-12" title={new Date(notification.createdAt).toLocaleString()}>
-          {when ?? new Date(notification.createdAt).toLocaleString()}
+        <span className="chip chip--muted">{t(TYPE_LABEL_KEYS[notification.type] ?? notification.type)}</span>
+        {priorityChip(notification.priority, t)}
+        {isUnread && <span className="chip chip--accent">{t('cardUnread')}</span>}
+        <span className="muted u-ml-auto u-fs-12" title={formatDateTime(notification.createdAt)}>
+          {when ?? formatDateTime(notification.createdAt)}
         </span>
       </div>
       <p className="notifpage-card-message">{notification.message}</p>
       {notification.runId && (
         <div className="u-mb-2">
           <Link to={`/runs/${notification.runId}`} className="inline-link u-fs-12">
-            run {notification.runId.slice(0, 12)} →
+            {t('cardRunLink', { id: notification.runId.slice(0, 12) })}
           </Link>
         </div>
       )}
@@ -259,9 +260,9 @@ function NotificationCard({
 
       <div className="action-bar u-justify-end u-mt-3">
         {notification.status !== 'archived' && (
-          <IconButton label="Archive" icon={<InboxIcon size={15} />} onClick={onArchive} />
+          <IconButton label={t('archive')} icon={<InboxIcon size={15} />} onClick={onArchive} />
         )}
-        <IconButton label="Delete" icon={<TrashIcon size={15} />} className="icon-button u-text-danger" onClick={onDelete} />
+        <IconButton label={t('common:delete')} icon={<TrashIcon size={15} />} className="icon-button u-text-danger" onClick={onDelete} />
       </div>
     </div>
   );
@@ -274,6 +275,7 @@ interface ResolverProps {
 }
 
 function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverProps): JSX.Element | null {
+  const { t } = useTranslation('notifications');
   const [open, setOpen] = useState<OpenInterrupt | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -301,7 +303,7 @@ function InlineInterruptResolver({ runId, interruptId, onResolved }: ResolverPro
   if (!open) {
     return (
       <div className="muted u-fs-12">
-        Interrupt may have been resolved elsewhere — refresh to reconcile.
+        {t('interruptResolvedElsewhere')}
       </div>
     );
   }

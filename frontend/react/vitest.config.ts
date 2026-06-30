@@ -25,5 +25,8 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // Bootstrap i18n (ADR 0065) so component tests render real English copy
+    // instead of raw translation keys — see src/test/i18n-setup.ts.
+    setupFiles: ['src/test/i18n-setup.ts'],
   },
 });

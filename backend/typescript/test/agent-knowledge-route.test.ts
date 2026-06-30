@@ -1,7 +1,8 @@
 /**
  * Agent Knowledge & Memory (ADR 0038) — ROUTE-level harness. Boots the real app
  * and drives the per-agent knowledge curation surface over HTTP:
- *   - toggle gating (404 when `agent-knowledge` is off)
+ *   - always-on (no toggle — graduated 2026-06-16, ADR 0038 § Correction): an
+ *     owned agent's knowledge view serves 200 with no feature gate
  *   - requireOwnedAgent IDOR (a cross-tenant agent id → 404, fail-closed)
  *   - RBAC (workspace:read view; workspace:write to bind/ingest/note)
  *   - create+bind a collection → ingest a doc → retrieve (deterministic embed
@@ -13,6 +14,7 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -22,8 +24,7 @@ import { createAgentMemoryPort, agentMemoryScope } from '../src/host/agentMemory
 import { ingestDocToBoundCollection } from '../src/features/agent-knowledge/service.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 
-const PORT = 18753;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 let n = 0;
 
@@ -32,9 +33,9 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
-  for (const id of ['users', 'kb', 'agent-knowledge']) {
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  for (const id of ['users', 'kb']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -60,8 +61,6 @@ async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ us
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
-const enable = async (id: string, status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status }, 'test'); };
-
 /** A tenant owner client + a standing agent in that tenant + a fresh org. */
 async function ownerWithAgent(): Promise<{ owner: Client; rosterId: string; orgId: string }> {
   const owner = client();
@@ -92,12 +91,10 @@ const k = (rosterId: string, suffix = ''): string => `/v1/host/openwop-app/agent
 const FELINE = 'Feline companions: cats groom themselves with their tongue and purr when content. A kitten is a young cat that loves to play and pounce.';
 const DB = 'Relational databases use B-tree indexes to speed up SQL query execution and JOIN operations across large tables.';
 
-describe('agent-knowledge — toggle gating', () => {
-  it('404s when the agent-knowledge toggle is off', async () => {
-    await enable('agent-knowledge', 'off');
+describe('agent-knowledge — always-on (no toggle)', () => {
+  it('serves an owned agent with no feature gate (200)', async () => {
     const { owner, rosterId } = await ownerWithAgent();
-    expect((await owner.get(k(rosterId))).status).toBe(404);
-    await enable('agent-knowledge', 'on');
+    expect((await owner.get(k(rosterId))).status).toBe(200);
   });
 });
 

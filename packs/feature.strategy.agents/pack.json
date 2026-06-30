@@ -1,0 +1,33 @@
+{
+  "name": "feature.strategy.agents",
+  "version": "1.0.0",
+  "description": "Strategy feature agent pack (ADR 0080 / ADR 0079 / ADR 0014) — a manifest agent whose tools are feature.strategy.nodes over the ctx.features.strategy surface. The Strategy Analyst audits alignment gaps across the strategy portfolio and drafts board-ready memos from the AI chat. Tool-allowlisted to the Strategy feature surface only; the strategy surface is read-only (its only write is a board-memo Document).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "strategy", "agent", "okr", "portfolio", "board"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.strategy.agents.strategy-analyst",
+      "persona": "RESEARCH",
+      "label": "Strategy Analyst",
+      "description": "Audits the strategy portfolio for alignment gaps (strategies with no linked execution, objectives with no key results, off-track linked projects, owner-less initiatives) and drafts board-ready memos — grounded via feature.strategy.nodes over ctx.features.strategy. Recommends and drafts; the human decides and authors strategy. It never mutates strategy data.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/strategy-analyst.md",
+      "toolAllowlist": [
+        "openwop:feature.strategy.nodes.list-strategies",
+        "openwop:feature.strategy.nodes.get-strategy",
+        "openwop:feature.strategy.nodes.get-context",
+        "openwop:feature.strategy.nodes.get-health",
+        "openwop:feature.strategy.nodes.create-board-memo"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

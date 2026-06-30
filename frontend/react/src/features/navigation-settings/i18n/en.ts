@@ -1,0 +1,36 @@
+/**
+ * `navigation-settings` namespace (ADR 0139) — the admin Menu-settings editor.
+ * FLAT camelCase keys (ADR 0065).
+ */
+export const messages = {
+  title: 'Menu settings',
+  lede: 'Choose what appears in each menu, group items under headers, and create your own headers. Sections can be collapsed from the rail itself (remembered per browser).',
+  scopeMine: 'My layout',
+  scopeTenant: 'Workspace default',
+  scopeMineHint: 'Your personal arrangement — only you see it.',
+  scopeTenantHint: 'The shared default for everyone in this workspace (admins only).',
+  mainMenu: 'Main menu',
+  adminMenu: 'Admin menu',
+  addHeader: 'Add header',
+  headerNamePlaceholder: 'New header name',
+  rename: 'Rename',
+  remove: 'Remove',
+  removeHeaderConfirm: 'Remove this header? Items under it move back to their suggested header.',
+  suggested: 'Suggested: {{tier}} · {{group}}',
+  menuLabel: 'Menu',
+  headerLabel: 'Header',
+  visible: 'Visible',
+  alwaysOn: 'Always on',
+  alwaysOnHint: 'Core items can be moved but never hidden.',
+  save: 'Save',
+  saving: 'Saving…',
+  saved: 'Menu layout saved.',
+  saveFailed: 'Couldn’t save the menu layout.',
+  tenantForbidden: 'Only workspace admins can change the shared default. Your change wasn’t saved.',
+  reset: 'Reset to default',
+  resetConfirm: 'Reset this layout to the defaults? Your overrides for this layer will be cleared.',
+  resetDone: 'Layout reset to defaults.',
+  noItems: 'No menu items available.',
+  unsaved: 'You have unsaved changes.',
+  loading: 'Loading…',
+};

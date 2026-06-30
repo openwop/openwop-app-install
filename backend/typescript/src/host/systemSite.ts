@@ -35,7 +35,7 @@ const SYSTEM_SITE_PAGE_ID = 'page:host-site-home';
 const SYSTEM_ACTOR = 'system';
 /** Bump when DEFAULT_SECTIONS changes — a redeploy then refreshes the live page
  *  IF it has never been human-edited (see `doEnsure`). */
-const SEED_VERSION = 4;
+const SEED_VERSION = 5;
 
 /**
  * The built-in default home page (ADR 0027) — a real, brand-aware marketing page
@@ -50,7 +50,27 @@ const DEFAULT_SECTIONS: Section[] = [
     subheading: 'OpenWOP is a live app *and* an open standard. Build AI agents and automated workflows that handle real tasks, then run them anywhere — because what you build is portable, not locked to one vendor.',
     ctaLabel: 'Try the live demo', ctaUrl: '/chat',
     ctaLabel2: 'See the open standard', ctaUrl2: 'https://openwop.dev',
-  } },
+  },
+    // RFC 0103 / ADR 0064: sparse per-locale overlays — only the human-facing
+    // text fields; ctaUrl/ctaUrl2 fall through to base. Exercises the live
+    // localized-delivery path on the steward host (pt-BR reviewed: native NS-1).
+    localizations: {
+      es: {
+        eyebrow: 'Un estándar abierto para agentes de IA y flujos de trabajo',
+        heading: 'Compañeros de IA que hacen trabajo real — y siguen siendo tuyos.',
+        subheading: 'OpenWOP es una app en vivo *y* un estándar abierto. Crea agentes de IA y flujos de trabajo automatizados que se encargan de tareas reales, y ejecútalos donde quieras — porque lo que creas es portable, no queda atado a un solo proveedor.',
+        ctaLabel: 'Probar la demo en vivo',
+        ctaLabel2: 'Ver el estándar abierto',
+      },
+      'pt-BR': {
+        eyebrow: 'Um padrão aberto para agentes de IA e fluxos de trabalho',
+        heading: 'Colegas de IA que fazem trabalho de verdade — e continuam sendo seus.',
+        subheading: 'O OpenWOP é um app ao vivo *e* um padrão aberto. Crie agentes de IA e fluxos de trabalho automatizados que cuidam de tarefas reais e execute-os em qualquer lugar — porque o que você cria é portátil, sem ficar preso a um único fornecedor.',
+        ctaLabel: 'Testar a demo ao vivo',
+        ctaLabel2: 'Ver o padrão aberto',
+      },
+    },
+  },
   { sectionId: 'd-life', type: 'columns', data: {
     eyebrow: 'How it works', heading: 'Build it. Run it. Stay in control.', layout: 'steps',
     columns: [
@@ -99,7 +119,12 @@ const DEFAULT_SECTIONS: Section[] = [
     heading: 'See it for yourself.',
     subheading: 'Explore the live app — no setup required — or read the open standard behind it.',
     label: 'Open the live demo →', url: '/chat',
-  } },
+  },
+    localizations: {
+      es: { eyebrow: 'Empezar', heading: 'Compruébalo tú mismo.', subheading: 'Explora la app en vivo — sin configuración — o lee el estándar abierto que la sustenta.', label: 'Abrir la demo en vivo →' },
+      'pt-BR': { eyebrow: 'Comece agora', heading: 'Veja você mesmo.', subheading: 'Explore o app ao vivo — sem configuração — ou leia o padrão aberto por trás dele.', label: 'Abrir a demo ao vivo →' },
+    },
+  },
 ];
 
 export interface SystemSite { tenantId: string; orgId: string; pageId: string; slug: string }
@@ -132,12 +157,20 @@ async function applyDefault(): Promise<void> {
   await transitionPage(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, SYSTEM_SITE_PAGE_ID, 'publish', SYSTEM_ACTOR);
 }
 
-async function doEnsure(): Promise<SystemSite> {
-  // 1. The reserved org (fixed id ⇒ idempotent upsert; no owner member — host-level).
+/** Ensure the reserved host-site org exists (fixed id ⇒ idempotent upsert; no owner
+ *  member — host-level). The SINGLE owner of this reserved-org creation: both the
+ *  system site (home page) and the system brand (ADR 0170) call it, so neither
+ *  duplicates the create nor couples to the other's seeding. */
+export async function ensureSystemSiteOrg(): Promise<void> {
   if (!(await getOrg(SYSTEM_SITE_ORG))) {
     await createOrg({ tenantId: SYSTEM_SITE_TENANT, orgId: SYSTEM_SITE_ORG, createdBy: SYSTEM_ACTOR, name: 'OpenWOP Site' });
     log.info('system_site_org_created', { orgId: SYSTEM_SITE_ORG });
   }
+}
+
+async function doEnsure(): Promise<SystemSite> {
+  // 1. The reserved org (shared helper — single owner of the create).
+  await ensureSystemSiteOrg();
   // 2. The home page (seeded + published) if absent.
   let page = await findHomePage();
   if (!page) {

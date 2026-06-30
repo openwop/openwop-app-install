@@ -4,6 +4,7 @@
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import {
@@ -13,8 +14,7 @@ import {
 } from '../src/byok/ephemeralRunSecrets.js';
 
 let server: http.Server;
-const PORT = 18181;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
@@ -23,14 +23,14 @@ beforeAll(async () => {
   // path is exercised separately in test/auth-cookies.test.ts.
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 

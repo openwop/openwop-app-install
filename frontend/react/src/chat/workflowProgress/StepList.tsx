@@ -10,6 +10,7 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleIcon, PauseIcon, XIcon } from '../../ui/icons/index.js';
 import type { ChatMessage, WorkflowRunState } from '../hooks/useChatSession.js';
 
@@ -21,12 +22,15 @@ export const STATUS_COLORS: Record<WorkflowRunState['status'], string> = {
   cancelled: 'var(--color-warning)',
 };
 
-export const STATUS_LABELS: Record<WorkflowRunState['status'], string> = {
-  pending: 'Starting…',
-  running: 'Running',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
+/** Maps a run status to its `chat` i18n key. Render sites translate at
+ *  display time: `t(STATUS_LABEL_KEYS[status])`. Kept as a key map (not
+ *  pre-translated strings) so the label follows the active locale. */
+export const STATUS_LABEL_KEYS: Record<WorkflowRunState['status'], string> = {
+  pending: 'stepStatusStarting',
+  running: 'stepStatusRunning',
+  completed: 'stepStatusCompleted',
+  failed: 'stepStatusFailed',
+  cancelled: 'stepStatusCancelled',
 };
 
 interface Props {
@@ -35,6 +39,7 @@ interface Props {
 }
 
 export function StepList({ run, message }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   const [expandedNodeId, setExpandedNodeId] = useState<string | null>(null);
   const completedSet = new Set(run.completedNodeIds);
   const failedSet = new Set(run.failedNodeIds);
@@ -59,7 +64,7 @@ export function StepList({ run, message }: Props): JSX.Element {
       {Object.entries(run.nodeNames).map(([nodeId, friendlyName], idx) => {
         const isCompleted = completedSet.has(nodeId);
         const isFailed = failedSet.has(nodeId);
-        const isSuspended = message.activeInterrupt?.nodeId === nodeId;
+        const isSuspended = (message.activeInterrupts ?? []).some((i) => i.nodeId === nodeId);
         // `runningNodeIds` is the new authoritative source (set by
         // node.started / cleared by node.completed/failed/suspended);
         // the `currentNodeName` fallback keeps legacy persisted runs
@@ -82,6 +87,17 @@ export function StepList({ run, message }: Props): JSX.Element {
           : isSuspended ? { icon: <PauseIcon size={13} />, color: STATUS_COLORS.running }
           : isRunning ? { icon: <StepSpinner />, color: STATUS_COLORS.running }
           : { icon: <CircleIcon size={13} />, color: 'var(--ink-3)' };
+
+        // The visible state cue is the icon (aria-hidden) + weight/opacity, so
+        // AT gets no state. Announce it with a visually-hidden label — except
+        // suspended, which already has the visible "awaiting your input" text.
+        // A not-yet-started node is "Pending", not the run-level "Starting…"
+        // that STATUS_LABEL_KEYS.pending carries for a whole run.
+        const stateLabelKey = isCompleted ? STATUS_LABEL_KEYS.completed
+          : isFailed ? STATUS_LABEL_KEYS.failed
+          : isSuspended ? null
+          : isRunning ? STATUS_LABEL_KEYS.running
+          : 'stepStatusPending';
 
         // A11y wiring for the disclosure pattern. Screen readers
         // announce the row as a button + report its expanded state +
@@ -120,22 +136,23 @@ export function StepList({ run, message }: Props): JSX.Element {
               <span className="u-flex-1 u-minw-0 u-truncate">
                 {friendlyName}
               </span>
+              {stateLabelKey && <span className="visually-hidden">{t(stateLabelKey)}</span>}
               {hasOutputs && (
                 <span className="steplist-output-link">
                   <span className="steplist-output-link-inner">
                     {isExpanded ? <ChevronDownIcon size={12} /> : <ChevronRightIcon size={12} />}
-                    {isExpanded ? 'hide' : 'view output'}
+                    {isExpanded ? t('hide') : t('viewOutputLower')}
                   </span>
                 </span>
               )}
               {isSuspended && (
                 <span className="steplist-suspended">
-                  Awaiting your input ↓
+                  {t('awaitingYourInputDown')}
                 </span>
               )}
               {isRunning && (
                 <span className="steplist-running" style={{ color: STATUS_COLORS.running }} aria-hidden>
-                  Running…
+                  {t('runningEllipsis')}
                 </span>
               )}
             </div>

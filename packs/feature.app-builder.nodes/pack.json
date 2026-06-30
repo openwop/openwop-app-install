@@ -1,0 +1,20 @@
+{
+  "name": "feature.app-builder.nodes",
+  "version": "1.0.0",
+  "description": "App-builder canvas producer node pack (ADR 0153 Phase 2). The `render` node emits a typed `canvas.app-builder` artifact — a structured app design { name, screens[], connectors[] } with a component tree per screen — that flows through the run-output producer (ADR 0083) and renders inline in the chat artifact workbench. Constrained typed JSON, never executable code; pure transform; replay-safe.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "app-builder", "canvas", "screens", "components"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.app-builder.nodes.render",
+      "version": "1.0.0",
+      "label": "Render app design",
+      "description": "Emit a `canvas.app-builder` artifact. Inputs: { app } (or `source` JSON) = { name, description?, theme?, screens: [{ id, name, route?, isInitial?, components: [tree] }], connectors?: [{ from, to, trigger?, label? }] }. Components reference the host app-builder catalog by `type`. Output: a typed canvas.app-builder artifact. Pure transform.",
+      "category": "transform",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

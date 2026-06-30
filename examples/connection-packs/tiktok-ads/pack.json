@@ -1,0 +1,57 @@
+{
+  "name": "core.openwop.connections.tiktok-ads",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "TikTok Ads connection pack (RFC 0095) \u2014 OAuth2 provider for the TikTok Business (Marketing) API. Reach is `openapi`: the manifest declares the TikTok business-api OAuth hosts and points at the Marketing API reference. Carries NO secret; the operator supplies the app id/secret host-side (ADR 0024 \u00a77). The third ad platform Campaign Studio dispatches to (ADR 0167 Phase 3) \u2014 TikTok authenticates with an `Access-Token` header (not `Authorization: Bearer`), handled host-side by the ads-dispatch adapter.",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "tiktok-ads",
+    "displayName": "TikTok Ads",
+    "category": "marketing",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "manual",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://business-api.tiktok.com/portal/auth",
+        "token": "https://business-api.tiktok.com/open_api/v1.3/oauth2/access_token/"
+      },
+      "scopes": {
+        "read": [
+          {
+            "key": "ads.read",
+            "label": "Read ad performance",
+            "scopes": [
+              "ads_read"
+            ]
+          }
+        ],
+        "write": [
+          {
+            "key": "ads.manage",
+            "label": "Manage ads & budgets",
+            "scopes": [
+              "ads_management"
+            ]
+          }
+        ]
+      }
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://business-api.tiktok.com/portal/docs"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http",
+      "feature.campaign-channels.nodes.publish-ad-variants"
+    ],
+    "docsUrl": "https://business-api.tiktok.com/portal/docs",
+    "apiHosts": [
+      "tiktok.com"
+    ]
+  }
+}

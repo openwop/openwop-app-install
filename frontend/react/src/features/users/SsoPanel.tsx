@@ -11,6 +11,7 @@
  * not a demo login button.
  */
 import { useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { config, authedHeaders, fetchOpts } from '../../client/config.js';
 
 interface Caps { auth?: { profiles?: string[] } }
@@ -18,8 +19,8 @@ interface Caps { auth?: { profiles?: string[] } }
 const ACS_PATH = '/v1/host/openwop-app/auth/saml/validate';
 const SCIM_PATH = '/v1/host/openwop-app/auth/scim/provision';
 
-function Row({ name, detail, on, onLabel = 'Advertised', offLabel = 'Not configured' }: {
-  name: string; detail: string; on: boolean; onLabel?: string; offLabel?: string;
+function Row({ name, detail, on, onLabel, offLabel }: {
+  name: string; detail: string; on: boolean; onLabel: string; offLabel: string;
 }): JSX.Element {
   return (
     <div className="sso-row">
@@ -33,6 +34,7 @@ function Row({ name, detail, on, onLabel = 'Advertised', offLabel = 'Not configu
 }
 
 export function SsoPanel(): JSX.Element {
+  const { t } = useTranslation('users');
   const [profiles, setProfiles] = useState<string[] | null>(null);
   const origin = config.baseUrl.replace(/\/$/, '');
 
@@ -52,41 +54,36 @@ export function SsoPanel(): JSX.Element {
   return (
     <div className="surface-card u-p-4 u-grid u-gap-4">
       <div className="u-grid u-gap-1">
-        <strong>Enterprise SSO &amp; provisioning</strong>
-        <span className="muted">
-          SAML 2.0 single sign-on and SCIM 2.0 provisioning. Host seams for
-          white-label / B2B deployments — advertised only when configured + honored.
-        </span>
+        <strong>{t('ssoTitle')}</strong>
+        <span className="muted">{t('ssoLede')}</span>
       </div>
 
       {profiles === null ? (
-        <div className="muted">Reading host capabilities…</div>
+        <div className="muted">{t('ssoReadingCaps')}</div>
       ) : (
         <div className="u-grid u-gap-2">
-          <Row name="OIDC (Google / GitHub)" detail="Firebase-brokered bearer — the host's primary sign-in." on onLabel="Active" />
-          <Row name="Email &amp; password" detail="Local accounts with TOTP MFA (this app, when the Users feature is on)." on onLabel="Active" />
-          <Row name="SAML 2.0 SSO" detail="The host validates IdP assertions at its ACS (Okta / Azure AD / Ping…)." on={saml} />
-          <Row name="SCIM 2.0 provisioning" detail="The IdP create/deactivates users + assigns groups via SCIM." on={scim} />
+          <Row name={t('ssoOidcName')} detail={t('ssoOidcDetail')} on onLabel={t('ssoActive')} offLabel={t('ssoNotConfigured')} />
+          <Row name={t('ssoPasswordName')} detail={t('ssoPasswordDetail')} on onLabel={t('ssoActive')} offLabel={t('ssoNotConfigured')} />
+          <Row name={t('ssoSamlName')} detail={t('ssoSamlDetail')} on={saml} onLabel={t('ssoAdvertised')} offLabel={t('ssoNotConfigured')} />
+          <Row name={t('ssoScimName')} detail={t('ssoScimDetail')} on={scim} onLabel={t('ssoAdvertised')} offLabel={t('ssoNotConfigured')} />
         </div>
       )}
 
       <div className="u-grid u-gap-2">
-        <span className="u-label-sm">Enterprise integration endpoints (point your IdP here)</span>
+        <span className="u-label-sm">{t('ssoEndpointsLabel')}</span>
         <label className="u-grid u-gap-1">
-          <span className="muted">SAML ACS</span>
+          <span className="muted">{t('ssoSamlAcs')}</span>
           <code className="mfa-secret">{origin}{ACS_PATH}</code>
         </label>
         <label className="u-grid u-gap-1">
-          <span className="muted">SCIM provisioning</span>
+          <span className="muted">{t('ssoScimProvisioning')}</span>
           <code className="mfa-secret">{origin}{SCIM_PATH}</code>
         </label>
       </div>
 
       {!saml && !scim ? (
         <div className="alert info" role="status">
-          Not enabled on this deployment. A white-label host turns these on by configuring an
-          IdP certificate / SCIM bearer; the host then advertises the
-          <code> openwop-auth-saml</code> / <code>openwop-auth-scim</code> profiles above.
+          <Trans t={t} i18nKey="ssoNotEnabled" components={[<code key="saml" />, <code key="scim" />]} />
         </div>
       ) : null}
     </div>

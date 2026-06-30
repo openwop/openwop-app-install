@@ -7,16 +7,19 @@
  * The stock app derives its surfaces from live stores and ships zero of
  * these; white-label forks add them wherever they stage example content.
  */
+import { useTranslation } from 'react-i18next';
+
 export function IllustrativeBadge({ detail }: {
   /** Optional hover explanation, e.g. "Example trend — not derived from your runs". */
   detail?: string;
 }): JSX.Element {
+  const { t } = useTranslation('ui');
   return (
     <span
       className="chip chip--muted illustrative-badge"
-      title={detail ?? 'Illustrative example data — not derived from live records'}
+      title={detail ?? t('illustrativeDetail')}
     >
-      Illustrative
+      {t('illustrativeLabel')}
     </span>
   );
 }

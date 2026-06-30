@@ -33,6 +33,7 @@
 
 import { createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
+import type { Subject } from './subject.js';
 import { computeNextFire } from './cronSchedule.js';
 
 /** Largest future horizon the host honors — mirrors the advertised
@@ -56,6 +57,12 @@ export interface ScheduledJob {
   /** ADR 0025 — a human USER that owns this schedule (the user/agent symmetry).
    *  Mutually exclusive with `rosterId`; powers the profile "Schedules" tab. */
   ownerUserId?: string;
+  /** ADR 0045/0046 — the GENERIC owner. The forward home for the legacy
+   *  `rosterId`/`ownerUserId` discriminator (same additive move the board's
+   *  `ownerSubject` made); lets a `kind:'project'` (or any new kind) own a
+   *  schedule with zero new infrastructure. When set it WINS over the legacy
+   *  fields in `scheduleSubject`. */
+  ownerSubject?: Subject;
   /** The manifest agent the owning roster member instantiates (attribution). */
   agentId?: string;
   /** Whether the schedule is active. A disabled schedule keeps its row but its
@@ -160,6 +167,7 @@ export async function registerJob(
     workflowId?: string;
     rosterId?: string;
     ownerUserId?: string;
+    ownerSubject?: Subject;
     agentId?: string;
     enabled?: boolean;
     metadata?: Record<string, unknown>;
@@ -187,6 +195,7 @@ export async function registerJob(
     ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
     ...(input.rosterId !== undefined ? { rosterId: input.rosterId } : {}),
     ...(input.ownerUserId !== undefined ? { ownerUserId: input.ownerUserId } : {}),
+    ...(input.ownerSubject !== undefined ? { ownerSubject: input.ownerSubject } : {}),
     ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     ...(input.configurable !== undefined ? { configurable: input.configurable } : {}),
@@ -205,15 +214,36 @@ export async function listJobs(tenantId?: string): Promise<ScheduledJob[]> {
   return scoped.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
 }
 
-/** List a single roster member's jobs within a tenant (agent "Schedules" tab). */
-export async function listJobsByRoster(tenantId: string, rosterId: string): Promise<ScheduledJob[]> {
-  return (await listJobs(tenantId)).filter((j) => j.rosterId === rosterId);
+/** ADR 0045 — the job's owner as the canonical `Subject`. Prefers the generic
+ *  `ownerSubject` (ADR 0046); falls back to the legacy `rosterId`/`ownerUserId`
+ *  fields (`rosterId` → `{kind:'agent'}`, `ownerUserId` → `{kind:'user'}`) so
+ *  existing rows surface as Subjects unchanged. */
+export function scheduleSubject(job: ScheduledJob): Subject | null {
+  if (job.ownerSubject) return job.ownerSubject;
+  if (job.rosterId) return { kind: 'agent', id: job.rosterId };
+  if (job.ownerUserId) return { kind: 'user', id: job.ownerUserId };
+  return null;
 }
 
-/** ADR 0025 — list a single user's jobs within a tenant (profile "Schedules"
- *  tab), the user-side mirror of `listJobsByRoster`. */
+/** ADR 0045 Phase 2 — list a SUBJECT's jobs (the canonical owner query that
+ *  unifies the per-agent + per-user paths). Tenant-scoped. */
+export async function listJobsForSubject(tenantId: string, subject: Subject): Promise<ScheduledJob[]> {
+  return (await listJobs(tenantId)).filter((j) => {
+    const s = scheduleSubject(j);
+    return s !== null && s.kind === subject.kind && s.id === subject.id;
+  });
+}
+
+/** List a single roster member's jobs (agent "Schedules" tab) — the agent
+ *  specialization of `listJobsForSubject`. */
+export async function listJobsByRoster(tenantId: string, rosterId: string): Promise<ScheduledJob[]> {
+  return listJobsForSubject(tenantId, { kind: 'agent', id: rosterId });
+}
+
+/** ADR 0025 — list a single user's jobs (profile "Schedules" tab) — the user
+ *  specialization of `listJobsForSubject`. */
 export async function listJobsByUser(tenantId: string, ownerUserId: string): Promise<ScheduledJob[]> {
-  return (await listJobs(tenantId)).filter((j) => j.ownerUserId === ownerUserId);
+  return listJobsForSubject(tenantId, { kind: 'user', id: ownerUserId });
 }
 
 /** ADR 0025 — the deterministic id for a user-owned schedule, keyed on its

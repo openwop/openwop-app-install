@@ -7,33 +7,35 @@
  * bumped budget is in flight (RFC 0033).
  */
 
+import { useTranslation } from 'react-i18next';
+import { formatNumber } from '../../i18n/format.js';
 import type { EnvelopeTruncation } from '../types.js';
 
 interface Props {
   truncation: EnvelopeTruncation;
 }
 
-function reasonLabel(reason: string): string {
-  switch (reason) {
-    case 'max_tokens': return 'hit max-tokens cap';
-    case 'length': return 'provider length cap';
-    case 'stop_sequence': return 'stop sequence';
-    default: return reason;
-  }
-}
+const STOP_REASON_KEY: Record<string, string> = {
+  max_tokens: 'truncReasonMaxTokens',
+  length: 'truncReasonLength',
+  stop_sequence: 'truncReasonStopSequence',
+};
 
 export function TruncationCard({ truncation }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
+  const reasonKey = STOP_REASON_KEY[truncation.stopReason];
+  const reasonLabel = reasonKey ? t(reasonKey) : truncation.stopReason;
   return (
-    <div className="env-chip env-chip-warning" role="status" aria-label="Envelope output was truncated">
-      <span className="env-chip-tag">TRUNCATED</span>
+    <div className="env-chip env-chip-warning" role="status" aria-label={t('truncatedTitle')}>
+      <span className="env-chip-tag">{t('truncatedBadge')}</span>
       <span className="env-chip-text">
-        <span className="env-chip-mono">{truncation.provider}/{truncation.model}</span> — {reasonLabel(truncation.stopReason)}
+        <span className="env-chip-mono">{truncation.provider}/{truncation.model}</span> — {reasonLabel}
         {typeof truncation.outputTokenCount === 'number' ? (
-          <> · <span className="env-chip-mono">{truncation.outputTokenCount} tokens</span></>
+          <> · <span className="env-chip-mono">{t('truncatedTokens', { count: formatNumber(truncation.outputTokenCount) })}</span></>
         ) : null}
       </span>
       {truncation.partialPayloadAvailable ? (
-        <span className="env-chip-pill">partial payload recovered</span>
+        <span className="env-chip-pill">{t('partialPayloadRecovered')}</span>
       ) : null}
     </div>
   );

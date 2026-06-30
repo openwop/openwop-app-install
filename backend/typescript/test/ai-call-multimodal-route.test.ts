@@ -10,34 +10,36 @@
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
-const PORT = 18261;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-const URL = `${BASE}/v1/host/openwop-app/ai/call`;
+let URL: string;
 
 let server: http.Server;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/v1/host/openwop-app/ai/call`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const post = (body: unknown) => fetch(URL, { method: 'POST', headers: H, body: JSON.stringify(body) });
 
 describe('RFC 0091 — callai-multimodal seam', () => {
-  it('advertises aiProviders.input.modalities including image + document', async () => {
+  it('advertises aiProviders.input.modalities including image + document + audio', async () => {
     const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
       aiProviders?: { input?: { modalities?: string[] } };
     };
     const mods = doc.aiProviders?.input?.modalities ?? [];
     expect(mods).toContain('image');
     expect(mods).toContain('document');
+    // ADR 0085 Phase 1 — audio is now advertised (and accepted, in lockstep).
+    expect(mods).toContain('audio');
   });
 
   it('accepts a plain string content (back-compat)', async () => {
@@ -65,9 +67,18 @@ describe('RFC 0091 — callai-multimodal seam', () => {
     expect((await res.json() as { modalities?: string[] }).modalities).toContain('document');
   });
 
-  it('rejects an UNADVERTISED modality (audio) with unsupported_modality', async () => {
+  it('accepts an advertised audio ContentPart (ADR 0085 Phase 1)', async () => {
     const res = await post({ messages: [{ role: 'user', content: [
+      { type: 'text', text: 'transcribe this' },
       { type: 'audio', mimeType: 'audio/wav', dataBase64: 'UklGRg==' },
+    ] }] });
+    expect(res.status).toBe(200);
+    expect((await res.json() as { modalities?: string[] }).modalities).toContain('audio');
+  });
+
+  it('rejects an UNADVERTISED modality (video) with unsupported_modality', async () => {
+    const res = await post({ messages: [{ role: 'user', content: [
+      { type: 'video', mimeType: 'video/mp4', dataBase64: 'AAAA' },
     ] }] });
     expect(res.status).toBe(400);
     const body = await res.json() as { error?: { code?: string } };

@@ -87,6 +87,42 @@ export const SelectField = forwardRef<HTMLSelectElement, FieldShell & React.Sele
   },
 );
 
+/**
+ * Checkbox field — the label sits AFTER the box (the one layout `<Field>` can't
+ * express, since it renders the label above the control). Explicit `htmlFor`/id
+ * association + the shared `field-help` / `field-error` wiring, so it reads as
+ * one product with the other form primitives (DESIGN.md §5.1).
+ */
+export const CheckboxField = forwardRef<HTMLInputElement, FieldShell & React.InputHTMLAttributes<HTMLInputElement>>(
+  function CheckboxField({ label, help, error, required, className, containerStyle, ...input }, ref) {
+    const id = useId();
+    const helpId = help ? `${id}-help` : undefined;
+    const errorId = error ? `${id}-error` : undefined;
+    const describedBy = [helpId, errorId].filter(Boolean).join(' ') || undefined;
+    return (
+      <div {...(className ? { className } : {})} {...(containerStyle ? { style: containerStyle } : {})}>
+        <label className="u-flex u-items-center u-gap-2 u-fs-13" htmlFor={id}>
+          <input
+            type="checkbox"
+            id={id}
+            ref={ref}
+            {...(describedBy ? { 'aria-describedby': describedBy } : {})}
+            {...(error ? { 'aria-invalid': true } : {})}
+            {...(required ? { 'aria-required': true } : {})}
+            {...input}
+          />
+          <span>
+            {label}
+            {required ? <span className="field-required" aria-hidden="true">*</span> : null}
+          </span>
+        </label>
+        {help ? <div className="field-help" id={helpId}>{help}</div> : null}
+        {error ? <div className="field-error" id={errorId} role="alert">{error}</div> : null}
+      </div>
+    );
+  },
+);
+
 /** Standalone inline error text (role="alert") for non-Field contexts. */
 export function FormError({ children }: { children: React.ReactNode }): JSX.Element | null {
   if (!children) return null;

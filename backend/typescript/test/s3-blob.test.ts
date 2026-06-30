@@ -75,6 +75,23 @@ describe('S3 blob surface', () => {
     expect(() => createS3Blob({ tenantId: 't' }, { config: null as unknown as S3Config }))
       .toThrow(/not configured/);
   });
+
+  it('refuses to buffer an object larger than the get cap (DATA-5)', async () => {
+    process.env.OPENWOP_BLOB_S3_MAX_GET_BYTES = '16';
+    try {
+      const { fetchFn } = makeFakeS3();
+      const blob = blobFor('t1', fetchFn);
+      // 32 bytes > 16-byte cap → refused (the fake Response carries Content-Length).
+      await blob.put({ key: 'big', contentBase64: Buffer.from('x'.repeat(32)).toString('base64') });
+      await expect(blob.get({ key: 'big' })).rejects.toThrow(/exceeds cap/);
+      // A small object under the cap still round-trips.
+      await blob.put({ key: 'small', contentBase64: Buffer.from('hi').toString('base64') });
+      const got = await blob.get({ key: 'small' }) as { found: boolean; contentBase64: string };
+      expect(Buffer.from(got.contentBase64, 'base64').toString()).toBe('hi');
+    } finally {
+      delete process.env.OPENWOP_BLOB_S3_MAX_GET_BYTES;
+    }
+  });
 });
 
 describe('registerS3BlobAdapter boot guard', () => {

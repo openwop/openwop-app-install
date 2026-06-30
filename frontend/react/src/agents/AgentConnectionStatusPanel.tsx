@@ -13,18 +13,20 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { getConnectionReadiness, type ConnectionReadiness } from './rosterClient.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { CheckIcon, XIcon, ClockIcon, PlugIcon } from '../ui/icons/index.js';
 
-const AUTONOMY_LABEL: Record<ConnectionReadiness['gatedAutonomy'], string> = {
-  auto: 'Acts autonomously',
-  guided: 'Acts with guardrails',
-  review: 'Proposes for review',
+const AUTONOMY_LABEL_KEY: Record<ConnectionReadiness['gatedAutonomy'], string> = {
+  auto: 'connActs',
+  guided: 'connActsGuardrails',
+  review: 'connProposes',
 };
 
-function ProviderChip({ provider, configured, status }: ConnectionReadiness['entries'][number]): JSX.Element {
+function ProviderChip({ provider, configured, status, t }: ConnectionReadiness['entries'][number] & { t: TFunction }): JSX.Element {
   if (configured) {
     return (
       <span className="chip chip--success u-iflex u-items-center u-gap-1">
@@ -37,18 +39,19 @@ function ProviderChip({ provider, configured, status }: ConnectionReadiness['ent
   if (status) {
     return (
       <span className="chip chip--warning u-iflex u-items-center u-gap-1">
-        <ClockIcon size={13} /> {provider} · {status}
+        <ClockIcon size={13} /> {t('connProviderStatus', { provider, status })}
       </span>
     );
   }
   return (
     <span className="chip chip--danger u-iflex u-items-center u-gap-1">
-      <XIcon size={13} /> {provider} · not connected
+      <XIcon size={13} /> {t('connNotConnected', { provider })}
     </span>
   );
 }
 
 export function AgentConnectionStatusPanel({ rosterId }: { rosterId: string }): JSX.Element {
+  const { t } = useTranslation('agents');
   const [readiness, setReadiness] = useState<ConnectionReadiness | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -63,7 +66,7 @@ export function AgentConnectionStatusPanel({ rosterId }: { rosterId: string }): 
     return () => { cancelled = true; };
   }, [rosterId]);
 
-  if (loading) return <p className="muted u-mt-0">Checking connection readiness…</p>;
+  if (loading) return <p className="muted u-mt-0">{t('connChecking')}</p>;
   if (error) return <Notice variant="error">{error}</Notice>;
   if (!readiness) return <></>;
 
@@ -71,8 +74,8 @@ export function AgentConnectionStatusPanel({ rosterId }: { rosterId: string }): 
     return (
       <StateCard
         icon={<PlugIcon size={20} />}
-        title="No required connections"
-        body="This agent declares no external integrations, so nothing gates its autonomy."
+        title={t('connNoneTitle')}
+        body={t('connNoneBody')}
       />
     );
   }
@@ -83,22 +86,21 @@ export function AgentConnectionStatusPanel({ rosterId }: { rosterId: string }): 
     <div className="u-flex u-flex-col u-gap-3">
       {allConfigured ? (
         <Notice variant="success">
-          All required connections are configured — {AUTONOMY_LABEL[gatedAutonomy].toLowerCase()}.
+          {t('connAllConfigured', { autonomy: t(AUTONOMY_LABEL_KEY[gatedAutonomy]).toLowerCase() })}
         </Notice>
       ) : (
         <Notice variant="warning">
-          {missing.length} of {readiness.required.length} required connection{readiness.required.length > 1 ? 's' : ''} not
-          ready — held for review until connected (was “{AUTONOMY_LABEL[declaredAutonomy]}”).
+          {t('connNotReady', { count: missing.length, missing: missing.length, total: readiness.required.length, declared: t(AUTONOMY_LABEL_KEY[declaredAutonomy]) })}
         </Notice>
       )}
 
-      <div className="u-flex u-flex-wrap u-gap-2" aria-label="Required connections">
-        {entries.map((e) => <ProviderChip key={e.provider} {...e} />)}
+      <div className="u-flex u-flex-wrap u-gap-2" aria-label={t('connRequiredLabel')}>
+        {entries.map((e) => <ProviderChip key={e.provider} {...e} t={t} />)}
       </div>
 
       <p className="muted u-fs-13 u-mt-0">
-        Effective autonomy: <strong>{AUTONOMY_LABEL[gatedAutonomy]}</strong>
-        {effective.acting ? '' : ' — external actions are draft/recommend only until every connection is configured.'}
+        {t('connEffective')} <strong>{t(AUTONOMY_LABEL_KEY[gatedAutonomy])}</strong>
+        {effective.acting ? '' : t('connDraftOnly')}
       </p>
     </div>
   );

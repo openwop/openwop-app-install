@@ -15,8 +15,19 @@
  */
 
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { SaveIcon } from '../ui/icons/index.js';
+import i18n from '../i18n/index.js';
+import { formatNumber } from '../i18n/format.js';
+
+/** Maps a timeline segment status to its display key. */
+const SEG_STATUS_KEYS: Record<SegStatus, string> = {
+  running: 'segStatusRunning',
+  completed: 'segStatusCompleted',
+  failed: 'segStatusFailed',
+  suspended: 'segStatusSuspended',
+};
 
 interface Props {
   events: readonly RunEventDoc[];
@@ -131,14 +142,15 @@ function buildSegments(events: readonly RunEventDoc[]): {
 }
 
 function fmtDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  if (ms < 1000) return i18n.t('runs:timelineDurationMs', { n: formatNumber(ms) });
+  if (ms < 60_000) return i18n.t('runs:timelineDurationSeconds', { n: formatNumber(ms / 1000, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
   const m = Math.floor(ms / 60_000);
   const s = Math.round((ms % 60_000) / 1000);
-  return `${m}m ${s}s`;
+  return i18n.t('runs:timelineDurationMinutes', { m: formatNumber(m), s: formatNumber(s) });
 }
 
 export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
+  const { t } = useTranslation('runs');
   const { lanes, minMs, maxMs } = useMemo(() => buildSegments(events), [events]);
   // §A3(b) / RFC 0057 — per-lane memory-write attribution from `memory.written`
   // events (keyed by `nodeId`, or `(run)` for host session-end writes). The
@@ -158,7 +170,7 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
   }, [events]);
   const [selected, setSelected] = useState<{ nodeId: string; startSeq: number } | null>(null);
 
-  if (events.length === 0) return <div className="muted">No events yet.</div>;
+  if (events.length === 0) return <div className="muted">{t('noEventsYet')}</div>;
 
   const span = maxMs - minMs;
   const pct = (ms: number) => ((ms - minMs) / span) * 100;
@@ -180,17 +192,17 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
             <div className="run-timeline-lane-label" title={lane.nodeId}>
               {lane.nodeId}
               {lane.segments.length > 1 && lane.nodeId !== '(run)' && (
-                <span className="muted run-timeline-attempts"> ×{lane.segments.length}</span>
+                <span className="muted run-timeline-attempts"> ×{formatNumber(lane.segments.length)}</span>
               )}
               {(() => {
                 const mw = memWrites.get(lane.nodeId);
                 if (!mw) return null;
+                const title = mw.refs.length
+                  ? t('timelineMemWroteWithRefs', { count: mw.count, refs: mw.refs.join(', ') })
+                  : t('timelineMemWrote', { count: mw.count });
                 return (
-                  <span
-                    className="muted run-timeline-mem-write"
-                    title={`Wrote ${mw.count} memory entr${mw.count === 1 ? 'y' : 'ies'}${mw.refs.length ? ` → ${mw.refs.join(', ')}` : ''}`}
-                  >
-                    {' '}<span aria-hidden="true"><SaveIcon size={12} /></span>{mw.count > 1 ? ` ${mw.count}` : ''}
+                  <span className="muted run-timeline-mem-write" title={title}>
+                    {' '}<span aria-hidden="true"><SaveIcon size={12} /></span>{mw.count > 1 ? ` ${formatNumber(mw.count)}` : ''}
                   </span>
                 );
               })()}
@@ -201,7 +213,8 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
                 const endMs = seg.endMs ?? maxMs;
                 const width = Math.max(pct(endMs) - left, 1.5);
                 const isSel = selected?.nodeId === seg.nodeId && selected.startSeq === seg.startSeq;
-                const dur = seg.endMs != null ? fmtDuration(seg.endMs - seg.startMs) : 'running…';
+                const dur = seg.endMs != null ? fmtDuration(seg.endMs - seg.startMs) : t('timelineRunning');
+                const statusLabel = t(SEG_STATUS_KEYS[seg.status]);
                 return (
                   <button
                     type="button"
@@ -219,8 +232,8 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
                       onSelectSeq?.(next ? seg.lastSeq : null);
                     }}
                     aria-pressed={isSel}
-                    aria-label={`${seg.nodeId}, ${seg.status}, ${dur} — select to inspect this step`}
-                    title={`${seg.nodeId} — ${seg.status} — ${dur}`}
+                    aria-label={t('timelineBarAria', { nodeId: seg.nodeId, status: statusLabel, dur })}
+                    title={t('timelineBarTitle', { nodeId: seg.nodeId, status: statusLabel, dur })}
                   >
                     <span className="run-timeline-bar-dur">{dur}</span>
                   </button>
@@ -236,16 +249,16 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
           <div className="run-timeline-detail-head">
             <strong>{selectedSeg.nodeId}</strong>
             <span className="status-badge" style={{ background: SEG_COLOR[selectedSeg.status] }}>
-              {selectedSeg.status}
+              {t(SEG_STATUS_KEYS[selectedSeg.status])}
             </span>
             {onForkFrom && (
               <button
                 type="button"
                 className="secondary u-ml-auto u-pad-2x8 u-fs-11"
                 onClick={() => onForkFrom(selectedSeg.lastSeq)}
-                title="Fork a new run from this segment's last event"
+                title={t('timelineForkSegmentTitle')}
               >
-                fork from #{selectedSeg.lastSeq}
+                {t('timelineForkFromSeq', { seq: formatNumber(selectedSeg.lastSeq) })}
               </button>
             )}
           </div>
@@ -255,7 +268,7 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
               <span className="event-type">{ev.type}</span>
               {ev.payload != null && Object.keys(ev.payload as object).length > 0 && (
                 <details>
-                  <summary className="muted">payload</summary>
+                  <summary className="muted">{t('payloadSummary')}</summary>
                   <pre>{JSON.stringify(ev.payload, null, 2)}</pre>
                 </details>
               )}

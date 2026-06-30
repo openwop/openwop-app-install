@@ -21,10 +21,13 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { listMemory, getCapabilities, type MemoryEntry } from '../client/runsClient.js';
 import { LockIcon, PencilIcon } from '../ui/icons/index.js';
 import { DataTable, type DataColumn } from '../ui/DataTable.js';
+import i18n from '../i18n/index.js';
+import { formatDateTime } from '../i18n/format.js';
 
 interface Props {
   runId: string;
@@ -77,20 +80,22 @@ function MEMORY_COLUMNS(attribution: Map<string, WriteAttribution>): DataColumn<
   return [
     {
       key: 'content',
-      header: 'Content',
+      header: i18n.t('runs:memoryColContent'),
       render: (e) => {
         const attr = attribution.get(e.id);
         return (
           <>
             {isRedacted(e.content) && (
-              <span className="memory-redacted-badge" title="Contains host-redacted secret material (SR-1)">
-                <LockIcon size={12} /> redacted
+              <span className="memory-redacted-badge" title={i18n.t('runs:memoryRedactedTitle')}>
+                <LockIcon size={12} /> {i18n.t('runs:memoryRedacted')}
               </span>
             )}
             {attr?.nodeId && (
               <span
                 className="memory-wrote-badge"
-                title={`Written by node ${attr.nodeId}${attr.agentId ? ` (agent ${attr.agentId})` : ''} — memory.written`}
+                title={attr.agentId
+                  ? i18n.t('runs:memoryWrittenByNodeAgent', { nodeId: attr.nodeId, agentId: attr.agentId })
+                  : i18n.t('runs:memoryWrittenByNode', { nodeId: attr.nodeId })}
               >
                 <PencilIcon size={12} /> {attr.nodeId}
               </span>
@@ -102,23 +107,23 @@ function MEMORY_COLUMNS(attribution: Map<string, WriteAttribution>): DataColumn<
     },
     {
       key: 'tags',
-      header: 'Tags',
+      header: i18n.t('runs:memoryColTags'),
       render: (e) => (
         <div className="memory-tags">
-          {e.tags.map((t) => (
-            <span key={t} className="memory-tag">{t}</span>
+          {e.tags.map((tag) => (
+            <span key={tag} className="memory-tag">{tag}</span>
           ))}
         </div>
       ),
     },
     {
       key: 'created',
-      header: 'Created',
+      header: i18n.t('runs:memoryColCreated'),
       render: (e) => (
         <span className="memory-created" title={e.createdAt}>
-          {new Date(e.createdAt).toLocaleString()}
+          {formatDateTime(e.createdAt)}
           {e.expiresAt && (
-            <span className="muted" title={`Expires ${e.expiresAt}`}> · TTL</span>
+            <span className="muted" title={i18n.t('runs:memoryExpires', { at: e.expiresAt })}> {i18n.t('runs:memoryTtlSuffix')}</span>
           )}
         </span>
       ),
@@ -127,6 +132,7 @@ function MEMORY_COLUMNS(attribution: Map<string, WriteAttribution>): DataColumn<
 }
 
 export function RunMemoryPanel({ runId, events, status }: Props) {
+  const { t } = useTranslation('runs');
   const [entries, setEntries] = useState<MemoryEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // null = not yet known; consume the attribution events only once we've
@@ -193,25 +199,23 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
   return (
     <div className="card">
       <div className="u-flex u-items-baseline u-gap-2">
-        <h2 className="u-flex-1">Memory ledger</h2>
+        <h2 className="u-flex-1">{t('memoryLedger')}</h2>
         {!error && (
           <span className="muted u-fs-12">
-            {fromThisRun > 0 ? `${fromThisRun} from this run · ` : ''}
-            {total} {total === 1 ? 'entry' : 'entries'}
+            {fromThisRun > 0 ? `${t('memoryFromThisRun', { count: fromThisRun })} · ` : ''}
+            {t('memoryEntryCount', { count: total })}
           </span>
         )}
       </div>
       <p className="muted runmem-subhead">
-        Tenant memory.{' '}
-        {useEvents
-          ? 'Entries this run wrote are highlighted and attributed to the node that wrote them.'
-          : 'Entries this run wrote are highlighted.'}
+        {t('memoryTenantPrefix')}{' '}
+        {useEvents ? t('memoryHighlightAttributed') : t('memoryHighlightSimple')}
       </p>
       {error ? (
         <div className="alert error">{error}</div>
       ) : (
         <DataTable<MemoryEntry>
-          caption="Tenant memory entries"
+          caption={t('memoryTableCaption')}
           rows={entries ?? []}
           rowKey={(e) => e.id}
           rowClassName={(e) => (mineFor(e) ? 'memory-row-mine' : undefined)}

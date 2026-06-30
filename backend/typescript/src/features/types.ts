@@ -16,6 +16,7 @@
 import type { RouteDeps } from '../routes/registerAllRoutes.js';
 import type { ToggleConfig } from '../host/featureToggles/types.js';
 import type { FeatureSurfaceBuilder } from '../host/featureSurfaces.js';
+import type { WorkflowDefinition } from '../executor/types.js';
 
 /** A pack a feature requires, pinned for replay determinism (RFC 0076). */
 export interface PackRef {
@@ -52,4 +53,11 @@ export interface BackendFeature {
   requiredPacks?: PackRef[];
   /** The feature's `ctx.features.<id>` workflow surface (ADR 0014 Phase 1). */
   surface?: FeatureSurfaceDef;
+  /**
+   * Always-present BUILT-IN workflow definitions this feature contributes to the
+   * hard-coded catalog (resolved restart-safe + cross-instance via
+   * `host/builtinWorkflows.ts`, NOT the in-memory builder registry). Use for a
+   * feature's own infrastructure workflows (e.g. a meta-workflow), not demo data.
+   */
+  builtinWorkflows?: readonly WorkflowDefinition[];
 }

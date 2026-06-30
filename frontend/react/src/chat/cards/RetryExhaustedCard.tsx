@@ -6,6 +6,8 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { formatNumber } from '../../i18n/format.js';
 import type { EnvelopeRetryExhausted } from '../types.js';
 
 interface Props {
@@ -13,12 +15,13 @@ interface Props {
 }
 
 export function RetryExhaustedCard({ exhausted }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   const [open, setOpen] = useState(false);
   return (
-    <div className="env-chip env-chip-danger" role="alert" aria-label="Envelope retry exhausted">
-      <span className="env-chip-tag">RETRY EXHAUSTED</span>
+    <div className="env-chip env-chip-danger" role="alert" aria-label={t('retryExhaustedTitle')}>
+      <span className="env-chip-tag">{t('retryExhaustedBadge')}</span>
       <span className="env-chip-text">
-        Gave up after {exhausted.totalAttempts} attempt{exhausted.totalAttempts === 1 ? '' : 's'} — {exhausted.finalReason}
+        {t('gaveUpAfter', { count: exhausted.totalAttempts, formattedCount: formatNumber(exhausted.totalAttempts) })}{exhausted.finalReason}
       </span>
       {exhausted.finalError ? (
         <button
@@ -27,7 +30,7 @@ export function RetryExhaustedCard({ exhausted }: Props): JSX.Element {
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
         >
-          {open ? 'hide error' : 'show error'}
+          {open ? t('hideError') : t('showError')}
         </button>
       ) : null}
       {open && exhausted.finalError ? (

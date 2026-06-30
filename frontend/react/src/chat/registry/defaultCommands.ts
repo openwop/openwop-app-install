@@ -3,7 +3,8 @@
  * `registerCommand({...})` from any module at boot.
  */
 
-import { registerCommand, listCommands } from './CommandRegistry.js';
+import { registerCommand, listCommands, resolveDescription } from './CommandRegistry.js';
+import i18n from '../../i18n/index.js';
 
 let registered = false;
 
@@ -13,7 +14,7 @@ export function registerDefaultCommands(): void {
   registerCommand({
     name: '/clear',
     aliases: ['/new', '/reset'],
-    description: 'Start a new chat session (wipes the current thread)',
+    description: () => i18n.t('chat:cmdNewDescription'),
     handler: async (_args, ctx) => {
       ctx.reset();
       return true;
@@ -23,14 +24,14 @@ export function registerDefaultCommands(): void {
   registerCommand({
     name: '/help',
     aliases: ['/?', '/commands'],
-    description: 'List available slash commands',
+    description: () => i18n.t('chat:cmdHelpDescription'),
     handler: async (_args, ctx) => {
       const lines = listCommands().map((c) => {
-        const aliases = c.aliases?.length ? ` (aliases: ${c.aliases.join(', ')})` : '';
+        const aliases = c.aliases?.length ? i18n.t('chat:cmdHelpAliases', { aliases: c.aliases.join(', ') }) : '';
         const usage = c.usage ? `\n      ${c.usage}` : '';
-        return `  ${c.name} — ${c.description}${aliases}${usage}`;
+        return `  ${c.name} — ${resolveDescription(c.description)}${aliases}${usage}`;
       });
-      ctx.emitSystem(`Available commands:\n${lines.join('\n')}`);
+      ctx.emitSystem(i18n.t('chat:cmdHelpHeader', { lines: lines.join('\n') }));
       return true;
     },
   });
@@ -38,7 +39,7 @@ export function registerDefaultCommands(): void {
   registerCommand({
     name: '/stop',
     aliases: ['/cancel'],
-    description: 'Cancel the in-flight turn (same as Esc)',
+    description: () => i18n.t('chat:cmdStopDescription'),
     handler: async (_args, ctx) => {
       await ctx.cancel();
       return true;

@@ -10,6 +10,7 @@
  * convenience, not a builder primitive.
  */
 
+import { useTranslation } from 'react-i18next';
 import { PROVIDERS } from '../../byok/lib/providers.js';
 
 interface Props {
@@ -19,6 +20,7 @@ interface Props {
 }
 
 export function ProviderPickerInput({ value, onChange, required }: Props): JSX.Element {
+  const { t } = useTranslation('builder');
   const visible = PROVIDERS.filter((p) => !p.managed && !p.hidden);
   return (
     <select
@@ -27,7 +29,7 @@ export function ProviderPickerInput({ value, onChange, required }: Props): JSX.E
       onChange={(e) => onChange(e.target.value || undefined)}
     >
       <option value="">
-        {required ? 'Pick a provider…' : '(use run-time inputs)'}
+        {required ? t('pickProvider') : t('useRunTimeInputs')}
       </option>
       {visible.map((p) => (
         <option key={p.id} value={p.id}>{p.label}</option>

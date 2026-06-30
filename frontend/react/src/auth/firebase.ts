@@ -31,6 +31,7 @@
 import type { FirebaseApp } from 'firebase/app';
 import type { AuthCredential, User, Auth } from 'firebase/auth';
 import { setCurrentIdToken } from '../client/config.js';
+import i18n from '../i18n/index.js';
 
 /** The lazily-imported `firebase/auth` module namespace. */
 type AuthMod = typeof import('firebase/auth');
@@ -125,10 +126,14 @@ export class ExistingProviderSignInError extends Error {
     public readonly pendingCredential: AuthCredential | null,
     public readonly attemptedProvider: 'google.com' | 'github.com',
   ) {
-    const friendly = existingProviders.map(friendlyProviderName).join(' or ');
+    const friendly = existingProviders.map(friendlyProviderName).join(
+      ` ${i18n.t('auth:or')} `,
+    );
+    const attempted = friendlyProviderName(attemptedProvider);
     super(
-      `${email} is already signed up with ${friendly || 'another provider'}. ` +
-        `Sign in with ${friendly || 'that provider'} to link your ${friendlyProviderName(attemptedProvider)} account.`,
+      friendly
+        ? i18n.t('auth:existingProviderKnown', { email, providers: friendly, attempted })
+        : i18n.t('auth:existingProviderUnknown', { email, attempted }),
     );
     this.name = 'ExistingProviderSignInError';
   }
@@ -137,10 +142,10 @@ export class ExistingProviderSignInError extends Error {
 function friendlyProviderName(providerId: string): string {
   switch (providerId) {
     case 'google.com':
-    case 'googleAuthProvider': return 'Google';
+    case 'googleAuthProvider': return i18n.t('auth:providerGoogle');
     case 'github.com':
-    case 'githubAuthProvider': return 'GitHub';
-    case 'password': return 'email + password';
+    case 'githubAuthProvider': return i18n.t('auth:providerGithub');
+    case 'password': return i18n.t('auth:providerPassword');
     default: return providerId;
   }
 }
@@ -290,18 +295,18 @@ export async function sendVerifyEmail(): Promise<void> {
 export function describeAuthError(err: unknown): string {
   const code = (err as { code?: string })?.code ?? '';
   switch (code) {
-    case 'auth/email-already-in-use': return 'An account with that email already exists. Try signing in.';
-    case 'auth/invalid-email': return 'That email address looks invalid.';
-    case 'auth/weak-password': return 'Password is too weak — use at least 6 characters.';
-    case 'auth/missing-password': return 'Enter a password.';
+    case 'auth/email-already-in-use': return i18n.t('auth:errEmailInUse');
+    case 'auth/invalid-email': return i18n.t('auth:errInvalidEmail');
+    case 'auth/weak-password': return i18n.t('auth:errWeakPassword');
+    case 'auth/missing-password': return i18n.t('auth:errMissingPassword');
     // Don't distinguish unknown-email from wrong-password (no account enumeration).
     case 'auth/invalid-credential':
     case 'auth/wrong-password':
-    case 'auth/user-not-found': return 'Invalid email or password.';
-    case 'auth/too-many-requests': return 'Too many attempts — try again in a few minutes.';
-    case 'auth/operation-not-allowed': return 'Email/password sign-in isn\'t enabled for this deployment. The maintainer needs to turn it on in the Firebase Console.';
-    case 'auth/network-request-failed': return 'Network error — check your connection and retry.';
-    default: return err instanceof Error && err.message ? err.message : 'Something went wrong.';
+    case 'auth/user-not-found': return i18n.t('auth:errInvalidCredential');
+    case 'auth/too-many-requests': return i18n.t('auth:errTooManyRequests');
+    case 'auth/operation-not-allowed': return i18n.t('auth:errOperationNotAllowed');
+    case 'auth/network-request-failed': return i18n.t('auth:errNetworkRequestFailed');
+    default: return err instanceof Error && err.message ? err.message : i18n.t('auth:errGeneric');
   }
 }
 

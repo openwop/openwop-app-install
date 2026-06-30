@@ -1,0 +1,57 @@
+{
+  "name": "feature.strategy.nodes",
+  "version": "1.0.0",
+  "description": "Strategy feature node pack (ADR 0080 / ADR 0079 / ADR 0014) — read nodes over the ctx.features.strategy surface (list, get, context, health) + a create-board-memo write node that persists an agent-authored board memo as a Document (ctx.features.documents). Lets a workflow — or the Strategy Analyst agent — read the portfolio + its health and draft a board-ready memo. The strategy surface stays READ-ONLY: the memo write lands in Documents, never in Strategy.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "strategy", "okr", "portfolio", "board", "memo"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.strategy.nodes.list-strategies",
+      "version": "1.0.0",
+      "label": "Strategy: List Strategies",
+      "description": "Lists the workspace's shared strategies (compact refs) over ctx.features.strategy. Tenant-guarded; user-scoped private drafts excluded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.strategy.nodes.get-strategy",
+      "version": "1.0.0",
+      "label": "Strategy: Get Strategy",
+      "description": "Gets one shared strategy by id (objectives, key results, initiatives, links) over ctx.features.strategy. Returns null for a missing or user-scoped strategy.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.strategy.nodes.get-context",
+      "version": "1.0.0",
+      "label": "Strategy: Get Context",
+      "description": "Resolves the compact strategy context packet for a consumer ref (projectId | priorityListId[+cardId] | boardId) over ctx.features.strategy. RBAC-bounded; private projects omitted.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.strategy.nodes.get-health",
+      "version": "1.0.0",
+      "label": "Strategy: Get Health",
+      "description": "Returns a per-strategy health rollup (on-track/at-risk/off-track) with the component signals over ctx.features.strategy, so an agent can reason about alignment gaps without inventing precision.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.strategy.nodes.create-board-memo",
+      "version": "1.0.0",
+      "label": "Strategy: Create Board Memo",
+      "description": "Persists an agent-authored board memo (markdown) as a Document of kind board-update via ctx.features.documents. Degrades to returning the markdown inline when the documents feature is OFF. The strategy surface is never written.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

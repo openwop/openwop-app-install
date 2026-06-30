@@ -8,9 +8,7 @@
 
 import type { Database } from 'better-sqlite3';
 
-export const LATEST_SCHEMA_VERSION = 25;
-
-const MIGRATIONS: Record<number, (db: Database) => void> = {
+export const MIGRATIONS: Record<number, (db: Database) => void> = {
   1: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
@@ -685,7 +683,89 @@ const MIGRATIONS: Record<number, (db: Database) => void> = {
     // suspensions). Mirrors postgres mig 22.
     addColumnIfTableExists(db, 'interrupts', 'expires_at', 'TEXT');
   },
+  26: (db) => {
+    // ADR 0050 — per-recipient notification targeting. `recipient_user_id`
+    // NULL = broadcast (tenant-wide, the pre-0050 behavior every existing row
+    // keeps); non-NULL = addressed to that one user. The inbox query returns
+    // rows where recipient_user_id = me OR recipient_user_id IS NULL. Mirrors
+    // postgres mig 23.
+    if (addColumnIfTableExists(db, 'notifications', 'recipient_user_id', 'TEXT')) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_notifications_tenant_recipient
+          ON notifications (tenant_id, recipient_user_id, created_at DESC);
+      `);
+    }
+    // ADR 0050 Phase 3 — role-addressed broadcast: a null-recipient row with a
+    // recipient_role is visible only to tenant members holding that role.
+    addColumnIfTableExists(db, 'notifications', 'recipient_role', 'TEXT');
+  },
+  27: (db) => {
+    // ADR 0050 — push subscriptions record their owning user so an addressed
+    // notification pushes only to that user's devices. Legacy rows keep NULL
+    // (broadcast-only — a null owner can't be safely matched). Mirrors
+    // postgres mig 24.
+    if (addColumnIfTableExists(db, 'push_subscriptions', 'user_id', 'TEXT')) {
+      db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_push_subs_tenant_user
+          ON push_subscriptions (tenant_id, user_id);
+      `);
+    }
+  },
+  28: (db) => {
+    // ADR 0052 §D4/§D5 — app-tier metadata, sibling to __schema_version. Records
+    // the running app version (fresh-vs-upgrade detection) and the applied
+    // app-migration counter (§D5 runner). A generic key/value store, distinct
+    // from the schema-version axis. Mirrors postgres mig 25.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS __app_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+    `);
+  },
+  29: (db) => {
+    // ADR 0102 Phase 2 — per-message author for the edit-authz gate. Nullable +
+    // additive; existing rows get a null author (⇒ owner-writable). Mirrors
+    // postgres mig 26.
+    addColumnIfTableExists(db, 'chat_messages', 'author_subject', 'TEXT');
+  },
+  30: (db) => {
+    // ADR 0106 — per-org daily media-generation usage (TTS chars + STT bytes) for
+    // the media cost-governance budget. Mirrors managed_provider_usage (mig 4):
+    // tenant = workspace = org at root (ADR 0015). `date` is the UTC calendar day
+    // in YYYY-MM-DD form. Mirrors postgres mig 27.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS media_provider_usage (
+        tenant_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        tts_chars INTEGER NOT NULL DEFAULT 0,
+        stt_bytes INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (tenant_id, date)
+      );
+    `);
+  },
+  31: (db) => {
+    // ADR 0050 Phase 3 (drift repair) — re-apply the role-addressed notification
+    // column. It was originally appended INSIDE mig 26, so a DB that recorded v26
+    // before that line was added never got it and the forward-only migrator never
+    // re-runs 26. A NEW version applies it everywhere; addColumnIfTableExists is a
+    // no-op when the column is already present. Mirrors postgres mig 28.
+    addColumnIfTableExists(db, 'notifications', 'recipient_role', 'TEXT');
+  },
+  32: (db) => {
+    // ADR 0151 — title provenance for conversation auto-titling. Nullable +
+    // additive; existing rows keep NULL (⇒ treated as 'default', still auto-
+    // titleable). 'auto' = LLM-titled (don't re-run), 'user' = manual rename
+    // (never overwrite). Mirrors postgres mig 29.
+    addColumnIfTableExists(db, 'chat_sessions', 'title_source', 'TEXT');
+  },
 };
+
+/** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap
+ *  (mirrors postgres schema.ts; prevents the "added a migration, forgot the cap →
+ *  it never runs" drift that left `recipient_role` unapplied). */
+export const LATEST_SCHEMA_VERSION = Math.max(...Object.keys(MIGRATIONS).map(Number));
 
 /** Defensive ALTER for forward migrations (mig 24/25): adds `column` to
  *  `table` when the table exists and the column doesn't. Returns true when

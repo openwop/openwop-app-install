@@ -23,7 +23,8 @@
 
 import type { Express } from 'express';
 import { OpenwopError } from '../types.js';
-import { listSecretRefs, removeSecret, setSecret } from '../byok/secretResolver.js';
+import { listSecretRefs, removeSecret, setSecret, type SecretScope } from '../byok/secretResolver.js';
+import { getHeadlessAiDefault, setHeadlessAiDefault, clearHeadlessAiDefault } from '../host/headlessAi.js';
 
 interface SetSecretRequest {
   credentialRef?: unknown;
@@ -32,12 +33,14 @@ interface SetSecretRequest {
 
 const REF_PATTERN = /^[a-zA-Z0-9_.\-:]{1,128}$/;
 
-function scopeFromReq(req: import('express').Request): { tenantId: string } | undefined {
+function scopeFromReq(req: import('express').Request): { tenantId: string; actorId?: string } | undefined {
   // In ephemeral mode the resolver needs a tenantId. Pull it from the
   // session-cookie-derived req.tenantId set by the auth middleware.
   // Bearer-authed callers (tenants: ['*']) get no scope, falling back
   // to the SQLite path which is global.
-  return req.tenantId ? { tenantId: req.tenantId } : undefined;
+  // Stamp the initiating principal so secret mutations are attributable in
+  // the audit log (SEC-4).
+  return req.tenantId ? { tenantId: req.tenantId, actorId: req.principal?.principalId } : undefined;
 }
 
 export function registerByokRoutes(app: Express): void {
@@ -94,6 +97,37 @@ export function registerByokRoutes(app: Express): void {
     } catch (err) {
       next(err);
     }
+  });
+
+  // ── Headless AI default (ADR 0110) — a tenant binding {provider, model, credentialRef}
+  // pointing at one of the tenant's own BYOK secrets, used when a headless op (KB media→text)
+  // needs a multimodal model the managed provider (MiniMax, text-only) doesn't offer. Lives
+  // under /byok/ because it is BYOK config; same session-tenant scope as the secrets above.
+  const tenantScope = (req: import('express').Request): SecretScope => {
+    const s = scopeFromReq(req);
+    if (!s) throw new OpenwopError('unauthenticated', 'Authentication required.', 401);
+    return s;
+  };
+
+  app.get('/v1/host/openwop-app/byok/ai-default', async (req, res, next) => {
+    try {
+      res.json({ default: await getHeadlessAiDefault(tenantScope(req).tenantId) });
+    } catch (err) { next(err); }
+  });
+
+  app.put('/v1/host/openwop-app/byok/ai-default', async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as { provider?: unknown; model?: unknown; credentialRef?: unknown };
+      const saved = await setHeadlessAiDefault(tenantScope(req), body, new Date().toISOString());
+      res.status(200).json({ default: saved });
+    } catch (err) { next(err); }
+  });
+
+  app.delete('/v1/host/openwop-app/byok/ai-default', async (req, res, next) => {
+    try {
+      await clearHeadlessAiDefault(tenantScope(req).tenantId);
+      res.status(204).send();
+    } catch (err) { next(err); }
   });
 }
 

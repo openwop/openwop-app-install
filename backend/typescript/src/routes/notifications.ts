@@ -36,6 +36,8 @@ import {
   type NotificationRecord,
 } from '../types.js';
 import { getNotificationEmitter } from '../notifications/emitter.js';
+import { openSseChannel } from '../host/sseChannel.js';
+import { listWorkspacesForSubject } from '../host/accessControlService.js';
 
 const VALID_STATUSES: readonly NotificationStatus[] = ['unread', 'read', 'archived'];
 
@@ -62,8 +64,10 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
       const includeArchived = req.query.includeArchived === 'true';
       const limit = Math.min(Number(req.query.limit) || 100, 500);
 
+      const recipient = recipientFilter(req);
       const notifications = await storage.listNotifications({
         tenantId,
+        ...(recipient ? { recipientUserId: recipient, recipientRoles: await callerTenantRoles(req) } : {}),
         ...(status ? { status } : {}),
         includeArchived,
         limit,
@@ -78,34 +82,35 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
     try {
       const tenantId = resolveTenantFromReq(req);
 
-      res.set({
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-      res.flushHeaders();
-
-      // Heartbeat every 15s — same cadence as the runs-event stream so
-      // proxies (Cloud Run, Cloudflare) don't drop the connection.
-      const heartbeat = setInterval(() => {
-        res.write(': heartbeat\n\n');
-      }, 15_000);
+      // Shared SSE lifecycle: canonical headers (incl. X-Accel-Buffering),
+      // 15s heartbeat, per-tenant connection cap, teardown (host/sseChannel).
+      const channel = openSseChannel(req, res);
 
       // Tenant filter: wildcard principals get everything; tenanted
       // principals get only their own rows. Anon (no tenant) gets
       // only heartbeats — they have nothing to notify yet, but the
       // stream stays open so a sign-in-mid-session reconnect works.
+      // ADR 0050 — addressed notifications only reach their recipient's
+      // stream; broadcasts (no recipientUserId) reach every tenant member.
+      const recipient = recipientFilter(req);
+      const isWildcard = req.principal?.tenants?.includes('*') ?? false;
+      // ADR 0050 Phase 3 — resolve the subscriber's roles ONCE (not per-event) so a
+      // role-addressed notification only streams to a member who holds the role.
+      const roles = recipient ? await callerTenantRoles(req) : [];
       const unsubscribe = getNotificationEmitter().subscribe((n) => {
+        if (channel.closed) return;
+        // Anon (no tenant, not the wildcard admin) gets heartbeats only — never
+        // another tenant's rows (the header contract; also closes the role/addressed
+        // leak to an unauthenticated stream).
+        if (tenantId === undefined && !isWildcard) return;
         if (tenantId !== undefined && n.tenantId !== tenantId) return;
+        if (n.recipientUserId && recipient && n.recipientUserId !== recipient) return;
+        if (n.recipientRole && recipient && !roles.includes(n.recipientRole)) return;
         res.write(`event: notification\n`);
         res.write(`data: ${JSON.stringify(projectNotification(n))}\n\n`);
       });
 
-      req.on('close', () => {
-        clearInterval(heartbeat);
-        unsubscribe();
-      });
+      channel.onClose(() => unsubscribe());
     } catch (err) {
       next(err);
     }
@@ -148,7 +153,13 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
         res.json({ updated: 0 });
         return;
       }
-      const updated = await storage.markAllNotificationsRead(tenantId, new Date().toISOString());
+      const recipient = recipientFilter(req);
+      const updated = await storage.markAllNotificationsRead(
+        tenantId,
+        new Date().toISOString(),
+        recipient,
+        recipient ? await callerTenantRoles(req) : undefined,
+      );
       res.json({ updated });
     } catch (err) {
       next(err);
@@ -159,7 +170,7 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
     try {
       const existing = await storage.getNotification(req.params.id);
       if (!existing) throw new OpenwopError('not_found', `notification ${req.params.id} not found`, 404);
-      assertTenantOwnership(req, existing);
+      await assertTenantOwnership(req, existing);
       const removed = await storage.deleteNotification(req.params.id);
       res.json({ deleted: removed });
     } catch (err) {
@@ -183,7 +194,7 @@ async function mutateStatus(
 ): Promise<NotificationRecord> {
   const existing = await storage.getNotification(notificationId);
   if (!existing) throw new OpenwopError('not_found', `notification ${notificationId} not found`, 404);
-  assertTenantOwnership(req, existing);
+  await assertTenantOwnership(req, existing);
   const updated = await storage.updateNotificationStatus(
     notificationId,
     status,
@@ -215,10 +226,48 @@ function resolveTenantFromReq(req: Request): string | undefined {
   return wildcard ? requestedTenant : (req.tenantId ?? undefined);
 }
 
-function assertTenantOwnership(req: Request, record: NotificationRecord): void {
+/**
+ * ADR 0050 — the acting user whose inbox view this is. A wildcard principal
+ * (admin / conformance harness) gets `undefined` → the unfiltered tenant view
+ * (addressed + broadcast for everyone). A normal user gets their own id →
+ * their addressed rows + tenant broadcasts. When no user id is resolvable
+ * (a tenanted service principal), it stays `undefined` → today's tenant-wide
+ * behavior, unchanged.
+ */
+function recipientFilter(req: Request): string | undefined {
+  const tenants = req.principal?.tenants ?? [];
+  if (tenants.includes('*')) return undefined;
+  return req.userId ?? undefined;
+}
+
+/** ADR 0050 Phase 3 — the caller's workspace-root (tenant) RBAC roles (ADR 0006/0015),
+ *  used to resolve role-addressed notifications. Empty when there's no resolvable user
+ *  or tenant (default-deny). */
+async function callerTenantRoles(req: Request): Promise<string[]> {
+  const subject = req.userId;
+  const tenantId = req.tenantId;
+  if (!subject || !tenantId) return [];
+  const workspaces = await listWorkspacesForSubject(subject);
+  return workspaces.find((w) => w.orgId === tenantId)?.roles ?? [];
+}
+
+async function assertTenantOwnership(req: Request, record: NotificationRecord): Promise<void> {
   const tenants = req.principal?.tenants ?? [];
   if (tenants.includes('*')) return;
-  if (req.tenantId && req.tenantId === record.tenantId) return;
+  if (req.tenantId && req.tenantId === record.tenantId) {
+    // ADR 0050 — an addressed notification is private to its recipient:
+    // another tenant member can't mutate it. Broadcasts (no recipientUserId)
+    // stay tenant-mutable as before. When the caller has no resolvable user id
+    // we fall back to the tenant check (pre-0050 behavior).
+    if (record.recipientUserId && req.userId && record.recipientUserId !== req.userId) {
+      throw new OpenwopError('not_found', 'notification not found', 404);
+    }
+    // ADR 0050 Phase 3 — a role-addressed row is mutable only by a role-holder.
+    if (record.recipientRole && req.userId && !(await callerTenantRoles(req)).includes(record.recipientRole)) {
+      throw new OpenwopError('not_found', 'notification not found', 404);
+    }
+    return;
+  }
   // Anon / mismatched tenant — pretend the row doesn't exist rather
   // than leaking a 403 that confirms its existence.
   throw new OpenwopError('not_found', 'notification not found', 404);
@@ -227,6 +276,7 @@ function assertTenantOwnership(req: Request, record: NotificationRecord): void {
 function projectNotification(record: NotificationRecord): Record<string, unknown> {
   return {
     notificationId: record.notificationId,
+    recipientUserId: record.recipientUserId,
     type: record.type,
     priority: record.priority,
     status: record.status,

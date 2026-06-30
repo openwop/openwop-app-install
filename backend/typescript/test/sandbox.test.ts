@@ -36,4 +36,70 @@ describe('sandbox (A13 / RFC 0035)', () => {
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe('sandbox_timeout');
   });
+
+  // Regression: node:vm is NOT escape-proof on its own — the classic break is
+  // walking the prototype chain of any outer-realm object the sandbox can reach
+  // (`x.constructor.constructor('return process')()`). The hardened primitive
+  // keeps every reachable reference inside the vm realm, so these now surface as
+  // ReferenceError → sandbox_escape_attempt rather than returning real `process`.
+  describe('prototype-chain escape hardening (AGENTRT-1)', () => {
+    it('blocks the host-function constructor escape', () => {
+      const r = runInSandbox("host.constructor.constructor('return process')()", {
+        allowedHostCalls: ['kv.get'],
+        hostCall: () => 'v',
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe('sandbox_escape_attempt');
+    });
+
+    it('blocks the generic Function-constructor escape', () => {
+      const r = runInSandbox("[].constructor.constructor('return process')()");
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe('sandbox_escape_attempt');
+    });
+
+    it('blocks escape via a host-call return value (results are context-native)', () => {
+      const r = runInSandbox("host('kv.get','k').constructor.constructor('return process')()", {
+        allowedHostCalls: ['kv.get'],
+        hostCall: () => ({ value: 'v' }),
+      });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe('sandbox_escape_attempt');
+    });
+
+    it('a host call still returns usable data (a plain context-native object)', () => {
+      const r = runInSandbox(
+        "(() => { const o = host('kv.get','k'); return typeof o === 'object' && o.value === 'v'; })()",
+        { allowedHostCalls: ['kv.get'], hostCall: () => ({ value: 'v' }) },
+      );
+      expect(r).toEqual({ ok: true, value: true });
+    });
+
+    // The subtle one: a host call that THROWS used to hand the sandbox an
+    // OUTER-realm Error object — catchable, and `e.constructor.constructor(
+    // 'return process')()` escaped. The bridge now carries the failure as a JSON
+    // envelope and re-throws an IN-CONTEXT Error, so a caught host-call error can
+    // no longer be walked back to the host realm.
+    it('blocks escape via an Error caught from a denied/throwing host call', () => {
+      const denied = runInSandbox(
+        "try { host('fs.read','/etc/passwd') } catch (e) { e.constructor.constructor('return process')(); }",
+        { allowedHostCalls: ['kv.get'] },
+      );
+      expect(denied.ok).toBe(false);
+      if (!denied.ok) expect(denied.error.code).toBe('sandbox_escape_attempt');
+
+      const throwing = runInSandbox(
+        "try { host('kv.get','k') } catch (e) { e.constructor.constructor('return process')(); }",
+        { allowedHostCalls: ['kv.get'], hostCall: () => { throw new Error('boom'); } },
+      );
+      expect(throwing.ok).toBe(false);
+      if (!throwing.ok) expect(throwing.error.code).toBe('sandbox_escape_attempt');
+    });
+
+    it('a denied host call without an escape attempt is classified capability_denied', () => {
+      const r = runInSandbox("host('fs.read','/etc/passwd')", { allowedHostCalls: ['kv.get'] });
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error.code).toBe('sandbox_capability_denied');
+    });
+  });
 });

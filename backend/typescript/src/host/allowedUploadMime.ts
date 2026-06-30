@@ -7,7 +7,13 @@
  * SECURITY: the asset serve route reflects the stored `Content-Type` verbatim
  * (no `nosniff`/`Content-Disposition`), so `text/html` and `image/svg+xml` are
  * deliberately EXCLUDED — serving user-authored HTML/SVG would be stored-XSS.
- * Only inert image + document types are allowed.
+ * Only inert image + document + audio/video container types are allowed.
+ *
+ * AUDIO/VIDEO (ADR 0085 Phase 2): the audio/video container types below are
+ * NotebookLM-style transcription sources. They are INERT when reflected — a
+ * browser handed `audio/mpeg`/`video/mp4` plays or downloads it, it does not
+ * execute script — so adding them does NOT widen the stored-XSS surface that the
+ * `text/html`/`svg` exclusion above guards. The exclusion is untouched.
  */
 export const ALLOWED_UPLOAD_MIME: ReadonlySet<string> = new Set<string>([
   'image/png',
@@ -19,6 +25,15 @@ export const ALLOWED_UPLOAD_MIME: ReadonlySet<string> = new Set<string>([
   'text/markdown',
   'application/json',
   'text/csv',
+  // Audio/video transcription sources (ADR 0085) — inert when reflected.
+  'audio/mpeg',
+  'audio/mp4',
+  'audio/wav',
+  'audio/x-wav',
+  'audio/webm',
+  'audio/ogg',
+  'video/mp4',
+  'video/webm',
 ]);
 
 export function isAllowedUploadMime(contentType: unknown): contentType is string {

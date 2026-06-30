@@ -16,7 +16,10 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { Trans, useTranslation } from 'react-i18next';
+import { useFormat } from '../../i18n/useFormat.js';
 import { PageHeader } from '../../ui/PageHeader.js';
+import { Tabs, TabPanel } from '../../ui/Tabs.js';
 import { Notice } from '../../ui/Notice.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { toast } from '../../ui/toast.js';
@@ -28,6 +31,10 @@ import { useOAuthCallbackToast } from '../connections/useOAuthCallback.js';
 import { ProfileWorkflowsTab } from './ProfileWorkflowsTab.js';
 import { ProfileSchedulesTab } from './ProfileSchedulesTab.js';
 import { ProfileActivityTab } from './ProfileActivityTab.js';
+import { ProfileMemoryTab } from '../profile-memory/ProfileMemoryTab.js';
+import { ProfileKnowledgeTab } from '../profile-memory/ProfileKnowledgeTab.js';
+import { ProfileTwinGrantsTab } from '../twin/ProfileTwinGrantsTab.js';
+import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { ApprovalsInbox } from '../../notifications/ApprovalsInbox.js';
 import {
   assetUrl,
@@ -44,20 +51,31 @@ import { updateMyDisplayName } from '../users/usersClient.js';
 
 const STATUSES: AvailabilityStatus[] = ['available', 'busy', 'away'];
 
-type ProfileTab = 'profile' | 'board' | 'workflows' | 'schedules' | 'activity' | 'connections';
+const AVAILABILITY_OPTION_KEY = {
+  available: 'availabilityAvailable',
+  busy: 'availabilityBusy',
+  away: 'availabilityAway',
+} as const;
+
+type ProfileTab = 'profile' | 'board' | 'workflows' | 'schedules' | 'activity' | 'connections' | 'memory' | 'knowledge' | 'twin';
 
 export function ProfilePage(): JSX.Element {
+  const { t } = useTranslation('profiles');
+  const f = useFormat();
   // Profiles graduated to always-on (§ Correction 2026-06-12) — no feature gate;
   // the page serves to any signed-in caller. The Connections tab is likewise a
   // permanent surface (ADR 0024 § Correction).
   const [me, setMe] = useState<Profile | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // ADR 0044 Phase 3 — the "Who can recall my memory" tab is shown only when the
+  // `twin-recall` toggle is on (the whole twin surface is opt-in per tenant).
+  const twinAccess = useFeatureAccess('twin-recall');
   // Deep-link the active tab via `?tab=` — used by the OAuth return path so a
   // connect started from the Connections tab lands back on it.
   const [searchParams] = useSearchParams();
   const [tab, setTab] = useState<ProfileTab>(() => {
     const t = searchParams.get('tab');
-    return t === 'board' || t === 'workflows' || t === 'schedules' || t === 'activity' || t === 'connections' ? t : 'profile';
+    return t === 'board' || t === 'workflows' || t === 'schedules' || t === 'activity' || t === 'connections' || t === 'memory' || t === 'knowledge' || t === 'twin' ? t : 'profile';
   });
   // Surface + strip the OAuth callback params after returning from consent.
   useOAuthCallbackToast();
@@ -105,8 +123,8 @@ export function ProfilePage(): JSX.Element {
     setError(null);
     void getMyProfile()
       .then(seed)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load your profile.'));
-  }, [seed]);
+      .catch((err) => setError(err instanceof Error ? err.message : t('loadProfileFailed')));
+  }, [seed, t]);
 
   useEffect(() => {
     load();
@@ -117,8 +135,8 @@ export function ProfilePage(): JSX.Element {
     if (tab !== 'board' || boardId || boardError) return;
     void getPersonalBoard()
       .then((d) => setBoardId(d.board.id))
-      .catch((err) => setBoardError(err instanceof Error ? err.message : 'Failed to load your board.'));
-  }, [tab, boardId, boardError]);
+      .catch((err) => setBoardError(err instanceof Error ? err.message : t('loadBoardFailed')));
+  }, [tab, boardId, boardError, t]);
 
   const splitList = (s: string): string[] => s.split(',').map((x) => x.trim()).filter((x) => x.length > 0);
 
@@ -128,7 +146,7 @@ export function ProfilePage(): JSX.Element {
     const hoursTrimmed = hours.trim();
     const hoursNum = hoursTrimmed ? Number(hoursTrimmed) : undefined;
     if (hoursNum !== undefined && (!Number.isFinite(hoursNum) || hoursNum < 0 || hoursNum > 168)) {
-      toast.error('Hours / week must be a number between 0 and 168.');
+      toast.error(t('hoursRangeError'));
       return;
     }
     setSavingFields(true);
@@ -155,13 +173,13 @@ export function ProfilePage(): JSX.Element {
           : null,
       });
       seed(updated);
-      toast.success('Profile saved.');
+      toast.success(t('profileSaved'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Save failed.');
+      toast.error(err instanceof Error ? err.message : t('saveFailed'));
     } finally {
       setSavingFields(false);
     }
-  }, [displayName, me, jobTitle, department, bio, equipment, interests, timezone, hours, status, seed]);
+  }, [displayName, me, jobTitle, department, bio, equipment, interests, timezone, hours, status, seed, t]);
 
   const saveSkills = useCallback(async () => {
     setSavingSkills(true);
@@ -169,46 +187,49 @@ export function ProfilePage(): JSX.Element {
       const clean = skills.filter((s) => s.name.trim().length > 0).map((s) => ({ name: s.name.trim(), proficiency: s.proficiency }));
       const updated = await setMySkills(clean);
       seed(updated);
-      toast.success('Skills saved.');
+      toast.success(t('skillsSaved'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Saving skills failed.');
+      toast.error(err instanceof Error ? err.message : t('saveSkillsFailed'));
     } finally {
       setSavingSkills(false);
     }
-  }, [skills, seed]);
+  }, [skills, seed, t]);
 
   const onPickAvatar = useCallback(async (file: File) => {
     try {
-      if (!file.type.startsWith('image/')) throw new Error('Avatar must be an image.');
+      if (!file.type.startsWith('image/')) throw new Error(t('avatarMustBeImage'));
       const token = await uploadImage(file);
       seed(await setAvatar(token));
-      toast.success('Avatar updated.');
+      toast.success(t('avatarUpdated'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Avatar upload failed.');
+      toast.error(err instanceof Error ? err.message : t('avatarUploadFailed'));
     }
-  }, [seed]);
+  }, [seed, t]);
 
   const removeAvatar = useCallback(async () => {
     try {
       seed(await clearAvatar());
-      toast.info('Avatar removed.');
+      toast.info(t('avatarRemoved'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not remove avatar.');
+      toast.error(err instanceof Error ? err.message : t('avatarRemoveFailed'));
     }
-  }, [seed]);
+  }, [seed, t]);
 
   const tabs: { key: ProfileTab; label: string }[] = [
-    { key: 'profile', label: 'Profile' },
-    { key: 'board', label: 'My Board' },
-    { key: 'workflows', label: 'Assigned workflows' },
-    { key: 'schedules', label: 'Schedules' },
-    { key: 'activity', label: 'Activity' },
-    { key: 'connections', label: 'Connections' },
+    { key: 'profile', label: t('tabProfile') },
+    { key: 'board', label: t('tabBoard') },
+    { key: 'workflows', label: t('tabWorkflows') },
+    { key: 'schedules', label: t('tabSchedules') },
+    { key: 'activity', label: t('tabActivity') },
+    { key: 'connections', label: t('tabConnections') },
+    { key: 'memory', label: t('tabMemory') },
+    { key: 'knowledge', label: t('tabKnowledge') },
+    ...(twinAccess.enabled ? [{ key: 'twin' as ProfileTab, label: t('tabTwin') }] : []),
   ];
 
   return (
     <div>
-      <PageHeader eyebrow="Platform" title="My Profile" lede="Your self-service profile. Visible to your team in the directory." />
+      <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />
 
       {error ? <Notice variant="error">{error}</Notice> : null}
 
@@ -218,21 +239,15 @@ export function ProfilePage(): JSX.Element {
         <>
           {/* Tabs — the canonical editorial tab strip (DESIGN.md §5 `.tabs`/`.tab`),
               mirroring the agent profile (ADR 0025 user/agent symmetry). */}
-          <div className="tabs u-mb-4 u-wrap" role="tablist">
-            {tabs.map((t) => (
-              <button
-                key={t.key}
-                type="button"
-                role="tab"
-                aria-selected={tab === t.key}
-                className="tab"
-                onClick={() => setTab(t.key)}
-              >
-                {t.label}
-              </button>
-            ))}
-          </div>
+          <Tabs
+            items={tabs.map((tb) => ({ id: tb.key, label: tb.label }))}
+            value={tab}
+            onChange={(id) => setTab(id as ProfileTab)}
+            idBase="profile"
+            className="u-mb-4 u-wrap"
+          />
 
+          <TabPanel idBase="profile" tabId={tab}>
           {tab === 'profile' ? (
             <div className="u-grid u-gap-4">
               {/* Identity + completeness */}
@@ -240,21 +255,21 @@ export function ProfilePage(): JSX.Element {
                 <div className="u-flex u-gap-4 u-items-center u-wrap">
                   <div className="profile-avatar">
                     {me.avatarAssetToken ? (
-                      <img src={assetUrl(me.avatarAssetToken)} alt="avatar" className="profile-avatar-img" />
+                      <img src={assetUrl(me.avatarAssetToken)} alt={t('avatarAlt')} className="profile-avatar-img" />
                     ) : (
                       <UserIcon />
                     )}
                   </div>
                   <div className="profile-identity-col">
                     <div className="u-flex u-gap-2 u-items-center u-wrap">
-                      <strong className="profile-name">{me.displayName ?? 'You'}</strong>
+                      <strong className="profile-name">{me.displayName ?? t('youFallback')}</strong>
                       {me.emailVerified === true ? (
-                        <span className="chip chip--success"><CheckIcon /> Verified</span>
+                        <span className="chip chip--success"><CheckIcon /> {t('verified')}</span>
                       ) : me.emailVerified === false ? (
-                        <span className="chip">Email unverified</span>
+                        <span className="chip">{t('emailUnverified')}</span>
                       ) : null}
                     </div>
-                    <span className="u-label-sm">Profile completeness: {me.completeness}%</span>
+                    <span className="u-label-sm">{t('completenessLabel', { percent: f.percent(me.completeness / 100) })}</span>
                     <div className="profile-meter-track">
                       <div className="profile-meter-fill" style={{ width: `${me.completeness}%` }} />
                     </div>
@@ -272,11 +287,11 @@ export function ProfilePage(): JSX.Element {
                       }}
                     />
                     <button type="button" className="btn-ghost" onClick={() => fileRef.current?.click()}>
-                      <ImageIcon /> Upload
+                      <ImageIcon /> {t('upload')}
                     </button>
                     {me.avatarAssetToken ? (
                       <button type="button" className="btn-ghost" onClick={() => void removeAvatar()}>
-                        <TrashIcon /> Remove
+                        <TrashIcon /> {t('common:remove')}
                       </button>
                     ) : null}
                   </div>
@@ -285,63 +300,63 @@ export function ProfilePage(): JSX.Element {
 
               {/* Descriptive fields */}
               <div className="surface-card u-gap-3">
-                <strong>Details</strong>
+                <h2 className="u-fs-16 u-m-0">{t('details')}</h2>
                 <label className="u-grid u-gap-1">
-                  <span className="u-label-sm">Your name</span>
-                  <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="e.g. Jordan Rivera" autoComplete="name" />
+                  <span className="u-label-sm">{t('yourName')}</span>
+                  <input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={t('yourNamePlaceholder')} autoComplete="name" />
                 </label>
                 <div className="profile-grid-220">
                   <label className="u-grid u-gap-1">
-                    <span className="u-label-sm">Job title</span>
-                    <input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder="Staff Engineer" />
+                    <span className="u-label-sm">{t('jobTitleLabel')}</span>
+                    <input value={jobTitle} onChange={(e) => setJobTitle(e.target.value)} placeholder={t('jobTitlePlaceholder')} />
                   </label>
                   <label className="u-grid u-gap-1">
-                    <span className="u-label-sm">Department</span>
-                    <input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder="Platform" />
+                    <span className="u-label-sm">{t('departmentLabel')}</span>
+                    <input value={department} onChange={(e) => setDepartment(e.target.value)} placeholder={t('departmentPlaceholder')} />
                   </label>
                 </div>
                 <label className="u-grid u-gap-1">
-                  <span className="u-label-sm">Bio</span>
-                  <textarea value={bio} onChange={(e) => setBio(e.target.value)} rows={3} placeholder="A short bio…" />
+                  <span className="u-label-sm">{t('bioLabel')}</span>
+                  <textarea value={bio} onChange={(e) => setBio(e.target.value)} rows={3} placeholder={t('bioPlaceholder')} />
                 </label>
                 <label className="u-grid u-gap-1">
-                  <span className="u-label-sm">Equipment (comma-separated)</span>
-                  <input value={equipment} onChange={(e) => setEquipment(e.target.value)} placeholder="laptop, camera" />
+                  <span className="u-label-sm">{t('equipmentLabel')}</span>
+                  <input value={equipment} onChange={(e) => setEquipment(e.target.value)} placeholder={t('equipmentPlaceholder')} />
                 </label>
                 <label className="u-grid u-gap-1">
-                  <span className="u-label-sm">Interests (comma-separated)</span>
-                  <input value={interests} onChange={(e) => setInterests(e.target.value)} placeholder="protocols, distributed systems" />
+                  <span className="u-label-sm">{t('interestsLabel')}</span>
+                  <input value={interests} onChange={(e) => setInterests(e.target.value)} placeholder={t('interestsPlaceholder')} />
                 </label>
                 <div className="profile-grid-160">
                   <label className="u-grid u-gap-1">
-                    <span className="u-label-sm">Timezone</span>
-                    <input value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder="America/New_York" />
+                    <span className="u-label-sm">{t('timezoneLabel')}</span>
+                    <input value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder={t('timezonePlaceholder')} />
                   </label>
                   <label className="u-grid u-gap-1">
-                    <span className="u-label-sm">Hours / week</span>
-                    <input value={hours} onChange={(e) => setHours(e.target.value)} inputMode="numeric" placeholder="40" />
+                    <span className="u-label-sm">{t('hoursLabel')}</span>
+                    <input value={hours} onChange={(e) => setHours(e.target.value)} inputMode="numeric" placeholder={t('hoursPlaceholder')} />
                   </label>
                   <label className="u-grid u-gap-1">
-                    <span className="u-label-sm">Availability</span>
+                    <span className="u-label-sm">{t('availabilityLabel')}</span>
                     <select value={status} onChange={(e) => setStatus(e.target.value as AvailabilityStatus | '')}>
-                      <option value="">—</option>
+                      <option value="">{t('availabilityNone')}</option>
                       {STATUSES.map((s) => (
-                        <option key={s} value={s}>{s}</option>
+                        <option key={s} value={s}>{t(AVAILABILITY_OPTION_KEY[s])}</option>
                       ))}
                     </select>
                   </label>
                 </div>
                 <div className="action-bar">
                   <button type="button" className="btn-primary" disabled={savingFields} onClick={() => void saveFields()}>
-                    <SaveIcon /> Save details
+                    <SaveIcon /> {t('saveDetails')}
                   </button>
                 </div>
               </div>
 
               {/* Skills */}
               <div className="surface-card u-gap-3">
-                <strong>Skills</strong>
-                <span className="u-label-sm">Endorsements from teammates are preserved when you edit a skill you keep.</span>
+                <h2 className="u-fs-16 u-m-0">{t('skills')}</h2>
+                <span className="u-label-sm">{t('skillsHint')}</span>
                 <div className="u-grid u-gap-2">
                   {skills.map((s, i) => {
                     const endorsed = me.skills.find((x) => x.name.toLowerCase() === s.name.trim().toLowerCase())?.endorsements.length ?? 0;
@@ -350,7 +365,7 @@ export function ProfilePage(): JSX.Element {
                         <input
                           value={s.name}
                           onChange={(e) => setSkills((cur) => cur.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
-                          placeholder="Skill"
+                          placeholder={t('skillPlaceholder')}
                           className="profile-skill-input"
                         />
                         <select
@@ -362,8 +377,8 @@ export function ProfilePage(): JSX.Element {
                             <option key={n} value={n}>{n}</option>
                           ))}
                         </select>
-                        {endorsed > 0 ? <span className="chip chip--accent">{endorsed} endorsed</span> : null}
-                        <button type="button" className="btn-ghost" onClick={() => setSkills((cur) => cur.filter((_, j) => j !== i))}>
+                        {endorsed > 0 ? <span className="chip chip--accent">{t('endorsedCount', { count: endorsed })}</span> : null}
+                        <button type="button" className="btn-ghost" aria-label={t('removeSkillLabel', { name: s.name || t('skills') })} onClick={() => setSkills((cur) => cur.filter((_, j) => j !== i))}>
                           <TrashIcon />
                         </button>
                       </div>
@@ -372,10 +387,10 @@ export function ProfilePage(): JSX.Element {
                 </div>
                 <div className="action-bar">
                   <button type="button" className="btn-ghost" onClick={() => setSkills((cur) => [...cur, { name: '', proficiency: 3 }])}>
-                    <PlusIcon /> Add skill
+                    <PlusIcon /> {t('addSkill')}
                   </button>
                   <button type="button" className="btn-primary" disabled={savingSkills} onClick={() => void saveSkills()}>
-                    <SaveIcon /> Save skills
+                    <SaveIcon /> {t('saveSkills')}
                   </button>
                 </div>
               </div>
@@ -393,17 +408,20 @@ export function ProfilePage(): JSX.Element {
               ) : boardId ? (
                 <AgentBoardPanel
                   boardId={boardId}
-                  persona={me.displayName ?? 'You'}
+                  persona={me.displayName ?? t('youFallback')}
                   refreshSignal={boardRefresh}
                   intro={
                     <p className="muted u-fs-12 u-m-0">
-                      <strong>Your board.</strong> New work arrives in <strong>To Do</strong>. <strong>Drag a card</strong> between
-                      lanes to move it along — dropping a card into a trigger lane runs its workflow on your behalf.
+                      <Trans
+                        t={t}
+                        i18nKey="boardIntro"
+                        components={{ 0: <strong />, 1: <strong />, 2: <strong /> }}
+                      />
                     </p>
                   }
                 />
               ) : (
-                <p className="muted">Loading your board…</p>
+                <p className="muted">{t('loadingBoard')}</p>
               )}
             </div>
           ) : null}
@@ -419,6 +437,13 @@ export function ProfilePage(): JSX.Element {
           {tab === 'connections' ? (
             <ConnectionsManager returnPath="/profile?tab=connections" />
           ) : null}
+
+          {tab === 'memory' ? <ProfileMemoryTab /> : null}
+
+          {tab === 'knowledge' ? <ProfileKnowledgeTab /> : null}
+
+          {tab === 'twin' && twinAccess.enabled ? <ProfileTwinGrantsTab /> : null}
+          </TabPanel>
         </>
       )}
     </div>

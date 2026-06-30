@@ -33,6 +33,9 @@ import { useBuilderStore } from '../store/builderStore.js';
 import { catalogEntry } from '../palette/catalogRegistry.js';
 import { isPortCompatible } from './portCompatibility.js';
 import { BaseNode } from './nodes/BaseNode.js';
+import { Notice } from '../../ui/Notice.js';
+import { InfoIcon } from '../../ui/icons/index.js';
+import { useTranslation } from 'react-i18next';
 
 const NODE_TYPES = { builder: BaseNode };
 export const PALETTE_MIME = 'application/openwop-node-kind';
@@ -53,6 +56,7 @@ export function BuilderCanvas() {
 }
 
 function BuilderCanvasInner() {
+  const { t } = useTranslation('builder');
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const { screenToFlowPosition } = useReactFlow();
 
@@ -286,12 +290,29 @@ function BuilderCanvasInner() {
   }, []);
 
   return (
+    // The canvas is a labeled drop-zone group: `onDrop`/`onDragOver` accept
+    // nodes dragged from the palette, which is intrinsic to this container.
+    // The inner xyflow surface owns node-level keyboard/pointer interaction;
+    // this wrapper is a grouping landmark, not a control. Same justified
+    // exception as WorkflowProgressPanel's Escape-scoped <aside>.
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <div
       ref={wrapperRef}
       className="builder-canvas"
+      role="group"
+      aria-label={t('canvasAria')}
       onDrop={onDrop}
       onDragOver={onDragOver}
     >
+      {/* RUN-1 — honest small-screen heads-up; the canvas still renders. CSS gates
+          its visibility to narrow viewports (.builder-canvas-mobilehint). */}
+      <div className="builder-canvas-mobilehint">
+        <Notice variant="info">{t('canvasMobileHint')}</Notice>
+      </div>
+      {/* RUN-3 — a discoverable keyboard-shortcut affordance. */}
+      <span className="builder-canvas-help" title={t('canvasShortcuts')}>
+        <InfoIcon size={13} aria-hidden /> {t('canvasKeyboardShortcuts')}
+      </span>
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}

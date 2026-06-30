@@ -29,6 +29,21 @@ describe('composeAgentSystemPrompt', () => {
     expect(out).not.toContain('named ');
   });
 
+  it('injects the strategy context block after the persona, before CONVERSATION CONTEXT (ADR 0079 Phase 5)', () => {
+    const block = 'STRATEGIC CONTEXT (...):\n• Win FY26 [s-1] (annual, active)';
+    const out = composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David', injectedContextBlock: block });
+    expect(out.startsWith(IRIS)).toBe(true);
+    expect(out).toContain(block);
+    // Order: persona … strategy block … CONVERSATION CONTEXT … identity re-anchor.
+    expect(out.indexOf(block)).toBeLessThan(out.indexOf('CONVERSATION CONTEXT:'));
+    expect(out.indexOf(IRIS)).toBeLessThan(out.indexOf(block));
+  });
+
+  it('omits the strategy block entirely when absent/empty', () => {
+    expect(composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David' })).not.toContain('STRATEGIC CONTEXT');
+    expect(composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David', injectedContextBlock: '   ' })).not.toContain('STRATEGIC CONTEXT');
+  });
+
   it('treats empty/whitespace userName as anonymous', () => {
     const out = composeAgentSystemPrompt({ persona: 'Devon', systemPrompt: 'x', userName: '   ' });
     expect(out).toContain('second person');

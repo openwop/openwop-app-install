@@ -14,17 +14,19 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   fetchRegistryIndex,
   fetchPackDetail,
   trustTierFor,
-  TRUST_TIER_LABEL,
+  trustTierLabel,
   registryUrl,
   sbomUrlFor,
   type PackIndexEntry,
   type PackDetail,
   type PackVersionRecord,
 } from './registryClient.js';
+import { useFormat } from '../i18n/useFormat.js';
 import { CheckIcon, XIcon } from '../ui/icons/index.js';
 
 interface Props {
@@ -45,6 +47,8 @@ const TIER_COLOR: Record<string, string> = {
 };
 
 export function PackBrowser({ installedTypeIds, onClose, onUseNode }: Props) {
+  const { t } = useTranslation('registry');
+  const f = useFormat();
   const [packs, setPacks] = useState<PackIndexEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState('');
@@ -69,25 +73,25 @@ export function PackBrowser({ installedTypeIds, onClose, onUseNode }: Props) {
   }, [packs, query]);
 
   return (
-    <div className="pack-browser-overlay" role="dialog" aria-modal="true" aria-label="Pack registry">
+    <div className="pack-browser-overlay" role="dialog" aria-modal="true" aria-label={t('dialogLabel')}>
       <div className="pack-browser">
         <header className="pack-browser-header">
-          <strong className="u-flex-1">Pack registry</strong>
-          {packs && <span className="muted u-fs-12">{packs.length} published</span>}
-          <button type="button" className="secondary" onClick={onClose} aria-label="Close"><XIcon size={14} /></button>
+          <strong className="u-flex-1">{t('title')}</strong>
+          {packs && <span className="muted u-fs-12">{t('publishedCount', { count: packs.length })}</span>}
+          <button type="button" className="secondary" onClick={onClose} aria-label={t('common:close')}><XIcon size={14} /></button>
         </header>
         <div className="pack-browser-search">
           <input
             type="search"
-            placeholder="Search packs, tags, typeIds…"
+            placeholder={t('searchPlaceholder')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             spellCheck={false}
             autoComplete="off"
           />
         </div>
-        {error && <div className="alert error packbrowser-alert">Registry unreachable: {error}</div>}
-        {!packs && !error && <div className="muted u-p-4">Loading registry…</div>}
+        {error && <div className="alert error packbrowser-alert">{t('registryUnreachable', { error })}</div>}
+        {!packs && !error && <div className="muted u-p-4">{t('loadingRegistry')}</div>}
         <div className="pack-browser-body">
           <ul className="pack-browser-list">
             {filtered.map((p) => {
@@ -102,27 +106,29 @@ export function PackBrowser({ installedTypeIds, onClose, onUseNode }: Props) {
                   >
                     <span className="pack-tier-dot" style={{ background: TIER_COLOR[tier] }} aria-hidden />
                     <span className="pack-browser-row-name">{p.name}</span>
-                    {p.yanked && <span className="pack-flag pack-flag-danger">yanked</span>}
-                    {p.deprecated && !p.yanked && <span className="pack-flag">deprecated</span>}
+                    {p.yanked && <span className="pack-flag pack-flag-danger">{t('flagYanked')}</span>}
+                    {p.deprecated && !p.yanked && <span className="pack-flag">{t('flagDeprecated')}</span>}
                     {installedCount > 0 && (
-                      <span className="pack-flag pack-flag-ok" title={`${installedCount} typeId(s) installed`}>
-                        installed
+                      <span className="pack-flag pack-flag-ok" title={t('installedTypeIdsTitle', { count: installedCount })}>
+                        {t('flagInstalled')}
                       </span>
                     )}
                     <span className="muted pack-browser-row-counts">
-                      {p.nodeCount}n{p.agentCount > 0 ? ` ${p.agentCount}a` : ''}
+                      {p.agentCount > 0
+                        ? t('rowCountsWithAgents', { nodes: f.number(p.nodeCount), agents: f.number(p.agentCount) })
+                        : t('rowCounts', { nodes: f.number(p.nodeCount) })}
                     </span>
                   </button>
                 </li>
               );
             })}
-            {packs && filtered.length === 0 && <li className="muted u-p-2">No packs match.</li>}
+            {packs && filtered.length === 0 && <li className="muted u-p-2">{t('noPacksMatch')}</li>}
           </ul>
           <div className="pack-browser-detail">
             {selected ? (
               <PackDetailView name={selected} installedTypeIds={installedTypeIds} onUseNode={onUseNode} />
             ) : (
-              <p className="muted u-p-4">Select a pack to view its manifest, signature, trust tier and SBOM.</p>
+              <p className="muted u-p-4">{t('selectPackPrompt')}</p>
             )}
           </div>
         </div>
@@ -140,6 +146,8 @@ function PackDetailView({
   installedTypeIds: ReadonlySet<string>;
   onUseNode?: ((typeId: string) => void) | undefined;
 }) {
+  const { t } = useTranslation('registry');
+  const f = useFormat();
   const [detail, setDetail] = useState<PackDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -154,7 +162,7 @@ function PackDetailView({
   }, [name]);
 
   if (error) return <div className="alert error packbrowser-alert">{error}</div>;
-  if (!detail) return <div className="muted u-p-4">Loading {name}…</div>;
+  if (!detail) return <div className="muted u-p-4">{t('loadingPack', { name })}</div>;
 
   const tier = trustTierFor(detail.name);
   const latest = detail.versions.find((v) => v.version === detail.latest) ?? detail.versions[detail.versions.length - 1];
@@ -164,57 +172,57 @@ function PackDetailView({
       <div className="pack-detail-head">
         <h3>{detail.name}</h3>
         <span className="pack-tier-badge" style={{ borderColor: TIER_COLOR[tier], color: TIER_COLOR[tier] }}>
-          {TRUST_TIER_LABEL[tier]}
+          {trustTierLabel(tier)}
         </span>
       </div>
       <p className="pack-detail-desc">{detail.description}</p>
       <p className="muted u-fs-12">
-        {detail.author && <>by {detail.author} · </>}
+        {detail.author && <>{t('byAuthor', { author: detail.author })}</>}
         {detail.license} ·{' '}
-        {detail.homepage && <a href={detail.homepage} target="_blank" rel="noreferrer">homepage</a>}
+        {detail.homepage && <a href={detail.homepage} target="_blank" rel="noreferrer">{t('homepage')}</a>}
         {detail.homepage && detail.repository && ' · '}
-        {detail.repository && <a href={detail.repository} target="_blank" rel="noreferrer">repo</a>}
+        {detail.repository && <a href={detail.repository} target="_blank" rel="noreferrer">{t('repo')}</a>}
       </p>
 
       {latest && (
         <div className="pack-detail-provenance">
-          <h4>Latest {latest.version}</h4>
+          <h4>{t('latestVersionHeading', { version: latest.version })}</h4>
           <dl>
-            <dt>Signature</dt>
+            <dt>{t('signatureLabel')}</dt>
             <dd>
-              {latest.signingMethod} · key <code>{latest.signingKeyId}</code> ·{' '}
-              <a href={registryUrl(latest.signatureUrl)} target="_blank" rel="noreferrer">.sig</a>
+              {t('signatureValue', { method: latest.signingMethod })} <code>{latest.signingKeyId}</code> ·{' '}
+              <a href={registryUrl(latest.signatureUrl)} target="_blank" rel="noreferrer">{t('sigLink')}</a>
             </dd>
-            <dt>Integrity (SRI)</dt>
+            <dt>{t('integrityLabel')}</dt>
             <dd><code className="pack-sri">{latest.integrity}</code></dd>
-            <dt>Artifacts</dt>
+            <dt>{t('artifactsLabel')}</dt>
             <dd>
-              <a href={registryUrl(latest.manifestUrl)} target="_blank" rel="noreferrer">manifest</a> ·{' '}
-              <a href={sbomUrlFor(latest)} target="_blank" rel="noreferrer">SBOM</a> ·{' '}
-              <a href={registryUrl(latest.tarballUrl)} target="_blank" rel="noreferrer">tarball</a>
+              <a href={registryUrl(latest.manifestUrl)} target="_blank" rel="noreferrer">{t('manifestLink')}</a> ·{' '}
+              <a href={sbomUrlFor(latest)} target="_blank" rel="noreferrer">{t('sbomLink')}</a> ·{' '}
+              <a href={registryUrl(latest.tarballUrl)} target="_blank" rel="noreferrer">{t('tarballLink')}</a>
             </dd>
           </dl>
         </div>
       )}
 
-      <h4>Type IDs ({detail.typeIds.length})</h4>
+      <h4>{t('typeIdsHeading', { count: detail.typeIds.length })}</h4>
       <ul className="pack-typeid-list">
-        {detail.typeIds.map((t) => {
-          const installed = installedTypeIds.has(t);
+        {detail.typeIds.map((typeId) => {
+          const installed = installedTypeIds.has(typeId);
           return (
-            <li key={t}>
-              <code>{t}</code>
+            <li key={typeId}>
+              <code>{typeId}</code>
               {installed
-                ? <span className="pack-flag pack-flag-ok">installed</span>
-                : <span className="muted pack-flag">not installed</span>}
+                ? <span className="pack-flag pack-flag-ok">{t('flagInstalled')}</span>
+                : <span className="muted pack-flag">{t('flagNotInstalled')}</span>}
               {installed && onUseNode && (
                 <button
                   type="button"
                   className="secondary pack-use-node packbrowser-use-node-btn"
-                  onClick={() => onUseNode(t)}
-                  title="Add this node to the builder canvas"
+                  onClick={() => onUseNode(typeId)}
+                  title={t('addToCanvasTitle')}
                 >
-                  + canvas
+                  {t('addToCanvas')}
                 </button>
               )}
             </li>
@@ -224,14 +232,14 @@ function PackDetailView({
 
       {detail.versions.length > 1 && (
         <details className="pack-versions">
-          <summary className="muted">All versions ({detail.versions.length})</summary>
+          <summary className="muted">{t('allVersionsSummary', { count: detail.versions.length })}</summary>
           <ul>
             {[...detail.versions].reverse().map((v) => (
               <li key={v.version}>
                 <code>{v.version}</code>
-                {v.yanked && <span className="pack-flag pack-flag-danger">yanked</span>}
-                {v.deprecated && !v.yanked && <span className="pack-flag">deprecated</span>}
-                <span className="muted u-fs-11"> {v.publishedAt.slice(0, 10)}</span>
+                {v.yanked && <span className="pack-flag pack-flag-danger">{t('flagYanked')}</span>}
+                {v.deprecated && !v.yanked && <span className="pack-flag">{t('flagDeprecated')}</span>}
+                <span className="muted u-fs-11"> {f.date(v.publishedAt)}</span>
               </li>
             ))}
           </ul>
@@ -256,13 +264,15 @@ function InstallGuidance({
   latest: PackVersionRecord | undefined;
   installedTypeIds: ReadonlySet<string>;
 }) {
+  const { t } = useTranslation('registry');
+  const f = useFormat();
   const [copied, setCopied] = useState(false);
-  const installedCount = detail.typeIds.filter((t) => installedTypeIds.has(t)).length;
+  const installedCount = detail.typeIds.filter((id) => installedTypeIds.has(id)).length;
   const allInstalled = detail.typeIds.length > 0 && installedCount === detail.typeIds.length;
   if (allInstalled) {
     return (
       <p className="muted pack-detail-install-note">
-        <CheckIcon size={12} /> All of this pack&apos;s nodes are installed — drag them onto the canvas from the palette.
+        <CheckIcon size={12} /> {t('allNodesInstalled')}
       </p>
     );
   }
@@ -287,18 +297,18 @@ function InstallGuidance({
     <div className="pack-detail-install-note">
       <p className="muted u-mb-1">
         {installedCount > 0
-          ? `${installedCount}/${detail.typeIds.length} of this pack's nodes are installed.`
-          : 'Not installed on this host.'}{' '}
-        The browser is read-only discovery — to add it, an operator sets this on the host env and restarts:
+          ? t('someNodesInstalled', { installed: f.number(installedCount), total: f.number(detail.typeIds.length) })
+          : t('notInstalledOnHost')}{' '}
+        {t('installReadOnly')}
       </p>
       <div className="pack-install-cmd">
         <code>{installLine}</code>
-        <button type="button" className="secondary" onClick={copy} title="Copy the install env line">
-          {copied ? 'Copied' : 'Copy'}
+        <button type="button" className="secondary" onClick={copy} title={t('copyInstallLineTitle')}>
+          {copied ? t('copied') : t('copy')}
         </button>
       </div>
       <p className="muted u-fs-11 u-mt-1">
-        On-demand install from the browser is deferred behind a trust-tier + auth model.
+        {t('installDeferred')}
       </p>
     </div>
   );

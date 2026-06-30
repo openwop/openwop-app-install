@@ -69,6 +69,20 @@ describe('scheduleDaemon — wall-clock firing', () => {
     expect(job?.lastRunId).toBe(runs[0]!.runId);
   });
 
+  it('fires a project-owned job and stamps the canonical ownerScope on the run (ADR 0046)', async () => {
+    // A `project:<id>` schedule (generic ownerSubject; no rosterId/ownerUserId).
+    await registerJob({ jobId: 'jp', tenantId: 't1', cronExpr: '0 * * * *', workflowId: 'wf-1', timezone: 'UTC', ownerSubject: { kind: 'project', id: 'project-abc' } }, T0);
+    expect(await processDueSchedules(deps, SLOT + 30_000)).toBe(1);
+
+    const runs = await scheduleRunsFor('jp');
+    expect(runs).toHaveLength(1);
+    const block = (runs[0]!.metadata as Record<string, unknown>).schedule as Record<string, unknown>;
+    // The canonical owner rides the run; no legacy agent/user owner is fabricated.
+    expect(block.ownerScope).toBe('project:project-abc');
+    expect(block.rosterId).toBeUndefined();
+    expect(block.ownerUserId).toBeUndefined();
+  });
+
   it('does not fire a job whose nextFireAt is still in the future', async () => {
     await registerJob({ jobId: 'j2', tenantId: 't1', cronExpr: '0 * * * *', workflowId: 'wf-1', timezone: 'UTC' }, T0);
     // now is before the 11:00 slot

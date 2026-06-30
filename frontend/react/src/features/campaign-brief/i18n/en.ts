@@ -1,0 +1,96 @@
+/**
+ * `campaign-brief` namespace (ADR 0156) — user-facing copy for Personas &
+ * Campaign Brief. Self-contained; generic actions (save/cancel/create/delete)
+ * come from `common` via `t('common:…')`.
+ */
+export const messages = {
+  eyebrow: 'Marketing',
+  title: 'Personas & Campaign Briefs',
+  lede: 'Define who you speak to and what a campaign says — marketing personas, the brief that gathers product, persona, brand, and channels, and the messaging kernel every channel echoes.',
+  notEnabledTitle: 'Campaign Briefs is not enabled',
+  notEnabledBody: 'Ask a workspace admin to turn on the Personas & Campaign Brief feature.',
+  tablistLabel: 'Campaign brief views',
+  tabBriefs: 'Briefs',
+  tabPersonas: 'Personas',
+
+  noOrgTitle: 'No organization yet',
+  noOrgBody: 'Create an organization first — briefs and personas belong to one.',
+
+  // Briefs list
+  loadingBriefs: 'Loading briefs…',
+  emptyBriefsTitle: 'No campaign briefs yet',
+  emptyBriefsBody: 'A brief gathers product, persona, brand, and channels — then generates the messaging kernel every channel echoes.',
+  newBrief: 'New brief',
+  hasKernel: 'Kernel ready',
+  noKernel: 'No kernel',
+  kernelStale: 'Kernel stale',
+  channelsEnabled_one: '{{count}} channel on',
+  channelsEnabled_other: '{{count}} channels on',
+  deleteBriefTitle: 'Delete this brief?',
+  deleteBriefBody: 'The brief and its messaging kernel are removed. This cannot be undone.',
+  status_draft: 'Draft',
+  status_validated: 'Validated',
+  status_confirmed: 'Confirmed',
+
+  // Create brief
+  fieldOrg: 'Organization',
+  fieldBriefName: 'Campaign name',
+  fieldProductName: 'Product',
+
+  // Brief detail
+  backToBriefs: 'Briefs',
+  validate: 'Validate',
+  validValid: 'Ready to generate. Channels: {{channels}}.',
+  validInvalid: 'Not ready:',
+  kernelTitle: 'Messaging kernel',
+  kernelCta: 'CTA',
+  kernelTone: 'Tone',
+  kernelSources_one: '{{count}} source cited',
+  kernelSources_other: '{{count}} sources cited',
+  noKernelYet: 'No messaging kernel yet.',
+  generateWithStrategist: 'Generate with the Brief Strategist',
+  secProduct: 'Product',
+  fieldObjective: 'Objective',
+  fieldProductDescription: 'Product description',
+  fieldIndustry: 'Industry / vertical',
+  fieldBrand: 'Brand',
+  brandNone: 'No brand',
+  secAudience: 'Audience',
+  noPersonasForOrg: 'No personas in this organization yet — add one on the Personas tab.',
+  secChannels: 'Channels',
+  secMessaging: 'Messaging',
+  fieldValueProp: 'Primary value proposition',
+  fieldProofPoints: 'Proof points',
+  fieldProofPointsHelp: 'Stats, case studies, certifications — one per line.',
+  fieldCtaStrategy: 'CTA strategy',
+
+  channel_landing_page: 'Landing page',
+  channel_ad_variants: 'Ad variants',
+  channel_email_sequence: 'Email sequence',
+  channel_creative_briefs: 'Creative briefs',
+  channel_social_posts: 'Social posts',
+
+  // Personas
+  loadingPersonas: 'Loading personas…',
+  emptyPersonasTitle: 'No personas yet',
+  emptyPersonasBody: 'A persona is a content-targeting archetype — buyer stage, pain points, objections — that calibrates every channel.',
+  newPersona: 'New persona',
+  editPersona: 'Edit persona',
+  painPointsCount_one: '{{count}} pain point',
+  painPointsCount_other: '{{count}} pain points',
+  deletePersonaTitle: 'Delete this persona?',
+  deletePersonaBody: 'Briefs that reference it keep the id but lose the persona. This cannot be undone.',
+  fieldPersonaName: 'Persona name',
+  fieldRole: 'Role / title',
+  fieldBuyerStage: 'Buyer stage',
+  fieldPainPoints: 'Pain points',
+  fieldObjections: 'Objections',
+  fieldGoals: 'Goals',
+  fieldDemographics: 'Audience notes',
+  linePerItem: 'One per line.',
+
+  buyerStage_unaware: 'Unaware',
+  buyerStage_problem_aware: 'Problem-aware',
+  buyerStage_solution_aware: 'Solution-aware',
+  buyerStage_product_aware: 'Product-aware',
+} as const;

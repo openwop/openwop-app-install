@@ -15,7 +15,7 @@ const routes: FeatureRoute[] = [
     element: <AdvisoryBoardPage />,
     tier: 'workspace',
     nav: {
-      group: 'Workspace',
+      group: 'Leadership',
       label: 'Board of Advisors',
       icon: ScaleIcon,
       hint: 'Councils of advisor agents',

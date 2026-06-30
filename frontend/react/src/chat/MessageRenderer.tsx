@@ -19,13 +19,22 @@
  * extensions when needed) renders as inline players / thumbnails.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useRef } from 'react';
+import { useTranslation } from 'react-i18next';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+// ADR 0129 — KaTeX math. `remark-math` + `rehype-katex` + `katex` are pinned into
+// the lazy `markdown` chunk by vite manualChunks, so they stay OFF the entry bundle.
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import { CodeBlock } from './CodeBlock.js';
+const MermaidDiagram = lazy(() => import('./MermaidDiagram.js').then((m) => ({ default: m.MermaidDiagram })));
+import 'katex/dist/katex.min.css';
 import type { ContentPart } from './hooks/useChatSession.js';
 import { config } from '../client/config.js';
+import { formatDurationSeconds } from '../i18n/format.js';
 import { MicIcon } from '../ui/icons/MicIcon.js';
-import { CheckIcon, PaperclipIcon } from '../ui/icons/index.js';
+import { PaperclipIcon } from '../ui/icons/index.js';
 
 /** Overrides applied to ReactMarkdown's element renderers. Two
  *  behaviors we want different from the defaults:
@@ -156,7 +165,9 @@ function TextWithCodeBlocks({ content, markdown }: { content: string; markdown: 
             ? <MarkdownText key={i} content={seg.content} />
             : <span key={i} className="msgrender-pre-text">{seg.content}</span>
         ) : (
-          <CodeBlock key={i} source={seg.content} language={seg.language} />
+          seg.language === 'mermaid'
+            ? <Suspense key={i} fallback={<CodeBlock source={seg.content} language="mermaid" />}><MermaidDiagram source={seg.content} /></Suspense>
+            : <CodeBlock key={i} source={seg.content} language={seg.language} />
         ),
       )}
     </>
@@ -174,7 +185,17 @@ function TextWithCodeBlocks({ content, markdown }: { content: string; markdown: 
 function MarkdownText({ content }: { content: string }): JSX.Element {
   return (
     <div className="chat-md msgrender-md">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={CHAT_MD_COMPONENTS}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm, remarkMath]}
+        // ADR 0129: `trust:false` (no \href/\url command injection) + `throwOnError:false`
+        // (a malformed/partial expression degrades to the literal source, never throws).
+        // ADR 0129 Phase 4 (a11y) — `output: 'htmlAndMathml'` is KaTeX's default, but
+        // we set it EXPLICITLY: the MathML sibling is what screen readers announce, so
+        // this is an accessibility-critical setting that must not silently change if a
+        // future KaTeX default does.
+        rehypePlugins={[[rehypeKatex, { trust: false, throwOnError: false, output: 'htmlAndMathml' }]]}
+        components={CHAT_MD_COMPONENTS}
+      >
         {content}
       </ReactMarkdown>
     </div>
@@ -198,45 +219,6 @@ function RenderingCard({ title, children }: { title?: string | undefined; childr
   );
 }
 
-interface CodeBlockProps { source: string; language?: string | undefined }
-
-function CodeBlock({ source, language }: CodeBlockProps): JSX.Element {
-  const [copied, setCopied] = useState(false);
-
-  async function copy(): Promise<void> {
-    try {
-      await navigator.clipboard.writeText(source);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch {
-      /* clipboard unavailable; silently ignore */
-    }
-  }
-
-  return (
-    <div className="msgrender-code">
-      <div className="u-flex u-items-center u-justify-between u-pad-4x8 u-bg-surface u-border-b u-fs-11 muted">
-        <span>{language ?? 'code'}</span>
-        <button
-          type="button"
-          className="secondary msgrender-copy-btn"
-          onClick={copy}
-          aria-label="Copy code"
-        >
-          {copied ? (
-            <span className="u-iflex u-items-center u-gap-1">
-              <CheckIcon size={12} /> Copied
-            </span>
-          ) : 'Copy'}
-        </button>
-      </div>
-      <pre className="msgrender-code-pre">
-        <code>{source}</code>
-      </pre>
-    </div>
-  );
-}
-
 interface AudioProps {
   mimeType: string;
   dataBase64: string;
@@ -244,6 +226,7 @@ interface AudioProps {
 }
 
 function AudioAttachment({ mimeType, dataBase64, durationSeconds }: AudioProps): JSX.Element {
+  const { t } = useTranslation('chat');
   const url = useMemo(() => `data:${mimeType};base64,${dataBase64}`, [mimeType, dataBase64]);
   const audioRef = useRef<HTMLAudioElement>(null);
   useEffect(() => () => {
@@ -254,7 +237,9 @@ function AudioAttachment({ mimeType, dataBase64, durationSeconds }: AudioProps):
     <div className="u-flex u-items-center u-gap-2 u-my-1-5 u-pad-6x10 u-bg-bg u-border u-radius u-fs-12">
       <MicIcon size={14} />
       <span className="u-shrink-0">
-        Voice{durationSeconds != null ? ` (${durationSeconds.toFixed(1)}s)` : ''}
+        {durationSeconds != null
+          ? t('voiceWithDuration', { duration: formatDurationSeconds(durationSeconds) })
+          : t('voiceLabel')}
       </span>
       <audio
         ref={audioRef}

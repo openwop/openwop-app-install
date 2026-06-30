@@ -15,14 +15,53 @@
  * fetchBatch, so it goes live automatically once a key is configured.
  */
 
+import { fetch as undiciFetch } from 'undici';
 import { createLogger } from '../observability/logger.js';
 import { resolveSecret } from '../byok/secretResolver.js';
+import {
+  isDeniedWebhookHost,
+  webhookPrivateEgressAllowed,
+  webhookEgressDispatcher,
+  WebhookEgressDeniedError,
+} from './webhookEgressGuard.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 
 const log = createLogger('host.webResearch');
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_BODY = 256 * 1024;
+
+/**
+ * SSRF-guarded fetch for web-research egress. The `urls`/search-result URLs
+ * are RUN-CONTROLLABLE (a workflow node supplies them), so a bare `fetch`
+ * here is an SSRF sink — a run could point the host at
+ * `http://169.254.169.254/...` or a public URL that 30x-redirects there.
+ * We route through the SAME pinned-resolution dispatcher the webhook layer
+ * uses (RFC 0093 §A.1): it re-resolves at connect time and rejects ANY
+ * resolved address in a denied range, on the initial request AND on every
+ * redirect hop (same dispatcher), so there is no DNS-rebind / redirect TOCTOU.
+ * A cheap hostname pre-check fails obvious internal targets fast with a clear
+ * error before a socket is opened.
+ */
+type UndiciFetchInit = NonNullable<Parameters<typeof undiciFetch>[1]>;
+
+async function ssrfGuardedFetch(rawUrl: string, init: UndiciFetchInit) {
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    throw new Error(`web-research: invalid URL: ${rawUrl.slice(0, 120)}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`web-research: refusing non-http(s) URL scheme '${parsed.protocol}'`);
+  }
+  if (!webhookPrivateEgressAllowed() && isDeniedWebhookHost(parsed.hostname)) {
+    throw new WebhookEgressDeniedError(parsed.hostname, parsed.hostname);
+  }
+  // undici's RequestInit type includes `dispatcher` (the guarded Agent), so no
+  // cast is needed — the helper + call sites use undici's own fetch types.
+  return undiciFetch(rawUrl, { ...init, dispatcher: webhookEgressDispatcher() });
+}
 
 interface Page { url: string; status: number; contentType?: string; title?: string; extractedText?: string; truncated?: boolean; fetchedAt?: string; error?: string }
 
@@ -90,7 +129,7 @@ async function searchLive(query: string, key: string, maxResults: number, siteFi
   const base = process.env.OPENWOP_WEBSEARCH_BASE_URL ?? 'https://api.search.brave.com/res/v1/web/search';
   const q = siteFilter ? `${query} site:${siteFilter}` : query;
   const url = `${base}?q=${encodeURIComponent(q)}&count=${Math.max(1, Math.min(maxResults, 20))}`;
-  const res = await fetch(url, { headers: { accept: 'application/json', 'x-subscription-token': key }, signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
+  const res = await ssrfGuardedFetch(url, { headers: { accept: 'application/json', 'x-subscription-token': key }, signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
   if (!res.ok) throw new Error(`search provider returned HTTP ${res.status}`);
   const body = (await res.json()) as { web?: { results?: Array<{ url?: string; title?: string; description?: string }> } };
   const raw = body.web?.results ?? [];
@@ -105,7 +144,9 @@ export function createWebResearchSurface(scope: BundleScope): WebResearchSurface
   async function fetchOne(url: string, timeoutMs: number, maxBody: number, readable: boolean): Promise<Page> {
     const fetchedAt = new Date().toISOString();
     try {
-      const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
+      // redirect:'follow' is safe here: every hop re-resolves through the
+      // guarded dispatcher, so a public→internal redirect is still denied.
+      const res = await ssrfGuardedFetch(url, { redirect: 'follow', signal: AbortSignal.timeout(timeoutMs) });
       const contentType = res.headers.get('content-type') ?? undefined;
       const raw = await res.text();
       const truncated = Buffer.byteLength(raw, 'utf8') > maxBody;

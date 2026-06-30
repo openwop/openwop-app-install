@@ -45,16 +45,15 @@ describe('Prioritization layer (pure — ADR 0023 §4)', () => {
 
 describe('feature.assistant.nodes over a stub ctx', () => {
   let server: http.Server;
-  const PORT = 18961;
   // Typed from the pack's ambient module declaration (test/feature-packs.d.ts) —
   // no `any`, no eslint-disable (mirrors the csm-nodes test pattern).
   let nodes: (typeof import('../../../packs/feature.assistant.nodes/index.mjs'))['nodes'];
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, res);
     });
     await __resetAssistantStore();
     nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;

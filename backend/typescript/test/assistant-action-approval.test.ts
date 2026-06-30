@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
@@ -21,8 +22,7 @@ import { getApproval, __resetApprovalStore } from '../src/host/approvalService.j
 import { getRosterEntry } from '../src/host/rosterService.js';
 import { findChiefOfStaff } from '../src/features/assistant/chiefOfStaff.js';
 
-const PORT = 18971;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 const TENANT = 'default'; // bearer-auth default tenant — routes resolve this
 
@@ -31,12 +31,12 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await __clearToggleStore();
   await __resetAssistantStore();
   await __resetApprovalStore();
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   const on = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/assistant', {
     method: 'PUT',

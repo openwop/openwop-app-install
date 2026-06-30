@@ -1,11 +1,47 @@
 import type { Express } from 'express';
 import { createLogger } from '../observability/logger.js';
 import { getManagedProviderStatuses } from '../providers/managedProvider.js';
-import { sessionSecretConfigError } from '../middleware/auth.js';
+import { sessionSecretConfigError, apiKeyConfigError } from '../middleware/auth.js';
+import { APP_VERSION } from '../version.js';
+import type { Storage } from '../storage/storage.js';
 
 const log = createLogger('routes.health');
 
-export function registerHealthRoutes(app: Express): void {
+/** How long the readiness storage probe waits before declaring the DB
+ *  unreachable. A pool-exhausted/hung DB would otherwise let `kvGet` block
+ *  indefinitely, so /readiness would hang past Cloud Run's external timeout
+ *  instead of returning a fast 503 (DATA-5). Override with
+ *  OPENWOP_READINESS_PROBE_TIMEOUT_MS. Read at call time so it's configurable. */
+function readinessProbeTimeoutMs(): number {
+  return Number(process.env.OPENWOP_READINESS_PROBE_TIMEOUT_MS) || 5_000;
+}
+
+/** Cheap storage-connectivity probe: a kv read of a non-existent key
+ *  exercises the DB round-trip without side effects. Returns an error
+ *  string when the read throws (dead DB / exhausted pool) or when it does
+ *  not settle within the probe timeout, else null. */
+export async function storageProbeError(storage: Pick<Storage, 'kvGet'>): Promise<string | null> {
+  const timeoutMs = readinessProbeTimeoutMs();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`storage probe timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+    });
+    await Promise.race([storage.kvGet('__readiness_probe__'), timeout]);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export function registerHealthRoutes(app: Express, deps: { storage?: Storage } = {}): void {
+  // /health stays a PURE liveness probe ({status:'ok'}). The deploy-verifiable
+  // version lives on /readiness (ADR 0052 §D4).
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok' });
   });
@@ -44,16 +80,26 @@ export function registerHealthRoutes(app: Express): void {
     // throws on the first session-minting POST (a silent 503) while readiness
     // would otherwise 200. Surface it here so a deploy smoke test fails fast
     // instead of the health check lying (PRD §8.3 footgun).
-    const configError = sessionSecretConfigError();
+    const configError = sessionSecretConfigError() ?? apiKeyConfigError();
     if (configError) {
       log.warn('readiness degraded — required prod config missing', { error: configError });
     }
-    const ready = unconfigured.length === 0 && !configError;
+    // Storage connectivity: a dead DB / exhausted pool used to report 200
+    // here while every real request 5xx'd (DATA-3). Probe it explicitly.
+    const storageError = deps.storage ? await storageProbeError(deps.storage) : null;
+    if (storageError) {
+      log.error('readiness degraded — storage probe failed', { error: storageError });
+    }
+    const ready = unconfigured.length === 0 && !configError && !storageError;
     res.status(ready ? 200 : 503).json({
       status: ready ? 'ready' : 'degraded',
+      // ADR 0052 §D4 — version-verify a deploy: the smoke test asserts this
+      // matches the version it just shipped.
+      version: APP_VERSION,
       checks: {
         managedProviders,
         config: configError ? { ok: false, error: configError } : { ok: true },
+        storage: deps.storage ? (storageError ? { ok: false, error: storageError } : { ok: true }) : { ok: true, skipped: true },
       },
     });
   });

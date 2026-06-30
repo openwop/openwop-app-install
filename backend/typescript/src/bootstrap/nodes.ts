@@ -15,6 +15,9 @@ import { getAgentRegistry } from '../executor/agentRegistry.js';
 import type { NodeContext, NodeModule } from '../executor/types.js';
 import { emitCost } from '../observability/costEmitter.js';
 import { composeAgentSystemPrompt } from '../host/agentPromptScaffold.js';
+import { applyToolResultTransform } from '../host/toolResultTransform.js';
+import { resolveAgentKnowledgeRetrieve, composeAgentKnowledgeContext } from '../host/agentKnowledgeComposition.js';
+import { createAgentMemoryPort, agentMemoryScope } from '../host/agentMemoryAdapter.js';
 import { conversationIdFor, makeTurn } from '../host/conversation.js';
 import { appendChannelMessage } from '../host/channelsRuntime.js';
 import { getUser } from '../features/users/usersService.js';
@@ -39,8 +42,10 @@ import {
   buildTruncatedPayload,
 } from '../host/envelopeReliabilityEmit.js';
 import { dispatchSubRun, type SubRunResult } from '../subruns/subRunDispatcher.js';
-import { registerMockAgentNode } from './conformanceMockAgent.js';
+import { registerMockAgentNode, conformanceNodesEnabled } from './conformanceMockAgent.js';
+import { diagnoseEmptyCompletion } from './emptyCompletionDiagnostic.js';
 import { storeMediaAsset, resolveMediaAsset, writeMemoryEntry, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
+import agentRunnerNode from '../host/agentRunnerNode.js';
 
 const noopNode: NodeModule = {
   typeId: 'core.noop',
@@ -163,6 +168,8 @@ const dispatchNode: NodeModule = {
       perWorkerInputMappings?: unknown;
       perWorkerOutputMappings?: unknown;
       fanOutPolicy?: unknown;
+      joinPolicy?: unknown;
+      maxConcurrency?: unknown;
     };
     const defaultInputMapping = (cfg.inputMapping && typeof cfg.inputMapping === 'object' && !Array.isArray(cfg.inputMapping))
       ? (cfg.inputMapping as Record<string, string>)
@@ -235,6 +242,9 @@ const dispatchNode: NodeModule = {
 
     const dispatchedChildren: Array<{ childRunId: string; childWorkflowId: string; childStatus: string }> = [];
     let terminateReason: string | null = null;
+    // RFC 0118 — set by a parallel fan-out wave; surfaces the normative {joinOutcome, children[]}
+    // node output (children: {workflowId, childRunId, childStatus, error?}). Last wave wins.
+    let parallelResult: { joinOutcome: string; children: Array<{ workflowId: string; childRunId: string; childStatus: string; error?: { code: string; message: string } }> } | null = null;
 
     // RFC 0061 §B — the observable `iteration` counter on runOrchestrator.decided
     // (additive optional field, `run-event-payloads.schema.json#runOrchestratorDecided`).
@@ -320,6 +330,116 @@ const dispatchNode: NodeModule = {
       }
       if (kind !== 'next-worker') continue; // ignore unknown kinds for forward-compat
       const nextWorkerIds = Array.isArray(decision.nextWorkerIds) ? (decision.nextWorkerIds as string[]) : [];
+
+      // RFC 0118 — parallel fan-out wave. When fanOutPolicy:'parallel' and >1 worker, dispatch
+      // all children concurrently (bounded by maxConcurrency) and join per joinPolicy, instead of
+      // the serial loop below. The host advertises only joinMode 'wait-all' (dispatchCapability),
+      // so registration already rejected anything else. CRITICAL replay invariant (R1): children
+      // are dispatched WITHOUT outputMapping; we record `mergeOrder` (observed terminal order) on
+      // the core.dispatch.join event and apply outputMapping ONCE in that order — so a colliding
+      // parent var resolves to the same (last-in-mergeOrder) winner reproducibly on :fork, never
+      // recomputed from child wall-clock. (ADR 0165 executor arm.)
+      if (cfg.fanOutPolicy === 'parallel' && nextWorkerIds.filter((w) => typeof w === 'string' && w).length > 1) {
+        const { runParallelFanOut, HOST_MAX_FAN_OUT } = await import('../host/dispatchFanOut.js');
+        const workers = nextWorkerIds.filter((w): w is string => typeof w === 'string' && w.length > 0);
+        const jpCfg = (cfg.joinPolicy && typeof cfg.joinPolicy === 'object' && !Array.isArray(cfg.joinPolicy)) ? (cfg.joinPolicy as Record<string, unknown>) : {};
+        const joinMode = typeof jpCfg.mode === 'string' ? jpCfg.mode : 'wait-all';
+        const maxConcurrency = typeof cfg.maxConcurrency === 'number' ? cfg.maxConcurrency : undefined;
+        const effConc = Math.min(maxConcurrency ?? Number.POSITIVE_INFINITY, HOST_MAX_FAN_OUT);
+
+        const fanOutRec = await eventLog.append({
+          runId: ctx.runId,
+          nodeId: ctx.nodeId,
+          type: 'core.dispatch.fanOut',
+          causationId: decidedRec.eventId,
+          payload: { fanOutPolicy: 'parallel', childCount: workers.length, maxConcurrency: effConc, joinMode },
+        });
+
+        const out = await runParallelFanOut({
+          nextWorkerIds: workers,
+          config: { fanOutPolicy: 'parallel', ...(maxConcurrency !== undefined ? { maxConcurrency } : {}), joinPolicy: { mode: 'wait-all' } },
+          maxFanOut: HOST_MAX_FAN_OUT,
+          // Dispatch each child WITHOUT outputMapping (R1) — collect its terminal + childVariables;
+          // outputMapping is applied post-join in mergeOrder below.
+          dispatchChild: async (childWorkflowId, idx) => {
+            const inputMapping = perWorkerInputMappings?.[childWorkflowId] ?? defaultInputMapping;
+            try {
+              const result = await dispatchSubWorkflow({
+                parentRunId: ctx.runId,
+                parentTenantId: ctx.tenantId,
+                ...(ctx.scopeId ? { parentScopeId: ctx.scopeId } : {}),
+                parentNodeId: ctx.nodeId,
+                childWorkflowId,
+                ...(inputMapping ? { inputMapping } : {}),
+                onChildFailure: 'continue',
+              });
+              await eventLog.append({
+                runId: ctx.runId,
+                nodeId: ctx.nodeId,
+                type: 'node.dispatched',
+                payload: { childRunId: result.childRunId, childWorkflowId, childStatus: result.childStatus },
+              });
+              const status = result.childStatus === 'completed' ? 'completed' : result.childStatus === 'cancelled' ? 'cancelled' : 'failed';
+              return {
+                childRunId: result.childRunId,
+                status,
+                workflowId: childWorkflowId,
+                childVariables: result.childVariables,
+                ...(result.childRuntimeError ? { error: result.childRuntimeError } : {}),
+              };
+            } catch (err) {
+              // Pre-creation failure (DispatchCreationError) — synthesize a `failed` terminal so the
+              // wave continues under collect (no parent throw). childRunId is deterministic.
+              const code = err instanceof DispatchCreationError ? (err as InstanceType<typeof DispatchCreationError>).code : 'dispatch_unexpected_error';
+              return {
+                childRunId: `dispatch-creation-failed:${childWorkflowId}:${idx}`,
+                status: 'failed' as const,
+                workflowId: childWorkflowId,
+                error: { code, message: err instanceof Error ? err.message : String(err) },
+              };
+            }
+          },
+        });
+
+        // R1 — apply outputMapping ONCE in the recorded mergeOrder (last-in-mergeOrder wins on a
+        // colliding parent var). outputMapping is `{parentVar: childVarName}` (RFC 0022 §A).
+        for (const childRunId of out.mergeOrder) {
+          const term = out.children.find((c) => c.childRunId === childRunId);
+          if (!term || term.status !== 'completed' || !term.workflowId || !term.childVariables) continue;
+          const om = perWorkerOutputMappings?.[term.workflowId] ?? defaultOutputMapping;
+          if (om) {
+            for (const [parentVar, childVar] of Object.entries(om)) {
+              if (Object.prototype.hasOwnProperty.call(term.childVariables, childVar)) {
+                ctx.variables?.set(parentVar, term.childVariables[childVar]);
+              }
+            }
+          }
+        }
+
+        await eventLog.append({
+          runId: ctx.runId,
+          nodeId: ctx.nodeId,
+          type: 'core.dispatch.join',
+          causationId: fanOutRec.eventId,
+          payload: {
+            joinOutcome: out.joinOutcome,
+            completedCount: out.completedCount,
+            failedCount: out.failedCount,
+            cancelledCount: out.cancelledCount,
+            mergeOrder: out.mergeOrder,
+          },
+        });
+
+        for (const term of out.children) {
+          dispatchedChildren.push({ childRunId: term.childRunId, childWorkflowId: term.workflowId ?? '', childStatus: String(term.status) });
+        }
+        parallelResult = {
+          joinOutcome: out.joinOutcome,
+          children: out.children.map((t) => ({ workflowId: t.workflowId ?? '', childRunId: t.childRunId, childStatus: String(t.status), ...(t.error ? { error: t.error } : {}) })),
+        };
+        continue; // wave handled; proceed to the next decision
+      }
+
       for (const childWorkflowId of nextWorkerIds) {
         if (typeof childWorkflowId !== 'string' || childWorkflowId.length === 0) continue;
         const inputMapping = perWorkerInputMappings?.[childWorkflowId] ?? defaultInputMapping;
@@ -479,6 +599,8 @@ const dispatchNode: NodeModule = {
         dispatched: dispatchedChildren,
         terminated: terminateReason !== null,
         ...(terminateReason !== null ? { reason: terminateReason } : {}),
+        // RFC 0118 §D — normative parallel-fan-out output (additive; absent on the serial path).
+        ...(parallelResult ? { joinOutcome: parallelResult.joinOutcome, children: parallelResult.children } : {}),
       },
     };
   },
@@ -661,6 +783,10 @@ const approvalGateNode: NodeModule = {
       requiredApprovals?: unknown;
       rejectionPolicy?: unknown;
       approversList?: unknown;
+      approverRefs?: unknown;
+      approverGroupRefs?: unknown;
+      approverRoleRefs?: unknown;
+      overrideScopes?: unknown;
       optionLabels?: unknown;
     };
     // Surface upstream node outputs to the approver. When two or more
@@ -706,10 +832,17 @@ const approvalGateNode: NodeModule = {
         data: {
           prompt: typeof cfg.prompt === 'string' ? cfg.prompt : (typeof cfg.title === 'string' ? cfg.title : 'Please approve to continue.'),
           actions: Array.isArray(cfg.actions) ? cfg.actions : ['approve', 'reject'],
-          ...(options.length >= 2 ? { options } : {}),
+          ...(options.length >= 1 ? { options } : {}),
           ...(typeof cfg.requiredApprovals === 'number' ? { requiredApprovals: cfg.requiredApprovals } : {}),
           ...(typeof cfg.rejectionPolicy === 'string' ? { rejectionPolicy: cfg.rejectionPolicy } : {}),
           ...(Array.isArray(cfg.approversList) ? { approversList: cfg.approversList } : {}),
+          // ADR 0070 — eligible approver subjects + override scopes for the quorum gate.
+          ...(Array.isArray(cfg.approverRefs) ? { approverRefs: cfg.approverRefs } : {}),
+          // ADR 0075 / RFC 0104 (Active) — group/role approver refs, host-resolved
+          // against the run's org to the eligible subject set at resolve time.
+          ...(Array.isArray(cfg.approverGroupRefs) ? { approverGroupRefs: cfg.approverGroupRefs } : {}),
+          ...(Array.isArray(cfg.approverRoleRefs) ? { approverRoleRefs: cfg.approverRoleRefs } : {}),
+          ...(Array.isArray(cfg.overrideScopes) ? { overrideScopes: cfg.overrideScopes } : {}),
         },
       },
     };
@@ -773,8 +906,22 @@ export const conversationGateNode: NodeModule = {
   typeId: 'core.conversationGate',
   version: '1.0.0',
   async execute(ctx) {
-    const cfg = (ctx.config ?? {}) as { prompt?: unknown; schema?: unknown; mockAutoResume?: unknown; turnCount?: unknown };
+    const cfg = (ctx.config ?? {}) as { prompt?: unknown; schema?: unknown; mockAutoResume?: unknown; turnCount?: unknown; participants?: unknown };
     const conversationId = conversationIdFor(ctx.runId, ctx.nodeId);
+    // RFC 0101 (ADR 0040 Phase 6) — when a multi-party conversation declares its
+    // agent cohort at OPEN time, carry the participant roster onto
+    // `conversation.opened` so a cross-host peer/auditor/replayer can discover
+    // "this conversation has advisors A,B,C". Additive: absent ⇒ omitted (a 1:1 /
+    // ungrouped chat opens with no roster, exactly as before). A board summoned
+    // INTO an existing chat (the common path) is still observable via the
+    // per-turn `speakerId` + the roster on the chat's `ConversationMeta`.
+    const participants = Array.isArray(cfg.participants)
+      ? cfg.participants
+          .map((p) => (p && typeof p === 'object' && typeof (p as { agentId?: unknown }).agentId === 'string'
+            ? { agentId: (p as { agentId: string }).agentId }
+            : null))
+          .filter((p): p is { agentId: string } => p !== null)
+      : undefined;
 
     // Conformance / replay-determinism mode (RFC 0005 §G). When
     // `mockAutoResume: true`, self-drive the whole conversation to COMPLETION in
@@ -823,6 +970,7 @@ export const conversationGateNode: NodeModule = {
       conversationId,
       initialTurn,
       ...(schema ? { schema } : {}),
+      ...(participants && participants.length > 0 ? { participants } : {}),
       capabilities: ['multi-turn'],
     });
     return {
@@ -1009,7 +1157,7 @@ const mockAiNode: NodeModule = {
 
 // Chat responder — dispatches to a real AI provider via raw fetch.
 // Reads BYOK credentialRef from ctx.secrets, model/provider from inputs,
-// and streams tokens via node.message events.
+// and streams tokens via ai.message.chunk events (ADR 0079).
 //
 // Tool calling: when inputs.tools is a non-empty array of
 // {workflowId, name, description}, the node routes anthropic dispatch
@@ -1444,6 +1592,43 @@ export const chatResponderNode: NodeModule = {
           systemPromptHash,
           systemPromptLength: agent.systemPrompt.length,
         });
+
+        // ADR 0043 Phase 5B: compose this agent's bound knowledge (ADR 0038) into
+        // the turn so advisors recall their preseeded memory + bound KB. Appended
+        // to the system prompt (keeps a single system message — see the de-dup
+        // note below). Gated on the agent's `knowledge` capability
+        // (`resolveAgentKnowledgeRetrieve` returns undefined otherwise) and
+        // entirely best-effort, so an agent without a binding — or a KB/memory
+        // backend hiccup — leaves the turn byte-identical to before.
+        //
+        // Retrieval query: an explicit `inputs.knowledgeQuery` wins, else the
+        // latest user text. The boardroom cadence (ADR 0043 Phase 5A) sets the
+        // explicit query to the user's ORIGINAL question, so each advisor
+        // retrieves against the real topic — not the bland "<persona>, your
+        // perspective?" hand-off that is the latest user turn on a cadence step.
+        // Knowledge is a TEXT query: a multimodal-only turn (no string user
+        // content and no explicit query) simply skips retrieval.
+        const knowledgeQuery = ((): string => {
+          const explicit = inputs['knowledgeQuery'];
+          if (typeof explicit === 'string' && explicit.trim().length > 0) return explicit;
+          const li = lastIndexOfRole(messages, 'user');
+          const last = li >= 0 ? messages[li] : undefined;
+          return typeof last?.content === 'string' ? last.content : '';
+        })();
+        if (knowledgeQuery) {
+          try {
+            // A per-agent profile read on the hot path — a cheap point lookup
+            // that returns undefined fast for agents with no `knowledge` binding.
+            const memory = createAgentMemoryPort(ctx.tenantId);
+            const retrieve = await resolveAgentKnowledgeRetrieve(ctx.tenantId, agent.agentId, memory, agentMemoryScope(agent.agentId));
+            if (retrieve) {
+              const knowledgeBlock = await composeAgentKnowledgeContext(retrieve, knowledgeQuery);
+              if (knowledgeBlock) systemBody = `${systemBody}\n\n${knowledgeBlock}`;
+            }
+          } catch {
+            /* best-effort — knowledge never fails the turn */
+          }
+        }
       }
     }
     if (systemBody === null) {
@@ -1462,7 +1647,8 @@ export const chatResponderNode: NodeModule = {
       // The chat-tab path bundles its own default system prompt into
       // `inputs.messages`; when an agent is active OR the workflow
       // pins its own system, we'd otherwise emit two system messages
-      // back-to-back. MiniMax-M2.7 rejects that with HTTP 400
+      // back-to-back. MiniMax (the managed default, now MiniMax-M3;
+      // first hit on M2.7) rejects that with HTTP 400
       // `invalid params, invalid chat setting (2013)` (confirmed by
       // direct curl bisect — single system passes, two systems fail).
       // Anthropic accepts multi-system but collapses them; OpenAI
@@ -1506,7 +1692,9 @@ export const chatResponderNode: NodeModule = {
 
       try {
         const onDelta = async (delta: string) => {
-          await ctx.emit('node.message', { delta });
+          // ADR 0079 — the spec-canonical streaming delta the FE consumes. The
+          // transitional `node.message` dual-emit was retired in Phase 5.
+          await ctx.emit('ai.message.chunk', { chunk: delta, isLast: false });
         };
         // Bound the upstream LLM call. Without this, an unresponsive
         // managed-provider request (slow network, stuck connection,
@@ -1616,7 +1804,9 @@ export const chatResponderNode: NodeModule = {
 
     try {
       const onDelta = async (delta: string) => {
-        await ctx.emit('node.message', { delta });
+        // ADR 0079 — canonical `ai.message.chunk` (see above); `node.message`
+        // retired in Phase 5.
+        await ctx.emit('ai.message.chunk', { chunk: delta, isLast: false });
       };
       let result: DispatchResult;
       if (useTools) {
@@ -1653,6 +1843,9 @@ export const chatResponderNode: NodeModule = {
             budgetMs: 30_000,
             tenantId: ctx.tenantId,
             ...(ctx.scopeId ? { scopeId: ctx.scopeId } : {}),
+            // ADR 0133 — link the delegated sub-run to the run + agent that spawned it.
+            parentRunId: ctx.runId,
+            ...(ctx.nodeAgent ? { delegatedBy: `agent:${ctx.nodeAgent.agentId}` } : {}),
           });
           await ctx.emit('node.tool_result', {
             toolUseId: use.id,
@@ -1664,7 +1857,14 @@ export const chatResponderNode: NodeModule = {
           });
           return {
             toolUseId: use.id,
-            content: formatSubRunResult(subResult),
+            // ADR 0099 — compact the tool result at this typed boundary (the
+            // string is known to be tool output) before it re-enters the model
+            // context. Fail-open identity when no compaction decision is frozen.
+            content: applyToolResultTransform(formatSubRunResult(subResult), {
+              decision: ctx.compaction,
+              toolName: use.name,
+              tenantId: ctx.tenantId,
+            }),
             isError: subResult.status === 'failed',
           };
         };
@@ -1731,13 +1931,29 @@ export const chatResponderNode: NodeModule = {
   },
 };
 
-interface ToolBinding {
+export interface ToolBinding {
   workflowId: string;
   name: string;
   description: string;
 }
 
-function validateToolBindings(raw: unknown[]): ToolBinding[] {
+/**
+ * Validate the untrusted `inputs.tools` array of a chat-responder/heartbeat node
+ * into executable tool bindings.
+ *
+ * SECURITY INVARIANT (ADR 0105): a heartbeat/scheduled chat node's "tools" are
+ * **workflow sub-runs ONLY** — each binding MUST carry a string `workflowId`
+ * (dispatched via `dispatchSubRun`, governed by the agent's workflow portfolio +
+ * autonomy + sub-run authz). A native/builtin tool id (the surface the ADR 0102
+ * per-tool `permissions.read/write` gate governs) MUST NOT enter here: a binding
+ * without a `workflowId` is DROPPED. This is the structural guarantee that makes
+ * the "ungated heartbeat path" a non-gap. If a future feature deliberately binds
+ * native tools to a chat node, it MUST extend this type with a native-tool kind AND
+ * gate exactly those bindings with `evaluateToolPermission` — do NOT relax the
+ * `workflowId` requirement. `validate-tool-bindings.test.ts` is the alarm that
+ * fires if this is loosened. Exported for that test.
+ */
+export function validateToolBindings(raw: unknown[]): ToolBinding[] {
   const out: ToolBinding[] = [];
   for (const r of raw) {
     if (!r || typeof r !== 'object') continue;
@@ -1923,48 +2139,334 @@ const uppercaseNode: NodeModule = {
 };
 
 /**
- * Provider-specific diagnostic for the 200 OK + no text case.
- * Prefers REAL provider-reported reasons (finishReason / blockReason
- * / safetyCategory) over heuristic guesses.
+ * `local.openwop-app.a2ui-clarify` — ADR 0051 Phase 3 producer.
+ *
+ * Raises a `clarification` interrupt that carries an A2UI surface in its
+ * `data` (RFC 0102 `ui.a2ui-surface` shape). The chat renders it as a real
+ * form (via the `a2uiInterruptCard` bridge in `MessageFeed` → the
+ * `ui.a2ui-surface` card) instead of a free-text textarea, and the collected
+ * field values come back as the interrupt resume value — the "structured
+ * clarification" use case from ADR 0051. The default surface is a
+ * meeting-scheduling form; a workflow MAY override `config.surface` /
+ * `config.question` / `config.catalogVersion`. The surface uses only the
+ * host-pinned day-1 catalog components (catalog 0.9.1) so the renderer's
+ * closed-catalog validation accepts it; `action.button.action.target:
+ * "resume"` confines the action to the interrupt-resume path.
  */
-function diagnoseEmptyCompletion(result: DispatchResult): string {
-  const { provider, model, finishReason, blockReason, safetyCategory, usage } = result;
-  const tail = ` [provider=${provider} model=${model}` +
-    (finishReason ? ` finishReason=${finishReason}` : '') +
-    (blockReason ? ` blockReason=${blockReason}` : '') +
-    (safetyCategory ? ` safety=${safetyCategory}` : '') +
-    (usage?.outputTokens != null ? ` outputTokens=${usage.outputTokens}` : '') +
-    ']';
+const A2UI_CLARIFY_DEFAULT_SURFACE = {
+  title: 'Schedule the kickoff',
+  components: [
+    { component: 'text', text: "A couple of details and I'll set it up." },
+    { component: 'field.date', id: 'date', label: 'Date', required: true },
+    {
+      component: 'field.select', id: 'duration', label: 'Duration', required: true,
+      options: [
+        { value: '30', label: '30 minutes' },
+        { value: '60', label: '60 minutes' },
+        { value: '90', label: '90 minutes' },
+      ],
+    },
+    { component: 'field.checkbox', id: 'reminder', label: 'Send a reminder the day before' },
+    { component: 'action.button', id: 'confirm', label: 'Confirm', action: { target: 'resume' } },
+  ],
+} as const;
 
-  // Authoritative reasons first.
-  if (blockReason) {
-    return `Prompt blocked by ${provider} (${blockReason}). Rephrase the prompt or check for sensitive content.${tail}`;
-  }
-  if (safetyCategory) {
-    return `Output blocked by ${provider} safety filter (${safetyCategory}). Try rephrasing.${tail}`;
-  }
-  if (finishReason === 'MAX_TOKENS' || finishReason === 'length' || finishReason === 'max_tokens') {
-    return `Model hit max-tokens before emitting visible text. Raise maxTokens (currently 4096) or switch to a model with a larger output cap.${tail}`;
-  }
-  if (finishReason === 'SAFETY' || finishReason === 'content_filter') {
-    return `Output blocked by safety/content filter. Try rephrasing the prompt.${tail}`;
-  }
-  if (finishReason === 'RECITATION') {
-    return `Output blocked because it matched training-data recitation. Rephrase to encourage paraphrasing.${tail}`;
-  }
-  if (finishReason === 'STOP' || finishReason === 'stop' || finishReason === 'end_turn') {
-    // STOP + zero output is an oddity — most likely an internal-reasoning model
-    // exhausted its budget before the visible-output phase started.
-    if (provider === 'google' && model.includes('2.5-') && !model.includes('-lite')) {
-      return `Gemini ${model} stopped cleanly with zero visible text. Most likely cause: internal reasoning consumed the maxOutputTokens budget before the visible-output phase began. Try \`gemini-2.5-flash-lite\` (no reasoning) or raise maxTokens >= 8192.${tail}`;
-    }
-    return `Provider stopped cleanly with zero visible text. Could be a model-side filter, an empty system-prompt edge case, or a tool-only response without text.${tail}`;
-  }
+const a2uiClarifyNode: NodeModule = {
+  typeId: 'local.openwop-app.a2ui-clarify',
+  version: '0.1.0',
+  async execute(ctx) {
+    const cfg = (ctx.config && typeof ctx.config === 'object' && !Array.isArray(ctx.config))
+      ? (ctx.config as Record<string, unknown>)
+      : {};
+    const surface = (cfg.surface && typeof cfg.surface === 'object' && !Array.isArray(cfg.surface))
+      ? (cfg.surface as Record<string, unknown>)
+      : A2UI_CLARIFY_DEFAULT_SURFACE;
+    return {
+      status: 'suspended',
+      interrupt: {
+        kind: 'clarification',
+        data: {
+          // Free-text fallback for any consumer that doesn't render A2UI
+          // surfaces (the renderer bridge prefers `surface` when present).
+          question: typeof cfg.question === 'string' ? cfg.question : 'A few details, please.',
+          // RFC 0102: the surface + its pinned catalog version. The chat's
+          // `a2uiInterruptCard` bridge keys on these two fields.
+          catalogVersion: typeof cfg.catalogVersion === 'string' ? cfg.catalogVersion : '0.9.1',
+          surface,
+        },
+      },
+    };
+  },
+};
 
-  // No finishReason at all — likely a stream that terminated early (network
-  // failure, server-side timeout) or a parsing bug.
-  return `Provider returned 200 OK with no text and no finishReason. The stream may have terminated early, or the response shape didn't match what the dispatcher parses.${tail}`;
+// diagnoseEmptyCompletion moved to ./emptyCompletionDiagnostic.ts (ENG-10).
+
+/**
+ * core.bigquery.query (ADR 0076) — a READ-ONLY BigQuery query node. Calls the
+ * BigQuery `jobs.query` REST API through `ctx.connectors` (the ADR 0037 broker:
+ * eTLD+1-pinned to `bigquery.googleapis.com` via the `google` provider, credential
+ * resolved as the run's acting human, RFC 0079 provenance stamped). It NEVER writes
+ * — there is no BigQuery write scope; a DML/DDL statement simply fails at Google's
+ * scope check.
+ *
+ * Output carries the exact `sql` + `projectId` + `jobId` as deterministic fields —
+ * the "Verify Source" provenance the variance workflow (ADR 0078) surfaces. The
+ * data-freshness `asOf` is stamped by that workflow from run-start (replay-safe),
+ * NOT fabricated here with a wall clock.
+ */
+function mapBigQueryRows(data: unknown): Array<Record<string, unknown>> {
+  const d = (data ?? {}) as { schema?: { fields?: Array<{ name?: unknown }> }; rows?: Array<{ f?: Array<{ v?: unknown }> }> };
+  const fields = Array.isArray(d.schema?.fields) ? d.schema!.fields! : [];
+  const rows = Array.isArray(d.rows) ? d.rows : [];
+  return rows.map((row) => {
+    const cells = Array.isArray(row.f) ? row.f : [];
+    const obj: Record<string, unknown> = {};
+    fields.forEach((field, i) => {
+      const name = typeof field?.name === 'string' ? field.name : `f${i}`;
+      obj[name] = cells[i]?.v;
+    });
+    return obj;
+  });
 }
+
+const bigqueryQueryNode: NodeModule = {
+  typeId: 'core.bigquery.query',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as { projectId?: unknown; sql?: unknown; connectorId?: unknown; maxRows?: unknown };
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const projectId = String(cfg.projectId ?? inputs.projectId ?? '').trim();
+    const sql = String(cfg.sql ?? inputs.sql ?? '').trim();
+    const connectorId = String(cfg.connectorId ?? 'bigquery');
+    const maxRows = Number.isFinite(Number(cfg.maxRows)) ? Math.max(1, Math.min(10_000, Number(cfg.maxRows))) : 1000;
+
+    if (!projectId) return { status: 'failure', error: { code: 'invalid_config', message: 'core.bigquery.query requires config.projectId.' } };
+    if (!sql) return { status: 'failure', error: { code: 'invalid_config', message: 'core.bigquery.query requires config.sql (or inputs.sql).' } };
+    if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
+
+    const r = await ctx.connectors.invoke(connectorId, {
+      url: `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries`,
+      method: 'POST',
+      body: JSON.stringify({ query: sql, useLegacySql: false, maxResults: maxRows }),
+      contentType: 'application/json',
+      authScheme: 'bearer',
+    });
+
+    if (!r.ok) {
+      return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `BigQuery query failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+    }
+
+    const data = r.data as { jobReference?: { jobId?: unknown }; totalRows?: unknown } | undefined;
+    const rows = mapBigQueryRows(r.data);
+    const jobId = typeof data?.jobReference?.jobId === 'string' ? data.jobReference.jobId : undefined;
+
+    return {
+      status: 'success',
+      outputs: {
+        rows,
+        rowCount: rows.length,
+        // Provenance (deterministic — feeds "Verify Source", ADR 0078):
+        sql,
+        projectId,
+        ...(jobId ? { jobId } : {}),
+      },
+    };
+  },
+};
+
+/**
+ * core.workday.query (ADR 0082) — read HCM / People data from Workday via `ctx.connectors`
+ * (the ADR 0037 broker: apiHosts-pinned to *.workday.com, credential resolved as the acting
+ * human, RFC 0079 provenance stamped, `connections:use` enforced, READ-ONLY provider). The
+ * real source node for the talent + recognition-drafting workflows (replaces the prior
+ * mock-ai placeholders). The tenant-specific REST base
+ * (`https://{instance}.workday.com/ccx/api/v1/{tenant}`) is supplied via `config.baseUrl`
+ * (resolved from the connection's `instanceUrlTemplate`); the apiHosts pin guarantees egress
+ * can only reach *.workday.com regardless of the configured base.
+ *
+ * Output carries `{ rows, rowCount, resource, baseUrl }` — deterministic "Verify Source"
+ * provenance, mirroring core.bigquery.query.
+ */
+const WORKDAY_RESOURCES = ['workers', 'performanceReviews', 'serviceDates'] as const;
+
+const workdayQueryNode: NodeModule = {
+  typeId: 'core.workday.query',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as { baseUrl?: unknown; resource?: unknown; connectorId?: unknown; params?: unknown; maxRows?: unknown };
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const baseUrl = String(cfg.baseUrl ?? inputs.baseUrl ?? '').trim().replace(/\/+$/, '');
+    // INS-4 — a run INPUT overrides the authored `config.resource` default (so a workflow can
+    // parameterize the resource via a variable, e.g. `promotionDates` instead of the baked-in
+    // `serviceDates`), falling back to config when no input is supplied. (Input-wins precedence;
+    // every existing caller passes the resource via config with no `inputs.resource`, so the
+    // default behaviour is unchanged.)
+    const resource = String(inputs.resource ?? cfg.resource ?? '').trim();
+    const connectorId = String(cfg.connectorId ?? 'workday');
+    const maxRows = Number.isFinite(Number(cfg.maxRows)) ? Math.max(1, Math.min(10_000, Number(cfg.maxRows))) : 1000;
+
+    if (!baseUrl) return { status: 'failure', error: { code: 'invalid_config', message: 'core.workday.query requires config.baseUrl (the tenant REST base, from the connection instanceUrlTemplate).' } };
+    if (!(WORKDAY_RESOURCES as readonly string[]).includes(resource)) {
+      return { status: 'failure', error: { code: 'invalid_config', message: `core.workday.query requires config.resource ∈ {${WORKDAY_RESOURCES.join(', ')}}.` } };
+    }
+    if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
+
+    // Build the query string from a flat params bag (scalars only — no injection surface).
+    const params = (cfg.params && typeof cfg.params === 'object') ? cfg.params as Record<string, unknown> : {};
+    const qs = new URLSearchParams();
+    qs.set('limit', String(maxRows));
+    for (const [k, v] of Object.entries(params)) {
+      if (v === null || v === undefined) continue;
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') qs.set(k, String(v));
+    }
+    // Read-only GET to the tenant REST base; the broker pins the host to *.workday.com.
+    const url = `${baseUrl}/${encodeURIComponent(resource)}?${qs.toString()}`;
+    const r = await ctx.connectors.invoke(connectorId, { url, method: 'GET', authScheme: 'bearer' });
+
+    if (!r.ok) {
+      return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `Workday query failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+    }
+
+    // Workday REST collections return `{ data: [...], total }`; tolerate a bare array too.
+    const data = (r.data ?? {}) as { data?: unknown };
+    const rows = Array.isArray(data.data) ? data.data as Array<Record<string, unknown>>
+      : Array.isArray(r.data) ? r.data as Array<Record<string, unknown>>
+      : [];
+    return {
+      status: 'success',
+      outputs: {
+        rows,
+        rowCount: rows.length,
+        resource, // Provenance (deterministic — "Verify Source"):
+        baseUrl,
+      },
+    };
+  },
+};
+
+/**
+ * core.email.draft (ADR 0076 P2, +Gmail parity ADR 0081 P6) — creates a DRAFT
+ * message in the acting human's mailbox via `ctx.connectors` (the ADR 0037 broker:
+ * eTLD+1-pinned per provider, credential resolved as the acting human, RFC 0079
+ * provenance stamped). Provider is chosen by `config.connectorId`:
+ *   - `microsoft-graph` (default) → Outlook draft via `POST /v1.0/me/messages`.
+ *   - `gmail` → Gmail draft via `POST gmail/v1/users/me/drafts` ({message:{raw}}).
+ *
+ * NEVER SENDS — the only URLs it ever constructs are the fixed create-draft literals;
+ * there is no code path to a send endpoint (`/sendMail`, `…/send`, drafts.send,
+ * messages.send). For Graph this is belt-and-suspenders (the `Mail.ReadWrite` scope
+ * also excludes `Mail.Send`); for Gmail the never-send guarantee is BY CONSTRUCTION
+ * ONLY — Gmail has no draft-create scope that forbids send (`gmail.compose` is the
+ * narrowest), so the fixed-drafts-URL construction is the sole guard. "Always draft
+ * for approval" (the PRD invariant) is enforced by construction either way.
+ */
+const GRAPH_CREATE_DRAFT_URL = 'https://graph.microsoft.com/v1.0/me/messages';
+// ADR 0081 P6 — Gmail draft endpoint (sibling to Graph). NEVER a send endpoint
+// (.../drafts/send or messages.send) — the never-send invariant is by construction.
+const GMAIL_CREATE_DRAFT_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/drafts';
+
+/** base64url (no padding) of a UTF-8 string — the Gmail `message.raw` encoding. */
+function gmailB64Url(s: string): string {
+  return Buffer.from(s, 'utf8').toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+/** Collapse CR/LF in a header value to a space — defense-in-depth against MIME
+ *  header injection (the node guard already rejects line-break values; this keeps the
+ *  pure builder safe even if reused). Body content is unaffected (only headers). */
+function headerSafe(v: string): string {
+  return v.replace(/[\r\n]+/g, ' ');
+}
+
+/** Pure: build the RFC822 MIME message Gmail's drafts.create expects in `raw`.
+ *  Headers + a single text/plain|text/html part. Exported-shape kept minimal —
+ *  no attachments, no non-ASCII header encoding (sufficient for the draft body).
+ *  Header values are CR/LF-stripped so a recipient/subject can never inject a
+ *  header (e.g. a hidden `Bcc:`) or terminate the header block early. */
+function buildRfc822(recipients: string[], subject: string, body: string, html: boolean): string {
+  const contentType = html ? 'text/html; charset="UTF-8"' : 'text/plain; charset="UTF-8"';
+  return [
+    `To: ${recipients.map(headerSafe).join(', ')}`,
+    `Subject: ${headerSafe(subject)}`,
+    'MIME-Version: 1.0',
+    `Content-Type: ${contentType}`,
+    '',
+    body,
+  ].join('\r\n');
+}
+
+const emailDraftNode: NodeModule = {
+  typeId: 'core.email.draft',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as { to?: unknown; subject?: unknown; body?: unknown; bodyFormat?: unknown; connectorId?: unknown };
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const toRaw = cfg.to ?? inputs.to;
+    const subject = String(cfg.subject ?? inputs.subject ?? '').trim();
+    const body = String(cfg.body ?? inputs.body ?? '');
+    const bodyFormat = String(cfg.bodyFormat ?? 'Text') === 'HTML' ? 'HTML' : 'Text';
+    const connectorId = String(cfg.connectorId ?? 'microsoft-graph');
+    const recipients = (Array.isArray(toRaw) ? toRaw : toRaw ? [toRaw] : [])
+      .map((a) => String(a).trim())
+      .filter(Boolean);
+
+    if (recipients.length === 0) return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.draft requires config.to (one or more recipients).' } };
+    if (!subject) return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.draft requires config.subject.' } };
+    // Email headers are single-line — a CR/LF in a recipient/subject is a MIME
+    // header-injection vector on the Gmail raw-RFC822 path (Graph's structured JSON is
+    // safe, but reject for both: a line break in a header value is never legitimate and
+    // could smuggle a hidden Bcc/Cc onto the draft). Fail closed (ADR 0081 P6).
+    if (/[\r\n]/.test(subject) || recipients.some((a) => /[\r\n]/.test(a))) {
+      return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.draft recipients/subject must not contain line breaks.' } };
+    }
+    if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
+
+    // Provider strategy by connectorId (ADR 0081 P6): `gmail` → Gmail drafts.create
+    // (base64url RFC822); anything else → the Graph create-message shape. Both URLs are
+    // fixed literals — never caller-supplied, never a send endpoint.
+    const isGmail = connectorId === 'gmail';
+    const url = isGmail ? GMAIL_CREATE_DRAFT_URL : GRAPH_CREATE_DRAFT_URL;
+    const requestBody = isGmail
+      ? JSON.stringify({ message: { raw: gmailB64Url(buildRfc822(recipients, subject, body, bodyFormat === 'HTML')) } })
+      : JSON.stringify({
+          subject,
+          body: { contentType: bodyFormat, content: body },
+          toRecipients: recipients.map((address) => ({ emailAddress: { address } })),
+        });
+
+    const r = await ctx.connectors.invoke(connectorId, {
+      url,
+      method: 'POST',
+      body: requestBody,
+      contentType: 'application/json',
+      authScheme: 'bearer',
+    });
+
+    if (!r.ok) {
+      const which = isGmail ? 'Gmail' : 'Outlook';
+      return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `${which} draft creation failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+    }
+
+    const data = r.data as { id?: unknown; webLink?: unknown } | undefined;
+    const draftId = typeof data?.id === 'string' ? data.id : undefined;
+    const webLink = typeof data?.webLink === 'string' ? data.webLink : undefined;
+
+    return {
+      status: 'success',
+      outputs: {
+        drafted: true,
+        ...(draftId ? { draftId } : {}),
+        ...(webLink ? { webLink } : {}),
+        // ADR 0083 — emit the recipients + body so the draft is previewable at the
+        // approval gate (the run-artifact the gate persists derives its preview from this
+        // output). Without the body the approver had nothing to see — the dead-end card.
+        to: recipients,
+        subject,
+        body,
+        recipientCount: recipients.length,
+      },
+    };
+  },
+};
 
 let registered = false;
 
@@ -1976,11 +2478,52 @@ export function ensureNodesRegistered(): void {
   registry.register(subWorkflowNode);
   registry.register(orchestratorSupervisorNode);
   registry.register(dispatchNode);
+  registry.register(channelWriteNode);
+  // ── Conformance-only nodes ──────────────────────────────────────────
+  // These typeIds exist solely to drive the OpenWOP conformance suite
+  // (capability-refusal, BYOK echo, cost-attr allowlist, model-capability
+  // refusal, agent-event hooks). They are gated behind
+  // conformanceNodesEnabled() so a production deploy of this codebase does
+  // NOT expose executable typeIds like `conformance.secret.echo` by default
+  // (it returns hashes of host-provisioned canary secrets) — only the
+  // reference conformance host opts in. The advertisement in
+  // routes/discovery.ts reads the SAME switch so the two cannot drift.
+  if (conformanceNodesEnabled()) {
+    registerConformanceNodes(registry);
+  }
+  registry.register(delayNode);
+  registry.register(failNode);
+  registry.register(approvalGateNode);
+  registry.register(clarificationGateNode);
+  registry.register(interruptNode);
+  registry.register(conversationGateNode);
+  registry.register(webSearchNode);
+  registry.register(uppercaseNode);
+  registry.register(a2uiClarifyNode);
+  registry.register(imageEmitNode);
+  registry.register(memoryWriteNode);
+  registry.register(mockAiNode);
+  registry.register(chatResponderNode);
+  registry.register(bigqueryQueryNode);
+  registry.register(workdayQueryNode);
+  registry.register(emailDraftNode);
+  // ADR 0089 Phase 4 (Option B) — the agent-runner node behind the synthetic
+  // `openwop-app.agent-mention` workflow (runs a tool-bearing @mentioned agent's
+  // gated tool loop as a persisted run / chat `workflow_run` bubble).
+  registry.register(agentRunnerNode);
+  registered = true;
+}
+
+/**
+ * The conformance-only node registrations, extracted so the production
+ * default (NODE_ENV=production without OPENWOP_ENABLE_CONFORMANCE_NODES=true)
+ * simply never calls them. See conformanceNodesEnabled().
+ */
+function registerConformanceNodes(registry: ReturnType<typeof getNodeRegistry>): void {
   // RFC: conformance-only typeId for runtime-capability refusal test.
   // Declares `requires` pointing at a capability the host never
   // provides. The executor's pre-execute capability check refuses
-  // with `capability_not_provided`. Production deployments SHOULD
-  // skip this registration (same posture as core.conformance.mock-agent).
+  // with `capability_not_provided`.
   registry.register({
     typeId: 'conformance.requiresMissing',
     version: '1.0.0',
@@ -1990,11 +2533,10 @@ export function ensureNodesRegistered(): void {
       return { status: 'success', outputs: {} };
     },
   });
-  registry.register(channelWriteNode);
   // Conformance-only typeId for BYOK end-to-end. Resolves the
   // host-provisioned canary secret via the SecretResolver, emits
   // SHA-256 hex + byte length to variables. NEVER emits the raw
-  // value. Production deployments SHOULD skip this registration.
+  // value.
   registry.register({
     typeId: 'conformance.secret.echo',
     version: '1.0.0',
@@ -2051,37 +2593,22 @@ export function ensureNodesRegistered(): void {
     },
   });
   // Conformance-only typeId for the RFC 0031 §B step 4 refusal path
-  // (`model-capability-insufficient.test.ts` end-to-end branch). Declares
-  // `requiredModelCapabilities: ['nonexistent-capability-9b3f']` —
-  // intentionally outside the spec-reserved set so the executor's gate
-  // check at executor.ts:230-289 ALWAYS refuses, emitting
-  // `model.capability.insufficient` before `node.failed` per §D.
-  // Production deployments SHOULD skip this registration.
+  // (`model-capability-insufficient.test.ts` end-to-end branch). Declares a
+  // capability no model advertises so the executor's gate check at
+  // executor.ts:230-289 ALWAYS refuses, emitting `model.capability.insufficient`
+  // before `node.failed` per §D. Per RFC 0031 §C "Reservation policy" the id
+  // MUST be spec-reserved OR match the `x-host-<host>-<key>` extension pattern;
+  // we use the host-extension form — still outside the reserved set (so it
+  // always refuses) AND conformant per `node-module-required-capabilities-shape`.
   registry.register({
     typeId: 'conformance.modelCapability.insufficient',
     version: '1.0.0',
-    requiredModelCapabilities: ['nonexistent-capability-9b3f'],
+    requiredModelCapabilities: ['x-host-openwop-app-nonexistent-capability-9b3f'],
     async execute() {
       // Unreachable — gate refuses before this runs.
       return { status: 'success', outputs: {} };
     },
   });
-  registry.register(delayNode);
-  registry.register(failNode);
-  registry.register(approvalGateNode);
-  registry.register(clarificationGateNode);
-  registry.register(interruptNode);
-  registry.register(conversationGateNode);
-  registry.register(webSearchNode);
-  registry.register(uppercaseNode);
-  registry.register(imageEmitNode);
-  registry.register(memoryWriteNode);
-  registry.register(mockAiNode);
-  registry.register(chatResponderNode);
   // RFC 0023 — conformance-only typeId for agent-event emission hooks.
-  // Reference host always registers it; production deployments of this
-  // codebase SHOULD remove this call + drop the
-  // capabilities.conformance.mockAgent advertisement.
   registerMockAgentNode();
-  registered = true;
 }

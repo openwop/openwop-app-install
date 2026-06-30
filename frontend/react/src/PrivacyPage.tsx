@@ -13,22 +13,26 @@
  * the steward contact) are deployment-specific — adopters should review
  * and rewrite this page for their own service. See WHITE-LABEL.md.
  */
+import { Trans, useTranslation } from 'react-i18next';
 import { brand } from './brand/brand.js';
 
 export function PrivacyPage() {
+  const { t } = useTranslation('chrome');
   return (
-    <section className="privacy-page">
-      <div className="card">
-        <h2>Privacy &amp; cookies</h2>
+    <section className="privacy-page" aria-labelledby="privacy-heading">
+      <div className="surface-card">
+        <h1 id="privacy-heading">{t('privacyTitle')}</h1>
         <p className="muted">
-          Last updated 2026-05-17 · Applies to <code>{brand.primaryDomain}</code> only
+          <Trans
+            t={t}
+            i18nKey="privacyLastUpdated"
+            values={{ domain: brand.primaryDomain }}
+            components={{ 0: <code /> }}
+          />
         </p>
 
-        <h3>The one cookie we set</h3>
-        <p>
-          On your first request without a session, the backend mints a single
-          cookie:
-        </p>
+        <h2>{t('privacyOneCookieHeading')}</h2>
+        <p>{t('privacyOneCookieBody')}</p>
         <pre>
 {`Name:    openwop.session
 Domain:  ${brand.primaryDomain}
@@ -37,102 +41,95 @@ Max-Age: 86400 seconds (24 hours)
 Flags:   HttpOnly; Secure; SameSite=Lax`}
         </pre>
         <p>
-          The cookie contains a base64url-encoded JSON payload
-          <code> {`{ sid, tenantId: "anon:<sid>", tier: "anon", iat, exp }`} </code>
-          and an HMAC-SHA256 signature. No personally identifying information.
-          The <code>sid</code> is a 144-bit random value scoped to this browser;
-          your workflows + BYOK keys are isolated by it.
+          <Trans
+            t={t}
+            i18nKey="privacyCookiePayload"
+            values={{ payload: '{ sid, tenantId: "anon:<sid>", tier: "anon", iat, exp }' }}
+            components={{ 0: <code />, 1: <code /> }}
+          />
         </p>
 
-        <h3>What we store about you</h3>
+        <h2>{t('privacyStoreHeading')}</h2>
         <table className="cap-table">
           <thead>
-            <tr><th>Data</th><th>Where</th><th>Retention</th></tr>
+            <tr><th>{t('privacyColData')}</th><th>{t('privacyColWhere')}</th><th>{t('privacyColRetention')}</th></tr>
           </thead>
           <tbody>
             <tr>
-              <td>Workflows you build</td>
-              <td>In-memory on the Cloud Run instance, scoped to your session's tenant</td>
-              <td>Until 24h cleanup OR cold-start (whichever comes first)</td>
+              <td>{t('privacyRowWorkflowsData')}</td>
+              <td>{t('privacyRowWorkflowsWhere')}</td>
+              <td>{t('privacyRowWorkflowsRetention')}</td>
             </tr>
             <tr>
-              <td>BYOK keys (LLM API keys you paste)</td>
-              <td>In-memory, scoped to your session's tenant</td>
-              <td>Until 24h cleanup OR cold-start. NEVER written to disk.</td>
+              <td>{t('privacyRowByokData')}</td>
+              <td>{t('privacyRowByokWhere')}</td>
+              <td>{t('privacyRowByokRetention')}</td>
             </tr>
             <tr>
-              <td>Run records + event logs</td>
-              <td>In-memory on the Cloud Run instance, scoped to your session's tenant</td>
-              <td>Until 24h cleanup OR cold-start. Wiped via the daily cleanup endpoint when the session goes idle.</td>
+              <td>{t('privacyRowRunsData')}</td>
+              <td>{t('privacyRowRunsWhere')}</td>
+              <td>{t('privacyRowRunsRetention')}</td>
             </tr>
             <tr>
-              <td>Cookie ID (<code>sid</code>)</td>
-              <td>Your browser only</td>
-              <td>24 hours (cookie expires)</td>
+              <td><Trans t={t} i18nKey="privacyRowCookieData" components={{ 0: <code /> }} /></td>
+              <td>{t('privacyRowCookieWhere')}</td>
+              <td>{t('privacyRowCookieRetention')}</td>
             </tr>
           </tbody>
         </table>
 
-        <h3>What we do NOT do</h3>
+        <h2>{t('privacyNotDoHeading')}</h2>
         <ul>
-          <li>No third-party trackers, analytics, or ad scripts.</li>
-          <li>No social-media pixels.</li>
-          <li>No fingerprinting beyond the session cookie above.</li>
-          <li>No persistent storage of anything you type — restart wipes it.</li>
-          <li>No sale or sharing of any visitor data.</li>
-          <li>
-            Your BYOK API keys are sent ONLY to the provider you target
-            (e.g., Anthropic / OpenAI / Google) at execution time. They never
-            land in event logs, audit records, or third-party services.
-          </li>
+          <li>{t('privacyNotDo1')}</li>
+          <li>{t('privacyNotDo2')}</li>
+          <li>{t('privacyNotDo3')}</li>
+          <li>{t('privacyNotDo4')}</li>
+          <li>{t('privacyNotDo5')}</li>
+          <li>{t('privacyNotDo6')}</li>
         </ul>
 
-        <h3>Outbound traffic</h3>
+        <h2>{t('privacyOutboundHeading')}</h2>
         <p>
-          When you run a workflow node that calls an external service
-          (an LLM provider, an HTTP endpoint, etc.), the backend reaches that
-          service directly using the BYOK credential you supplied for the run.
-          The backend will refuse to fetch from private IP ranges
-          (<code>127.0.0.0/8</code>, RFC 1918, <code>169.254.0.0/16</code> / cloud
-          metadata, IPv6 link-local + ULA, multicast) per the SSRF defense in
-          <code> core.openwop.http@1.1.1</code> and <code>core.openwop.rag@1.0.1</code>.
+          <Trans
+            t={t}
+            i18nKey="privacyOutboundBody"
+            components={{ 0: <code />, 1: <code />, 2: <code />, 3: <code /> }}
+          />
         </p>
 
-        <h3>Server logs</h3>
+        <h2>{t('privacyLogsHeading')}</h2>
         <p>
-          Google Cloud Run records request metadata (method, path, status, IP,
-          user-agent) for operational debugging. Request bodies and response
-          bodies are NOT captured. The application's structured logs strip BYOK
-          secrets via the <code>stripSecretsFromPersisted</code> harness on
-          every event-log + interrupt boundary; the protocol invariants
-          <code>secret-leakage-eventlog-payload</code> and{' '}
-          <code>secret-leakage-error-envelope</code> (tracked in{' '}
-          <code>SECURITY/invariants.yaml</code>) gate this with public
-          conformance tests. No API-key plaintext appears in any log line,
-          event payload, error envelope, or audit record.
+          <Trans
+            t={t}
+            i18nKey="privacyLogsBody"
+            components={{ 0: <code />, 1: <code />, 2: <code />, 3: <code /> }}
+          />
         </p>
 
-        <h3>How to delete your data immediately</h3>
+        <h2>{t('privacyDeleteHeading')}</h2>
         <ol>
-          <li>Clear cookies for <code>{brand.primaryDomain}</code> in your browser.</li>
-          <li>Your session ID is gone, and the backend's in-memory state for it becomes
-              unreachable; the daily cleanup endpoint will wipe it within 24h.</li>
+          <li><Trans t={t} i18nKey="privacyDeleteStep1" values={{ domain: brand.primaryDomain }} components={{ 0: <code /> }} /></li>
+          <li>{t('privacyDeleteStep2')}</li>
         </ol>
 
-        <h3>What's coming</h3>
-        <p>
-          Signup with persistent storage (Firebase Auth + a real SQL backend +
-          KMS-encrypted BYOK at rest) is on the roadmap as Phase 3 of the
-          deploy plan. This page will be updated with the signed-in
-          retention rules when that lands.
-        </p>
+        <h2>{t('privacyComingHeading')}</h2>
+        <p>{t('privacyComingBody')}</p>
 
-        <h3>Contact</h3>
+        <h2>{t('privacyContactHeading')}</h2>
         <p>
-          The protocol's single steward is reachable via the contact email on
-          <a href={brand.homeUrl} target="_blank" rel="noopener">{brand.homeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')}</a>.
-          For security disclosures see <code>SECURITY.md</code> in the
-          <a href={brand.repoUrl} target="_blank" rel="noopener">{brand.repoUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\/$/, '')}</a> repo.
+          <Trans
+            t={t}
+            i18nKey="privacyContactBody"
+            values={{
+              home: brand.homeUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+              repo: brand.repoUrl.replace(/^https?:\/\/(www\.)?github\.com\//, '').replace(/\/$/, ''),
+            }}
+            components={{
+              0: <a href={brand.homeUrl} className="inline-link" target="_blank" rel="noopener" />,
+              1: <code />,
+              2: <a href={brand.repoUrl} className="inline-link" target="_blank" rel="noopener" />,
+            }}
+          />
         </p>
       </div>
     </section>

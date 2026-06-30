@@ -8,26 +8,26 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
 let server: http.Server;
-const PORT = 18585;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -243,5 +243,72 @@ describe('sample chat sessions — messages sub-collection + cascade', () => {
     // along with it.
     const gone = await jsonFetch<{ error: string }>(`/v1/host/openwop-app/chat/sessions/${id}/messages`);
     expect(gone.status).toBe(404);
+  });
+});
+
+describe('sample chat sessions — message pagination (ADR 0043 Phase 3b)', () => {
+  // 10 messages with zero-padded ids so (created_at, message_id) ordering is
+  // deterministic even if appends share a millisecond (the message_id tiebreak
+  // is monotonic with insertion order).
+  const ids = Array.from({ length: 10 }, (_, i) => `m${String(i + 1).padStart(2, '0')}`);
+  let sessionId = '';
+
+  beforeAll(async () => {
+    const s = await jsonFetch<SessionRecord>('/v1/host/openwop-app/chat/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ title: 'paged' }),
+    });
+    sessionId = s.body.sessionId;
+    for (const messageId of ids) {
+      await jsonFetch(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages`, {
+        method: 'POST',
+        body: JSON.stringify({ messageId, role: 'user', content: messageId }),
+      });
+    }
+  });
+
+  interface Page { messages: Array<{ messageId: string; createdAt: string }>; nextCursor: string | null }
+
+  it('returns the full thread (ASC) with no limit — legacy shape, no cursor', async () => {
+    const r = await jsonFetch<Page>(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages`);
+    expect(r.status).toBe(200);
+    expect(r.body.messages.map((m) => m.messageId)).toEqual(ids);
+    expect(r.body.nextCursor).toBeUndefined(); // legacy path omits the cursor entirely
+  });
+
+  it('returns the most-recent page (ASC) + a cursor when limited', async () => {
+    const r = await jsonFetch<Page>(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages?limit=3`);
+    expect(r.status).toBe(200);
+    expect(r.body.messages.map((m) => m.messageId)).toEqual(['m08', 'm09', 'm10']);
+    expect(typeof r.body.nextCursor).toBe('string');
+  });
+
+  it('pages strictly older than the cursor until history is exhausted', async () => {
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    let guard = 0;
+    do {
+      const qs = `limit=3${cursor ? `&before=${encodeURIComponent(cursor)}` : ''}`;
+      const r: { status: number; body: Page } = await jsonFetch<Page>(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages?${qs}`);
+      expect(r.status).toBe(200);
+      // Each page is ascending and older than everything seen so far.
+      seen.unshift(...r.body.messages.map((m) => m.messageId));
+      cursor = r.body.nextCursor;
+      if (++guard > 10) throw new Error('pagination did not terminate');
+    } while (cursor);
+    // Walking the cursor reconstructs the full thread in order, exactly once.
+    expect(seen).toEqual(ids);
+  });
+
+  it('returns all + a null cursor when the limit exceeds the message count', async () => {
+    const r = await jsonFetch<Page>(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages?limit=50`);
+    expect(r.body.messages.map((m) => m.messageId)).toEqual(ids);
+    expect(r.body.nextCursor).toBeNull();
+  });
+
+  it('rejects an out-of-range limit and a malformed cursor', async () => {
+    expect((await jsonFetch(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages?limit=0`)).status).toBe(400);
+    expect((await jsonFetch(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages?limit=999`)).status).toBe(400);
+    expect((await jsonFetch(`/v1/host/openwop-app/chat/sessions/${sessionId}/messages?limit=3&before=not-a-cursor`)).status).toBe(400);
   });
 });

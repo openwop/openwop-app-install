@@ -6,9 +6,28 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { extractDriveFileId, driveReadPlan } from '../src/host/knowledgeSourceFetch.js';
+import { extractDriveFileId, extractDriveFolderId, driveReadPlan } from '../src/host/knowledgeSourceFetch.js';
 
 const ID = '1AbcDEF_ghiJKL-mnoPQRstuVWxyz0123456789';
+
+describe('extractDriveFolderId (ADR 0107 — paste a folder link or id)', () => {
+  it('extracts the id from a folder URL', () => {
+    expect(extractDriveFolderId(`https://drive.google.com/drive/folders/${ID}`)).toBe(ID);
+    expect(extractDriveFolderId(`https://drive.google.com/drive/folders/${ID}?usp=sharing`)).toBe(ID);
+  });
+  it('extracts from a /drive/u/<n>/folders/<id> URL', () => {
+    expect(extractDriveFolderId(`https://drive.google.com/drive/u/0/folders/${ID}`)).toBe(ID);
+  });
+  it('accepts a bare id (the same charset the list-time guard accepts)', () => {
+    expect(extractDriveFolderId(ID)).toBe(ID);
+    expect(extractDriveFolderId('Short_Id-1')).toBe('Short_Id-1');
+  });
+  it('returns null for garbage / an injection attempt (caller maps to 400)', () => {
+    expect(extractDriveFolderId('not a folder ref')).toBeNull();      // space ⇒ not a bare id
+    expect(extractDriveFolderId("x' or '1'='1")).toBeNull();          // would-be query injection
+    expect(extractDriveFolderId('https://example.com/whatever')).toBeNull();
+  });
+});
 
 describe('extractDriveFileId', () => {
   it('accepts a raw file id', () => {

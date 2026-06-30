@@ -27,7 +27,9 @@ import type { BundleScope } from './inMemorySurfaces.js';
 const log = createLogger('host.a2a');
 
 const AGENT_CARD_PATHS = ['/.well-known/agent-card.json', '/.well-known/agent.json'];
-const RPC_TIMEOUT_MS = 20_000;
+/** Per-RPC timeout for outbound A2A calls. Configurable (INT-3) — a peer agent
+ *  with a slower SLA can raise it via OPENWOP_A2A_RPC_TIMEOUT_MS. */
+const RPC_TIMEOUT_MS = Number(process.env.OPENWOP_A2A_RPC_TIMEOUT_MS) || 20_000;
 const TERMINAL_STATES = new Set(['COMPLETED', 'FAILED', 'CANCELED', 'REJECTED']);
 
 type Json = Record<string, unknown>;

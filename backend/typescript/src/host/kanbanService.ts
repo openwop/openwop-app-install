@@ -27,6 +27,7 @@
 
 import { createHash, randomUUID } from 'node:crypto';
 import { DurableCollection, publishHostExtEvent, subscribeHostExtEvent } from './hostExtPersistence.js';
+import type { Subject } from './subject.js';
 
 /** A column on a board. When `triggerWorkflowId` is set, any card moved
  *  into this column starts that workflow (unless the card overrides it
@@ -38,6 +39,16 @@ export interface KanbanColumn {
   /** Column-level default workflow fired when a card enters this column.
    *  A card's own `workflowId` takes precedence. */
   triggerWorkflowId?: string;
+  /** ADR 0049 — marks the board's terminal (Done) lane. A card sitting in a
+   *  terminal column is "complete" (the canonical card-level completion signal,
+   *  robust to column renames). The default board flags its "Done" column. */
+  terminal?: boolean;
+  /** CHATP-4 — the STRUCTURED kind of a terminal lane, so consumers (e.g. the
+   *  priority-matrix schedule status, ADR 0103) can distinguish a completion lane
+   *  ("Done") from a cancellation lane ("Won't Do") WITHOUT a locale-fragile name
+   *  regex. Optional + only meaningful when `terminal` is true; legacy boards that
+   *  predate it fall back to the stable seeded id / name heuristic. */
+  terminalKind?: 'completion' | 'cancellation';
 }
 
 /** Where a task card came from — the demo "task source taxonomy" so the UI
@@ -84,8 +95,16 @@ export interface KanbanCard {
    *  not a dependency graph). Surfaced as a "Blocked" chip. */
   blockerNote?: string;
   /** Who the task is assigned to (host.kanban taskAssign / resourceMonitor).
-   *  Additive — existing cards without it stay valid. */
+   *  The single accountable owner — a userId (ADR 0049). Additive — existing
+   *  cards without it stay valid. */
   assigneeId?: string;
+  /** ADR 0049 — role-addressed assignment: the card is unclaimed and notifies
+   *  every holder of this role; the first to CLAIM it sets `assigneeId` and
+   *  clears this. Mutually exclusive with a set `assigneeId` in steady state. */
+  assigneeRole?: string;
+  /** ADR 0049 — set to the ISO timestamp the card first entered a `terminal`
+   *  column (completion audit). Cleared if it moves back out of terminal. */
+  completedAt?: string;
   /** Effort estimate in hours (host.kanban timelinePlan). */
   estimateHours?: number;
   /** Free-form labels (host.kanban automateRules `label-changed` triggers). */
@@ -110,6 +129,10 @@ export interface KanbanBoard {
    *  Mutually exclusive with `rosterId`; a board owned by a person attributes
    *  card→run triggers to that user, not an agent. */
   ownerUserId?: string;
+  /** ADR 0045/0046 — the generic owning `Subject` (the forward field). When set it
+   *  is authoritative; legacy `rosterId`/`ownerUserId` remain for back-compat (no
+   *  migration). A `kind:'project'` board's cards fire workflows, not agent turns. */
+  ownerSubject?: Subject;
   createdAt: string;
   updatedAt: string;
 }
@@ -122,6 +145,26 @@ export function boardOwner(board: KanbanBoard): BoardOwner {
   if (board.rosterId) return { kind: 'agent', rosterId: board.rosterId };
   if (board.ownerUserId) return { kind: 'user', userId: board.ownerUserId };
   return null;
+}
+
+/** ADR 0045 — the board's owner as the canonical `Subject` (the bridge from the
+ *  legacy `rosterId`/`ownerUserId` storage fields). Maps `rosterId` →
+ *  `{kind:'agent'}`, `ownerUserId` → `{kind:'user'}`. */
+export function boardSubject(board: KanbanBoard): Subject | null {
+  if (board.ownerSubject) return board.ownerSubject;
+  if (board.rosterId) return { kind: 'agent', id: board.rosterId };
+  if (board.ownerUserId) return { kind: 'user', id: board.ownerUserId };
+  return null;
+}
+
+/** ADR 0045 Phase 2 — list a SUBJECT's boards (the canonical owner query that
+ *  unifies the per-agent `b.rosterId === …` filter and the per-user path). Storage
+ *  is unchanged; this matches on the derived `boardSubject`. Tenant-scoped. */
+export async function listBoardsForSubject(tenantId: string, subject: Subject): Promise<KanbanBoard[]> {
+  return (await listBoards(tenantId)).filter((b) => {
+    const s = boardSubject(b);
+    return s !== null && s.kind === subject.kind && s.id === subject.id;
+  });
 }
 
 /** Returned by `moveCard` when the destination column resolves a workflow
@@ -140,8 +183,29 @@ export interface KanbanTriggerDirective {
 export const DEFAULT_COLUMNS: ReadonlyArray<Omit<KanbanColumn, 'triggerWorkflowId'>> = [
   { id: 'todo', name: 'To Do' },
   { id: 'doing', name: 'Doing' },
-  { id: 'done', name: 'Done' },
+  // ADR 0049 — the canonical terminal lane; a card here is "complete".
+  { id: 'done', name: 'Done', terminal: true },
 ];
+
+/** Column-name hints that mean "done" — the fallback terminal signal for boards
+ *  whose columns predate the `terminal` flag (or were created via a path that
+ *  doesn't set it, e.g. the `host.kanban` boardCreate surface). */
+const DONE_HINTS = ['done', 'complete', 'completed', 'shipped', 'closed', 'archived'];
+
+/** ADR 0049 — is `columnId` a TERMINAL (completion) lane on `board`?
+ *  - If ANY column on the board is explicitly flagged `terminal`, only flagged
+ *    columns count (respect an author's explicit lane design exactly).
+ *  - Otherwise (legacy / surface-created / custom-column boards with no flag),
+ *    fall back to a name/id "done" match OR the last column, so completion
+ *    semantics still fire instead of silently no-op'ing. */
+export function isTerminalColumn(board: KanbanBoard, columnId: string): boolean {
+  const column = board.columns.find((c) => c.id === columnId);
+  if (!column) return false;
+  if (board.columns.some((c) => c.terminal)) return column.terminal === true;
+  const hay = `${column.id} ${column.name}`.toLowerCase();
+  if (DONE_HINTS.some((h) => hay.includes(h))) return true;
+  return board.columns.length > 0 && board.columns[board.columns.length - 1].id === columnId;
+}
 
 const boards = new DurableCollection<KanbanBoard>('kanban:board', (b) => b.id);
 const cards = new DurableCollection<KanbanCard>('kanban:card', (c) => c.id);
@@ -160,6 +224,9 @@ export async function createBoard(input: {
   rosterId?: string;
   /** ADR 0025 — a human user that owns this board (mutually exclusive with rosterId). */
   ownerUserId?: string;
+  /** ADR 0045/0046 — the generic owning Subject (e.g. a `kind:'project'` board).
+   *  Authoritative when set; legacy `rosterId`/`ownerUserId` still supported. */
+  ownerSubject?: Subject;
   /** ADR 0025 — override the random id for deterministic, idempotent provisioning. */
   id?: string;
 }): Promise<KanbanBoard> {
@@ -179,6 +246,7 @@ export async function createBoard(input: {
     columns,
     ...(input.rosterId ? { rosterId: input.rosterId } : {}),
     ...(input.ownerUserId ? { ownerUserId: input.ownerUserId } : {}),
+    ...(input.ownerSubject ? { ownerSubject: input.ownerSubject } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -209,6 +277,23 @@ export async function ensurePersonalBoard(tenantId: string, ownerUserId: string,
   const existing = await boards.get(id);
   if (existing && existing.tenantId === tenantId) return existing;
   return createBoard({ id, tenantId, name: name ?? 'My Board', ownerUserId });
+}
+
+/** ADR 0045/0046 — the deterministic id for a SUBJECT's one board in a workspace
+ *  (the generic form of `personalBoardId`). Stable ⇒ idempotent provisioning. */
+export function subjectBoardId(tenantId: string, subject: Subject): string {
+  const key = createHash('sha256').update(`${tenantId}:${subject.kind}:${subject.id}`).digest('hex').slice(0, 24);
+  return `board-${subject.kind}-${key}`;
+}
+
+/** ADR 0045/0046 — auto-provision a subject's board (idempotent; e.g. a project's
+ *  board). Owned via the generic `ownerSubject`. Concurrent-first-access safe via
+ *  the deterministic id. */
+export async function ensureSubjectBoard(tenantId: string, subject: Subject, name?: string): Promise<KanbanBoard> {
+  const id = subjectBoardId(tenantId, subject);
+  const existing = await boards.get(id);
+  if (existing && existing.tenantId === tenantId) return existing;
+  return createBoard({ id, tenantId, name: name ?? 'Board', ownerSubject: subject });
 }
 
 export async function listBoards(tenantId: string): Promise<KanbanBoard[]> {
@@ -288,6 +373,7 @@ export async function createCard(input: {
   assignmentReason?: string;
   blockerNote?: string;
   assigneeId?: string;
+  assigneeRole?: string;
   estimateHours?: number;
   labels?: string[];
   dependsOn?: string[];
@@ -313,6 +399,7 @@ export async function createCard(input: {
     assignmentReason: input.assignmentReason,
     blockerNote: input.blockerNote,
     ...(input.assigneeId !== undefined ? { assigneeId: input.assigneeId } : {}),
+    ...(input.assigneeRole !== undefined ? { assigneeRole: input.assigneeRole } : {}),
     ...(input.estimateHours !== undefined ? { estimateHours: input.estimateHours } : {}),
     ...(input.labels !== undefined ? { labels: input.labels } : {}),
     ...(input.dependsOn !== undefined ? { dependsOn: input.dependsOn } : {}),
@@ -337,7 +424,10 @@ export async function updateCardFields(
     createdBy?: string;
     assignmentReason?: string;
     blockerNote?: string;
-    assigneeId?: string;
+    /** Pass `null` to UNASSIGN (clear the field). ADR 0049. */
+    assigneeId?: string | null;
+    /** Pass `null` to clear the role-pending state (e.g. on claim). ADR 0049. */
+    assigneeRole?: string | null;
     estimateHours?: number;
     labels?: string[];
     dependsOn?: string[];
@@ -355,13 +445,55 @@ export async function updateCardFields(
   if (patch.createdBy !== undefined) card.createdBy = patch.createdBy;
   if (patch.assignmentReason !== undefined) card.assignmentReason = patch.assignmentReason;
   if (patch.blockerNote !== undefined) card.blockerNote = patch.blockerNote;
-  if (patch.assigneeId !== undefined) card.assigneeId = patch.assigneeId;
+  // `null` clears (unassign); a string sets; `undefined` leaves untouched.
+  if (patch.assigneeId === null) delete card.assigneeId;
+  else if (patch.assigneeId !== undefined) card.assigneeId = patch.assigneeId;
+  if (patch.assigneeRole === null) delete card.assigneeRole;
+  else if (patch.assigneeRole !== undefined) card.assigneeRole = patch.assigneeRole;
   if (patch.estimateHours !== undefined) card.estimateHours = patch.estimateHours;
   if (patch.labels !== undefined) card.labels = patch.labels;
   if (patch.dependsOn !== undefined) card.dependsOn = patch.dependsOn;
   card.updatedAt = nowIso();
   await cards.put(card);
   return card;
+}
+
+/** ADR 0049 — every card across the tenant addressed to a given user: their
+ *  direct assignments (`assigneeId`) plus cards role-addressed to a role they
+ *  hold (`assigneeRole` ∈ roleKeys). This is the derived "assigned to me"
+ *  projection backing the personal-board live mirror — a single cards scan
+ *  joined to the tenant's boards (no copies; the same records the origin
+ *  boards render). */
+export async function listCardsAssignedToUser(
+  tenantId: string,
+  userId: string,
+  roleKeys: readonly string[] = [],
+): Promise<Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean }>> {
+  const tenantBoards = (await boards.list()).filter((b) => b.tenantId === tenantId);
+  const boardById = new Map(tenantBoards.map((b) => [b.id, b]));
+  const roles = new Set(roleKeys);
+  const out: Array<KanbanCard & { boardName: string; columnName: string; terminal: boolean }> = [];
+  for (const card of await cards.list()) {
+    const board = boardById.get(card.boardId);
+    if (!board) continue; // cross-tenant / orphaned — never leak
+    const mine = card.assigneeId === userId || (card.assigneeRole ? roles.has(card.assigneeRole) : false);
+    if (!mine) continue;
+    const column = board.columns.find((c) => c.id === card.columnId);
+    out.push({
+      ...card,
+      boardName: board.name,
+      columnName: column?.name ?? card.columnId,
+      terminal: isTerminalColumn(board, card.columnId),
+    });
+  }
+  return out.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+}
+
+/** ADR 0049 — is `userId` allowed to act on this card without being a member
+ *  of its origin board? True when they are the assignee (assignment confers
+ *  card-scoped access, D4). Tenant isolation is enforced by the caller. */
+export function isCardAssignee(card: KanbanCard, userId: string): boolean {
+  return card.assigneeId === userId;
 }
 
 export async function deleteCard(cardId: string): Promise<boolean> {
@@ -406,9 +538,20 @@ export async function moveCard(
   const siblings = (await cards.list()).filter(
     (c) => c.boardId === card.boardId && c.columnId === toColumnId,
   );
+  const now = nowIso();
   card.columnId = toColumnId;
   card.order = siblings.length;
-  card.updatedAt = nowIso();
+  card.updatedAt = now;
+  // ADR 0049 — completion is "in a terminal column" (with a legacy fallback for
+  // boards without an explicit `terminal` flag, see isTerminalColumn). Stamp
+  // `completedAt` on first entry into a terminal lane; clear it when moved back
+  // out. Because the origin board and the personal-board mirror render the SAME
+  // record, this propagates both ways with no reconciliation.
+  if (isTerminalColumn(board, toColumnId)) {
+    if (!card.completedAt) card.completedAt = now;
+  } else if (card.completedAt) {
+    delete card.completedAt;
+  }
   await cards.put(card);
 
   const workflowId = card.workflowId ?? destColumn.triggerWorkflowId;

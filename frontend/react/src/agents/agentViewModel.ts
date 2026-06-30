@@ -11,6 +11,7 @@
 import { listRoster, getRosterEntry, getFleetActivity, type RosterEntry } from './rosterClient.js';
 import { listBoards, listBoardsWithCards, getBoard, type KanbanBoard, type KanbanCard } from '../kanban/kanbanClient.js';
 import { listJobs, type ScheduledJob } from './scheduleClient.js';
+import { columnLaneKind } from '../kanban/laneKind.js';
 
 export type AgentStatus = 'active' | 'working' | 'waiting' | 'paused' | 'needs-setup' | 'error';
 
@@ -39,7 +40,7 @@ export interface AgentView {
 const STATUS_META: Record<AgentStatus, { label: string; chip: string; help: string }> = {
   active: { label: 'Ready', chip: 'chip--success', help: 'Idle and ready — no work in progress. Add a task or run the heartbeat to give it work.' },
   working: { label: 'Working', chip: 'chip--accent', help: 'Has at least one task in the Working lane with a run in progress.' },
-  waiting: { label: 'Waiting on you', chip: 'chip--warning chip--pulse', help: 'A task is parked in the Waiting lane and needs a person to act before it can move on.' },
+  waiting: { label: 'Waiting on you', chip: 'chip--warning chip--pulse', help: 'Waiting for your approval — a task is parked in the Waiting lane and needs your go-ahead before it can move on.' },
   paused: { label: 'Paused', chip: 'chip--muted', help: 'Disabled — its board triggers and heartbeat are inert until you re-enable it.' },
   'needs-setup': { label: 'Needs setup', chip: 'chip--danger', help: 'No workflows assigned or no board yet — finish setup so it can pick up work.' },
   error: { label: 'Run failed', chip: 'chip--danger chip--pulse', help: 'A recent run for this agent failed — open the Activity tab to see what went wrong.' },
@@ -79,18 +80,13 @@ export function relativeTime(iso: string | undefined): string | null {
   return iso.slice(0, 10);
 }
 
-/** Match a column by canonical id or its (case-insensitive) display name. */
+/** Match a card's column to a canonical lane (BLD-8: shared with
+ *  KanbanBoardView via `columnLaneKind`). */
 function laneOf(card: KanbanCard, board: KanbanBoard | null): keyof LaneCounts | null {
   if (!board) return null;
   const col = board.columns.find((c) => c.id === card.columnId);
   if (!col) return null;
-  const key = col.id.toLowerCase();
-  const name = col.name.toLowerCase();
-  if (key === 'todo' || name === 'to do') return 'todo';
-  if (key === 'working' || name === 'working' || key === 'doing' || name === 'doing') return 'working';
-  if (key === 'waiting' || name.startsWith('waiting')) return 'waiting';
-  if (key === 'done' || name === 'done') return 'done';
-  return null;
+  return columnLaneKind(col);
 }
 
 function deriveStatus(entry: RosterEntry, board: KanbanBoard | null, counts: LaneCounts, hasRecentFailure: boolean): AgentStatus {

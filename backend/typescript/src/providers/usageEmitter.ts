@@ -25,6 +25,11 @@ export interface ProviderUsagePayload {
   costEstimateUsd?: number;
   currency?: string;
   cacheHit?: boolean;
+  /** RFC 0116 — cost-only prompt-prefix cache token split. Optional, integer ≥0;
+   *  NOT replay-asserted (omittable on replay, like costEstimateUsd); a hit-vs-
+   *  miss difference MUST NOT change inputTokens/outputTokens or the envelope. */
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   nodeId?: string;
   traceId?: string;
 }
@@ -51,8 +56,66 @@ const RATE_TABLE: Readonly<Record<string, { input: number; output: number }>> = 
   'gemini-1.5-flash': { input: 0.075, output: 0.3 },
 };
 
-function computeCostUsd(model: string, inputTokens: number, outputTokens: number): number | undefined {
-  const rate = RATE_TABLE[model];
+/**
+ * Prefix fallback so a newly-dated model snapshot (e.g. a future
+ * `claude-sonnet-4-*` or `gemini-2.5-flash-*`) still resolves an advisory
+ * rate instead of silently dropping `costEstimateUsd` (INT-3). LONGEST prefix
+ * wins, so `claude-opus-4` beats `claude`. Numbers are USD per 1M tokens, a
+ * conservative public-list-price snapshot — still advisory; hosts SHOULD
+ * refresh. Covers the model families the managed tier and BYOK actually use
+ * (Claude 4.x, GPT-4.1/4o/o-series, Gemini 2.x, MiniMax).
+ */
+const PREFIX_RATE_TABLE: ReadonlyArray<readonly [string, { input: number; output: number }]> = [
+  // Anthropic Claude 4.x + 3.x families
+  ['claude-opus-4', { input: 15.0, output: 75.0 }],
+  ['claude-sonnet-4', { input: 3.0, output: 15.0 }],
+  ['claude-haiku-4', { input: 0.8, output: 4.0 }],
+  ['claude-3-7-sonnet', { input: 3.0, output: 15.0 }],
+  ['claude-3-5-haiku', { input: 0.8, output: 4.0 }],
+  ['claude-3-5-sonnet', { input: 3.0, output: 15.0 }],
+  ['claude-3-opus', { input: 15.0, output: 75.0 }],
+  ['claude-3-haiku', { input: 0.25, output: 1.25 }],
+  // OpenAI
+  ['gpt-4.1-mini', { input: 0.4, output: 1.6 }],
+  ['gpt-4.1-nano', { input: 0.1, output: 0.4 }],
+  ['gpt-4.1', { input: 2.0, output: 8.0 }],
+  ['gpt-4o-mini', { input: 0.15, output: 0.6 }],
+  ['gpt-4o', { input: 2.5, output: 10.0 }],
+  ['o3-mini', { input: 1.1, output: 4.4 }],
+  ['o3', { input: 10.0, output: 40.0 }],
+  ['o1-mini', { input: 3.0, output: 12.0 }],
+  ['o1', { input: 15.0, output: 60.0 }],
+  // Google Gemini 2.x / 1.5
+  ['gemini-2.5-pro', { input: 1.25, output: 10.0 }],
+  ['gemini-2.5-flash', { input: 0.3, output: 2.5 }],
+  ['gemini-2.0-flash', { input: 0.1, output: 0.4 }],
+  ['gemini-1.5-pro', { input: 1.25, output: 5.0 }],
+  ['gemini-1.5-flash', { input: 0.075, output: 0.3 }],
+  // MiniMax
+  ['minimax', { input: 0.2, output: 1.1 }],
+  ['abab', { input: 0.2, output: 1.1 }],
+];
+
+function rateForModel(model: string): { input: number; output: number } | undefined {
+  const exact = RATE_TABLE[model];
+  if (exact) return exact;
+  let best: { input: number; output: number } | undefined;
+  let bestLen = -1;
+  for (const [prefix, rate] of PREFIX_RATE_TABLE) {
+    if (model.startsWith(prefix) && prefix.length > bestLen) {
+      best = rate;
+      bestLen = prefix.length;
+    }
+  }
+  return best;
+}
+
+/** Estimate the USD cost of a model call from the per-1M-token RATE_TABLE. Returns
+ *  `undefined` for an unpriced model (callers show 0 — no fabricated cost). The ONE
+ *  cost-estimation source; reused by the usage rollup (ADR 0118 Phase 5) so there is
+ *  no second rate table to drift. */
+export function computeCostUsd(model: string, inputTokens: number, outputTokens: number): number | undefined {
+  const rate = rateForModel(model);
   if (!rate) return undefined;
   // Rates are per-1M-tokens; cost = (inputTokens * inputRate + outputTokens * outputRate) / 1e6
   return (inputTokens * rate.input + outputTokens * rate.output) / 1_000_000;
@@ -109,7 +172,7 @@ export function buildProviderUsagePayloadFromTokens(
   model: string,
   inputTokens: number,
   outputTokens: number,
-  opts: { totalTokens?: number; nodeId?: string; traceId?: string; cacheHit?: boolean } = {},
+  opts: { totalTokens?: number; nodeId?: string; traceId?: string; cacheHit?: boolean; cacheReadTokens?: number; cacheWriteTokens?: number } = {},
 ): ProviderUsagePayload {
   const totalTokens = opts.totalTokens ?? inputTokens + outputTokens;
   const costEstimateUsd = computeCostUsd(model, inputTokens, outputTokens);
@@ -127,6 +190,11 @@ export function buildProviderUsagePayloadFromTokens(
   if (opts.nodeId !== undefined) payload.nodeId = opts.nodeId;
   if (opts.traceId !== undefined) payload.traceId = opts.traceId;
   if (opts.cacheHit !== undefined) payload.cacheHit = opts.cacheHit;
+  // RFC 0116 — cost-only prompt-prefix cache token split (NOT replay-asserted;
+  // never changes inputTokens/outputTokens). Emitted only when present (>0 or 0
+  // on a real cross-tenant miss); omit entirely when the provider didn't report.
+  if (typeof opts.cacheReadTokens === 'number') payload.cacheReadTokens = opts.cacheReadTokens;
+  if (typeof opts.cacheWriteTokens === 'number') payload.cacheWriteTokens = opts.cacheWriteTokens;
   return payload;
 }
 

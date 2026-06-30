@@ -6,7 +6,11 @@
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
 export interface Org { orgId: string; name: string }
-export type ResourceType = 'cms_page' | 'kb_collection';
+// Mirrors the backend's authoritative RESOURCE_TYPES (sharingService.ts): the host
+// resolves all of these. The mint picker currently offers only the two with a
+// `listResources` source; the others arrive via API/feature flows and MUST still
+// render a correct label in the link list (ADR 0122 Phase 4 / ADR 0116 2b).
+export type ResourceType = 'cms_page' | 'kb_collection' | 'document' | 'conversation' | 'prompt';
 export interface ResourceRef { id: string; label: string }
 
 export interface ShareLink {
@@ -47,6 +51,28 @@ export async function listResources(orgId: string, type: ResourceType): Promise<
       const { pages } = (await res.json()) as { pages: Array<{ pageId: string; title: string; status: string }> };
       return (pages ?? []).map((p) => ({ id: p.pageId, label: `${p.title} (${p.status})` }));
     }
+    // ADR 0122 Phase 5 — the backend resolves document/conversation/prompt shares; the
+    // picker now lists them too (each via its owning feature's list endpoint).
+    if (type === 'document') {
+      const res = await fetch(`${root}/documents/orgs/${encodeURIComponent(orgId)}/documents`, fetchOpts({ headers: authedHeaders() }));
+      if (!res.ok) return [];
+      const { documents } = (await res.json()) as { documents: Array<{ documentId: string; title: string }> };
+      return (documents ?? []).map((d) => ({ id: d.documentId, label: d.title }));
+    }
+    if (type === 'prompt') {
+      const res = await fetch(`${root}/prompts/orgs/${encodeURIComponent(orgId)}/entries`, fetchOpts({ headers: authedHeaders() }));
+      if (!res.ok) return [];
+      const { entries } = (await res.json()) as { entries: Array<{ entryId: string; name: string }> };
+      return (entries ?? []).map((e) => ({ id: e.entryId, label: e.name }));
+    }
+    if (type === 'conversation') {
+      // Conversations are tenant-scoped (no org path); the backend resolver validates
+      // tenant membership on mint.
+      const res = await fetch(`${root}/chat/sessions`, fetchOpts({ headers: authedHeaders() }));
+      if (!res.ok) return [];
+      const { sessions } = (await res.json()) as { sessions: Array<{ sessionId: string; title: string }> };
+      return (sessions ?? []).map((s) => ({ id: s.sessionId, label: s.title }));
+    }
     const res = await fetch(`${root}/kb/orgs/${encodeURIComponent(orgId)}/collections`, fetchOpts({ headers: authedHeaders() }));
     if (!res.ok) return [];
     const { collections } = (await res.json()) as { collections: Array<{ collectionId: string; name: string }> };
@@ -71,5 +97,21 @@ export async function revokeLink(orgId: string, token: string): Promise<void> {
   if (!res.ok) throw new Error(`revokeLink returned ${res.status}`);
 }
 
-/** The public, unauthenticated share URL for a token. */
+/** The raw public API endpoint for a token (returns JSON). */
 export const sharedUrl = (token: string): string => `${root}/shared/${encodeURIComponent(token)}`;
+
+/** The user-facing SPA viewer URL for a token — what you hand to a recipient
+ *  (renders the read-only page, NOT raw JSON). ADR 0122 Phase 6. */
+export const sharedPageUrl = (token: string): string => `${window.location.origin}/shared/${encodeURIComponent(token)}`;
+
+/** A resolved public share (the shape the public, unauthenticated endpoint returns). */
+export interface SharedResource { resourceType: ResourceType; label?: string; resource: Record<string, unknown> }
+
+/** Resolve a share token on the PUBLIC, unauthenticated surface (no auth headers —
+ *  the unguessable token is the credential). Used by the public viewer page. */
+export async function resolveSharedPublic(token: string): Promise<SharedResource> {
+  const res = await fetch(sharedUrl(token));
+  if (res.status === 404 || res.status === 410) throw new Error('not-found');
+  if (!res.ok) throw new Error(`resolveShared returned ${res.status}`);
+  return (await res.json()) as SharedResource;
+}

@@ -52,7 +52,8 @@ export type HostSurfaceName =
   | 'host.canvas'
   | 'host.webResearch'
   | 'host.launchStudio'
-  | 'host.connectors';
+  | 'host.connectors'
+  | 'host.artifactTypes';
 
 export interface HostSurfaceAdvertisement {
   /** Stable surface name. */
@@ -124,7 +125,10 @@ export function seedDefaultHostSurfaces(): void {
               ? // ADR 0035 / RFC 0100 — durable Tasks wired: message/send persists an
                 // A2ATaskState, tasks/get returns it after disconnect, tasks/resubscribe
                 // re-attaches, push-config fires (SSRF-guarded) on terminal/blocking
-                // transitions. The a2a capability slot advertises durableTasks/streaming/push.
+                // transitions. The a2a capability slot advertises durableTasks/push;
+                // `streaming` is decoupled onto OPENWOP_A2A_STREAMING (default off →
+                // advertised false) — no conformance 1.34.0 resubscribe witness; the
+                // JSON-RPC server still serves resubscribe, it's just unadvertised.
                 'RFC 0076 §A + RFC 0100. A2A 0.3 JSON-RPC client AND a live server endpoint at POST /v1/host/openwop-app/a2a with DURABLE Tasks — message/send persists the projected A2ATaskState, tasks/get returns live state after disconnect, tasks/resubscribe re-attaches the update stream, and tasks/pushNotificationConfig/set registers an SSRF-guarded push (ADR 0035).'
               : 'RFC 0076 §A. A2A 0.3 JSON-RPC client (discover/send/stream/tasks/pushConfig) AND a live server endpoint at POST /v1/host/openwop-app/a2a — agent/getCard + message/send route to a real manifest-agent dispatch (synchronous core; set OPENWOP_A2A_DURABLE_TASKS=true for durable Tasks per RFC 0100 / ADR 0035).',
         }
@@ -139,6 +143,7 @@ export function seedDefaultHostSurfaces(): void {
     // fails closed with connector_no_connection). A connector can only reach the
     // provider's curated apiHosts.
     { name: 'host.connectors', supported: true, implementation: 'workflow-engine', note: 'ADR 0037. connectorInvoker.invoke(providerId, {context,request}) resolves the acting user’s Connection through the broker + brokered egress (RFC 0093 SSRF + apiHosts pin + connections:use gate + RFC 0079 provenance). Per-provider reach is deploy-gated behind a configured Connection — unconfigured fails closed.' },
+    { name: 'host.artifactTypes', supported: true, implementation: 'workflow-engine', note: 'ADR 0055 (RFC 0071/0075). Host artifact-type registry — host-native doc.* types with JSON-Schema validation, schemas served at /schemas/artifacts/{id}.schema.json, typed artifact.created emission from feature.documents.nodes. The kind:artifact-type pack tier is deferred.' },
   ];
   for (const ad of defaults) {
     if (!registry.has(ad.name)) {

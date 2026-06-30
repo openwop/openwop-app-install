@@ -5,6 +5,7 @@
  */
 
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Group, OrgMember } from '../client/accessClient.js';
 import { LockIcon, PencilIcon, TrashIcon } from '../ui/icons/index.js';
 import { NEUTRAL_CHIP } from './orgUi.js';
@@ -36,17 +37,17 @@ export function GroupsPanel({
   editingGroupId, setEditingGroupId, draftGroupMembers, setDraftGroupMembers,
   onCreateGroup, startEditGroup, onDeleteGroup, onSaveGroupMembers, nameOfMember, can, roleLabel, toggleStr,
 }: GroupsPanelProps): JSX.Element {
+  const { t } = useTranslation('orgs');
   return (
     <>
       <h3 className="u-fs-14 u-mt-5 u-flex u-items-center u-gap-2">
-        <LockIcon size={15} /> Groups <span className="groups-muted">· role bundles</span>
+        <LockIcon size={15} /> {t('groupsHeading')} <span className="groups-muted">{t('groupsHeadingSuffix')}</span>
       </h3>
       <p className="groups-muted">
-        A group bundles roles and grants them to its members — on top of each member&rsquo;s own
-        roles. Use it for batch access management (e.g. &ldquo;Editors&rdquo;, &ldquo;Admins&rdquo;).
+        {t('groupsIntro')}
       </p>
       <form onSubmit={onCreateGroup} className="action-bar u-wrap u-mb-2">
-        <input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder="New group name" aria-label="New group name" />
+        <input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder={t('newGroupPlaceholder')} aria-label={t('newGroupAriaLabel')} />
         <span className="action-bar u-gap-1-5">
           {assignableRoleIds.map((role) => (
             <label key={role} className={`${NEUTRAL_CHIP} groups-chip-toggle`} style={{ opacity: groupRoles.has(role) ? 1 : 0.6 }}>
@@ -55,10 +56,10 @@ export function GroupsPanel({
             </label>
           ))}
         </span>
-        <button type="submit" className="primary" disabled={!groupName.trim() || !can('host:groups:manage')} title={can('host:groups:manage') ? undefined : 'Requires host:groups:manage'}>Add group</button>
+        <button type="submit" className="primary" disabled={!groupName.trim() || !can('host:groups:manage')} title={can('host:groups:manage') ? undefined : t('addGroupRequiresScope')}>{t('addGroup')}</button>
       </form>
       {groups.length === 0 ? (
-        <p className="groups-muted">No groups yet.</p>
+        <p className="groups-muted">{t('noGroupsYet')}</p>
       ) : (
         groups.map((g) => (
           <div key={g.groupId} className="surface-card u-mb-2">
@@ -67,25 +68,25 @@ export function GroupsPanel({
                 <LockIcon size={14} /> <strong>{g.name}</strong>
               </span>
               <span className="action-bar">
-                <button type="button" className="secondary" disabled={!can('host:groups:manage')} onClick={() => startEditGroup(g)} aria-label={`Edit members of ${g.name}`}>
-                  <PencilIcon size={13} /> Members
+                <button type="button" className="secondary" disabled={!can('host:groups:manage')} onClick={() => startEditGroup(g)} aria-label={t('editGroupMembersAriaLabel', { name: g.name })}>
+                  <PencilIcon size={13} /> {t('membersButton')}
                 </button>
-                <button type="button" className="secondary" disabled={!can('host:groups:manage')} onClick={() => void onDeleteGroup(g)} aria-label={`Delete group ${g.name}`}>
+                <button type="button" className="secondary" disabled={!can('host:groups:manage')} onClick={() => void onDeleteGroup(g)} aria-label={t('deleteGroupAriaLabel', { name: g.name })}>
                   <TrashIcon size={13} />
                 </button>
               </span>
             </div>
             <div className="u-flex u-wrap u-gap-1-5 u-mt-1-5">
-              {g.roles.length === 0 ? <span className="chip chip--muted">no roles</span> : g.roles.map((r) => <span key={r} className={NEUTRAL_CHIP}>{roleLabel(r)}</span>)}
+              {g.roles.length === 0 ? <span className="chip chip--muted">{t('noGroupRoles')}</span> : g.roles.map((r) => <span key={r} className={NEUTRAL_CHIP}>{roleLabel(r)}</span>)}
             </div>
             <div className="groups-muted-mt">
-              {g.memberIds.length} member{g.memberIds.length === 1 ? '' : 's'}
-              {g.memberIds.length ? `: ${g.memberIds.map(nameOfMember).join(', ')}` : ''}
+              {t('groupMemberCount', { count: g.memberIds.length })}
+              {g.memberIds.length ? t('groupMemberListSuffix', { names: g.memberIds.map(nameOfMember).join(', ') }) : ''}
             </div>
             {editingGroupId === g.groupId ? (
               <div className="action-bar u-wrap u-mt-2">
                 {members.length === 0 ? (
-                  <span className="groups-muted">Add members to the org first.</span>
+                  <span className="groups-muted">{t('addMembersToOrgFirst')}</span>
                 ) : (
                   members.map((m) => (
                     <label key={m.memberId} className={`${NEUTRAL_CHIP} groups-chip-toggle`} style={{ opacity: draftGroupMembers.has(m.memberId) ? 1 : 0.6 }}>
@@ -99,8 +100,8 @@ export function GroupsPanel({
                     </label>
                   ))
                 )}
-                <button type="button" className="primary" onClick={() => void onSaveGroupMembers(g)}>Save</button>
-                <button type="button" className="secondary" onClick={() => setEditingGroupId(null)}>Cancel</button>
+                <button type="button" className="primary" onClick={() => void onSaveGroupMembers(g)}>{t('common:save')}</button>
+                <button type="button" className="secondary" onClick={() => setEditingGroupId(null)}>{t('common:cancel')}</button>
               </div>
             ) : null}
           </div>

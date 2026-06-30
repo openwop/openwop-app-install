@@ -16,6 +16,9 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
+import { formatDateTime, formatNumber } from '../i18n/format.js';
 import { deleteMemoryEntry, listMemory, type MemoryEntry } from './lib/memoryClient.js';
 import { DatabaseIcon, LockIcon, TrashIcon } from '../ui/icons/index.js';
 import { PageHeader } from '../ui/PageHeader.js';
@@ -31,6 +34,7 @@ function isRedacted(content: string): boolean {
 }
 
 export function MemoryInspectorPage(): JSX.Element {
+  const { t } = useTranslation('memory');
   const [entries, setEntries] = useState<MemoryEntry[] | null>(null);
   const [memoryRef, setMemoryRef] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
@@ -67,25 +71,25 @@ export function MemoryInspectorPage(): JSX.Element {
   }, [entries, search]);
 
   async function onDelete(e: MemoryEntry) {
-    if (!window.confirm(`Delete memory entry "${e.id}"? This cannot be undone.`)) return;
+    if (!(await confirm({ title: t('confirmDelete', { id: e.id }), danger: true, confirmLabel: t('common:delete') }))) return;
     try {
       await deleteMemoryEntry(e.id, memoryRef || undefined);
-      toast.success('Memory entry deleted.');
+      toast.success(t('deleteSuccess'));
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
-      toast.error('Could not delete the memory entry.');
+      toast.error(t('deleteError'));
     }
   }
 
   async function onBulkDelete(rows: MemoryEntry[]) {
     if (rows.length === 0) return;
-    if (!window.confirm(`Delete ${rows.length} memory ${rows.length === 1 ? 'entry' : 'entries'}? This cannot be undone.`)) return;
+    if (!(await confirm({ title: t('confirmBulkDelete', { count: rows.length, n: formatNumber(rows.length) }), danger: true, confirmLabel: t('common:delete') }))) return;
     const results = await Promise.allSettled(rows.map((e) => deleteMemoryEntry(e.id, memoryRef || undefined)));
     const failed = results.filter((r) => r.status === 'rejected').length;
     const ok = rows.length - failed;
-    if (ok > 0) toast.success(`Deleted ${ok} memory ${ok === 1 ? 'entry' : 'entries'}.`);
-    if (failed > 0) toast.error(`${failed} ${failed === 1 ? 'entry' : 'entries'} could not be deleted.`);
+    if (ok > 0) toast.success(t('bulkDeleteSuccess', { count: ok, n: formatNumber(ok) }));
+    if (failed > 0) toast.error(t('bulkDeleteError', { count: failed, n: formatNumber(failed) }));
     setSelected(new Set());
     await refresh();
   }
@@ -93,12 +97,12 @@ export function MemoryInspectorPage(): JSX.Element {
   const columns: DataColumn<MemoryEntry>[] = [
     {
       key: 'content',
-      header: 'Content',
+      header: t('columnContent'),
       render: (e) => (
         <>
           {isRedacted(e.content) && (
-            <span className="memory-redacted-badge" title="Contains host-redacted secret material (SR-1)">
-              <LockIcon size={12} /> redacted
+            <span className="memory-redacted-badge" title={t('redactedTitle')}>
+              <LockIcon size={12} /> {t('redactedBadge')}
             </span>
           )}
           <span className="memory-content">{e.content}</span>
@@ -107,19 +111,19 @@ export function MemoryInspectorPage(): JSX.Element {
     },
     {
       key: 'tags',
-      header: 'Tags',
+      header: t('columnTags'),
       cellClassName: 'memory-tags',
       render: (e) => e.tags.map((t) => <span key={t} className="memory-tag">{t}</span>),
     },
     {
       key: 'created',
-      header: 'Created',
+      header: t('columnCreated'),
       cellClassName: 'memory-created',
       sortValue: (e) => (e.createdAt ? Date.parse(e.createdAt) : 0),
       render: (e) => (
         <span title={e.createdAt}>
-          {new Date(e.createdAt).toLocaleString()}
-          {e.expiresAt && <span className="muted" title={`Expires ${e.expiresAt}`}> · TTL</span>}
+          {formatDateTime(e.createdAt)}
+          {e.expiresAt && <span className="muted" title={t('expiresTitle', { date: formatDateTime(e.expiresAt) })}> · {t('ttlSuffix')}</span>}
         </span>
       ),
     },
@@ -128,7 +132,7 @@ export function MemoryInspectorPage(): JSX.Element {
       header: '',
       align: 'right',
       render: (e) => (
-        <button className="secondary btn-sm" onClick={() => { void onDelete(e); }} title="Delete this memory entry" aria-label={`Delete memory entry ${e.id}`}>
+        <button className="secondary btn-sm" onClick={() => { void onDelete(e); }} title={t('deleteEntryTitle')} aria-label={t('deleteEntryAria', { id: e.id })}>
           <TrashIcon size={13} />
         </button>
       ),
@@ -138,27 +142,27 @@ export function MemoryInspectorPage(): JSX.Element {
   return (
     <section>
       <PageHeader
-        eyebrow="Memory"
-        title="Memory inspector"
-        lede={<>Browse the tenant&apos;s memory ledger. Entries are written host-internally — the executor writes a run-summary on completion. Reads and deletes are scoped to your credential server-side; the inspector can&apos;t see another tenant&apos;s memory.{memoryRef && <> Showing <code>{memoryRef}</code>.</>}</>}
-        actions={<button className="secondary" onClick={() => { void refresh(); }}>Refresh</button>}
+        eyebrow={t('eyebrow')}
+        title={t('inspectorTitle')}
+        lede={<>{t('inspectorLedePrefix')}{memoryRef && <> {t('inspectorLedeShowing')} <code>{memoryRef}</code>.</>}</>}
+        actions={<button className="secondary" onClick={() => { void refresh(); }}>{t('common:refresh')}</button>}
       />
-      <div className="card">
+      <div className="surface-card">
 
         <div className="form-row u-flex u-gap-2 u-wrap u-items-end">
           <TextField
-            containerStyle={{ flex: 2, minWidth: 200 }}
-            label={<>Search <span className="muted">(content or tags)</span></>}
+            className="memory-search-field"
+            label={<>{t('searchLabel')} <span className="muted">{t('searchHint')}</span></>}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="filter entries…"
+            placeholder={t('searchPlaceholder')}
           />
           <TextField
-            containerStyle={{ flex: 1, minWidth: 140 }}
-            label={<>Tag filter <span className="muted">(server-side)</span></>}
+            className="memory-tag-field"
+            label={<>{t('tagFilterLabel')} <span className="muted">{t('tagFilterHint')}</span></>}
             value={tag}
             onChange={(e) => setTag(e.target.value)}
-            placeholder="e.g. run-summary"
+            placeholder={t('tagFilterPlaceholder')}
             onKeyDown={(e) => { if (e.key === 'Enter') void refresh(); }}
           />
         </div>
@@ -171,8 +175,8 @@ export function MemoryInspectorPage(): JSX.Element {
           <>
             <div className="action-bar u-justify-between">
               <p className="muted u-fs-12 u-m-0">
-                {filtered.length} {filtered.length === 1 ? 'entry' : 'entries'}
-                {entries.length !== filtered.length ? ` of ${entries.length}` : ''}
+                {t('entryCount', { count: filtered.length, n: formatNumber(filtered.length) })}
+                {entries.length !== filtered.length ? ` ${t('entryCountOf', { shown: formatNumber(filtered.length), total: formatNumber(entries.length) })}` : ''}
               </p>
               <DensityToggle value={density} onChange={setDensity} />
             </div>
@@ -181,24 +185,24 @@ export function MemoryInspectorPage(): JSX.Element {
               rowKey={(e) => e.id}
               columns={columns}
               density={density}
-              caption="Memory entries"
+              caption={t('tableCaption')}
               initialSort={{ key: 'created', dir: 'desc' }}
               selectable
               selected={selected}
               onSelectionChange={setSelected}
               bulkActions={(rows) => (
                 <button className="secondary btn-sm" onClick={() => { void onBulkDelete(rows); }}>
-                  <TrashIcon size={13} /> Delete selected
+                  <TrashIcon size={13} /> {t('deleteSelected')}
                 </button>
               )}
               empty={
                 <StateCard
                   icon={<DatabaseIcon size={28} />}
-                  title={search || tag ? 'No matching memory entries' : 'No memory entries yet'}
+                  title={search || tag ? t('emptyNoMatchTitle') : t('emptyNoEntriesTitle')}
                   body={
                     search || tag
-                      ? 'No entries match the current search or tag filter. Clear the filters to see the full ledger.'
-                      : 'Entries are written host-internally — the executor writes a run-summary on completion. Run a workflow to populate the ledger.'
+                      ? t('emptyNoMatchBody')
+                      : t('emptyNoEntriesBody')
                   }
                 />
               }

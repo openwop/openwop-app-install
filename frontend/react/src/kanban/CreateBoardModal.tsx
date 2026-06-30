@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RosterEntry } from '../agents/rosterClient.js';
 import { ALL_WORKFLOW_OPTIONS } from '../agents/roleTemplates.js';
 import { IconButton } from '../ui/IconButton.js';
@@ -18,6 +19,7 @@ export function CreateBoardModal({ roster, onClose, onCreate }: {
   onClose: () => void;
   onCreate: (input: { name: string; triggerWorkflowId?: string; rosterId?: string }) => void;
 }): JSX.Element {
+  const { t } = useTranslation('kanban');
   const [name, setName] = useState('');
   const [workflowId, setWorkflowId] = useState('');
   const [rosterId, setRosterId] = useState('');
@@ -33,42 +35,42 @@ export function CreateBoardModal({ roster, onClose, onCreate }: {
   }, []);
 
   return (
-    <Modal onClose={onClose} label="Create a board">
+    <Modal onClose={onClose} label={t('createBoardLabel')}>
         <div className="hire-head">
           <div>
-            <div className="hire-eyebrow">New board</div>
-            <h2 className="hire-title">Create a board</h2>
+            <div className="hire-eyebrow">{t('newBoardEyebrow')}</div>
+            <h2 className="hire-title">{t('createBoardTitle')}</h2>
             <p className="hire-lede">
-              A board tracks work through To do → Done. Optionally connect a workflow that fires when cards hit the <ZapIcon size={12} aria-hidden /> trigger column.
+              {t('createBoardLedeBefore')} <ZapIcon size={12} aria-hidden /> {t('createBoardLedeAfter')}
             </p>
           </div>
-          <IconButton label="Close" icon={<XIcon size={16} />} onClick={onClose} />
+          <IconButton label={t('common:close')} icon={<XIcon size={16} />} onClick={onClose} />
         </div>
 
-        <label className="hire-label" htmlFor="cb-name">Board name</label>
+        <label className="hire-label" htmlFor="cb-name">{t('boardNameLabel')}</label>
         <input
           id="cb-name"
           autoFocus
           className="ui-input"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. Q3 onboarding"
+          placeholder={t('boardNamePlaceholder')}
         />
 
-        <label className="hire-label" htmlFor="cb-workflow">Trigger workflow <span className="hire-label-optional">· optional</span></label>
+        <label className="hire-label" htmlFor="cb-workflow">{t('triggerWorkflowLabel')} <span className="hire-label-optional">{t('optionalSuffix')}</span></label>
         <select id="cb-workflow" className="ui-input" value={workflowId} onChange={(e) => setWorkflowId(e.target.value)}>
-          <option value="">No workflow — manual board</option>
+          <option value="">{t('noWorkflowOption')}</option>
           {workflowOptions.map((w) => <option key={w.workflowId} value={w.workflowId}>{w.name}</option>)}
         </select>
 
-        <label className="hire-label" htmlFor="cb-owner">Owning agent <span className="hire-label-optional">· optional</span></label>
+        <label className="hire-label" htmlFor="cb-owner">{t('owningAgentLabel')} <span className="hire-label-optional">{t('optionalSuffix')}</span></label>
         <select id="cb-owner" className="ui-input" value={rosterId} onChange={(e) => setRosterId(e.target.value)}>
-          <option value="">No owner — shared board</option>
+          <option value="">{t('noOwnerOption')}</option>
           {roster.map((r) => <option key={r.rosterId} value={r.rosterId}>{r.persona}{r.label ? ` — ${r.label}` : ''}</option>)}
         </select>
 
         <div className="hire-foot action-bar">
-          <button type="button" className="secondary btn-sm" onClick={onClose}>Cancel</button>
+          <button type="button" className="secondary btn-sm" onClick={onClose}>{t('common:cancel')}</button>
           <button
             type="button"
             className="btn-accent-solid btn-sm"
@@ -79,7 +81,7 @@ export function CreateBoardModal({ roster, onClose, onCreate }: {
               ...(rosterId ? { rosterId } : {}),
             })}
           >
-            + Create board
+            {t('createBoardButton')}
           </button>
         </div>
     </Modal>

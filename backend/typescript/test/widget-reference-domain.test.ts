@@ -8,6 +8,7 @@
  *   - the env gate (routes absent unless OPENWOP_EXAMPLE_WIDGETS_ENABLED=true).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import {
@@ -18,8 +19,7 @@ import {
 } from '../src/host/examples/widgetService.js';
 
 let server: http.Server;
-const PORT = 18713;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
@@ -27,13 +27,13 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_EXAMPLE_WIDGETS_ENABLED = 'true';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 
 afterAll(async () => {

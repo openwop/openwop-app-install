@@ -168,13 +168,26 @@ export default defineConfig(({ mode }) => {
           // minified, ~70KB gzip). Splitting keeps the main bundle
           // under the vite 500KB warning threshold and lets browsers
           // cache the markdown chunk independently of UI churn.
-          manualChunks: {
-            markdown: ['react-markdown', 'remark-gfm'],
-            // Firebase Auth SDK in its own chunk (GAP-ANALYSIS E13). src/auth/
-            // firebase.ts now loads it via dynamic import(), so this chunk is
-            // ASYNC — fetched only on first auth use (the boot-time
-            // onAuthChanged subscription or a sign-in click), never in entry.
-            firebase: ['firebase/app', 'firebase/auth'],
+          // Function form so first-party i18n CATALOGS (src/**/i18n/<locale>.ts)
+          // join the i18n chunk too — eager-bundled but off the entry critical
+          // path (ADR 0065). Keeps the entry lean as catalogs + locales grow.
+          manualChunks(id) {
+            const n = id.replace(/\\/g, '/');
+            if (n.includes('/node_modules/')) {
+              if (/\/node_modules\/(i18next|react-i18next|void-elements|html-parse-stringify)\//.test(n)) return 'i18n';
+              if (/\/node_modules\/(@firebase|firebase)\//.test(n)) return 'firebase';
+              if (/\/node_modules\/(react-markdown|remark-[^/]+|rehype-[^/]+|mdast-util-[^/]+|micromark[^/]*|unified|unist-util-[^/]+|hast-util-[^/]+|hastscript|property-information|vfile[^/]*|bail|trough|comma-separated-tokens|space-separated-tokens|decode-named-character-reference|character-entities[^/]*|devlop|html-url-attributes|zwitch|longest-streak|ccount|escape-string-regexp|markdown-table|estree-util-[^/]+|web-namespaces|stringify-entities|katex)\//.test(n)) return 'markdown';
+              return undefined;
+            }
+            // LAZY locales (fr/es): kept OUT of the eager i18n chunk so they code-split
+            // into their own async chunk and don't tax the shipped bundle. They are
+            // SUPPORTED (advertised/auto-negotiated) yet still lazy — eager-bundling
+            // every locale (~+76 kB gzip each) would overflow the chunk budget, so the
+            // bundle decision is separate from the SUPPORTED_LOCALES decision. Keep this
+            // list in sync with `lazyLocaleGlobs` in src/i18n/resources.ts.
+            if (/\/i18n\/(?:locales\/)?(?:fr|es)(?:\/|\.ts$)/.test(n)) return undefined;
+            if (/\/src\/i18n\//.test(n) || /\/i18n\/(en|[a-z]{2}(-[A-Z]{2})?)\.ts$/.test(n)) return 'i18n';
+            return undefined;
           },
         },
       },

@@ -6,6 +6,17 @@
  * possible but the user-facing rate is bounded by Cloud Run's own
  * scale-up policy).
  *
+ * SEC-3 (CODEBASE-ASSESSMENT.md): under multi-instance scale-out these
+ * per-process counters are evadable (each instance has its own budget). A
+ * correct fix needs SHARED state checked per request — but that is deliberately
+ * NOT done here as a kv/SQL-CAS counter, because it would add a storage
+ * round-trip to EVERY request, degrading the very hot path the limiter exists
+ * to protect. The production-grade path is a dedicated distributed limiter
+ * (Redis/Memcached token bucket, an API-gateway rate limiter, or a managed
+ * service) — infrastructure, not a code edit on this middleware. The in-memory
+ * limiter remains the correct demo/single-instance default; operators needing
+ * hard multi-instance limits front the service with one of the above.
+ *
  * Three buckets, ordered from outermost to innermost:
  *
  *   1. Per-IP token bucket on EVERY request (default 60/min).
@@ -50,6 +61,9 @@ interface Limits {
   sessionRunsPerDay: number;
   sessionConcurrent: number;
   ipRunsPerDay: number;
+  /** MCP-1 (ADR 0087 OQ-2) — per-principal budget for inbound MCP `tools/call`,
+   *  layered on the per-IP floor. Defaults to the per-IP request budget. */
+  mcpPrincipalReqsPerMin: number;
 }
 
 /** Which specific limiter fired — carried in `details.reason` and mapped to the
@@ -59,7 +73,8 @@ type RateLimitReason =
   | 'session_runs_per_min'
   | 'session_runs_per_day'
   | 'session_concurrent'
-  | 'ip_runs_per_day';
+  | 'ip_runs_per_day'
+  | 'mcp_principal_rate';
 
 function loadLimits(): Limits {
   const n = (k: string, dflt: number) => {
@@ -79,6 +94,10 @@ function loadLimits(): Limits {
     sessionRunsPerDay: n('OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY', 50),
     sessionConcurrent: n('OPENWOP_RATELIMIT_SESSION_CONCURRENT', 5),
     ipRunsPerDay: n('OPENWOP_RATELIMIT_IP_RUNS_PER_DAY', 60),
+    // NOT tied to `forced` — that flag is the REST conformance harness's per-IP
+    // affordance; the MCP per-principal budget has its own env and must not shift
+    // under it (MCP-1).
+    mcpPrincipalReqsPerMin: n('OPENWOP_MCP_PRINCIPAL_REQS_PER_MIN', 60),
   };
 }
 
@@ -95,12 +114,16 @@ const RATE_LIMIT_SCOPE: Record<RateLimitReason, 'tenant' | 'route' | 'global' | 
   session_runs_per_min: 'tenant',
   session_runs_per_day: 'tenant',
   session_concurrent: 'tenant',
+  // Per authenticated MCP principal (subject-scoped, like the per-session buckets).
+  mcp_principal_rate: 'tenant',
 };
 
 // ── State (all maps reset per process / cold start) ──
 
 /** Sliding-window per-key request timestamps (ms). */
 const ipReqTimes = new Map<string, number[]>();
+/** MCP-1 — sliding-window per-principal `tools/call` timestamps (ms). */
+const mcpPrincipalReqTimes = new Map<string, number[]>();
 const sessionRunTimesMin = new Map<string, number[]>();
 const sessionRunCountsDay = new Map<string, { day: number; count: number }>();
 const ipRunCountsDay = new Map<string, { day: number; count: number }>();
@@ -131,6 +154,40 @@ function isLoopbackSelf(req: Request): boolean {
   if (req.header('x-forwarded-for')) return false;
   const addr = req.socket.remoteAddress ?? '';
   return addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
+}
+
+/**
+ * The host's long-lived SSE GET endpoints — a single persistent connection,
+ * not a burst of reads. Matched on the exact route shape (NOT the
+ * client-controlled `Accept` header alone) so this can't be used to slip
+ * arbitrary cheap-poll requests past the per-IP bucket: a caller would have to
+ * hit one of these exact paths AND request `text/event-stream`, at which point
+ * they just get the long-lived stream the route already serves.
+ *   - notifications feed:  /v1/host/openwop-app/notifications/stream
+ *   - kanban board feed:   /v1/host/openwop-app/kanban/boards/<id>/events
+ *   - run-event stream:    /v1/runs/<id>/events  (SSE mode only; its JSON
+ *                          polling mode stays inside the budget via the
+ *                          Accept gate below)
+ */
+const SSE_STREAM_PATHS: readonly RegExp[] = [
+  /^\/v1\/host\/openwop-app\/notifications\/stream$/,
+  /^\/v1\/host\/openwop-app\/kanban\/boards\/[^/]+\/events$/,
+  /^\/v1\/runs\/[^/]+\/events$/,
+];
+
+/**
+ * True for an established long-lived SSE stream connection. These are exempt
+ * from the per-IP *request-rate* bucket because a session-long EventStream is
+ * ONE connection, not a 60/min burst — and counting each reconnect against the
+ * burst budget creates a feedback loop where a rate-limited tab's capped-backoff
+ * reconnects keep it rate-limited, so the live feed never recovers. Gated on
+ * (method=GET) ∧ (known stream path) ∧ (Accept: text/event-stream) so it neither
+ * exempts the run-events JSON path nor lets the header bypass other routes.
+ */
+function isLongLivedSseStream(req: Request): boolean {
+  if (req.method !== 'GET') return false;
+  if (!(req.header('accept') ?? '').includes('text/event-stream')) return false;
+  return SSE_STREAM_PATHS.some((re) => re.test(req.path));
 }
 
 function clientIp(req: Request): string {
@@ -173,6 +230,38 @@ function rejectRateLimited(
   });
 }
 
+/**
+ * MCP-1 (ADR 0087 OQ-2) — per-PRINCIPAL inbound budget for MCP `tools/call`,
+ * layered ON TOP of the global per-IP floor (the IP is the MCP client's — Claude
+ * Desktop / a shared gateway — not the user's). Sliding 60s window keyed on the
+ * authenticated `principalId`. Returns `true` (and sends the canonical 429
+ * envelope) when the caller is over budget; `false` (and records the call)
+ * otherwise. `tools/list` and other reads stay on the per-IP floor — only
+ * `tools/call`, which executes a workflow run, gets this tighter budget.
+ *
+ * Residuals (stated, accepted reference-host posture — same as the per-IP
+ * limiter): per-instance under Cloud Run scale-out (a distributed limiter is the
+ * production path); `mcp-anonymous` callers share one bucket (they are already
+ * denied every gated tool, and the per-IP floor still applies).
+ */
+export function enforceMcpPrincipalRateLimit(res: import('express').Response, principalId: string): boolean {
+  if (process.env.OPENWOP_RATELIMIT_DISABLED === 'true') return false;
+  const limit = loadLimits().mcpPrincipalReqsPerMin;
+  if (limit === 0) return false;
+  const now = Date.now();
+  const times = pruneWindow(mcpPrincipalReqTimes.get(principalId) ?? [], 60_000, now);
+  if (times.length >= limit) {
+    const oldest = times[0]!;
+    const retryIn = (oldest + 60_000 - now) / 1000;
+    log.warn('mcp principal rate limit hit', { principalId, recentCalls: times.length, limit });
+    rejectRateLimited(res, 'mcp_principal_rate', retryIn);
+    return true;
+  }
+  times.push(now);
+  mcpPrincipalReqTimes.set(principalId, times);
+  return false;
+}
+
 // ── Public middleware ──
 
 /** Global per-IP request bucket. Mount before route handlers. */
@@ -189,6 +278,12 @@ export function ipRateLimitMiddleware(): RequestHandler {
       next();
       return;
     }
+    // A long-lived SSE stream is one persistent connection, not a burst — and
+    // charging each capped-backoff reconnect against the 60/min budget keeps a
+    // throttled tab's live feed permanently throttled. Exempt it from the burst
+    // bucket (run-creation + per-day quotas are enforced elsewhere). See
+    // isLongLivedSseStream for the path+Accept gate that prevents header bypass.
+    if (isLongLivedSseStream(req)) { next(); return; }
     const limits = loadLimits();
     if (limits.ipReqsPerMin === 0) { next(); return; }
     const ip = clientIp(req);
@@ -326,6 +421,7 @@ export function reserveConcurrentSlot(req: Request, runId: string): () => void {
 
 export function _resetRateLimitState(): void {
   ipReqTimes.clear();
+  mcpPrincipalReqTimes.clear();
   sessionRunTimesMin.clear();
   sessionRunCountsDay.clear();
   ipRunCountsDay.clear();

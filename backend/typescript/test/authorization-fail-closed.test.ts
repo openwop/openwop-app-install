@@ -20,13 +20,13 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-const PORT = 18653;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 
 beforeAll(async () => {
@@ -35,9 +35,9 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   delete process.env.OPENWOP_AUTHORIZATION_ENFORCEMENT;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   const def = getToggleDefault('users');
   if (def) await saveConfig({ ...def, status: 'on' }, 'test');
@@ -224,7 +224,7 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     expect(manage.body.allowed).toBe(false);
   });
 
-  it('every gated run route denies a zero-scope member of a shared workspace: bulk-cancel, events/poll, debug-bundle', async () => {
+  it('every gated run route denies a zero-scope member of a shared workspace: bulk-cancel, events/poll, debug-bundle, interrupt-resolve', async () => {
     const owner = client();
     await signup(owner);
     const ws = (await owner.post('/v1/host/openwop-app/workspaces', { name: 'GateCo' })).body;
@@ -246,6 +246,10 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
     expect(poll.status).toBe(403);
     const debug = await member.get('/v1/runs/no-such-run/debug-bundle');
     expect(debug.status).toBe(403);
+    // The interrupt node-resolve route gates on runs:read too (ADR 0070
+    // architecture-review follow-up) — denied before the interrupt lookup.
+    const resolve = await member.post('/v1/runs/no-such-run/interrupts/no-such-node', { resumeValue: { action: 'accept' } });
+    expect(resolve.status, JSON.stringify(resolve.body)).toBe(403);
   });
 
   // The wildcard-bearer escape hatch: the trusted operator key (OPENWOP_API_KEYS /

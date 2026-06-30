@@ -19,11 +19,21 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import i18n from '../../i18n/index.js';
 
 export interface RecordedAudio {
   blob: Blob;
   mimeType: string;
   durationSeconds: number;
+}
+
+/** Options for `start`. Default = record-to-blob (existing behavior). Passing `onChunk`
+ *  + a `timeslice` switches on STREAMING mode (ADR 0138 voice mode): the recorder emits a
+ *  chunk every `timeslice` ms so the caller can stream the utterance live, while `stop()`
+ *  still returns the full blob. One mic abstraction — no second MediaRecorder. */
+export interface StartRecordingOpts {
+  onChunk?: (chunk: Blob) => void;
+  timeslice?: number;
 }
 
 export interface UseAudioRecorderResult {
@@ -32,11 +42,17 @@ export interface UseAudioRecorderResult {
   /** Last error from getUserMedia or MediaRecorder. */
   error: string | null;
   /** Start a new recording. Resolves once the mic stream is live. */
-  start: () => Promise<void>;
+  start: (opts?: StartRecordingOpts) => Promise<void>;
   /** Stop the in-flight recording. Resolves with the captured audio. */
   stop: () => Promise<RecordedAudio | null>;
   /** Abort + discard any in-flight recording. */
   cancel: () => void;
+}
+
+/** The MIME type this host's recorder will capture — exported so a streaming caller can
+ *  open its host session with the matching `mimeType`. */
+export function recorderMimeType(): string {
+  return pickMimeType();
 }
 
 function pickMimeType(): string {
@@ -66,7 +82,7 @@ export function useAudioRecorder(): UseAudioRecorderResult {
     streamRef.current?.getTracks().forEach((t) => t.stop());
   }, []);
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (opts?: StartRecordingOpts) => {
     if (!isSupported || isRecording) return;
     setError(null);
     chunksRef.current = [];
@@ -75,7 +91,7 @@ export function useAudioRecorder(): UseAudioRecorderResult {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
-      setError(`Microphone access denied or unavailable: ${reason}`);
+      setError(i18n.t('chat:micAccessDenied', { reason }));
       return;
     }
     streamRef.current = stream;
@@ -90,7 +106,10 @@ export function useAudioRecorder(): UseAudioRecorderResult {
       return;
     }
     rec.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
+      if (e.data && e.data.size > 0) {
+        chunksRef.current.push(e.data);
+        opts?.onChunk?.(e.data); // STREAMING mode — emit each chunk live
+      }
     };
     rec.onstop = () => {
       const blob = new Blob(chunksRef.current, { type: mimeType });
@@ -103,12 +122,15 @@ export function useAudioRecorder(): UseAudioRecorderResult {
       stopResolveRef.current = null;
     };
     rec.onerror = (e) => {
-      const reason = (e as ErrorEvent).message ?? 'unknown recorder error';
+      const reason = (e as ErrorEvent).message ?? i18n.t('chat:unknownRecorderError');
       setError(reason);
     };
     recorderRef.current = rec;
     startedAtRef.current = Date.now();
-    rec.start();
+    // Streaming mode emits a chunk every `timeslice` ms (default 250ms); record-to-blob
+    // mode (no onChunk) emits one chunk on stop.
+    if (opts?.onChunk) rec.start(opts.timeslice ?? 250);
+    else rec.start();
     setIsRecording(true);
   }, [isSupported, isRecording]);
 

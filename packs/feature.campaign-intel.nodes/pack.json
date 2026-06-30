@@ -1,0 +1,30 @@
+{
+  "name": "feature.campaign-intel.nodes",
+  "version": "1.0.0",
+  "description": "Campaign Intelligence node pack (ADR 0160 / ADR 0014) — `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-intel", "budget", "forecast", "marketing"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-intel.nodes.budget-optimize",
+      "version": "1.0.0",
+      "label": "Intel: Budget Optimize",
+      "description": "Recommends budget reallocations (shift spend toward higher ROAS) over the performance store, with an optional AI scenario narrative. Inputs: { orgId, campaignId?, narrate?, provider?, model? }. Output: { recommendation, narrative? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.forecast",
+      "version": "1.0.0",
+      "label": "Intel: Forecast",
+      "description": "Per-campaign creative-fatigue detection + outcome projection over the performance store. Inputs: { orgId, campaignId? }. Output: { forecasts }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

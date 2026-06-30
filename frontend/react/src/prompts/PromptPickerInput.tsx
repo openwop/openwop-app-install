@@ -11,9 +11,12 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getPrompt, listPrompts } from './promptsClient.js';
 import type { PromptKind, PromptTemplate } from './types.js';
 import { parseRef, refToString } from './types.js';
+import { Notice } from '../ui/Notice.js';
+import { Skeleton } from '../ui/Skeleton.js';
 
 export interface PromptPickerInputProps {
   value: string | undefined;
@@ -27,6 +30,7 @@ export interface PromptPickerInputProps {
 }
 
 export function PromptPickerInput({ value, onChange, promptKind, required }: PromptPickerInputProps) {
+  const { t } = useTranslation('prompts');
   const [prompts, setPrompts] = useState<PromptTemplate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -45,10 +49,10 @@ export function PromptPickerInput({ value, onChange, promptKind, required }: Pro
   }, [promptKind]);
 
   if (error) {
-    return <div className="alert error">Failed to load prompts: {error}</div>;
+    return <Notice variant="error">{t('pickerFailedToLoad', { error })}</Notice>;
   }
   if (prompts === null) {
-    return <p className="muted">Loading prompts…</p>;
+    return <Skeleton />;
   }
 
   return (
@@ -58,12 +62,12 @@ export function PromptPickerInput({ value, onChange, promptKind, required }: Pro
         required={required}
         onChange={(e) => onChange(e.target.value === '' ? undefined : e.target.value)}
       >
-        <option value="">— none —</option>
+        <option value="">{t('pickerNone')}</option>
         {prompts.map((p) => {
           const ref = refToString(p);
           return (
             <option key={ref} value={ref}>
-              {p.name ? `${p.name} (${ref})` : ref}
+              {p.name ? t('pickerOptionWithName', { name: p.name, ref }) : ref}
             </option>
           );
         })}
@@ -74,6 +78,7 @@ export function PromptPickerInput({ value, onChange, promptKind, required }: Pro
 }
 
 function PromptPreview({ ref }: { ref: string }) {
+  const { t } = useTranslation('prompts');
   const [preview, setPreview] = useState<PromptTemplate | null>(null);
   useEffect(() => {
     let cancelled = false;
@@ -95,11 +100,11 @@ function PromptPreview({ ref }: { ref: string }) {
   return (
     <div className="prompt-picker-preview">
       <details>
-        <summary className="muted">Show template body</summary>
+        <summary className="muted">{t('pickerShowBody')}</summary>
         <pre className="prompt-preview">{preview.text}</pre>
         {preview.variables && preview.variables.length > 0 && (
           <div className="muted prompt-picker-preview-vars">
-            Variables: {preview.variables.map((v) => v.name).join(', ')}
+            {t('pickerVariables', { vars: preview.variables.map((v) => v.name).join(', ') })}
           </div>
         )}
       </details>

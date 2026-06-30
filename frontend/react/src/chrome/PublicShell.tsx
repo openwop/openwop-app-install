@@ -5,15 +5,18 @@
  * stays reachable even when a deployment runs a sign-in / password gate.
  */
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { brand } from '../brand/brand.js';
+import { useBrand } from '../brand/BrandProvider.js';
 import { SignInButton } from '../auth/SignInButton.js';
 import { ThemeToggle } from '../ui/ThemeToggle.js';
 
 export function PublicShell({ children }: { children: ReactNode }): JSX.Element {
+  const { t } = useTranslation('chrome');
+  const brand = useBrand(); // live runtime brand (ADR 0170)
   return (
     <div className="public-shell">
-      <a className="skip-link" href="#public-main">Skip to content</a>
+      <a className="skip-link" href="#public-main">{t('common:skipToContent')}</a>
       <header className="public-shell-header action-bar">
         <Link to="/" className="public-shell-brand">
           {brand.logoSrc ? <img src={brand.logoSrc} alt="" className="public-shell-logo" /> : null}
@@ -21,8 +24,8 @@ export function PublicShell({ children }: { children: ReactNode }): JSX.Element 
         </Link>
         <div className="action-bar">
           <ThemeToggle />
-          <a className="chip" href="https://openwop.dev" rel="noopener noreferrer">Read the spec ↗</a>
-          <Link className="chip" to="/chat">Explore the demo →</Link>
+          <a className="chip" href="https://openwop.dev" rel="noopener noreferrer">{t('readTheSpec')}</a>
+          <Link className="chip" to="/chat">{t('exploreTheDemo')}</Link>
           <SignInButton />
         </div>
       </header>
@@ -31,7 +34,7 @@ export function PublicShell({ children }: { children: ReactNode }): JSX.Element 
       </main>
       <footer className="app-footer">
         {brand.footerText} ·{' '}
-        <Link to="/privacy">Privacy</Link>
+        <Link to="/privacy">{t('common:privacy')}</Link>
       </footer>
     </div>
   );

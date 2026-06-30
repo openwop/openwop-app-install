@@ -1,0 +1,57 @@
+{
+  "name": "core.openwop.connections.meta-ads",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Meta (Facebook/Instagram) Ads connection pack (RFC 0095) \u2014 OAuth2 provider for the Meta Marketing API. Reach is `openapi`: the manifest declares the global Meta OAuth hosts and points at the Marketing API reference, consumed by the core.openwop.http nodes. Carries NO secret; the operator supplies the app id/secret host-side (ADR 0024 \u00a77). An available provider (the parallel ad platform to google-ads); one of the three ad platforms Campaign Studio syncs (ADR 0159).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "meta-ads",
+    "displayName": "Meta Ads",
+    "category": "marketing",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "manual",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://www.facebook.com/v19.0/dialog/oauth",
+        "token": "https://graph.facebook.com/v19.0/oauth/access_token"
+      },
+      "scopes": {
+        "read": [
+          {
+            "key": "ads.read",
+            "label": "Read ad performance",
+            "scopes": [
+              "ads_read"
+            ]
+          }
+        ],
+        "write": [
+          {
+            "key": "ads.manage",
+            "label": "Manage ads & budgets",
+            "scopes": [
+              "ads_management"
+            ]
+          }
+        ]
+      }
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://developers.facebook.com/docs/marketing-api/reference"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http",
+      "feature.campaign-channels.nodes.publish-ad-variants"
+    ],
+    "docsUrl": "https://developers.facebook.com/docs/marketing-api",
+    "apiHosts": [
+      "facebook.com"
+    ]
+  }
+}

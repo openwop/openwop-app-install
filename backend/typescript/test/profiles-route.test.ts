@@ -12,14 +12,14 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-const PORT = 18661;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 
 beforeAll(async () => {
@@ -27,9 +27,9 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   // `users` must be on (signup). `profiles` graduated to always-on (no toggle).
   const u = getToggleDefault('users');
@@ -162,6 +162,32 @@ describe('profiles — agent pinning (ADR 0023)', () => {
     const u = await c.del(`/v1/host/openwop-app/profiles/me/pinned-agents/${encodeURIComponent(agent.rosterId)}`);
     expect(u.status).toBe(200);
     expect(u.body.pinnedAgentIds).not.toContain(agent.rosterId);
+  });
+
+  it('chat-pin is an INDEPENDENT target from the sidebar pin (ADR 0040 welcome row)', async () => {
+    await enableProfiles('on');
+    const c = client();
+    await signup(c);
+    const seeded = await c.post('/v1/host/openwop-app/example-data/seed', {});
+    expect(seeded.status).toBe(200);
+    const roster = await c.get('/v1/host/openwop-app/roster');
+    const agent = (roster.body.roster as Array<{ rosterId: string }>)[0]!;
+
+    // Pin to AI chat → lands in pinnedChatAgentIds, NOT pinnedAgentIds (the two
+    // targets are independent).
+    const p = await c.put(`/v1/host/openwop-app/profiles/me/pinned-chat-agents/${encodeURIComponent(agent.rosterId)}`);
+    expect(p.status, JSON.stringify(p.body)).toBe(200);
+    expect(p.body.pinnedChatAgentIds).toContain(agent.rosterId);
+    expect(p.body.pinnedAgentIds ?? []).not.toContain(agent.rosterId);
+
+    // Unknown agent → 404 (fail-closed).
+    const bad = await c.put('/v1/host/openwop-app/profiles/me/pinned-chat-agents/host:nope');
+    expect(bad.status).toBe(404);
+
+    // Unpin from chat → removed; sidebar list untouched throughout.
+    const u = await c.del(`/v1/host/openwop-app/profiles/me/pinned-chat-agents/${encodeURIComponent(agent.rosterId)}`);
+    expect(u.status).toBe(200);
+    expect(u.body.pinnedChatAgentIds).not.toContain(agent.rosterId);
   });
 
   it('UN-pinning a deleted/unknown agent succeeds (self-heal — DELETE never 404s)', async () => {

@@ -6,6 +6,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
 import { classifyHttpError } from '../client/classifyHttpError.js';
 import {
   type AccessRole,
@@ -36,9 +38,18 @@ import {
   updateGroup,
   updateMember,
 } from '../client/accessClient.js';
-import { assignableRoleIdsFor, assignableScopesFor, roleLabelFor } from './orgsHelpers.js';
+import { assignableRoleIdsFor, assignableScopesFor, isBuiltIn, roleLabelFor } from './orgsHelpers.js';
+
+/** Built-in role code → orgs-catalog display-label key (codes stay as wire data). */
+const BUILT_IN_ROLE_LABEL_KEY = {
+  viewer: 'roleLabelViewer',
+  editor: 'roleLabelEditor',
+  admin: 'roleLabelAdmin',
+  owner: 'roleLabelOwner',
+} as const;
 
 export function useOrgsController() {
+  const { t } = useTranslation('orgs');
   const [orgs, setOrgs] = useState<Organization[]>([]);
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [teams, setTeams] = useState<Team[]>([]);
@@ -79,12 +90,14 @@ export function useOrgsController() {
   const [viewAs, setViewAs] = useState<string | null>(null);
   const [viewScopes, setViewScopes] = useState<Set<string>>(new Set());
 
-  const fail = (err: unknown) => {
+  // Memoized so the loaders below can depend on it without re-creating every
+  // render (exhaustive-deps). `t` is stable in react-i18next, so `fail` is too.
+  const fail = useCallback((err: unknown) => {
     // Friendly transport copy (GAP-ANALYSIS E5): 429/offline render as
     // recoverable guidance, not a raw `listX failed: 429`.
     const c = classifyHttpError(err);
-    setError(`${c.title} — ${c.detail}`);
-  };
+    setError(t('errorWithDetail', { title: c.title, detail: c.detail }));
+  }, [t]);
 
   const loadOrgs = useCallback(async () => {
     try {
@@ -95,7 +108,7 @@ export function useOrgsController() {
     } catch (err) {
       fail(err);
     }
-  }, []);
+  }, [fail]);
 
   const loadOrgDetail = useCallback(async (orgId: string) => {
     try {
@@ -108,7 +121,7 @@ export function useOrgsController() {
     } catch (err) {
       fail(err);
     }
-  }, []);
+  }, [fail]);
 
   useEffect(() => {
     void loadOrgs();
@@ -143,7 +156,7 @@ export function useOrgsController() {
   };
 
   const onDeleteOrg = async (org: Organization) => {
-    if (!window.confirm(`Delete organization "${org.name}" and all its teams + members? This can't be undone.`)) return;
+    if (!(await confirm({ title: t('confirmDeleteOrg', { name: org.name }), danger: true, confirmLabel: t('common:delete') }))) return;
     try {
       await deleteOrg(org.orgId);
       if (selectedOrgId === org.orgId) setSelectedOrgId(null);
@@ -168,7 +181,7 @@ export function useOrgsController() {
 
   const onDeleteTeam = async (team: Team) => {
     if (!selectedOrgId) return;
-    if (!window.confirm(`Delete team "${team.name}"?`)) return;
+    if (!(await confirm({ title: t('confirmDeleteTeam', { name: team.name }), danger: true, confirmLabel: t('common:delete') }))) return;
     try {
       await deleteTeam(selectedOrgId, team.teamId);
       await loadOrgDetail(selectedOrgId);
@@ -215,7 +228,7 @@ export function useOrgsController() {
 
   const onDeleteMember = async (m: OrgMember) => {
     if (!selectedOrgId) return;
-    if (!window.confirm(`Remove member "${m.displayName}"?`)) return;
+    if (!(await confirm({ title: t('confirmRemoveMember', { name: m.displayName }), danger: true }))) return;
     try {
       await deleteMember(selectedOrgId, m.memberId);
       await loadOrgDetail(selectedOrgId);
@@ -255,7 +268,7 @@ export function useOrgsController() {
 
   const onDeleteGroup = async (g: Group) => {
     if (!selectedOrgId) return;
-    if (!window.confirm(`Delete group "${g.name}"? Members keep their direct roles.`)) return;
+    if (!(await confirm({ title: t('confirmDeleteGroup', { name: g.name }), danger: true, confirmLabel: t('common:delete') }))) return;
     try {
       await deleteGroup(selectedOrgId, g.groupId);
       await loadOrgDetail(selectedOrgId);
@@ -316,7 +329,8 @@ export function useOrgsController() {
 
   // ── Role catalog helpers (built-in + custom) ──
   const assignableRoleIds: string[] = assignableRoleIdsFor(customRoles);
-  const roleLabel = (id: string): string => roleLabelFor(customRoles, id);
+  const roleLabel = (id: string): string =>
+    isBuiltIn(id) ? t(BUILT_IN_ROLE_LABEL_KEY[id]) : roleLabelFor(customRoles, id);
   const assignableScopes: string[] = assignableScopesFor(roles);
 
   // ── Custom-role actions ──
@@ -335,7 +349,7 @@ export function useOrgsController() {
 
   const onDeleteRole = async (r: CustomRole) => {
     if (!selectedOrgId) return;
-    if (!window.confirm(`Delete custom role "${r.name}"? It will be removed from any member or group that has it.`)) return;
+    if (!(await confirm({ title: t('confirmDeleteRole', { name: r.name }), danger: true, confirmLabel: t('common:delete') }))) return;
     try {
       await deleteCustomRole(selectedOrgId, r.roleId);
       await loadOrgDetail(selectedOrgId);

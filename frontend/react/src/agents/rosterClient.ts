@@ -10,6 +10,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
+import { cachedRead } from '../client/requestCache.js';
 
 export interface RosterAgentRef {
   agentId: string;
@@ -142,10 +143,18 @@ const rosterBase = `${config.baseUrl}/v1/host/openwop-app/roster`;
 const orgBase = `${config.baseUrl}/v1/host/openwop-app/org-chart`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
-export async function listRoster(): Promise<RosterEntry[]> {
-  const res = await fetch(rosterBase, fetchOpts({ headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`listRoster returned ${res.status}`);
-  return ((await res.json()) as { roster: RosterEntry[] }).roster;
+/** The named agents. Advisor-subject agents (ADR 0040) are excluded by default —
+ *  they live only in the Board of Advisors feature; pass `includeAdvisors` to get
+ *  them (the advisory picker + the chat `@@`-convene do). */
+export async function listRoster(opts?: { includeAdvisors?: boolean }): Promise<RosterEntry[]> {
+  // Read on mount by the welcome card + roster pickers. Coalesce concurrent reads
+  // (TTL 0 = in-flight-only), keyed by the includeAdvisors variant so the two
+  // shapes don't share a slot; roster edits reflect on the next read.
+  return cachedRead(`roster.list:${opts?.includeAdvisors ? 'all' : 'named'}`, 0, async () => {
+    const res = await fetch(`${rosterBase}${opts?.includeAdvisors ? '?includeAdvisors=true' : ''}`, fetchOpts({ headers: authedHeaders() }));
+    if (!res.ok) throw new Error(`listRoster returned ${res.status}`);
+    return ((await res.json()) as { roster: RosterEntry[] }).roster;
+  });
 }
 
 export async function getRosterEntry(rosterId: string): Promise<RosterEntry> {
@@ -172,7 +181,7 @@ export async function createRosterEntry(input: {
 
 export async function updateRosterEntry(
   rosterId: string,
-  patch: { persona?: string; workflows?: string[]; enabled?: boolean; label?: string; description?: string; avatarUrl?: string | null; heartbeatIntervalMs?: number; autonomyLevel?: 'auto' | 'review' },
+  patch: { persona?: string; workflows?: string[]; enabled?: boolean; label?: string; description?: string; avatarUrl?: string | null; heartbeatIntervalMs?: number; autonomyLevel?: 'auto' | 'guided' | 'review' },
 ): Promise<RosterEntry> {
   const res = await fetch(`${rosterBase}/${encodeURIComponent(rosterId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
   if (!res.ok) throw new Error(`updateRosterEntry returned ${res.status}`);

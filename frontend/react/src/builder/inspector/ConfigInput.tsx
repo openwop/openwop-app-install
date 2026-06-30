@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
 import { type ConfigField } from '../palette/nodeCatalog.js';
 import { AlertIcon } from '../../ui/icons/index.js';
@@ -166,6 +167,7 @@ function StringListInput({
   placeholder?: string | undefined;
   maxItems?: number | undefined;
 }): JSX.Element {
+  const { t } = useTranslation('builder');
   const [draft, setDraft] = useState<string>(value.join('\n'));
   // Reset the draft when the store-side value changes from somewhere
   // OTHER than this input (e.g., reset, import, multi-select edit).
@@ -187,7 +189,7 @@ function StringListInput({
       <textarea
         rows={Math.min(6, Math.max(2, value.length + 1))}
         value={draft}
-        placeholder={placeholder ?? 'One per line'}
+        placeholder={placeholder ?? t('stringListPlaceholder')}
         onChange={(e) => {
           const next = e.target.value;
           setDraft(next);
@@ -198,7 +200,7 @@ function StringListInput({
       />
       {overLimit ? (
         <div className="muted builder-inspector-help" role="status">
-          <AlertIcon size={12} /> Only the first {maxItems} entries are kept (host limit).
+          <AlertIcon size={12} /> {t('stringListOverLimit', { count: maxItems })}
         </div>
       ) : null}
     </>

@@ -1,0 +1,31 @@
+{
+  "name": "feature.brand.agents",
+  "version": "1.0.0",
+  "description": "Brand & Guardrails feature agent pack (ADR 0155 / ADR 0014) — a manifest agent (the Brand Steward) whose tools are feature.brand.nodes over the ctx.features.brand surface. It explains a workspace's brand voice and audits content for compliance (banned phrases, formality, per-channel rules) from the AI chat. Tool-allowlisted to the Brand feature surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "brand", "agent", "steward", "guardrails", "compliance", "marketing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.brand.agents.brand-steward",
+      "persona": "RESEARCH",
+      "label": "Brand Steward",
+      "description": "Teaches and enforces a workspace's brand — voice, formality, approved + banned phrases, per-channel rules — and scores content for compliance, grounded via feature.brand.nodes over ctx.features.brand. Recommends; the human decides.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/brand-steward.md",
+      "toolAllowlist": [
+        "openwop:feature.brand.nodes.list-brands",
+        "openwop:feature.brand.nodes.resolve-voice",
+        "openwop:feature.brand.nodes.compliance-check"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

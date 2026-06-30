@@ -1,0 +1,73 @@
+{
+  "name": "core.openwop.workflows.market-intel",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0149/0150). A competitive / market-intelligence digest authored entirely over PUBLISHED node packs (vendor.myndhyve.market-intel-* + core.openwop.ai), so it expands + runs on any conformant host. The thin-slice proof that the real-work workflows publish to packs.openwop.dev. Published under the `core.openwop.workflows.*` namespace (openwop-team signing key); the registry adds `signing` at publish time.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "market-intel.digest",
+      "version": "1.0.0",
+      "label": "Competitive / market-intel digest",
+      "description": "Discover sources for a topic, extract voice-of-customer signals, score opportunities, then synthesize a digest with recommended actions. Portable: every node is a published typeId.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic"],
+        "properties": {
+          "topic": { "type": "string", "description": "The market/topic to research (e.g. 'AI workflow orchestration for mid-market ops teams')." },
+          "audience": { "type": "string", "default": "", "description": "Optional audience framing for the synthesis." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          {
+            "id": "discover",
+            "typeId": "market-intel.ai-discovery",
+            "name": "Discover sources",
+            "position": { "x": 0, "y": 0 },
+            "config": { "query": "{{params.topic}}" },
+            "inputs": {}
+          },
+          {
+            "id": "voc",
+            "typeId": "market-intel.voc-extraction",
+            "name": "Extract voice-of-customer",
+            "position": { "x": 260, "y": 0 },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "score",
+            "typeId": "market-intel.opportunity-scoring",
+            "name": "Score opportunities",
+            "position": { "x": 520, "y": 0 },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "synthesize",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Synthesize digest",
+            "position": { "x": 780, "y": 0 },
+            "config": {
+              "systemPrompt": "You are a market analyst. Synthesize a concise competitive/market-intel digest with recommended actions for the topic \"{{params.topic}}\"{{params.audience}}, using the discovered sources, voice-of-customer signals, and opportunity scores."
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          { "from": "discover", "to": "voc" },
+          { "from": "voc", "to": "score" },
+          { "from": "score", "to": "synthesize" }
+        ]
+      },
+      "outputs": {
+        "digest": { "type": "string", "description": "The synthesized market-intel digest with recommended actions." }
+      }
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "name": "feature.campaign-channels.nodes",
+  "version": "1.0.0",
+  "description": "Campaign Studio channel-generation node pack (ADR 0157 / ADR 0014). One parameterized `generate` node turns a brief's messaging kernel into a channel deliverable (landing page / ad variants / email sequence / creative briefs / social posts) — grounded in the KB (kb.rag citations) + brand voice (ctx.features.brand) via the run-scoped provider — plus a `content.quality.check` node. Drives the five channel child workflows the orchestration (ADR 0158) fans out.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-channels", "generation", "marketing", "grounding"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-channels.nodes.generate",
+      "version": "1.0.0",
+      "label": "Channel: Generate",
+      "description": "Generates a channel deliverable from a brief's kernel + KB grounding + brand voice. Inputs: { briefId, channel, provider?, model? }. Output: { draft }. channel ∈ {landing_page, ad_variants, email_sequence, creative_briefs, social_posts}.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-channels.nodes.content-quality-check",
+      "version": "1.0.0",
+      "label": "Channel: Content Quality Check",
+      "description": "Scores a generated channel draft (0-100) on citation presence, length vs the channel cap, and kernel echo. Non-blocking — the report flows to the approval gate. Inputs: { draft, channel, maxLength? }. Output: { report }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-channels.nodes.publish-landing-page",
+      "version": "1.0.0",
+      "label": "Channel: Publish Landing Page",
+      "description": "Publishes a landing_page draft as a real DRAFT CMS page (ADR 0162) via ctx.features.cms.createDraftPage — first section → hero, rest → richText/cta. Never auto-publishes; idempotent on a deterministic pageId. Inputs: { draft, briefId? | orgId? }. Output: { page }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-channels.nodes.publish-email-sequence",
+      "version": "1.0.0",
+      "label": "Channel: Publish Email Sequence",
+      "description": "Publishes an email_sequence draft as real DRAFT email entities (ADR 0162) via ctx.features.email.createDraftCampaign — one draft template + one draft campaign per email step. Never sends; idempotent on deterministic ids. Inputs: { draft, briefId? | orgId?, stage? }. Output: { campaign }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-channels.nodes.publish-ad-variants",
+      "version": "1.0.0",
+      "label": "Channel: Publish Ad Copy",
+      "description": "Publishes an ad_variants draft as a DRAFT 'campaign-ad-copy' document (ADR 0166) via ctx.features.documents.createDraftDocument — Markdown, one section per platform with a variant table. A handoff packet (no live ad dispatch — that's RFC-gated). Idempotent. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-channels.nodes.publish-creative-briefs",
+      "version": "1.0.0",
+      "label": "Channel: Publish Creative Briefs",
+      "description": "Publishes a creative_briefs draft as a DRAFT 'campaign-creative-briefs' document (ADR 0166) via ctx.features.documents.createDraftDocument — Markdown, one section per brief (scene/composition/messaging). Idempotent. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-channels.nodes.publish-social-posts",
+      "version": "1.0.0",
+      "label": "Channel: Publish Social Calendar",
+      "description": "Publishes a social_posts draft as a DRAFT 'campaign-social-calendar' document (ADR 0166) via ctx.features.documents.createDraftDocument — Markdown, posts grouped by platform with hashtags. A handoff packet (no live social dispatch — RFC-gated). Idempotent. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

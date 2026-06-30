@@ -21,6 +21,8 @@ export interface KanbanColumn {
   id: string;
   name: string;
   triggerWorkflowId?: string;
+  /** ADR 0049 — the board's terminal (Done) lane. A card here is complete. */
+  terminal?: boolean;
 }
 
 export type KanbanCardSource = 'human' | 'workflow' | 'agent' | 'discord' | 'schedule' | 'api';
@@ -43,10 +45,20 @@ export interface KanbanCard {
   assignmentReason?: string;
   /** Free-text note on what's blocking the task (lightweight; not a graph). */
   blockerNote?: string;
+  /** ADR 0049 — the single accountable assignee (a userId). */
+  assigneeId?: string;
+  /** ADR 0049 — role-addressed + unclaimed; surfaces in every holder's mirror. */
+  assigneeRole?: string;
+  /** ADR 0049 — set when the card first entered a terminal column. */
+  completedAt?: string;
   order: number;
   createdAt: string;
   updatedAt: string;
 }
+
+/** ADR 0049 — a card on the "assigned to me" mirror, carrying its origin-board
+ *  provenance (the card stays in its board; this is a derived view). */
+export type AssignedCard = KanbanCard & { boardName: string; columnName: string; terminal: boolean };
 
 export interface KanbanBoard {
   id: string;
@@ -210,4 +222,39 @@ export function subscribeBoardEvents(boardId: string, onChange: () => void): () 
 export async function deleteCard(cardId: string): Promise<void> {
   const res = await fetch(`${base}/cards/${encodeURIComponent(cardId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
   if (!res.ok) throw new Error(`deleteCard returned ${res.status}`);
+}
+
+/** ADR 0049 — the caller's "assigned to me" live mirror: every card across the
+ *  active workspace addressed to them (direct or via a role they hold), grouped
+ *  with its origin-board name. A derived view — these are the same records the
+ *  origin boards render. */
+export async function listAssignedToMe(): Promise<AssignedCard[]> {
+  const res = await fetch(`${base}/assigned`, fetchOpts({ headers: authedHeaders() }));
+  if (!res.ok) throw new Error(`listAssignedToMe returned ${res.status}`);
+  return ((await res.json()) as { cards: AssignedCard[] }).cards;
+}
+
+/** ADR 0049 — assign a card to a person, address it to a role, or unassign
+ *  (`assigneeId: null`). The card never leaves its origin board. */
+export async function assignCard(
+  cardId: string,
+  input: { assigneeId?: string | null; assigneeRole?: string; comment?: string; notifyAssignee?: boolean },
+): Promise<{ card: KanbanCard }> {
+  const res = await fetch(
+    `${base}/cards/${encodeURIComponent(cardId)}/assign`,
+    fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }),
+  );
+  if (!res.ok) throw new Error(`assignCard returned ${res.status}`);
+  return (await res.json()) as { card: KanbanCard };
+}
+
+/** ADR 0049 — claim a role-addressed (unclaimed) card; the caller becomes the
+ *  accountable assignee. */
+export async function claimCard(cardId: string): Promise<{ card: KanbanCard }> {
+  const res = await fetch(
+    `${base}/cards/${encodeURIComponent(cardId)}/claim`,
+    fetchOpts({ method: 'POST', headers: jsonHeaders() }),
+  );
+  if (!res.ok) throw new Error(`claimCard returned ${res.status}`);
+  return (await res.json()) as { card: KanbanCard };
 }

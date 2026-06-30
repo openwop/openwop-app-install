@@ -17,6 +17,7 @@
  */
 
 import { catalogEntryByTypeId } from '../palette/catalogRegistry.js';
+import i18n from '../../i18n/index.js';
 import type { NodeCatalogEntry } from '../palette/nodeCatalog.js';
 import type {
   BuilderEdge,
@@ -108,7 +109,7 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
   const def = (input && typeof input === 'object' ? input : {}) as CanonicalDefinition;
   const rawNodes = Array.isArray(def.nodes) ? def.nodes : [];
   if (rawNodes.length === 0) {
-    throw new CanonicalParseError('Workflow definition has no nodes.');
+    throw new CanonicalParseError(i18n.t('builder:errDefinitionNoNodes'));
   }
 
   const entryByNodeId = new Map<string, NodeCatalogEntry>();
@@ -119,7 +120,7 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
     const id = n.id ?? n.nodeId;
     const typeId = n.typeId;
     if (!id || !typeId) {
-      throw new CanonicalParseError(`Node ${i} is missing an id or typeId.`);
+      throw new CanonicalParseError(i18n.t('builder:errNodeMissingIdOrTypeId', { index: i }));
     }
     const entry = catalogEntryByTypeId(typeId);
     if (!entry) {
@@ -143,8 +144,7 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
   if (unresolved.length > 0) {
     const uniq = [...new Set(unresolved)];
     throw new CanonicalParseError(
-      `This host can't load ${uniq.length} node type${uniq.length === 1 ? '' : 's'} ` +
-        `(not installed): ${uniq.join(', ')}.`,
+      i18n.t('builder:errCantLoadNodeTypes', { count: uniq.length, types: uniq.join(', ') }),
     );
   }
 
@@ -170,7 +170,7 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
   });
 
   return {
-    name: typeof def.name === 'string' && def.name.trim() ? def.name : 'Imported workflow',
+    name: typeof def.name === 'string' && def.name.trim() ? def.name : i18n.t('builder:importedWorkflow'),
     nodes,
     edges,
     defaultInputs: normalizeDefaultInputs(def),

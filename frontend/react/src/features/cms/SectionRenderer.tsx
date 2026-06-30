@@ -10,9 +10,38 @@
  * `` `code` `` / `[label](url)` with an http(s)/mailto / internal-path guard.
  */
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import type { Section } from './cmsClient.js';
 import { assetUrl } from './cmsClient.js';
+import type { IconCmp } from '../../chrome/featureTypes.js';
+import {
+  MessageSquareIcon, MessageCircleIcon, BotIcon, WorkflowIcon, FolderIcon,
+  InboxIcon, ColumnsIcon, ClockIcon, MonitorIcon, PlayIcon, BoxesIcon,
+  PackageIcon, BriefcaseIcon, ShieldIcon, DatabaseIcon, StarIcon, ActivityIcon,
+  BookOpenIcon, FileTextIcon, PencilIcon, MicIcon, SparklesIcon, ImageIcon,
+  LayoutGridIcon, GlobeIcon, ClipboardIcon, ScaleIcon, FlagIcon, LifeBuoyIcon,
+  ListIcon, MegaphoneIcon, LockIcon, PlugIcon, KeyIcon, BuildingIcon, UserIcon,
+  SettingsIcon, TerminalIcon, LinkIcon,
+} from '../../ui/icons/index.js';
+
+/** Per-feature card icons (ADR 0027). A card's `icon` slug (authored in
+ *  featurePages.json / editable in the CMS) maps to one glyph here; an absent or
+ *  unknown slug falls back to the node motif (`NodeGlyph`). Slugs are semantic,
+ *  so several may resolve to the same Lucide glyph across distant sections. */
+const ICON_BY_SLUG: Record<string, IconCmp> = {
+  chat: MessageSquareIcon, channels: MessageCircleIcon, comments: MessageCircleIcon,
+  bot: BotIcon, workflow: WorkflowIcon, folder: FolderIcon, inbox: InboxIcon,
+  board: ColumnsIcon, clock: ClockIcon, monitor: MonitorIcon, play: PlayIcon,
+  boxes: BoxesIcon, package: PackageIcon, roster: BriefcaseIcon, briefcase: BriefcaseIcon,
+  shield: ShieldIcon, database: DatabaseIcon, star: StarIcon, activity: ActivityIcon,
+  book: BookOpenIcon, file: FileTextIcon, pencil: PencilIcon, mic: MicIcon,
+  sparkles: SparklesIcon, image: ImageIcon, grid: LayoutGridIcon, globe: GlobeIcon,
+  clipboard: ClipboardIcon, scale: ScaleIcon, flag: FlagIcon, lifebuoy: LifeBuoyIcon,
+  list: ListIcon, megaphone: MegaphoneIcon, lock: LockIcon, plug: PlugIcon,
+  key: KeyIcon, building: BuildingIcon, user: UserIcon, settings: SettingsIcon,
+  terminal: TerminalIcon, link: LinkIcon,
+};
 
 /** A node-supplied string field, or '' when absent/non-string. */
 const str = (v: unknown): string => (typeof v === 'string' ? v : '');
@@ -61,18 +90,22 @@ function RichText({ text, className = 'cms-richtext' }: { text: string; classNam
 
 // ── Public (front-page) building blocks ─────────────────────────────────────
 
-/** Mono eyebrow + serif heading — the recurring section header. */
-function SectionHead({ eyebrow, heading }: { eyebrow?: string | undefined; heading?: string | undefined }): JSX.Element | null {
-  if (!eyebrow && !heading) return null;
+/** Mono eyebrow + serif heading + an optional one-line orienting lede — the
+ *  recurring section header. The lede gives a first-time reader one sentence of
+ *  context under the heading (ADR 0027 Features page). */
+function SectionHead({ eyebrow, heading, lede }: { eyebrow?: string | undefined; heading?: string | undefined; lede?: string | undefined }): JSX.Element | null {
+  if (!eyebrow && !heading && !lede) return null;
   return (
     <header className="fp-head">
       {eyebrow ? <p className="fp-eyebrow">{eyebrow}</p> : null}
       {heading ? <h2 className="fp-head__title">{heading}</h2> : null}
+      {lede ? <p className="fp-head__lede">{inlineMarkdown(lede, 'lede')}</p> : null}
     </header>
   );
 }
 
-/** The openwop node motif — square / circle / diamond, cycled per index. */
+/** The openwop node motif — square / circle / diamond, cycled per index.
+ *  The fallback when a card has no (or an unknown) `icon` slug. */
 function NodeGlyph({ i }: { i: number }): JSX.Element {
   const shape = i % 3;
   return (
@@ -82,6 +115,18 @@ function NodeGlyph({ i }: { i: number }): JSX.Element {
           : shape === 1 ? <circle cx="12" cy="12" r="8" />
             : <path d="M12 2.5 L21.5 12 L12 21.5 L2.5 12 Z" />}
       </svg>
+    </span>
+  );
+}
+
+/** A card's glyph: the per-feature icon for a known `icon` slug, else the node
+ *  motif. Same `.fp-glyph` chrome either way so the grid stays visually even. */
+function CardGlyph({ icon, i }: { icon?: string | undefined; i: number }): JSX.Element {
+  const Icon = icon ? ICON_BY_SLUG[icon] : undefined;
+  if (!Icon) return <NodeGlyph i={i} />;
+  return (
+    <span className="fp-glyph" aria-hidden="true">
+      <Icon size={20} />
     </span>
   );
 }
@@ -111,6 +156,7 @@ function CtaLink({ label, url, primary }: { label: string; url: string; primary?
 
 /** Render one section's PUBLIC (front-page) markup. */
 function PublicSection({ section }: { section: Section }): JSX.Element {
+  const { t } = useTranslation('cms');
   const d = section.data;
   const eyebrow = str(d.eyebrow) || undefined;
   const heading = str(d.heading) || undefined;
@@ -167,7 +213,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       );
 
     case 'columns': {
-      const cols: { title?: string; text?: string }[] = Array.isArray(d.columns) ? d.columns : [];
+      const cols: { title?: string; text?: string; href?: string; icon?: string; optional?: boolean }[] = Array.isArray(d.columns) ? d.columns : [];
       const layout = str(d.layout) || 'cards';
 
       if (layout === 'stats') {
@@ -197,7 +243,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
                     <span className="fp-step__num">{pad2(i + 1)}</span>
                     <div className="fp-step__body">
                       {str(c.title) ? <h3 className="fp-step__title">{str(c.title)}</h3> : null}
-                      <p className="fp-step__text">{str(c.text)}</p>
+                      <p className="fp-step__text">{inlineMarkdown(str(c.text), `step-${i}`)}</p>
                     </div>
                   </li>
                 ))}
@@ -209,15 +255,24 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
       return (
         <section className="cms-public-section fp-section fp-cards">
           <div className="fp-shell">
-            <SectionHead eyebrow={eyebrow} heading={heading} />
+            <SectionHead eyebrow={eyebrow} heading={heading} lede={str(d.lede) || undefined} />
             <div className="fp-cards__grid">
-              {cols.map((c, i) => (
-                <article key={i} className="fp-card">
-                  <NodeGlyph i={i} />
-                  {str(c.title) ? <h3 className="fp-card__title">{str(c.title)}</h3> : null}
-                  <p className="fp-card__text">{str(c.text)}</p>
-                </article>
-              ))}
+              {cols.map((c, i) => {
+                const cardInner = (
+                  <>
+                    <CardGlyph icon={c.icon} i={i} />
+                    {str(c.title) ? <h3 className="fp-card__title">{str(c.title)}</h3> : null}
+                    {c.optional ? <span className="fp-card__badge">{t('optionalBadge')}</span> : null}
+                    <p className="fp-card__text">{inlineMarkdown(str(c.text), `card-${i}`)}</p>
+                  </>
+                );
+                const href = str(c.href);
+                // Whole-card link: ONE anchor per card (no nested links — card text
+                // carries no inline link when href is set). Keyboard + semantics free.
+                if (href && isInternal(href)) return <Link key={i} to={href} className="fp-card fp-card--link">{cardInner}</Link>;
+                if (href && isSafeHref(href)) return <a key={i} href={href} className="fp-card fp-card--link" rel="noopener noreferrer">{cardInner}</a>;
+                return <article key={i} className="fp-card">{cardInner}</article>;
+              })}
             </div>
           </div>
         </section>
@@ -231,6 +286,7 @@ function PublicSection({ section }: { section: Section }): JSX.Element {
 
 /** The simple editor preview (markup kept rough — the public page is `.fp-*`). */
 function EditorPreview({ section }: { section: Section }): JSX.Element {
+  const { t } = useTranslation('cms');
   const d = section.data;
   switch (section.type) {
     case 'hero':
@@ -247,7 +303,7 @@ function EditorPreview({ section }: { section: Section }): JSX.Element {
     case 'image':
       return str(d.token)
         ? <img src={assetUrl(str(d.token))} alt={str(d.alt)} className="cms-img" />
-        : <span className="u-label-sm">(no image)</span>;
+        : <span className="u-label-sm">{t('noImage')}</span>;
     case 'cta':
       return <span className="chip chip--accent">{str(d.heading) || str(d.label)}</span>;
     case 'columns': {
@@ -259,7 +315,7 @@ function EditorPreview({ section }: { section: Section }): JSX.Element {
       );
     }
     default:
-      return <span className="u-label-sm">Unknown section.</span>;
+      return <span className="u-label-sm">{t('unknownSection')}</span>;
   }
 }
 

@@ -3,17 +3,19 @@
  * extracted from OrgsPage (GAP-ANALYSIS E11). Purely presentational.
  */
 
+import { useTranslation } from 'react-i18next';
 import type { AccessRole } from '../client/accessClient.js';
 import { ShieldIcon } from '../ui/icons/index.js';
 import { NEUTRAL_CHIP, muted } from './orgUi.js';
 
 export function RoleCatalogPanel({ roles }: { roles: AccessRole[] }): JSX.Element {
+  const { t } = useTranslation('orgs');
   return (
     <>
       <h3 className="u-fs-14 u-mt-5 u-flex u-items-center u-gap-2">
-        <ShieldIcon size={15} /> Role catalog
+        <ShieldIcon size={15} /> {t('roleCatalogHeading')}
       </h3>
-      <p style={muted}>Built-in roles and the scopes they grant. Bare scopes are OpenWOP protocol scopes; <code>host:</code> scopes manage this org/team/member surface.</p>
+      <p style={muted}>{t('roleCatalogIntro')}</p>
       {roles.map((r) => (
         <div key={r.id} className="surface-card u-mb-2">
           <div className="u-flex u-items-center u-gap-2">

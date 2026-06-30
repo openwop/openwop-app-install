@@ -3,6 +3,10 @@ node_modules/
 **/node_modules/
 dist/
 lib/
+# …but `lib/` is a SOURCE directory under the frontend (byok/lib, …), not build
+# output — re-include it so new source files there aren't silently untracked.
+!frontend/react/src/**/lib/
+!frontend/react/src/**/lib/**
 *.tsbuildinfo
 
 # runtime / local
@@ -54,3 +58,14 @@ gha-creds-*.json
 !.env.production.example
 !.env.example
 !.env*.example
+
+# Claude Code personal/local settings (never commit)
+.claude/settings.local.json
+
+# browser tool (tools/browser) runtime artifacts
+.browser-state.json
+.browser-server.log
+/node_modules/
+
+# ADR 0146 Phase 4a — vendored CPython-WASI runtime (synced via scripts/sync-pythonwasm.sh, never committed)
+backend/typescript/vendor/*.wasm

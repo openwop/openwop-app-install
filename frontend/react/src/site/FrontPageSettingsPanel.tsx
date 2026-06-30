@@ -7,6 +7,7 @@
  * `SectionRenderer` for a live preview. Non-superadmins see a read-only notice.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { PageHeader } from '../ui/PageHeader.js';
 import { Notice } from '../ui/Notice.js';
 import { Skeleton } from '../ui/Skeleton.js';
@@ -20,6 +21,7 @@ import {
 } from '../features/site/siteConfigClient.js';
 
 export function FrontPageSettingsPanel(): JSX.Element {
+  const { t } = useTranslation('site');
   const [loading, setLoading] = useState(true);
   const [denied, setDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -57,24 +59,23 @@ export function FrontPageSettingsPanel(): JSX.Element {
       await putSiteConfig({ enabled });
       invalidateFrontPage();
       setSections(page.sections);
-      toast.success('Home page saved.');
+      toast.success(t('homePageSaved'));
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) { setDenied(true); return; }
-      toast.error(err instanceof Error ? err.message : 'Save failed.');
+      toast.error(err instanceof Error ? err.message : t('saveFailed'));
     } finally {
       setSaving(false);
     }
-  }, [title, sections, enabled]);
+  }, [title, sections, enabled, t]);
 
   if (loading) return <div className="u-p-4"><Skeleton /></div>;
 
   if (denied) {
     return (
       <div className="u-grid u-gap-3">
-        <PageHeader eyebrow="Content" title="Front page" lede="The public homepage at /." />
+        <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('ledeDenied')} />
         <Notice variant="warning">
-          Editing the homepage requires a <strong>superadmin</strong> principal (a tenant in
-          <code> OPENWOP_SUPERADMIN_TENANTS</code>, or the admin bearer key).
+          <Trans t={t} i18nKey="deniedNotice" components={{ 0: <strong />, 1: <code /> }} />
         </Notice>
       </div>
     );
@@ -83,12 +84,12 @@ export function FrontPageSettingsPanel(): JSX.Element {
   return (
     <div className="u-grid u-gap-4">
       <PageHeader
-        eyebrow="Content"
-        title="Front page"
-        lede="The public homepage shown at / to anonymous visitors. Signed-in users always get the app."
+        eyebrow={t('eyebrow')}
+        title={t('title')}
+        lede={t('lede')}
         actions={
           <button type="button" className="btn primary" disabled={saving} onClick={() => void save()}>
-            <SaveIcon size={15} /> {saving ? 'Saving…' : 'Save + publish'}
+            <SaveIcon size={15} /> {saving ? t('saving') : t('savePublish')}
           </button>
         }
       />
@@ -98,23 +99,23 @@ export function FrontPageSettingsPanel(): JSX.Element {
       <section className="surface-card u-grid u-gap-3 u-p-4">
         <label className="u-flex u-gap-2 u-items-center">
           <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} />
-          <span><strong>Show the front page</strong> at <code>/</code> (off ⇒ <code>/</code> is the app for everyone)</span>
+          <span><Trans t={t} i18nKey="frontPageToggle" components={{ 0: <strong />, 1: <code />, 2: <code /> }} /></span>
         </label>
         <label className="u-grid u-gap-1">
-          <span className="u-label-sm">Page title (browser tab / SEO)</span>
+          <span className="u-label-sm">{t('pageTitleLabel')}</span>
           <input value={title} onChange={(e) => setTitle(e.target.value)} />
         </label>
       </section>
 
       <div className="builder-two-col u-grid u-gap-4">
         <section className="surface-card u-grid u-gap-3 u-p-4">
-          <strong>Sections</strong>
+          <h2 className="u-fs-16 u-m-0">{t('sectionsHeading')}</h2>
           <SectionsEditor sections={sections} assets={[]} onChange={setSections} />
         </section>
         <section className="surface-card u-grid u-gap-3 u-p-4">
-          <strong>Preview</strong>
+          <h2 className="u-fs-16 u-m-0">{t('previewHeading')}</h2>
           {sections.length === 0
-            ? <span className="u-label-sm">Add a section to preview.</span>
+            ? <span className="u-label-sm">{t('addSectionToPreview')}</span>
             : <div className="cms-public-page">{sections.map((s) => <RenderSection key={s.sectionId} section={s} mode="public" />)}</div>}
         </section>
       </div>

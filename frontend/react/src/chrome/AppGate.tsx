@@ -1,4 +1,5 @@
 import { FormEvent, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { brand } from '../brand/brand.js';
 import { SignInButton } from '../auth/SignInButton.js';
 import { useAuth } from '../auth/useAuth.js';
@@ -43,6 +44,7 @@ function GateShell(props: {
 }
 
 function PasswordGate({ children }: { children: React.ReactNode }): JSX.Element {
+  const { t } = useTranslation('chrome');
   const key = useMemo(storageKey, []);
   const [unlocked, setUnlocked] = useState(() => readUnlocked(key));
   const [value, setValue] = useState('');
@@ -56,7 +58,7 @@ function PasswordGate({ children }: { children: React.ReactNode }): JSX.Element 
   function submit(event: FormEvent<HTMLFormElement>): void {
     event.preventDefault();
     if (disabled) {
-      setError('This deployment is configured for a password gate, but no password was supplied.');
+      setError(t('passwordGateMisconfigured'));
       return;
     }
     if (value === expected) {
@@ -64,18 +66,18 @@ function PasswordGate({ children }: { children: React.ReactNode }): JSX.Element 
       setUnlocked(true);
       return;
     }
-    setError('That password did not match.');
+    setError(t('passwordMismatch'));
   }
 
   return (
     <GateShell
-      title="Enter password"
-      lede="This workspace is private."
+      title={t('enterPassword')}
+      lede={t('workspacePrivate')}
       error={error}
     >
       <form className="app-gate-form" onSubmit={submit}>
         <label>
-          <span>Password</span>
+          <span>{t('passwordLabel')}</span>
           <input
             autoComplete="current-password"
             autoFocus
@@ -86,7 +88,7 @@ function PasswordGate({ children }: { children: React.ReactNode }): JSX.Element 
           />
         </label>
         <button className="primary" disabled={disabled || value.length === 0} type="submit">
-          Continue
+          {t('continue')}
         </button>
       </form>
     </GateShell>
@@ -94,13 +96,14 @@ function PasswordGate({ children }: { children: React.ReactNode }): JSX.Element 
 }
 
 function SignInGate({ children }: { children: React.ReactNode }): JSX.Element {
+  const { t } = useTranslation('chrome');
   const { user, loading, isConfigured } = useAuth();
   if (user) return <>{children}</>;
   return (
     <GateShell
-      title="Sign in"
-      lede={loading ? 'Checking your session.' : 'Sign in to open this workspace.'}
-      error={!loading && !isConfigured ? 'This deployment requires sign-in, but Firebase Auth is not configured.' : null}
+      title={t('signIn')}
+      lede={loading ? t('checkingSession') : t('signInToOpen')}
+      error={!loading && !isConfigured ? t('signInNotConfigured') : null}
     >
       <div className="app-gate-actions">
         <SignInButton />

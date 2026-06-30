@@ -5,6 +5,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { listPrompts, renderLocal } from './promptsClient.js';
 import type { PromptKind, PromptTemplate } from './types.js';
 import { PageHeader } from '../ui/PageHeader.js';
@@ -13,7 +14,7 @@ import { Modal } from '../ui/Modal.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Skeleton } from '../ui/Skeleton.js';
-import { IconButton } from '../ui/IconButton.js';
+import { ViewToggle, useViewMode } from '../ui/ViewToggle.js';
 import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
 import {
   FileTextIcon,
@@ -21,50 +22,41 @@ import {
   UserIcon,
   ListIcon,
   CodeIcon,
-  PencilIcon,
-  TrashIcon,
-  AlertIcon,
 } from '../ui/icons/index.js';
 import { refToString } from './types.js';
-import { lintPromptForTierOne, tierOneFindingsCount } from './tierOneLint.js';
+import { tierOneFindingsCount } from './tierOneLint.js';
 import { getCapabilities } from '../client/runsClient.js';
+import { KindGlyph, PromptCard, PromptRow } from './PromptViews.js';
 import {
   deleteUserPrompt,
-  isUserPromptId,
   suggestUserPromptId,
   upsertUserPrompt,
 } from './userPrompts.js';
 
 type TierOneCompliance = 'strict' | 'warn' | 'off' | undefined;
 
-const KINDS: { value: PromptKind | 'all'; label: string }[] = [
-  { value: 'all', label: 'All' },
-  { value: 'system', label: 'System' },
-  { value: 'user', label: 'User' },
-  { value: 'few-shot', label: 'Few-shot' },
-  { value: 'schema-hint', label: 'Schema hint' },
-];
+const KINDS: { value: PromptKind | 'all'; labelKey: string }[] = [
+  { value: 'all', labelKey: 'kindAll' },
+  { value: 'system', labelKey: 'kindSystem' },
+  { value: 'user', labelKey: 'kindUser' },
+  { value: 'few-shot', labelKey: 'kindFewShot' },
+  { value: 'schema-hint', labelKey: 'kindSchemaHint' },
+] as const;
 
-const KIND_LABEL: Record<PromptKind, string> = {
-  system: 'System',
-  user: 'User',
-  'few-shot': 'Few-shot',
-  'schema-hint': 'Schema hint',
-};
-
-/** Kind is a category axis — differentiate by glyph + label, never by color. */
-function KindGlyph({ kind, size = 12 }: { kind: PromptKind; size?: number }): JSX.Element {
-  if (kind === 'system') return <SettingsIcon size={size} />;
-  if (kind === 'user') return <UserIcon size={size} />;
-  if (kind === 'few-shot') return <ListIcon size={size} />;
-  return <CodeIcon size={size} />; // schema-hint
-}
+const KIND_LABEL_KEY: Record<PromptKind, string> = {
+  system: 'kindSystem',
+  user: 'kindUser',
+  'few-shot': 'kindFewShot',
+  'schema-hint': 'kindSchemaHint',
+} as const;
 
 export function PromptLibraryPage() {
+  const { t } = useTranslation('prompts');
   const [prompts, setPrompts] = useState<PromptTemplate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [kindFilter, setKindFilter] = useState<PromptKind | 'all'>('all');
   const [search, setSearch] = useState('');
+  const [viewMode, setViewMode] = useViewMode('prompts', 'grid');
   const [selected, setSelected] = useState<PromptTemplate | null>(null);
   // Editor modal state. When `editing` is non-null, the EditorModal
   // renders. `null` for the templateId field signals "new prompt"
@@ -134,13 +126,13 @@ export function PromptLibraryPage() {
     const all = prompts ?? [];
     const count = (k: PromptKind) => all.filter((p) => p.kind === k).length;
     return [
-      { key: 'all', label: 'All prompts', value: all.length, glyph: <FileTextIcon size={12} /> },
-      { key: 'system', label: 'System', value: count('system'), glyph: <SettingsIcon size={12} /> },
-      { key: 'user', label: 'User', value: count('user'), glyph: <UserIcon size={12} /> },
-      { key: 'few-shot', label: 'Few-shot', value: count('few-shot'), glyph: <ListIcon size={12} /> },
-      { key: 'schema-hint', label: 'Schema hint', value: count('schema-hint'), glyph: <CodeIcon size={12} /> },
+      { key: 'all', label: t('figureAllPrompts'), value: all.length, glyph: <FileTextIcon size={12} /> },
+      { key: 'system', label: t('kindSystem'), value: count('system'), glyph: <SettingsIcon size={12} /> },
+      { key: 'user', label: t('kindUser'), value: count('user'), glyph: <UserIcon size={12} /> },
+      { key: 'few-shot', label: t('kindFewShot'), value: count('few-shot'), glyph: <ListIcon size={12} /> },
+      { key: 'schema-hint', label: t('kindSchemaHint'), value: count('schema-hint'), glyph: <CodeIcon size={12} /> },
     ];
-  }, [prompts]);
+  }, [prompts, t]);
 
   const hasFilter = kindFilter !== 'all' || search.trim().length > 0;
   const clearFilters = () => { setKindFilter('all'); setSearch(''); };
@@ -148,10 +140,10 @@ export function PromptLibraryPage() {
   return (
     <section>
       <PageHeader
-        eyebrow="Build"
-        title="Prompt library"
-        lede="Reusable prompts your workflow's AI nodes can pick from. Edit one in a single place and every node that uses it updates the next time it runs — no copy-paste, no drift. System prompts set the AI's role and tone; user prompts shape what you ask of it."
-        actions={<button onClick={() => setEditing('new')}>+ New prompt</button>}
+        eyebrow={t('pageEyebrow')}
+        title={t('pageTitle')}
+        lede={t('pageLede')}
+        actions={<button type="button" onClick={() => setEditing('new')}>{t('newPrompt')}</button>}
       />
 
       <div className="page-stack">
@@ -159,10 +151,10 @@ export function PromptLibraryPage() {
 
         {tierOneActive && flaggedCount > 0 && (
           <Notice variant={tierOneCompliance === 'strict' ? 'warning' : 'info'}>
-            <strong>Tier-1 subset</strong> ({tierOneCompliance}):{' '}
-            <strong>{flaggedCount}</strong> schema-hint prompt{flaggedCount === 1 ? '' : 's'} flagged against{' '}
-            <a href="https://github.com/openwop/openwop/blob/main/spec/v1/structured-output-subset.md" target="_blank" rel="noopener">structured-output-subset.md</a>.
-            Inline chips on each offender point to the specific finding.
+            <strong>{t('tierOneStrong')}</strong> {t('tierOnePosture', { posture: tierOneCompliance })}{' '}
+            <strong>{flaggedCount}</strong> {t('tierOneFlagged', { count: flaggedCount })}{' '}
+            <a href="https://github.com/openwop/openwop/blob/main/spec/v1/structured-output-subset.md" target="_blank" rel="noopener">{t('tierOneLinkText')}</a>.
+            {' '}{t('tierOneFindingHint')}
           </Notice>
         )}
 
@@ -170,37 +162,38 @@ export function PromptLibraryPage() {
           figures={figures}
           activeKey={kindFilter}
           onToggle={(k) => setKindFilter(k as PromptKind | 'all')}
-          ariaLabel="Filter prompts by kind"
+          ariaLabel={t('filterByKindAria')}
         />
 
-        <div className="filterbar" role="group" aria-label="Filter prompts">
+        <div className="filterbar" role="group" aria-label={t('filterGroupAria')}>
           <input
             type="search"
             className="ui-input filterbar-search"
-            placeholder="templateId, name, description, tag…"
-            aria-label="Search prompts"
+            placeholder={t('searchPlaceholder')}
+            aria-label={t('searchAria')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
           <select
             className="ui-input filterbar-select"
-            aria-label="Filter by kind"
+            aria-label={t('filterByKindSelectAria')}
             value={kindFilter}
             onChange={(e) => setKindFilter(e.target.value as PromptKind | 'all')}
           >
             {KINDS.map((k) => (
-              <option key={k.value} value={k.value}>{k.label === 'All' ? 'All kinds' : k.label}</option>
+              <option key={k.value} value={k.value}>{k.value === 'all' ? t('kindAllKinds') : t(k.labelKey)}</option>
             ))}
           </select>
           {prompts !== null && (
             <span className="muted u-fs-13 u-nowrap">
-              {filtered.length} of {prompts.length} prompt{prompts.length === 1 ? '' : 's'}
+              {t('countSummary', { count: prompts.length, filtered: filtered.length, total: prompts.length })}
             </span>
           )}
+          <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
         </div>
 
         {prompts === null ? (
-          <div className="card-grid" aria-busy="true" aria-label="Loading prompts">
+          <div className="card-grid" aria-busy="true" aria-label={t('loadingPromptsAria')}>
             {Array.from({ length: 6 }, (_, i) => (
               <div className="surface-card u-grid u-gap-2" key={i}>
                 <Skeleton width="55%" height={16} />
@@ -213,73 +206,43 @@ export function PromptLibraryPage() {
           hasFilter ? (
             <StateCard
               icon={<FileTextIcon size={26} />}
-              title="No prompts match"
-              body="Try clearing the search or kind filter."
-              action={<button type="button" className="secondary" onClick={clearFilters}>Clear filters</button>}
+              title={t('noMatchTitle')}
+              body={t('noMatchBody')}
+              action={<button type="button" className="secondary" onClick={clearFilters}>{t('clearFilters')}</button>}
             />
           ) : (
             <StateCard
               icon={<FileTextIcon size={26} />}
-              title="No prompts yet"
-              body="Author a reusable prompt your workflow's AI nodes can pick from."
-              action={<button type="button" onClick={() => setEditing('new')}>+ New prompt</button>}
+              title={t('emptyTitle')}
+              body={t('emptyBody')}
+              action={<button type="button" onClick={() => setEditing('new')}>{t('newPrompt')}</button>}
             />
           )
-        ) : (
+        ) : viewMode === 'grid' ? (
           <div className="card-grid">
-            {filtered.map((p) => {
-              const findings = tierOneActive ? lintPromptForTierOne(p) : [];
-              const isUser = isUserPromptId(p.templateId);
-              return (
-                <div key={`${p.templateId}@${p.version}`} className="surface-card surface-card--interactive u-grid u-gap-2">
-                  <button
-                    type="button"
-                    className="u-button-bare u-grid u-gap-2 u-w-full u-text-left"
-                    onClick={() => setSelected(p)}
-                  >
-                    <div className="action-bar u-justify-between u-items-baseline u-gap-2">
-                      <code className="prompt-list-item-id">{refToString(p)}</code>
-                      <span className="chip chip--muted u-nowrap">
-                        <KindGlyph kind={p.kind} /> {KIND_LABEL[p.kind]}
-                      </span>
-                    </div>
-                    {p.name && <div className="prompt-list-item-name">{p.name}</div>}
-                    {p.description && <div className="muted prompt-list-item-desc">{p.description}</div>}
-                    {p.tags && p.tags.length > 0 && (
-                      <div className="action-bar u-gap-2 u-wrap">
-                        {p.tags.map((t) => (
-                          <span key={t} className="chip chip--muted">{t}</span>
-                        ))}
-                      </div>
-                    )}
-                    {findings.length > 0 && (
-                      <div className="action-bar u-gap-2 u-wrap">
-                        {findings.map((f) => (
-                          <span key={f.rule} className="chip chip--warning" title="Tier-1 subset finding — see structured-output-subset.md">
-                            <AlertIcon size={12} /> {f.label}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-                  </button>
-                  {isUser && (
-                    <div className="action-bar u-gap-2 u-justify-end">
-                      <IconButton
-                        label={`Edit ${p.name ?? p.templateId}`}
-                        icon={<PencilIcon size={15} />}
-                        onClick={() => setEditing(p)}
-                      />
-                      <IconButton
-                        label={`Delete ${p.name ?? p.templateId}`}
-                        className="icon-button u-text-danger"
-                        icon={<TrashIcon size={15} />}
-                        onClick={() => setPendingDelete(p)}
-                      />
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+            {filtered.map((p) => (
+              <PromptCard
+                key={`${p.templateId}@${p.version}`}
+                prompt={p}
+                tierOneActive={tierOneActive}
+                onSelect={setSelected}
+                onEdit={setEditing}
+                onDelete={setPendingDelete}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className="surface-card list-view">
+            {filtered.map((p) => (
+              <PromptRow
+                key={`${p.templateId}@${p.version}`}
+                prompt={p}
+                tierOneActive={tierOneActive}
+                onSelect={setSelected}
+                onEdit={setEditing}
+                onDelete={setPendingDelete}
+              />
+            ))}
           </div>
         )}
       </div>
@@ -320,20 +283,20 @@ function DeletePromptModal({
   onClose: () => void;
   onConfirm: () => void;
 }) {
+  const { t } = useTranslation('prompts');
   const name = prompt.name ?? prompt.templateId;
   return (
-    <Modal label={`Delete ${name}`} onClose={onClose}>
+    <Modal label={t('deleteModalLabel', { name })} onClose={onClose}>
       <div className="modal-header">
-        <h3>Delete prompt</h3>
+        <h3>{t('deleteModalTitle')}</h3>
       </div>
       <div className="modal-body">
         <p>
-          Delete <strong>{name}</strong>? This can&apos;t be undone — any workflow
-          node still referencing it will fall back to its inline default.
+          {t('deleteModalBodyPrefix')} <strong>{name}</strong>{t('deleteModalBodySuffix')}
         </p>
         <div className="action-bar u-gap-2 u-justify-end u-mt-4">
-          <button className="secondary" onClick={onClose}>Cancel</button>
-          <button className="secondary u-text-danger" onClick={onConfirm}>Delete prompt</button>
+          <button type="button" className="secondary" onClick={onClose}>{t('common:cancel')}</button>
+          <button type="button" className="secondary u-text-danger" onClick={onConfirm}>{t('deletePromptButton')}</button>
         </div>
       </div>
     </Modal>
@@ -351,6 +314,7 @@ function PromptEditorModal({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const { t } = useTranslation('prompts');
   const isEdit = existing !== null;
   const [name, setName] = useState(existing?.name ?? '');
   const [kind, setKind] = useState<PromptKind>(existing?.kind ?? 'system');
@@ -362,11 +326,11 @@ function PromptEditorModal({
   function onSave() {
     setSaveError(null);
     if (!name.trim()) {
-      setSaveError('Name is required.');
+      setSaveError(t('errorNameRequired'));
       return;
     }
     if (!text.trim()) {
-      setSaveError('Prompt text is required.');
+      setSaveError(t('errorTextRequired'));
       return;
     }
     const tags = tagsRaw
@@ -391,64 +355,63 @@ function PromptEditorModal({
   }
 
   return (
-    <Modal label={isEdit ? 'Edit prompt' : 'New prompt'} onClose={onClose}>
+    <Modal label={isEdit ? t('editModalTitle') : t('newModalTitle')} onClose={onClose}>
       <div className="modal-header">
-        <h3>{isEdit ? 'Edit prompt' : 'New prompt'}</h3>
-        <button className="secondary" onClick={onClose}>Cancel</button>
+        <h3>{isEdit ? t('editModalTitle') : t('newModalTitle')}</h3>
+        <button type="button" className="secondary" onClick={onClose}>{t('common:cancel')}</button>
       </div>
       <div className="modal-body">
         {saveError && <Notice variant="error">{saveError}</Notice>}
         <TextField
-          label="Name"
+          label={t('fieldName')}
           required
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g., Tone-of-voice editor"
+          placeholder={t('namePlaceholder')}
           autoFocus
         />
-        <SelectField label="Kind" value={kind} onChange={(e) => setKind(e.target.value as PromptKind)}>
-          <option value="system">System</option>
-          <option value="user">User</option>
-          <option value="few-shot">Few-shot</option>
-          <option value="schema-hint">Schema hint</option>
+        <SelectField label={t('fieldKind')} value={kind} onChange={(e) => setKind(e.target.value as PromptKind)}>
+          <option value="system">{t('kindSystem')}</option>
+          <option value="user">{t('kindUser')}</option>
+          <option value="few-shot">{t('kindFewShot')}</option>
+          <option value="schema-hint">{t('kindSchemaHint')}</option>
         </SelectField>
         <TextField
-          label="Description"
+          label={t('fieldDescription')}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
-          placeholder="What this prompt does and when to use it."
+          placeholder={t('descriptionPlaceholder')}
         />
         <TextareaField
-          label="Prompt text"
+          label={t('fieldPromptText')}
           required
           value={text}
           onChange={(e) => setText(e.target.value)}
           rows={10}
           placeholder={
             kind === 'user'
-              ? 'Mustache-style template. Use {{variable}} for inputs.'
-              : 'The system instruction. Set role, tone, output shape.'
+              ? t('promptTextPlaceholderUser', { token: '{{variable}}' })
+              : t('promptTextPlaceholderSystem')
           }
-          style={{ fontFamily: 'var(--mono, monospace)', fontSize: 13 }}
         />
         <TextField
-          label={<>Tags <span className="muted">(comma-separated)</span></>}
+          label={<>{t('fieldTags')} <span className="muted">{t('tagsHint')}</span></>}
           value={tagsRaw}
           onChange={(e) => setTagsRaw(e.target.value)}
-          placeholder="editorial, writing"
+          placeholder={t('tagsPlaceholder')}
         />
         {isEdit && existing && (
           <div className="form-row">
-            <span className="builder-inspector-field-label">Template ID</span>
+            <span className="builder-inspector-field-label">{t('templateIdLabel')}</span>
             <code className="builder-inspector-typeid">{existing.templateId}</code>
             <div className="muted builder-inspector-help">
-              IDs are immutable once created so existing references don&apos;t break.
+              {t('templateIdHelp')}
             </div>
           </div>
         )}
         <div className="action-bar u-gap-2 u-justify-end u-mt-4">
-          <button className="secondary" onClick={onClose}>Cancel</button>
-          <button onClick={onSave}>{isEdit ? 'Save changes' : 'Create prompt'}</button>
+          <button type="button" className="secondary" onClick={onClose}>{t('common:cancel')}</button>
+          <button type="button" onClick={onSave}>{isEdit ? t('saveChanges') : t('createPrompt')}</button>
         </div>
       </div>
     </Modal>
@@ -456,6 +419,7 @@ function PromptEditorModal({
 }
 
 function PromptDetailModal({ prompt, onClose }: { prompt: PromptTemplate; onClose: () => void }) {
+  const { t } = useTranslation('prompts');
   const [bindings, setBindings] = useState<Record<string, string>>({});
 
   const { rendered, missingRequired } = useMemo(() => {
@@ -478,29 +442,29 @@ function PromptDetailModal({ prompt, onClose }: { prompt: PromptTemplate; onClos
     <Modal label={prompt.name ?? prompt.templateId} onClose={onClose}>
       <div className="modal-header">
         <h3>{prompt.name ?? prompt.templateId}</h3>
-        <button className="secondary" onClick={onClose}>Close</button>
+        <button type="button" className="secondary" onClick={onClose}>{t('common:close')}</button>
       </div>
       <div className="modal-body">
         <div className="form-row">
-          <span className="builder-inspector-field-label">Ref</span>
+          <span className="builder-inspector-field-label">{t('detailRef')}</span>
           <code className="builder-inspector-typeid">{refToString(prompt)}</code>
         </div>
         <div className="form-row">
-          <span className="builder-inspector-field-label">Kind</span>
+          <span className="builder-inspector-field-label">{t('detailKind')}</span>
           <span className="chip chip--muted u-nowrap">
-            <KindGlyph kind={prompt.kind} /> {KIND_LABEL[prompt.kind]}
+            <KindGlyph kind={prompt.kind} /> {t(KIND_LABEL_KEY[prompt.kind])}
           </span>
         </div>
         {prompt.description && (
           <div className="form-row">
-            <span className="builder-inspector-field-label">Description</span>
+            <span className="builder-inspector-field-label">{t('detailDescription')}</span>
             <p className="muted">{prompt.description}</p>
           </div>
         )}
         {prompt.variables && prompt.variables.length > 0 && (
           <>
             <div className="builder-inspector-divider" />
-            <div className="builder-inspector-section-label">Variables</div>
+            <div className="builder-inspector-section-label">{t('detailVariables')}</div>
             {prompt.variables.map((v) => (
               <TextField
                 key={v.name}
@@ -509,11 +473,15 @@ function PromptDetailModal({ prompt, onClose }: { prompt: PromptTemplate; onClos
                     {v.name}
                     {v.required && <span className="builder-inspector-required" aria-hidden> *</span>}
                     {' '}
-                    <span className="muted">({v.type}{v.source ? ` from ${v.source}` : ''})</span>
+                    <span className="muted">
+                      {v.source
+                        ? t('variableMetaFromSource', { type: v.type, source: v.source })
+                        : t('variableMeta', { type: v.type })}
+                    </span>
                   </>
                 }
                 value={bindings[v.name] ?? ''}
-                placeholder={v.defaultValue !== undefined ? `default: ${String(v.defaultValue)}` : ''}
+                placeholder={v.defaultValue !== undefined ? t('variableDefault', { value: String(v.defaultValue) }) : ''}
                 onChange={(e) => setBindings((prev) => ({ ...prev, [v.name]: e.target.value }))}
                 {...(v.description ? { help: v.description } : {})}
               />
@@ -521,17 +489,17 @@ function PromptDetailModal({ prompt, onClose }: { prompt: PromptTemplate; onClos
           </>
         )}
         <div className="builder-inspector-divider" />
-        <div className="builder-inspector-section-label">Preview (local render)</div>
+        <div className="builder-inspector-section-label">{t('previewLabel')}</div>
         {missingRequired.length > 0 && (
           <Notice variant="warning">
-            Missing required: {missingRequired.join(', ')}
+            {t('missingRequired', { vars: missingRequired.join(', ') })}
           </Notice>
         )}
         <pre className="prompt-preview">{rendered}</pre>
         <p className="muted">
-          This is a local Mustache-style render. Once the host advertises{' '}
-          <code>capabilities.prompts.supported</code>, the preview will route through{' '}
-          <code>POST /v1/prompts:render</code> for the deterministic-hash invariant.
+          {t('localRenderNotePrefix')}{' '}
+          <code>capabilities.prompts.supported</code>{t('localRenderNoteMiddle')}{' '}
+          <code>POST /v1/prompts:render</code> {t('localRenderNoteSuffix')}
         </p>
       </div>
     </Modal>

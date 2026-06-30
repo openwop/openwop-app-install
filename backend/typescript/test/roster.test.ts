@@ -12,6 +12,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -85,15 +86,14 @@ describe('roster service (pure)', () => {
 
 describe('roster routes + board attribution (sqlite memory app)', () => {
   let server: http.Server;
-  const PORT = 18733;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
   const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({
-      port: PORT,
+      port: 0,
       storageDsn: 'memory://',
       serviceName: 'test',
       serviceVersion: '0.0.1',
@@ -102,7 +102,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     await __resetRosterStore();
     await __resetKanbanStore();
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
 
@@ -174,6 +174,48 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     expect(moved.body.attribution?.agentId).toBe('core.openwop.agents.brief-writer');
   });
 
+  it('hides advisor-subject members from the general roster, opt-in with ?includeAdvisors', async () => {
+    // A normal agent lands in the caller's resolved tenant via the route.
+    const normal = await jsonFetch<{ rosterId: string; tenantId: string }>('/v1/host/openwop-app/roster', {
+      method: 'POST',
+      body: JSON.stringify({ persona: 'Nora', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
+    });
+    expect(normal.status).toBe(201);
+    const tenantId = normal.body.tenantId;
+
+    // Seed an advisor-subject member in the SAME tenant (the route's POST
+    // doesn't accept `roleKey`, mirroring the advisory-board seed path).
+    const advisor = await createRosterEntry({
+      tenantId,
+      persona: 'Marcus Aurelius',
+      agentRef: { agentId: 'core.openwop.agents.brief-writer' },
+      roleKey: 'advisor',
+    });
+
+    // Default list excludes the advisor, includes the normal agent.
+    const defaultList = await jsonFetch<{ roster: { rosterId: string }[] }>('/v1/host/openwop-app/roster');
+    const defaultIds = defaultList.body.roster.map((e) => e.rosterId);
+    expect(defaultIds).toContain(normal.body.rosterId);
+    expect(defaultIds).not.toContain(advisor.rosterId);
+
+    // ?includeAdvisors=true opts the advisor back in (the board-of-advisors picker).
+    const withAdvisors = await jsonFetch<{ roster: { rosterId: string }[] }>(
+      '/v1/host/openwop-app/roster?includeAdvisors=true',
+    );
+    const withIds = withAdvisors.body.roster.map((e) => e.rosterId);
+    expect(withIds).toContain(normal.body.rosterId);
+    expect(withIds).toContain(advisor.rosterId);
+
+    // The list filter is presentation-only: a direct GET by id still resolves an
+    // advisor (the Board of Advisors `@@`-convene resolves the council by id).
+    const byId = await jsonFetch<{ rosterId: string; roleKey?: string }>(
+      `/v1/host/openwop-app/roster/${advisor.rosterId}`,
+    );
+    expect(byId.status).toBe(200);
+    expect(byId.body.rosterId).toBe(advisor.rosterId);
+    expect(byId.body.roleKey).toBe('advisor');
+  });
+
   it('rejects binding a board to an unknown roster member', async () => {
     const res = await jsonFetch('/v1/host/openwop-app/kanban/boards', {
       method: 'POST',
@@ -218,6 +260,34 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     // null clears it.
     await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ avatarUrl: null }) });
     expect((await jsonFetch<{ avatarUrl?: string }>(`/v1/host/openwop-app/roster/${id}`)).body.avatarUrl).toBeUndefined();
+  });
+
+  it('round-trips heartbeatIntervalMs + autonomyLevel through PATCH→GET and validates them', async () => {
+    const created = await jsonFetch<{ rosterId: string }>('/v1/host/openwop-app/roster', {
+      method: 'POST',
+      body: JSON.stringify({ persona: 'Hb', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.rosterId;
+
+    // A negative cadence is rejected.
+    expect(
+      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: -1 }) })).status,
+    ).toBe(400);
+
+    // A positive cadence + autonomy level persist and round-trip on GET.
+    const ok = await jsonFetch(`/v1/host/openwop-app/roster/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ heartbeatIntervalMs: 900_000, autonomyLevel: 'review' }),
+    });
+    expect(ok.status).toBe(200);
+    const after = await jsonFetch<{ heartbeatIntervalMs?: number; autonomyLevel?: string }>(`/v1/host/openwop-app/roster/${id}`);
+    expect(after.body.heartbeatIntervalMs).toBe(900_000);
+    expect(after.body.autonomyLevel).toBe('review');
+
+    // 0 disables the heartbeat (the field is cleared, not stored as 0).
+    await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: 0 }) });
+    expect((await jsonFetch<{ heartbeatIntervalMs?: number }>(`/v1/host/openwop-app/roster/${id}`)).body.heartbeatIntervalMs).toBeUndefined();
   });
 
   it('does NOT fire the trigger when the bound roster member is disabled (RFC 0086 §A)', async () => {

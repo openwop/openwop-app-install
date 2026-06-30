@@ -6,12 +6,12 @@
  * test/feature-toggles-superadmin.test.ts.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import type { Server } from 'node:http';
 import { createApp } from '../src/index.js';
 
-const PORT = 8799;
-const BASE = `http://localhost:${PORT}`;
+let BASE: string;
 const ADMIN = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 let server: Server;
 let n = 0;
@@ -24,8 +24,8 @@ beforeAll(async () => {
   delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
   delete process.env.OPENWOP_FRONTPAGE_DEFAULT_ENABLED; // default-on (ADR 0027)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://localhost:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 

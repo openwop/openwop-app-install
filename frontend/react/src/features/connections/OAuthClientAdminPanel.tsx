@@ -10,6 +10,7 @@
  * write-only (sealed server-side, never read back), mirroring the `/keys` BYOK UX.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/Notice.js';
 import { toast } from '../../ui/toast.js';
 import { KeyIcon } from '../../ui/icons/index.js';
@@ -32,6 +33,7 @@ function redirectUriHint(provider: string): string {
 }
 
 export function OAuthClientAdminPanel(): JSX.Element | null {
+  const { t } = useTranslation('connections');
   const [hidden, setHidden] = useState(false); // true ⇒ not a superadmin
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<Provider[]>([]);
@@ -49,10 +51,10 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
       })
       .catch((err) => {
         if (err instanceof ForbiddenError) { setHidden(true); return; }
-        setError(err instanceof Error ? err.message : 'Failed to load OAuth client config.');
+        setError(err instanceof Error ? err.message : t('loadOAuthClientFailed'));
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [t]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -66,27 +68,27 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
     try {
       await setOAuthClient(provider, d.clientId.trim(), d.clientSecret.trim());
       setDraft((prev) => ({ ...prev, [provider]: { clientId: '', clientSecret: '' } }));
-      toast.success(`OAuth client saved — ${provider} can now run consent.`);
+      toast.success(t('oauthClientSaved', { provider }));
       load();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Save failed.');
+      toast.error(err instanceof Error ? err.message : t('saveFailed'));
     } finally {
       setBusy(null);
     }
-  }, [draft, load]);
+  }, [draft, load, t]);
 
   const remove = useCallback(async (provider: string) => {
     setBusy(provider);
     try {
       await deleteOAuthClient(provider);
-      toast.success(`OAuth client removed for ${provider}.`);
+      toast.success(t('oauthClientRemoved', { provider }));
       load();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Remove failed.');
+      toast.error(err instanceof Error ? err.message : t('removeFailed'));
     } finally {
       setBusy(null);
     }
-  }, [load]);
+  }, [load, t]);
 
   // Non-superadmin (or still resolving the gate): render nothing.
   if (hidden) return null;
@@ -96,12 +98,8 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
   return (
     <div className="surface-card u-p-4 u-grid u-gap-3">
       <div className="u-grid u-gap-1">
-        <span className="u-label-sm"><KeyIcon /> OAuth client setup (operator)</span>
-        <p className="muted">
-          Configure each provider's OAuth app so its Connect button works — no env vars, no redeploy. Register the
-          redirect URI shown below with the provider, then paste its Client ID and Secret here. The secret is sealed
-          server-side and never shown again.
-        </p>
+        <span className="u-label-sm"><KeyIcon /> {t('oauthClientSetup')}</span>
+        <p className="muted">{t('oauthClientBlurb')}</p>
       </div>
 
       {error ? <Notice variant="error">{error}</Notice> : null}
@@ -117,30 +115,30 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
               <div className="action-bar" style={{ justifyContent: 'space-between' }}>
                 <span className="u-label-sm">{p.label}</span>
                 <span className={`chip ${cfg?.configured ? 'chip--success' : 'chip--muted'}`}>
-                  {cfg?.configured ? 'Configured' : 'Not configured'}
+                  {cfg?.configured ? t('configured') : t('notConfigured')}
                 </span>
               </div>
               <label className="u-grid u-gap-1">
-                <span className="u-label-sm">Redirect URI to register with {p.label}</span>
+                <span className="u-label-sm">{t('redirectUriLabel', { label: p.label })}</span>
                 <input type="text" readOnly value={redirectUriHint(p.id)} onFocus={(e) => e.currentTarget.select()} />
               </label>
               <label className="u-grid u-gap-1">
-                <span className="u-label-sm">Client ID{cfg ? ` (current: ${cfg.clientId})` : ''}</span>
+                <span className="u-label-sm">{cfg ? t('clientIdLabelCurrent', { clientId: cfg.clientId }) : t('clientIdLabel')}</span>
                 <input
                   type="text"
                   value={d.clientId}
                   onChange={(e) => setField('clientId', e.target.value)}
-                  placeholder={cfg ? 'replace the client id' : 'paste the OAuth client id'}
+                  placeholder={cfg ? t('clientIdPlaceholderReplace') : t('clientIdPlaceholder')}
                   autoComplete="off"
                 />
               </label>
               <label className="u-grid u-gap-1">
-                <span className="u-label-sm">Client secret</span>
+                <span className="u-label-sm">{t('clientSecretLabel')}</span>
                 <input
                   type="password"
                   value={d.clientSecret}
                   onChange={(e) => setField('clientSecret', e.target.value)}
-                  placeholder="paste the OAuth client secret"
+                  placeholder={t('clientSecretPlaceholder')}
                   autoComplete="off"
                 />
               </label>
@@ -151,11 +149,11 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
                   disabled={busy !== null || !d.clientId.trim() || !d.clientSecret.trim()}
                   onClick={() => void save(p.id)}
                 >
-                  {cfg ? 'Replace' : 'Save'}
+                  {cfg ? t('replace') : t('common:save')}
                 </button>
                 {cfg ? (
-                  <button type="button" className="btn-ghost" disabled={busy !== null} onClick={() => void remove(p.id)} aria-label={`Remove OAuth client for ${p.label}`}>
-                    Remove
+                  <button type="button" className="btn-ghost" disabled={busy !== null} onClick={() => void remove(p.id)} aria-label={t('removeOAuthClientLabel', { label: p.label })}>
+                    {t('common:remove')}
                   </button>
                 ) : null}
               </div>

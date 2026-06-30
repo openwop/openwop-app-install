@@ -8,13 +8,13 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { sessionSecretConfigError } from '../src/middleware/auth.js';
 
 let server: http.Server;
-const PORT = 18199;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -23,14 +23,14 @@ beforeAll(async () => {
   // stays unconfigured for this boot.
   delete process.env.MINIMAX_API_KEY;
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'readiness-test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -58,8 +58,11 @@ describe('GET /readiness', () => {
   it('reports 503 degraded when an advertised managed tier has no key seeded', async () => {
     const res = await fetch(`${BASE}/readiness`);
     expect(res.status).toBe(503);
-    const body = (await res.json()) as ReadinessBody;
+    const body = (await res.json()) as ReadinessBody & { version?: string };
     expect(body.status).toBe('degraded');
+    // ADR 0052 §D4 — readiness carries the app version for deploy verification.
+    expect(typeof body.version).toBe('string');
+    expect(body.version!.length).toBeGreaterThan(0);
     const free = body.checks?.managedProviders.find((p) => p.providerId === 'openwop-free');
     expect(free).toBeTruthy();
     expect(free!.ready).toBe(false);

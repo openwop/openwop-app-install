@@ -6,6 +6,8 @@
  * Read-only reporting over the authed surface; ingest is the public beacon.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useFormat } from '../../i18n/useFormat.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -30,7 +32,16 @@ const FIGURE_FILTER: Record<string, AnalyticsEvent['type'] | undefined> = {
   conversions: 'conversion',
 };
 
+/** Event-type enum → its translation key (display labels only). */
+const TYPE_LABEL: Record<AnalyticsEvent['type'], 'typePageview' | 'typeEvent' | 'typeConversion'> = {
+  pageview: 'typePageview',
+  event: 'typeEvent',
+  conversion: 'typeConversion',
+};
+
 export function AnalyticsPage(): JSX.Element {
+  const { t } = useTranslation('analytics');
+  const f = useFormat();
   const access = useFeatureAccess('analytics');
   const [orgs, setOrgs] = useState<Org[] | null>(null);
   const [orgId, setOrgId] = useState('');
@@ -54,56 +65,56 @@ export function AnalyticsPage(): JSX.Element {
 
   const load = useCallback((org: string) => {
     setSummary(null); setEvents(null); setError(null); setActiveFigure(null);
-    void getSummary(org).then(setSummary).catch((e) => setError(e instanceof Error ? e.message : 'Failed to load analytics.'));
+    void getSummary(org).then(setSummary).catch((e) => setError(e instanceof Error ? e.message : t('loadFailed')));
     void getEvents(org).then(setEvents).catch(() => setEvents([]));
-  }, []);
+  }, [t]);
   useEffect(() => { if (orgId) load(orgId); }, [orgId, load]);
 
   const eventColumns: DataColumn<AnalyticsEvent>[] = useMemo(() => [
     {
-      key: 'type', header: 'Type', width: '120px',
+      key: 'type', header: t('colType'), width: '120px',
       sortValue: (e) => e.type,
-      render: (e) => <StatusBadge status={TYPE_STATUS[e.type]} label={e.type} />,
+      render: (e) => <StatusBadge status={TYPE_STATUS[e.type]} label={t(TYPE_LABEL[e.type])} />,
     },
     {
-      key: 'detail', header: 'Path / name', width: '1fr',
+      key: 'detail', header: t('colDetail'), width: '1fr',
       sortValue: (e) => e.path ?? e.name ?? e.utm?.source ?? '',
-      render: (e) => (e.path ? <code>{e.path}</code> : <span>{e.name ?? (e.utm?.source ? `utm: ${e.utm.source}` : '—')}</span>),
+      render: (e) => (e.path ? <code>{e.path}</code> : <span>{e.name ?? (e.utm?.source ? t('utmDetail', { source: e.utm.source }) : t('emDash'))}</span>),
     },
     {
-      key: 'ts', header: 'When', align: 'right', width: '200px', cellClassName: 'muted',
+      key: 'ts', header: t('colWhen'), align: 'right', width: '200px', cellClassName: 'muted',
       sortValue: (e) => e.ts,
-      render: (e) => <span title={e.ts}>{new Date(e.ts).toLocaleString()}</span>,
+      render: (e) => <span title={e.ts}>{f.dateTime(e.ts)}</span>,
     },
-  ], []);
+  ], [t, f]);
 
   const pathColumns: DataColumn<{ path: string; count: number }>[] = useMemo(() => [
-    { key: 'path', header: 'Path', width: '1fr', sortValue: (r) => r.path, render: (r) => <code>{r.path}</code> },
-    { key: 'count', header: 'Views', align: 'right', width: '100px', cellClassName: 'u-tabular', sortValue: (r) => r.count, render: (r) => r.count },
-  ], []);
+    { key: 'path', header: t('colPath'), width: '1fr', sortValue: (r) => r.path, render: (r) => <code>{r.path}</code> },
+    { key: 'count', header: t('colViews'), align: 'right', width: '100px', cellClassName: 'u-tabular', sortValue: (r) => r.count, render: (r) => f.number(r.count) },
+  ], [t, f]);
 
   const sourceColumns: DataColumn<{ source: string; count: number }>[] = useMemo(() => [
-    { key: 'source', header: 'Source', width: '1fr', sortValue: (r) => r.source, render: (r) => r.source },
-    { key: 'count', header: 'Hits', align: 'right', width: '100px', cellClassName: 'u-tabular', sortValue: (r) => r.count, render: (r) => r.count },
-  ], []);
+    { key: 'source', header: t('colSource'), width: '1fr', sortValue: (r) => r.source, render: (r) => r.source },
+    { key: 'count', header: t('colHits'), align: 'right', width: '100px', cellClassName: 'u-tabular', sortValue: (r) => r.count, render: (r) => f.number(r.count) },
+  ], [t, f]);
 
   if (access.loading) return <Skeleton />;
   if (!access.enabled) {
-    return <StateCard icon={<LockIcon />} title="Analytics is not enabled" body="Ask an administrator to enable the Analytics feature for this tenant." />;
+    return <StateCard icon={<LockIcon />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />;
   }
 
   const orgPicker = orgs && orgs.length > 0 ? (
-    <select value={orgId} onChange={(e) => setOrgId(e.target.value)} className="u-w-auto" aria-label="Organization">
+    <select value={orgId} onChange={(e) => setOrgId(e.target.value)} className="u-w-auto" aria-label={t('orgPickerLabel')}>
       {orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
     </select>
   ) : undefined;
 
   const figures: KeyFigureItem[] = summary
     ? [
-        { key: 'events', label: 'Events', value: summary.total },
-        { key: 'sessions', label: 'Sessions', value: summary.sessions },
-        { key: 'pageviews', label: 'Pageviews', value: summary.byType.pageview },
-        { key: 'conversions', label: 'Conversions', value: summary.byType.conversion },
+        { key: 'events', label: t('figureEvents'), value: f.number(summary.total) },
+        { key: 'sessions', label: t('figureSessions'), value: f.number(summary.sessions) },
+        { key: 'pageviews', label: t('figurePageviews'), value: f.number(summary.byType.pageview) },
+        { key: 'conversions', label: t('figureConversions'), value: f.number(summary.byType.conversion) },
       ]
     : [];
 
@@ -119,52 +130,52 @@ export function AnalyticsPage(): JSX.Element {
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="Workspace" title="Analytics" lede="Traffic, sessions, and conversions on your public surface." actions={orgPicker} />
+      <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={orgPicker} />
       {error ? <Notice variant="error">{error}</Notice> : null}
 
       {!orgs ? <SkeletonRows rows={4} columns={[120, '1fr', 200]} /> : orgs.length === 0 ? (
-        <StateCard icon={<GlobeIcon />} title="No organizations" body="Create an organization first — analytics belong to an org." />
+        <StateCard icon={<GlobeIcon />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
       ) : !summary ? <SkeletonRows rows={4} columns={[120, '1fr', 200]} /> : summary.total === 0 ? (
-        <StateCard icon={<ActivityIcon />} title="No analytics yet" body="Events appear here once your published pages report to the public beacon." />
+        <StateCard icon={<ActivityIcon />} title={t('noAnalyticsTitle')} body={t('noAnalyticsBody')} />
       ) : (
         <div className="page-enter page-stack">
           <KeyFigureBand
             figures={figures}
             activeKey={activeFigure}
             onToggle={onFigureToggle}
-            ariaLabel="Analytics summary — pageviews and conversions filter recent events"
+            ariaLabel={t('summaryBandLabel')}
           />
 
           <section className="surface-card u-flex u-flex-col u-gap-2">
-            <h2 className="u-label-sm">Top paths</h2>
+            <h2 className="u-label-sm">{t('topPathsHeading')}</h2>
             <DataTable
               rows={summary.topPaths}
               rowKey={(p) => p.path}
               columns={pathColumns}
               density={density}
-              caption="Most-viewed paths"
+              caption={t('captionTopPaths')}
               initialSort={{ key: 'count', dir: 'desc' }}
-              empty={<p className="muted">No pageviews yet.</p>}
+              empty={<p className="muted">{t('emptyTopPaths')}</p>}
             />
           </section>
 
           <section className="surface-card u-flex u-flex-col u-gap-2">
-            <h2 className="u-label-sm">Acquisition (UTM source)</h2>
+            <h2 className="u-label-sm">{t('acquisitionHeading')}</h2>
             <DataTable
               rows={summary.utmSources}
               rowKey={(s) => s.source}
               columns={sourceColumns}
               density={density}
-              caption="Traffic by UTM source"
+              caption={t('captionUtmSources')}
               initialSort={{ key: 'count', dir: 'desc' }}
-              empty={<p className="muted">No UTM-tagged traffic yet.</p>}
+              empty={<p className="muted">{t('emptyUtmSources')}</p>}
             />
           </section>
 
           <section className="surface-card u-flex u-flex-col u-gap-2">
             <div className="action-bar u-justify-between">
               <h2 className="u-label-sm">
-                Recent events{filterType ? ` — ${filterType}` : ''}
+                {filterType ? t('recentEventsHeadingFiltered', { type: t(TYPE_LABEL[filterType]) }) : t('recentEventsHeading')}
               </h2>
               <DensityToggle value={density} onChange={setDensity} />
             </div>
@@ -173,13 +184,13 @@ export function AnalyticsPage(): JSX.Element {
               rowKey={(e) => e.eventId}
               columns={eventColumns}
               density={density}
-              caption="Recent analytics events"
+              caption={t('captionRecentEvents')}
               initialSort={{ key: 'ts', dir: 'desc' }}
               empty={
                 !events ? (
                   <SkeletonRows rows={6} columns={[120, '1fr', 200]} />
                 ) : (
-                  <p className="muted">{filterType ? `No ${filterType} events.` : 'No events.'}</p>
+                  <p className="muted">{filterType ? t('emptyEventsFiltered', { type: t(TYPE_LABEL[filterType]) }) : t('emptyEvents')}</p>
                 )
               }
             />

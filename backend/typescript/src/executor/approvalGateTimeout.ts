@@ -78,7 +78,12 @@ export async function timeoutApprovalGateIfDue(
   if (deadline === null || now < deadline) return false;
 
   const resolvedAt = new Date(now).toISOString();
-  await storage.resolveInterrupt(interrupt.interruptId, { action: 'reject', reason: 'timeout' }, resolvedAt);
+  // Atomic compare-and-set: only the caller that flips resolved_at NULL→set
+  // proceeds to emit events. A concurrent lazy-timeout + periodic sweep (or a
+  // late vote) that loses the race returns here without double-emitting
+  // `interrupt.resolved`/`run.failed` (ENG-6).
+  const won = await storage.resolveInterrupt(interrupt.interruptId, { action: 'reject', reason: 'timeout' }, resolvedAt);
+  if (!won) return false;
   // RFC 0093 §D.1 — the standard interrupt.resolved event, outcome rejected,
   // reason timeout.
   await getEventLog().append({
@@ -93,7 +98,7 @@ export async function timeoutApprovalGateIfDue(
     },
   });
 
-  // Fail the run (fail closed) — mirrors the reject-majority path in
+  // Fail the run (fail closed) — mirrors the reject-quorum path in
   // routes/interrupts.ts. A run that already settled is left untouched
   // (the gate is merely invalidated).
   const run = await storage.getRun(interrupt.runId);

@@ -1,0 +1,42 @@
+{
+  "name": "feature.slides.agents",
+  "version": "1.0.0",
+  "description": "Slide Designer agent (ADR 0153 Phase 1). Turns a request into a structured slide deck rendered inline in the EXISTING chat artifact workbench — composes the AI chat + the feature.slides.nodes pack; no new chat surface. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/feature.slides.agents",
+  "repository": "https://github.com/openwop/openwop-app",
+  "keywords": ["feature", "agents", "slides", "canvas", "presentation", "deck"],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.slides.agents.default",
+      "persona": "Slide Designer",
+      "label": "Slide Designer",
+      "description": "Turns a topic or outline into a structured slide deck rendered live in the artifact workbench. Uses openwop:feature.slides.nodes.render.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/slide-designer.md",
+      "toolAllowlist": [
+        "openwop:feature.slides.nodes.render"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.8
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

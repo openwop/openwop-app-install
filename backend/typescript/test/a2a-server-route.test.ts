@@ -10,16 +10,16 @@
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createApp } from '../src/index.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 
-const PORT = 18272;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
-const A2A_URL = `${BASE}/v1/host/openwop-app/a2a`;
+let A2A_URL: string;
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..', '..', '..');
 const SUPERVISOR = 'core.openwop.agents.supervisor.default';
 
@@ -33,9 +33,9 @@ beforeAll(async () => {
   // deterministically (a sibling durable-route suite may set it; env is
   // per-process, so pin it here rather than rely on ordering).
   delete process.env.OPENWOP_A2A_DURABLE_TASKS;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor'));
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; A2A_URL = `${BASE}/v1/host/openwop-app/a2a`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));

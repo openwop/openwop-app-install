@@ -24,6 +24,7 @@
 
 import type { Request } from 'express';
 import { randomUUID } from 'node:crypto';
+import { insertRunWithStartContext } from '../../host/runInsert.js';
 import { OpenwopError } from '../../types.js';
 import type { RunRecord } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
@@ -235,7 +236,7 @@ export function registerCrmRoutes(deps: RouteDeps): void {
         createdAt: now,
         updatedAt: now,
       };
-      await storage.insertRun(run);
+      await insertRunWithStartContext(storage, run);
       await getEventLog().append({
         runId,
         type: 'host.crm.contact.triaged',

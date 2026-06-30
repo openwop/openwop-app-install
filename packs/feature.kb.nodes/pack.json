@@ -1,6 +1,6 @@
 {
   "name": "feature.kb.nodes",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Knowledge Base feature node pack (ADR 0014 Phase 2) — workflow nodes over the `ctx.features.kb` surface shipped by the KB feature (ADR 0011). `search` retrieves chunks from one collection; `rag` retrieves + builds an augmented prompt + citations for an agent/callPrompt downstream. Action nodes — they read the tenant KB store (a side-effect), so their outputs are recorded and replay/fork read the recorded result.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -20,6 +20,14 @@
       "version": "1.0.0",
       "label": "KB RAG (retrieve + augment)",
       "description": "Retrieve + assemble a grounded augmented prompt + citations via ctx.features.kb.rag. Inputs: { orgId, collectionId, query, topK? }. Output: { augmentedPrompt, citations, contexts } — feed augmentedPrompt to a downstream callPrompt/agent (generation is run-scoped).",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.kb.nodes.list-collections",
+      "version": "1.0.0",
+      "label": "KB List Collections",
+      "description": "Lists an org's KB collections via ctx.features.kb.listCollections — discover a collectionId before search/rag. Inputs: { orgId }. Output: { collections }. Tenant-guarded.",
       "category": "integration",
       "role": "action"
     }

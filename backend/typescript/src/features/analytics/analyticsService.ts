@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
 
 export type EventType = 'pageview' | 'event' | 'conversion';
 export const EVENT_TYPES: readonly EventType[] = ['pageview', 'event', 'conversion'];
@@ -34,7 +35,8 @@ export interface AnalyticsEvent {
 
 const MAX_STR = 1024;
 const MAX_PROPS_CHARS = 4096;
-const events = new DurableCollection<AnalyticsEvent>('analytics:event', (e) => e.eventId);
+// GOV-1: `tenantOf` arms the tenant secondary index (bounded retention-purge scan).
+const events = new DurableCollection<AnalyticsEvent>('analytics:event', (e) => e.eventId, undefined, (e) => e.tenantId);
 
 const cap = (v: unknown): string | undefined => (typeof v === 'string' && v ? v.slice(0, MAX_STR) : undefined);
 
@@ -126,6 +128,20 @@ export async function deleteSubjectEvents(tenantId: string, sessionKey: string):
 // here (the subject-erasure seam — ADR 0020 / 0018). Module-load once per process.
 const analyticsEraser = async (tenantId: string, subjectKey: string): Promise<void> => { await deleteSubjectEvents(tenantId, subjectKey); };
 registerSubjectEraser(analyticsEraser);
+
+// ADR 0077 P3 — time-based retention. Analytics events are session/behavior data
+// (confidential-pii). Delete this tenant's events older than the cutoff. No-op on a
+// falsy tenant (fail-closed — never a cross-tenant/global purge).
+registerRetentionPurger({
+  feature: 'analytics',
+  async purge(tenantId, classification, cutoffIso) {
+    if (!tenantId || classification !== 'confidential-pii') return 0;
+    // Analytics ages on `ts` (event time); map it onto the helper's `updatedAt` slot.
+    return purgeRowsByAge('analytics', await events.listForTenantIndexed(tenantId), tenantId, cutoffIso,
+      (e) => ({ tenantId: e.tenantId, updatedAt: e.ts, id: e.eventId }),
+      (id) => events.delete(id));
+  },
+});
 
 /** Test-only: clear the event store. */
 export async function __resetAnalyticsStore(): Promise<void> { await events.__clear(); }

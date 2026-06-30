@@ -10,6 +10,7 @@
 
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { listStoredRefs } from '../../byok/lib/byokClient.js';
 
 interface Props {
@@ -21,6 +22,7 @@ interface Props {
 }
 
 export function CredentialPickerInput({ value, onChange, providerFilter, required }: Props): JSX.Element {
+  const { t } = useTranslation('builder');
   const [refs, setRefs] = useState<readonly string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -43,14 +45,14 @@ export function CredentialPickerInput({ value, onChange, providerFilter, require
   });
 
   if (refs === null) {
-    return <div className="muted u-fs-12">Loading credentials…</div>;
+    return <div className="muted u-fs-12">{t('loadingCredentials')}</div>;
   }
   if (visible.length === 0) {
     return (
       <div>
         <div className="alert info u-fs-12 u-pad-6x10">
-          No {providerFilter ? `${providerFilter} ` : ''}keys stored yet.{' '}
-          <Link to="/keys" target="_blank" rel="noopener noreferrer">Manage keys</Link> to add one.
+          {t('noKeysStored', { provider: providerFilter ? `${providerFilter} ` : '' })}{' '}
+          <Link to="/keys" target="_blank" rel="noopener noreferrer">{t('manageKeys')}</Link> {t('manageKeysToAdd')}
         </div>
         {error && <div className="muted u-fs-11">{error}</div>}
       </div>
@@ -65,7 +67,7 @@ export function CredentialPickerInput({ value, onChange, providerFilter, require
         onChange={(e) => onChange(e.target.value || undefined)}
         className="u-flex-1"
       >
-        <option value="">{required ? 'Pick a key…' : '(none)'}</option>
+        <option value="">{required ? t('pickKey') : t('noneOption')}</option>
         {visible.map((ref) => (
           <option key={ref} value={ref}>{ref}</option>
         ))}
@@ -75,9 +77,9 @@ export function CredentialPickerInput({ value, onChange, providerFilter, require
         target="_blank"
         rel="noopener noreferrer"
         className="muted u-fs-11 u-nowrap"
-        title="Open the Keys management page in a new tab"
+        title={t('manageTitle')}
       >
-        Manage
+        {t('manage')}
       </Link>
     </div>
   );

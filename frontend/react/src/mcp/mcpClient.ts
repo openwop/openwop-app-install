@@ -9,6 +9,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
+import i18n from '../i18n/index.js';
 
 export interface McpTool {
   name: string;
@@ -41,12 +42,12 @@ export async function listMcpTools(): Promise<McpListResult> {
   // The mount isn't registered unless OPENWOP_MCP_SERVER_ENABLED=true →
   // a 404 means "MCP server composition is off on this host".
   if (res.status === 404) return { enabled: false, tools: [] };
-  if (!res.ok) return { enabled: true, tools: [], error: `MCP endpoint returned ${res.status}` };
+  if (!res.ok) return { enabled: true, tools: [], error: i18n.t('mcp:endpointReturned', { status: res.status }) };
 
   const body = (await res.json()) as {
     result?: { tools?: McpTool[] };
     error?: { message?: string };
   };
-  if (body.error) return { enabled: true, tools: [], error: body.error.message ?? 'JSON-RPC error' };
+  if (body.error) return { enabled: true, tools: [], error: body.error.message ?? i18n.t('mcp:jsonRpcError') };
   return { enabled: true, tools: body.result?.tools ?? [] };
 }

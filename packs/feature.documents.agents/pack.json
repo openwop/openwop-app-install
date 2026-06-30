@@ -1,0 +1,44 @@
+{
+  "name": "feature.documents.agents",
+  "version": "1.0.0",
+  "description": "Documents & Templates agent pack (ADR 0053) — manifest agents whose tools are feature.documents.nodes over the ctx.features.documents surface. document-author drafts a business document from a template; document-reviewer critiques an existing document against its kind's rubric (read-only). Tool-allowlisted to the Documents feature surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "documents", "agent", "sow", "prd", "rfp", "templates"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.documents.agents.document-author",
+      "persona": "BUILDER",
+      "label": "Document Author",
+      "description": "Drafts a business document (SOW/PRD/RFP/Epic-Brief/board-agenda) from a template + parameters, grounded via feature.documents.nodes.generate-from-template over ctx.features.documents.",
+      "modelClass": "builder",
+      "systemPromptRef": "prompts/document-author.md",
+      "toolAllowlist": [
+        "openwop:feature.documents.nodes.assemble",
+        "openwop:feature.documents.nodes.generate-from-template",
+        "openwop:feature.documents.nodes.list-documents"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    },
+    {
+      "agentId": "feature.documents.agents.document-reviewer",
+      "persona": "RESEARCH",
+      "label": "Document Reviewer",
+      "description": "Critiques an existing business document against its kind's rubric (completeness, clarity, risks) — grounded via feature.documents.nodes.list-documents. Read-only: it reports, it never edits.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/document-reviewer.md",
+      "toolAllowlist": [
+        "openwop:feature.documents.nodes.list-documents"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

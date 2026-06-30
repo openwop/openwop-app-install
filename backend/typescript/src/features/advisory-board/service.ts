@@ -1,10 +1,12 @@
 /**
- * Board of Advisors service (ADR 0040) — the thin composition layer over the
- * roster (advisors), the host convene orchestration (`host/advisoryBoardConvene`),
- * and a host-ext durable store for the board entity + session transcripts. It adds
- * NO persona store and NO RAG store (those are the roster + ADR 0038, composed in
- * the convene layer). Visibility (`private`/`shared`) is server-authoritative; the
- * route layer enforces the toggle + RBAC + org scope BEFORE any method here runs.
+ * Board of Advisors service (ADR 0040) — the board ENTITY store: a named, ordered
+ * cohort of advisor rosterIds (+ moderator, visibility, persona kind). It adds NO
+ * persona store, NO RAG store, and NO transcript/convene runtime — the boardroom
+ * conversation runs in the AI chat over the existing `chat.turn` infra (ADR 0040
+ * § Correction 2026-06-15); this service only resolves a board so the chat can
+ * expand its cohort into the active-agents lineup. Visibility (`private`/`shared`)
+ * is server-authoritative; the route layer enforces toggle + RBAC + org scope
+ * BEFORE any method here runs.
  *
  * @see docs/adr/0040-board-of-advisors.md
  */
@@ -13,8 +15,13 @@ import { randomBytes } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { getRosterEntry } from '../../host/rosterService.js';
-import { conveneAdvisors, defaultCouncilReply, type CouncilReply } from '../../host/advisoryBoardConvene.js';
-import type { AdvisoryBoard, AdvisorySession, BoardVisibility, CouncilTurn, PersonaKind } from './types.js';
+import { parseTurnPolicy } from '../../host/turnPolicy.js';
+// ADR 0079 Phase 5 — strategy context (one-directional import; strategy never
+// imports advisory-board, so no cycle).
+import { getStrategy, canSubjectReadStrategy, buildStrategyContextBlock, resolveStrategyEntriesByIds } from '../strategy/strategyService.js';
+import { getProject, resolveProjectAccess, buildProjectContextBlock } from '../projects/projectsService.js';
+import type { StrategyContextEntry } from '../strategy/types.js';
+import type { AdvisoryBoard, AdvisoryContextRef, BoardVisibility, PersonaKind } from './types.js';
 
 const PERSONA_KINDS: readonly PersonaKind[] = ['historical', 'fictional', 'original', 'living'];
 const VISIBILITIES: readonly BoardVisibility[] = ['private', 'shared'];
@@ -22,13 +29,11 @@ const VISIBILITIES: readonly BoardVisibility[] = ['private', 'shared'];
 const LIMITS = {
   name: 120,
   handle: 60,
-  advisors: 8,          // fan-out cap (cost; ADR 0040 § Open questions)
-  prompt: 8000,
-  maxRounds: 3,
+  advisors: 8,          // cohort cap (cost; ADR 0040 § Open questions)
+  contextRefs: 20,      // strategy context cap (ADR 0079 Phase 5)
 } as const;
 
 const boards = new DurableCollection<AdvisoryBoard>('advisory:board', (b) => `${b.tenantId}:${b.boardId}`);
-const sessions = new DurableCollection<AdvisorySession>('advisory:session', (s) => `${s.tenantId}:${s.sessionId}`);
 
 const now = (): string => new Date().toISOString();
 const shortId = (): string => randomBytes(5).toString('hex');
@@ -110,7 +115,47 @@ export async function getBoardView(tenantId: string, userId: string | undefined,
 interface BoardInput {
   name?: unknown; handle?: unknown; advisors?: unknown; moderatorRosterId?: unknown;
   visibility?: unknown; personaKind?: unknown; livingPersonaAck?: unknown;
+  contextRefs?: unknown;
   turnPolicy?: { rounds?: unknown; order?: unknown; synthesize?: unknown };
+}
+
+/**
+ * Validate the selected strategy context refs (ADR 0079 Phase 5). Each ref MUST
+ * be a strategy the SETTING USER can read (404 on an unreadable/absent strategy —
+ * a board can't carry context its author can't see); deduped + capped. The
+ * convene-time resolution RBAC-filters AGAIN for the convener (defense in depth).
+ */
+async function resolveContextRefs(tenantId: string, actor: string | undefined, raw: unknown): Promise<AdvisoryContextRef[]> {
+  if (raw === undefined || raw === null) return [];
+  if (!Array.isArray(raw)) throw new OpenwopError('validation_error', '`contextRefs` MUST be an array.', 400, { field: 'contextRefs' });
+  const out: AdvisoryContextRef[] = [];
+  const seen = new Set<string>();
+  for (const r of raw.slice(0, LIMITS.contextRefs)) {
+    const o = (r && typeof r === 'object' ? r : {}) as Record<string, unknown>;
+    if (o.kind === 'strategy') {
+      const strategyId = str(o.strategyId, 'contextRefs.strategyId', 128);
+      if (seen.has(`strategy:${strategyId}`)) continue;
+      seen.add(`strategy:${strategyId}`);
+      const s = await getStrategy(tenantId, strategyId);
+      if (!s || !(await canSubjectReadStrategy(tenantId, actor, s))) {
+        throw new OpenwopError('not_found', 'Strategy not found or not readable.', 404, { strategyId });
+      }
+      out.push({ kind: 'strategy', strategyId });
+    } else if (o.kind === 'project') {
+      const projectId = str(o.projectId, 'contextRefs.projectId', 128);
+      if (seen.has(`project:${projectId}`)) continue;
+      seen.add(`project:${projectId}`);
+      // RBAC: the convener must be able to READ the project (a `private` project
+      // they're not a member of is rejected — mirrors the strategy readability gate).
+      if (!(await getProject(tenantId, projectId)) || (await resolveProjectAccess(tenantId, projectId, actor)) === 'none') {
+        throw new OpenwopError('not_found', 'Project not found or not readable.', 404, { projectId });
+      }
+      out.push({ kind: 'project', projectId });
+    } else {
+      throw new OpenwopError('validation_error', '`contextRefs[].kind` MUST be "strategy" or "project".', 400, { field: 'contextRefs.kind' });
+    }
+  }
+  return out;
 }
 
 function readPersonaKind(v: unknown): PersonaKind {
@@ -127,13 +172,6 @@ function readVisibility(v: unknown): BoardVisibility {
     throw new OpenwopError('validation_error', `Field \`visibility\` MUST be one of: ${VISIBILITIES.join(', ')}.`, 400, { field: 'visibility' });
   }
   return v as BoardVisibility;
-}
-
-function readTurnPolicy(v: BoardInput['turnPolicy']): AdvisoryBoard['turnPolicy'] {
-  const rounds = typeof v?.rounds === 'number' && Number.isFinite(v.rounds) ? Math.min(LIMITS.maxRounds, Math.max(1, Math.floor(v.rounds))) : 1;
-  const order = v?.order === 'round-robin' ? 'round-robin' : 'declared';
-  const synthesize = v?.synthesize === undefined ? true : Boolean(v.synthesize);
-  return { rounds, order, synthesize };
 }
 
 /** A living-persona board MUST carry the acknowledgement (right-of-publicity /
@@ -174,6 +212,7 @@ export async function createBoard(tenantId: string, orgId: string, actor: string
   }
   const desiredHandle = input.handle === undefined ? slugify(name) : slugify(str(input.handle, 'handle', LIMITS.handle));
   const handle = await uniqueHandle(tenantId, desiredHandle);
+  const contextRefs = await resolveContextRefs(tenantId, actor, input.contextRefs);
 
   const ts = now();
   const board: AdvisoryBoard = {
@@ -184,10 +223,11 @@ export async function createBoard(tenantId: string, orgId: string, actor: string
     handle,
     advisors,
     ...(moderatorRosterId ? { moderatorRosterId } : {}),
+    ...(contextRefs.length ? { contextRefs } : {}),
     visibility: readVisibility(input.visibility),
     personaKind,
     ...(livingAck ? { livingPersonaAck: true } : {}),
-    turnPolicy: readTurnPolicy(input.turnPolicy),
+    turnPolicy: parseTurnPolicy(input.turnPolicy),
     createdBy: actor,
     createdAt: ts,
     updatedAt: ts,
@@ -204,8 +244,12 @@ export async function updateBoard(tenantId: string, userId: string | undefined, 
   if (input.name !== undefined) next.name = str(input.name, 'name', LIMITS.name);
   if (input.personaKind !== undefined) next.personaKind = readPersonaKind(input.personaKind);
   if (input.visibility !== undefined) next.visibility = readVisibility(input.visibility);
-  if (input.turnPolicy !== undefined) next.turnPolicy = readTurnPolicy(input.turnPolicy);
+  if (input.turnPolicy !== undefined) next.turnPolicy = parseTurnPolicy(input.turnPolicy);
   if (input.advisors !== undefined) next.advisors = await resolveCohort(tenantId, input.advisors);
+  if (input.contextRefs !== undefined) {
+    const refs = await resolveContextRefs(tenantId, userId, input.contextRefs);
+    if (refs.length) next.contextRefs = refs; else delete next.contextRefs;
+  }
   if (input.moderatorRosterId !== undefined) {
     if (input.moderatorRosterId === null) { delete next.moderatorRosterId; }
     else {
@@ -223,6 +267,46 @@ export async function updateBoard(tenantId: string, userId: string | undefined, 
 
   await boards.put(next);
   return projectBoard(next);
+}
+
+// ── strategy context (ADR 0079 Phase 5) ───────────────────────────────────────
+
+/** The strategy ids a board carries as context. */
+function strategyIdsOf(board: AdvisoryBoard): string[] {
+  return (board.contextRefs ?? []).flatMap((r) => (r.kind === 'strategy' ? [r.strategyId] : []));
+}
+
+/** The project ids a board carries as context. */
+function projectIdsOf(board: AdvisoryBoard): string[] {
+  return (board.contextRefs ?? []).flatMap((r) => (r.kind === 'project' ? [r.projectId] : []));
+}
+
+/**
+ * The board-context RESOLVER registered into the core seam (ADR 0079 §Correction).
+ * Core calls this at board-group formation; it loads the board (raw — the convener
+ * already passed board RBAC at the `@@` summon) and builds the strategy block,
+ * RBAC-filtered for the convener. Fail-soft: a missing board / no refs ⇒ null.
+ */
+export async function resolveBoardStrategyContext(tenantId: string, boardId: string, convener: string | undefined): Promise<string | null> {
+  const board = await boards.get(`${tenantId}:${boardId}`);
+  if (!board) return null;
+  const strategyIds = strategyIdsOf(board);
+  const projectIds = projectIdsOf(board);
+  // Both static-context kinds (ADR 0079 strategy + ADR 0100 project), each
+  // RBAC-filtered for the convener, concatenated into one boardroom context block.
+  const blocks = (await Promise.all([
+    strategyIds.length > 0 ? buildStrategyContextBlock(tenantId, strategyIds, convener) : Promise.resolve(null),
+    projectIds.length > 0 ? buildProjectContextBlock(tenantId, projectIds, convener) : Promise.resolve(null),
+  ])).filter((b): b is string => Boolean(b));
+  return blocks.length > 0 ? blocks.join('\n\n') : null;
+}
+
+/** Preview the resolved strategy context a board would give its advisors,
+ *  RBAC-filtered for the CALLER (the FE "preview before convening"). The board
+ *  read is RBAC-gated by `getBoard` (visibility + tenant). */
+export async function previewBoardStrategyContext(tenantId: string, userId: string | undefined, boardId: string): Promise<StrategyContextEntry[]> {
+  const board = await getBoard(tenantId, userId, boardId);
+  return resolveStrategyEntriesByIds(tenantId, strategyIdsOf(board), userId);
 }
 
 export async function deleteBoard(tenantId: string, userId: string | undefined, boardId: string): Promise<void> {
@@ -249,78 +333,18 @@ export async function clearSeededAdvisoryBoards(tenantId: string): Promise<numbe
   return ids.length;
 }
 
-export async function getSession(tenantId: string, userId: string | undefined, boardId: string, sessionId: string): Promise<AdvisorySession> {
-  await getBoard(tenantId, userId, boardId); // visibility gate on the board
-  const s = await sessions.get(`${tenantId}:${sessionId}`);
-  if (!s || s.boardId !== boardId) throw new OpenwopError('not_found', 'Session not found.', 404, { sessionId });
-  return s;
-}
-
-interface ConveneInput { prompt?: unknown; sessionId?: unknown }
-
-/** Run a council round on a board and persist the transcript. Reuses the host
- *  convene orchestration; `reply` is injectable for tests (default = managed/mock
- *  per the request's provider). Continues an existing `sessionId` or starts one. */
-export async function convene(
+/** Resolve a board by its `@@<handle>` summon token (visibility-gated). Returns
+ *  the board + its advisor + moderator rosterIds so the AI chat can expand the
+ *  cohort into the active-agents lineup. The chat conversation itself runs on the
+ *  existing `chat.turn` infra (ADR 0040 § Correction 2026-06-15) — there is no
+ *  separate convene/transcript here. */
+export async function getBoardByHandle(
   tenantId: string,
   userId: string | undefined,
-  userName: string | null,
-  boardId: string,
-  input: ConveneInput,
-  replyOverride?: CouncilReply,
-): Promise<AdvisorySession> {
-  const board = await getBoard(tenantId, userId, boardId);
-  // Living-persona ack is fail-closed at convene too (a board edited to `living`
-  // without re-acking can't run).
-  assertLivingAck(board.personaKind, board.livingPersonaAck);
-  const prompt = str(input.prompt, 'prompt', LIMITS.prompt);
-
-  let session = input.sessionId !== undefined
-    ? await sessions.get(`${tenantId}:${str(input.sessionId, 'sessionId', 120)}`)
-    : null;
-  if (input.sessionId !== undefined && (!session || session.boardId !== boardId)) {
-    throw new OpenwopError('not_found', 'Session not found.', 404, { sessionId: input.sessionId });
-  }
-
-  // The cohort is resolved (and stamped) at FIRST convene — a later board edit
-  // doesn't rewrite an in-flight transcript (ADR 0040 §9).
-  const cohort = session?.resolvedCohort ?? { advisors: board.advisors, ...(board.moderatorRosterId ? { moderatorRosterId: board.moderatorRosterId } : {}) };
-
-  // Always the managed (free-tier) provider — the provider is a SERVER decision,
-  // never client-selectable from the request body (a `mock`-provider passthrough
-  // would let a caller bypass the managed path in prod). Tests inject via
-  // `replyOverride`, not an HTTP provider field.
-  const reply = replyOverride ?? defaultCouncilReply(tenantId);
-  const priorTurns: CouncilTurn[] = session?.turns ?? [];
-  const newTurns = await conveneAdvisors(
-    {
-      tenantId,
-      userName,
-      prompt,
-      advisors: cohort.advisors,
-      moderatorRosterId: cohort.moderatorRosterId,
-      personaKind: board.personaKind,
-      synthesize: board.turnPolicy.synthesize,
-      priorTurns,
-    },
-    { reply },
-  );
-
-  const ts = now();
-  if (!session) {
-    session = {
-      sessionId: `sess_${shortId()}${shortId()}`,
-      boardId,
-      tenantId,
-      createdBy: userId ?? 'unknown',
-      resolvedCohort: cohort,
-      turns: newTurns,
-      createdAt: ts,
-      updatedAt: ts,
-    };
-  } else {
-    session = { ...session, turns: [...session.turns, ...newTurns], updatedAt: ts };
-  }
-  await sessions.put(session);
-  return session;
+  handle: string,
+): Promise<AdvisoryBoard & { disclaimer: string | null }> {
+  const norm = slugify(handle);
+  const b = (await boards.listByPrefix(`${tenantId}:`)).find((x) => x.handle === norm && canRead(x, userId));
+  if (!b) throw new OpenwopError('not_found', 'Board not found.', 404, { handle });
+  return projectBoard(b);
 }

@@ -85,6 +85,12 @@ interface ConnectionPackManifest {
       | { integration: { node: string } };
     consumerNodes?: string[];
     docsUrl?: string;
+    // RFC 0120 — bare registrable hostname(s) the host MAY send this provider's
+    // resolved credential to for connector egress (RFC 0045). Schema-REQUIRED when
+    // reach is openapi (the provider-level `allOf`). Read into ProviderManifest below
+    // so brokeredEgress' apiHosts pin works for a PACK-delivered provider (it never
+    // did before — that was the documented confused-deputy gap that fails closed).
+    apiHosts?: string[];
   };
 }
 
@@ -135,6 +141,10 @@ function toProviderManifest(p: ConnectionPackManifest['provider']): ProviderMani
     defaultScopes,
     consumerNodes: p.consumerNodes ?? [],
     ...(p.docsUrl ? { docsUrl: p.docsUrl } : {}),
+    // RFC 0120 — populate the egress allow-list so brokeredEgress can pin a
+    // pack-delivered provider's credentialed egress to its curated apiHosts
+    // (eTLD+1 floor, dot-anchored in hostMatchesApi). Absent ⇒ fails closed.
+    ...(p.apiHosts ? { apiHosts: p.apiHosts } : {}),
   };
   if ('mcp' in p.reach) {
     return { ...base, reach: 'mcp', mcpServer: p.reach.mcp.server };

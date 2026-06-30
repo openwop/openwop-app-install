@@ -28,6 +28,13 @@ export interface ResolvedAgentManifest {
   requiresCapabilities?: string[];
   memoryShape?: { scratchpad?: boolean; conversation?: boolean; longTerm?: boolean };
   confidence?: { defaultThreshold?: number };
+  /** ADR 0089 Phase 4 (Option B) — agent-declared opt-in to "deep investigation":
+   *  when a tool-bearing agent with `investigationDepth: 'deep'` is @mentioned in
+   *  a conversation, its tool loop is dispatched as a SEPARATE persisted run
+   *  (embedded as a `workflow_run` chat bubble) instead of the inline turn loop —
+   *  a first-class, long-horizon run with progress. Absent/any-other value ⇒ the
+   *  default inline behavior (no regression for existing agents). */
+  investigationDepth?: 'deep';
   /** Resolved handoff JSON Schemas (parsed) + their provenance refs + the
    *  validators pre-compiled at load (RFC 0003 §D "MAY pre-compile"). Pre-
    *  compiling avoids per-dispatch recompilation and the shared-Ajv `$id`

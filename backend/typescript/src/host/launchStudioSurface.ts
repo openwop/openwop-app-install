@@ -20,9 +20,20 @@ interface Studio {
   brandId?: string;
   designSystemId?: string;
   prdId?: string;
-  sharedArtifactRefs: Array<{ artifactId: string; artifactTypeId: string }>;
+  /** A shared artifact ref MAY point at a real owned Document (ADR 0056) — the
+   *  single-owner direction (launch-studio references documents, never forks them). */
+  sharedArtifactRefs: Array<{ artifactId: string; artifactTypeId: string; documentId?: string }>;
   steps: Array<{ stepId: string; canvasTypeId: string; projectId?: string }>;
 }
+
+/**
+ * Fill-a-seam (ADR 0056): the documents feature installs a resolver so launch-studio
+ * can resolve a `sharedArtifactRef.documentId` to the owned Document's projection —
+ * without `core`/host importing the feature (mirrors `setKnowledgeBackend`).
+ */
+export type LaunchStudioDocumentResolver = (tenantId: string, documentId: string) => Promise<{ documentId: string; title: string; status: string } | null>;
+let _docResolver: LaunchStudioDocumentResolver | null = null;
+export function setLaunchStudioDocumentResolver(fn: LaunchStudioDocumentResolver | null): void { _docResolver = fn; }
 
 // Seeded demo studio so getStudio returns real data out of the box. Keyed per
 // studioId; tenant-agnostic (studio config is shared reference data in the demo).
@@ -50,7 +61,8 @@ export interface LaunchStudioSurface {
   resolveLinkedArtifacts(args: { studio: Studio; userId?: string; sourceCanvasTypeId: string }): Promise<Record<string, unknown>>;
 }
 
-export function createLaunchStudioSurface(_scope: BundleScope): LaunchStudioSurface {
+export function createLaunchStudioSurface(scope: BundleScope): LaunchStudioSurface {
+  const tenantId = scope.tenantId;
   return {
     async getStudio(studioId) {
       return STUDIOS.get(studioId) ?? null;
@@ -76,9 +88,18 @@ export function createLaunchStudioSurface(_scope: BundleScope): LaunchStudioSurf
       const priorSteps = studio.steps
         .slice(0, Math.max(0, studio.steps.findIndex((s) => s.canvasTypeId === sourceCanvasTypeId)))
         .map((s) => ({ stepId: s.stepId, canvasTypeId: s.canvasTypeId }));
+      // ADR 0056: resolve any ref that references a real owned Document, attaching
+      // its live projection (title/status). Refs without a documentId pass through.
+      const sharedArtifacts = await Promise.all(studio.sharedArtifactRefs.map(async (ref) => {
+        if (ref.documentId && _docResolver) {
+          const doc = await _docResolver(tenantId, ref.documentId).catch(() => null);
+          if (doc) return { ...ref, document: doc };
+        }
+        return ref;
+      }));
       return {
         sourceCanvasTypeId,
-        sharedArtifacts: studio.sharedArtifactRefs,
+        sharedArtifacts,
         inheritedSteps: priorSteps,
       };
     },

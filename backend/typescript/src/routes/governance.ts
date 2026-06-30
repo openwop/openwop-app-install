@@ -18,6 +18,7 @@ import type { Express, Request } from 'express';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError } from '../types.js';
 import { requireSuperadmin } from '../host/superadmin.js';
+import { mediaDailyBudget, resolveBudget } from '../aiProviders/mediaBudget.js';
 import {
   getGovernancePolicy,
   setGovernancePolicy,
@@ -62,6 +63,83 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
     }
   });
 
+  // ADR 0106 Phase 3 — read-only media-generation budget + today's usage for the
+  // superadmin Governance panel. Budgets are operator env-configured
+  // (OPENWOP_MEDIA_DAILY_{TTS_CHARS,STT_BYTES}); 0 ⇒ uncapped. Usage is this
+  // tenant's accumulation for the current UTC day.
+  app.get('/v1/host/openwop-app/governance/media-budget', async (req, res, next) => {
+    try {
+      requireSuperadmin(req, 'Governance administration');
+      const date = new Date().toISOString().slice(0, 10);
+      const env = mediaDailyBudget();
+      const effective = await resolveBudget(tenantOf(req)); // override-aware (ADR 0106)
+      const override = (await getGovernancePolicy(tenantOf(req)))?.mediaBudget ?? null;
+      const usage = await deps.storage.getMediaUsage(tenantOf(req), date);
+      res.json({
+        date,
+        // The EFFECTIVE caps actually enforced (override wins over env; 0 = uncapped).
+        budgets: { ttsChars: effective.tts, sttBytes: effective.stt },
+        envDefaults: { ttsChars: env.tts, sttBytes: env.stt },
+        override, // the per-org override (or null) — what the editor binds to
+        usage,
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ADR 0106 (editable override) — set/clear the per-org media budget override.
+  // Body: { ttsChars?, sttBytes? } — a finite ≥0 number sets that kind's cap
+  // (0 ⇒ uncapped for this org); `null` CLEARS that field (falls back to the env
+  // default). A read-modify-write that preserves the other policy fields (the
+  // policy store does a full replace).
+  app.put('/v1/host/openwop-app/governance/media-budget', async (req, res, next) => {
+    try {
+      requireSuperadmin(req, 'Governance administration');
+      const body = (req.body ?? {}) as { ttsChars?: unknown; sttBytes?: unknown };
+      const field = (name: 'ttsChars' | 'sttBytes'): number | undefined => {
+        const v = body[name];
+        if (v === undefined || v === null) return undefined; // cleared ⇒ fall to env default
+        if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+          throw new OpenwopError('validation_error', `\`${name}\` MUST be null or a non-negative number.`, 400, { field: name });
+        }
+        return Math.floor(v);
+      };
+      const ttsChars = field('ttsChars');
+      const sttBytes = field('sttBytes');
+      const mediaBudget = {
+        ...(ttsChars !== undefined ? { ttsChars } : {}),
+        ...(sttBytes !== undefined ? { sttBytes } : {}),
+      };
+      const current = await getGovernancePolicy(tenantOf(req));
+      const updatedBy = req.userId ?? req.principal?.principalId;
+      await setGovernancePolicy(
+        tenantOf(req),
+        {
+          ...(current?.providerAllowlist !== undefined ? { providerAllowlist: current.providerAllowlist } : {}),
+          ...(current?.actionPolicy !== undefined ? { actionPolicy: current.actionPolicy } : {}),
+          ...(current?.retention !== undefined ? { retention: current.retention } : {}),
+          mediaBudget,
+        },
+        updatedBy,
+      );
+      void deps.storage
+        .appendAudit({
+          timestamp: new Date().toISOString(),
+          principalId: updatedBy ?? 'unknown',
+          action: 'governance.media-budget.updated',
+          resource: `tenant:${tenantOf(req)}`,
+          outcome: 'success',
+          payload: { mediaBudget },
+        })
+        .catch(() => undefined);
+      const effective = await resolveBudget(tenantOf(req));
+      res.json({ override: mediaBudget, budgets: { ttsChars: effective.tts, sttBytes: effective.stt } });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.put('/v1/host/openwop-app/governance/policy', async (req, res, next) => {
     try {
       requireSuperadmin(req, 'Governance administration');
@@ -74,6 +152,19 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
             : (() => {
                 throw new OpenwopError('validation_error', '`providerAllowlist` MUST be an array of provider ids.', 400, {});
               })();
+      // The two DELETION-driving windows (GOV-2) are validated strictly: the sweep computes
+      // `cutoff = now - days*DAY`, so a negative/NaN value would push the cutoff into the
+      // future and purge EVERYTHING. Reject anything that isn't a finite, non-negative number.
+      const retentionWindow = (field: 'confidentialPiiDays' | 'internalDays'): number | undefined => {
+        const v = (body.retention as Record<string, unknown> | undefined)?.[field];
+        if (v === undefined) return undefined;
+        if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+          throw new OpenwopError('validation_error', `\`retention.${field}\` MUST be a non-negative number of days.`, 400, {});
+        }
+        return v;
+      };
+      const confidentialPiiDays = retentionWindow('confidentialPiiDays'); // validated once
+      const internalDays = retentionWindow('internalDays');
       const retention =
         body.retention && typeof body.retention === 'object'
           ? {
@@ -83,6 +174,8 @@ export function registerGovernanceRoutes(app: Express, deps: { storage: Storage 
               ...(typeof (body.retention as Record<string, unknown>).sourceDerivedDays === 'number'
                 ? { sourceDerivedDays: (body.retention as Record<string, number>).sourceDerivedDays }
                 : {}),
+              ...(confidentialPiiDays !== undefined ? { confidentialPiiDays } : {}),
+              ...(internalDays !== undefined ? { internalDays } : {}),
             }
           : undefined;
       const updatedBy = req.userId ?? req.principal?.principalId;

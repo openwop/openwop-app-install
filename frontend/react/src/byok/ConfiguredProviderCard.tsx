@@ -5,6 +5,8 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
 import { getProvider } from './lib/providers.js';
 import type { BYOKActiveConfig } from './lib/useBYOKConfig.js';
 import { deleteKey } from './lib/byokClient.js';
@@ -17,6 +19,7 @@ interface Props {
 }
 
 export function ConfiguredProviderCard({ config, onChange, onRemoved, compact }: Props): JSX.Element {
+  const { t } = useTranslation('byok');
   const provider = getProvider(config.provider);
   const model = provider.models.find((m) => m.id === config.model);
   const [removing, setRemoving] = useState(false);
@@ -26,7 +29,7 @@ export function ConfiguredProviderCard({ config, onChange, onRemoved, compact }:
     // Managed providers don't have a user-owned key to delete — the
     // "remove" action just clears the active config (server-held key
     // stays put).
-    if (!isManaged && !confirm(`Delete BYOK key for ${provider.label}?`)) return;
+    if (!isManaged && !(await confirm({ title: t('deleteKeyConfirm', { provider: provider.label }), danger: true, confirmLabel: t('common:delete') }))) return;
     setRemoving(true);
     try {
       if (!isManaged) {
@@ -41,7 +44,7 @@ export function ConfiguredProviderCard({ config, onChange, onRemoved, compact }:
   const badge = (
     <span className="configprov-badge" style={{
       width: compact ? 20 : 32, height: compact ? 20 : 32, borderRadius: compact ? 4 : 6,
-      background: provider.badgeColor, fontSize: compact ? 11 : 14,
+      fontSize: compact ? 11 : 14,
     }} aria-hidden>
       {provider.label.charAt(0)}
     </span>
@@ -59,8 +62,8 @@ export function ConfiguredProviderCard({ config, onChange, onRemoved, compact }:
           type="button"
           className="secondary u-pad-0x6 u-fs-10 u-minh-0"
           onClick={onChange}
-          aria-label="Change provider / model"
-        >change</button>
+          aria-label={t('changeProviderModel')}
+        >{t('changeAction')}</button>
       </span>
     );
   }
@@ -72,14 +75,14 @@ export function ConfiguredProviderCard({ config, onChange, onRemoved, compact }:
         <div className="u-fw-600 u-fs-13">{provider.label}</div>
         <div className="muted u-fs-11">
           {isManaged
-            ? 'Server-managed · daily usage limit applies'
-            : <>{model?.label ?? config.model} · key <code>{config.credentialRef}</code></>}
+            ? t('serverManagedLimit')
+            : <>{t('modelKeyLabel', { model: model?.label ?? config.model })} <code>{config.credentialRef}</code></>}
         </div>
       </div>
       <div className="button-row u-m-0">
-        <button type="button" className="secondary" onClick={onChange} aria-label="Change">Change</button>
-        <button type="button" className="secondary" disabled={removing} onClick={onDelete} aria-label={isManaged ? 'Disconnect' : 'Delete key'}>
-          {removing ? '…' : (isManaged ? 'Disconnect' : 'Delete')}
+        <button type="button" className="secondary" onClick={onChange} aria-label={t('change')}>{t('change')}</button>
+        <button type="button" className="secondary" disabled={removing} onClick={onDelete} aria-label={isManaged ? t('disconnect') : t('deleteKeyLabel')}>
+          {removing ? '…' : (isManaged ? t('disconnectAction') : t('deleteAction'))}
         </button>
       </div>
     </div>

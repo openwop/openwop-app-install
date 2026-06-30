@@ -6,6 +6,7 @@
  */
 
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 import type {
   AccessRole,
   CustomRole,
@@ -95,6 +96,7 @@ export interface OrgDetailPanelProps {
 }
 
 export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
+  const { t } = useTranslation('orgs');
   const {
     selectedOrg,
     members,
@@ -155,7 +157,7 @@ export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
   return (
     <div className="orgdetail-col">
       {!selectedOrg ? (
-        <StateCard title="Select an organization" body="Pick an organization on the left to manage its teams and members." />
+        <StateCard title={t('selectOrgTitle')} body={t('selectOrgBody')} />
       ) : (
         <>
           <h2 className="u-fs-16 u-flex u-items-center u-gap-2">
@@ -166,19 +168,19 @@ export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
               needed) or enforce as a specific MEMBER (server-side via act-as). */}
           <div className="action-bar u-mb-2">
             <label className="orgdetail-viewas-label">
-              View as
-              <select value={viewAs ?? ''} onChange={(e) => void changeView(e.target.value || null)}>
-                <option value="">Owner (you) — full access</option>
-                <optgroup label="Preview a role (UI only)">
+              {t('viewAsLabel')}
+              <select aria-label={t('viewAsLabel')} value={viewAs ?? ''} onChange={(e) => void changeView(e.target.value || null)}>
+                <option value="">{t('viewAsOwnerOption')}</option>
+                <optgroup label={t('viewAsRoleGroupLabel')}>
                   {roles.filter((r) => r.id !== 'owner').map((r) => (
-                    <option key={`role:${r.id}`} value={`role:${r.id}`}>As {r.name}</option>
+                    <option key={`role:${r.id}`} value={`role:${r.id}`}>{t('viewAsRoleOption', { name: r.name })}</option>
                   ))}
                 </optgroup>
                 {members.length > 0 ? (
-                  <optgroup label="View as member (enforced)">
+                  <optgroup label={t('viewAsMemberGroupLabel')}>
                     {members.map((m) => (
                       <option key={m.memberId} value={m.memberId}>
-                        {m.displayName} ({m.roles.join('/') || 'no roles'})
+                        {t('viewAsMemberOption', { name: m.displayName, roles: m.roles.join('/') || t('viewAsMemberNoRoles') })}
                       </option>
                     ))}
                   </optgroup>
@@ -190,15 +192,13 @@ export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
             <Notice variant="info">
               {viewAs.startsWith('role:') ? (
                 <>
-                  Previewing the{' '}
+                  {t('previewingRolePrefix')}{' '}
                   <strong>{roles.find((r) => r.id === viewAs.slice('role:'.length))?.name ?? viewAs.slice('role:'.length)}</strong>{' '}
-                  role — {viewScopes.size} scope(s). This is a UI preview (nothing is granted); actions this role
-                  can&rsquo;t perform are disabled below.
+                  {t('previewingRoleSuffix', { count: viewScopes.size })}
                 </>
               ) : (
                 <>
-                  Enforcing as <strong>{nameOfMember(viewAs)}</strong> — {viewScopes.size} scope(s). Actions this
-                  member can&rsquo;t perform are disabled below; attempting one server-side returns 403.
+                  {t('enforcingMemberPrefix')} <strong>{nameOfMember(viewAs)}</strong> {t('enforcingMemberSuffix', { count: viewScopes.size })}
                 </>
               )}
             </Notice>

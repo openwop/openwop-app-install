@@ -76,7 +76,14 @@ export async function pushNotification(
   notification: NotificationRecord,
 ): Promise<{ delivered: number; pruned: number }> {
   if (!configured) return { delivered: 0, pruned: 0 };
-  const subs = await storage.listPushSubscriptions(notification.tenantId);
+  const allSubs = await storage.listPushSubscriptions(notification.tenantId);
+  // ADR 0050 — an addressed notification pushes ONLY to its recipient's
+  // devices. Legacy subs with no owner (userId absent) can't be safely matched
+  // to a user, so they receive broadcasts only, never addressed pushes. A
+  // broadcast (no recipientUserId) still fans out to every tenant device.
+  const subs = notification.recipientUserId
+    ? allSubs.filter((s) => s.userId === notification.recipientUserId)
+    : allSubs;
   if (subs.length === 0) return { delivered: 0, pruned: 0 };
 
   const payload = JSON.stringify({

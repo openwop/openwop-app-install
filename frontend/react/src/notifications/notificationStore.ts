@@ -40,6 +40,8 @@ import {
   shouldCountUnread,
   shouldFireDesktop,
 } from './preferences.js';
+import { REVIEW_UPDATED_SIGNAL_TYPE } from './types.js';
+import { publishReviewSignal } from './signalBus.js';
 import {
   disablePush as disablePushApi,
   enablePush as enablePushApi,
@@ -271,6 +273,14 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       let primed = false;
       const cleanup = subscribeToNotifications({
         onNotification: (n) => {
+          // ADR 0074 — a `review.updated` frame is a transient cache hint, NOT
+          // an inbox row. Route it to the signal bus (the review-status store
+          // consumes it) and never `_ingest` it: no bell row, no unread bump.
+          if (n.type === REVIEW_UPDATED_SIGNAL_TYPE) {
+            publishReviewSignal(n);
+            if (get().connectionStatus !== 'connected') set({ connectionStatus: 'connected' });
+            return;
+          }
           get()._ingest(n);
           if (get().connectionStatus !== 'connected') {
             set({ connectionStatus: 'connected' });

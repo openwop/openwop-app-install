@@ -16,6 +16,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { insertRunWithStartContext } from './runInsert.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
@@ -24,6 +25,29 @@ import type { AutonomyLevel, Workforce, WorkforceStatus } from './workforce.js';
 import workforceSeed from './seed-data/workforces.json';
 
 const log = createLogger('workforce');
+
+/**
+ * Cap on how many runs the workforce aggregation scans per tenant. Past this
+ * the clear/completeness math silently undercounts (ENG-7), so we both raise
+ * the default and WARN when a tenant actually reaches the cap, turning a silent
+ * correctness bug into an operational signal. Overridable via
+ * OPENWOP_WORKFORCE_RUN_SCAN_LIMIT.
+ */
+const MAX_WORKFORCE_RUNS = (() => {
+  const n = Number(process.env.OPENWOP_WORKFORCE_RUN_SCAN_LIMIT);
+  return Number.isFinite(n) && n > 0 ? n : 50_000;
+})();
+
+/** List a tenant's runs for workforce aggregation, warning if the scan cap is
+ *  reached (beyond it the counts are no longer exhaustive). */
+async function listWorkforceRuns(storage: Storage, tenantId: string) {
+  const runs = await storage.listRuns({ tenantId, limit: MAX_WORKFORCE_RUNS });
+  if (runs.length >= MAX_WORKFORCE_RUNS) {
+    log.warn('workforce_run_scan_cap_reached', { tenantId, cap: MAX_WORKFORCE_RUNS });
+  }
+  return runs;
+}
+
 const WEEKS = 6;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -92,7 +116,7 @@ export async function countWorkforceRuns(
   storage: Storage,
   tenantId: string,
 ): Promise<{ workforces: number; runs: number }> {
-  const runs = await storage.listRuns({ tenantId, limit: 5000 });
+  const runs = await listWorkforceRuns(storage, tenantId);
   const mine = runs.filter((r) => (r.metadata as { workforceId?: string } | undefined)?.workforceId);
   const ids = new Set(mine.map((r) => (r.metadata as { workforceId?: string }).workforceId));
   return { workforces: ids.size, runs: mine.length };
@@ -105,7 +129,7 @@ export async function clearWorkforceHistory(
   storage: Storage,
   tenantId: string,
 ): Promise<{ runs: number }> {
-  const runs = await storage.listRuns({ tenantId, limit: 5000 });
+  const runs = await listWorkforceRuns(storage, tenantId);
   const mine = runs.filter((r) => (r.metadata as { workforceId?: string } | undefined)?.workforceId);
   for (const r of mine) await storage.deleteRun(r.runId);
   return { runs: mine.length };
@@ -139,7 +163,7 @@ export async function seedWorkforceHistory(
   let seededRuns = 0;
 
   // One read of the tenant's runs to gate idempotency for all workforces.
-  const existing = await storage.listRuns({ tenantId, limit: 5000 });
+  const existing = await listWorkforceRuns(storage, tenantId);
   const seenWorkforce = new Set(
     existing.map((r) => (r.metadata as { workforceId?: string } | undefined)?.workforceId).filter(Boolean),
   );
@@ -166,7 +190,7 @@ export async function seedWorkforceHistory(
     });
     let annotationStoreUnavailable = false;
     for (const gr of history.runs) {
-      await storage.insertRun(gr.record);
+      await insertRunWithStartContext(storage, gr.record);
       // Annotations (RFC 0056 flavor) are BEST-EFFORT: the workforce surface
       // reads `metadata.outcome`, never annotation records, so a backend without
       // an annotations store (e.g. a Postgres deploy whose schema omits the
@@ -222,7 +246,7 @@ export async function seedShowcaseWorkforces(
 ): Promise<{ runs: number; healed: boolean }> {
   await seedWorkforceEntities();
   const expected = seedDefs.reduce((n, w) => n + (w.historyRunCount ?? 0), 0);
-  const existing = await storage.listRuns({ tenantId: SHOWCASE_TENANT, limit: 5000 });
+  const existing = await listWorkforceRuns(storage, SHOWCASE_TENANT);
   const have = existing.filter(
     (r) => (r.metadata as { workforceId?: string }).workforceId,
   ).length;

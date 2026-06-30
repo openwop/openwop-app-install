@@ -9,6 +9,7 @@
 
 import { memo, useState, type ReactNode } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
+import { useTranslation } from 'react-i18next';
 import { catalogEntry } from '../../palette/catalogRegistry.js';
 import { useBuilderStore, type NodeRunStatus } from '../../store/builderStore.js';
 import { CircleIcon, CheckIcon, XIcon, PauseIcon, AlertIcon } from '../../../ui/icons/index.js';
@@ -21,18 +22,20 @@ interface NodeData extends Record<string, unknown> {
 }
 
 // Status → accent color + glyph for the live-execution overlay badge.
-const RUN_STATUS_META: Record<NodeRunStatus, { color: string; label: string; glyph: ReactNode }> = {
-  running: { color: 'var(--color-warning-text)', label: 'Running', glyph: <CircleIcon size={12} filled /> },
-  completed: { color: 'var(--color-success-text)', label: 'Completed', glyph: <CheckIcon size={12} /> },
-  failed: { color: 'var(--color-danger-text)', label: 'Failed', glyph: <XIcon size={12} /> },
-  suspended: { color: 'var(--color-ai-text)', label: 'Suspended', glyph: <PauseIcon size={12} /> },
+// `labelKey` resolves to translated copy in the `builder` namespace.
+const RUN_STATUS_META: Record<NodeRunStatus, { color: string; labelKey: string; glyph: ReactNode }> = {
+  running: { color: 'var(--color-warning-text)', labelKey: 'runStatusRunning', glyph: <CircleIcon size={12} filled /> },
+  completed: { color: 'var(--color-success-text)', labelKey: 'runStatusCompleted', glyph: <CheckIcon size={12} /> },
+  failed: { color: 'var(--color-danger-text)', labelKey: 'runStatusFailed', glyph: <XIcon size={12} /> },
+  suspended: { color: 'var(--color-ai-text)', labelKey: 'runStatusSuspended', glyph: <PauseIcon size={12} /> },
 };
 
 function BaseNodeImpl({ id, data, selected }: NodeProps) {
+  const { t } = useTranslation('builder');
   const d = data as NodeData;
   const entry = catalogEntry(d.kind);
   if (!entry) {
-    return <div className="builder-node builder-node-unknown">Unknown: {d.kind}</div>;
+    return <div className="builder-node builder-node-unknown">{t('unknownNodePrefix', { kind: d.kind })}</div>;
   }
   // Client-only nodes (sticky notes, future annotations) get a distinct
   // render: no ports, no run status (they never execute), no missing-
@@ -44,6 +47,7 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
     return <ClientOnlyNode nodeId={id} selected={Boolean(selected)} accent={entry.accent} badge={entry.badge} />;
   }
   const runMeta = d.runStatus ? RUN_STATUS_META[d.runStatus] : null;
+  const runMetaLabel = runMeta ? t(runMeta.labelKey) : '';
   // Author-time capability gap: the connected host doesn't advertise a
   // surface this node kind needs (catalog `missingHostSurfaces`, server-
   // computed). Surface it on the canvas — not just the inspector — so the
@@ -66,8 +70,8 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
       {showCapWarning && (
         <span
           className="builder-node-warn-badge"
-          title={`This host can't run this node — needs: ${missingSurfaces.join(', ')}`}
-          aria-label={`Host capability missing: needs ${missingSurfaces.join(', ')}`}
+          title={t('hostCantRunNodeTitle', { caps: missingSurfaces.join(', ') })}
+          aria-label={t('hostCapabilityMissingNeedsAria', { caps: missingSurfaces.join(', ') })}
         >
           <AlertIcon size={14} />
         </span>
@@ -75,8 +79,8 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
       {runMeta && (
         <span
           className="builder-node-run-badge basenode-run-badge"
-          title={runMeta.label}
-          aria-label={`Run status: ${runMeta.label}`}
+          title={runMetaLabel}
+          aria-label={t('runStatusBadgeAria', { status: runMetaLabel })}
           style={{
             background: runMeta.color,
             // running → live breathe; landed (completed/failed) → one-shot
@@ -146,6 +150,7 @@ function ClientOnlyNode({ nodeId, selected, accent, badge }: {
   accent: string;
   badge: string;
 }) {
+  const { t } = useTranslation('builder');
   const node = useBuilderStore((s) => s.nodes.find((n) => n.id === nodeId) ?? null);
   if (!node) return null;
   const content = (node.config['content'] as string | undefined) ?? '';
@@ -159,7 +164,7 @@ function ClientOnlyNode({ nodeId, selected, accent, badge }: {
         <span className="muted builder-node-client-only__name">{node.name}</span>
       </div>
       <div className={`builder-node-client-only__body${content ? '' : ' builder-node-client-only__body--empty'}`}>
-        {content || 'Empty note — edit in the Inspector →'}
+        {content || t('emptyNote')}
       </div>
     </div>
   );
@@ -170,13 +175,14 @@ function ClientOnlyNode({ nodeId, selected, accent, badge }: {
 // stopPropagation keeps the canvas keyboard shortcuts (Delete / ⌘D)
 // from firing keystrokes meant for the input.
 function EditableTitle({ nodeId, name }: { nodeId: string; name: string }) {
+  const { t } = useTranslation('builder');
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(name);
   if (!editing) {
     return (
       <span
         className="builder-node-title"
-        title="Double-click to rename"
+        title={t('doubleClickToRename')}
         onDoubleClick={(e) => {
           e.stopPropagation();
           setDraft(name);

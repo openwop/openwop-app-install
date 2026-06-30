@@ -17,30 +17,32 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { deleteKey, listStoredRefs, storeKey } from './lib/byokClient.js';
 import { PROVIDERS, type ProviderConfig } from './lib/providers.js';
+import { AiDefaultCard } from './AiDefaultCard.js';
+import { CompatEndpointsCard } from './CompatEndpointsCard.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { useHub } from '../chrome/hubContext.js';
+import { RealtimeVoiceSettings } from './RealtimeVoiceSettings.js';
 import { TextField } from '../ui/Field.js';
 import {
-  DataTable,
   IconButton,
   Modal,
   Notice,
   SkeletonRows,
   StateCard,
-  type DataColumn,
+  ViewToggle,
+  useViewMode,
 } from '../ui/index.js';
 import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
-import { KeyIcon, PlusIcon, RotateCwIcon, TrashIcon } from '../ui/icons/index.js';
+import { GlobeIcon, KeyIcon, PlusIcon, RotateCwIcon, TrashIcon } from '../ui/icons/index.js';
+import { CredentialList, type CredentialEntry } from './CredentialViews.js';
 
-interface CredentialEntry {
-  ref: string;
-  providerId: string | null;
-  /** Trailing label after `<providerId>:` if present (e.g., "prod"). */
-  label: string | null;
-  /** Most-recently-stored masked rendering, if added this session. */
-  masked?: string;
-}
+/** The bare credentialRef the host's web-research surface resolves for a
+ *  BYOK search key (ADR 0101 Phase 3 — `resolveSecret('web-search')`). NOT a
+ *  `provider:label` ref, so it gets a dedicated card, not a provider tile. */
+const WEB_SEARCH_REF = 'web-search';
 
 /** Split a credentialRef like `anthropic:prod` into provider+label.
  *  Refs without a colon are treated as legacy: provider unknown. */
@@ -57,6 +59,8 @@ function parseRef(ref: string): CredentialEntry {
 const LEGACY = '__legacy__';
 
 export function KeysPage(): JSX.Element {
+  const { t } = useTranslation('byok');
+  const { embedded } = useHub();
   const [refs, setRefs] = useState<readonly string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
@@ -71,6 +75,9 @@ export function KeysPage(): JSX.Element {
   // value in component state lets the user visually confirm "this is
   // the sk-ant-...e4f7 I just added" until they reload the page.
   const [maskedByRef, setMaskedByRef] = useState<Record<string, string>>({});
+  // ADR 0131 — a DataTable operate-surface: the per-provider tables stay the
+  // default "list" view; Grid renders each provider's keys as cards alongside.
+  const [viewMode, setViewMode] = useViewMode('keys', 'list');
 
   const refresh = useCallback(async () => {
     try {
@@ -112,7 +119,10 @@ export function KeysPage(): JSX.Element {
     [],
   );
 
-  const legacy = refs !== null ? grouped.get(LEGACY) ?? [] : [];
+  // Exclude the web-search key from the "unscoped/legacy" warning list — it's a
+  // deliberate bare ref owned by the dedicated Web-search card below (ADR 0101 P3).
+  const legacy = (refs !== null ? grouped.get(LEGACY) ?? [] : []).filter((e) => e.ref !== WEB_SEARCH_REF);
+  const webSearchConfigured = (refs ?? []).includes(WEB_SEARCH_REF);
   const totalKeys = entries.length;
   const loading = refs === null;
 
@@ -121,17 +131,17 @@ export function KeysPage(): JSX.Element {
   // provider. Total acts as the "clear filter" tile.
   const figures = useMemo<KeyFigureItem[]>(() => {
     const tiles: KeyFigureItem[] = [
-      { key: '__all__', label: 'Total keys', value: totalKeys, glyph: <KeyIcon size={13} /> },
+      { key: '__all__', label: t('totalKeys'), value: totalKeys, glyph: <KeyIcon size={13} /> },
     ];
     for (const p of byokProviders) {
       const count = grouped.get(p.id)?.length ?? 0;
       if (count > 0) tiles.push({ key: p.id, label: p.label, value: count });
     }
     if (legacy.length > 0) {
-      tiles.push({ key: LEGACY, label: 'Unscoped', value: legacy.length, tone: 'attention' });
+      tiles.push({ key: LEGACY, label: t('unscoped'), value: legacy.length, tone: 'attention' });
     }
     return tiles;
-  }, [byokProviders, grouped, totalKeys, legacy.length]);
+  }, [byokProviders, grouped, totalKeys, legacy.length, t]);
 
   const onToggleFigure = useCallback((key: string) => {
     setFilter((prev) => (key === '__all__' || prev === key ? null : key));
@@ -168,50 +178,22 @@ export function KeysPage(): JSX.Element {
     }
   }
 
-  const keyColumns: DataColumn<CredentialEntry>[] = [
-    {
-      key: 'ref',
-      header: 'Reference',
-      sortValue: (e) => e.ref,
-      render: (e) => <code className="keys-list-item-ref">{e.ref}</code>,
-    },
-    {
-      key: 'masked',
-      header: 'Masked value',
-      cellClassName: 'muted',
-      render: (e) =>
-        e.masked ? (
-          <span title="Masked rendering returned by the BE on store">{e.masked}</span>
-        ) : (
-          <span className="muted">—</span>
-        ),
-    },
-    {
-      key: 'actions',
-      header: '',
-      align: 'right',
-      width: '64px',
-      render: (e) => (
-        <IconButton
-          label={`Delete ${e.ref}`}
-          icon={<TrashIcon size={15} />}
-          onClick={() => requestDelete(e.ref)}
-        />
-      ),
-    },
-  ];
-
   return (
     <section>
-      <PageHeader
-        eyebrow="Settings"
-        title="API keys"
-        lede="Manage the API keys your workflows use. Each key is stored server-side (encrypted at rest); the chat and workflow-node dispatchers reference a key by its label. Add multiple keys per provider (e.g., separate prod/test keys) and pick which one a specific workflow node uses from the builder."
-      />
+      {embedded ? null : (
+        <PageHeader
+          eyebrow={t('settingsEyebrow')}
+          title={t('apiKeysTitle')}
+          lede={t('apiKeysLede')}
+        />
+      )}
 
       <div className="action-bar u-justify-end">
+        {!loading && totalKeys > 0 ? (
+          <ViewToggle value={viewMode} onChange={setViewMode} labels={{ list: t('keysViewTable') }} />
+        ) : null}
         <button className="secondary" onClick={() => { void refresh(); }}>
-          <span className="u-iflex u-gap-1"><RotateCwIcon size={14} aria-hidden /> Refresh</span>
+          <span className="u-iflex u-gap-1"><RotateCwIcon size={14} aria-hidden /> {t('common:refresh')}</span>
         </button>
       </div>
 
@@ -222,7 +204,7 @@ export function KeysPage(): JSX.Element {
           figures={figures}
           activeKey={filter ?? '__all__'}
           onToggle={onToggleFigure}
-          ariaLabel="Stored keys by provider"
+          ariaLabel={t('storedKeysByProvider')}
         />
       )}
 
@@ -238,11 +220,11 @@ export function KeysPage(): JSX.Element {
           <div className="surface-card">
             <StateCard
               icon={<KeyIcon size={28} />}
-              title="No API keys yet"
-              body="Add a key to let chat and workflow nodes call a provider on your behalf. Keys are encrypted at rest; nodes reference them by label."
+              title={t('noKeysTitle')}
+              body={t('noKeysBody')}
               action={
                 <button onClick={() => setAdding(byokProviders[0]?.id ?? null)}>
-                  <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> Add your first key</span>
+                  <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addFirstKey')}</span>
                 </button>
               }
             />
@@ -259,13 +241,13 @@ export function KeysPage(): JSX.Element {
                   <span className="chip chip--accent">
                     <KeyIcon size={13} aria-hidden /> {p.label}
                   </span>
-                  <span className="muted">{list.length} key{list.length === 1 ? '' : 's'}</span>
+                  <span className="muted">{t('keyCount', { count: list.length })}</span>
                 </div>
                 {!isAdding && (
                   <IconButton
-                    label={`Add ${p.label} key`}
+                    label={t('addProviderKey', { provider: p.label })}
                     className="secondary"
-                    icon={<span className="u-iflex u-gap-1"><PlusIcon size={14} aria-hidden /> Add key</span>}
+                    icon={<span className="u-iflex u-gap-1"><PlusIcon size={14} aria-hidden /> {t('addKey')}</span>}
                     onClick={() => setAdding(p.id)}
                   />
                 )}
@@ -284,21 +266,19 @@ export function KeysPage(): JSX.Element {
                 />
               )}
 
-              <DataTable
-                columns={keyColumns}
-                rows={list}
-                rowKey={(e) => e.ref}
-                density="compact"
-                caption={`Stored ${p.label} keys`}
-                initialSort={{ key: 'ref', dir: 'asc' }}
+              <CredentialList
+                list={list}
+                viewMode={viewMode}
+                caption={t('storedProviderKeys', { provider: p.label })}
+                onDelete={requestDelete}
                 empty={
                   <StateCard
                     icon={<KeyIcon size={24} />}
-                    title={`No ${p.label} keys yet`}
-                    body="Add a key to let chat and workflow nodes call this provider."
+                    title={t('noProviderKeysTitle', { provider: p.label })}
+                    body={t('noProviderKeysBody')}
                     {...(isAdding ? {} : { action: (
                       <button onClick={() => setAdding(p.id)}>
-                        <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> Add a key</span>
+                        <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addAKey')}</span>
                       </button>
                     ) })}
                   />
@@ -308,51 +288,121 @@ export function KeysPage(): JSX.Element {
           );
         })}
 
+        {/* Web search (optional) — a host-tool fallback for tiers/providers
+            without native grounding (ADR 0101). Backs `resolveSecret('web-search')`. */}
+        {!loading && (
+          <WebSearchKeyCard configured={webSearchConfigured} onChanged={refresh} />
+        )}
+
         {/* Legacy refs (no `<provider>:` prefix) — surfaced separately
             so the user can clean them up. */}
         {showLegacy && (
           <div className="surface-card">
             <div className="keys-provider-head action-bar u-justify-between">
               <div className="keys-provider-name u-iflex u-gap-2">
-                <span className="chip chip--muted"><KeyIcon size={13} aria-hidden /> Unscoped keys</span>
+                <span className="chip chip--muted"><KeyIcon size={13} aria-hidden /> {t('unscopedKeysChip')}</span>
                 <span className="muted">{legacy.length}</span>
               </div>
             </div>
             <Notice variant="warning">
-              These credentials don&apos;t carry a <code>provider:</code>{' '}
-              prefix. They still work, but the per-node picker can&apos;t
-              filter them by provider. Delete and re-add to scope them.
+              {t('unscopedKeysNoticeBefore')} <code>provider:</code>{' '}
+              {t('unscopedKeysNoticeAfter')}
             </Notice>
-            <DataTable
-              columns={keyColumns}
-              rows={legacy}
-              rowKey={(e) => e.ref}
-              density="compact"
-              caption="Unscoped keys"
-              initialSort={{ key: 'ref', dir: 'asc' }}
+            <CredentialList
+              list={legacy}
+              viewMode={viewMode}
+              caption={t('unscopedKeysCaption')}
+              onDelete={requestDelete}
+              empty={null}
             />
           </div>
         )}
       </div>
 
+      {/* Voice + self-hosted endpoints are first-class Access Hub tabs (ADR 0144);
+          inside the hub they render there, not buried in the Keys tab. */}
+      {embedded ? null : (
+        <div className="u-mt-4">
+          <RealtimeVoiceSettings storedRefs={refs ?? []} />
+        </div>
+      )}
+
       {pendingDelete && (
-        <Modal label="Delete key" onClose={() => { if (!deleting) setPendingDelete(null); }}>
-          <h2 className="u-mt-0">Delete this key?</h2>
+        <Modal label={t('deleteKeyModalLabel')} onClose={() => { if (!deleting) setPendingDelete(null); }}>
+          <h2 className="u-mt-0">{t('deleteThisKeyTitle')}</h2>
           <p>
-            Nodes referencing <code>{pendingDelete}</code> will fail until you
-            re-add a key with the same label. This can&apos;t be undone.
+            {t('deleteThisKeyBodyBefore')} <code>{pendingDelete}</code>{' '}
+            {t('deleteThisKeyBodyAfter')}
           </p>
           <div className="action-bar u-justify-end">
             <button className="secondary" onClick={() => setPendingDelete(null)} disabled={deleting}>
-              Cancel
+              {t('common:cancel')}
             </button>
-            <button className="btn-danger" onClick={() => { void confirmDelete(); }} disabled={deleting}>
-              {deleting ? 'Deleting…' : 'Delete key'}
+            <button className="secondary u-text-danger" onClick={() => { void confirmDelete(); }} disabled={deleting}>
+              {deleting ? t('deleting') : t('deleteKeyModalLabel')}
             </button>
           </div>
         </Modal>
       )}
+      {refs !== null ? <AiDefaultCard refs={refs} /> : null}
+      {embedded ? null : <CompatEndpointsCard />}
     </section>
+  );
+}
+
+/** Optional web-search key (ADR 0101 Phase 3). A search-provider key (Brave /
+ *  Tavily / etc.) is NOT an LLM provider, so it gets a dedicated card and stores
+ *  under the bare ref `web-search` that the host resolves. Only needed for the
+ *  host-tool fallback — providers with NATIVE grounding use their own LLM key. */
+export function WebSearchKeyCard({ configured, onChanged }: { configured: boolean; onChanged: () => void | Promise<void> }): JSX.Element {
+  const { t } = useTranslation('byok');
+  const [value, setValue] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const showForm = !configured || editing;
+  const save = useCallback(async () => {
+    const v = value.trim();
+    if (!v) return;
+    setBusy(true);
+    try { await storeKey(WEB_SEARCH_REF, v); setValue(''); setEditing(false); await onChanged(); }
+    finally { setBusy(false); }
+  }, [value, onChanged]);
+  const remove = useCallback(async () => {
+    setBusy(true);
+    try { await deleteKey(WEB_SEARCH_REF); await onChanged(); }
+    finally { setBusy(false); }
+  }, [onChanged]);
+  return (
+    <div className="surface-card">
+      <div className="keys-provider-head action-bar u-justify-between">
+        <div className="keys-provider-name u-iflex u-gap-2">
+          <span className="chip chip--accent"><span className="u-iflex u-gap-1"><GlobeIcon size={14} aria-hidden /> {t('webSearch.title')}</span></span>
+          {configured && <span className="muted">{t('webSearch.configured')}</span>}
+        </div>
+        {configured && !editing && (
+          <button className="secondary" onClick={() => { void remove(); }} disabled={busy}>
+            <span className="u-iflex u-gap-1"><TrashIcon size={14} aria-hidden /> {t('common:remove')}</span>
+          </button>
+        )}
+      </div>
+      <p className="muted">{t('webSearch.body')}</p>
+      {showForm && (
+        <div className="form-row">
+          <TextField
+            label={t('webSearch.keyLabel')}
+            type="password"
+            value={value}
+            onChange={(e) => setValue(e.target.value)}
+            placeholder={t('webSearch.placeholder')}
+            autoComplete="off"
+          />
+          <div className="u-flex u-gap-2 u-justify-end">
+            {configured && <button className="secondary" onClick={() => { setEditing(false); setValue(''); }} disabled={busy}>{t('common:cancel')}</button>}
+            <button onClick={() => { void save(); }} disabled={busy || !value.trim()}>{busy ? t('common:saving') : t('common:save')}</button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -370,6 +420,7 @@ function AddKeyForm({
    *  the masked view on the corresponding list row. */
   onSaved: (storedRef: string, masked: string) => Promise<void>;
 }): JSX.Element {
+  const { t } = useTranslation('byok');
   const [label, setLabel] = useState('');
   const [value, setValue] = useState('');
   const [saving, setSaving] = useState(false);
@@ -392,21 +443,21 @@ function AddKeyForm({
     if (!provider.apiKeyPrefix) return null;
     const trimmed = value.trim();
     if (!trimmed || trimmed.startsWith(provider.apiKeyPrefix)) return null;
-    return `${provider.label} keys usually start with \`${provider.apiKeyPrefix}\`. Double-check this is the right provider.`;
-  }, [provider.apiKeyPrefix, provider.label, value]);
+    return t('addKeyPrefixWarning', { provider: provider.label, prefix: provider.apiKeyPrefix });
+  }, [provider.apiKeyPrefix, provider.label, value, t]);
 
   async function onSubmit() {
     setErr(null);
     if (!label.trim()) {
-      setErr('Label is required.');
+      setErr(t('labelRequired'));
       return;
     }
     if (!value.trim()) {
-      setErr('Key value is required.');
+      setErr(t('keyValueRequired'));
       return;
     }
     if (labelTaken) {
-      setErr('A key with this label already exists. Pick a different label.');
+      setErr(t('labelTakenError'));
       return;
     }
     setSaving(true);
@@ -424,20 +475,20 @@ function AddKeyForm({
     <div className="keys-add-form">
       {err && <Notice variant="error">{err}</Notice>}
       <TextField
-        label={<>Label <span className="muted">(used to identify the key in workflow nodes)</span></>}
+        label={<>{t('labelFieldLabel')} <span className="muted">{t('labelFieldHint')}</span></>}
         value={label}
         onChange={(e) => setLabel(e.target.value)}
-        placeholder="prod, test, personal, …"
+        placeholder={t('labelPlaceholder')}
         autoFocus
-        {...(credentialRef ? { help: <>Will be stored as <code>{credentialRef}</code></> } : {})}
+        {...(credentialRef ? { help: <>{t('willBeStoredAs')} <code>{credentialRef}</code></> } : {})}
       />
       <div className="form-row">
         <TextField
-          label="API key"
+          label={t('apiKeyLabel')}
           type="password"
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          placeholder={provider.apiKeyPlaceholder ?? 'paste your key here'}
+          placeholder={provider.apiKeyPlaceholder ?? t('keyPlaceholderDefault')}
           autoComplete="off"
           {...(provider.apiKeyHelpText ? { help: provider.apiKeyHelpText } : {})}
         />
@@ -447,15 +498,15 @@ function AddKeyForm({
         {provider.apiKeyConsoleUrl && (
           <div className="muted builder-inspector-help">
             <a href={provider.apiKeyConsoleUrl} target="_blank" rel="noopener noreferrer">
-              Get a key from {provider.label}
+              {t('getKeyFromProvider', { provider: provider.label })}
             </a>
           </div>
         )}
       </div>
       <div className="u-flex u-gap-2 u-justify-end">
-        <button className="secondary" onClick={onCancel} disabled={saving}>Cancel</button>
+        <button className="secondary" onClick={onCancel} disabled={saving}>{t('common:cancel')}</button>
         <button onClick={() => { void onSubmit(); }} disabled={saving}>
-          {saving ? 'Saving…' : 'Save key'}
+          {saving ? t('common:saving') : t('saveKey')}
         </button>
       </div>
     </div>

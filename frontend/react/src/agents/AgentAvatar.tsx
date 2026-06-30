@@ -8,6 +8,7 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RoleTheme } from './roleTemplates.js';
 import { ImageIcon } from '../ui/icons/index.js';
 
@@ -47,6 +48,7 @@ export function AgentAvatar({
    *  from the circle — the roster's at-a-glance status cue. */
   ring?: string | undefined;
 }): JSX.Element {
+  const { t } = useTranslation('agents');
   const RoleIcon = roleTheme.Icon;
   const [active, setActive] = useState(false); // hover OR keyboard focus
 
@@ -82,8 +84,8 @@ export function AgentAvatar({
           onMouseLeave={() => setActive(false)}
           onFocus={() => setActive(true)}
           onBlur={() => setActive(false)}
-          title="Edit profile photo"
-          aria-label={`Edit ${persona}'s profile photo`}
+          title={t('avatarEditTitle')}
+          aria-label={t('avatarEditAria', { persona })}
           className="agentavatar-edit-btn"
           style={{ outline: active ? '2px solid var(--color-accent)' : 'none' }}
         >
@@ -105,7 +107,7 @@ export function AgentAvatar({
       {showBadge ? (
         <div
           aria-hidden="true"
-          title={`${roleTheme.label} role`}
+          title={t('avatarRoleTitle', { role: roleTheme.label })}
           className="agentavatar-badge"
           style={{ width: badge, height: badge }}
         >

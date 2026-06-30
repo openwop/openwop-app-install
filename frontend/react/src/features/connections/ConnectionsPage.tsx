@@ -11,20 +11,24 @@
  * its feature toggle to a permanent admin surface (ADR 0024 § Correction), so
  * there is no feature-gate here — the page renders unconditionally.
  */
+import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
+import { useHub } from '../../chrome/hubContext.js';
 import { ConnectionsManager } from './ConnectionsManager.js';
 import { GovernancePanel } from './GovernancePanel.js';
 import { OAuthClientAdminPanel } from './OAuthClientAdminPanel.js';
 import { useOAuthCallbackToast } from './useOAuthCallback.js';
 
 export function ConnectionsPage(): JSX.Element {
+  const { t } = useTranslation('connections');
+  const { embedded } = useHub();
   // Surface the OAuth callback outcome (the provider bounced the browser back to
   // /connections?connected=… or ?connectError=…&reason=…), then strip the params.
   useOAuthCallbackToast();
 
   return (
     <section className="u-grid u-gap-4">
-      <PageHeader eyebrow="Access & data" title="Connections" lede="Connect the apps your assistant works across — Google, Slack, ServiceNow, Zoom." />
+      {embedded ? null : <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />}
       <ConnectionsManager />
       {/* Superadmin-only panels (each hidden on 403): host OAuth client setup
           (ADR 0024 § host-managed OAuth) + workspace policy (ADR 0028). */}

@@ -1,0 +1,30 @@
+{
+  "name": "feature.podcasts.agents",
+  "version": "1.0.0",
+  "description": "Podcasts feature agent pack (ADR 0086 Phase 4) — a feature-bound manifest agent that helps a user PLAN a multi-speaker audio episode from a research notebook: shaping the briefing, proposing the cast (1–4 speakers + personas), segment count, and outline angle. Advisory by design — the actual generation is an RBAC-gated async executor run triggered from the Podcast Studio (or POST /podcasts/episodes), not a chat write, which keeps the generation behind workspace:write and off the chat injection surface. Chat-drivability = agent + nodes (ADR 0058); this agent reuses the notebook grounding tools to discuss the source material.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "podcasts", "audio", "agent", "planning"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.podcasts.agents.producer",
+      "persona": "RESEARCH",
+      "label": "Podcast Producer",
+      "description": "A producer who helps plan a multi-speaker audio episode from a research notebook — the briefing, the cast (1–4 speakers with distinct personas/voices), the segment count, and the outline angle. Grounds the plan on the notebook's sources via feature.notebooks.nodes.ask / .search, then guides the user to generate the episode from the Podcast Studio (an async, workspace:write run). Tools are allowlisted to the notebook grounding surface only.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/podcast-producer.md",
+      "toolAllowlist": [
+        "openwop:feature.notebooks.nodes.ask",
+        "openwop:feature.notebooks.nodes.search"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

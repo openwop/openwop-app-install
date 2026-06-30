@@ -18,8 +18,10 @@
  */
 
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { MessageSquareIcon, WrenchIcon, ScaleIcon } from '../ui/icons/index.js';
+import { formatPercent } from '../i18n/format.js';
 
 interface Props {
   events: readonly RunEventDoc[];
@@ -130,6 +132,7 @@ function jsonStr(v: unknown): string {
 }
 
 export function RunAgentTrace({ events }: Props) {
+  const { t } = useTranslation('runs');
   const steps = useMemo(() => buildSteps(events), [events]);
   if (steps.length === 0) return null;
 
@@ -137,7 +140,7 @@ export function RunAgentTrace({ events }: Props) {
   // preserving overall sequence order.
   return (
     <div className="card">
-      <h2>Agent activity</h2>
+      <h2>{t('agentActivity')}</h2>
       <div className="agent-trace">
         {steps.map((step) => (
           <div className="agent-trace-step" key={`${step.kind}-${step.seq}`}>
@@ -162,6 +165,7 @@ function ReasoningStepView({ step }: { step: ReasonStep }) {
 }
 
 function ToolStepView({ step }: { step: ToolStep }) {
+  const { t } = useTranslation('runs');
   const [open, setOpen] = useState(false);
   const isError = !!step.error;
   return (
@@ -170,16 +174,16 @@ function ToolStepView({ step }: { step: ToolStep }) {
         <span className="agent-trace-glyph" aria-hidden><WrenchIcon size={14} /></span>
         <strong>{step.toolName}</strong>
         <span className="muted agent-trace-tool-status">
-          {!step.returned ? 'running…' : isError ? 'failed' : 'ok'}
+          {!step.returned ? t('toolStatusRunning') : isError ? t('toolStatusFailed') : t('toolStatusOk')}
         </span>
       </button>
       {open && (
         <div className="agent-trace-tool-detail">
           {step.inputs !== undefined && (
-            <details><summary className="muted">inputs</summary><pre>{jsonStr(step.inputs)}</pre></details>
+            <details><summary className="muted">{t('toolInputs')}</summary><pre>{jsonStr(step.inputs)}</pre></details>
           )}
           {step.outcome !== undefined && !isError && (
-            <details><summary className="muted">outcome</summary><pre>{jsonStr(step.outcome)}</pre></details>
+            <details><summary className="muted">{t('toolOutcome')}</summary><pre>{jsonStr(step.outcome)}</pre></details>
           )}
           {isError && step.error && (
             <div className="alert error">{step.error.code}: {step.error.message}</div>
@@ -191,6 +195,7 @@ function ToolStepView({ step }: { step: ToolStep }) {
 }
 
 function DecisionStepView({ step }: { step: DecisionStep }) {
+  const { t } = useTranslation('runs');
   const conf = step.confidence;
   const confColor = conf == null ? 'var(--ink-3)'
     : conf >= 0.7 ? 'var(--color-success)'
@@ -198,17 +203,17 @@ function DecisionStepView({ step }: { step: DecisionStep }) {
     : 'var(--color-danger)';
   const label = typeof step.decision === 'string'
     ? step.decision
-    : (asRecord(step.decision).kind as string) ?? 'decision';
+    : (asRecord(step.decision).kind as string) ?? t('decisionFallbackLabel');
   return (
     <div className="agent-trace-body agent-trace-decision">
       <span className="agent-trace-glyph" aria-hidden><ScaleIcon size={14} /></span>
-      <strong>Decision: {label}</strong>
+      <strong>{t('decisionLabel', { label })}</strong>
       {conf != null && (
         <span className="agent-trace-conf" style={{ borderColor: confColor, color: confColor }}>
-          {Math.round(conf * 100)}%
+          {formatPercent(conf)}
         </span>
       )}
-      <details className="u-w-full"><summary className="muted">raw</summary><pre>{jsonStr(step.decision)}</pre></details>
+      <details className="u-w-full"><summary className="muted">{t('decisionRaw')}</summary><pre>{jsonStr(step.decision)}</pre></details>
     </div>
   );
 }

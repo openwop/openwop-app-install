@@ -1,0 +1,73 @@
+/**
+ * `capability-firewall` namespace (ADR 0135) — firewall de capacidades. Portuguese (Brazil).
+ */
+export const messages = {
+  eyebrow: 'Acesso e dados',
+  title: 'Firewall de capacidades',
+  lede: 'Exija aprovação (ou bloqueie) quando uma execução de IA combina passos arriscados — como ler dados e depois enviá-los para fora do host.',
+  org: 'Organização',
+  usingDefault: 'usando o padrão',
+
+  whatTitle: 'O que isto faz',
+  whatBody: 'Agentes de IA usam ferramentas para trabalhar. Ler dados é normal; enviá-los também — mas ler dados e depois enviá-los para fora do host é como a informação vaza. Este firewall observa a combinação do que uma execução já fez e do que uma ferramenta está prestes a fazer, e pode pausar para aprovação ou bloquear.',
+
+  tierPure: 'apenas calcular',
+  tierRead: 'ler dados',
+  tierWrite: 'alterar dados',
+  tierExec: 'executar código',
+  egrNone: 'manter os dados no app',
+  egrSafeFetch: 'ler a web pública',
+  egrHostMediated: 'enviar dados por um app conectado',
+  egrHostOwned: 'agir em seu nome',
+  scopeClass: 'escopo: {{scope}}',
+
+  rulesHeading: 'Regras ativas',
+  emptyTitle: 'Ativado, mas ainda sem vigiar nada',
+  emptyBody: 'Sem regras, qualquer combinação de ferramentas é permitida. Adicione a regra recomendada abaixo ou crie a sua.',
+  sentRunDid: 'Se uma execução já fez:',
+  sentAndTool: 'e uma ferramenta tenta',
+  sentToolOnly: 'Se uma ferramenta tenta',
+  verdictDeny: 'negar',
+  verdictRequireApproval: 'exigir aprovação',
+  remove: 'Remover',
+  removeRuleConfirm: 'Remover esta regra?',
+  removeRuleAria: 'Remover a regra {{desc}}',
+
+  recommendedTitle: 'Regra recomendada',
+  recommendedBody: 'Peça aprovação quando uma execução lê dados e uma ferramenta tenta enviá-los para fora do host — o vazamento mais comum.',
+  recommendedAdd: 'Adicionar regra recomendada',
+  recommendedDesc: 'Ler dados e depois enviá-los para fora do host',
+  recommendedReason: 'Esta execução leu dados e está prestes a enviá-los para fora do host — aprove para continuar.',
+
+  addHeading: 'Criar uma regra',
+  anyOfLegend: 'Se uma execução já…',
+  anyOfHint: 'deixe em branco para qualquer execução',
+  withLegend: '…e uma ferramenta então tenta…',
+  groupAction: 'fazer isto:',
+  groupData: 'com os dados:',
+  verdictLabel: 'então',
+  reasonPlaceholder: 'Motivo mostrado ao usuário (opcional)',
+  addRule: 'Adicionar regra',
+  needWith: 'Escolha pelo menos uma coisa que a ferramenta poderia fazer.',
+  customRule: 'Regra personalizada',
+
+  previewLabel: 'Prévia',
+  previewWithAny: 'Se uma execução já fez: {{any}}; e uma ferramenta tenta {{next}}',
+  previewNoAny: 'Se uma ferramenta tenta {{next}}',
+  previewDeny: 'bloquear',
+  previewApproval: 'pedir aprovação',
+  orJoin: ' ou ',
+
+  policyHeading: 'Ferramentas que não conseguimos classificar',
+  policyBody: 'Ferramentas personalizadas e de terceiros podem ainda não estar classificadas. Escolha o que o firewall assume sobre elas.',
+  policySkipLabel: 'Permiti-las — apenas ferramentas classificadas são verificadas',
+  policyRiskyLabel: 'Tratá-las como arriscadas — mais seguro, mas pode pedir aprovação com mais frequência',
+
+  loading: 'Carregando…',
+  loadOrgsFailed: 'Falha ao carregar as organizações.',
+  loadFailed: 'Falha ao carregar as regras.',
+  saveFailed: 'Falha ao salvar as regras.',
+  saved: 'Regras do firewall salvas',
+  noOrgsTitle: 'Sem organizações',
+  noOrgsBody: 'Crie uma organização para configurar o firewall de capacidades.',
+};

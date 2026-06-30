@@ -15,13 +15,13 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { createRosterEntry, listRoster } from '../src/host/rosterService.js';
 
 let server: http.Server;
-const PORT = 18795;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 const TENANT = 'default';
 
@@ -29,9 +29,9 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true'; // single fixed 'default' tenant
   const app = await createApp({
-    port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
+    port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 
 afterAll(async () => {
@@ -50,20 +50,23 @@ async function seed(body: unknown = {}): Promise<{ status: number; body: { heale
 const personas = async (): Promise<string[]> => (await listRoster(TENANT)).map((e) => e.persona);
 
 describe('legacy-persona migration on reconcile (ADR 0032 / T2.A)', () => {
-  it('heal prunes demo-owned legacy personas; spares user-re-roled; never resurrects', async () => {
+  it('heal prunes retired legacy personas by NAME (regardless of roleKey drift); spares a renamed one; never resurrects', async () => {
     // A fresh tenant first seeds the ten-twin canonical set (stamps the marker).
     await seed();
     expect((await personas()).length).toBe(10);
 
-    // Simulate a pre-reconciliation tenant: inject legacy personas as the old
-    // seed would have. Sally + Marcus are demo-owned (name + original roleKey).
-    // "Devon" was RE-ROLED by the user (kept the name, changed the roleKey) — it
-    // must survive the prune.
+    // Simulate a pre-reconciliation tenant: inject legacy personas as the old seed
+    // would have. Sally + Marcus are demo-owned (original retired roleKey). "Devon"
+    // was RE-ROLED by the user (kept the retired NAME, changed the roleKey) — under
+    // the name-based prune (2026-06-15) it is now pruned too, because a stranded
+    // legacy NAME is exactly what surfaced in the agent inventory / chat welcome
+    // row. "Dakota" was RENAMED away from a retired name — it must SURVIVE.
     await createRosterEntry({ tenantId: TENANT, persona: 'Sally', agentRef: { agentId: 'user.default.sally' }, workflows: [], roleKey: 'sales-ops' });
     await createRosterEntry({ tenantId: TENANT, persona: 'Marcus', agentRef: { agentId: 'user.default.marcus' }, workflows: [], roleKey: 'support-triage' });
     await createRosterEntry({ tenantId: TENANT, persona: 'Devon', agentRef: { agentId: 'user.default.devon' }, workflows: [], roleKey: 'my-custom-role' });
+    await createRosterEntry({ tenantId: TENANT, persona: 'Dakota', agentRef: { agentId: 'user.default.dakota' }, workflows: [], roleKey: 'my-custom-role' });
     expect((await personas()).sort()).toContain('Sally');
-    expect((await personas()).length).toBe(13); // 10 twins + 3 injected
+    expect((await personas()).length).toBe(14); // 10 twins + 4 injected
 
     // Silent re-seed must NOT reconcile (heal-gated — respects user curation).
     const silent = await seed();
@@ -71,16 +74,17 @@ describe('legacy-persona migration on reconcile (ADR 0032 / T2.A)', () => {
     expect((await personas())).toContain('Sally');
     expect((await personas())).toContain('Marcus');
 
-    // Explicit heal prunes the two demo-owned legacy personas; the re-roled
-    // "Devon" survives (its roleKey no longer matches the retired pair).
+    // Explicit heal prunes EVERY retired-named persona (Sally, Marcus, Devon —
+    // including the re-roled Devon); the renamed-away "Dakota" survives.
     const healed = await seed({ heal: true });
     expect(healed.status).toBe(200);
-    expect(healed.body.healed?.prunedLegacy).toBe(2);
+    expect(healed.body.healed?.prunedLegacy).toBe(3);
     const after = await personas();
     expect(after).not.toContain('Sally');
     expect(after).not.toContain('Marcus');
-    expect(after).toContain('Devon');        // user-re-roled → spared
-    expect(after.length).toBe(11);           // 10 twins + the surviving re-roled Devon
+    expect(after).not.toContain('Devon');    // retired NAME → pruned despite roleKey drift
+    expect(after).toContain('Dakota');       // renamed away from a retired name → spared
+    expect(after.length).toBe(11);           // 10 twins + the surviving renamed Dakota
 
     // Idempotent: a second heal finds no legacy left to prune, and the silent
     // path never resurrects the pruned personas.

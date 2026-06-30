@@ -1,6 +1,6 @@
 # ADR 0003 — Canonical user identity & session binding
 
-**Status:** Accepted (Phases 1–3 implemented; **Phase 4a** OIDC-bind + **Phase 4c** canonical personal tenant + anon-sandbox adopt-migration **implemented 2026-06-11** — fixes the password-stranding bug, closes ADR 0015's "anon→personal migration" open question; **Phases 4b** account-linking + **4d** one-shot subject re-key remain designed/pending. See "Phase 4 design" + the 4c implementation correction below.)
+**Status:** Phases 1–4 implemented. (Phases 1–3 + **Phase 4a** OIDC-bind + **Phase 4c** canonical personal tenant + anon-sandbox adopt-migration implemented 2026-06-11 — fixes the password-stranding bug, closes ADR 0015's "anon→personal migration" open question. **Phase 4b** account-linking is **moot** — superseded by ADR 0026 (Firebase links providers natively). **Phase 4d** one-shot subject re-key **implemented 2026-06-22**. See "Phase 4 design" + the 4c implementation correction + the 4d ledger below.)
 **Date:** 2026-06-08
 **Refines:** ADR 0002 (Users & Authentication) — closes its deferred identity seam.
 **Unblocks / prerequisite of:** ADR 0006 (Roles & Permissions / RBAC) — RBAC keys
@@ -167,9 +167,14 @@ Each phase is additive and gated. The **bound-session path is new** (nothing set
   `oidc:<sub>` (deterministic — no per-request store scan, mirroring the Phase 0 cost
   rule) and set `req.userId` → subject becomes `user:<userId>`. *Gate:* an OIDC bearer
   resolves a stable `user:<userId>` across requests; existing OIDC tests unaffected.
-- **4b — `linkedIds[]` + explicit linking.** Add `User.linkedIds: string[]`; resolve any
-  `linkedId → userId`; `POST …/users/me/link` (verified-email guard). *Gate:* password+OIDC
-  for one human collapse to one `userId`; an unverified link is rejected (`403`).
+- **4b — `linkedIds[]` + explicit linking.** ~~Add `User.linkedIds: string[]`; resolve any
+  `linkedId → userId`; `POST …/users/me/link` (verified-email guard).~~ **MOOT — superseded by
+  ADR 0026 (2026-06-11).** The host password system was removed in favor of Firebase
+  email/password, and **Firebase links providers natively** (one Firebase user with multiple
+  linked providers resolves to one OIDC `sub`, hence one `tenantIdFromOidc` and one durable
+  `User`). The host has no second principal to link, so an in-host `linkedIds[]` + a
+  `/users/me/link` route are not needed and were never built. The account-takeover concern the
+  design guarded against (auto-linking on an unverified email) is Firebase's responsibility now.
 - **4c — Canonical personal tenant + adopt-migration.** Re-key the personal tenant to
   `user:<userId>` and migrate the source sandbox. **Completes `reassignTenant`** to cover
   *every* tenant-scoped store the source can hold — not just `runs`+`workflows`
@@ -223,6 +228,27 @@ Each phase is additive and gated. The **bound-session path is new** (nothing set
   before any traffic depends on the new keying. *Gate:* `isWorkspaceMember(user:<id>)`
   resolves post-rekey; a pre-existing run's stamped owner is unchanged.
 
+  > **Implementation ledger (2026-06-22).** Phase 4d shipped as a maintenance-gated,
+  > idempotent, transactional batch migration that re-keys ONLY `OrgMember.subject` —
+  > runs / run ownership / the event log are untouched (runs are tenant-owned with no
+  > subject stamp), so it is replay/fork-safe per the design.
+  >
+  > | Piece | Where |
+  > |---|---|
+  > | Service fn `rekeyLegacyMemberSubjects(tenantId) → { scanned, rekeyed, skipped }` | `src/host/subjectRekeyMigration.ts` |
+  > | Tenant-wide member lister `listTenantMembers(tenantId)` | `src/host/accessControlService.ts` |
+  > | Maintenance route `POST /v1/host/openwop-app/maintenance/rekey-member-subjects` | `src/routes/subjectRekey.ts` |
+  > | Re-key primitive reused (deterministic owner-member re-derivation + ≥1-owner safety) | `accessControlService.ts` `rekeyMemberSubject` |
+  > | User resolver reused (legacy subject → durable `User`) | `features/users/usersService.ts` `getUserByPrincipal` |
+  > | Superadmin gate reused (SAME posture as governance/feature-toggles, ADR 0028) | `host/superadmin.ts` `requireSuperadmin` |
+  > | Focused test (a re-key / b canonical-untouched / c unresolvable-skip / d idempotent) | `test/subject-rekey-migration.test.ts` |
+  >
+  > Resolution is **never-mint**: a legacy subject (`oidc:`/`saml:`/`scim:`/`session:`/
+  > `anon:`/`password:` …) is re-keyed to `user:<userId>` ONLY when
+  > `getUserByPrincipal(tenantId, legacySubject)` resolves a durable user; an unresolvable
+  > legacy subject is SKIPPED (counted, never invented). A member already `user:<…>` is left
+  > untouched, so re-running re-keys nothing (idempotent).
+
 ### Sequencing & risk
 
 4a → 4b → 4c → 4d. Independent of, but unblocks the premise of, ADR 0006 ("subject =
@@ -239,10 +265,29 @@ gated by the near-empty-prod fact + the transactional/maintenance-window constra
 - **SECURITY:** closes the RFC 0048 PII-in-principal leak on the run-owner/audit
   surface; the stable owner is the correct `:fork` behavior (C3 / ADR 0002 C4).
 
+### Correction (2026-06-16) — canonicalize at the PROVISIONING choke points, not just reads
+
+Phase 4a/4c canonicalized *read* resolution (`resolveCallerUser` →
+`resolveCanonicalUserForTenant`), but two *write* choke points that auto-provision
+per-human records still keyed on the raw `callerSubject`: the personal-workspace
+owner member + the personal kanban board (`routes/workspaces.ts` `GET /me/workspaces`
+and `routes/kanban.ts` `GET /kanban/boards/personal`). `callerSubject` falls back to
+the volatile channel principal (`oidc:<sub>` bearer / `session:<sid>`) whenever the
+session isn't bound, and `ensurePersonalWorkspace` keys the owner member on
+`personalOwnerMemberId(tenant, ownerSubject)` while `personalBoardId` hashes the
+owner — so an unbound touch minted a SEPARATE owner member + "My Board" per channel.
+Observed in prod: two "My Board"s + a stray `session:<sid>` (`manual`) principal on
+`/users` for one human. **Fix:** both choke points now resolve the caller's ONE
+canonical durable user (`resolveCallerUser(req).userId`) and key the owner member +
+board on that. The Phase 4a bind re-key (`rekeyMemberSubject`) is retained as a
+safety net for legacy memberships seeded under `oidc:<sub>` before this fix. No wire
+change.
+
 ## Open questions
 
-- [x] **Linked-id model:** RESOLVED (Phase 4 design) — `User` grows an explicit
-  `linkedIds[]`; linking is an explicit, verified-email-gated action, not auto-merge.
+- [x] **Linked-id model:** RESOLVED (Phase 4 design), then **MOOT** (ADR 0026) — the
+  designed in-host `linkedIds[]` + verified-email-gated `/users/me/link` were never built;
+  Firebase links providers natively, so one human resolves to one OIDC `sub` → one `User`.
 - [x] **OIDC bearer remap timing:** RESOLVED — Phase 4 sub-phase 4a (durable User on the
   OIDC bearer path). No longer waits on RBAC; it is the prerequisite ADR 0006 assumes.
 - [x] **Canonical personal tenant** (NEW, raised by the 2026-06-10 review): RESOLVED —

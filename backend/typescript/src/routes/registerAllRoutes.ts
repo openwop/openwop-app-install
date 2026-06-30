@@ -22,6 +22,7 @@ import type { HostAdapterSuite } from '../host/index.js';
 // index.ts → registerAllRoutes.ts → index.ts shape is NOT a runtime cycle.
 import type { AppConfig } from '../index.js';
 import { registerHealthRoutes } from './health.js';
+import { registerSchemaRoutes } from './schemas.js';
 import { registerDiscoveryRoutes } from './discovery.js';
 import { registerRunRoutes } from './runs.js';
 import { registerInterruptRoutes } from './interrupts.js';
@@ -33,9 +34,14 @@ import { registerWebhookRoutes } from './webhooks.js';
 import { registerPackRoutes } from './packs.js';
 import { registerPackTestRoutes } from './packs-test.js';
 import { registerByokRoutes } from './byok.js';
+import { registerUiPluginRoutes } from './uiPlugins.js';
+import { presentationEnabled } from '../host/hostProfile.js';
+import { registerDispatchFanOutRoutes } from './dispatchFanOut.js';
+import { registerCompatEndpointRoutes } from './compatEndpoints.js';
 import { registerChatSessionRoutes } from './chatSessions.js';
 import { registerPromptRoutes } from './prompts.js';
 import { registerMigrateRoute } from './migrate.js';
+import { registerSubjectRekeyRoute } from './subjectRekey.js';
 import { registerAccountRoutes } from './account.js';
 import { registerMemoryRoutes } from './memory.js';
 import { registerMemoryCompactionSeamRoutes } from './memoryCompactionSeam.js';
@@ -48,6 +54,7 @@ import { registerSamlAuthRoutes } from './authSaml.js';
 import { registerSamlSsoRoutes } from './authSamlSso.js';
 import { registerScimAuthRoutes } from './authScim.js';
 import { registerMcpServerRoutes } from './mcp.js';
+import { registerToolCatalogRoutes } from './toolCatalog.js';
 import { registerAdminRoutes } from './admin.js';
 import { registerWorkflowRoutes } from './workflows.js';
 import { registerNodeCatalogRoute } from './nodeCatalog.js';
@@ -66,19 +73,27 @@ import { registerWorkspaceTenancyRoutes } from './workspaces.js';
 import { registerKanbanRoutes } from './kanban.js';
 import { registerAgentOpsRoutes } from './agentOps.js';
 import { registerApprovalRoutes } from './approvals.js';
+import { registerReviewRoutes } from './reviews.js';
+import { registerUiStateRoutes } from './uiState.js';
 import { registerGovernanceRoutes } from './governance.js';
 import { registerTriggerBridgeRoutes } from './triggerBridge.js';
 import { registerMessagingRoutes } from './messaging.js';
 import { createSelfHttpBridge } from '../messaging/bridge.js';
+import { resolveInternalToken } from '../subruns/subRunDispatcher.js';
 import { resolveNotifyDelivererFromEnv } from '../messaging/notifyDeliverer.js';
 import { initHostExtPersistence } from '../host/hostExtPersistence.js';
 import { fetch as undiciFetch } from 'undici';
 import { webhookEgressDispatcher } from '../host/webhookEgressGuard.js';
 import { setA2aPushSink } from '../host/a2aTaskStore.js';
 import { registerFeatureToggleRoutes } from './featureToggles.js';
+import { registerAgentAllowlistRoutes } from './agentAllowlists.js';
 import { registerSiteConfigRoutes } from './siteConfig.js';
 import { registerSitePageRoutes } from './sitePage.js';
+import { registerAppBrandRoutes } from './appBrand.js';
+import { registerContentDeliveryRoutes } from './contentDelivery.js';
 import { ensureSystemSite } from '../host/systemSite.js';
+import { ensureSystemBrand } from '../host/systemBrand.js';
+import { ensureFeaturesPage } from '../host/featuresPage.js';
 import { registerBackendFeatures } from '../features/index.js';
 
 const log = createLogger('routes.registerAll');
@@ -99,8 +114,9 @@ interface RouteModule {
 /** Mount order IS Express precedence order — append new domains where they
  *  belong semantically, and keep the ordering comments truthful. */
 const ROUTE_MODULES: RouteModule[] = [
-  { name: 'health', register: ({ app }) => registerHealthRoutes(app) },
+  { name: 'health', register: ({ app, storage }) => registerHealthRoutes(app, { storage }) },
   { name: 'discovery', register: ({ app, storage, config }) => registerDiscoveryRoutes(app, { storage, config }) },
+  { name: 'schemas', register: ({ app }) => registerSchemaRoutes(app) },
   { name: 'runs', register: ({ app, storage, hostSuite }) => registerRunRoutes(app, { storage, hostSuite }) },
   { name: 'interrupts', register: ({ app, storage }) => registerInterruptRoutes(app, { storage }) },
   // notifications + pushSubscriptions are now a BackendFeature (ADR 0010),
@@ -113,6 +129,17 @@ const ROUTE_MODULES: RouteModule[] = [
   // env-gate is unset, so production deploys default to "off".
   { name: 'packs-test', register: ({ app }) => registerPackTestRoutes(app) },
   { name: 'byok', register: ({ app }) => registerByokRoutes(app) },
+  // RFC 0117 — front-end plugin packs. The ui-plugin/1 RPC witness seam; mounted
+  // when the host presents uiPlugins (discovery.ts advertises it from the same gate).
+  // ADR 0168 — left UNMOUNTED in OPENWOP_PROFILE=headless so advertise and serve stay
+  // co-gated (a headless deploy serves no iframe-render RPC it doesn't advertise).
+  { name: 'uiPlugins', register: ({ app }) => { if (presentationEnabled('uiPlugins')) registerUiPluginRoutes(app); } },
+  // RFC 0118 — parallel sub-workflow fan-out. The dispatch/fanout witness seam; always
+  // mounted because the host honestly advertises dispatch.fanOutSupported (discovery.ts).
+  { name: 'dispatchFanOut', register: ({ app }) => registerDispatchFanOutRoutes(app) },
+  // RFC 0108 / ADR 0121 — compat (self-hosted/OpenAI-compatible) endpoint config.
+  // Env-gated (OPENWOP_COMPAT_PROVIDER_ENABLED, default OFF); routes 404 when unset.
+  { name: 'compat-endpoints', register: ({ app }) => registerCompatEndpointRoutes(app) },
   { name: 'chatSessions', register: ({ app, storage }) => registerChatSessionRoutes(app, { storage }) },
   {
     name: 'prompts',
@@ -121,6 +148,7 @@ const ROUTE_MODULES: RouteModule[] = [
     }),
   },
   { name: 'migrate', register: ({ app, storage }) => registerMigrateRoute(app, { storage }) },
+  { name: 'subjectRekey', register: ({ app, storage }) => registerSubjectRekeyRoute(app, { storage }) },
   { name: 'account', register: ({ app, storage }) => registerAccountRoutes(app, { storage }) },
   { name: 'memory', register: ({ app }) => registerMemoryRoutes(app) },
   { name: 'memoryCompactionSeam', register: ({ app }) => registerMemoryCompactionSeamRoutes(app) },
@@ -130,9 +158,10 @@ const ROUTE_MODULES: RouteModule[] = [
   { name: 'testSeam', register: ({ app, storage }) => registerTestSeamRoutes(app, { storage }) },
   { name: 'authTestSeam', register: ({ app }) => registerAuthTestSeamRoutes(app) },
   { name: 'authSaml', register: ({ app }) => registerSamlAuthRoutes(app) },
-  { name: 'authSamlSso', register: ({ app }) => registerSamlSsoRoutes(app) },
+  { name: 'authSamlSso', register: ({ app, storage }) => registerSamlSsoRoutes(app, { storage }) },
   { name: 'authScim', register: ({ app }) => registerScimAuthRoutes(app) },
   { name: 'mcp', register: ({ app, storage, hostSuite }) => registerMcpServerRoutes(app, { storage, hostSuite }) },
+  { name: 'toolCatalog', register: ({ app, storage }) => registerToolCatalogRoutes(app, { storage }) },
   { name: 'admin', register: ({ app }) => registerAdminRoutes(app) },
   { name: 'workflows', register: ({ app, hostSuite }) => registerWorkflowRoutes(app, { hostSuite }) },
   { name: 'nodeCatalog', register: ({ app }) => registerNodeCatalogRoute(app) },
@@ -191,11 +220,18 @@ const ROUTE_MODULES: RouteModule[] = [
   // host-ext kv, so it must mount AFTER hostExt:persistence is wired.
   // See docs/adr/0001-feature-first-package-architecture.md §3.
   { name: 'featureToggles', register: ({ app }) => registerFeatureToggleRoutes(app) },
+  // Agent tool-allowlist editor (ADR 0104) — superadmin override of an agent's
+  // offered tools, applied at the dispatch seam. Host-ext kv, so after persistence.
+  { name: 'agentAllowlists', register: ({ app }) => registerAgentAllowlistRoutes(app) },
   // Site config (ADR 0027) — runtime, superadmin-managed public front-page pointer.
   { name: 'siteConfig', register: ({ app }) => registerSiteConfigRoutes(app) },
   // System home page (ADR 0027) — host-level, superadmin-edited homepage over the
   // reserved system site org (cross-tenant by host authority, not org RBAC).
   { name: 'sitePage', register: ({ app }) => registerSitePageRoutes(app) },
+  { name: 'appBrand', register: ({ app }) => registerAppBrandRoutes(app) },
+  // RFC 0103 normative public content delivery (ADR 0064 Phase 3) — projects the
+  // system-site published content at GET /v1/content/pages/:slug, locale-negotiated.
+  { name: 'contentDelivery', register: ({ app }) => registerContentDeliveryRoutes(app) },
   { name: 'scheduler', register: ({ app, storage, hostSuite }) => registerSchedulerRoutes(app, { storage, hostSuite }) },
   // Standing agent roster — RFCS/0086 reference impl (named agent instances +
   // workflow portfolios). Registered before Kanban so a board can bind to a
@@ -228,6 +264,13 @@ const ROUTE_MODULES: RouteModule[] = [
   // Approval inbox — the human side of "agents propose, humans dispose". After
   // agentOps since it resolves proposals agentOps creates.
   { name: 'approvals', register: ({ app, storage, hostSuite }) => registerApprovalRoutes(app, { storage, hostSuite }) },
+  // Unified review inbox (ADR 0068) — a read-first projection over runtime
+  // interrupts + pending approvals. After both owners; the /reviews prefix is new
+  // (no collision). Dispatches actions to the SAME resolve paths (no second owner).
+  { name: 'reviews', register: ({ app, storage, hostSuite }) => registerReviewRoutes(app, { storage, hostSuite }) },
+  // Per-user durable UI-state (ADR 0071) — non-authoritative display prefs,
+  // caller-scoped by the session subject. New /ui-state prefix; no collision.
+  { name: 'uiState', register: ({ app, storage }) => registerUiStateRoutes(app, { storage }) },
   // Governance administration (ADR 0028) — superadmin policy + the audit read
   // view. The policy CONFIGURES existing seams (connections allowlist,
   // assistant action policy); enforcement never lives here.
@@ -257,11 +300,13 @@ const ROUTE_MODULES: RouteModule[] = [
         bridge: createSelfHttpBridge({
           storage,
           baseUrl: `http://127.0.0.1:${config.port}`,
-          // Prefer a dedicated, tenant-scopable bridge credential; fall back to
-          // the host bearer for the demo. A real multi-tenant host SHOULD set
-          // OPENWOP_MESSAGING_BRIDGE_TOKEN to a scoped credential (the run's
-          // tenant still comes from the registered device, not the message).
-          bearer: process.env.OPENWOP_MESSAGING_BRIDGE_TOKEN ?? process.env.OPENWOP_API_KEY ?? 'dev-token',
+          // Prefer a dedicated, tenant-scopable bridge credential; else fall
+          // back to the shared service credential (which fails closed under
+          // enforced auth instead of presenting a guessable literal). A real
+          // multi-tenant host SHOULD set OPENWOP_MESSAGING_BRIDGE_TOKEN to a
+          // scoped credential (the run's tenant still comes from the registered
+          // device, not the message).
+          bearer: process.env.OPENWOP_MESSAGING_BRIDGE_TOKEN ?? resolveInternalToken(),
           defaultWorkflowId: process.env.OPENWOP_MESSAGING_WORKFLOW_ID ?? 'openwop-app.uppercase',
         }),
         // Email/SMS delivery: a real webhook (OPENWOP_NOTIFY_WEBHOOK_URL) when
@@ -285,4 +330,13 @@ export function registerAllRoutes(deps: RouteDeps): void {
   // fire-and-forget) so '/' serves a real editable page on first visit. Also
   // lazily ensured by the public-site-config + site-page routes.
   void ensureSystemSite().catch((err) => log.warn('system_site_seed_failed', { error: String(err) }));
+  // ADR 0170 — seed the reserved app-brand record at boot (idempotent,
+  // fire-and-forget) so the super-admin Appearance editor has a row immediately.
+  // Also lazily ensured by the app-brand / public-brand routes.
+  void ensureSystemBrand().catch((err) => log.warn('system_brand_seed_failed', { error: String(err) }));
+  // ADR 0027 — the public host-global Features page (/p/features). Ensured at
+  // boot so a redeploy that bumps featuresPage.ts SEED_VERSION actually refreshes
+  // the live page (the documented contract) — it has no lazy public route of its
+  // own to trigger the refresh, unlike the home page above.
+  void ensureFeaturesPage().catch((err) => log.warn('features_page_seed_failed', { error: String(err) }));
 }

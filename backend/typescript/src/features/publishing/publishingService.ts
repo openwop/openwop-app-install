@@ -14,7 +14,7 @@ import { optionalCleanString, safeUrl, escapeXml } from '../../host/boundedStrin
 import { getOrg } from '../../host/accessControlService.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import { createLogger } from '../../observability/logger.js';
-import { getPage, getPublishedBySlug, listPages, type Page, type Section } from '../cms/cmsService.js';
+import { getPage, getPublishedBySlug, listPages, getContentLanguageSettings, localizePage, type Page, type Section } from '../cms/cmsService.js';
 
 const log = createLogger('features.publishing');
 
@@ -125,12 +125,22 @@ export interface PublicPage {
   };
 }
 
-export async function publicPageBySlug(orgId: string, slug: string, baseUrl: string): Promise<PublicPage> {
+export async function publicPageBySlug(
+  orgId: string,
+  slug: string,
+  baseUrl: string,
+  acceptLanguage?: string | null,
+): Promise<{ page: PublicPage; locale: string }> {
   const tenantId = await resolvePublicOrg(orgId);
   const hit = await getPublishedBySlug(tenantId, orgId, slug);
   if (!hit) throw new OpenwopError('not_found', 'Page not found.', 404, { slug });
+  // ADR 0064 — resolve sections for the locale negotiated from Accept-Language
+  // (anonymous browsers send it automatically). No authored locales ⇒ base
+  // verbatim. The negotiated locale is a response concern (Content-Language).
+  const settings = await getContentLanguageSettings(tenantId, orgId);
+  const { page: localized, locale } = localizePage(hit.page, acceptLanguage, settings);
   const seo = await seoStore.get(`${tenantId}:${orgId}:${hit.page.pageId}`);
-  return projectPublic(hit.page, seo, orgId, baseUrl, hit.redirectedFrom);
+  return { page: projectPublic(localized as Page, seo, orgId, baseUrl, hit.redirectedFrom), locale };
 }
 
 /** Published pages for an org's public surface (sitemap/feed), excluding

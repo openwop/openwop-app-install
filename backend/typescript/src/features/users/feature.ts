@@ -22,11 +22,21 @@
 import type { BackendFeature } from '../types.js';
 import { registerUsersRoutes } from './routes.js';
 import { registerUsersAuthRoutes } from './authRoutes.js';
+import { getUserByPrincipal } from './usersService.js';
+import { registerSubjectToUserIdResolver } from '../../host/approverResolution.js';
 
 export const usersFeature: BackendFeature = {
   id: 'users',
   registerRoutes: (deps) => {
     registerUsersRoutes(deps);
     registerUsersAuthRoutes(deps);
+    // ADR 0075 §D6 — map an approver's principal subject (e.g. `oidc:<sub>` from a
+    // group/role expansion) to its durable `userId` for addressed HITL delivery.
+    // Core declares the seam; the users feature owns the identity store, so it
+    // registers the mapping here (feature→core; core never imports the feature).
+    registerSubjectToUserIdResolver(async (tenantId, subject) => {
+      const user = await getUserByPrincipal(tenantId, subject);
+      return user?.userId ?? null;
+    });
   },
 };

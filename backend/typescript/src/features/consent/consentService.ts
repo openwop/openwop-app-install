@@ -9,6 +9,9 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { eraseSubject } from '../../host/subjectErasure.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('feature.consent');
 
 export type ConsentCategory = 'necessary' | 'analytics' | 'marketing';
 export const CONSENT_CATEGORIES: readonly ConsentCategory[] = ['necessary', 'analytics', 'marketing'];
@@ -98,9 +101,20 @@ export async function isAllowed(tenantId: string, subjectKey: string, category: 
   const assignment = await resolveOne('consent', { tenantId });
   if (!assignment || !assignment.enabled) return true; // toggle off ⇒ permissive (honest opt-in)
   const rec = await getConsent(tenantId, subjectKey);
-  if (rec) return rec.categories[category] === true;
-  const policy = await getPolicy(tenantId);
-  return policy?.defaultMode === 'opt-out'; // no record: opt-out allows; opt-in/unset denies (fail-closed)
+  const policy = rec ? null : await getPolicy(tenantId);
+  const allowed = rec ? rec.categories[category] === true : policy?.defaultMode === 'opt-out';
+  if (!allowed) {
+    // A compliance-relevant denial under an active regime — log it so the
+    // gate's decisions are auditable (FEAT-2). subjectKey is an opaque id,
+    // not PII; no consent payload is logged.
+    log.info('consent_denied', {
+      tenantId,
+      subjectKey,
+      category,
+      basis: rec ? 'record' : (policy?.defaultMode ?? 'unset'),
+    });
+  }
+  return allowed;
 }
 
 /** Test-only: clear both stores. */

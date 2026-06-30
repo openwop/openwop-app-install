@@ -58,7 +58,7 @@ export const assistantFeature: BackendFeature = {
   // loop node-pack calls (reads + idempotent role:action writes).
   surface: { id: 'assistant', build: buildAssistantSurface },
   requiredPacks: [
-    { name: 'feature.assistant.nodes', version: '1.2.0' },
+    { name: 'feature.assistant.nodes', version: '1.3.0' },
     { name: 'feature.assistant.agents', version: '1.0.0' },
   ],
   // § Correction (2026-06-11) — graduated OFF the feature toggle. The Chief of

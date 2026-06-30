@@ -4,19 +4,21 @@
  */
 
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from './store/builderStore.js';
 
-const OVERLAY_STATUS_META: Record<string, { label: string; color: string }> = {
-  running: { label: 'Running', color: 'var(--clay-text)' },
-  completed: { label: 'Completed', color: 'var(--color-success-text)' },
-  failed: { label: 'Failed', color: 'var(--color-danger-text)' },
-  cancelled: { label: 'Cancelled', color: 'var(--ink-3)' },
+const OVERLAY_STATUS_META: Record<string, { labelKey: string; color: string }> = {
+  running: { labelKey: 'overlayStatusRunning', color: 'var(--clay-text)' },
+  completed: { labelKey: 'overlayStatusCompleted', color: 'var(--color-success-text)' },
+  failed: { labelKey: 'overlayStatusFailed', color: 'var(--color-danger-text)' },
+  cancelled: { labelKey: 'overlayStatusCancelled', color: 'var(--ink-3)' },
 };
 
 // Live-run banner shown above the canvas while an overlay is active.
 // Counts painted nodes, links to the full run detail, and dismisses
 // the overlay (which also tears down the SSE subscription).
 export function RunOverlayBanner() {
+  const { t } = useTranslation('builder');
   const overlay = useBuilderStore((s) => s.overlay);
   const clearOverlay = useBuilderStore((s) => s.clearOverlay);
   if (!overlay) return null;
@@ -34,21 +36,21 @@ export function RunOverlayBanner() {
         }}
         aria-hidden
       />
-      <strong style={{ color: meta.color }}>{meta.label}</strong>
+      <strong style={{ color: meta.color }}>{t(`builder:${meta.labelKey}`)}</strong>
       <span className="muted">
-        {done} done{failed > 0 ? `, ${failed} failed` : ''}
+        {failed > 0 ? t('overlayDoneFailed', { done, failed }) : t('overlayDone', { done })}
       </span>
       <span className="builder-toolbar-spacer" />
-      <Link to={`/runs/${overlay.runId}`} title="Open the full run detail — timeline, reasoning, I/O">
-        Run detail →
+      <Link to={`/runs/${overlay.runId}`} title={t('runDetailTitle')}>
+        {t('runDetailLink')}
       </Link>
       <button
         type="button"
         className="secondary u-pad-2x10 u-minh-0"
         onClick={clearOverlay}
-        title="Dismiss the live overlay"
+        title={t('dismissOverlayTitle')}
       >
-        Dismiss
+        {t('dismiss')}
       </button>
     </div>
   );

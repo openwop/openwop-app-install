@@ -23,10 +23,12 @@
  * different device).
  */
 
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useMemo, useState } from 'react';
 import { getSavedWorkflow } from '../builder/persistence/localStore.js';
 import { formatElapsed } from './workflowProgress/formatters.js';
+import { formatNumber } from '../i18n/format.js';
 import { AlertIcon, BanIcon, CheckIcon } from '../ui/icons/index.js';
 import type { WorkflowRunState } from './types.js';
 
@@ -39,6 +41,9 @@ interface Props {
 }
 
 export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.Element | null {
+  // `t` is used below as the terminal-node loop variable (`terminals.map((t) => …)`),
+  // so the translation hook is aliased to `translate` to avoid the name collision.
+  const { t: translate } = useTranslation('chat');
   // Hooks MUST come before any conditional return — Rules of Hooks.
   // The previous shape early-returned on non-terminal states and then
   // called hooks below, which throws "Rendered more hooks than during
@@ -53,14 +58,17 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
   if (!isTerminal) return null;
 
   const stepCount = run.totalNodes > 0
-    ? `${run.completedNodeIds.length}/${run.totalNodes} steps`
-    : `${run.completedNodeIds.length} step${run.completedNodeIds.length === 1 ? '' : 's'}`;
+    ? translate('stepCount', {
+        completed: formatNumber(run.completedNodeIds.length),
+        total: formatNumber(run.totalNodes),
+      })
+    : translate('steps', { count: run.completedNodeIds.length });
 
   const unavailable = run.runUnavailable === true;
 
   if (run.status === 'failed') {
     return (
-      <CompletionShell tone="danger" iconKind="alert" title="Workflow failed">
+      <CompletionShell tone="danger" iconKind="alert" title={translate('workflowFailed')}>
         <Meta items={[stepCount, elapsed]} />
         {run.error && (
           <div className="muted wfcomplete-error">
@@ -78,7 +86,7 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
 
   if (run.status === 'cancelled') {
     return (
-      <CompletionShell tone="muted" iconKind="ban" title="Workflow cancelled">
+      <CompletionShell tone="muted" iconKind="ban" title={translate('workflowCancelled')}>
         <Meta items={[stepCount, elapsed]} />
         {run.runId && (
           <Actions>
@@ -91,7 +99,7 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
 
   // status === 'completed'
   return (
-    <CompletionShell tone="success" iconKind="check" title="Workflow completed">
+    <CompletionShell tone="success" iconKind="check" title={translate('workflowCompleted')}>
       <Meta items={[stepCount, elapsed]} />
       <Actions>
         {terminals.length > 0
@@ -108,9 +116,9 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
                   //   - one terminal, untagged → "View output" (generic;
                   //     legacy v1 behavior)
                   //   - N>1 untagged terminals → "View {label}" (disambiguates)
-                  title={t.isPrimary ? `Primary output — declared by workflow author` : undefined}
+                  title={t.isPrimary ? translate('primaryOutputTitle') : undefined}
                 >
-                  {(t.isPrimary || terminals.length > 1) ? `View ${t.label}` : 'View output'} →
+                  {(t.isPrimary || terminals.length > 1) ? translate('viewLabeled', { label: t.label }) : translate('viewOutput')} →
                 </button>
                 {run.runId && !unavailable && (
                   // Deep-link companion to the modal-opening View button —
@@ -121,9 +129,9 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
                     href={`/runs/${run.runId}#node-${encodeURIComponent(t.nodeId)}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    title="Open in run detail (new tab)"
+                    title={translate('openInRunDetail')}
                     className="wfcomplete-deeplink"
-                    aria-label={`Open ${t.label} in run detail (new tab)`}
+                    aria-label={translate('openLabeledInRunDetail', { label: t.label })}
                   >
                     ↗
                   </a>
@@ -147,19 +155,20 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
  * when the orphan-detection probe set `runUnavailable: true`.
  */
 function OpenRunLink({ runId, unavailable }: { runId: string; unavailable: boolean }): JSX.Element {
+  const { t: translate } = useTranslation('chat');
   if (unavailable) {
     return (
       <span
         className="muted u-fs-12 u-italic"
-        title="Run record no longer available on the server"
+        title={translate('runRecordUnavailableTitle')}
       >
-        Open run (unavailable)
+        {translate('openRunUnavailable')}
       </span>
     );
   }
   return (
     <Link to={`/runs/${runId}`} className="u-fs-12">
-      Open run →
+      {translate('openRun')}
     </Link>
   );
 }
@@ -292,6 +301,7 @@ interface ShellProps {
 }
 
 function CompletionShell({ tone, iconKind, title, children }: ShellProps): JSX.Element {
+  const { t: translate } = useTranslation('chat');
   const color = tone === 'success'
     ? 'var(--color-success)'
     : tone === 'danger'
@@ -301,7 +311,7 @@ function CompletionShell({ tone, iconKind, title, children }: ShellProps): JSX.E
   // with limited color discrimination still see the failure call-out.
   const borderWidth = tone === 'danger' ? 2 : 1;
   // ARIA landmark label so SR users can navigate the row as a unit.
-  const ariaLabel = `Workflow run: ${title}`;
+  const ariaLabel = translate('workflowRunAria', { title });
   return (
     <div
       role="status"

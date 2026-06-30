@@ -38,7 +38,7 @@ export interface ResolvedModel {
  *  resolve time so a catalog change can't produce a dangling model. */
 const MODEL_CLASS_DEFAULTS: Record<ModelClass, { provider: string; model: string }> = {
   chat: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
-  reasoning: { provider: 'anthropic', model: 'claude-opus-4-7' },
+  reasoning: { provider: 'anthropic', model: 'claude-opus-4-8' },
   coding: { provider: 'anthropic', model: 'claude-sonnet-4-6' },
   extraction: { provider: 'anthropic', model: 'claude-haiku-4-5' },
 };

@@ -13,6 +13,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
@@ -22,8 +23,7 @@ import { __resetAssistantStore, getPendingAction } from '../src/features/assista
 import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 
-const PORT = 18995;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 const TENANT = 'default';
 
@@ -34,13 +34,13 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await __clearToggleStore();
   await __resetConnectionsStore();
   await __resetGovernanceStore();
   await __resetAssistantStore();
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   // Connections is toggle-less (permanent admin surface, ADR 0024 § Correction);
   // only the assistant feature still gates on a toggle.
@@ -111,6 +111,100 @@ describe('policy administration', () => {
     expect(denied.status).toBe(403);
 
     await __resetGovernanceStore(); // leave no policy behind for later suites
+  });
+
+  it('GOV-2: the admin route persists the retention windows the sweep enforces, and rejects a negative window', async () => {
+    // The sweep daemon enforces `confidentialPiiDays` / `internalDays`; before GOV-2 the
+    // route dropped them, so they could never be set via the API. Assert they round-trip.
+    const put = await jf<{ policy: { retention?: { confidentialPiiDays?: number; internalDays?: number } } }>(
+      '/v1/host/openwop-app/governance/policy',
+      { method: 'PUT', body: JSON.stringify({ retention: { confidentialPiiDays: 365, internalDays: 90 } }) },
+    );
+    expect(put.status).toBe(200);
+    expect(put.body.policy.retention).toMatchObject({ confidentialPiiDays: 365, internalDays: 90 });
+
+    const got = await jf<{ policy: { retention?: { confidentialPiiDays?: number } } }>('/v1/host/openwop-app/governance/policy');
+    expect(got.body.policy.retention?.confidentialPiiDays).toBe(365);
+
+    // A negative window would push the sweep's cutoff into the future and purge everything.
+    const bad = await jf('/v1/host/openwop-app/governance/policy', {
+      method: 'PUT',
+      body: JSON.stringify({ retention: { confidentialPiiDays: -1 } }),
+    });
+    expect(bad.status).toBe(400);
+
+    await __resetGovernanceStore();
+  });
+});
+
+describe('media-budget readout (ADR 0106 Phase 3)', () => {
+  it('superadmin reads configured budgets + usage; a signed-in non-admin is 403', async () => {
+    process.env.OPENWOP_MEDIA_DAILY_TTS_CHARS = '100000';
+    try {
+      const r = await jf<{ date: string; budgets: { ttsChars: number; sttBytes: number }; usage: { ttsChars: number; sttBytes: number } }>(
+        '/v1/host/openwop-app/governance/media-budget',
+      );
+      expect(r.status).toBe(200);
+      expect(r.body.budgets.ttsChars).toBe(100000);
+      expect(r.body.budgets.sttBytes).toBe(0); // unset ⇒ uncapped
+      expect(r.body.usage).toEqual({ ttsChars: 0, sttBytes: 0 });
+      expect(r.body.date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    } finally {
+      delete process.env.OPENWOP_MEDIA_DAILY_TTS_CHARS;
+    }
+
+    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: 'media-nonadmin@example.com' }),
+    });
+    const cookie = sessionCookieOf(login);
+    const denied = await fetch(`${BASE}/v1/host/openwop-app/governance/media-budget`, { headers: { cookie } });
+    expect(denied.status).toBe(403);
+  });
+});
+
+describe('media-budget editable override (ADR 0106)', () => {
+  type Budget = { override: { ttsChars?: number; sttBytes?: number } | null; budgets: { ttsChars: number; sttBytes: number }; envDefaults?: { ttsChars: number; sttBytes: number } };
+
+  it('superadmin sets a per-org override; GET reflects it as the effective cap', async () => {
+    await __resetGovernanceStore();
+    const put = await jf<Budget>('/v1/host/openwop-app/governance/media-budget', {
+      method: 'PUT', body: JSON.stringify({ ttsChars: 4242, sttBytes: 0 }),
+    });
+    expect(put.status, JSON.stringify(put.body)).toBe(200);
+    expect(put.body.override).toEqual({ ttsChars: 4242, sttBytes: 0 });
+    const get = await jf<Budget>('/v1/host/openwop-app/governance/media-budget');
+    expect(get.body.budgets.ttsChars).toBe(4242); // effective = override
+    expect(get.body.budgets.sttBytes).toBe(0);     // 0 = uncapped for this org
+    expect(get.body.override).toEqual({ ttsChars: 4242, sttBytes: 0 });
+    await __resetGovernanceStore();
+  });
+
+  it('read-modify-write preserves OTHER policy fields (does not wipe the provider allowlist)', async () => {
+    await __resetGovernanceStore();
+    // set a provider allowlist via the policy route first
+    await jf('/v1/host/openwop-app/governance/policy', { method: 'PUT', body: JSON.stringify({ providerAllowlist: ['github'] }) });
+    // then set the media budget — must NOT drop the allowlist
+    await jf('/v1/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: 10 }) });
+    const policy = await jf<{ policy: { providerAllowlist?: string[]; mediaBudget?: { ttsChars?: number } } }>('/v1/host/openwop-app/governance/policy');
+    expect(policy.body.policy.providerAllowlist).toEqual(['github']); // preserved
+    expect(policy.body.policy.mediaBudget?.ttsChars).toBe(10);
+    await __resetGovernanceStore();
+  });
+
+  it('rejects a negative budget (400) and a non-admin (403)', async () => {
+    const bad = await jf('/v1/host/openwop-app/governance/media-budget', { method: 'PUT', body: JSON.stringify({ ttsChars: -1 }) });
+    expect(bad.status).toBe(400);
+
+    const login = await fetch(`${BASE}/v1/host/openwop-app/test/login`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ email: 'media-put-nonadmin@example.com' }),
+    });
+    const cookie = sessionCookieOf(login);
+    const denied = await fetch(`${BASE}/v1/host/openwop-app/governance/media-budget`, {
+      method: 'PUT', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ ttsChars: 5 }),
+    });
+    expect(denied.status).toBe(403);
   });
 });
 

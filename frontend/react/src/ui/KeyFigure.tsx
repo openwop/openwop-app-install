@@ -10,6 +10,7 @@
  * Token-only; no color literals.
  */
 import type { ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 
 export interface KeyFigureItem {
   /** stable key — also the filter value passed to onToggle. */
@@ -25,7 +26,7 @@ export function KeyFigureBand({
   figures,
   activeKey,
   onToggle,
-  ariaLabel = 'Key figures',
+  ariaLabel,
 }: {
   figures: KeyFigureItem[];
   /** when set (incl. null), tiles become filter toggles; null = none active. */
@@ -33,9 +34,10 @@ export function KeyFigureBand({
   onToggle?: (key: string) => void;
   ariaLabel?: string;
 }): JSX.Element {
+  const { t } = useTranslation('ui');
   const interactive = typeof onToggle === 'function';
   return (
-    <div className="figure-band" role="group" aria-label={ariaLabel}>
+    <div className="figure-band" role="group" aria-label={ariaLabel ?? t('keyFiguresLabel')}>
       {figures.map((f) => {
         const active = interactive && activeKey === f.key;
         const cls = `figure-tile${f.tone === 'attention' ? ' figure-tile--attention' : ''}${active ? ' figure-tile--active' : ''}`;

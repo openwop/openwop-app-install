@@ -1,0 +1,124 @@
+{
+  "name": "feature.notebooks.nodes",
+  "version": "1.0.0",
+  "description": "Research Notebooks feature node pack (ADR 0084) — workflow nodes over the `ctx.features.notebooks` surface. `ask` runs multi-query grounded retrieval over a notebook's bound KB sources and returns a FENCED, context-level-filtered augmented prompt + citations for a downstream callPrompt/agent (generation is run-scoped). `search` returns raw ranked hits. Transformations T1: `read-source` reads a source's full text into a chatCompletion `messages` payload and `store-summary` persists the LLM summary via the one justified surface write — with `core.ai.chatCompletion` they form the `notebooks.summarize` built-in workflow. Action nodes — they read/write the tenant notebook/KB store (a side-effect), so their outputs are recorded and replay/fork read the recorded result. Fencing + Full/Excluded/Summary context-level filtering are inherited from the HOST surface, not reimplemented here.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "notebooks", "knowledge", "rag", "research"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.notebooks.nodes.ask",
+      "version": "1.0.0",
+      "label": "Notebook Ask (grounded retrieve)",
+      "description": "Multi-query grounded retrieval over a notebook's sources via ctx.features.notebooks. Inputs: { notebookId, query | queries[], topK? }. Output: { augmentedPrompt, citations, contexts } — feed augmentedPrompt to a downstream callPrompt/agent; generation is run-scoped downstream. Fencing + Full/Excluded context-level filtering are inherited from the host surface.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.search",
+      "version": "1.0.0",
+      "label": "Notebook Search",
+      "description": "Raw ranked hits over a notebook's bound KB sources via ctx.features.notebooks.searchNotebook (excluded sources already dropped by the host). Inputs: { notebookId, query, topK? }. Output: { hits }.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.read-source",
+      "version": "1.0.0",
+      "label": "Notebook Read Source (for summarize)",
+      "description": "Reads a notebook source's full text via ctx.features.notebooks.getSourceText and emits a chatCompletion-ready messages payload (ADR 0084 Transformations T1). Inputs: { notebookId, sourceId } (via {type:'variable'} declarations). Output: { empty, messages } — wire `messages` to a downstream core.ai.chatCompletion. An empty/missing source emits { empty:true, messages:[] } for a clean no-op.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.store-summary",
+      "version": "1.0.0",
+      "label": "Notebook Store Summary",
+      "description": "Persists an LLM summary for a notebook source via ctx.features.notebooks.setSourceSummary — the one justified surface write (ADR 0084 Transformations T1). Un-gates the source's `summary` context level + recomputes the binding projection. Inputs: { notebookId, sourceId } (via {type:'variable'}) + { summary } (wire the upstream core.ai.chatCompletion `content` output to this `summary` input port). Output: { stored }. Empty summary ⇒ no-op { stored:false }.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.write-transformation",
+      "version": "1.0.0",
+      "label": "Notebook Write Transformation",
+      "description": "Persists an applied-transformation result as a Document owned by the notebook subject via ctx.features.documents.createDocument + addVersion (ADR 0084 Transformations T2) — the notebooks surface stays read-only; the write lands in Documents (the single owner of stored artifacts, the strategy create-board-memo precedent). Inputs: { orgId, title, kind, ownerSubject } (via {type:'variable'}) + { content } (wire the upstream core.ai.chatCompletion `content` output to this `content` input port). Output: { written, documentId, title }. Empty content ⇒ no-op { written:false }.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.transcribe-source",
+      "version": "1.0.0",
+      "label": "Notebook Transcribe Source (audio/video)",
+      "description": "Transcribes an uploaded audio/video source by feeding its bytes to a multimodal model via ctx.callAI with an {type:'audio'} ContentPart (RFC 0091 audio input; ADR 0085 Phase 3). No new wire surface — transcription is callAI + an audio part, not a distinct capability. Inputs: { audioBase64, mimeType, language? } (run inputs from the upload route). Config: { provider, model } (google/gemini default — audio-capable). Output: { transcript, empty }. Empty/blank audio ⇒ no-op { empty:true }.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.fetch-youtube-source",
+      "version": "1.0.0",
+      "label": "Notebook Fetch YouTube Source (captions)",
+      "description": "Fetches a YouTube video's caption track via ctx.http.safeFetch (SSRF-guarded egress, RFC 0076; ADR 0085 Phase 4) and returns the caption text as the transcript — higher-fidelity and far cheaper than STT. Inputs: { url }. Output: { transcript, empty }. Throws `no_transcript` when no caption track exists (the audio-track STT fallback is a documented deferral).",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.ingest-source",
+      "version": "1.0.0",
+      "label": "Notebook Ingest Source (transcript → KB)",
+      "description": "Persists a transcript as an ordinary notebook KB source via ctx.features.notebooks.ingestSource (untrusted; ADR 0084 deferred / ADR 0085 Phase 5). Downstream it IS a KB document — search, citations, and per-source context levels apply unchanged. Inputs: { notebookId, title, sourceType? } (via {type:'variable'}) + { text } (wire the upstream transcribe/fetch `transcript` output to this `text` input port). Output: { ingested, sourceId, title }. Empty text ⇒ no-op { ingested:false }. Wired ONLY into the upload-route ingest workflows — NOT in any chat agent's allowlist (the injection-surface guard).",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.list-notebooks",
+      "version": "1.0.0",
+      "label": "Notebook List (all)",
+      "description": "Lists the run-tenant's org-visible notebooks via ctx.features.notebooks.listNotebooks (ADR 0087 — backs the notebook-list MCP tool). No inputs. Output: { notebooks }. Read-only; org-visibility + tenant scoping inherited from the host surface.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.get-notebook",
+      "version": "1.0.0",
+      "label": "Notebook Get",
+      "description": "Gets one org-visible notebook via ctx.features.notebooks.getNotebook (ADR 0087 — backs notebook-get). Inputs: { notebookId } (via {type:'variable'}). Output: { notebook } (null when missing/private/cross-tenant). Read-only.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.list-sources",
+      "version": "1.0.0",
+      "label": "Notebook List Sources",
+      "description": "Lists a notebook's sources via ctx.features.notebooks.listSources (ADR 0087 — backs notebook-list-sources). Inputs: { notebookId } (via {type:'variable'}). Output: { sources } (each with its context level). Read-only.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.list-notes",
+      "version": "1.0.0",
+      "label": "Notebook List Notes",
+      "description": "Lists a notebook's notes via ctx.features.notebooks.listNotes (ADR 0087 — backs notebook-list-notes). Inputs: { notebookId } (via {type:'variable'}). Output: { notes }. Read-only.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.mcp-add-source",
+      "version": "1.0.0",
+      "label": "Notebook Add Source (MCP write, HITL-gated)",
+      "description": "Adds a TEXT source to a notebook via ctx.features.notebooks.ingestSource (ADR 0087 OQ-1 write tool notebook-add-source). Inputs: { notebookId, title, text } (via {type:'variable'}) + { decision } (edge from core.hitl.approval-request). Writes ONLY when decision==='accept'; otherwise a no-op { written:false, declined:true }. Output: { written, sourceId }.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.notebooks.nodes.mcp-create-note",
+      "version": "1.0.0",
+      "label": "Notebook Create Note (MCP write, HITL-gated)",
+      "description": "Adds a NOTE to a notebook via ctx.features.notebooks.addNote (ADR 0087 OQ-1 write tool notebook-create-note). Inputs: { notebookId, content } (via {type:'variable'}) + { decision } (edge from core.hitl.approval-request). Writes ONLY when decision==='accept'; otherwise a no-op { created:false, declined:true }. Output: { created }.",
+      "category": "integration",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

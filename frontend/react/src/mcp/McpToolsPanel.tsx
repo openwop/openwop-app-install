@@ -9,9 +9,11 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { listMcpTools, type McpTool } from './mcpClient.js';
 
 export function McpToolsPanel() {
+  const { t } = useTranslation('mcp');
   const [state, setState] = useState<
     { status: 'loading' } | { status: 'disabled' } | { status: 'error'; message: string } | { status: 'ready'; tools: McpTool[] }
   >({ status: 'loading' });
@@ -29,30 +31,29 @@ export function McpToolsPanel() {
 
   return (
     <div className="card">
-      <h2>MCP tools</h2>
-      {state.status === 'loading' && <div className="muted">Probing host MCP seam…</div>}
+      <h2>{t('title')}</h2>
+      {state.status === 'loading' && <div className="muted">{t('probing')}</div>}
       {state.status === 'disabled' && (
         <p className="muted u-fs-13">
-          This host doesn&apos;t expose an MCP server mount (<code>OPENWOP_MCP_SERVER_ENABLED</code> is off).
-          When enabled, the host advertises its registered workflows as MCP tools here.
+          {t('disabledPrefix')}<code>OPENWOP_MCP_SERVER_ENABLED</code>{t('disabledSuffix')}
         </p>
       )}
       {state.status === 'error' && <div className="alert error">{state.message}</div>}
       {state.status === 'ready' && state.tools.length === 0 && (
-        <p className="muted u-fs-13">MCP mount is enabled, but no tools are advertised.</p>
+        <p className="muted u-fs-13">{t('noToolsAdvertised')}</p>
       )}
       {state.status === 'ready' && state.tools.length > 0 && (
         <ul className="mcp-tool-list">
-          {state.tools.map((t) => (
-            <li key={t.name} className="mcp-tool">
+          {state.tools.map((tool) => (
+            <li key={tool.name} className="mcp-tool">
               <div className="mcp-tool-head">
-                <code className="mcp-tool-name">{t.name}</code>
+                <code className="mcp-tool-name">{tool.name}</code>
               </div>
-              {t.description && <p className="mcp-tool-desc muted">{t.description}</p>}
-              {t.inputSchema && Object.keys(t.inputSchema).length > 0 && (
+              {tool.description && <p className="mcp-tool-desc muted">{tool.description}</p>}
+              {tool.inputSchema && Object.keys(tool.inputSchema).length > 0 && (
                 <details>
-                  <summary className="muted">input schema</summary>
-                  <pre>{JSON.stringify(t.inputSchema, null, 2)}</pre>
+                  <summary className="muted">{t('inputSchema')}</summary>
+                  <pre>{JSON.stringify(tool.inputSchema, null, 2)}</pre>
                 </details>
               )}
             </li>

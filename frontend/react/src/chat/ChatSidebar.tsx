@@ -3,24 +3,47 @@
  * input) inside a vertical flex container.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { ChatHeader } from './ChatHeader.js';
-import { ChatInput } from './ChatInput.js';
-import { MessageFeed } from './MessageFeed.js';
-import { WelcomeCard } from './WelcomeCard.js';
+import { listOrgs } from '../client/promptLibraryClient.js';
+import { registerPromptCommands } from './promptCommands.js';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
+import { ConversationView } from './ConversationView.js';
 import { LeftRail, type LeftRailTab } from './leftRail/LeftRail.js';
-import { DEFAULT_ASSISTANT_ID } from './activeAgents/ActiveAgentsPanel.js';
+// ADR budget reclaim — the artifact workbench is a modal (renders only when an
+// artifact is opened); lazy-split it + its diff/revision/provenance panels out of the
+// eager chat entry chunk (the PR #804/#808 pattern).
+const ArtifactWorkbench = lazy(() => import('./artifacts/ArtifactWorkbench.js').then((m) => ({ default: m.ArtifactWorkbench })));
+// ADR 0117 Phase 3 — the read-only side-by-side compare view; lazy (zero entry-budget).
+const CompareView = lazy(() => import('./CompareView.js').then((m) => ({ default: m.CompareView })));
+// ADR 0154 — channel-only chrome; lazy so it (and channelsClient's SSE code)
+// stays out of the eager chat entry chunk (only loads when a channel is open).
+const ChannelPresenceBar = lazy(() => import('./conversations/ChannelPresenceBar.js').then((m) => ({ default: m.ChannelPresenceBar })));
+// ADR 0154 Phase 2 — channel management chrome, lazy (only mounts on demand).
+const ChannelCreateDialog = lazy(() => import('./conversations/ChannelCreateDialog.js').then((m) => ({ default: m.ChannelCreateDialog })));
+const ChannelBrowseDialog = lazy(() => import('./conversations/ChannelBrowseDialog.js').then((m) => ({ default: m.ChannelBrowseDialog })));
+const ChannelManageDialog = lazy(() => import('./conversations/ChannelManageDialog.js').then((m) => ({ default: m.ChannelManageDialog })));
+import { useReviewStatusStore, useReviewCount } from './reviews/reviewStatusStore.js';
+import { DEFAULT_ASSISTANT_ID } from './activeAgents/constants.js';
+import { useScopeToAgent } from './activeAgents/useScopeToAgent.js';
+import { SparklesIcon } from '../ui/icons/index.js';
+import { toast } from '../ui/toast.js';
 import { useChatSession } from './hooks/useChatSession.js';
 import { useChatSessions } from './hooks/useChatSessions.js';
-import { findCommand } from './registry/CommandRegistry.js';
+import { useComposerModifiers } from './hooks/useComposerModifiers.js';
+import { useConversationActions } from './hooks/useConversationActions.js';
 import { registerDefaultCommands } from './registry/defaultCommands.js';
-import { getProvider } from '../byok/lib/providers.js';
+import { resolveActiveModel } from '../byok/lib/providers.js';
 import type { BYOKActiveConfig } from '../byok/lib/useBYOKConfig.js';
 import type { ContentPart } from './hooks/useChatSession.js';
-import { buildAvailableTools } from './lib/availableTools.js';
-import { detectWorkflowSlashMention } from './lib/workflowMentions.js';
-import { detectAgentMention, useAgentMentions } from './lib/agentMentions.js';
+import { runCoreSubmit } from './lib/chatSubmit.js';
+import { useAgentMentions } from './lib/agentMentions.js';
+import { buildBoardInterceptor, buildProjectConveneInterceptor, runProjectConvene, type ConveneDeps } from './conversations/convene.js';
+import { useBoardroomCadence } from './conversations/useBoardroomCadence.js';
+import { participantsToLineup } from './conversations/participantLineup.js';
+import { useChannelMessageStream } from './conversations/useChannelMessageStream.js';
 
 // localStorage keys for rail persistence — keeps the user's "which
 // tab" / "which run is focused" choice across page reloads.
@@ -29,11 +52,6 @@ import { detectAgentMention, useAgentMentions } from './lib/agentMentions.js';
 // each other's state leak into their UI.
 const LS_RAIL_TAB_PREFIX = 'openwop-app.chat.leftRail.activeTab';
 const LS_PROGRESS_FOCUSED_PREFIX = 'openwop-app.chat.progressPanel.focusedRunMsgId';
-// Legacy keys — pre-consolidation, History/Progress/Agents each had
-// their own open boolean. Read once on first mount per tenant to
-// migrate, then removed. Predates the LeftRail consolidation.
-const LS_LEGACY_PROGRESS_OPEN_PREFIX = 'openwop-app.chat.progressPanel.open';
-const LS_LEGACY_AGENTS_OPEN_PREFIX = 'openwop-app.chat.activeAgentsPanel.open';
 const MOBILE_BREAKPOINT_PX = 720;
 
 function railTabKey(tenantId: string): string {
@@ -46,20 +64,13 @@ function progressFocusedKey(tenantId: string): string {
 function readRailTabFromStorage(tenantId: string): LeftRailTab | null {
   try {
     const v = localStorage.getItem(railTabKey(tenantId));
-    if (v === 'history' || v === 'progress' || v === 'agents') return v;
-    // First mount after upgrade — migrate from the legacy two-boolean
-    // shape. Progress wins over Agents because the auto-open-on-new-
-    // workflow_run behavior makes Progress the more likely "last-open"
-    // panel for active users.
-    const legacyProgress = localStorage.getItem(`${LS_LEGACY_PROGRESS_OPEN_PREFIX}:${tenantId}`);
-    const legacyAgents = localStorage.getItem(`${LS_LEGACY_AGENTS_OPEN_PREFIX}:${tenantId}`);
-    let migrated: LeftRailTab | null = null;
-    if (legacyProgress === '1') migrated = 'progress';
-    else if (legacyAgents === '1') migrated = 'agents';
-    if (legacyProgress !== null) localStorage.removeItem(`${LS_LEGACY_PROGRESS_OPEN_PREFIX}:${tenantId}`);
-    if (legacyAgents !== null) localStorage.removeItem(`${LS_LEGACY_AGENTS_OPEN_PREFIX}:${tenantId}`);
-    if (migrated !== null) localStorage.setItem(railTabKey(tenantId), migrated);
-    return migrated;
+    if (v === 'progress') return 'progress';
+    if (v === 'reviews') return 'reviews';
+    // Any prior tab id (the retired 'history'/'agents', or 'conversations')
+    // maps to the single Conversations rail that replaced them (ADR 0043
+    // legacy-drawer retirement).
+    if (v === 'conversations' || v === 'history' || v === 'agents') return 'conversations';
+    return null;
   } catch { return null; }
 }
 
@@ -73,9 +84,7 @@ function writeStorage(key: string, value: string | null): void {
 /** Drop tenant-suffixed rail keys that don't match the current
  *  tenant. Switching identity in the same browser would otherwise
  *  leave the old tenant's entries behind forever. Called once on
- *  mount per ChatSidebar instance. Also sweeps legacy panel-open
- *  keys for tenants other than the current one (current-tenant
- *  legacy keys are migrated, not pruned, by `readRailTabFromStorage`). */
+ *  mount per ChatSidebar instance. */
 function pruneStalePanelKeys(currentTenantId: string): void {
   try {
     const keep = new Set([
@@ -85,8 +94,6 @@ function pruneStalePanelKeys(currentTenantId: string): void {
     const prefixes = [
       `${LS_RAIL_TAB_PREFIX}:`,
       `${LS_PROGRESS_FOCUSED_PREFIX}:`,
-      `${LS_LEGACY_PROGRESS_OPEN_PREFIX}:`,
-      `${LS_LEGACY_AGENTS_OPEN_PREFIX}:`,
     ];
     const toRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -111,7 +118,23 @@ interface Props {
 }
 
 export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'demo' }: Props): JSX.Element {
-  const { session, isSending, error, send, cancel, emitSystem, reset, resolveInterrupt, runWorkflowMention, cancelWorkflowRun, regenerate, setFeedback, loadSessionFromBackend, activeAgents } = useChatSession();
+  const { t } = useTranslation('chat');
+  const { session, isSending, thinkingAgentId, error, send, cancel, emitSystem, reset, resolveInterrupt, runWorkflowMention, cancelWorkflowRun, regenerate, setFeedback, loadSessionFromBackend, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents } = useChatSession();
+  // ADR 0116 Phase 3c — when the prompt library is enabled, register the org's
+  // prompts as `/p-<slug>` slash commands (best-effort; scoped to the primary org).
+  // They surface in the existing SlashAutocomplete — no bespoke composer affordance.
+  const promptsAccess = { enabled: true }; // always-on
+  const exportAccess = { enabled: true }; // always-on
+  const sharingAccess = useFeatureAccess('sharing'); // ADR 0122 — gates the Share item (default OFF)
+  useEffect(() => {
+    if (!promptsAccess.enabled) return;
+    void (async () => {
+      try {
+        const orgId = (await listOrgs())[0]?.orgId;
+        if (orgId) await registerPromptCommands(orgId);
+      } catch { /* prompts are an optional surface — ignore a fetch failure */ }
+    })();
+  }, [promptsAccess.enabled]);
   // Stable regenerate handler (GAP-ANALYSIS E14): an inline arrow here made a
   // new function each render, defeating MessageBubble's memo. useCallback keeps
   // it referentially stable across streaming tokens (config is unchanged
@@ -130,22 +153,33 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
   // refresh doesn't re-activate and the URL stays clean. Entry-gated: an
   // unknown/legacy id simply no-ops (the catalog re-runs this effect as it
   // loads, so an early mount before `agentEntries` arrives still resolves).
+  // Read the `?agent=` deep-link ONCE per value into local state and strip the
+  // param immediately; useScopeToAgent (ADR 0073 Phase 2) owns the entry-gated,
+  // once-only activation so a refresh doesn't re-activate and the URL stays clean.
+  // The id lives in component state, not the URL, so stripping it can't race the
+  // catalog still loading.
   const [searchParams, setSearchParams] = useSearchParams();
-  const deepLinkAgentHandled = useRef<string | null>(null);
+  const [scopeAgentId, setScopeAgentId] = useState<string | null>(null);
+  useScopeToAgent(activeAgents, agentEntries, scopeAgentId);
+  const agentParamHandled = useRef<string | null>(null);
   useEffect(() => {
     const wanted = searchParams.get('agent');
-    if (!wanted || deepLinkAgentHandled.current === wanted) return;
-    const entry = agentEntries.find((e) => e.agentId === wanted || e.slug === wanted.toLowerCase());
-    if (!entry) return; // catalog may still be loading; this effect re-runs when it arrives
-    deepLinkAgentHandled.current = wanted;
-    activeAgents.activateAgent(entry);
+    if (!wanted || agentParamHandled.current === wanted) return;
+    agentParamHandled.current = wanted;
+    setScopeAgentId(wanted);
     const next = new URLSearchParams(searchParams);
     next.delete('agent');
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams, agentEntries, activeAgents]);
+  }, [searchParams, setSearchParams]);
   const sessionsCollection = useChatSessions();
-  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
-  const [toolsEnabled, setToolsEnabled] = useState(false);
+  // ADR 0043 Phase 5A: the sequential boardroom cadence. Only ever started from
+  // a `@@<board>` summon, so a normal chat is untouched. Drives one advisor turn
+  // at a time off the completion of the prior turn.
+  const personaOf = useCallback(
+    (agentId: string) => activeAgents.lineup.find((a) => a.agentId === agentId)?.persona ?? t('advisorFallbackPersona'),
+    [activeAgents.lineup, t],
+  );
+  const cadence = useBoardroomCadence({ isSending, errored: error !== null, send, personaOf });
   const [activeRailTab, setActiveRailTab] = useState<LeftRailTab | null>(
     () => readRailTabFromStorage(tenantId),
   );
@@ -153,7 +187,7 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
   // the rail to whichever panel the user was last looking at, rather
   // than forcing them through a default tab every time.
   const [lastRailTab, setLastRailTab] = useState<LeftRailTab>(
-    () => readRailTabFromStorage(tenantId) ?? 'history',
+    () => readRailTabFromStorage(tenantId) ?? 'conversations',
   );
   const [focusedWorkflowMessageId, setFocusedWorkflowMessageId] = useState<string | null>(() => {
     try { return localStorage.getItem(progressFocusedKey(tenantId)); } catch { return null; }
@@ -182,6 +216,56 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
   useEffect(() => {
     pruneStalePanelKeys(tenantId);
   }, [tenantId]);
+
+  // One-shot remedial cleanup: HARD-DELETE the empty (messageCount:0)
+  // conversations that the old reset()-eagerly-creates behavior left behind, so
+  // the history rail stops showing a wall of abandoned "New chat" rows. Guarded
+  // by a per-tenant localStorage flag so it runs exactly once per browser — it
+  // is NOT an ongoing sweep (the reset() fix already stops new empties; the
+  // rail's display filter masks any stragglers). The active session is always
+  // spared (it may be a fresh chat the user is about to type into). Deletes are
+  // idempotent server-side (a `not_found` is treated as already-gone), so a
+  // reload mid-purge just finishes the remainder.
+  const purgedEmptyRef = useRef(false);
+  useEffect(() => {
+    if (purgedEmptyRef.current || sessionsCollection.isLoading) return;
+    const flagKey = `openwop-app.chat.purgedEmpty:${tenantId}`;
+    try { if (localStorage.getItem(flagKey)) { purgedEmptyRef.current = true; return; } } catch { /* disabled — skip */ }
+    purgedEmptyRef.current = true;
+    const empties = sessionsCollection.sessions.filter(
+      (s) => s.messageCount === 0 && s.sessionId !== session.id,
+    );
+    void (async () => {
+      for (const e of empties) {
+        try { await sessionsCollection.remove(e.sessionId); } catch { /* best-effort; the rail filter still hides it */ }
+      }
+      try { localStorage.setItem(flagKey, '1'); } catch { /* disabled — a later mount retries */ }
+    })();
+  }, [tenantId, sessionsCollection.isLoading, sessionsCollection.sessions, sessionsCollection.remove, session.id]);
+
+  // ADR 0068/0070 — the unified review inbox (rail tab) + its pending-count badge,
+  // and ADR 0069 — the artifact workbench opened from a review pinned to an
+  // artifact. ADR 0074 — the badge reads the shared reviewStatusStore (the single
+  // source of truth), kept live by the broadcast signal. The rail connects here
+  // (ref-counted) so the badge stays current even when the Reviews tab is closed;
+  // re-connect on tenant change re-hydrates for the new scope.
+  const reviewCount = useReviewCount();
+  const connectReviews = useReviewStatusStore((s) => s.connect);
+  const disconnectReviews = useReviewStatusStore((s) => s.disconnect);
+  const refreshReviews = useReviewStatusStore((s) => s.refresh);
+  const [openArtifact, setOpenArtifact] = useState<{ artifactId: string; revisionId?: string } | null>(null);
+  useEffect(() => {
+    void connectReviews();
+    return () => disconnectReviews();
+  }, [connectReviews, disconnectReviews]);
+  // Re-hydrate for the new scope on a tenant switch (connect()'s ref-count would
+  // otherwise skip the refresh if the Reviews tab is also mounted). Skips the
+  // initial mount, where connect() already hydrated.
+  const tenantHydrated = useRef(false);
+  useEffect(() => {
+    if (!tenantHydrated.current) { tenantHydrated.current = true; return; }
+    void refreshReviews();
+  }, [tenantId, refreshReviews]);
 
   // Workflow_run messages in this session — feed into the panel +
   // run-switcher. Most-recent first so the run-switcher row order
@@ -259,14 +343,57 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
     setLastRailTab('progress');
   }, []);
 
-  // Per-turn capability hints sourced from providers.json for the active model.
-  const activeModel = (() => {
-    try {
-      return getProvider(config.provider).models.find((m) => m.id === config.model) ?? null;
-    } catch {
-      return null;
+  // Open a persisted conversation: load its messages, then DERIVE the active-
+  // agents lineup from its server-side participants (ADR 0043 — so the lineup
+  // survives a cross-device reload instead of starting empty), mark it read, and
+  // collapse the rail. Shared by the Conversations rail + the legacy history
+  // drawer so both behave identically.
+  const selectConversation = useCallback(async (id: string) => {
+    await loadSessionFromBackend(id);
+    const conv = sessionsCollection.sessions.find((s) => s.sessionId === id);
+    if (conv?.participants && conv.participants.length > 0) {
+      activeAgents.setLineup(participantsToLineup(conv.participants, (agentId) => {
+        const e = agentEntries.find((x) => x.agentId === agentId);
+        return e ? { persona: e.displayName, slug: e.slug, modelClass: e.modelClass } : null;
+      }));
     }
-  })();
+    void sessionsCollection.markRead(id);
+    selectRailTab(null);
+    // activeAgents.setLineup is stable; the lineup churns each render so depend on
+    // the stable member, not the whole object.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadSessionFromBackend, sessionsCollection, agentEntries, activeAgents.setLineup, selectRailTab]);
+
+  // ADR 0140 parity — the SHARED per-conversation actions (branch · branch-from ·
+  // import · export · share + compare state), factored into a hook so the standalone
+  // sidebar and each multi-tab TabSession run identical handlers. The standalone opens
+  // a result in-place (selectConversation) and refreshes its own list.
+  const { onBranch, onBranchFrom, onImport, onExport, onShare, compareOpen, openCompare, closeCompare } = useConversationActions({
+    sessionId: session.id,
+    refreshList: sessionsCollection.refresh,
+    onOpenConversation: selectConversation,
+  });
+
+  // ADR 0054 D3 — deep-link a specific conversation (e.g. "Open project chat"):
+  // `/chat?conversation=<sessionId>` opens it once it has loaded into the sidebar
+  // list, then strips the param. Mirrors the `?agent=` deep-link above.
+  const deepLinkConvHandled = useRef<string | null>(null);
+  useEffect(() => {
+    const wanted = searchParams.get('conversation');
+    if (!wanted || deepLinkConvHandled.current === wanted) return;
+    if (!sessionsCollection.sessions.some((s) => s.sessionId === wanted)) return; // list may still be loading
+    deepLinkConvHandled.current = wanted;
+    void selectConversation(wanted);
+    const next = new URLSearchParams(searchParams);
+    next.delete('conversation');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, sessionsCollection.sessions, selectConversation]);
+
+
+  // Per-turn capability hints sourced from providers.json for the active model.
+  // Falls back to the provider default when `config.model` is stale (renamed/removed by a
+  // catalog refresh) so the capability-gated composer controls don't vanish — see resolveActiveModel.
+  const activeModel = resolveActiveModel(config.provider, config.model);
   const supportsAudioInput = activeModel?.audioInput === true;
   // Image (vision) input is the model's `vision` capability. PDFs ride the
   // same native document channel only on Anthropic + Gemini in our dispatcher
@@ -279,105 +406,111 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
   // Tool calling is gated to Anthropic in the backend dispatcher
   // (OpenAI / Google have their own wire shapes — see
   // backend/.../bootstrap/nodes.ts useTools).
-  // Tools support is per-model. Anthropic Claude 4 models, MiniMax-M2,
+  // Tools support is per-model. Anthropic Claude 4 models, MiniMax-M2.7,
   // and any future provider whose adapter we wire all declare `tools`
   // in providers.json. The provider-level check we had before was a
   // proxy for "Anthropic-only" — replaced with a real capability lookup
   // so MiniMax (the managed Try-it-free path) unlocks tool-use too.
   const supportsTools = activeModel?.capabilities?.includes('tools') === true;
 
-  const disabledReason = isSending ? 'A turn is in flight — wait for the response.' : undefined;
+  // ADR 0140 — the SHARED next-turn composer controls (web search · tools ·
+  // capability scope) + the per-exchange model switcher, factored into a hook so the
+  // standalone sidebar and each multi-tab TabSession render identical modifiers and
+  // thread identical send options. `getSubmitExtras` is the `baseSendOptions` below.
+  const { composerModifiers, modelSwitcher, getSubmitExtras } = useComposerModifiers({
+    sessionId: session.id, supportsWebSearch, supportsTools, activeProvider: config.provider,
+  });
 
-  /** Submit path. Dispatch precedence (highest first):
-   *    1. Built-in `/command` (registered in CommandRegistry).
-   *       Always takes precedence over a same-name workflow so a
-   *       workflow can't shadow `/clear` / `/help` / `/stop`.
-   *    2. `/<slug>` workflow mention (canonical workflow syntax).
-   *    3. `@<slug>` agent mention — phase D3 will activate the agent
-   *       in the active-agents side panel; until then the `@` text
-   *       falls through to (4) so the message still sends, just as
-   *       a regular chat turn that happens to mention the agent's
-   *       persona name.
-   *    4. Otherwise fall through to `send()` (regular LLM chat;
-   *       Anthropic tool-use can still dispatch workflows via the
-   *       `availableTools` path on its own).
-   *
-   *  Attachments short-circuit 1-3 (workflow + command + agent
-   *  surfaces are text-only) and route to `send` directly. */
+  // ADR 0054 D6 — the active conversation's owning project (a `project:<id>`
+  // Subject), when this is a project group chat; drives the "Convene the team"
+  // affordance below.
+  const activeConversation = sessionsCollection.sessions.find((s) => s.sessionId === session.id);
+  const conveneProjectId = activeConversation?.ownerSubject?.kind === 'project' ? activeConversation.ownerSubject.id : null;
+  const conveneAgentCount = (activeConversation?.participants ?? []).filter((p) => p.subjectRef.startsWith('agent:')).length;
+
+  // ADR 0154 Phase 2 — channel management chrome. Owner-gating is server-side
+  // (the manage dialog reads `viewerIsOwner` from GET /:id); nothing here needs
+  // to know the caller identity.
+  const isChannelActive = activeConversation?.type === 'channel';
+  // ADR 0154 FU-6 — live channel message delivery (debounced reload on each frame).
+  useChannelMessageStream(session.id, isChannelActive, loadSessionFromBackend);
+  const [showCreateChannel, setShowCreateChannel] = useState(false);
+  const [showBrowseChannels, setShowBrowseChannels] = useState(false);
+  const [showChannelDetails, setShowChannelDetails] = useState(false);
+  const onChannelCreated = useCallback((channelId: string) => {
+    void (async () => {
+      await sessionsCollection.refresh();
+      void selectConversation(channelId);
+    })();
+  }, [sessionsCollection, selectConversation]);
+
+  // Convene/board deps (ADR 0140 G3) — the SHARED interceptors (chat/conversations/
+  // convene.ts) run on THIS surface's activeAgents/cadence/send/session, so convened
+  // turns land here. `session.id` is read live (getSessionId) so a board attach targets
+  // the CURRENT chat after a reset/switch.
+  const sessionId = session.id;
+  const conveneDeps: ConveneDeps = useMemo(() => ({
+    agentEntries,
+    activeAgents: { activateAgent: activeAgents.activateAgent, switchTo: activeAgents.switchTo },
+    cadenceStart: cadence.start,
+    send, config, emitSystem, t,
+    attachBoard: sessionsCollection.attachBoard,
+    getSessionId: () => sessionId,
+    conveneProjectId,
+  }), [agentEntries, activeAgents.activateAgent, activeAgents.switchTo, cadence.start, send, config, emitSystem, t, sessionsCollection.attachBoard, sessionId, conveneProjectId]);
+
+  // The "Convene the team" button (ADR 0054 D6) calls this directly.
+  const conveneProject = useCallback((topic: string) => runProjectConvene(topic, conveneDeps), [conveneDeps]);
+  const conveneInterceptor = useMemo(() => buildProjectConveneInterceptor(conveneDeps), [conveneDeps]);
+  const boardInterceptor = useMemo(() => buildBoardInterceptor(conveneDeps), [conveneDeps]);
+
+  /** Submit path (ADR 0140 G1): the shared CORE (command → /workflow → @agent → send)
+   *  with the full surface's convene/board interceptors + per-turn send options
+   *  (web-search / model / tools). Depends on the stable `activeAgents` MEMBERS, not the
+   *  churning object. */
+  // Hide empty (messageCount:0) conversations from the history rail — an
+  // abandoned "New chat" never earns a slot. The currently-active session is
+  // always kept (it may be a fresh chat the user is about to type into). This is
+  // a DISPLAY guard that also masks any pre-existing empty rows created before
+  // the reset()-no-longer-eagerly-creates fix; it deletes nothing server-side.
+  const visibleConversations = useMemo(
+    () => sessionsCollection.sessions.filter((s) => s.messageCount > 0 || s.sessionId === session.id),
+    [sessionsCollection.sessions, session.id],
+  );
+
   const onUserSubmit = useCallback(async (text: string, attachments?: readonly ContentPart[]) => {
-    // 1. Built-in slash command — registered commands win over
-    //    workflows of the same slug so `/clear` is never overridable.
-    const cmd = findCommand(text);
-    if (cmd && !attachments) {
-      const consumed = await cmd.reg.handler(cmd.args, {
-        send: (msg) => send(msg, config),
-        reset,
-        cancel,
-        config,
-        emitSystem,
-      });
-      if (consumed) return;
-    }
-    if (!attachments) {
-      // 2. `/<slug>` → workflow dispatch. Only fires when (1) didn't
-      //    match — `findCommand` returned null, so the slash text
-      //    isn't a registered command.
-      const slashMatch = detectWorkflowSlashMention(text);
-      if (slashMatch) {
-        await runWorkflowMention(slashMatch.entry, slashMatch.trailing ?? undefined);
-        return;
+    // ADR 0154 — a channel (`type:'channel'`) posts to the channels host-ext
+    // route, NOT a chat.turn run. The submit diverges HERE in the surface so
+    // ConversationView stays generic (ADR 0073). v1 is text-only (attachments
+    // are dropped); there is no message-delivery SSE, so we reload after posting
+    // (parity with the retired standalone view). @agent → server-side turn is
+    // Phase 4.
+    if (activeConversation?.type === 'channel') {
+      const body = text.trim();
+      // v1 is text-only — warn rather than silently drop an attachment (the
+      // composer has already cleared it), then return if there's no text.
+      if (attachments?.length) toast.error(t('channelTextOnly'));
+      if (!body) return;
+      try {
+        const { postChannelMessage } = await import('../client/channelsClient.js');
+        await postChannelMessage(session.id, body);
+        await loadSessionFromBackend(session.id);
+        void sessionsCollection.markRead(session.id);
+        void sessionsCollection.refresh();
+      } catch {
+        // A failed post (403/429/network) must surface — the old standalone view
+        // toasted; the unified surface does too (the composer already cleared).
+        toast.error(t('channelPostError'));
       }
+      return;
     }
-    // 3. `@<slug>` agent activation (phase D3). First-time mention
-    //    adds the agent to the lineup AND switches to it; subsequent
-    //    mentions of the same agent just switch. The activation
-    //    mutates session state; we then fall through to (4) so the
-    //    send goes through with the newly-routed agent id.
-    let activeAgentIdForThisTurn: string | undefined;
-    if (!attachments) {
-      const agentMatch = detectAgentMention(text, agentEntries);
-      if (agentMatch) {
-        activeAgentIdForThisTurn = activeAgents.activateAgent(agentMatch.entry);
-        // The mention text stays in the chat as-is — users see
-        // `@code-reviewer ...` in their own message, matching the
-        // group-chat mental model. Trailing text is the actual
-        // turn content; bare `@code-reviewer` (no trailing) sends
-        // an empty turn which is fine — most chat models treat
-        // that as a re-greet from the new persona.
-      }
-    }
-    // 4. Regular chat. Anthropic-side tool-use can still dispatch
-    //    workflows the model decides to invoke based on availableTools.
-    //    Phase D2: thread the currently-routing agent through to the
-    //    chat-responder so the LLM takes on the agent's persona.
-    //
-    //    Precedence on `activeAgentId`:
-    //    - The just-activated agent from step (3) wins, because the
-    //      activation's `setSession` may not have committed before
-    //      this turn dispatches (React state is async). Reading
-    //      `activeAgents.currentAgentId` post-activation can return
-    //      the old value for one render. The explicit return value
-    //      from `activateAgent` dodges that race.
-    //    - Otherwise fall back to the current routing agent.
-    //    - Default to undefined when the assistant is current; the
-    //      chat-responder's default system-prompt path then runs.
-    const activeAgentId =
-      activeAgentIdForThisTurn ??
-      (activeAgents.currentAgentId !== DEFAULT_ASSISTANT_ID
-        ? activeAgents.currentAgentId
-        : undefined);
-    await send(text, config, {
-      attachments,
-      webSearch: webSearchEnabled && supportsWebSearch,
-      tools: toolsEnabled && supportsTools ? buildAvailableTools() : undefined,
-      ...(activeAgentId ? { activeAgentId } : {}),
-    });
-    // Intentionally depends on the specific stable activeAgents MEMBERS
-    // (currentAgentId, activateAgent) rather than the whole `activeAgents`
-    // object, whose identity churns each render and would needlessly recreate
-    // this callback. (GAP-ANALYSIS code-review)
+    await runCoreSubmit(text, attachments, {
+      config, send, reset, cancel, emitSystem, runWorkflowMention, activeAgents, agentEntries,
+      baseSendOptions: getSubmitExtras,
+      onAgentActivated: (agentId) => { void sessionsCollection.addParticipant(session.id, `agent:${agentId}`); },
+    }, [conveneInterceptor, boardInterceptor]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [send, cancel, reset, emitSystem, config, webSearchEnabled, supportsWebSearch, toolsEnabled, supportsTools, runWorkflowMention, activeAgents.currentAgentId, activeAgents.activateAgent, agentEntries]);
+  }, [send, cancel, reset, emitSystem, config, getSubmitExtras, runWorkflowMention, activeAgents.currentAgentId, activeAgents.activateAgent, agentEntries, session.id, sessionsCollection.addParticipant, conveneInterceptor, boardInterceptor, activeConversation?.type, loadSessionFromBackend, sessionsCollection.markRead, sessionsCollection.refresh, t]);
 
   return (
     <div className="u-flex u-flex-1 u-minh-0 u-border u-radius u-bg-surface u-overflow-hidden u-relative">
@@ -385,13 +518,13 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
         activeTab={activeRailTab}
         onSelectTab={selectRailTab}
         isMobile={isMobile}
-        historyProps={{
-          sessions: sessionsCollection.sessions,
+        conversationsProps={{
+          conversations: visibleConversations,
           isLoading: sessionsCollection.isLoading,
           error: sessionsCollection.error,
           activeSessionId: session.id,
           onRefresh: sessionsCollection.refresh,
-          onSelect: (id) => { void loadSessionFromBackend(id); selectRailTab(null); },
+          onSelect: (id) => { void selectConversation(id); },
           onRename: sessionsCollection.rename,
           onDelete: async (id) => {
             await sessionsCollection.remove(id);
@@ -399,6 +532,23 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
             // a fresh local chat so the message feed isn't orphaned.
             if (id === session.id) reset();
           },
+          // The open conversation's live participants — folds in the active-
+          // agents panel's controls (switch routing voice / drop an agent).
+          lineup: activeAgents.lineup,
+          currentAgentId: activeAgents.currentAgentId ?? DEFAULT_ASSISTANT_ID,
+          thinkingAgentId,
+          onSwitchAgent: activeAgents.switchTo,
+          onRemoveAgent: (agentId) => { activeAgents.remove(agentId); void sessionsCollection.removeParticipant(session.id, `agent:${agentId}`); },
+          onNewChat: () => { cadence.cancel(); reset(); selectRailTab(null); },
+          onOpenWorkspace: () => {
+            void (async () => {
+              const conv = await sessionsCollection.openWorkspace();
+              if (conv) void selectConversation(conv.sessionId);
+              else emitSystem(t('noWorkspaceAssistant'));
+            })();
+          },
+          onCreateChannel: () => setShowCreateChannel(true),
+          onBrowseChannels: () => setShowBrowseChannels(true),
         }}
         progressProps={{
           workflowRunMessages,
@@ -406,64 +556,105 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
           onFocus: (id) => setFocusedWorkflowMessageId(id),
           onCancel: cancelWorkflowRun,
         }}
-        agentsProps={{
-          lineup: activeAgents.lineup,
-          currentAgentId: activeAgents.currentAgentId ?? DEFAULT_ASSISTANT_ID,
-          onSwitch: activeAgents.switchTo,
-          onRemove: activeAgents.remove,
+        reviewsProps={{
+          onOpenRun: openProgressForRun,
+          onOpenArtifact: (artifactId, revisionId) => setOpenArtifact({ artifactId, ...(revisionId ? { revisionId } : {}) }),
         }}
         progressBadgeCount={workflowRunMessages.length}
-        agentsBadgeCount={Math.max(0, activeAgents.lineup.length - 1)}
+        reviewsBadgeCount={reviewCount}
       />
+      {openArtifact ? (
+        <Suspense fallback={null}>
+          <ArtifactWorkbench
+            artifactId={openArtifact.artifactId}
+            {...(openArtifact.revisionId ? { revisionId: openArtifact.revisionId } : {})}
+            onClose={() => setOpenArtifact(null)}
+          />
+        </Suspense>
+      ) : null}
+      {compareOpen ? (
+        <Suspense fallback={null}>
+          <CompareView currentSessionId={session.id} onClose={closeCompare} />
+        </Suspense>
+      ) : null}
+      {showCreateChannel ? (
+        <Suspense fallback={null}>
+          <ChannelCreateDialog onClose={() => setShowCreateChannel(false)} onCreated={onChannelCreated} />
+        </Suspense>
+      ) : null}
+      {showBrowseChannels ? (
+        <Suspense fallback={null}>
+          <ChannelBrowseDialog
+            onClose={() => setShowBrowseChannels(false)}
+            onOpen={(id) => { void selectConversation(id); }}
+            onJoined={onChannelCreated}
+          />
+        </Suspense>
+      ) : null}
+      {showChannelDetails && isChannelActive ? (
+        <Suspense fallback={null}>
+          <ChannelManageDialog
+            channelId={session.id}
+            onClose={() => setShowChannelDetails(false)}
+            onChanged={() => sessionsCollection.refresh()}
+            onArchived={() => { reset(); }}
+          />
+        </Suspense>
+      ) : null}
       <div className="u-flex-1 u-flex u-flex-col u-minw-0">
         <ChatHeader
           config={config}
           onOpenSettings={onOpenSettings}
           onRemoveKey={onRemoveKey}
-          onNewChat={reset}
+          onNewChat={() => { cadence.cancel(); reset(); }}
+          onBranch={() => { void onBranch(); }}
+          onCompare={openCompare}
+          {...(exportAccess.enabled ? { onExport: (format: 'md' | 'json') => { void onExport(format); }, onImport: (f: File) => { void onImport(f); } } : {})}
+          {...(sharingAccess.enabled ? { onShare: () => { void onShare(); } } : {})}
           session={session}
-          webSearchEnabled={webSearchEnabled}
-          onToggleWebSearch={supportsWebSearch ? () => setWebSearchEnabled((v) => !v) : null}
-          toolsEnabled={toolsEnabled}
-          onToggleTools={supportsTools ? () => setToolsEnabled((v) => !v) : null}
+          modelSwitcher={modelSwitcher}
           railOpen={activeRailTab !== null}
           onToggleRail={() => selectRailTab(activeRailTab === null ? lastRailTab : null)}
           railBadgeCount={workflowRunMessages.length + Math.max(0, activeAgents.lineup.length - 1)}
+          {...(isChannelActive ? { onOpenChannelDetails: () => setShowChannelDetails(true) } : {})}
         />
 
-        {session.messages.length === 0 ? (
-          <div className="u-flex-1 u-overflow-y-auto">
-            <WelcomeCard onPickSuggestion={(text) => onUserSubmit(text)} />
-          </div>
-        ) : (
-          <MessageFeed
-            messages={session.messages}
-            tenantId={tenantId}
-            onResolveInterrupt={resolveInterrupt}
-            onOpenWorkflowProgress={openProgressForRun}
-            focusedWorkflowMessageId={activeRailTab === 'progress' ? focusedWorkflowMessageId : null}
-            onRegenerate={onRegenerate}
-            onFeedback={setFeedback}
-            onReconfigureBYOK={onOpenSettings}
-          />
-        )}
+        {activeConversation?.type === 'channel' ? (
+          <Suspense fallback={null}><ChannelPresenceBar channelId={session.id} /></Suspense>
+        ) : null}
 
-        {error && (
-          <div className="alert error u-m-2 u-fs-12">{error}</div>
-        )}
-
-        <div className="u-p-3 u-border-t">
-          <ChatInput
-            onSend={onUserSubmit}
-            onCancel={cancel}
-            disabled={isSending}
-            disabledReason={disabledReason}
-            placeholder={isSending ? 'Generating… (Esc to stop)' : 'Type / for commands + workflows, @ for agents, or just chat…'}
-            supportsAudioInput={supportsAudioInput}
-            supportsImageInput={supportsImageInput}
-            supportsPdfInput={supportsPdfInput}
-          />
-        </div>
+        <ConversationView
+          messages={session.messages}
+          tenantId={tenantId}
+          draftKey={`openwop-app.chat.draft:${tenantId}:${session.id}`}
+          {...(scopeAgentId ? { voiceAgentId: scopeAgentId } : {})}
+          error={error}
+          isSending={isSending}
+          onPickSuggestion={(text) => onUserSubmit(text)}
+          onSend={onUserSubmit}
+          onCancel={cancel}
+          supportsAudioInput={supportsAudioInput}
+          supportsImageInput={supportsImageInput}
+          supportsPdfInput={supportsPdfInput}
+          composerModifiers={composerModifiers}
+          onResolveInterrupt={resolveInterrupt}
+          progress={{ focusedMessageId: activeRailTab === 'progress' ? focusedWorkflowMessageId : null, onOpen: openProgressForRun }}
+          onRegenerate={onRegenerate}
+          onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}
+          onFeedback={setFeedback}
+          onReconfigureBYOK={onOpenSettings}
+          hasOlderMessages={hasOlderMessages}
+          isLoadingEarlier={isLoadingEarlier}
+          onLoadEarlier={loadEarlierMessages}
+          footerSlot={conveneProjectId && conveneAgentCount > 0 ? (
+            <div className="u-flex u-items-center u-wrap u-gap-2 u-pad-2-4 u-fs-12 muted">
+              <button type="button" className="secondary btn-sm" disabled={isSending} onClick={() => void conveneProject('')}>
+                <SparklesIcon size={13} /> {t('conveneTheTeam')}
+              </button>
+              <span>{t('conveneHelpPrefix')}<code>@@</code>{t('conveneHelpSuffix')}</span>
+            </div>
+          ) : null}
+        />
       </div>
     </div>
   );

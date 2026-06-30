@@ -297,6 +297,29 @@ export const mockAgentNode: NodeModule = {
   },
 };
 
+/**
+ * Whether the conformance-only node typeIds (`core.conformance.mock-agent`,
+ * `conformance.secret.echo`, `conformance.cost.emit`,
+ * `conformance.requiresMissing`, `conformance.modelCapability.insufficient`)
+ * and their capability advertisement should be active.
+ *
+ * The reference host runs the OpenWOP conformance suite, so these are ON by
+ * default for dev/test/conformance. They are OFF by default under
+ * `NODE_ENV=production` — a fork that deploys this codebase to production no
+ * longer exposes `conformance.secret.echo` & friends as live, executable
+ * typeIds unless it explicitly opts back in. The app.openwop.dev reference
+ * deploy, which is *meant* to advertise conformance, sets
+ * `OPENWOP_ENABLE_CONFORMANCE_NODES=true`. This is the single switch both the
+ * registration (bootstrap/nodes.ts) and the advertisement (routes/discovery.ts)
+ * read, so they cannot drift.
+ */
+export function conformanceNodesEnabled(): boolean {
+  const flag = process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
+  if (flag === 'true') return true;
+  if (flag === 'false') return false;
+  return process.env.NODE_ENV !== 'production';
+}
+
 let registered = false;
 
 /**

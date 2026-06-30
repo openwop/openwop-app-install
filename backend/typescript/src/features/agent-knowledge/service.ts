@@ -23,7 +23,14 @@ import {
   getAgentProfile,
   setAgentKnowledge,
 } from '../../host/agentProfileService.js';
-import { createAgentMemoryPort, agentMemoryScope, countAgentMemoryByTag } from '../../host/agentMemoryAdapter.js';
+import { createAgentMemoryPort, agentMemoryScope } from '../../host/agentMemoryAdapter.js';
+import {
+  addSubjectNote,
+  listSubjectNotes,
+  removeSubjectNote,
+  countSubjectNotes,
+  type SubjectNote,
+} from '../../host/subjectMemory.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 import { fetchKnowledgeSource } from '../../host/knowledgeSourceFetch.js';
 import type { Storage } from '../../storage/storage.js';
@@ -66,14 +73,13 @@ async function profileInitFor(agentId: string): Promise<{ roleKey: string; auton
   return { roleKey: entry?.roleKey ?? 'unknown', autonomy: { specLevel: 'draft-only' } };
 }
 
-/** Sources marker tag stamped on every curated note, so the note count + a
- *  future "list notes" view can distinguish user-curated facts from dispatch
- *  turn summaries in the same namespace. */
-const NOTE_TAG = 'agent-knowledge:note';
-
-/** Per-agent curation caps (bound unbounded growth + dispatch fan-out cost). */
-const NOTE_CAP = 200;
+/** Curated notes (NOTE_TAG, NOTE_CAP) are owned by `host/subjectMemory.ts` (ADR
+ *  0041) so agents and humans share one validator + cap. This feature owns only
+ *  the agent-specific binding cap below. */
 const BINDING_CAP = 20;
+
+/** An agent is just a `MemorySubject` of kind `agent` (ADR 0041). */
+const agentSubject = (agentId: string) => ({ kind: 'agent' as const, id: agentId });
 
 async function mustOwnedCollectionBound(
   tenantId: string,
@@ -126,10 +132,10 @@ export async function getAgentKnowledge(tenantId: string, agentId: string): Prom
     await setAgentKnowledge(tenantId, agentId, { collectionIds: liveIds }, await profileInitFor(agentId));
   }
 
-  // Count ONLY user-curated notes (NOTE_TAG) — dispatch turn summaries share this
-  // namespace (written with tag `[agentId]`), so an unfiltered count would inflate
-  // and grow every run. Tag-aware count via the per-agent memory module.
-  const noteCount = countAgentMemoryByTag(tenantId, agentMemoryScope(agentId), NOTE_TAG);
+  // Count ONLY user-curated notes — dispatch turn summaries share this namespace
+  // (written with tag `[agentId]`), so an unfiltered count would inflate and grow
+  // every run. Tag-aware count via the shared subject-memory module (ADR 0041).
+  const noteCount = await countSubjectNotes(tenantId, agentSubject(agentId));
 
   return {
     agentId,
@@ -287,21 +293,21 @@ export async function addNote(tenantId: string, agentId: string, content: string
       { agentId },
     );
   }
-  const text = typeof content === 'string' ? content.trim() : '';
-  if (text.length === 0) {
-    throw new OpenwopError('validation_error', 'Field `content` is required and MUST be a non-empty string.', 400, { field: 'content' });
-  }
-  if (text.length > 4000) {
-    throw new OpenwopError('validation_error', 'A note MUST be 4000 characters or fewer.', 400, { field: 'content' });
-  }
-  // Cap curated notes per agent (bound growth; keep noteCount accurate — the cap
-  // is below the read cap so the count never under-reports). Reject, don't evict —
-  // user-curated notes must never silently vanish.
-  if (countAgentMemoryByTag(tenantId, agentMemoryScope(agentId), NOTE_TAG) >= NOTE_CAP) {
-    throw new OpenwopError('validation_error', `This agent already has the maximum ${NOTE_CAP} curated notes. Remove some before adding more.`, 400, { cap: NOTE_CAP });
-  }
-  const memory = createAgentMemoryPort(tenantId);
-  await memory.write(agentMemoryScope(agentId), { content: text, tags: [NOTE_TAG, agentId] });
+  // Validation + per-subject cap + durable+embedded write are owned by the shared
+  // subject-memory seam (ADR 0041) — identical for agents and humans.
+  await addSubjectNote(tenantId, agentSubject(agentId), content);
+}
+
+/** List the agent's curated notes (newest first) for the memory browser (ADR
+ *  0041) — excludes dispatch turn summaries; durable source. */
+export function listAgentNotes(tenantId: string, agentId: string): Promise<SubjectNote[]> {
+  return listSubjectNotes(tenantId, agentSubject(agentId));
+}
+
+/** Remove a curated note by id. Only a curated note is removable (a dispatch
+ *  turn-summary in the same namespace is not). Resolves false when none matched. */
+export function removeAgentNote(tenantId: string, agentId: string, noteId: string): Promise<boolean> {
+  return removeSubjectNote(tenantId, agentSubject(agentId), noteId);
 }
 
 /** Set the `memoryWritable` knob on the binding (opt the agent in/out of curated

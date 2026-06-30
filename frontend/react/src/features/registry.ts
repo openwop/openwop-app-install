@@ -24,12 +24,38 @@ import { sharingFeature } from './sharing/routes.js';
 import { formsFeature } from './forms/routes.js';
 import { consentFeature } from './consent/routes.js';
 import { analyticsFeature } from './analytics/routes.js';
+import { usageAnalyticsFeature } from './usage-analytics/routes.js';
+import { evalsFeature } from './evals/routes.js';
+import { scheduledChatsFeature } from './scheduled-chats/routes.js';
+import { channelsFeature } from './channels/routes.js';
+import { chatWidgetFeature } from './chat-widget/routes.js';
+import { capabilityFirewallFeature } from './capability-firewall/routes.js';
+import { modelRouterFeature } from './model-router/routes.js';
+import { ambientWorkGraphFeature } from './ambient-work-graph/routes.js';
+import { navigationSettingsFeature } from './navigation-settings/routes.js';
 import { connectionsFeature } from './connections/routes.js';
 import { emailFeature } from './email/routes.js';
 import { commentsFeature } from './comments/routes.js';
 import { marketplaceFeature } from './marketplace/routes.js';
 import { agentKnowledgeFeature } from './agent-knowledge/routes.js';
 import { advisoryBoardFeature } from './advisory-board/routes.js';
+import { projectsFeature } from './projects/routes.js';
+import { documentsFeature } from './documents/routes.js';
+import { priorityMatrixFeature } from './priority-matrix/routes.js';
+import { strategyFeature } from './strategy/routes.js';
+import { brandFeature } from './brand/routes.js';
+import { campaignBriefFeature } from './campaign-brief/routes.js';
+import { campaignOrchestrationFeature } from './campaign-orchestration/routes.js';
+import { campaignConnectorsFeature } from './campaign-connectors/routes.js';
+import { campaignIntelFeature } from './campaign-intel/routes.js';
+import { accessHubFeature } from './access-hub/routes.js';
+import { modelsFeature } from './models/routes.js';
+import { chatDeploymentFeature } from './chat-deployment/routes.js';
+import { appBuilderFeature } from './app-builder/routes.js';
+// ADR 0084 correction — notebooks (Sources) + podcasts are surfaced as PROJECT tabs
+// (ProjectDetailPage), not standalone top-level nav destinations. Their feature
+// modules + i18n still ship (the panels are imported by the projects feature); only
+// the standalone routes/nav are withdrawn here.
 
 export interface FrontendFeature {
   /** Feature id — matches the backend toggle id. */
@@ -39,7 +65,7 @@ export interface FrontendFeature {
 }
 
 /** Every frontend feature the app composes. Append a new feature here. */
-export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature];
+export const FRONTEND_FEATURES: FrontendFeature[] = [crmFeature, csmFeature, usersFeature, profilesFeature, mediaFeature, cmsFeature, notificationsFeature, kbFeature, publishingFeature, sharingFeature, formsFeature, consentFeature, analyticsFeature, connectionsFeature, emailFeature, commentsFeature, marketplaceFeature, agentKnowledgeFeature, advisoryBoardFeature, projectsFeature, documentsFeature, priorityMatrixFeature, strategyFeature, brandFeature, campaignBriefFeature, campaignOrchestrationFeature, campaignConnectorsFeature, campaignIntelFeature, usageAnalyticsFeature, evalsFeature, scheduledChatsFeature, channelsFeature, chatWidgetFeature, capabilityFirewallFeature, modelRouterFeature, ambientWorkGraphFeature, navigationSettingsFeature, accessHubFeature, modelsFeature, chatDeploymentFeature, appBuilderFeature];
 
 /** Flatten every feature's routes for the manifest. */
 export function featureRoutes(): FeatureRoute[] {

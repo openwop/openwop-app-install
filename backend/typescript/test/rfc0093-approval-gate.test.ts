@@ -41,6 +41,9 @@ import type { InterruptRecord, RunRecord } from '../src/types.js';
 const storage = await openStorage('memory://');
 setEventLogBackend(storage);
 setSuspendBackend(storage);
+// ADR 0070 — the quorum vote ledger is durable host-ext storage now; init it.
+const { initHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
+initHostExtPersistence(storage);
 initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-rfc0093-gate-')) });
 const baseSuite = createHostAdapterSuite({ storage });
 // Recording audit sink: Storage has no audit READ surface, so the §D.2
@@ -163,6 +166,32 @@ describe('rfc0093 §D.1 — gate timeout ⇒ auto-reject', () => {
 
     // Idempotent: a second pass is a no-op.
     expect(await timeoutApprovalGateIfDue(storage, (await storage.getInterrupt(gate.interruptId))!)).toBe(false);
+  });
+
+  it('TOCTOU: two callers holding the SAME stale (unresolved) gate resolve EXACTLY once (ENG-6)', async () => {
+    const run = await seedRun();
+    // One in-memory interrupt object, never re-fetched — both the lazy path and
+    // the periodic sweep would hold a snapshot like this.
+    const stale = await seedGate(
+      run.runId,
+      { timeoutSec: 1 },
+      { createdAt: new Date(Date.now() - 5_000).toISOString() },
+    );
+
+    // Fire both with the SAME stale object (resolvedAt still undefined on it).
+    const results = await Promise.all([
+      timeoutApprovalGateIfDue(storage, stale),
+      timeoutApprovalGateIfDue(storage, stale),
+    ]);
+
+    // Exactly one wins the compare-and-set; the other is a no-op.
+    expect(results.filter(Boolean)).toHaveLength(1);
+
+    // And exactly one interrupt.resolved + one run.failed were emitted (no
+    // double-emit), proving the events are gated on the CAS winner.
+    const events = await storage.listEvents(run.runId);
+    expect(events.filter((e) => e.type === 'interrupt.resolved')).toHaveLength(1);
+    expect(events.filter((e) => e.type === 'run.failed')).toHaveLength(1);
   });
 
   it('does NOT time out a gate before its deadline or one with no timeout', async () => {

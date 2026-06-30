@@ -19,6 +19,7 @@
 
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { getCapabilities } from '../client/runsClient.js';
 import { useAuth } from '../auth/useAuth.js';
 import { InfoIcon, XIcon } from '../ui/icons/index.js';
@@ -32,6 +33,7 @@ interface HostSurfaceAd {
 }
 
 export function InMemoryHostBanner() {
+  const { t } = useTranslation('builder');
   const { user } = useAuth();
   const [hidden, setHidden] = useState<boolean>(() => {
     try { return localStorage.getItem(DISMISS_KEY) === 'true'; }
@@ -79,18 +81,16 @@ export function InMemoryHostBanner() {
     <div className="demo-host-banner" role="status" aria-live="polite">
       <span className="demo-host-banner-icon" aria-hidden><InfoIcon size={16} /></span>
       <span className="demo-host-banner-text">
-        <strong>Anonymous demo session.</strong>{' '}
-        Your workflows + any BYOK keys you add are scoped to this browser
-        session and reset after 24&nbsp;hours. Nothing is shared with other
-        visitors. Signup with persistent storage is coming soon.{' '}
-        <Link to="/privacy">Privacy & cookies →</Link>
+        <strong>{t('demoSessionStrong')}</strong>{' '}
+        {t('demoSessionBody')}{' '}
+        <Link to="/privacy">{t('demoSessionPrivacyLink')}</Link>
       </span>
       <button
         className="demo-host-banner-close"
         type="button"
         onClick={dismiss}
-        aria-label="Dismiss notice"
-        title="Dismiss"
+        aria-label={t('dismissNotice')}
+        title={t('common:close')}
       >
         <XIcon size={14} />
       </button>

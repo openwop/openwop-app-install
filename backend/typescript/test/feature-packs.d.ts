@@ -49,3 +49,45 @@ declare module '*feature.marketplace.nodes/index.mjs' {
     (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>
   >;
 }
+declare module '*feature.priority-matrix.nodes/index.mjs' {
+  export const nodes: Record<
+    string,
+    (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>
+  >;
+}
+declare module '*feature.insights-suite.nodes/index.mjs' {
+  export const nodes: Record<
+    string,
+    (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>
+  >;
+}
+declare module '*feature.strategy.nodes/index.mjs' {
+  export const nodes: Record<
+    string,
+    (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>
+  >;
+}
+declare module '*feature.interactive-artifacts.nodes/index.mjs' {
+  export const nodes: Record<
+    string,
+    (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown> }>
+  >;
+}
+declare module '*feature.brand.nodes/index.mjs' {
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}
+declare module '*feature.campaign-brief.nodes/index.mjs' {
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}
+declare module '*feature.campaign-channels.nodes/index.mjs' {
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}
+declare module '*feature.campaign-orchestration.nodes/index.mjs' {
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}
+declare module '*feature.campaign-connectors.nodes/index.mjs' {
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}
+declare module '*feature.campaign-intel.nodes/index.mjs' {
+  export const nodes: Record<string, (ctx: unknown) => Promise<{ status: string; outputs?: Record<string, unknown>; error?: { code: string; message: string } }>>;
+}

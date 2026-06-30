@@ -466,3 +466,17 @@ Two identities are kept distinct (the GCP-impersonation / AWS-AssumeRole pattern
 1. **(Medium) Manifest distribution** — built-in only, or installable via
    Marketplace (ADR 0022) with signing? *Built-in v1; marketplace later.*
 2. **(Medium) Key custody / rotation** for `encryptedConfig`.
+
+> **Phase E (Connection + MCP management UI) — gap flagged 2026-06-24.** A third-party
+> competitive analysis (`compare.md`, June 2026, "Connector Catalog" / "Managed Tool
+> Servers", from LobeHub + AnythingLLM) identified a real **frontend** gap: the
+> outbound credential broker (Phases A–D) + the outbound MCP client (ADR 0030) + the
+> RFC 0078 tool catalog (`routes/toolCatalog.ts`) all ship, but there is **no polished,
+> non-technical management surface** — no "connected providers / MCP servers" dashboard
+> showing per-connection **auth state, granted scopes, health (`/test` probe result),
+> last-used, and usage examples**, and no guided catalog for a non-engineer to add a
+> connection. The backend is done; this is a **UI-layer phase** composing the existing
+> `/connections/*`, `/providers/*`, `/connections/:id/test`, and `GET /v1/tools` reads.
+> MCP server *URLs* stay manifest-curated (the SSRF guard, ADR 0030) — the dashboard
+> manages the *connection* (auth/scopes/health), not arbitrary author-supplied
+> endpoints. Host-extension, **no new RFC**. Run `/ux-review` on landing.

@@ -21,9 +21,11 @@
  * full PATCH-op semantics, ETags — is a documented follow-on; provisioning +
  * the fail-closed deactivation contract are honored.)
  *
- * AUTH (finding C3 / §B MUST): a real deployment authenticates SCIM requests
- * with the IdP's SCIM bearer (host secret store). Here the app's auth context
- * gates the surface; the SCIM bearer wiring is the follow-on noted above.
+ * AUTH (finding C3 / §B MUST): SCIM requests are authenticated with the IdP's
+ * SCIM bearer (`OPENWOP_SCIM_BEARER`), verified in constant time by
+ * `requireScimBearer` on every `/scim/v2/*` route; the routes 404 entirely
+ * when the bearer is unconfigured. (This wiring is now IMPLEMENTED — the prior
+ * "follow-on" note was stale.)
  */
 
 import { timingSafeEqual } from 'node:crypto';

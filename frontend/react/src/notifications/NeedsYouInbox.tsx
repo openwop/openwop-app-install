@@ -14,6 +14,7 @@
  * branch, and no new CSS.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Notice } from '../ui/Notice.js';
 import { toast } from '../ui/toast.js';
@@ -25,10 +26,13 @@ import {
   type PendingApproval, type AssistantActionView,
 } from '../agents/approvalsClient.js';
 import { ScaleIcon, CheckIcon, XIcon, ClockIcon, ColumnsIcon, BoxesIcon, ListIcon } from '../ui/icons/index.js';
+import { subscribeReviewSignal } from './signalBus.js';
 
 type ViewMode = 'list' | 'grid';
 const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant-action' || !!a.actionId;
-const compact = (rel: string | null): string => (rel ? rel.replace(' ago', '') : 'now');
+/** Strip the " ago" suffix from a relativeTime() string; `nowLabel` covers the
+ *  null/"now" case (passed in so the caller's `t('relativeNow')` localizes it). */
+const compact = (rel: string | null, nowLabel: string): string => (rel ? rel.replace(' ago', '') : nowLabel);
 
 /** http(s)-only guard for provider-derived (untrusted) source URLs. */
 const safeHref = (u?: string): string | undefined => (u && /^https?:\/\//i.test(u) ? u : undefined);
@@ -42,17 +46,19 @@ function destinationOf(action: AssistantActionView): string | null {
 function ItemHead({ persona, role, ringColor, avatarUrl, theme, age }: {
   persona: string; role?: string | undefined; ringColor: string; avatarUrl?: string | undefined; theme: ReturnType<typeof roleThemeForAgent>; age: string | null;
 }): JSX.Element {
+  const { t } = useTranslation('notifications');
   return (
     <div className="u-flex u-items-center u-gap-2 u-wrap">
       <AgentAvatar persona={persona} avatarUrl={avatarUrl} roleTheme={theme} size={36} showBadge={false} ring={ringColor} />
       <span className="roster-name">{persona}</span>
       {role ? <span className="muted u-fs-12">{role}</span> : null}
-      {age ? <span className="chip chip--warning"><ClockIcon size={11} aria-hidden /> {compact(age)}</span> : null}
+      {age ? <span className="chip chip--warning"><ClockIcon size={11} aria-hidden /> {compact(age, t('relativeNow'))}</span> : null}
     </div>
   );
 }
 
 export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.Element | null {
+  const { t } = useTranslation('notifications');
   const nav = useNavigate();
   const [approvals, setApprovals] = useState<PendingApproval[] | null>(null);
   const [views, setViews] = useState<AgentView[]>([]);
@@ -71,6 +77,10 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
     }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
+  // ADR 0074 — when a review is decided on ANY surface/client, the broadcast
+  // signal lands here; re-pull the pending list so a resolved approval drops out
+  // live (the inbox owns a separate approvals list, so it reconciles by refetch).
+  useEffect(() => subscribeReviewSignal(() => { void refresh(); }), [refresh]);
 
   const after = useCallback(async () => { await refresh(); onResolved?.(); }, [refresh, onResolved]);
 
@@ -78,32 +88,32 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
     setBusy(a.approvalId);
     try {
       const { runId } = await claimApproval(a.approvalId);
-      toast.success(isAssistantAction(a) ? `Approved — ${a.persona} will carry it out.` : `Approved — ${a.persona} is running it now.`);
+      toast.success(isAssistantAction(a) ? t('toastApprovedCarry', { persona: a.persona }) : t('toastApprovedRunning', { persona: a.persona }));
       await after();
       if (runId) nav(`/runs/${encodeURIComponent(runId)}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not approve.');
+      toast.error(err instanceof Error ? err.message : t('toastCouldNotApprove'));
     } finally { setBusy(null); }
-  }, [after, nav]);
+  }, [after, nav, t]);
 
   const reject = useCallback(async (a: PendingApproval) => {
     setBusy(a.approvalId);
-    try { await rejectApproval(a.approvalId); toast.info('Dismissed.'); await after(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : 'Could not reject.'); }
+    try { await rejectApproval(a.approvalId); toast.info(t('toastDismissed')); await after(); }
+    catch (err) { toast.error(err instanceof Error ? err.message : t('toastCouldNotRejectShort')); }
     finally { setBusy(null); }
-  }, [after]);
+  }, [after, t]);
 
   const saveEdit = useCallback(async (a: PendingApproval) => {
     if (!a.actionId) return;
     setBusy(a.approvalId);
     try {
       await editAssistantAction(a.actionId, { draft });
-      toast.success('Draft updated — it will face you again for approval.');
+      toast.success(t('toastDraftUpdated'));
       setEditing(null);
       await refresh();
-    } catch (err) { toast.error(err instanceof Error ? err.message : 'Edit failed.'); }
+    } catch (err) { toast.error(err instanceof Error ? err.message : t('toastEditFailed')); }
     finally { setBusy(null); }
-  }, [draft, refresh]);
+  }, [draft, refresh, t]);
 
   const viewByRoster = new Map(views.map((v) => [v.entry.rosterId, v]));
   const blockers = views.filter((v) => v.status === 'waiting');
@@ -112,9 +122,9 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
   // All clear → a single quiet line (don't dominate the inbox with an empty card).
   if (approvals !== null && total === 0 && !error) {
     return (
-      <div className="card u-flex u-items-center u-gap-2 u-fs-12">
+      <div className="surface-card u-flex u-flex-row u-items-center u-gap-2 u-fs-12">
         <CheckIcon size={14} />
-        <span className="muted">You&rsquo;re all caught up — nothing needs your sign-off or a board action right now.</span>
+        <span className="muted">{t('needsYouAllClear')}</span>
       </div>
     );
   }
@@ -133,33 +143,33 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
             <div className="u-flex u-items-center u-gap-2 u-wrap">
               <span className="chip">{action.kind}</span>
               {action.riskLevel ? (
-                <span className={`chip ${action.riskLevel === 'high' ? 'chip--danger' : action.riskLevel === 'medium' ? 'chip--warning' : 'chip--muted'}`}>risk: {action.riskLevel}</span>
+                <span className={`chip ${action.riskLevel === 'high' ? 'chip--danger' : action.riskLevel === 'medium' ? 'chip--warning' : 'chip--muted'}`}>{t('riskChip', { level: action.riskLevel })}</span>
               ) : null}
-              {action.derivedFromUntrusted ? <span className="chip chip--muted">from connected (untrusted) content</span> : null}
+              {action.derivedFromUntrusted ? <span className="chip chip--muted">{t('needsYouFromUntrusted')}</span> : null}
             </div>
-            {destinationOf(action) ? <p className="muted u-m-0 u-fs-13">To: {destinationOf(action)}</p> : null}
+            {destinationOf(action) ? <p className="muted u-m-0 u-fs-13">{t('destinationTo', { destination: destinationOf(action) })}</p> : null}
             {isEditing ? (
-              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} aria-label="Edit draft" />
+              <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={4} aria-label={t('editDraftLabel')} />
             ) : (
               <p className="u-m-0">{action.draft}</p>
             )}
-            {action.reason ? <p className="muted u-m-0 u-fs-13">Why: {action.reason}</p> : null}
+            {action.reason ? <p className="muted u-m-0 u-fs-13">{t('whyPrefix', { reason: action.reason })}</p> : null}
             {action.sourceRefs && action.sourceRefs.length > 0 ? (
-              <p className="muted u-m-0 u-fs-12">Sources: {action.sourceRefs.map((s, i) => (
+              <p className="muted u-m-0 u-fs-12">{t('sourcesPrefix')}{action.sourceRefs.map((s, i) => (
                 <span key={`${s.externalId}-${i}`}>{i > 0 ? ' · ' : ''}{safeHref(s.url) ? <a href={safeHref(s.url)} target="_blank" rel="noreferrer">{s.kind}</a> : s.kind}</span>
               ))}</p>
             ) : null}
             <div className="action-bar u-justify-end">
               {isEditing ? (
                 <>
-                  <button type="button" className="primary btn-sm" disabled={busy === a.approvalId} onClick={() => void saveEdit(a)}>Save edit</button>
-                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => setEditing(null)}>Cancel</button>
+                  <button type="button" className="primary btn-sm" disabled={busy === a.approvalId} onClick={() => void saveEdit(a)}>{t('saveEdit')}</button>
+                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => setEditing(null)}>{t('common:cancel')}</button>
                 </>
               ) : (
                 <>
-                  <button type="button" className="btn-accent-solid btn-sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> Approve</button>
-                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> Reject</button>
-                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => { setEditing(a.approvalId); setDraft(action.draft); }}>Edit</button>
+                  <button type="button" className="btn-accent-solid btn-sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveLabel')}</button>
+                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</button>
+                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => { setEditing(a.approvalId); setDraft(action.draft); }}>{t('common:edit')}</button>
                 </>
               )}
             </div>
@@ -167,10 +177,10 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
         ) : (
           // Run-proposal: a compact row.
           <>
-            <p className="u-m-0">Run <strong>{workflowName(a.workflowId)}</strong>{a.cardTitle ? <span className="muted"> on “{a.cardTitle}”</span> : null}</p>
+            <p className="u-m-0"><Trans t={t} i18nKey="approvalsRunWorkflow" values={{ name: workflowName(a.workflowId) }} components={{ 1: <strong /> }} />{a.cardTitle ? <span className="muted"> {t('approvalsOnCard', { title: a.cardTitle })}</span> : null}</p>
             <div className="action-bar u-justify-end">
-              <button type="button" className="btn-accent-solid btn-sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> Approve &amp; run</button>
-              <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> Reject</button>
+              <button type="button" className="btn-accent-solid btn-sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveAndRun')}</button>
+              <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</button>
             </div>
           </>
         )}
@@ -185,28 +195,33 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
     return (
       <article className="surface-card u-gap-2" key={v.entry.rosterId}>
         <ItemHead persona={v.entry.persona} role={v.entry.label} ringColor={statusRingColor('waiting')} avatarUrl={v.entry.avatarUrl} theme={theme} age={card?.updatedAt ? relativeTime(card.updatedAt) : null} />
-        <p className="u-m-0">{card?.title ?? 'A task is parked in the Waiting lane'}</p>
-        <p className="muted u-m-0 u-fs-13">{card?.blockerNote ?? 'A person needs to act on the board before this can move on.'}</p>
+        <p className="u-m-0">{card?.title ?? t('blockerDefaultTitle')}</p>
+        <p className="muted u-m-0 u-fs-13">
+          {card?.blockerNote
+            ?? (card?.workflowId
+                ? t('blockerWaitingWorkflow', { workflow: workflowName(card.workflowId) })
+                : t('blockerDefaultNote'))}
+        </p>
         <div className="action-bar u-justify-end">
-          <button type="button" className="btn-accent-solid btn-sm" onClick={() => nav(`/agents/${encodeURIComponent(v.entry.rosterId)}?tab=board`)}><ColumnsIcon size={13} /> Open board</button>
+          <button type="button" className="btn-accent-solid btn-sm" onClick={() => nav(`/agents/${encodeURIComponent(v.entry.rosterId)}?tab=board`)}><ColumnsIcon size={13} /> {t('openBoard')}</button>
         </div>
       </article>
     );
   };
 
   return (
-    <div className="card">
+    <div className="surface-card">
       <div className="u-flex u-items-center u-gap-2 u-mb-2">
         <ScaleIcon size={16} />
-        <h2 className="u-flex-1 u-m-0">Needs you</h2>
+        <h2 className="u-flex-1 u-m-0">{t('needsYouTitle')}</h2>
         {total > 0 && <span className="chip chip--warning">{total}</span>}
-        <div className="action-bar" role="group" aria-label="View mode">
-          <button type="button" className={mode === 'list' ? 'primary btn-sm' : 'secondary btn-sm'} aria-pressed={mode === 'list'} title="List" onClick={() => setMode('list')}><ListIcon size={14} aria-hidden /> List</button>
-          <button type="button" className={mode === 'grid' ? 'primary btn-sm' : 'secondary btn-sm'} aria-pressed={mode === 'grid'} title="Grid" onClick={() => setMode('grid')}><BoxesIcon size={14} aria-hidden /> Grid</button>
+        <div className="action-bar" role="group" aria-label={t('viewModeLabel')}>
+          <button type="button" className={mode === 'list' ? 'primary btn-sm' : 'secondary btn-sm'} aria-pressed={mode === 'list'} title={t('viewModeList')} onClick={() => setMode('list')}><ListIcon size={14} aria-hidden /> {t('viewModeList')}</button>
+          <button type="button" className={mode === 'grid' ? 'primary btn-sm' : 'secondary btn-sm'} aria-pressed={mode === 'grid'} title={t('viewModeGrid')} onClick={() => setMode('grid')}><BoxesIcon size={14} aria-hidden /> {t('viewModeGrid')}</button>
         </div>
       </div>
       <p className="muted approvals-lede">
-        Proposals to approve, drafted actions, and board blockers from your agents — everything waiting on a decision, in one place.
+        {t('needsYouLede')}
       </p>
       {error && <Notice variant="error">{error}</Notice>}
       <div className={mode === 'grid' ? 'card-grid' : 'u-grid u-gap-2'}>

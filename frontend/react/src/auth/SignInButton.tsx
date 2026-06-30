@@ -12,12 +12,17 @@
  */
 
 import { useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
+import i18n from '../i18n/index.js';
+import { getFormatLocale } from '../i18n/format.js';
 import { Modal } from '../ui/Modal.js';
 import { BuildingIcon, LogOutIcon, TrashIcon, UserIcon } from '../ui/icons/index.js';
 import { useAuth } from './useAuth.js';
 import { finalizeFirebaseSession } from './finalizeSession.js';
 import { getMe, logout, type User as DurableUser } from '../features/users/usersClient.js';
+import { GoogleMark } from '../brand/vendor/GoogleMark.js';
+import { GithubMark } from '../brand/vendor/GithubMark.js';
 import { AuthCard } from './AuthCard.js';
 import {
   ExistingProviderSignInError,
@@ -37,15 +42,15 @@ function describeSignInError(err: unknown): string {
       switch (m[1]) {
         case 'popup-closed-by-user':
         case 'cancelled-popup-request':
-          return 'Sign-in was cancelled.';
+          return i18n.t('auth:signInCancelled');
         case 'popup-blocked':
-          return 'Your browser blocked the sign-in popup. Allow popups for app.openwop.dev and try again.';
+          return i18n.t('auth:popupBlocked');
         case 'operation-not-allowed':
-          return 'This provider isn\'t enabled for the deployment. The maintainer needs to turn it on in the Firebase Console.';
+          return i18n.t('auth:providerNotEnabled');
         case 'network-request-failed':
-          return 'Network error reaching the identity provider. Check your connection and try again.';
+          return i18n.t('auth:networkErrorIdp');
         default:
-          return `Sign-in failed: ${m[1]}.`;
+          return i18n.t('auth:signInFailed', { code: m[1] });
       }
     }
     return err.message;
@@ -60,8 +65,8 @@ interface PendingLink {
 }
 
 function providerLabel(id: string): string {
-  if (id === 'google.com') return 'Google';
-  if (id === 'github.com') return 'GitHub';
+  if (id === 'google.com') return i18n.t('auth:providerGoogle');
+  if (id === 'github.com') return i18n.t('auth:providerGithub');
   return id;
 }
 
@@ -82,6 +87,7 @@ function LinkAccountBody(props: {
   onContinue: (which: 'google' | 'github') => Promise<void>;
   onCancel: () => void;
 }) {
+  const { t } = useTranslation('auth');
   const { pendingLink, busy, error, onContinue, onCancel } = props;
   const attempted = providerLabel(pendingLink.attemptedProvider);
   const known = pendingLink.existingProviders.length > 0;
@@ -93,12 +99,27 @@ function LinkAccountBody(props: {
     : ['google.com', 'github.com'].filter((p) => p !== pendingLink.attemptedProvider);
   return (
     <>
-      <h3 className="signin-modal-title">Link your {attempted} account</h3>
+      <h3 className="signin-modal-title">{t('linkYourAccount', { provider: attempted })}</h3>
       <p className="signin-modal-lede muted">
-        <strong>{pendingLink.email}</strong> is already signed up
-        {known ? ` with ${pendingLink.existingProviders.map(providerLabel).join(' or ')}` : ''}.
-        Sign in with that provider once and we'll attach {attempted} so
-        you can use either next time.
+        {known ? (
+          <Trans
+            t={t}
+            i18nKey="alreadySignedUpKnown"
+            values={{
+              email: pendingLink.email,
+              providers: pendingLink.existingProviders.map(providerLabel).join(` ${t('or')} `),
+              attempted,
+            }}
+            components={{ 0: <strong /> }}
+          />
+        ) : (
+          <Trans
+            t={t}
+            i18nKey="alreadySignedUpUnknown"
+            values={{ email: pendingLink.email, attempted }}
+            components={{ 0: <strong /> }}
+          />
+        )}
       </p>
       {error ? <div className="alert error" role="alert">{error}</div> : null}
       {choices.map((id) => {
@@ -112,7 +133,7 @@ function LinkAccountBody(props: {
             type="button"
             onClick={() => onContinue(which)}
           >
-            Continue with {providerLabel(id)}
+            {t('continueWith', { provider: providerLabel(id) })}
           </button>
         );
       })}
@@ -122,13 +143,14 @@ function LinkAccountBody(props: {
         disabled={busy}
         onClick={onCancel}
       >
-        Cancel
+        {t('cancel')}
       </button>
     </>
   );
 }
 
 export function SignInButton() {
+  const { t } = useTranslation('auth');
   const { user, loading, isConfigured, signOut } = useAuth();
   // profiles is always-on (graduated — see backend/features/profiles/feature.ts §Correction);
   // The backend session is the canonical signed-in truth (ADR 0003): OIDC, a
@@ -197,9 +219,9 @@ export function SignInButton() {
   /** The unified signed-in identity: Firebase user (OIDC) OR the durable backend
    *  User (password / bound session). EITHER means signed in. */
   const account = user
-    ? { name: user.displayName ?? user.email ?? 'Account', email: user.email ?? user.uid, photoURL: user.photoURL ?? null, isFirebase: true }
+    ? { name: user.displayName ?? user.email ?? t('accountFallbackName'), email: user.email ?? user.uid, photoURL: user.photoURL ?? null, isFirebase: true }
     : backendUser
-    ? { name: backendUser.displayName ?? backendUser.email ?? 'Account', email: backendUser.email ?? backendUser.userId, photoURL: null, isFirebase: false }
+    ? { name: backendUser.displayName ?? backendUser.email ?? t('accountFallbackName'), email: backendUser.email ?? backendUser.userId, photoURL: null, isFirebase: false }
     : null;
 
   /** Reconcile the SPA session after a backend (password) auth + close the modal. */
@@ -232,12 +254,20 @@ export function SignInButton() {
 
   const oidcButtons = (
     <div className="u-grid u-gap-1">
-      <button className="signin-provider signin-google" disabled={busy} type="button" onClick={() => { void attemptSignIn('google'); }}>
-        Continue with Google
+      <button className="signin-provider signin-google" disabled={busy} aria-busy={busy} type="button" onClick={() => { void attemptSignIn('google'); }}>
+        <GoogleMark />
+        {t('continueWithGoogle')}
       </button>
-      <button className="signin-provider signin-github" disabled={busy} type="button" onClick={() => { void attemptSignIn('github'); }}>
-        Continue with GitHub
+      <button className="signin-provider signin-github" disabled={busy} aria-busy={busy} type="button" onClick={() => { void attemptSignIn('github'); }}>
+        <GithubMark />
+        {t('continueWithGithub')}
       </button>
+      {/* §11: surface a visible, announced "still signing in" status while the
+       *  redirect round-trip is in flight (the page navigates away, then returns
+       *  via processRedirectResult on the next load). */}
+      <div className="signin-status muted" role="status" aria-live="polite">
+        {busy ? 'Signing in… you may be redirected to your provider.' : ''}
+      </div>
     </div>
   );
 
@@ -249,11 +279,11 @@ export function SignInButton() {
           onClick={() => setModalOpen(true)}
           type="button"
         >
-          Sign in
+          {t('signIn')}
         </button>
         {modalOpen ? (
           <Modal
-            label="Sign in"
+            label={t('signIn')}
             onClose={() => setModalOpen(false)}
             className="signin-modal"
             scrimClassName="signin-modal-backdrop"
@@ -268,10 +298,11 @@ export function SignInButton() {
               />
             ) : (
               <>
-                <h3 className="signin-modal-title">Sign in to <em>save your work</em></h3>
+                <h3 className="signin-modal-title">
+                  <Trans t={t} i18nKey="signInToSaveTitle" components={{ 0: <em /> }} />
+                </h3>
                 <p className="signin-modal-lede muted">
-                  Workflows + BYOK keys you add after signing in persist across
-                  sessions. Anonymous session state is wiped every 24h.
+                  {t('signInToSaveLede')}
                 </p>
                 {error ? <div className="alert error" role="alert">{error}</div> : null}
                 <AuthCard
@@ -284,7 +315,7 @@ export function SignInButton() {
                   type="button"
                   onClick={() => setModalOpen(false)}
                 >
-                  Cancel
+                  {t('cancel')}
                 </button>
               </>
             )}
@@ -296,7 +327,7 @@ export function SignInButton() {
 
   // Signed-in: avatar + dropdown (account = Firebase OIDC user OR durable backend User)
   const initials = account.name
-    .split(/\s+/).map((s) => s[0]).join('').slice(0, 2).toUpperCase();
+    .split(/\s+/).map((s) => s[0]).join('').slice(0, 2).toLocaleUpperCase(getFormatLocale());
   return (
     <div className="account-menu">
       <button
@@ -328,7 +359,7 @@ export function SignInButton() {
                 onClick={() => setMenuOpen(false)}
               >
                 <span className="account-menu-item-icon" aria-hidden><UserIcon size={16} /></span>
-                My Profile
+                {t('myProfile')}
               </Link>
               <Link
                 to="/team"
@@ -337,7 +368,7 @@ export function SignInButton() {
                 onClick={() => setMenuOpen(false)}
               >
                 <span className="account-menu-item-icon" aria-hidden><BuildingIcon size={16} /></span>
-                Team
+                {t('team')}
               </Link>
             </>
           ) : null}
@@ -355,7 +386,7 @@ export function SignInButton() {
             type="button"
           >
             <span className="account-menu-item-icon" aria-hidden><LogOutIcon size={16} /></span>
-            Sign Out
+            {t('signOut')}
           </button>
           {account.isFirebase ? (
             <button
@@ -369,25 +400,26 @@ export function SignInButton() {
               type="button"
             >
               <span className="account-menu-item-icon" aria-hidden><TrashIcon size={16} /></span>
-              Delete Account
+              {t('deleteAccount')}
             </button>
           ) : null}
         </div>
       ) : null}
       {confirmingDelete ? (
         <Modal
-          label="Confirm account deletion"
+          label={t('confirmAccountDeletion')}
           onClose={() => { if (!deleting) setConfirmingDelete(false); }}
           className="signin-modal"
           scrimClassName="signin-modal-backdrop"
         >
-            <h3 className="signin-modal-title">Delete your account?</h3>
+            <h3 className="signin-modal-title">{t('deleteAccountTitle')}</h3>
             <p>
-              This permanently removes every workflow, run, event,
-              interrupt, and BYOK credential you've stored under{' '}
-              <strong>{account.email}</strong>.
-              Your Firebase identity record is revoked too. There is
-              no undo.
+              <Trans
+                t={t}
+                i18nKey="deleteAccountBody"
+                values={{ email: account.email }}
+                components={{ 0: <strong /> }}
+              />
             </p>
             {deleteError ? <div className="alert error">{deleteError}</div> : null}
             <div className="button-row">
@@ -397,7 +429,7 @@ export function SignInButton() {
                 disabled={deleting}
                 onClick={() => setConfirmingDelete(false)}
               >
-                Cancel
+                {t('cancel')}
               </button>
               <button
                 type="button"
@@ -424,7 +456,7 @@ export function SignInButton() {
                   }
                 }}
               >
-                {deleting ? 'Deleting…' : 'Yes, delete everything'}
+                {deleting ? t('deleting') : t('deleteEverything')}
               </button>
             </div>
         </Modal>

@@ -14,12 +14,14 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { insertRunWithStartContext } from './runInsert.js';
 import { createLogger } from '../observability/logger.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { snapshotRunVariables } from './variablesRuntime.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import type { Storage } from '../storage/storage.js';
 import type { RunRecord } from '../types.js';
+import type { Subject } from './subject.js';
 
 const log = createLogger('host.canvas');
 
@@ -52,6 +54,10 @@ interface Canvas {
   canvasTypeId: string;
   name?: string;
   projectId?: string;
+  /** ADR 0153 §R6 — additive owning Subject (project/user/agent). Absent ⇒ tenant-
+   *  scoped as before (no migration of existing rows). Org/visibility resolves via
+   *  `subjectOrgScope`/`subjectAccess` at the editor route; the field is the anchor. */
+  ownerSubject?: Subject;
   state: Json;
   version: number;
   metadata?: Json;
@@ -60,6 +66,90 @@ interface Canvas {
 }
 
 const canvases = new DurableCollection<Canvas>('canvas', (c) => c.canvasId);
+
+/** Tenant-scoped read of a canvas for non-run code (ADR 0056 — document
+ *  materialization). Returns null if absent or cross-tenant (no existence leak). */
+export interface CanvasRecordView { canvasId: string; canvasTypeId: string; name?: string; projectId?: string; ownerSubject?: Subject; state: Json; version: number }
+export async function getCanvasForTenant(tenantId: string, canvasId: string): Promise<CanvasRecordView | null> {
+  const c = await canvases.get(canvasId);
+  if (!c || c.tenantId !== tenantId) return null;
+  return { canvasId: c.canvasId, canvasTypeId: c.canvasTypeId, ...(c.name ? { name: c.name } : {}), ...(c.projectId ? { projectId: c.projectId } : {}), ...(c.ownerSubject ? { ownerSubject: c.ownerSubject } : {}), state: c.state, version: c.version };
+}
+
+/** Tenant-scoped, idempotent canvas create for non-run code — the editor "open"
+ *  / seed-from-artifact path (ADR 0153 §R1). Reuses the same store + `_idem` cache
+ *  as the run-scoped `create`, so the same `idempotencyKey` (e.g. an artifact key)
+ *  yields ONE working copy, not duplicates. Additive `ownerSubject` (§R6). */
+export async function createCanvasForTenant(tenantId: string, args: {
+  canvasTypeId: string; name?: string; projectId?: string; ownerSubject?: Subject; initialState?: Json; metadata?: Json; idempotencyKey?: string;
+}): Promise<CanvasRecordView> {
+  if (args.idempotencyKey) {
+    const cached = _idem.get(`${tenantId}::ct:${args.idempotencyKey}`) as CanvasRecordView | undefined;
+    if (cached) return cached;
+  }
+  const now = new Date().toISOString();
+  const canvas: Canvas = {
+    canvasId: `canvas-${randomUUID()}`,
+    tenantId,
+    canvasTypeId: args.canvasTypeId,
+    ...(args.name !== undefined ? { name: args.name } : {}),
+    ...(args.projectId !== undefined ? { projectId: args.projectId } : {}),
+    ...(args.ownerSubject !== undefined ? { ownerSubject: args.ownerSubject } : {}),
+    state: args.initialState ?? {},
+    version: 1,
+    ...(args.metadata !== undefined ? { metadata: args.metadata } : {}),
+    createdAt: now,
+    updatedAt: now,
+  };
+  await canvases.put(canvas);
+  const view: CanvasRecordView = { canvasId: canvas.canvasId, canvasTypeId: canvas.canvasTypeId, ...(canvas.name ? { name: canvas.name } : {}), ...(canvas.projectId ? { projectId: canvas.projectId } : {}), ...(canvas.ownerSubject ? { ownerSubject: canvas.ownerSubject } : {}), state: canvas.state, version: canvas.version };
+  if (args.idempotencyKey) _idem.set(`${tenantId}::ct:${args.idempotencyKey}`, view);
+  return view;
+}
+
+/** Tenant-scoped, idempotent create-with-a-FIXED-id (no `canvas-<uuid>` generation).
+ *  For host seams that address a canvas by a well-known stable id (e.g. the RFC 0117
+ *  ui-plugin `conformance-canary` artifact) — returns the existing record if present, else
+ *  creates it at version 1. Distinct from `createCanvasForTenant`, which mints a random id. */
+export async function ensureCanvasForTenant(
+  tenantId: string, canvasId: string, args: { canvasTypeId: string; initialState?: Json },
+): Promise<CanvasRecordView> {
+  const existing = await getCanvasForTenant(tenantId, canvasId);
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const canvas: Canvas = { canvasId, tenantId, canvasTypeId: args.canvasTypeId, state: args.initialState ?? {}, version: 1, createdAt: now, updatedAt: now };
+  await canvases.put(canvas);
+  return { canvasId, canvasTypeId: canvas.canvasTypeId, state: canvas.state, version: canvas.version };
+}
+
+/** Tenant-scoped optimistic write for the editor save path (ADR 0153 Phase 2b) — the
+ *  non-run mirror of the surface `write`. `expectedVersion` (if given) must match or it
+ *  throws `canvas_version_conflict` (last-writer protection for the live editor); merge
+ *  defaults to `replace` (the editor sends the whole canvas state). Returns null when the
+ *  canvas is absent or cross-tenant (no existence leak). */
+export async function updateCanvasForTenant(
+  tenantId: string, canvasId: string, mutation: Json,
+  opts?: { expectedVersion?: number; merge?: 'shallow' | 'deep' | 'replace' },
+): Promise<{ canvasId: string; newVersion: number } | null> {
+  const c = await canvases.get(canvasId);
+  if (!c || c.tenantId !== tenantId) return null;
+  if (opts?.expectedVersion !== undefined && opts.expectedVersion !== c.version) {
+    throw Object.assign(new Error(`canvas ${canvasId} version conflict: expected ${opts.expectedVersion}, have ${c.version}`), { code: 'canvas_version_conflict' });
+  }
+  const merge = opts?.merge ?? 'replace';
+  const m = (mutation ?? {}) as Json;
+  c.state = merge === 'replace' ? { ...m } : merge === 'deep' ? deepMerge(c.state, m) : { ...c.state, ...m };
+  c.version += 1;
+  c.updatedAt = new Date().toISOString();
+  await canvases.put(c);
+  return { canvasId, newVersion: c.version };
+}
+
+/** Test-only: seed a canvas record directly (route tests have no run to create one). */
+export async function __putCanvasForTest(c: { canvasId: string; tenantId: string; canvasTypeId: string; name?: string; projectId?: string; state: Json; version?: number }): Promise<void> {
+  const now = new Date().toISOString();
+  await canvases.put({ canvasId: c.canvasId, tenantId: c.tenantId, canvasTypeId: c.canvasTypeId, ...(c.name ? { name: c.name } : {}), ...(c.projectId ? { projectId: c.projectId } : {}), state: c.state, version: c.version ?? 1, createdAt: now, updatedAt: now });
+}
 // Idempotency cache for create/write keyed by tenant::idempotencyKey.
 const _idem = new Map<string, unknown>();
 
@@ -203,7 +293,7 @@ export function createCanvasSurface(scope: BundleScope): CanvasSurface {
         createdAt: now,
         updatedAt: now,
       };
-      await storage.insertRun(childRun);
+      await insertRunWithStartContext(storage, childRun);
 
       // awaitTerminal:false → fire-and-forget; return the id immediately.
       if (opts?.awaitTerminal === false) {

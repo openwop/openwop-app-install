@@ -4,6 +4,7 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { BACKEND_FEATURES } from '../src/features/index.js';
@@ -35,18 +36,17 @@ import { createHmac } from 'node:crypto';
 
 describe('Connections feature (sqlite memory app)', () => {
   let server: http.Server;
-  const PORT = 18941;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
   const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await __clearToggleStore();
     await __resetConnectionsStore();
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
   afterAll(async () => {
@@ -290,14 +290,13 @@ describe('Org-shared connection: connections:use gate (ADR 0024 Phase C / D2)', 
 });
 
 describe('Inbound provider webhooks (ADR 0024 §6 / Phase C)', () => {
-  const PORT = 18942;
   const SIGNING = 'slack-signing-secret';
   let deps: { storage: import('../src/storage/storage.js').Storage; hostSuite: Parameters<typeof handleInboundEvent>[0]['hostSuite'] };
   let connectionId: string;
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     deps = { storage: app.locals.storage, hostSuite: app.locals.hostSuite };
     await __resetConnectionsStore();
     await __resetInboundStore();

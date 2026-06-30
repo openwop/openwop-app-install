@@ -7,6 +7,9 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import i18n from '../../i18n/index.js';
+import { useFormat } from '../../i18n/useFormat.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
@@ -17,7 +20,7 @@ import { assetUrl, endorseSkill, getMyProfile, listProfiles, unendorseSkill, typ
 
 /** Human display name, never the raw `user:<uuid>` id. */
 function nameOf(p: Profile): string {
-  return p.displayName?.trim() || 'Unnamed teammate';
+  return p.displayName?.trim() || i18n.t('profiles:unnamedTeammate');
 }
 
 /** A short, readable handle derived from the opaque user id. */
@@ -41,10 +44,10 @@ function tintIndex(seed: string): number {
   return h % 6;
 }
 
-const AVAILABILITY_LABEL: Record<AvailabilityStatus, string> = {
-  available: 'Available',
-  busy: 'Busy',
-  away: 'Away',
+const AVAILABILITY_LABEL_KEY: Record<AvailabilityStatus, string> = {
+  available: 'availabilityAvailable',
+  busy: 'availabilityBusy',
+  away: 'availabilityAway',
 };
 
 /** A profile nobody has filled in yet — show a single tasteful hint, not a
@@ -65,6 +68,8 @@ function searchHaystack(p: Profile): string {
 }
 
 export function TeamPage(): JSX.Element {
+  const { t } = useTranslation('profiles');
+  const f = useFormat();
   // Profiles graduated to always-on (§ Correction 2026-06-12) — no feature gate.
   const [rows, setRows] = useState<Profile[] | null>(null);
   const [myId, setMyId] = useState<string | null>(null);
@@ -76,8 +81,8 @@ export function TeamPage(): JSX.Element {
     void getMyProfile().then((p) => setMyId(p.userId)).catch(() => setMyId(null));
     void listProfiles()
       .then(setRows)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load the directory.'));
-  }, []);
+      .catch((err) => setError(err instanceof Error ? err.message : t('loadDirectoryFailed')));
+  }, [t]);
 
   useEffect(() => {
     load();
@@ -93,10 +98,10 @@ export function TeamPage(): JSX.Element {
         const updated = endorsed ? await unendorseSkill(target.userId, skill) : await endorseSkill(target.userId, skill);
         replace(updated);
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : 'Endorsement failed.');
+        toast.error(err instanceof Error ? err.message : t('endorsementFailed'));
       }
     },
-    [replace],
+    [replace, t],
   );
 
   // Filter by the search box, then sort: you first, then alphabetically.
@@ -113,7 +118,7 @@ export function TeamPage(): JSX.Element {
 
   return (
     <div>
-      <PageHeader eyebrow="Platform" title="Team directory" lede="Everyone's profile in this tenant. Endorse a teammate's skill." />
+      <PageHeader eyebrow={t('teamEyebrow')} title={t('teamTitle')} lede={t('teamLede')} />
       {error ? <Notice variant="error">{error}</Notice> : null}
 
       {rows && rows.length > 0 ? (
@@ -124,13 +129,16 @@ export function TeamPage(): JSX.Element {
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search by name, role, skill…"
-              aria-label="Search the team directory"
+              placeholder={t('searchPlaceholder')}
+              aria-label={t('searchAriaLabel')}
             />
           </div>
           <span className="teampage-count" aria-live="polite">
-            {query.trim() && visible ? `${visible.length} of ${rows.length}` : `${rows.length}`}
-            {rows.length === 1 ? ' person' : ' people'}
+            {query.trim() && visible
+              ? t('countFiltered', { shown: f.number(visible.length), total: f.number(rows.length) })
+              : f.number(rows.length)}
+            {' '}
+            {t('countPeople', { count: rows.length })}
           </span>
         </div>
       ) : null}
@@ -138,12 +146,12 @@ export function TeamPage(): JSX.Element {
       {!rows ? (
         <Skeleton />
       ) : rows.length === 0 ? (
-        <StateCard icon={<UserIcon />} title="No profiles yet" body="Profiles appear here as teammates fill them in." />
+        <StateCard icon={<UserIcon />} title={t('noProfilesTitle')} body={t('noProfilesBody')} />
       ) : visible && visible.length === 0 ? (
         <StateCard
           icon={<SearchIcon />}
-          title="No matches"
-          body={`Nobody matches "${query.trim()}". Try a different name, role, or skill.`}
+          title={t('noMatchesTitle')}
+          body={t('noMatchesBody', { query: query.trim() })}
         />
       ) : (
         <div className="teampage-grid">
@@ -170,7 +178,7 @@ export function TeamPage(): JSX.Element {
                     {status ? (
                       <span
                         className={`teampage-status-dot teampage-status-dot--${status}`}
-                        title={AVAILABILITY_LABEL[status]}
+                        title={t(AVAILABILITY_LABEL_KEY[status])}
                       />
                     ) : null}
                   </div>
@@ -178,9 +186,9 @@ export function TeamPage(): JSX.Element {
                     <div className="teampage-name-row">
                       <strong className="u-truncate">{name}</strong>
                       {p.emailVerified === true ? (
-                        <span className="chip chip--success teampage-flag" title="Email verified"><CheckIcon size={12} /></span>
+                        <span className="chip chip--success teampage-flag" title={t('emailVerifiedTitle')}><CheckIcon size={12} /></span>
                       ) : null}
-                      {self ? <span className="chip chip--accent teampage-flag">You</span> : null}
+                      {self ? <span className="chip chip--accent teampage-flag">{t('youChip')}</span> : null}
                     </div>
                     <span className="u-label-sm u-truncate">{role || handleOf(p)}</span>
                   </div>
@@ -196,8 +204,8 @@ export function TeamPage(): JSX.Element {
                     ) : null}
                     {status ? (
                       <span className="teampage-meta">
-                        {AVAILABILITY_LABEL[status]}
-                        {p.availability?.hoursPerWeek ? ` · ${p.availability.hoursPerWeek}h/wk` : ''}
+                        {t(AVAILABILITY_LABEL_KEY[status])}
+                        {p.availability?.hoursPerWeek ? t('hoursPerWeek', { hours: f.number(p.availability.hoursPerWeek) }) : ''}
                       </span>
                     ) : null}
                   </div>
@@ -216,23 +224,23 @@ export function TeamPage(): JSX.Element {
                           className={`${endorsed ? 'chip chip--accent' : 'chip'} teampage-skill-chip`}
                           disabled={self}
                           aria-pressed={endorsed}
-                          title={self ? 'You cannot endorse your own skill' : endorsed ? 'Remove your endorsement' : 'Endorse this skill'}
+                          title={self ? t('cannotEndorseOwn') : endorsed ? t('removeEndorsement') : t('endorseSkill')}
                           onClick={() => void toggleEndorse(p, s.name, endorsed)}
                         >
                           <ThumbsUpIcon size={13} /> {s.name}
-                          {s.endorsements.length > 0 ? <span className="teampage-endorse-count">{s.endorsements.length}</span> : null}
+                          {s.endorsements.length > 0 ? <span className="teampage-endorse-count">{f.number(s.endorsements.length)}</span> : null}
                         </button>
                       );
                     })}
                   </div>
                 ) : empty ? (
                   <span className="u-label-sm teampage-empty-hint">
-                    {self ? "You haven't filled in your profile yet." : "Hasn't filled in their profile yet."}
+                    {self ? t('emptyProfileSelf') : t('emptyProfileOther')}
                   </span>
                 ) : null}
 
                 {p.interests.length > 0 ? (
-                  <span className="teampage-meta teampage-interests">Interests: {p.interests.join(', ')}</span>
+                  <span className="teampage-meta teampage-interests">{t('interestsPrefix', { list: f.list(p.interests) })}</span>
                 ) : null}
 
                 {self ? (
@@ -243,12 +251,12 @@ export function TeamPage(): JSX.Element {
                       aria-valuenow={p.completeness}
                       aria-valuemin={0}
                       aria-valuemax={100}
-                      aria-label="Your profile completeness"
+                      aria-label={t('completenessAria')}
                     >
                       <div className="teampage-meter-fill" style={{ width: `${p.completeness}%` }} />
                     </div>
-                    <span className="u-label-sm teampage-meter-label">{p.completeness}%</span>
-                    <Link to="/profile" className="btn-ghost btn-sm">Edit profile</Link>
+                    <span className="u-label-sm teampage-meter-label">{f.percent(p.completeness / 100)}</span>
+                    <Link to="/profile" className="btn-ghost btn-sm">{t('editProfile')}</Link>
                   </div>
                 ) : null}
               </div>

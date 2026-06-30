@@ -14,12 +14,30 @@
  */
 
 import { DurableCollection } from '../hostExtPersistence.js';
+import { createLogger } from '../../observability/logger.js';
 import { assignVariant } from './bucketing.js';
 import { getToggleDefault, listToggleDefaults } from './registry.js';
-import type { ResolvedAssignment, ToggleConfig, ToggleSubject } from './types.js';
+import type { FeatureToggleStatus, ResolvedAssignment, ToggleConfig, ToggleSubject } from './types.js';
+
+const log = createLogger('host.featureToggles');
 
 /** Durable store of admin-saved toggle configs, keyed by toggle id. */
 const store = new DurableCollection<ToggleConfig>('feature-toggle', (c) => c.id);
+
+/**
+ * INS-3 — toggle-status lifecycle seam. A listener fires when a toggle's effective STATUS
+ * changes via `saveConfig`, letting a feature tear down side-effects it armed while enabled
+ * (scheduled jobs, trigger subscriptions) when its toggle flips OFF. Host owns the seam;
+ * features register at module load (the `registerSubjectEraser` inversion pattern — core
+ * never imports features, so no cycle). Best-effort: a listener error never blocks the save.
+ */
+export type ToggleStatusListener = (id: string, prev: FeatureToggleStatus | null, next: FeatureToggleStatus) => void | Promise<void>;
+const statusListeners: ToggleStatusListener[] = [];
+export function registerToggleStatusListener(fn: ToggleStatusListener): void {
+  if (!statusListeners.includes(fn)) statusListeners.push(fn);
+}
+/** Test-only: clear registered status listeners. */
+export function __resetToggleStatusListeners(): void { statusListeners.length = 0; }
 
 /** The effective config for one toggle: stored override layered over the
  *  feature-declared default. A stored override only applies while the feature
@@ -66,10 +84,21 @@ export async function pruneOrphanedConfigs(): Promise<number> {
   return pruned;
 }
 
-/** Persist an admin-saved config (upsert). Caller validates first. */
+/** Persist an admin-saved config (upsert). Caller validates first. Fires the INS-3
+ *  toggle-status seam when the effective status changes (best-effort, never blocks). */
 export async function saveConfig(config: ToggleConfig, savedBy: string): Promise<ToggleConfig> {
+  const prevStatus = (await store.get(config.id))?.status ?? getToggleDefault(config.id)?.status ?? null;
   const next: ToggleConfig = { ...config, updatedAt: new Date().toISOString(), updatedBy: savedBy };
   await store.put(next);
+  if (prevStatus !== next.status) {
+    for (const fn of statusListeners) {
+      try {
+        await fn(config.id, prevStatus, next.status);
+      } catch (err) {
+        log.warn('toggle_status_listener_failed', { id: config.id, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
   return next;
 }
 

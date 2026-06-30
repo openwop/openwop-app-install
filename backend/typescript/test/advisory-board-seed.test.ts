@@ -8,6 +8,7 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
@@ -16,10 +17,11 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 import { seedAdvisoryBoards, countAdvisors, clearAdvisoryBoards } from '../src/host/advisoryBoardSeed.js';
 import { exampleDataStatus } from '../src/host/exampleDataSeeders.js';
-import { listBoards, convene } from '../src/features/advisory-board/service.js';
+import { listBoards } from '../src/features/advisory-board/service.js';
+import { resolveAgentKnowledgeRetrieve } from '../src/host/agentKnowledgeComposition.js';
+import { createAgentMemoryPort, agentMemoryScope } from '../src/host/agentMemoryAdapter.js';
 
-const PORT = 18769;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 let n = 0;
 
@@ -28,9 +30,9 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
-  for (const id of ['users', 'kb', 'agent-knowledge', 'advisory-board']) {
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  for (const id of ['users', 'kb', 'advisory-board']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   }
@@ -61,7 +63,7 @@ async function ownerTenant(): Promise<{ tenantId: string; userId: string }> {
 }
 
 describe('advisory-board seed', () => {
-  it('seeds 8 advisors + 2 boards, is idempotent, and preseeded memory recalls in a convene', async () => {
+  it('seeds 8 advisors + 2 boards, is idempotent, and preseeded memory is recallable per advisor', async () => {
     const { tenantId, userId } = await ownerTenant();
     const storage = __hostExtStorage();
     expect(storage).not.toBeNull();
@@ -84,13 +86,15 @@ describe('advisory-board seed', () => {
     // Living board carries the ack + a disclaimer; historical board carries a disclaimer.
     expect(byHandle.get('titans')!.disclaimer).toMatch(/simulated/i);
 
-    // Preseeded memory recalls: convene the historical board with a decision prompt
-    // (Ben Franklan's "moral algebra" memory should surface) → an advisor is grounded.
-    const reply = async (): Promise<string> => 'noted';
-    const session = await convene(tenantId, userId, 'Dana', byHandle.get('timeless')!.boardId, { prompt: 'How should I weigh a hard decision with strong pros and cons?' }, reply);
-    const advisorTurns = session.turns.filter((t) => t.role === 'advisor');
-    expect(advisorTurns).toHaveLength(4);
-    expect(advisorTurns.some((t) => t.grounded === true)).toBe(true);
+    // Preseeded memory is recallable for an advisor (keyed by rosterId, with the
+    // `knowledge` capability active) — exactly what the AI chat's chat.turn agent
+    // dispatch composes (ADR 0038), so the persona recalls it in a council chat.
+    const advisorRosterId = byHandle.get('timeless')!.advisors[0]!;
+    const memory = createAgentMemoryPort(tenantId);
+    const retrieve = await resolveAgentKnowledgeRetrieve(tenantId, advisorRosterId, memory, agentMemoryScope(advisorRosterId));
+    expect(retrieve, 'advisor has the knowledge capability + a memory binding').toBeDefined();
+    const chunks = await retrieve!('How should I weigh a hard decision with strong pros and cons?');
+    expect(chunks.some((c) => c.kind === 'memory')).toBe(true);
   });
 
   it('surfaces advisors + cms-homepage in the demo-data status registry, and clears them', async () => {

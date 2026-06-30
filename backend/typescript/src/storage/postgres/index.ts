@@ -7,9 +7,17 @@
  * backing store.
  *
  * Connection model:
- *   - One `pg.Pool` per process. Default pool: max=20, idleTimeoutMillis=30s.
- *   - Cloud Run min=0 max=10 → at most 200 connections in the worst case.
- *     Set Cloud SQL max_connections >= 250 to stay headroom-safe.
+ *   - One `pg.Pool` per process. Pool max is `OPENWOP_PG_POOL_MAX` (default 10),
+ *     idleTimeoutMillis=30s.
+ *   - **Connection BUDGET (load-bearing):** total connections ≈ `poolMax ×
+ *     maxInstances`. This MUST stay under the Cloud SQL instance's
+ *     `max_connections` (a `db-f1-micro` allows only ~25). Size it so
+ *     `OPENWOP_PG_POOL_MAX × Cloud Run --max-instances ≤ max_connections − ~3`
+ *     (the reserved superuser slots). Exceeding it manifests as
+ *     `Connection terminated due to connection timeout` (the 10 s acquire wait) —
+ *     which stalls in-flight runs (e.g. a chat stuck on "Thinking"). The
+ *     app.openwop.dev demo runs db-f1-micro with maxScale=10, so it sets
+ *     `OPENWOP_PG_POOL_MAX=4` + `--max-instances=5` (4×5=20 ≤ ~22).
  *   - The pool reconnects automatically on transient drops.
  *
  * Atomicity:
@@ -56,6 +64,9 @@ import type {
 import { egressExtraJson, applyEgressExtra } from '../../messaging/types.js';
 import type { Storage } from '../storage.js';
 import { applyMigrations } from './schema.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('storage.postgres');
 
 type Row = Record<string, unknown>;
 
@@ -122,6 +133,8 @@ function rowToNotification(r: Row): NotificationRecord {
   return {
     notificationId: r.notification_id as string,
     tenantId: r.tenant_id as string,
+    recipientUserId: (r.recipient_user_id as string | null) ?? undefined,
+    recipientRole: (r.recipient_role as string | null) ?? undefined,
     type: r.type as string,
     priority: r.priority as NotificationRecord['priority'],
     status: r.status as NotificationRecord['status'],
@@ -143,6 +156,7 @@ function rowToPushSubscription(r: Row): PushSubscriptionRecord {
   return {
     subscriptionId: r.subscription_id as string,
     tenantId: r.tenant_id as string,
+    userId: (r.user_id as string | null) ?? undefined,
     endpoint: r.endpoint as string,
     p256dhKey: r.p256dh_key as string,
     authKey: r.auth_key as string,
@@ -238,11 +252,43 @@ async function tenantScopedTablesPg(pool: Pool): Promise<string[]> {
 export async function openPostgresStorage(options: PostgresStorageOptions | string): Promise<Storage> {
   const opts: PostgresStorageOptions =
     typeof options === 'string' ? { connectionString: options } : options;
+  // Pool max is env-tunable so a deploy can fit the connection budget to its
+  // Cloud SQL `max_connections` (see the header note): `poolMax × maxInstances`
+  // MUST stay under it, or connection acquisition times out and stalls in-flight
+  // runs. Default 10; clamped ≥ 1.
+  const poolMax = Math.max(1, Number(process.env.OPENWOP_PG_POOL_MAX ?? 10) || 10);
   const pool = new Pool({
-    max: 20,
+    max: poolMax,
     idleTimeoutMillis: 30_000,
+    // Bound how long we wait to acquire a connection and how long a single
+    // statement may run, so a stuck query can't hold a pool slot forever
+    // (DATA-1). Both overridable through the caller's opts.
+    connectionTimeoutMillis: 10_000,
+    statement_timeout: 30_000,
+    // statement_timeout bounds a single statement; a multi-statement
+    // transaction that stalls between statements could still pin a slot beyond
+    // the per-statement budget. idle_in_transaction_session_timeout bounds that
+    // idle gap (DATA-2) — server-side, widely supported (PG ≥ 9.6). Tunable via
+    // OPENWOP_PG_IDLE_IN_TXN_TIMEOUT_MS for deploys whose batch transactions
+    // legitimately idle longer (0 disables); still overridable through opts.
+    idle_in_transaction_session_timeout:
+      Number(process.env.OPENWOP_PG_IDLE_IN_TXN_TIMEOUT_MS ?? 60_000),
     ...opts,
   });
+
+  // A pooled client can emit 'error' asynchronously while idle (server-side
+  // termination, network reset). node-pg re-raises this on the Pool, and an
+  // UNHANDLED 'error' here crashes the Node process — the classic pg footgun.
+  // Log and swallow: the pool evicts the broken client and hands out a fresh
+  // one on the next acquire (DATA-1). The LISTEN client has its own handler.
+  pool.on('error', (err) => {
+    log.error('pg_pool_idle_client_error', { error: err instanceof Error ? err.message : String(err) });
+  });
+
+  // Surface the effective pool max at startup — the connection-budget knob
+  // (`poolMax × maxInstances` vs Cloud SQL max_connections) is the first thing to
+  // check when runs stall on `Connection terminated due to connection timeout`.
+  log.info('pg_pool_configured', { poolMax });
 
   // Run migrations once at boot. Single dedicated client; avoid
   // holding a pool slot for the duration of DDL.
@@ -517,10 +563,14 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
     },
 
     async resolveInterrupt(interruptId, resolvedValue, resolvedAt) {
-      await pool.query(
-        `UPDATE interrupts SET resolved_at = $1, resolved_value = $2 WHERE interrupt_id = $3`,
+      // CONDITIONAL on resolved_at IS NULL — rowCount is 1 iff this call won the
+      // resolve, 0 if it was already resolved (ENG-6).
+      const res = await pool.query(
+        `UPDATE interrupts SET resolved_at = $1, resolved_value = $2
+         WHERE interrupt_id = $3 AND resolved_at IS NULL`,
         [resolvedAt, resolvedValue ?? null, interruptId],
       );
+      return (res.rowCount ?? 0) > 0;
     },
 
     async listOpenInterrupts(runId) {
@@ -1037,6 +1087,31 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       };
     },
 
+    async incrementMediaUsage(tenantId, dateUtc, ttsChars, sttBytes) {
+      await pool.query(
+        `INSERT INTO media_provider_usage (tenant_id, date, tts_chars, stt_bytes)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (tenant_id, date) DO UPDATE SET
+           tts_chars = media_provider_usage.tts_chars + EXCLUDED.tts_chars,
+           stt_bytes = media_provider_usage.stt_bytes + EXCLUDED.stt_bytes`,
+        [tenantId, dateUtc, ttsChars, sttBytes],
+      );
+    },
+
+    async getMediaUsage(tenantId, dateUtc) {
+      const { rows } = await pool.query<{ tts_chars: number | string; stt_bytes: number | string }>(
+        `SELECT tts_chars, stt_bytes FROM media_provider_usage WHERE tenant_id = $1 AND date = $2`,
+        [tenantId, dateUtc],
+      );
+      const row = rows[0];
+      if (!row) return { ttsChars: 0, sttBytes: 0 };
+      // BIGINT comes back as a string from pg — coerce.
+      return {
+        ttsChars: typeof row.tts_chars === 'number' ? row.tts_chars : Number(row.tts_chars),
+        sttBytes: typeof row.stt_bytes === 'number' ? row.stt_bytes : Number(row.stt_bytes),
+      };
+    },
+
     async getEnvelopeCorrelation(runId, correlationId) {
       const { rows } = await pool.query<{ outcome: string; envelope_type: string; recorded_at: Date | string }>(
         `SELECT outcome, envelope_type, recorded_at FROM envelope_correlations
@@ -1076,11 +1151,12 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         session_id: string;
         tenant_id: string;
         title: string;
+        title_source: string | null;
         created_at: Date;
         updated_at: Date;
         message_count: number;
       }>(
-        `SELECT session_id, tenant_id, title, created_at, updated_at, message_count
+        `SELECT session_id, tenant_id, title, title_source, created_at, updated_at, message_count
          FROM chat_sessions
          WHERE tenant_id = $1
          ORDER BY updated_at DESC
@@ -1091,6 +1167,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         sessionId: row.session_id,
         tenantId: row.tenant_id,
         title: row.title,
+        ...(row.title_source ? { titleSource: row.title_source as ChatSessionRecord['titleSource'] } : {}),
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
         messageCount: row.message_count,
@@ -1099,12 +1176,13 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
 
     async createChatSession(record) {
       await pool.query(
-        `INSERT INTO chat_sessions (session_id, tenant_id, title, created_at, updated_at, message_count)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
+        `INSERT INTO chat_sessions (session_id, tenant_id, title, title_source, created_at, updated_at, message_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
         [
           record.sessionId,
           record.tenantId,
           record.title,
+          record.titleSource ?? null,
           record.createdAt,
           record.updatedAt,
           record.messageCount,
@@ -1117,11 +1195,12 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         session_id: string;
         tenant_id: string;
         title: string;
+        title_source: string | null;
         created_at: Date;
         updated_at: Date;
         message_count: number;
       }>(
-        `SELECT session_id, tenant_id, title, created_at, updated_at, message_count
+        `SELECT session_id, tenant_id, title, title_source, created_at, updated_at, message_count
          FROM chat_sessions
          WHERE tenant_id = $1 AND session_id = $2`,
         [tenantId, sessionId],
@@ -1132,6 +1211,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         sessionId: row.session_id,
         tenantId: row.tenant_id,
         title: row.title,
+        ...(row.title_source ? { titleSource: row.title_source as ChatSessionRecord['titleSource'] } : {}),
         createdAt: row.created_at.toISOString(),
         updatedAt: row.updated_at.toISOString(),
         messageCount: row.message_count,
@@ -1142,13 +1222,15 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       await pool.query(
         `UPDATE chat_sessions
             SET title         = COALESCE($3, title),
-                updated_at    = COALESCE($4, updated_at),
-                message_count = COALESCE($5, message_count)
+                title_source  = COALESCE($4, title_source),
+                updated_at    = COALESCE($5, updated_at),
+                message_count = COALESCE($6, message_count)
           WHERE tenant_id = $1 AND session_id = $2`,
         [
           tenantId,
           sessionId,
           patch.title ?? null,
+          patch.titleSource ?? null,
           patch.updatedAt ?? null,
           patch.messageCount ?? null,
         ],
@@ -1163,27 +1245,51 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return (r.rowCount ?? 0) > 0;
     },
 
-    async listChatSessionMessages(sessionId) {
-      const r = await pool.query<{
-        message_id: string;
-        session_id: string;
-        role: string;
-        content: string;
-        meta: string | null;
-        created_at: Date;
-      }>(
-        `SELECT message_id, session_id, role, content, meta, created_at
-         FROM chat_messages
-         WHERE session_id = $1
-         ORDER BY created_at ASC, message_id ASC`,
-        [sessionId],
-      );
-      return r.rows.map((row): ChatMessageRecord => ({
+    async listChatSessionMessages(sessionId, opts) {
+      type Row = { message_id: string; session_id: string; role: string; content: string; meta: string | null; author_subject: string | null; created_at: Date };
+      let rows: Row[];
+      if (opts?.limit !== undefined) {
+        // Bounded page: most-recent `limit` (optionally strictly older than the
+        // cursor) DESC, then reversed to ASC. The row-value comparison
+        // `(created_at, message_id) < ($2::timestamptz, $3)` pages
+        // deterministically across millisecond ties (ADR 0043 Phase 3b). The
+        // cursor's createdAt is an ISO string → cast to timestamptz so it
+        // compares against the column type.
+        const r = opts.before
+          ? await pool.query<Row>(
+              `SELECT message_id, session_id, role, content, meta, author_subject, created_at
+               FROM chat_messages
+               WHERE session_id = $1 AND (created_at, message_id) < ($2::timestamptz, $3)
+               ORDER BY created_at DESC, message_id DESC
+               LIMIT $4`,
+              [sessionId, opts.before.createdAt, opts.before.messageId, opts.limit],
+            )
+          : await pool.query<Row>(
+              `SELECT message_id, session_id, role, content, meta, author_subject, created_at
+               FROM chat_messages
+               WHERE session_id = $1
+               ORDER BY created_at DESC, message_id DESC
+               LIMIT $2`,
+              [sessionId, opts.limit],
+            );
+        rows = r.rows.slice().reverse();
+      } else {
+        const r = await pool.query<Row>(
+          `SELECT message_id, session_id, role, content, meta, author_subject, created_at
+           FROM chat_messages
+           WHERE session_id = $1
+           ORDER BY created_at ASC, message_id ASC`,
+          [sessionId],
+        );
+        rows = r.rows;
+      }
+      return rows.map((row): ChatMessageRecord => ({
         messageId: row.message_id,
         sessionId: row.session_id,
         role: row.role as ChatMessageRecord['role'],
         content: row.content,
         meta: row.meta,
+        authorSubject: row.author_subject,
         createdAt: row.created_at.toISOString(),
       }));
     },
@@ -1197,14 +1303,15 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       try {
         await client.query('BEGIN');
         await client.query(
-          `INSERT INTO chat_messages (message_id, session_id, role, content, meta, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
+          `INSERT INTO chat_messages (message_id, session_id, role, content, meta, author_subject, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
           [
             record.messageId,
             record.sessionId,
             record.role,
             record.content,
             record.meta,
+            record.authorSubject,
             record.createdAt,
           ],
         );
@@ -1224,16 +1331,35 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       }
     },
 
+    async updateChatMessageContent(sessionId, messageId, content, meta) {
+      const res = await pool.query(
+        `UPDATE chat_messages SET content = $1, meta = $2
+          WHERE session_id = $3 AND message_id = $4`,
+        [content, meta, sessionId, messageId],
+      );
+      return (res.rowCount ?? 0) > 0;
+    },
+
+    async getChatMessageAuthor(sessionId, messageId) {
+      const res = await pool.query<{ author_subject: string | null }>(
+        `SELECT author_subject FROM chat_messages WHERE session_id = $1 AND message_id = $2`,
+        [sessionId, messageId],
+      );
+      const row = res.rows[0];
+      return row ? { authorSubject: row.author_subject } : undefined;
+    },
+
     async insertNotification(record) {
       await pool.query(
         `INSERT INTO notifications (
-          notification_id, tenant_id, type, priority, status,
+          notification_id, tenant_id, recipient_user_id, recipient_role, type, priority, status,
           title, message, run_id, workflow_id, node_id,
           interrupt_id, action_url, metadata,
           created_at, read_at, archived_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
         [
-          record.notificationId, record.tenantId, record.type, record.priority, record.status,
+          record.notificationId, record.tenantId, record.recipientUserId ?? null, record.recipientRole ?? null,
+          record.type, record.priority, record.status,
           record.title, record.message,
           record.runId ?? null, record.workflowId ?? null, record.nodeId ?? null,
           record.interruptId ?? null, record.actionUrl ?? null, record.metadata ?? null,
@@ -1242,7 +1368,7 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       );
     },
 
-    async listNotifications({ tenantId, status, includeArchived, ascending, limit = 100 }) {
+    async listNotifications({ tenantId, recipientUserId, recipientRoles, status, includeArchived, ascending, limit = 100 }) {
       const wantStatuses: readonly string[] | null = status
         ? (Array.isArray(status) ? status : [status as string])
         : null;
@@ -1250,6 +1376,21 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       // tab passes `includeArchived: true` to opt in.
       const params: unknown[] = [tenantId];
       let where = `tenant_id = $1`;
+      // ADR 0050 — addressed rows for this user + TRUE broadcasts (both NULL) +
+      // role-addressed rows the caller holds (Phase 3). A role row is never a plain
+      // broadcast → default-deny when roles is empty.
+      if (recipientUserId) {
+        const roles = recipientRoles ?? [];
+        params.push(recipientUserId);
+        let clause = `(recipient_user_id = $${params.length} OR (recipient_user_id IS NULL AND (recipient_role IS NULL`;
+        if (roles.length > 0) {
+          const ph = roles.map((_, i) => `$${params.length + i + 1}`).join(', ');
+          clause += ` OR recipient_role IN (${ph})`;
+          for (const r of roles) params.push(r);
+        }
+        clause += ')))';
+        where += ` AND ${clause}`;
+      }
       if (wantStatuses && wantStatuses.length > 0) {
         const placeholders = wantStatuses.map((_, i) => `$${params.length + i + 1}`).join(', ');
         where += ` AND status IN (${placeholders})`;
@@ -1298,14 +1439,31 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       return rows[0] ? rowToNotification(rows[0]) : null;
     },
 
-    async markAllNotificationsRead(tenantId, now) {
+    async markAllNotificationsRead(tenantId, now, recipientUserId, recipientRoles) {
+      // ADR 0050 — scoped to the rows this user can see (their addressed rows +
+      // true broadcasts + role rows they hold, Phase 3), never another member's
+      // addressed or unheld-role items.
+      const params: unknown[] = [tenantId, now];
+      let recipientClause = '';
+      if (recipientUserId) {
+        const roles = recipientRoles ?? [];
+        params.push(recipientUserId);
+        recipientClause = ` AND (recipient_user_id = $${params.length} OR (recipient_user_id IS NULL AND (recipient_role IS NULL`;
+        if (roles.length > 0) {
+          const ph = roles.map((_, i) => `$${params.length + i + 1}`).join(', ');
+          recipientClause += ` OR recipient_role IN (${ph})`;
+          for (const r of roles) params.push(r);
+        }
+        recipientClause += ')))';
+      }
       const r = await pool.query(
         `UPDATE notifications
             SET status = 'read',
                 read_at = COALESCE(read_at, $2)
           WHERE tenant_id = $1
-            AND status = 'unread'`,
-        [tenantId, now],
+            AND status = 'unread'
+            ${recipientClause}`,
+        params,
       );
       return r.rowCount ?? 0;
     },
@@ -1332,16 +1490,17 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
       // server-side but keeps the unique endpoint constraint happy.
       await pool.query(
         `INSERT INTO push_subscriptions (
-          subscription_id, tenant_id, endpoint, p256dh_key, auth_key,
+          subscription_id, tenant_id, user_id, endpoint, p256dh_key, auth_key,
           user_agent, created_at, last_used_at
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
         ON CONFLICT (endpoint) DO UPDATE SET
           p256dh_key = EXCLUDED.p256dh_key,
           auth_key = EXCLUDED.auth_key,
           user_agent = EXCLUDED.user_agent,
-          tenant_id = EXCLUDED.tenant_id`,
+          tenant_id = EXCLUDED.tenant_id,
+          user_id = EXCLUDED.user_id`,
         [
-          record.subscriptionId, record.tenantId, record.endpoint,
+          record.subscriptionId, record.tenantId, record.userId ?? null, record.endpoint,
           record.p256dhKey, record.authKey,
           record.userAgent ?? null,
           record.createdAt, record.lastUsedAt ?? null,
@@ -1830,6 +1989,20 @@ export async function openPostgresStorage(options: PostgresStorageOptions | stri
         set.delete(handler);
         if (set.size === 0) channelHandlers.delete(channel);
       };
+    },
+
+    // ── app metadata (ADR 0052) ──
+    async getAppMeta(key) {
+      const { rows } = await pool.query<{ value: string }>(
+        `SELECT value FROM __app_meta WHERE key = $1`, [key]);
+      return rows[0] ? rows[0].value : null;
+    },
+    async setAppMeta(key, value) {
+      await pool.query(
+        `INSERT INTO __app_meta (key, value, updated_at) VALUES ($1, $2, $3)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+        [key, value, new Date().toISOString()],
+      );
     },
 
     async close() {

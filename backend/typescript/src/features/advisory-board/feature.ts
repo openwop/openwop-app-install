@@ -1,25 +1,22 @@
 /**
- * Board of Advisors (ADR 0040). A feature-package that COMPOSES existing owners
- * into multi-persona advisory councils:
+ * Board of Advisors (ADR 0040). A feature-package that defines advisory-board
+ * COHORTS and lets them be convened in the existing AI chat:
  *   - advisors = roster agents + their `agentProfile` persona (ADR 0031/0032);
- *   - per-advisor RAG = the `agent-knowledge` feature (ADR 0038), retrieved per
- *     advisor in the host convene layer — unchanged;
- *   - the `@@` summon = a broadcast fan-out over the host multi-agent conversation
- *     scaffold (`agentPromptScaffold`), then a moderator synthesis.
+ *   - per-advisor RAG = the `agent-knowledge` feature (ADR 0038), composed into
+ *     the existing `chat.turn` agent dispatch — unchanged;
+ *   - the `@@<handle>` summon (ADR 0040 § Correction 2026-06-15) expands the board's
+ *     cohort into the AI chat's active-agents lineup; the boardroom conversation
+ *     runs on the EXISTING multi-agent chat infra (one advisor at a time), NOT a
+ *     parallel convene runtime (that parallel stack was retired).
  *
- * Adds a NEW `AdvisoryBoard` grouping entity under /v1/host/openwop-app/advisors/*
- * (explicitly NOT host.kanban's board). No persona store, no RAG store, no parallel
- * conversation runtime. Toggle `advisory-board`, OFF by default, tenant-bucketed
- * (boards + roster are workspace-scoped, ADR 0015).
+ * This package owns ONLY the board entity (CRUD + `@@`-handle resolution) under
+ * /v1/host/openwop-app/advisors/* (explicitly NOT host.kanban's board). No persona
+ * store, no RAG store, no transcript store, no second chat runtime. Toggle
+ * `advisory-board`, OFF by default, tenant-bucketed (ADR 0015).
  *
- * RFC gate (ADR 0040): host work, NO blocking RFC — the MVP rides Accepted RFC
- * 0005 + RFC 0002 §A8 under the non-normative host-ext namespace. The normative
- * cross-host multi-party shape is the non-blocking companion RFC 0101 (Phase 6).
- *
- * Deferred (logged, not silent): the signed `feature.advisory-board.nodes` pack +
- * the `advisory-board.convene` chat envelope (need the pack-build/sign pipeline)
- * and the `tmpl.advisors.*` celebrity-persona seed — the feature is fully
- * functional against the workspace's existing roster agents without them.
+ * RFC gate (ADR 0040): host work, NO blocking RFC — every council turn is an
+ * ordinary non-normative `chat.turn` run. The normative cross-host multi-party
+ * shape is the Parked companion RFC 0101 (Phase 6).
  *
  * @see docs/adr/0040-board-of-advisors.md
  */
@@ -32,6 +29,7 @@ export const advisoryBoardFeature: BackendFeature = {
   id: 'advisory-board',
   registerRoutes: (deps) => registerAdvisoryBoardRoutes(deps),
   surface: { id: 'advisory-board', build: buildAdvisoryBoardSurface },
+  requiredPacks: [{ name: 'feature.advisory-board.nodes', version: '1.0.0' }],
   toggleDefault: {
     id: 'advisory-board',
     label: 'Board of Advisors',

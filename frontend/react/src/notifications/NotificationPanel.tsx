@@ -15,10 +15,14 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
+import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
 import { useNotificationStore } from './notificationStore.js';
 import { NotificationPreferencesPanel } from './NotificationPreferencesPanel.js';
 import { AlertIcon, CheckIcon, MessageSquareIcon, SettingsIcon, XIcon } from '../ui/icons/index.js';
+import { formatDateTime } from '../i18n/format.js';
 import type { Notification, NotificationType } from './types.js';
 
 type Tab = 'all' | 'unread' | 'archived';
@@ -43,6 +47,7 @@ const TYPE_COLOR: Record<string, string> = {
 };
 
 export function NotificationPanel(): JSX.Element | null {
+  const { t } = useTranslation('notifications');
   const panelOpen = useNotificationStore((s) => s.panelOpen);
   const closePanel = useNotificationStore((s) => s.closePanel);
   const notifications = useNotificationStore((s) => s.notifications);
@@ -121,7 +126,7 @@ export function NotificationPanel(): JSX.Element | null {
       >
         <header className="u-flex u-items-center u-justify-between u-pad-3-4 u-border-b">
           <h2 id="notification-panel-heading" className="u-m-0 u-fs-18">
-            Notifications
+            {t('panelHeading')}
             {unreadCount > 0 && (
               <span className="notifpanel-unread-badge">
                 {unreadCount}
@@ -133,8 +138,8 @@ export function NotificationPanel(): JSX.Element | null {
               type="button"
               className="secondary u-fs-14"
               onClick={openPreferences}
-              aria-label="Notification preferences"
-              title="Notification preferences"
+              aria-label={t('preferencesButtonLabel')}
+              title={t('preferencesButtonLabel')}
             >
               <SettingsIcon size={16} />
             </button>
@@ -142,7 +147,7 @@ export function NotificationPanel(): JSX.Element | null {
               type="button"
               className="secondary"
               onClick={closePanel}
-              aria-label="Close notifications"
+              aria-label={t('closePanelLabel')}
             >
               <XIcon size={16} />
             </button>
@@ -166,14 +171,14 @@ export function NotificationPanel(): JSX.Element | null {
             bar — we can't re-prompt). */}
         {desktopPermission === 'default' && (
           <DesktopPermissionRow
-            label="Get a desktop alert when something needs your attention"
-            cta="Enable desktop alerts"
+            label={t('desktopAlertsLabel')}
+            cta={t('desktopAlertsCta')}
             onClick={() => void requestDesktopPermission()}
           />
         )}
         {desktopPermission === 'denied' && (
           <DesktopPermissionRow
-            label="Desktop alerts are blocked. Unblock in site settings to re-enable."
+            label={t('desktopAlertsBlocked')}
             tone="muted"
           />
         )}
@@ -186,16 +191,16 @@ export function NotificationPanel(): JSX.Element | null {
             Pairs naturally with the desktop-perm row above. */}
         {desktopPermission === 'granted' && pushStatus === 'available' && (
           <DesktopPermissionRow
-            label="Also receive alerts when this tab is closed"
-            cta="Enable background push"
+            label={t('pushAvailableLabel')}
+            cta={t('pushAvailableCta')}
             onClick={() => void enablePush()}
           />
         )}
         {desktopPermission === 'granted' && pushStatus === 'subscribed' && (
           <DesktopPermissionRow
-            label="Background push is on. Alerts continue when the tab is closed."
+            label={t('pushSubscribedLabel')}
             tone="muted"
-            cta="Disable"
+            cta={t('pushDisableCta')}
             onClick={() => void disablePush()}
           />
         )}
@@ -207,22 +212,22 @@ export function NotificationPanel(): JSX.Element | null {
             onClick={() => void markAllRead()}
             disabled={unreadCount === 0}
           >
-            Mark all read
+            {t('markAllRead')}
           </button>
           <button
             type="button"
             className="secondary u-fs-12"
             onClick={() => void refresh()}
           >
-            Refresh
+            {t('refresh')}
           </button>
         </div>
 
         <nav className="u-flex u-border-b">
           {([
-            ['all',      'All'],
-            ['unread',   `Unread (${unreadCount})`],
-            ['archived', 'Archived'],
+            ['all',      t('tabAll')],
+            ['unread',   t('tabUnread', { count: unreadCount })],
+            ['archived', t('tabArchived')],
           ] as const).map(([key, label]) => (
             <button
               key={key}
@@ -251,16 +256,16 @@ export function NotificationPanel(): JSX.Element | null {
           )}
           {loading && filtered.length === 0 && (
             <div className="muted notifpanel-empty">
-              Loading…
+              {t('common:loading')}
             </div>
           )}
           {!loading && filtered.length === 0 && (
             <div className="muted notifpanel-empty">
               {tab === 'unread'
-                ? 'Nothing unread.'
+                ? t('emptyUnread')
                 : tab === 'archived'
-                  ? 'Nothing archived.'
-                  : 'No notifications yet. Run a workflow that needs an approval to see something here.'}
+                  ? t('emptyArchived')
+                  : t('emptyAll')}
             </div>
           )}
           {filtered.map((n) => (
@@ -269,7 +274,7 @@ export function NotificationPanel(): JSX.Element | null {
               notification={n}
               onMarkRead={() => void markAsRead(n.notificationId)}
               onArchive={() => void archive(n.notificationId)}
-              onDelete={() => { if (window.confirm("Delete this notification? This can't be undone — use Archive to dismiss without deleting.")) void deleteNotif(n.notificationId); }}
+              onDelete={() => { void confirm({ title: t('deleteConfirm'), danger: true, confirmLabel: t('common:delete') }).then((ok) => { if (ok) void deleteNotif(n.notificationId); }); }}
               onClose={closePanel}
             />
           ))}
@@ -296,6 +301,7 @@ function NotificationRow({
   onDelete,
   onClose,
 }: NotificationRowProps): JSX.Element {
+  const { t } = useTranslation('notifications');
   const isUnread = notification.status === 'unread';
   const icon = TYPE_ICON[notification.type] ?? '•';
   const color = TYPE_COLOR[notification.type] ?? 'var(--color-text-muted)';
@@ -327,7 +333,7 @@ function NotificationRow({
         <div className="u-flex u-items-baseline u-justify-between u-gap-2">
           <strong style={{ fontWeight: isUnread ? 600 : 400 }}>{notification.title}</strong>
           <span className="muted u-fs-11 u-nowrap">
-            {formatTime(notification.createdAt)}
+            {relativeLabel(notification.createdAt, t)}
           </span>
         </div>
         <div className="muted notifpanel-row-message">{notification.message}</div>
@@ -338,7 +344,7 @@ function NotificationRow({
               onClick={(e) => { e.stopPropagation(); onClose(); }}
               className="u-fs-12"
             >
-              {actionLabelFor(notification.type)} →
+              {t(actionLabelKeyFor(notification.type))} →
             </Link>
           </div>
         )}
@@ -349,7 +355,7 @@ function NotificationRow({
               className="secondary u-fs-11"
               onClick={(e) => { e.stopPropagation(); onMarkRead(); }}
             >
-              Mark read
+              {t('rowMarkRead')}
             </button>
           )}
           {notification.status !== 'archived' && (
@@ -358,7 +364,7 @@ function NotificationRow({
               className="secondary u-fs-11"
               onClick={(e) => { e.stopPropagation(); onArchive(); }}
             >
-              Archive
+              {t('rowArchive')}
             </button>
           )}
           <button
@@ -366,7 +372,7 @@ function NotificationRow({
             className="secondary u-fs-11 u-text-danger"
             onClick={(e) => { e.stopPropagation(); onDelete(); }}
           >
-            Delete
+            {t('rowDelete')}
           </button>
         </div>
       </div>
@@ -407,23 +413,25 @@ function DesktopPermissionRow({ label, cta, onClick, tone = 'default' }: Desktop
   );
 }
 
-function actionLabelFor(type: NotificationType): string {
-  if (type === 'workflow.approval_needed' || type === 'workflow.input_needed') return 'Open inbox';
-  if (type === 'workflow.failed' || type === 'workflow.completed') return 'View run';
-  return 'View';
+/** Catalog key for a row's inline action link, by notification type. */
+function actionLabelKeyFor(type: NotificationType): string {
+  if (type === 'workflow.approval_needed' || type === 'workflow.input_needed') return 'actionOpenInbox';
+  if (type === 'workflow.failed' || type === 'workflow.completed') return 'actionViewRun';
+  return 'actionView';
 }
 
-function formatTime(iso: string): string {
+/** Localized relative timestamp (`just now`, `5m ago`, …); falls back to a date past a week. */
+function relativeLabel(iso: string, t: TFunction<'notifications'>): string {
   const then = new Date(iso).getTime();
   const diffMs = Date.now() - then;
   const m = Math.floor(diffMs / 60_000);
   const h = Math.floor(diffMs / 3_600_000);
   const d = Math.floor(diffMs / 86_400_000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m ago`;
-  if (h < 24) return `${h}h ago`;
-  if (d < 7) return `${d}d ago`;
-  return new Date(iso).toLocaleDateString();
+  if (m < 1) return t('relativeJustNow');
+  if (m < 60) return t('relativeMinutes', { count: m });
+  if (h < 24) return t('relativeHours', { count: h });
+  if (d < 7) return t('relativeDays', { count: d });
+  return formatDateTime(iso, { dateStyle: 'medium' });
 }
 
 function useIsMobile(): boolean {

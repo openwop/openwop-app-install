@@ -14,6 +14,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { featurePackRefs } from '../src/features/index.js';
@@ -22,8 +23,7 @@ import { __resetCrmStore } from '../src/features/crm/contactsService.js';
 
 describe('feature variant — replay/fork safety', () => {
   let server: http.Server;
-  const PORT = 18889;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
   const TOKEN = 'dev-token';
   let workflowId: string;
 
@@ -31,7 +31,7 @@ describe('feature variant — replay/fork safety', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({
-      port: PORT,
+      port: 0,
       storageDsn: 'memory://',
       serviceName: 'test',
       serviceVersion: '0.0.1',
@@ -40,7 +40,7 @@ describe('feature variant — replay/fork safety', () => {
     await __clearToggleStore();
     await __resetCrmStore();
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
     // A real catalog workflow id — fork 404s on an unknown workflow.
     const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');

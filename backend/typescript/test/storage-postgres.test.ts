@@ -223,6 +223,8 @@ async function makeStorage(): Promise<Storage> {
     deleteAllTenantData: async () => ({ runs: 0, events: 0, interrupts: 0, workflows: 0, secrets: 0, notifications: 0, pushSubscriptions: 0 }),
     incrementManagedUsage: async () => {},
     getManagedUsage: async () => ({ inputTokens: 0, outputTokens: 0 }),
+    incrementMediaUsage: async () => {},
+    getMediaUsage: async () => ({ ttsChars: 0, sttBytes: 0 }),
     getEnvelopeCorrelation: async () => null,
     putEnvelopeCorrelation: async () => {},
     listChatSessions: async () => [],
@@ -232,6 +234,8 @@ async function makeStorage(): Promise<Storage> {
     deleteChatSession: async () => false,
     listChatSessionMessages: async () => [],
     appendChatMessage: async () => { throw new Error('not exercised'); },
+    updateChatMessageContent: async () => { throw new Error('not exercised'); },
+    getChatMessageAuthor: async () => { throw new Error('not exercised'); },
     insertNotification: async () => { throw new Error('not exercised'); },
     listNotifications: async () => [],
     getNotification: async () => null,
@@ -336,6 +340,17 @@ async function makeStorage(): Promise<Storage> {
     kvCompareAndSwap: async () => ({ swapped: false, actual: null }),
     publish: async () => {},
     subscribe: async () => async () => {},
+    getAppMeta: async (key: string) => {
+      const { rows } = await pool.query(`SELECT value FROM __app_meta WHERE key = $1`, [key]);
+      return rows[0] ? (rows[0] as { value: string }).value : null;
+    },
+    setAppMeta: async (key: string, value: string) => {
+      await pool.query(
+        `INSERT INTO __app_meta (key, value, updated_at) VALUES ($1,$2,$3)
+         ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+        [key, value, new Date().toISOString()],
+      );
+    },
     close: async () => { await pool.end(); },
   };
 }

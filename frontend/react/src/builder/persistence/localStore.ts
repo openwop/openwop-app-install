@@ -5,6 +5,7 @@
  */
 
 import type { SavedWorkflow } from '../schema/workflow.js';
+import i18n from '../../i18n/index.js';
 
 const LS_KEY = 'openwop-app.builder.workflows';
 const LS_SEEDED_KEY = 'openwop-app.builder.workflows.seeded';
@@ -24,15 +25,21 @@ function readIndex(): Index {
   }
 }
 
-function writeIndex(idx: Index): void {
+/** Returns true iff the index was actually persisted. The boolean lets the
+ *  one-time migrations avoid marking themselves complete when the write
+ *  silently failed (quota/disabled) — otherwise the flag would be set on
+ *  un-migrated data and the migration would never re-run (BLD-5). */
+function writeIndex(idx: Index): boolean {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify(idx));
+    return true;
   } catch (err) {
     // Quota exceeded (or storage disabled). The current session keeps
     // working from zustand state, but the workflow won't survive a
     // page reload. Warn so dev iterations notice instead of silently
     // losing work.
     console.warn('[openwop-builder] workflow persist failed:', err);
+    return false;
   }
 }
 
@@ -76,8 +83,12 @@ function mockAiToChatMigration(): void {
       mutated = true;
     }
   }
-  if (mutated) writeIndex(idx);
-  try { localStorage.setItem(LS_MIGRATION_MOCK_AI_TO_CHAT, '1'); } catch { /* ignore */ }
+  // Only mark the migration done if there was nothing to persist OR the write
+  // actually succeeded — otherwise re-run next load against the un-migrated data
+  // (the rename is idempotent, so re-running is safe) (BLD-5).
+  if (!mutated || writeIndex(idx)) {
+    try { localStorage.setItem(LS_MIGRATION_MOCK_AI_TO_CHAT, '1'); } catch { /* ignore */ }
+  }
 }
 
 function stripFromTemplateSuffixMigration(): void {
@@ -95,8 +106,11 @@ function stripFromTemplateSuffixMigration(): void {
       mutated = true;
     }
   }
-  if (mutated) writeIndex(idx);
-  try { localStorage.setItem(LS_MIGRATION_STRIPPED_FROM_TEMPLATE_SUFFIX, '1'); } catch { /* ignore */ }
+  // Same crash-safety as the mock-ai migration: don't flag complete if the
+  // persist silently failed (BLD-5). The suffix strip is idempotent.
+  if (!mutated || writeIndex(idx)) {
+    try { localStorage.setItem(LS_MIGRATION_STRIPPED_FROM_TEMPLATE_SUFFIX, '1'); } catch { /* ignore */ }
+  }
 }
 
 export function getSavedWorkflow(id: string): SavedWorkflow | undefined {
@@ -135,7 +149,7 @@ export function duplicateSavedWorkflow(id: string): SavedWorkflow | undefined {
   const copy: SavedWorkflow = {
     ...src,
     id: newWorkflowId(),
-    name: `${src.name} (copy)`,
+    name: i18n.t('builder:workflowNameSuffixCopy', { name: src.name }),
     createdAt: now,
     updatedAt: now,
   };

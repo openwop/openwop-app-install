@@ -36,8 +36,67 @@ const log = createLogger('byok.secretResolver');
 let backend: Storage | null = null;
 let masterKeyPath: string | null = null;
 
-/** Lazy-decryption cache for the SQLite-backed path. Keyed by ref. */
-const plaintextCache = new Map<string, string>();
+/**
+ * SEC-1: bounded TTL + LRU cache for decrypted plaintext secrets. The prior
+ * implementation was an unbounded `Map` — plaintext lived in process memory for
+ * the full process lifetime with no eviction (a slow leak and a longer-than-
+ * necessary exposure window for secret material). This caps both: entries
+ * expire after `SECRET_CACHE_TTL_MS` (re-resolved on demand) and the map is
+ * FIFO/LRU-bounded to `SECRET_CACHE_CAP`. It does NOT replace the documented
+ * production swap-point — a managed vault (Vault/HSM) is still the production
+ * action — but it closes the *eviction* gap for the reference host.
+ */
+const SECRET_CACHE_TTL_MS = 5 * 60_000;
+const SECRET_CACHE_CAP = 5_000;
+
+class BoundedSecretCache {
+  private readonly map = new Map<string, { value: string; expiry: number }>();
+
+  constructor(
+    private readonly ttlMs: number,
+    private readonly cap: number,
+  ) {}
+
+  get(key: string): string | undefined {
+    const hit = this.map.get(key);
+    if (hit === undefined) return undefined;
+    if (Date.now() > hit.expiry) {
+      this.map.delete(key);
+      return undefined;
+    }
+    // LRU touch: re-insert so the most-recently-read key is the newest.
+    this.map.delete(key);
+    this.map.set(key, hit);
+    return hit.value;
+  }
+
+  set(key: string, value: string): void {
+    this.map.delete(key);
+    if (this.map.size >= this.cap) {
+      const oldest = this.map.keys().next().value;
+      if (oldest !== undefined) this.map.delete(oldest);
+    }
+    this.map.set(key, { value, expiry: Date.now() + this.ttlMs });
+  }
+
+  delete(key: string): void {
+    this.map.delete(key);
+  }
+
+  /** Drop every entry whose key begins with `prefix` (tenant-scoped wipe). */
+  deleteByPrefix(prefix: string): void {
+    for (const key of Array.from(this.map.keys())) {
+      if (key.startsWith(prefix)) this.map.delete(key);
+    }
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
+}
+
+/** Lazy-decryption cache for the SQLite-backed path. Keyed by ref. Bounded — see SEC-1. */
+const plaintextCache = new BoundedSecretCache(SECRET_CACHE_TTL_MS, SECRET_CACHE_CAP);
 
 /**
  * Per-tenant in-memory store for ephemeral-mode BYOK (P0.3 in the
@@ -66,6 +125,10 @@ function ephemeralBucket(tenantId: string): Map<string, string> {
  *  and for signed-in (`user:*`) tenants; optional otherwise. */
 export interface SecretScope {
   tenantId: string;
+  /** Principal that initiated this secret mutation, stamped into the audit
+   *  log (SEC-4). Optional: system-initiated calls (token refresh, eviction)
+   *  leave it unset; user-facing routes populate it from `req.principal`. */
+  actorId?: string;
 }
 
 /**
@@ -82,9 +145,10 @@ function isSignedInTenant(tenantId: string | undefined): tenantId is string {
   );
 }
 
-/** Per-tenant decrypt cache (keyed by tenantId + ref). */
-const tenantPlaintextCache = new Map<string, string>();
-const tenantCacheKey = (tenantId: string, ref: string) => `${tenantId}::${ref}`;
+/** Per-tenant decrypt cache (keyed by tenantId + ref). Bounded — see SEC-1. */
+const tenantPlaintextCache = new BoundedSecretCache(SECRET_CACHE_TTL_MS, SECRET_CACHE_CAP);
+const tenantCachePrefix = (tenantId: string) => `${tenantId}::`;
+const tenantCacheKey = (tenantId: string, ref: string) => `${tenantCachePrefix(tenantId)}${ref}`;
 
 /**
  * Wire the resolver to the storage backend + master-key location.
@@ -238,6 +302,9 @@ export async function setSecret(credentialRef: string, value: string, scope?: Se
       new Date().toISOString(),
     );
     tenantPlaintextCache.set(tenantCacheKey(scope!.tenantId, credentialRef), value);
+    // Audit the mutation (SEC-4) — credentialRef is a NAME, never the value;
+    // `actor` is the initiating principal (undefined for system-initiated calls).
+    log.info('secret_set', { tenantId: scope!.tenantId, credentialRef, tier: 'kms', actor: scope?.actorId });
     return;
   }
 
@@ -246,12 +313,14 @@ export async function setSecret(credentialRef: string, value: string, scope?: Se
       throw new Error('setSecret in ephemeral mode requires scope.tenantId');
     }
     ephemeralBucket(scope.tenantId).set(credentialRef, value);
+    log.info('secret_set', { tenantId: scope.tenantId, credentialRef, tier: 'ephemeral', actor: scope.actorId });
     return;
   }
   const { storage, masterKey } = requireConfigured();
   const record = encrypt(value, masterKey);
   await storage.upsertEncryptedSecret(credentialRef, JSON.stringify(record), new Date().toISOString());
   plaintextCache.set(credentialRef, value);
+  log.info('secret_set', { credentialRef, tier: 'local-aes', actor: scope?.actorId });
 }
 
 /** Remove a secret. Called by DELETE /v1/host/openwop-app/byok/secrets/:ref. */
@@ -260,16 +329,19 @@ export async function removeSecret(credentialRef: string, scope?: SecretScope): 
     const { storage } = requireConfigured();
     await storage.deleteTenantSecret(scope!.tenantId, credentialRef);
     tenantPlaintextCache.delete(tenantCacheKey(scope!.tenantId, credentialRef));
+    log.info('secret_removed', { tenantId: scope!.tenantId, credentialRef, tier: 'kms', actor: scope?.actorId });
     return;
   }
   if (ephemeralEnabled()) {
     if (!scope?.tenantId) throw new Error('removeSecret in ephemeral mode requires scope.tenantId');
     ephemeralBucket(scope.tenantId).delete(credentialRef);
+    log.info('secret_removed', { tenantId: scope.tenantId, credentialRef, tier: 'ephemeral', actor: scope.actorId });
     return;
   }
   const { storage } = requireConfigured();
   await storage.deleteSecret(credentialRef);
   plaintextCache.delete(credentialRef);
+  log.info('secret_removed', { credentialRef, tier: 'local-aes', actor: scope?.actorId });
 }
 
 /** Return all stored credentialRefs for the given scope. NEVER returns values. */
@@ -337,9 +409,9 @@ export async function migrateEphemeralSecretsToTenant(
  * deletion flow where the cascade has already removed the rows.
  */
 export function clearTenantSecretCache(tenantId: string): void {
-  for (const key of Array.from(tenantPlaintextCache.keys())) {
-    if (key.startsWith(`${tenantId}::`)) tenantPlaintextCache.delete(key);
-  }
+  // Reuse the exact prefix builder the keys are made with, so the wipe delimiter
+  // can never drift from the key-builder (SEC-1).
+  tenantPlaintextCache.deleteByPrefix(tenantCachePrefix(tenantId));
 }
 
 /**

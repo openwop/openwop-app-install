@@ -1,0 +1,20 @@
+{
+  "name": "feature.slides.nodes",
+  "version": "1.0.0",
+  "description": "Slides canvas producer node pack (ADR 0153 Phase 1). The `render` node emits a typed `canvas.slides` artifact — a constrained deck { title?, theme?, slides[] } — that flows through the run-output producer (ADR 0083) and renders inline in the chat artifact workbench's slides renderer. Constrained typed JSON, never executable code; pure transform; replay-safe (output recorded, never re-derived).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "slides", "canvas", "deck", "presentation"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.slides.nodes.render",
+      "version": "1.0.0",
+      "label": "Render slide deck",
+      "description": "Emit a `canvas.slides` artifact. Inputs: { title?, theme?, slides: [{ layout, title?, subtitle?, bullets?, attribution?, imageUrl?, notes? }] } (or `deck` as the whole object, or `source` as its JSON). Output: a typed canvas.slides artifact (contentTrust: model-authored structured JSON). Pure transform.",
+      "category": "transform",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

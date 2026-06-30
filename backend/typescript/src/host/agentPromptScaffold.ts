@@ -34,6 +34,19 @@ export interface AgentPromptScaffoldInput {
    *  scaffold addresses them in the second person and tells the model NOT to
    *  invent a name (the failure mode we are fixing). */
   userName?: string | null | undefined;
+  /** Optional pre-resolved context block (ADR 0079 Phase 5 / ADR 0080 §Follow-on)
+   *  from a board-context resolver — company planning the advisors receive
+   *  (strategy is the only producer today). Snapshotted onto the boardroom
+   *  conversation; injected verbatim here. The block carries its own framing
+   *  (advisors MAY challenge it but MUST NOT invent facts, and it never overrides
+   *  the persona/safety guidance). Absent ⇒ omitted entirely. */
+  injectedContextBlock?: string | null | undefined;
+  /** Optional FENCED knowledge block (ADR 0084 Phase 2) — the conversation's
+   *  owner-subject knowledge composed by `composeKnowledgeForSubject` (cited
+   *  trusted KB/memory + BEGIN/END-fenced untrusted chunks). Distinct from
+   *  `injectedContextBlock` (a board-context snapshot): this is live-retrieved
+   *  per turn and carries its own trust fencing. Absent/empty ⇒ omitted. */
+  knowledgeBlock?: string | null | undefined;
 }
 
 /** Compose the wrapped system prompt for a chat agent turn. */
@@ -45,8 +58,13 @@ export function composeAgentSystemPrompt(input: AgentPromptScaffoldInput): strin
     ? `- You are talking to a human user named ${name}. Address them as ${name}. ${name} is a person, never an AI agent.`
     : `- You are talking to a human user. Address them in the second person ("you"); never invent or guess a name for them.`;
 
+  const injectedBlock = input.injectedContextBlock?.trim();
+  const knowledgeBlock = input.knowledgeBlock?.trim();
+
   return [
     input.systemPrompt.trim(),
+    ...(injectedBlock ? ['', injectedBlock] : []),
+    ...(knowledgeBlock ? ['', knowledgeBlock] : []),
     '',
     'CONVERSATION CONTEXT:',
     userLine,

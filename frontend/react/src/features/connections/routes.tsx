@@ -6,7 +6,6 @@
  * and carries no `featureId` gate.
  */
 import { lazy } from 'react';
-import { PlugIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -17,7 +16,9 @@ const routes: FeatureRoute[] = [
     path: '/connections',
     element: <ConnectionsPage />,
     tier: 'admin',
-    nav: { group: 'Access & data', label: 'Connections', icon: PlugIcon, hint: 'Credentials for external apps' },
+    // ADR 0144 §Correction (2026-06-26) — reached only via the always-on Access
+    // Hub; no standalone nav. Route + hubTab stay (the hub renders the element).
+    hubTab: { group: 'credentials', order: 1, scopes: ['workspace', 'personal'] },
   },
 ];
 

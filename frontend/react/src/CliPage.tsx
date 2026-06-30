@@ -10,6 +10,8 @@
  */
 
 import type { ReactNode } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
+import i18n from './i18n/index.js';
 import { PageHeader } from './ui/PageHeader.js';
 import { DataTable, type DataColumn } from './ui/DataTable.js';
 import { IconButton } from './ui/IconButton.js';
@@ -26,16 +28,17 @@ import {
 const INSTALL_CMD = 'npm install -g @openwop/cli';
 const CLI_REPO = 'https://github.com/openwop/openwop-cli';
 
-function copy(text: string, label = 'Command copied'): void {
+function copy(text: string, label?: string): void {
+  const message = label ?? i18n.t('chrome:cliCommandCopied');
   void navigator.clipboard
     ?.writeText(text)
-    .then(() => toast.success(label))
+    .then(() => toast.success(message))
     .catch(() => {
       /* clipboard blocked */
     });
 }
 
-function Cmd({ children }: { children: string }) {
+function Cmd({ children }: { children?: ReactNode }) {
   return <code>{children}</code>;
 }
 
@@ -45,7 +48,7 @@ function CommandBlock({ children, copyLabel }: { children: string; copyLabel?: s
     <div className="u-flex u-flex-col u-gap-1">
       <div className="u-flex u-justify-end">
         <IconButton
-          label="Copy command"
+          label={i18n.t('chrome:cliCopyCommand')}
           className="btn-ghost btn-sm"
           icon={<ClipboardIcon size={15} />}
           onClick={() => copy(children, copyLabel)}
@@ -67,195 +70,155 @@ const CATALOG: CatalogEntry[] = [
   {
     group: 'onboard',
     commands: ['--non-interactive'],
-    description: <>Stores a tenant API key + writes <Cmd>~/.openwop/config.json</Cmd>.</>,
+    description: <Trans i18nKey="cliCatOnboard" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
   {
     group: 'doctor',
     commands: ['--json'],
-    description: <>Connectivity + auth + advertised capability check; non-zero exit on hard failure.</>,
+    description: <Trans i18nKey="cliCatDoctor" ns="chrome" />,
   },
   {
     group: 'capabilities',
     commands: [],
-    description: <>Print this host's <Cmd>/.well-known/openwop</Cmd> document.</>,
+    description: <Trans i18nKey="cliCatCapabilities" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
   {
     group: 'runs',
     commands: ['create', 'get', 'events', 'annotations', 'debug-bundle'],
-    description: (
-      <>
-        Submit a workflow run, stream its events (<Cmd>values</Cmd>/<Cmd>updates</Cmd>/
-        <Cmd>messages</Cmd>/<Cmd>debug</Cmd>), and pull the diagnostic bundle.
-      </>
-    ),
+    description: <Trans i18nKey="cliCatRuns" ns="chrome" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd />, 3: <Cmd /> }} />,
   },
   {
     group: 'prompts',
     commands: ['list', 'render'],
-    description: <>Browse the host's prompt library and render a template with variables locally.</>,
+    description: <Trans i18nKey="cliCatPrompts" ns="chrome" />,
   },
   {
     group: 'memory',
     commands: ['list', 'get', 'write'],
-    description: <>Inspect and write tenant-scoped agent memory (with SR-1 redaction).</>,
+    description: <Trans i18nKey="cliCatMemory" ns="chrome" />,
   },
   {
     group: 'agents',
     commands: ['list', 'get', 'dispatch'],
-    description: <>List the host's manifest-runtime agent inventory and dispatch directly.</>,
+    description: <Trans i18nKey="cliCatAgents" ns="chrome" />,
   },
   {
     group: 'interrupts',
     commands: ['list', 'resume'],
-    description: <>Browse open HITL interrupts and answer them via the signed-token callback.</>,
+    description: <Trans i18nKey="cliCatInterrupts" ns="chrome" />,
   },
   {
     group: 'messaging',
     commands: ['connectors', 'routing', 'policy', 'pairing', 'allowlist', 'logs'],
-    description: (
-      <>
-        Manage the messaging relay-gateway: list connectors, route a channel + peer to a workflow or
-        agent, enforce pairing + allowlist + mention policy.
-      </>
-    ),
+    description: <Trans i18nKey="cliCatMessaging" ns="chrome" />,
   },
   {
     group: 'relay',
     commands: ['signal', 'imessage', 'whatsapp', 'discord'],
-    description: <>Run a channel-adapter daemon locally that bridges the named channel into this host (non-normative host extension).</>,
+    description: <Trans i18nKey="cliCatRelay" ns="chrome" />,
   },
   {
     group: 'notifications',
     commands: ['list', 'ack'],
-    description: <>Read + acknowledge the per-tenant inbox feed.</>,
+    description: <Trans i18nKey="cliCatNotifications" ns="chrome" />,
   },
   {
     group: 'proposals',
     commands: ['list', 'get', 'revise', 'apply', 'reject', 'archive'],
-    description: (
-      <>
-        Reviewable-learning proposal lifecycle (RFC 0096): an agent's learned change lands{' '}
-        <strong>inert</strong>; a human applies it through the host's activation gate. The CLI never
-        activates locally.
-      </>
-    ),
+    description: <Trans i18nKey="cliCatProposals" ns="chrome" components={{ 0: <strong /> }} />,
   },
   {
     group: 'goals',
     commands: ['list', 'get', 'create', 'pause', 'resume', 'abandon'],
-    description: (
-      <>
-        Standing goals (RFC 0097): a durable objective the host pursues across runs until a{' '}
-        <strong>judge</strong> verdicts it satisfied or a <strong>bound</strong> stops it. Completion
-        is the judge's verdict — no <Cmd>satisfy</Cmd> verb.
-      </>
-    ),
+    description: <Trans i18nKey="cliCatGoals" ns="chrome" components={{ 0: <strong />, 1: <strong />, 2: <Cmd /> }} />,
   },
   {
     group: 'export / import',
     commands: ['--kinds', '--dry-run'],
-    description: (
-      <>
-        Agent-platform portability (RFC 0098): move reusable estate between hosts as a{' '}
-        <strong>refs-only</strong> bundle — <Cmd>--dry-run</Cmd> plan, then idempotent apply. Never
-        carries secret values.
-      </>
-    ),
+    description: <Trans i18nKey="cliCatExportImport" ns="chrome" components={{ 0: <strong />, 1: <Cmd /> }} />,
   },
   {
     group: 'triggers',
     commands: ['list', 'get', 'register'],
-    description: (
-      <>
-        External-event trigger subscriptions (RFC 0099): bind a <strong>webhook / email / form</strong>{' '}
-        source to a workflow; the host verifies, dedups, and runs the durable delivery state machine. A
-        binding secret is shown <strong>once</strong> at creation — the CLI renders the fingerprint only.
-      </>
-    ),
+    description: <Trans i18nKey="cliCatTriggers" ns="chrome" components={{ 0: <strong />, 1: <strong /> }} />,
   },
   {
     group: 'a2a',
     commands: ['status', 'task'],
-    description: (
-      <>
-        Async / durable A2A tasks (RFC 0100): read a backing run's persisted <Cmd>A2ATaskState</Cmd>{' '}
-        (<Cmd>taskId === runId</Cmd>) that survives caller disconnect, host restart, and HITL pauses. The
-        record is content-free; the durable read needs <Cmd>a2a.durableTasks</Cmd>.
-      </>
-    ),
+    description: <Trans i18nKey="cliCatA2a" ns="chrome" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd /> }} />,
   },
   {
     group: 'approvals',
     commands: ['list', 'get', 'claim', 'reject'],
-    description: <>The human side of "agents propose, humans dispose" — resolve the host's policy-gated approval inbox.</>,
+    description: <Trans i18nKey="cliCatApprovals" ns="chrome" />,
   },
   {
     group: 'governance',
     commands: ['policy', 'audit'],
-    description: <>Read/set tenant policy (provider allowlist, per-action mode, retention) + the tenant audit log. The group is also invocable as <Cmd>openwop policy</Cmd>.</>,
+    description: <Trans i18nKey="cliCatGovernance" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
   {
     group: 'consent',
     commands: ['policy', 'records', 'get', 'erase'],
-    description: <>Tenant-scoped, region-aware consent + GDPR erasure (public + authed surfaces).</>,
+    description: <Trans i18nKey="cliCatConsent" ns="chrome" />,
   },
   {
     group: 'toggles',
     commands: ['list', 'get'],
-    description: <>Render the host-resolved feature-toggle / variant assignments for the caller (render-only; the host is the authority).</>,
+    description: <Trans i18nKey="cliCatToggles" ns="chrome" />,
   },
   {
     group: 'users',
     commands: ['list', 'get', 'create', 'disable', 'me'],
-    description: <>Tenant identity directory + account lifecycle.</>,
+    description: <Trans i18nKey="cliCatUsers" ns="chrome" />,
   },
   {
     group: 'profiles',
     commands: ['get', 'edit', 'skills', 'endorse'],
-    description: <>Self-service persona / skills / portfolio.</>,
+    description: <Trans i18nKey="cliCatProfiles" ns="chrome" />,
   },
   {
     group: 'auth',
     commands: ['status', 'saml', 'scim'],
-    description: <>Enterprise SSO / SAML / SCIM config — refs only, secrets never printed (alias <Cmd>sso</Cmd>).</>,
+    description: <Trans i18nKey="cliCatAuth" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
   {
     group: 'mcp',
     commands: ['info', 'tools', 'resources', 'prompts'],
-    description: <>JSON-RPC MCP client for the host's server mount (RFC 0020).</>,
+    description: <Trans i18nKey="cliCatMcp" ns="chrome" />,
   },
   {
     group: 'connections',
     commands: ['list', 'test', 'authorize', 'oauth-clients'],
-    description: <>Inspect third-party connections + OAuth client config — refs only (alias <Cmd>conn</Cmd>).</>,
+    description: <Trans i18nKey="cliCatConnections" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
   {
     group: 'workforces',
     commands: ['list', 'metrics', 'governance', 'status'],
-    description: <>Durable multi-agent orchestration + graduated-autonomy governance posture (alias <Cmd>fleet</Cmd>).</>,
+    description: <Trans i18nKey="cliCatWorkforces" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
   {
     group: 'analytics',
     commands: ['summary', 'events', 'collect'],
-    description: <>Org-scoped usage / cost / observability (alias <Cmd>usage</Cmd>).</>,
+    description: <Trans i18nKey="cliCatAnalytics" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
   {
     group: 'cron',
     commands: ['list', 'add', 'enable', 'disable', 'remove'],
-    description: <>Scheduled jobs (RFC 0052) — enable/disable a schedule + a <Cmd>--roster</Cmd> filter.</>,
+    description: <Trans i18nKey="cliCatCron" ns="chrome" components={{ 0: <Cmd /> }} />,
   },
 ];
 
 const CATALOG_COLUMNS: DataColumn<CatalogEntry>[] = [
   {
     key: 'group',
-    header: 'Group',
+    header: i18n.t('chrome:cliColGroup'),
     width: '160px',
     render: (row) => <span className="chip chip--accent">{row.group}</span>,
   },
   {
     key: 'commands',
-    header: 'Commands',
+    header: i18n.t('chrome:cliColCommands'),
     width: '34%',
     render: (row) =>
       row.commands.length === 0 ? (
@@ -270,7 +233,7 @@ const CATALOG_COLUMNS: DataColumn<CatalogEntry>[] = [
   },
   {
     key: 'description',
-    header: 'What it does',
+    header: i18n.t('chrome:cliColWhatItDoes'),
     render: (row) => row.description,
   },
 ];
@@ -287,72 +250,69 @@ const ADAPTERS: Adapter[] = [
   {
     name: 'Signal',
     icon: <PlugIcon size={18} />,
-    note: <><Cmd>signal-cli</Cmd> must be installed and registered separately.</>,
+    note: <Trans i18nKey="cliAdapterSignalNote" ns="chrome" components={{ 0: <Cmd /> }} />,
     command: 'openwop relay signal --account +15555550100',
   },
   {
     name: 'iMessage',
     icon: <MessageSquareIcon size={18} />,
-    note: <>macOS host with Messages access; bridges your local iMessage account.</>,
+    note: <Trans i18nKey="cliAdapterImessageNote" ns="chrome" />,
     command: 'openwop relay imessage',
   },
   {
     name: 'WhatsApp',
     icon: <MessageCircleIcon size={18} />,
-    note: <><Cmd>npm install @whiskeysockets/baileys</Cmd>; first run prompts a QR scan.</>,
+    note: <Trans i18nKey="cliAdapterWhatsappNote" ns="chrome" components={{ 0: <Cmd /> }} />,
     command: 'openwop relay whatsapp',
   },
   {
     name: 'Discord',
     icon: <TerminalIcon size={18} />,
-    note: <><Cmd>npm install discord.js</Cmd>; provide <Cmd>DISCORD_TOKEN</Cmd>.</>,
+    note: <Trans i18nKey="cliAdapterDiscordNote" ns="chrome" components={{ 0: <Cmd />, 1: <Cmd /> }} />,
     command: 'DISCORD_TOKEN=… openwop relay discord',
   },
 ];
 
 export function CliPage() {
+  const { t } = useTranslation('chrome');
   return (
     <section className="cli-page page-stack">
       <PageHeader
-        eyebrow="CLI"
-        title="OpenWOP CLI"
-        lede={<>The <Cmd>openwop</Cmd> command operates this host (and any OpenWOP-compatible host) from the terminal — auth onboarding, capabilities discovery, run submission + streaming, prompts + memory + agents, channel messaging, governance + identity + portability, and host doctor. Every command is <strong>capability-gated</strong>: it drives only what the host advertises at <Cmd>/.well-known/openwop</Cmd> and fails closed otherwise.</>}
+        eyebrow={t('cliEyebrow')}
+        title={t('cliTitle')}
+        lede={<Trans t={t} i18nKey="cliLede" components={{ 0: <Cmd />, 1: <strong />, 2: <Cmd /> }} />}
         actions={
           <>
             <button
               type="button"
               className="btn-primary u-iflex u-gap-1"
-              onClick={() => copy(INSTALL_CMD, 'Install command copied')}
+              onClick={() => copy(INSTALL_CMD, t('cliInstallCommandCopied'))}
             >
-              <ClipboardIcon size={15} /> Copy install command
+              <ClipboardIcon size={15} /> {t('cliCopyInstall')}
             </button>
             <a className="btn-ghost u-iflex u-gap-1" href={CLI_REPO}>
-              <LinkIcon size={15} /> Source &amp; issues
+              <LinkIcon size={15} /> {t('cliSourceAndIssues')}
             </a>
           </>
         }
       />
 
       <section id="install" className="surface-card u-gap-3">
-        <h2>Install</h2>
-        <p>Global (recommended for daily use):</p>
-        <CommandBlock copyLabel="Install command copied">{`npm install -g @openwop/cli
+        <h2>{t('cliInstallHeading')}</h2>
+        <p>{t('cliInstallGlobal')}</p>
+        <CommandBlock copyLabel={t('cliInstallCommandCopied')}>{`npm install -g @openwop/cli
 openwop --version`}</CommandBlock>
-        <p>One-off (no install) — useful in CI or scratch shells:</p>
+        <p>{t('cliInstallOneOff')}</p>
         <CommandBlock>{`npx -y @openwop/cli@latest --help`}</CommandBlock>
         <p className="muted">
-          Requires Node ≥ 20. Channel adapters for Discord and WhatsApp are
-          declared as <em>optional</em> peer dependencies; install them only
-          if you actually use those channels.
+          <Trans t={t} i18nKey="cliInstallRequires" components={{ 0: <em /> }} />
         </p>
       </section>
 
       <section id="point-at-host" className="surface-card u-gap-3">
-        <h2>Point it at this host</h2>
+        <h2>{t('cliPointHeading')}</h2>
         <p>
-          The CLI reads <Cmd>OPENWOP_BASE_URL</Cmd> (or <Cmd>--base-url</Cmd>)
-          and <Cmd>OPENWOP_API_KEY</Cmd> (or the interactive onboard flow).
-          Against this deployment:
+          <Trans t={t} i18nKey="cliPointBody" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd /> }} />
         </p>
         <CommandBlock>{`export OPENWOP_BASE_URL=https://app.openwop.dev/api
 openwop onboard           # interactive auth + key issuance
@@ -361,100 +321,83 @@ openwop capabilities      # read /.well-known/openwop`}</CommandBlock>
       </section>
 
       <section id="new-capabilities" className="surface-card u-gap-3">
-        <h2>New: agent-platform capabilities</h2>
+        <h2>{t('cliNewCapsHeading')}</h2>
         <p>
-          The latest CLI adds command groups for the host's agent-platform
-          surfaces — governance &amp; safety (<Cmd>approvals</Cmd>,{' '}
-          <Cmd>governance</Cmd>, <Cmd>consent</Cmd>, <Cmd>toggles</Cmd>),
-          identity &amp; access (<Cmd>users</Cmd>, <Cmd>profiles</Cmd>,{' '}
-          <Cmd>auth</Cmd>), extensibility (<Cmd>mcp</Cmd>,{' '}
-          <Cmd>connections</Cmd>), orchestration (<Cmd>workforces</Cmd>), and
-          observability (<Cmd>analytics</Cmd>) — plus five capabilities that
-          land behind their governing RFCs:
+          <Trans
+            t={t}
+            i18nKey="cliNewCapsBody"
+            components={{
+              0: <Cmd />, 1: <Cmd />, 2: <Cmd />, 3: <Cmd />, 4: <Cmd />, 5: <Cmd />,
+              6: <Cmd />, 7: <Cmd />, 8: <Cmd />, 9: <Cmd />, 10: <Cmd />,
+            }}
+          />
         </p>
         <div className="card-grid">
           <div className="surface-card u-gap-2">
-            <h3>Reviewable learning — <Cmd>proposals</Cmd></h3>
+            <h3><Trans t={t} i18nKey="cliCardProposalsTitle" components={{ 0: <Cmd /> }} /></h3>
             <p className="muted">
-              RFC 0096. An agent's learned change is stored as an{' '}
-              <strong>inert</strong> proposal; a human reviews and applies it
-              through the host's activation gate. The CLI renders the host's
-              verdict and never activates locally.
+              <Trans t={t} i18nKey="cliCardProposalsBody" components={{ 0: <strong /> }} />
             </p>
             <CommandBlock>{`openwop proposals list --state pending
 openwop proposals apply prop_123`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3>Standing goals — <Cmd>goals</Cmd></h3>
+            <h3><Trans t={t} i18nKey="cliCardGoalsTitle" components={{ 0: <Cmd /> }} /></h3>
             <p className="muted">
-              RFC 0097. A durable objective the host pursues across runs until a{' '}
-              <strong>judge</strong> verdicts it satisfied or a{' '}
-              <strong>bound</strong> stops it. Completion is the judge's verdict —
-              you can't declare victory from the client.
+              <Trans t={t} i18nKey="cliCardGoalsBody" components={{ 0: <strong />, 1: <strong /> }} />
             </p>
             <CommandBlock>{`openwop goals create --objective "Keep backlog < 20" \\
   --judge verifier --max-iterations 50`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3>Portability — <Cmd>export</Cmd> / <Cmd>import</Cmd></h3>
+            <h3><Trans t={t} i18nKey="cliCardPortabilityTitle" components={{ 0: <Cmd />, 1: <Cmd /> }} /></h3>
             <p className="muted">
-              RFC 0098. Move reusable estate between hosts as a{' '}
-              <strong>refs-only</strong> bundle — secrets never travel as values.
-              Always dry-run first; apply is idempotent and re-owned to you.
+              <Trans t={t} i18nKey="cliCardPortabilityBody" components={{ 0: <strong /> }} />
             </p>
             <CommandBlock>{`openwop export --kinds agent --out estate.json
 openwop import estate.json --dry-run`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3>Trigger bridge — <Cmd>triggers</Cmd></h3>
+            <h3><Trans t={t} i18nKey="cliCardTriggersTitle" components={{ 0: <Cmd /> }} /></h3>
             <p className="muted">
-              RFC 0099. Bind an external <strong>webhook / email / form</strong>{' '}
-              source to a workflow; the host verifies, dedups, and runs the durable
-              delivery state machine. The binding secret is shown <strong>once</strong> —
-              the CLI prints the fingerprint, never the value.
+              <Trans t={t} i18nKey="cliCardTriggersBody" components={{ 0: <strong />, 1: <strong /> }} />
             </p>
             <CommandBlock>{`openwop triggers register --source webhook \\
   --workflow wf_intake --dedup --verification required`}</CommandBlock>
           </div>
           <div className="surface-card u-gap-2">
-            <h3>Durable A2A tasks — <Cmd>a2a</Cmd></h3>
+            <h3><Trans t={t} i18nKey="cliCardA2aTitle" components={{ 0: <Cmd /> }} /></h3>
             <p className="muted">
-              RFC 0100. Read a backing run's persisted <Cmd>A2ATaskState</Cmd>{' '}
-              (<Cmd>taskId === runId</Cmd>) that survives caller disconnect, host
-              restart, and HITL pauses. The record is content-free; the CLI renders
-              the host's projection, never a locally-derived state.
+              <Trans t={t} i18nKey="cliCardA2aBody" components={{ 0: <Cmd />, 1: <Cmd /> }} />
             </p>
             <CommandBlock>{`openwop a2a status
 openwop a2a task <taskId>`}</CommandBlock>
           </div>
         </div>
         <p className="muted">
-          These groups are capability-gated: they appear only when this host
-          advertises <Cmd>agents.proposals</Cmd>, <Cmd>agents.goals</Cmd>,{' '}
-          <Cmd>portability</Cmd>, <Cmd>triggerBridge</Cmd>, or <Cmd>a2a</Cmd> in
-          its <Cmd>/.well-known/openwop</Cmd> document.
+          <Trans
+            t={t}
+            i18nKey="cliNewCapsGated"
+            components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd />, 3: <Cmd />, 4: <Cmd />, 5: <Cmd /> }}
+          />
         </p>
       </section>
 
       <section id="command-catalog" className="surface-card u-gap-3">
-        <h2>Command catalog</h2>
+        <h2>{t('cliCatalogHeading')}</h2>
         <DataTable
           columns={CATALOG_COLUMNS}
           rows={CATALOG}
           rowKey={(row) => row.group}
           density="comfortable"
-          caption="OpenWOP CLI command groups and their subcommands"
+          caption={t('cliCatalogCaption')}
         />
       </section>
 
       <section id="channel-relay" className="surface-card u-gap-3">
-        <h2>Channel relay (optional)</h2>
+        <h2>{t('cliRelayHeading')}</h2>
         <p>
-          The <Cmd>messaging</Cmd> and <Cmd>relay</Cmd> commands are a
-          non-normative host extension under <Cmd>/v1/host/openwop-app/messaging/*</Cmd>:
-          they let the CLI act as a local bridge between a chat channel and a
-          workflow or agent on this host. Each adapter is opt-in — install only
-          what you use:
+          <Trans t={t} i18nKey="cliRelayBody" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd /> }} />
         </p>
         <div className="card-grid">
           {ADAPTERS.map((a) => (
@@ -469,21 +412,22 @@ openwop a2a task <taskId>`}</CommandBlock>
           ))}
         </div>
         <p className="muted">
-          The CLI never sees a user's primary credentials directly. It pairs
-          with the host via a 6-character code over an authenticated session,
-          and channel-side auth lives only in the local adapter process.
+          {t('cliRelayPairing')}
         </p>
       </section>
 
       <section id="source" className="surface-card u-gap-3">
-        <h2>Source &amp; issues</h2>
+        <h2>{t('cliSourceHeading')}</h2>
         <p>
-          The CLI is <a href="https://www.npmjs.com/package/@openwop/cli">@openwop/cli</a> on
-          npm. Source, docs, and issue tracker live in
-          {' '}<a href={CLI_REPO}>github.com/openwop/openwop-cli</a>.
-          Bug reports especially welcome — the CLI is young (the agent-platform
-          groups plus the trigger bridge and durable A2A tasks ship in{' '}
-          <strong>v0.3.0</strong>) and additive changes will land throughout v1.x.
+          <Trans
+            t={t}
+            i18nKey="cliSourceBody"
+            components={{
+              0: <a href="https://www.npmjs.com/package/@openwop/cli" />,
+              1: <a href={CLI_REPO} />,
+              2: <strong />,
+            }}
+          />
         </p>
       </section>
     </section>

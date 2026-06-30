@@ -30,8 +30,28 @@ export interface GovernancePolicy {
   providerAllowlist?: string[];
   /** Per assistant-action kind; absent kinds default `approval-required`. */
   actionPolicy?: Record<string, ActionKindPolicy>;
-  /** Retention windows (days). Stored now; the sweep daemon is ADR 0029's. */
-  retention?: { assistantGraphDays?: number; sourceDerivedDays?: number };
+  /** Retention windows (days). The legacy `assistantGraphDays`/`sourceDerivedDays`
+   *  are kept for back-compat; ADR 0077 P3 adds per-DataClassification windows the
+   *  retention sweep daemon enforces. Both `confidentialPiiDays` and `internalDays` are
+   *  OPT-IN — a window only purges when EXPLICITLY configured (ADR 0081 P5 footgun fix
+   *  removed the old implicit `confidential-pii: 365` default). 365 is the recommended
+   *  value to SET, not a default. Settable via the governance admin route (GOV-2). */
+  retention?: {
+    assistantGraphDays?: number;
+    sourceDerivedDays?: number;
+    confidentialPiiDays?: number;
+    internalDays?: number;
+  };
+  /** ADR 0106 — per-org media-generation cost budget OVERRIDE. When a field is
+   *  present it OVERRIDES the host env default (`OPENWOP_MEDIA_DAILY_{TTS_CHARS,
+   *  STT_BYTES}`) for this tenant; an explicit `0` UNCAPS that kind for the org.
+   *  Absent fields fall through to the env default. Settable via the superadmin
+   *  governance route; consulted by `aiProviders/mediaBudget` through a DI seam
+   *  (no direct module coupling). */
+  mediaBudget?: {
+    ttsChars?: number;
+    sttBytes?: number;
+  };
   updatedAt: string;
   updatedByUserId?: string;
 }
@@ -42,9 +62,16 @@ export async function getGovernancePolicy(tenantId: string): Promise<GovernanceP
   return policies.get(tenantId);
 }
 
+/** Tenants that have a governance policy — the EXPLICIT enumeration the retention
+ *  sweep iterates (ADR 0077 P3). Never a wildcard: a tenant with no policy is never
+ *  swept. */
+export async function listGovernedTenants(): Promise<string[]> {
+  return (await policies.list()).map((p) => p.tenantId);
+}
+
 export async function setGovernancePolicy(
   tenantId: string,
-  patch: Pick<GovernancePolicy, 'providerAllowlist' | 'actionPolicy' | 'retention'>,
+  patch: Pick<GovernancePolicy, 'providerAllowlist' | 'actionPolicy' | 'retention' | 'mediaBudget'>,
   updatedByUserId?: string,
 ): Promise<GovernancePolicy> {
   const next: GovernancePolicy = {
@@ -53,6 +80,7 @@ export async function setGovernancePolicy(
     ...(patch.providerAllowlist !== undefined ? { providerAllowlist: patch.providerAllowlist } : {}),
     ...(patch.actionPolicy !== undefined ? { actionPolicy: patch.actionPolicy } : {}),
     ...(patch.retention !== undefined ? { retention: patch.retention } : {}),
+    ...(patch.mediaBudget !== undefined ? { mediaBudget: patch.mediaBudget } : {}),
     ...(updatedByUserId !== undefined ? { updatedByUserId } : {}),
   };
   await policies.put(next);

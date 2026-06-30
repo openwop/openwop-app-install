@@ -14,10 +14,15 @@
  */
 
 import { useEffect, useState } from 'react'; // useState used by both AgentDetailPage (state) and AgentDetail (delete-in-flight + error)
-import { EmptyBlock, slugify } from './agentUi.js';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
+import { slugify } from './agentUi.js';
+import { StateCard } from '../ui/StateCard.js';
+import { Notice } from '../ui/Notice.js';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { deleteUserAgent, getAgent, type AgentEntry } from '../client/agentsClient.js';
 import { ArrowLeftIcon, CheckIcon, CircleIcon } from '../ui/icons/index.js';
+import { formatNumber } from '../i18n/format.js';
 
 interface State {
   agent: AgentEntry | null;
@@ -26,6 +31,7 @@ interface State {
 }
 
 export function AgentDetailPage(): JSX.Element {
+  const { t } = useTranslation('agents');
   const { agentId } = useParams<{ agentId: string }>();
   const [state, setState] = useState<State>({ agent: null, isLoading: true, error: null });
 
@@ -53,21 +59,27 @@ export function AgentDetailPage(): JSX.Element {
     <section aria-labelledby="agent-detail-heading">
       <div className="u-mb-3">
         <Link to="/agents/templates" className="u-fs-12 u-ink-3">
-          <ArrowLeftIcon size={12} /> Agent templates
+          <ArrowLeftIcon size={12} /> {t('detailBack')}
         </Link>
       </div>
 
       {state.isLoading && (
-        <EmptyBlock>Loading agent…</EmptyBlock>
+        <StateCard loading title={t('detailLoading')} />
       )}
       {state.error && (
-        <EmptyBlock tone="error">Couldn't load agent: {state.error}</EmptyBlock>
+        <Notice variant="error">{t('detailLoadError', { error: state.error })}</Notice>
       )}
       {!state.isLoading && !state.error && !state.agent && (
-        <EmptyBlock>
-          Agent <code>{agentId}</code> is not installed on this host.{' '}
-          <Link to="/agents/templates">Back to the list.</Link>
-        </EmptyBlock>
+        <StateCard
+          icon={<CircleIcon size={20} />}
+          title={t('detailNotInstalledTitle')}
+          body={
+            <>
+              Agent <code>{agentId}</code> {t('detailNotInstalled')}{' '}
+              <Link to="/agents/templates">{t('detailBackToList')}</Link>
+            </>
+          }
+        />
       )}
 
       {state.agent && <AgentDetail agent={state.agent} />}
@@ -76,6 +88,7 @@ export function AgentDetailPage(): JSX.Element {
 }
 
 function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
+  const { t } = useTranslation('agents');
   const navigate = useNavigate();
   // User-authored agents carry `packName: 'user:<tenantId>'` (phase E1
   // synthesises that on register); pack-installed agents always carry
@@ -88,7 +101,7 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
 
   async function onDelete(): Promise<void> {
     if (!isUserAuthored) return;
-    if (!window.confirm(`Delete the "${agent.persona}" agent? This can't be undone.`)) {
+    if (!(await confirm({ title: t('detailDeleteConfirm', { persona: agent.persona }), danger: true, confirmLabel: t('common:delete') }))) {
       return;
     }
     setIsDeleting(true);
@@ -124,9 +137,9 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
             type="button"
             className="secondary"
             onClick={() => navigate(`/agents/fork?fork=${encodeURIComponent(agent.agentId)}`)}
-            title="Duplicate this agent's config into a new one you can customize"
+            title={t('detailForkTitle')}
           >
-            Fork
+            {t('detailFork')}
           </button>
           {isUserAuthored ? (
             <button
@@ -134,13 +147,13 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
               className="secondary u-text-danger"
               onClick={() => void onDelete()}
               disabled={isDeleting}
-              title="Permanently delete this user-authored agent"
+              title={t('detailDeleteTitle')}
             >
-              {isDeleting ? 'Deleting…' : 'Delete'}
+              {isDeleting ? t('detailDeleting') : t('detailDelete')}
             </button>
           ) : (
             <span className="muted agentdetail-pack-note">
-              Pack-installed agents are not deletable. Fork to customize.
+              {t('detailNotDeletable')}
             </span>
           )}
         </div>
@@ -149,56 +162,54 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
             role="alert"
             className="agentdetail-delete-error"
           >
-            Delete failed: {deleteError}
+            {t('detailDeleteFailed', { error: deleteError })}
           </div>
         )}
       </header>
 
-      <DetailSection title="Source">
-        <Row label="Pack" value={<code>{agent.packName}@{agent.packVersion}</code>} />
-        <Row label="Agent ID" value={<code className="u-fs-11">{agent.agentId}</code>} />
+      <DetailSection title={t('detailSectionSource')}>
+        <Row label={t('detailRowPack')} value={<code>{agent.packName}@{agent.packVersion}</code>} />
+        <Row label={t('detailRowAgentId')} value={<code className="u-fs-11">{agent.agentId}</code>} />
       </DetailSection>
 
-      <DetailSection title="Model + behaviour">
-        <Row label="Model class" value={<code>{agent.modelClass}</code>} />
+      <DetailSection title={t('detailSectionModel')}>
+        <Row label={t('detailRowModelClass')} value={<code>{agent.modelClass}</code>} />
         {agent.confidenceThreshold !== undefined && (
           <Row
-            label="Confidence threshold"
-            value={<code>≥ {agent.confidenceThreshold.toFixed(2)}</code>}
-            hint="The agent declares decisions below this score as low-confidence."
+            label={t('detailRowConfidence')}
+            value={<code>≥ {formatNumber(agent.confidenceThreshold, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</code>}
+            hint={t('detailConfidenceHint')}
           />
         )}
         <Row
-          label="Handoff schemas"
-          value={agent.hasHandoffSchemas ? 'Declared' : 'Not declared'}
+          label={t('detailRowHandoff')}
+          value={agent.hasHandoffSchemas ? t('detailHandoffDeclared') : t('detailHandoffNotDeclared')}
           hint={
             agent.hasHandoffSchemas
-              ? 'The pack declares typed input + output schemas for inter-agent handoff.'
-              : 'Inter-agent handoff falls back to free-form text.'
+              ? t('detailHandoffHintDeclared')
+              : t('detailHandoffHintNot')
           }
         />
       </DetailSection>
 
-      <DetailSection title="Memory shape">
+      <DetailSection title={t('detailSectionMemory')}>
         {agent.memoryShape ? (
           <div className="u-flex u-gap-2 u-wrap">
-            <MemoryBadge label="Scratchpad" enabled={agent.memoryShape.scratchpad ?? false} />
-            <MemoryBadge label="Conversation" enabled={agent.memoryShape.conversation ?? false} />
-            <MemoryBadge label="Long-term" enabled={agent.memoryShape.longTerm ?? false} />
+            <MemoryBadge label={t('detailMemoryScratchpad')} enabled={agent.memoryShape.scratchpad ?? false} />
+            <MemoryBadge label={t('detailMemoryConversation')} enabled={agent.memoryShape.conversation ?? false} />
+            <MemoryBadge label={t('detailMemoryLongTerm')} enabled={agent.memoryShape.longTerm ?? false} />
           </div>
         ) : (
           <p className="muted agentdetail-section-note">
-            The pack does not declare a memory shape; the runtime treats this
-            agent as stateless across turns.
+            {t('detailMemoryNone')}
           </p>
         )}
       </DetailSection>
 
-      <DetailSection title={`Tool allowlist (${agent.toolAllowlist.length})`}>
+      <DetailSection title={t('detailToolAllowlist', { count: agent.toolAllowlist.length })}>
         {agent.toolAllowlist.length === 0 ? (
           <p className="muted agentdetail-section-note">
-            No tools allowlisted — the agent runs as a pure-completion
-            persona without function-call surface.
+            {t('detailNoTools')}
           </p>
         ) : (
           <ul className="u-list-none u-m-0 u-p-0 u-flex u-wrap u-gap-1-5">
@@ -215,11 +226,9 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
       </DetailSection>
 
       {agent.degraded && agent.degraded.length > 0 && (
-        <DetailSection title="Degraded capability tiers" tone="warning">
+        <DetailSection title={t('detailSectionDegraded')} tone="warning">
           <p className="muted agentdetail-degraded-note">
-            This pack declares capability tiers that this host does not
-            satisfy. The agent still dispatches; these
-            features are inert until the host advertises them.
+            {t('detailDegradedNote')}
           </p>
           <ul className="u-list-none u-m-0 u-p-0 u-flex u-wrap u-gap-1-5">
             {agent.degraded.map((tier) => (

@@ -23,11 +23,11 @@
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
-const PORT = 18291;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
 
 let server: http.Server;
@@ -38,8 +38,8 @@ beforeAll(async () => {
   process.env.OPENWOP_TRIGGER_INGESTION_ENABLED = 'true';
   process.env.OPENWOP_A2A_SERVER_ENABLED = 'true';
   process.env.OPENWOP_A2A_DURABLE_TASKS = 'true';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));

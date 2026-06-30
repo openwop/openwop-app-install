@@ -27,20 +27,43 @@ const SRC = join(__dirname, '..', 'src');
 const ALLOWLIST = [
   'brand/OpenwopLogo.tsx',
   'brand/defaults.ts',
+  // The theme generator + its STOCK constants are the SSoT for generated colors
+  // (ADR 0171) — color literals here are data/output, like brand/defaults.ts.
+  'brand/theme/',
+  // Vendor brand marks (Google "G", GitHub Octocat) carry their trademark fills
+  // and are never re-colored (DESIGN.md §8) — sanctioned literal colors.
+  'brand/vendor/',
   'ui/icons/',
 ];
 
 // Hex colors (#abc / #aabbcc / #aabbccdd) and functional color literals.
 // `var(--token)` references and CSS files are out of scope (the css-token
 // gate owns those); this scans only .ts/.tsx component code.
-const COLOR_RE = /#[0-9a-fA-F]{3,8}\b|\boklch\(|\brgba?\(|\bhsla?\(/g;
+//
+// Named CSS colors are caught too — but ONLY as a fully-quoted standalone value
+// (`'white'`, `"black"`), so prose/identifiers like `'white-label'` or `whitelist`
+// don't false-positive. The theme-neutral keywords (`transparent`, `currentColor`,
+// `inherit`, `none`, …) are deliberately NOT colors, so they stay allowed.
+const NAMED_COLORS = [
+  'white', 'black', 'red', 'green', 'blue', 'gray', 'grey', 'silver', 'orange',
+  'yellow', 'purple', 'pink', 'cyan', 'magenta', 'gold', 'navy', 'teal', 'lime',
+  'maroon', 'olive', 'aqua', 'fuchsia', 'crimson', 'coral', 'salmon', 'indigo',
+  'violet', 'turquoise', 'beige', 'ivory', 'khaki',
+].join('|');
+const COLOR_RE = new RegExp(
+  `#[0-9a-fA-F]{3,8}\\b|\\boklch\\(|\\brgba?\\(|\\bhsla?\\(|(['"])(?:${NAMED_COLORS})\\1`,
+  'g',
+);
 
 const offenders = [];
 function walk(dir) {
   for (const name of readdirSync(dir)) {
     const p = join(dir, name);
     if (statSync(p).isDirectory()) { walk(p); continue; }
-    if (!/\.(ts|tsx)$/.test(name) || name.endsWith('.d.ts')) continue;
+    // Component code only (per this gate's scope). `.d.ts` declarations and test
+    // files never ship colors to users — a `.test.ts` legitimately carries sample
+    // color inputs as fixtures (e.g. brand/applyBrand.test.ts), so skip them.
+    if (!/\.(ts|tsx)$/.test(name) || /\.(d|test|spec)\.tsx?$/.test(name)) continue;
     const rel = relative(SRC, p).replaceAll('\\', '/');
     if (ALLOWLIST.some((a) => rel === a || rel.startsWith(a))) continue;
     const source = readFileSync(p, 'utf8');

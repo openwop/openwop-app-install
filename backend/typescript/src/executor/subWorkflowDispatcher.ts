@@ -29,6 +29,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { insertRunWithStartContext } from '../host/runInsert.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { RunRecord } from '../types.js';
@@ -69,10 +70,16 @@ export interface SubWorkflowOpts {
    *  child reaches terminal `completed`; skipped on failed/cancelled
    *  per RFC 0022 §B HVMAP-1b. */
   outputMapping?: Record<string, string>;
-  /** Per `spec/v1/node-packs.md §core.subWorkflow` — when `false`
-   *  (default for back-compat), spawn the child but don't await its
-   *  terminal state. Today's implementation always awaits since the
-   *  conformance test exercises the wait-for-completion path. */
+  /** Per `spec/v1/node-packs.md §core.subWorkflow`. This reference host
+   *  ALWAYS awaits the child's terminal/suspended state regardless of this
+   *  flag — a deliberate, conformant choice (awaiting is a stricter superset
+   *  of fire-and-forget): it preserves the parent↔child cascade contract
+   *  (parent cancel → child cancel, child resolve → parent resume) and output
+   *  mapping, and avoids a detached child run that would be lost on a process
+   *  crash with no owner to recover it. A true non-waiting (detached) mode is
+   *  intentionally NOT implemented here; it needs durable child-ownership +
+   *  crash-recovery design first (tracked as ENG-9 in CODEBASE-ASSESSMENT.md).
+   *  The field is accepted for wire-compatibility. */
   waitForCompletion?: boolean;
   /** Per RFC 0022 §B HVMAP-1b — `'fail-parent' | 'continue'`. When
    *  the child terminates non-completed, decide whether the
@@ -175,6 +182,12 @@ export async function dispatchSubWorkflow(
   // BEFORE allocating the child run. Reading parent → ancestor →
   // root via storage; bounded by MAX_SUBWORKFLOW_DEPTH so even a
   // hand-crafted chain can't pathologically slow this check.
+  //
+  // ENG-9: this is safe under parallel sibling dispatch — depth + cycle are
+  // properties of the IMMUTABLE persisted ancestor chain (parent.parentRunId,
+  // already committed before the parent's subWorkflow node runs), not of
+  // concurrently-dispatching siblings, so two siblings compute the same
+  // ancestor depth independently. No insert-time race to guard.
   const ancestorWorkflowIds: string[] = [];
   let cursorRunId: string | undefined = opts.parentRunId;
   while (cursorRunId && ancestorWorkflowIds.length < MAX_SUBWORKFLOW_DEPTH) {
@@ -234,7 +247,7 @@ export async function dispatchSubWorkflow(
     updatedAt: now,
   };
   try {
-    await storage.insertRun(childRun);
+    await insertRunWithStartContext(storage, childRun);
   } catch (err) {
     // Storage failure during insertRun is a pre-creation failure per
     // RFC 0037 §"Handoff state machine" (child run was never persisted),

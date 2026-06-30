@@ -20,6 +20,7 @@
 
 import type { BundleScope, SurfaceFn } from './inMemorySurfaces.js';
 import { resolveOne } from './featureToggles/service.js';
+import { getToggleDefault } from './featureToggles/registry.js';
 
 /** A feature's workflow surface: method name → async surface fn. */
 export type FeatureSurface = Record<string, SurfaceFn>;
@@ -49,8 +50,16 @@ export function buildFeatureSurfaces(scope: BundleScope): Record<string, Feature
  * id IS the toggle id by convention; resolved per call against the RUN's tenant,
  * so a tenant with the feature OFF gets a uniform `host_capability_disabled`
  * refusal on EVERY method (not just the ones that happened to gate internally).
+ *
+ * ALWAYS-ON exception (ADR 0027): a feature that graduated to always-on
+ * substrate has NO registered toggle default (e.g. `cms`). Such a surface is
+ * unconditionally available — there is no toggle to be OFF — so the gate is
+ * skipped. (Without this, `resolveOne` returns null for a retired toggle and the
+ * surface would be wrongly denied on every call.)
  */
 function gate(id: string, scope: BundleScope, surface: FeatureSurface): FeatureSurface {
+  const alwaysOn = !getToggleDefault(id);
+  if (alwaysOn) return surface;
   const wrapped: FeatureSurface = {};
   for (const [method, fn] of Object.entries(surface)) {
     wrapped[method] = async (args) => {

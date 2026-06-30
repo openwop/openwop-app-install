@@ -36,7 +36,7 @@ beforeAll(() => {
   ensureNodesRegistered();
 });
 
-const ALLOWED_TYPE_IDS = new Set(['local.openwop-app.mock-ai', 'core.approvalGate', 'core.subWorkflow']);
+const ALLOWED_TYPE_IDS = new Set(['local.sample.demo.mock-ai', 'core.approvalGate', 'core.subWorkflow']);
 
 async function newRun(workflowId: string): Promise<RunRecord> {
   const now = new Date().toISOString();

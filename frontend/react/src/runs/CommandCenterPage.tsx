@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
 import { Link } from 'react-router-dom';
 import type { RunEventDoc } from '@openwop/openwop';
 import { cancelRun, deleteRun, listMyRuns, pollEvents, type RunListItem } from '../client/runsClient.js';
@@ -33,6 +35,7 @@ function needsAttention(status: string): boolean {
 }
 
 export function CommandCenterPage() {
+  const { t } = useTranslation('runs');
   const [runs, setRuns] = useState<RunListItem[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [listError, setListError] = useState<string | null>(null);
@@ -103,20 +106,21 @@ export function CommandCenterPage() {
   }
 
   const onCancel = (runId: string) => runAction(runId, () => cancelRun(runId, 'cancelled from Mission Control'));
-  const onDelete = (runId: string) => {
-    if (!window.confirm('Permanently delete this run? This removes its events and history and cannot be undone.')) return;
+  const onDelete = async (runId: string) => {
+    if (!(await confirm({ title: t('deleteRunConfirm'), danger: true, confirmLabel: t('common:delete') }))) return;
     void runAction(runId, () => deleteRun(runId));
   };
 
   return (
     <section>
       <PageHeader
-        eyebrow="Mission"
-        title="Mission Control"
-        lede="Live view of every in-flight run for this session. Select a run to watch its agent handoffs and reasoning stream in real time."
+        eyebrow={t('missionEyebrow')}
+        title={t('missionControlTitle')}
+        lede={t('missionControlLede')}
         actions={
           <span className="muted u-fs-12" aria-live="polite">
-            {runs.length} active{attentionCount > 0 ? ` · ${attentionCount} need attention` : ''}
+            {t('activeCount', { count: runs.length })}
+            {attentionCount > 0 ? ` · ${t('needAttentionCount', { count: attentionCount })}` : ''}
           </span>
         }
       />
@@ -124,7 +128,7 @@ export function CommandCenterPage() {
       {actionError && <Notice variant="error">{actionError}</Notice>}
 
       <div className="command-center">
-        <aside className="command-center-rail" aria-label="Active runs">
+        <aside className="command-center-rail" aria-label={t('activeRunsLabel')}>
           {!loadedOnce ? (
             // First-fetch placeholder so the rail reads as loading-on-purpose,
             // not a blank gate, while listMyRuns resolves.
@@ -140,9 +144,9 @@ export function CommandCenterPage() {
           ) : runs.length === 0 ? (
             <StateCard
               icon={<ActivityIcon size={20} />}
-              title="No active runs"
-              body="In-flight runs appear here automatically as you start them."
-              action={<Link className="primary" to="/builder">New workflow run</Link>}
+              title={t('noActiveRunsTitle')}
+              body={t('noActiveRunsBody')}
+              action={<Link className="primary" to="/builder">{t('newWorkflowRun')}</Link>}
             />
           ) : (
             sortedRuns.map((r) => {
@@ -164,21 +168,21 @@ export function CommandCenterPage() {
                     {needsAttention(r.status) && (
                       <span className="chip chip--warning chip--pulse">
                         <span aria-hidden="true"><AlertIcon size={12} /></span>
-                        Awaiting human input
+                        {t('awaitingHumanInput')}
                       </span>
                     )}
                   </button>
                   <div className="action-bar">
-                    <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => onCancel(r.runId)} title="Cancel (kill) this run">
-                      {busy ? '…' : 'Cancel'}
+                    <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => onCancel(r.runId)} title={t('cancelRunTitle')}>
+                      {busy ? '…' : t('common:cancel')}
                     </button>
                     <button
                       type="button"
                       className="secondary btn-sm"
                       disabled={busy}
                       onClick={() => onDelete(r.runId)}
-                      title="Delete this run permanently"
-                      aria-label="Delete run permanently"
+                      title={t('deleteRunTitle')}
+                      aria-label={t('deleteRunAria')}
                     >
                       <span aria-hidden="true"><TrashIcon size={14} /></span>
                     </button>
@@ -200,8 +204,8 @@ export function CommandCenterPage() {
             loadedOnce && runs.length > 0 && (
               <StateCard
                 icon={<ActivityIcon size={20} />}
-                title="Select a run to watch it live"
-                body="Pick a run from the left to stream its agent handoffs and reasoning in real time."
+                title={t('selectRunTitle')}
+                body={t('selectRunBody')}
               />
             )
           )}
@@ -218,6 +222,7 @@ export function CommandCenterPage() {
  * idle/absolute timeouts for long HITL waits, close on unmount).
  */
 function RunWatch({ runId, fallbackStatus }: { runId: string; fallbackStatus?: string | undefined }) {
+  const { t } = useTranslation('runs');
   const [events, setEvents] = useState<RunEventDoc[]>([]);
   const [streamError, setStreamError] = useState<string | null>(null);
 
@@ -240,14 +245,14 @@ function RunWatch({ runId, fallbackStatus }: { runId: string; fallbackStatus?: s
           return [...prev, ev].sort((a, b) => a.sequence - b.sequence);
         });
       },
-      onError: () => setStreamError('Event stream connection error (reconnecting)'),
+      onError: () => setStreamError(t('streamConnectionError')),
     });
 
     return () => {
       cancelled = true;
       sub.close();
     };
-  }, [runId]);
+  }, [runId, t]);
 
   // Derive status from the event log (seeded + live), so an already-finished
   // run selected from a stale rail entry still reads its true terminal state
@@ -262,16 +267,16 @@ function RunWatch({ runId, fallbackStatus }: { runId: string; fallbackStatus?: s
       <div className="surface-card">
         <div className="u-flex u-items-center u-gap-2 u-wrap">
           <h2 className="u-m-0 u-flex-1">
-            Run <code>{runId.slice(0, 8)}…</code>
+            {t('runLabel')} <code>{runId.slice(0, 8)}…</code>
             <StatusBadge status={status} className="u-ml-2" />
           </h2>
           {live && (
-            <span className="chip chip--accent chip--pulse" title="Streaming live">
+            <span className="chip chip--accent chip--pulse" title={t('streamingLive')}>
               <span aria-hidden="true"><ActivityIcon size={12} /></span>
-              Live
+              {t('live')}
             </span>
           )}
-          <Link to={`/runs/${runId}`}>Open full detail →</Link>
+          <Link to={`/runs/${runId}`}>{t('openFullDetail')}</Link>
         </div>
         {streamError && <div className="u-mt-2"><Notice variant="error">{streamError}</Notice></div>}
       </div>
@@ -285,12 +290,8 @@ function RunWatch({ runId, fallbackStatus }: { runId: string; fallbackStatus?: s
         <StateCard
           loading={live}
           icon={<ActivityIcon size={20} />}
-          title={live ? 'Waiting for agent activity' : 'No agent activity'}
-          body={
-            live
-              ? 'This run is live — handoffs and reasoning will stream in as soon as the engine emits them.'
-              : 'This run produced no agent handoffs or reasoning events.'
-          }
+          title={live ? t('waitingForAgentActivity') : t('noAgentActivityTitle')}
+          body={live ? t('waitingForAgentActivityBody') : t('noAgentActivityBody')}
         />
       )}
     </>

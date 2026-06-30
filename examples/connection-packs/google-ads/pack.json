@@ -1,0 +1,58 @@
+{
+  "name": "core.openwop.connections.google-ads",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Google Ads connection pack (RFC 0095) \u2014 OAuth2 provider for the Google Ads REST API. Reach is `openapi`: Google Ads has no first-party global MCP server; the manifest declares the global Google OAuth hosts and points at the REST API reference, consumed by the core.openwop.http nodes. Carries NO secret; the operator supplies the OAuth client id/secret + developer token host-side (ADR 0024 \u00a77). One of the three ad platforms Campaign Studio syncs (ADR 0159 \u2014 Google / Meta / LinkedIn Ads).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "google-ads",
+    "displayName": "Google Ads",
+    "category": "marketing",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token": "https://oauth2.googleapis.com/token",
+        "revoke": "https://oauth2.googleapis.com/revoke"
+      },
+      "scopes": {
+        "read": [
+          {
+            "key": "adwords.read",
+            "label": "Read Google Ads performance",
+            "scopes": [
+              "https://www.googleapis.com/auth/adwords"
+            ]
+          }
+        ],
+        "write": [
+          {
+            "key": "adwords.manage",
+            "label": "Manage Google Ads campaigns & budgets",
+            "scopes": [
+              "https://www.googleapis.com/auth/adwords"
+            ]
+          }
+        ]
+      }
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://developers.google.com/google-ads/api/rest/overview"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http",
+      "feature.campaign-channels.nodes.publish-ad-variants"
+    ],
+    "docsUrl": "https://developers.google.com/google-ads/api/docs/start",
+    "apiHosts": [
+      "googleapis.com"
+    ]
+  }
+}

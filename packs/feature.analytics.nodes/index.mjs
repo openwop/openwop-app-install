@@ -22,8 +22,16 @@ export async function query(ctx) {
   return { status: 'success', outputs: { summary: out.summary ?? null } };
 }
 
+export async function events(ctx) {
+  const analytics = ensureAnalytics(ctx);
+  const orgId = typeof (ctx.inputs ?? {}).orgId === 'string' ? ctx.inputs.orgId : '';
+  const out = await analytics.events({ orgId });
+  return { status: 'success', outputs: { events: out.events ?? [] } };
+}
+
 export const nodes = {
   'feature.analytics.nodes.query': query,
+  'feature.analytics.nodes.events': events,
 };
 
 export default nodes;

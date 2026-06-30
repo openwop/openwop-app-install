@@ -74,6 +74,25 @@ export function loadS3ConfigFromEnv(): { config: S3Config | null; missing: strin
   };
 }
 
+/** Hard cap on how many bytes `get()` will buffer into memory. An unbounded
+ *  read of an attacker-or-bug-sized object is an OOM vector (DATA-5).
+ *  Read per-call (cheap) so it stays operationally tunable + testable.
+ *  Overridable via OPENWOP_BLOB_S3_MAX_GET_BYTES (default 64 MiB). */
+function maxGetBytes(): number {
+  const n = Number(process.env.OPENWOP_BLOB_S3_MAX_GET_BYTES);
+  return Number.isFinite(n) && n > 0 ? n : 64 * 1024 * 1024;
+}
+
+/** Discard a response body we won't read, so the underlying connection can be
+ *  reused instead of leaking (un-drained fetch bodies pin a socket). */
+async function drainBody(res: { body?: { cancel?: () => Promise<void> } | null }): Promise<void> {
+  try {
+    await res.body?.cancel?.();
+  } catch {
+    /* already consumed / no body */
+  }
+}
+
 export function createS3Blob(scope: BundleScope, deps: S3BlobDeps = {}): BlobSurface {
   const fetchFn = deps.fetch ?? fetch;
   const clock = deps.now ?? (() => new Date());
@@ -103,15 +122,28 @@ export function createS3Blob(scope: BundleScope, deps: S3BlobDeps = {}): BlobSur
         body: Buffer.from(String(contentBase64), 'base64'),
         headers: contentType ? { 'content-type': String(contentType) } : {},
       });
-      if (!res.ok) throw new Error(`s3 blob put failed: HTTP ${res.status}`);
+      if (!res.ok) { await drainBody(res); throw new Error(`s3 blob put failed: HTTP ${res.status}`); }
+      await drainBody(res);
       return { ok: true, key };
     },
 
     async get({ key }) {
       const res = await fetchFn(sign('GET', key, 60));
-      if (res.status === 404 || res.status === 403) return { found: false };
-      if (!res.ok) throw new Error(`s3 blob get failed: HTTP ${res.status}`);
+      if (res.status === 404 || res.status === 403) { await drainBody(res); return { found: false }; }
+      if (!res.ok) { await drainBody(res); throw new Error(`s3 blob get failed: HTTP ${res.status}`); }
+      // Reject oversized objects via the declared Content-Length BEFORE
+      // buffering, so we never load a multi-GB body into memory (DATA-5).
+      const cap = maxGetBytes();
+      const declared = Number(res.headers.get('content-length'));
+      if (Number.isFinite(declared) && declared > cap) {
+        await drainBody(res);
+        throw new Error(`s3 blob get refused: object ${declared} bytes exceeds cap ${cap}`);
+      }
       const buf = Buffer.from(await res.arrayBuffer());
+      // Belt-and-suspenders for responses without a Content-Length header.
+      if (buf.byteLength > cap) {
+        throw new Error(`s3 blob get refused: object ${buf.byteLength} bytes exceeds cap ${cap}`);
+      }
       return {
         found: true,
         contentBase64: buf.toString('base64'),
@@ -123,6 +155,7 @@ export function createS3Blob(scope: BundleScope, deps: S3BlobDeps = {}): BlobSur
       // Existence check so an absent object surfaces { found: false } (parity
       // with the in-memory surface) rather than a URL that 404s on use.
       const head = await fetchFn(sign('HEAD', key, 60), { method: 'HEAD' });
+      await drainBody(head);
       if (head.status === 404 || head.status === 403) return { found: false };
       const ttl = Number(expiresInSeconds) > 0 ? Number(expiresInSeconds) : cfg.presignTtlSeconds;
       const url = sign('GET', key, ttl);

@@ -16,6 +16,7 @@
 
 import { config, authedHeaders, fetchOpts } from '../client/config.js';
 import { deleteCurrentFirebaseUser } from './firebase.js';
+import i18n from '../i18n/index.js';
 
 export interface DeleteAccountResult {
   deleted: true;
@@ -28,7 +29,7 @@ export interface DeleteAccountResult {
 
 export class RequiresRecentLoginError extends Error {
   constructor() {
-    super('Firebase requires a recent sign-in to delete the account. Please sign out and back in.');
+    super(i18n.t('auth:requiresRecentLogin'));
     this.name = 'RequiresRecentLoginError';
   }
 }

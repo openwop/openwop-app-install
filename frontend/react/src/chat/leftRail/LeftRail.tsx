@@ -1,43 +1,42 @@
 /**
- * Left rail — single sidebar that hosts three tab panels (History,
- * Workflow Progress, Active Agents). Replaces the prior layout where
- * History sat on the left and Progress + Agents stacked on the right.
+ * Left rail — single sidebar hosting two tab panels: the Conversations rail
+ * (ADR 0043, the persistent-conversation list that folds in the open chat's
+ * participants) and the Workflow Progress panel.
  *
  * Layout:
- *   - Open  → rail is 320px wide at the left of the chat. Three
- *             horizontal tabs across its top, active panel content
- *             below.
- *   - Closed → rail is hidden entirely. ChatHeader's rail-toggle
- *             button reopens to the last-active tab.
- *   - Mobile (viewport < 720) → when open, the rail covers the chat
- *             as a full-width overlay so the panel is readable on
- *             phones; closed is the same as desktop.
+ *   - Open  → rail is 320px wide at the left of the chat. Tabs across its top,
+ *             active panel content below.
+ *   - Closed → rail is hidden entirely. ChatHeader's rail-toggle button reopens
+ *             to the last-active tab.
+ *   - Mobile (viewport < 720) → when open, the rail covers the chat as a
+ *             full-width overlay so the panel is readable on phones.
  *
- * The three panel components each render at width 100% / height 100% —
- * the rail owns chrome.
+ * The legacy History drawer + Active-agents panel were retired here once the
+ * Conversations rail became the default chat IA (ADR 0043) — the rail subsumes
+ * both (history → the conversation list; active agents → the open conversation's
+ * inline participants).
  */
 
-import type { ComponentProps, ReactNode } from 'react';
-import { SessionHistoryDrawer } from '../SessionHistoryDrawer.js';
+import type { ComponentProps, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { WorkflowProgressPanel } from '../workflowProgress/WorkflowProgressPanel.js';
-import { ActiveAgentsPanel } from '../activeAgents/ActiveAgentsPanel.js';
-import { BotIcon, ClockIcon, WorkflowIcon } from '../../ui/icons/index.js';
+import { ConversationsRail } from '../conversations/ConversationsRail.js';
+import { ReviewInboxPanel } from '../reviews/ReviewInboxPanel.js';
+import { MessageSquareIcon, WorkflowIcon, InboxIcon } from '../../ui/icons/index.js';
 
-export type LeftRailTab = 'history' | 'progress' | 'agents';
+export type LeftRailTab = 'conversations' | 'progress' | 'reviews';
 
 interface TabDescriptor {
   id: LeftRailTab;
-  label: string;
-  /** Tab glyph — either a single Unicode char (≡ / ◉) or a small
-   *  inline-SVG component from `../icons` (e.g. `<ClockIcon />` for
-   *  History). The rest of the chat header still uses character
-   *  glyphs; mixing is fine because both render inside the same
-   *  flex span. */
+  /** i18n key (namespace `chat`) for the tab label, translated at the render site. */
+  labelKey: string;
+  /** Tab glyph — a small inline-SVG component from `../icons`. */
   icon: ReactNode;
-  /** Optional small numeric badge — total workflow runs / activated
-   *  agents. Omitted for History (sessions aren't a per-session count
-   *  the user needs surfaced on the tab). */
+  /** Optional small numeric badge — total workflow runs. */
   badge?: number;
+  /** Pre-translated accessible label for the badge (e.g. "reviews pending: 3").
+   *  Falls back to the bare count when absent. */
+  badgeLabel?: string;
 }
 
 interface Props {
@@ -48,47 +47,44 @@ interface Props {
   onSelectTab: (tab: LeftRailTab | null) => void;
   isMobile: boolean;
 
-  historyProps: Omit<ComponentProps<typeof SessionHistoryDrawer>, 'onClose'>;
+  /** Omit to drop the Conversations panel entirely (the multi-tab deck owns
+   *  conversations via its tab strip + library picker, so its rail is Runs + Reviews
+   *  only — ADR 0140). The standalone ChatSidebar always supplies it. */
+  conversationsProps?: Omit<ComponentProps<typeof ConversationsRail>, 'onClose'>;
   progressProps: Omit<ComponentProps<typeof WorkflowProgressPanel>, 'onClose'>;
-  agentsProps: Omit<ComponentProps<typeof ActiveAgentsPanel>, 'onClose'>;
+  reviewsProps: ComponentProps<typeof ReviewInboxPanel>;
 
   progressBadgeCount: number;
-  agentsBadgeCount: number;
+  /** Pending human-review count (ADR 0068/0070) — drives the Reviews tab badge. */
+  reviewsBadgeCount: number;
 }
-
-const RAIL_WIDTH_PX = 320;
 
 export function LeftRail({
   activeTab,
   onSelectTab,
   isMobile,
-  historyProps,
+  conversationsProps,
   progressProps,
-  agentsProps,
+  reviewsProps,
   progressBadgeCount,
-  agentsBadgeCount,
+  reviewsBadgeCount,
 }: Props): JSX.Element | null {
+  const { t } = useTranslation('chat');
   if (activeTab === null) return null;
 
   const tabs: TabDescriptor[] = [
-    { id: 'history', label: 'History', icon: <ClockIcon size={13} /> },
-    { id: 'progress', label: 'Workflow', icon: <WorkflowIcon size={13} />, badge: progressBadgeCount },
-    { id: 'agents', label: 'Agents', icon: <BotIcon size={13} />, badge: agentsBadgeCount },
+    // The Conversations panel is optional — the multi-tab deck omits it (ADR 0140).
+    ...(conversationsProps ? [{ id: 'conversations' as const, labelKey: 'tabConversations', icon: <MessageSquareIcon size={13} /> }] : []),
+    { id: 'progress', labelKey: 'tabWorkflow', icon: <WorkflowIcon size={13} />, badge: progressBadgeCount },
+    { id: 'reviews', labelKey: 'tabReviews', icon: <InboxIcon size={13} />, badge: reviewsBadgeCount, badgeLabel: t('reviewsBadgeA11y', { count: reviewsBadgeCount }) },
   ];
 
   const close = () => onSelectTab(null);
 
   return (
     <aside
-      aria-label="Chat tools"
-      className="leftrail-aside"
-      style={{
-        width: isMobile ? '100%' : RAIL_WIDTH_PX,
-        borderRight: isMobile ? 'none' : '1px solid var(--color-border)',
-        position: isMobile ? 'absolute' : 'relative',
-        inset: isMobile ? 0 : 'auto',
-        zIndex: isMobile ? 20 : 'auto',
-      }}
+      aria-label={t('chatToolsAside')}
+      className={`leftrail-aside${isMobile ? ' leftrail-aside--mobile' : ''}`}
     >
       <TabStrip
         tabs={tabs}
@@ -101,15 +97,20 @@ export function LeftRail({
           }
         }}
       />
-      <div className="u-flex-1 u-minh-0 u-flex u-flex-col">
-        {activeTab === 'history' && (
-          <SessionHistoryDrawer {...historyProps} onClose={close} />
+      <div
+        id={`left-rail-panel-${activeTab}`}
+        role="tabpanel"
+        aria-labelledby={`left-rail-tab-${activeTab}`}
+        className="u-flex-1 u-minh-0 u-flex u-flex-col"
+      >
+        {activeTab === 'conversations' && conversationsProps && (
+          <ConversationsRail {...conversationsProps} onClose={close} />
         )}
         {activeTab === 'progress' && (
           <WorkflowProgressPanel {...progressProps} onClose={close} />
         )}
-        {activeTab === 'agents' && (
-          <ActiveAgentsPanel {...agentsProps} onClose={close} />
+        {activeTab === 'reviews' && (
+          <ReviewInboxPanel {...reviewsProps} />
         )}
       </div>
     </aside>
@@ -125,43 +126,54 @@ function TabStrip({
   activeTab: LeftRailTab;
   onSelectTab: (tab: LeftRailTab) => void;
 }): JSX.Element {
+  const { t } = useTranslation('chat');
+  // WAI-ARIA tablist roving: Arrow/Home/End move focus to and select another tab.
+  const onTabKeyDown = (e: ReactKeyboardEvent) => {
+    const i = tabs.findIndex((tab) => tab.id === activeTab);
+    let next = i;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (i + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') next = (i - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    const target = tabs[next];
+    if (target && target.id !== activeTab) {
+      onSelectTab(target.id);
+      document.getElementById(`left-rail-tab-${target.id}`)?.focus();
+    }
+  };
   return (
     <div
       role="tablist"
-      aria-label="Chat tool tabs"
+      aria-label={t('chatToolTabs')}
       className="leftrail-tabstrip"
+      onKeyDown={onTabKeyDown}
     >
       {tabs.map((tab) => {
         const isActive = tab.id === activeTab;
+        const label = t(tab.labelKey);
         return (
           <button
             key={tab.id}
+            id={`left-rail-tab-${tab.id}`}
             type="button"
             role="tab"
             aria-selected={isActive}
             aria-controls={`left-rail-panel-${tab.id}`}
+            tabIndex={isActive ? 0 : -1}
             onClick={() => onSelectTab(tab.id)}
-            title={isActive ? `${tab.label} (click to close)` : `Switch to ${tab.label}`}
-            className="leftrail-tab"
-            style={{
-              fontWeight: isActive ? 600 : 400,
-              background: isActive
-                ? 'var(--color-surface)'
-                : 'transparent',
-              color: isActive ? 'var(--ink, var(--color-text))' : 'var(--color-text-muted, var(--color-text))',
-              borderBottom: isActive
-                ? '2px solid var(--color-accent)'
-                : '2px solid transparent',
-            }}
+            title={isActive ? t('tabCloseTitle', { label }) : t('tabSwitchTitle', { label })}
+            className={`leftrail-tab${isActive ? ' is-active' : ''}`}
           >
             <span
               aria-hidden
               className="leftrail-tab-icon"
             >{tab.icon}</span>
-            <span>{tab.label}</span>
+            <span>{label}</span>
             {tab.badge !== undefined && tab.badge > 0 && (
               <span
-                aria-label={`${tab.badge}`}
+                aria-label={tab.badgeLabel ?? `${tab.badge}`}
                 className="leftrail-tab-badge"
               >
                 {tab.badge}

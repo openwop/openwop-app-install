@@ -22,6 +22,11 @@
 
 import { createHash } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
+
+// ADR 0077 P1 — a User's email + display name are personal data (the `userId`
+// itself is an opaque, non-PII principal id per RFC 0048, so it is NOT listed).
+declarePiiFields('users.user', ['email', 'displayName']);
 
 /** Account lifecycle state. `disabled` is FAIL-CLOSED (finding H5): a disabled
  *  user is denied; there is no fail-open path. */

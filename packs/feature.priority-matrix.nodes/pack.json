@@ -1,0 +1,75 @@
+{
+  "name": "feature.priority-matrix.nodes",
+  "version": "1.1.0",
+  "description": "Priority Matrix feature node pack (ADR 0058 / ADR 0014) — read + write nodes over the ctx.features['priority-matrix'] surface shipped by the Priority Matrix feature package. Lets a workflow (or a chat agent via the agent pack) capture ideas, score them, read the ranking, and generate a planning agenda.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "priority-matrix", "scoring", "ranking", "prioritization"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.priority-matrix.nodes.list-lists",
+      "version": "1.0.0",
+      "label": "Priority Matrix: List Lists",
+      "description": "Lists the workspace's priority lists (id, name, criteria) over ctx.features['priority-matrix']. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.list-portfolio",
+      "version": "1.0.0",
+      "label": "Priority Matrix: List Portfolio",
+      "description": "Lists the workspace portfolio — ideas across ALL the tenant's lists, ranked by computed priority (ADR 0060) — over ctx.features['priority-matrix'].listPortfolio. Inputs: { topN? }. Output: { items }. Tenant-trusted aggregate.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.list-ranked-ideas",
+      "version": "1.0.0",
+      "label": "Priority Matrix: List Ranked Ideas",
+      "description": "Lists a list's ideas ranked by computed weighted priority (descending) over ctx.features['priority-matrix']. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.submit-idea",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Submit Idea",
+      "description": "Submits a new idea/request into a priority list (lands in the New status) over ctx.features['priority-matrix']. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.score-idea",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Score Idea",
+      "description": "Scores one idea against the list's criteria (criterionId → 1..10) and returns its recomputed priority, over ctx.features['priority-matrix']. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.generate-agenda",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Generate Planning Agenda",
+      "description": "Generates a planning-session agenda from a list's top-N ideas over ctx.features['priority-matrix']. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.schedule-status",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Schedule Status",
+      "description": "Derives each idea's ahead/behind schedule state (on-track / at-risk / behind / done-early / done-late / unscheduled) from its target date + card status, plus a list rollup (ADR 0103), over ctx.features['priority-matrix']. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

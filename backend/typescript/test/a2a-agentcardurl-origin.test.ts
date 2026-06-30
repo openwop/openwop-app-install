@@ -2,7 +2,7 @@
  * RFC 0076/0100 — `capabilities.a2a.agentCardUrl` MUST advertise a
  * cross-host-reachable backend origin, never a `localhost` stub (capabilities.md
  * advertise-honestly). Regression test for the P2-APP deploy defect where the
- * live doc advertised `http://localhost:8080/v1/host/openwop-app/a2a`.
+ * live doc advertised `http://localhost:8080/.well-known/agent-card.json`.
  *
  * The base derives, in precedence order:
  *   1. OPENWOP_A2A_PUBLIC_BASE_URL (dedicated override — custom-domain backends),
@@ -14,11 +14,11 @@
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
-const PORT = 18293;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 
 beforeAll(async () => {
@@ -28,8 +28,8 @@ beforeAll(async () => {
   process.env.OPENWOP_A2A_DURABLE_TASKS = 'true';
   delete process.env.OPENWOP_A2A_PUBLIC_BASE_URL;
   delete process.env.OPENWOP_PUBLIC_BASE_URL;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -47,7 +47,7 @@ const cardUrl = async (headers: Record<string, string> = {}): Promise<string> =>
 describe('a2a.agentCardUrl — honest cross-host origin', () => {
   it('derives from X-Forwarded-Proto/Host (the origin the caller reached) — https, not localhost', async () => {
     const url = await cardUrl({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'openwop-app-backend-xyz.a.run.app' });
-    expect(url).toBe('https://openwop-app-backend-xyz.a.run.app/v1/host/openwop-app/a2a');
+    expect(url).toBe('https://openwop-app-backend-xyz.a.run.app/.well-known/agent-card.json');
     expect(url).not.toContain('localhost');
   });
 
@@ -55,7 +55,7 @@ describe('a2a.agentCardUrl — honest cross-host origin', () => {
     process.env.OPENWOP_A2A_PUBLIC_BASE_URL = 'https://a2a.example.com';
     try {
       const url = await cardUrl({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'ignored.run.app' });
-      expect(url).toBe('https://a2a.example.com/v1/host/openwop-app/a2a');
+      expect(url).toBe('https://a2a.example.com/.well-known/agent-card.json');
     } finally {
       delete process.env.OPENWOP_A2A_PUBLIC_BASE_URL;
     }
@@ -67,7 +67,7 @@ describe('a2a.agentCardUrl — honest cross-host origin', () => {
       const url = await cardUrl({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'backend.run.app' });
       // The a2a card tracks the backend the caller reached, not the SPA origin —
       // app.openwop.dev only routes /api/** to the backend, not /v1/...
-      expect(url).toBe('https://backend.run.app/v1/host/openwop-app/a2a');
+      expect(url).toBe('https://backend.run.app/.well-known/agent-card.json');
       expect(url).not.toContain('app.openwop.dev');
     } finally {
       delete process.env.OPENWOP_PUBLIC_BASE_URL;
@@ -78,7 +78,7 @@ describe('a2a.agentCardUrl — honest cross-host origin', () => {
     // `_` is a valid HTTP header-value byte (so fetch sends it) but not a valid
     // host token — the sanitizer strips it (and CR/LF, quotes, etc.).
     const url = await cardUrl({ 'x-forwarded-proto': 'https', 'x-forwarded-host': 'evil_host.run.app' });
-    expect(url).toBe('https://evilhost.run.app/v1/host/openwop-app/a2a');
+    expect(url).toBe('https://evilhost.run.app/.well-known/agent-card.json');
     expect(url).not.toContain('_');
   });
 });

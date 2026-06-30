@@ -1,129 +1,30 @@
 /**
- * A4 — a concrete `AgentMemoryPort` (RFC 0004) over the host's tenant-scoped
- * memory store, so a live agent turn can read prior-run memory into its context
- * and write a turn summary back (the dispatch wiring in `agentDispatch.ts`
- * gates this on the agent declaring `memoryShape.longTerm`).
+ * Per-agent memory adapter — back-compat shim (ADR 0041).
  *
- * Backing: the in-memory RFC 0004 store (`writeMemoryEntry`/`listMemoryEntries`
- * in `inMemorySurfaces.ts`), the same store the demo read routes (`routes/memory.ts`)
- * serve. Tenant isolation (CTI-1) is enforced by BINDING `tenantId` at
- * construction from the request principal — the caller never passes a tenant
- * through the `scope` argument, so a read/write can't cross a tenant boundary.
- * The `scope` argument is the per-agent memory namespace (`memoryRef`).
+ * The memory port + namespace now live in `host/subjectMemory.ts`, the single
+ * owner that serves BOTH agents (`agent:<id>`) and humans (`user:<id>`). This
+ * module re-exports the agent specialization so every pre-existing importer
+ * (dispatch, the `agent-knowledge` feature, the advisory board, agent routes)
+ * keeps the same symbols with IDENTICAL behavior — the no-fork guarantee.
  *
- * SR-1 (no credential material in memory) is the writer's responsibility; this
- * adapter persists exactly the content it is handed.
+ * Originally A4/A5 (RFC 0004 + RAG); see `subjectMemory.ts` for the contract.
  *
- * A5 (RAG) — every write is ALSO embedded (`embedText`, dim `DEFAULT_EMBEDDING_DIMS`)
- * and upserted into the host's `host.db.vector` cosine store under the same
- * tenant+scope namespace. A `read(scope, query)` then embeds the query at the
- * SAME dimension and returns the top-K most-similar entries; `read(scope)` with
- * no query (or an empty vector store) falls back to the recency listing. The
- * vector surface is already advertised `supported: true` at runtime
- * (initInMemorySurfaces registers the brute-force-cosine backend), so this wires
- * an already-real surface into recall — no advertisement change.
+ * @see docs/adr/0041-subject-memory.md
+ * @see docs/adr/0038-per-agent-knowledge-memory.md
  */
 
-import { randomUUID } from 'node:crypto';
-import type { AgentMemoryPort } from './agentDispatch.js';
-import { MEMORY_UNTRUSTED_TAG } from './agentDispatch.js';
-import { writeMemoryEntry, listMemoryEntries, buildHostSurfaceBundle } from './inMemorySurfaces.js';
-import { embedText, DEFAULT_EMBEDDING_DIMS } from '../aiProviders/localEmbedding.js';
-import { scrubSecretShaped } from './redactSecrets.js';
+import { subjectMemoryScope, createSubjectMemoryPort, countSubjectMemoryByTag } from './subjectMemory.js';
 
-/** Top-K entries a RAG recall returns into the turn's context. */
-const RAG_TOP_K = 8;
-
-/** Stable per-agent memory namespace within a tenant. Keeps each agent's
- *  long-term memory isolated from the demo `MEMORY_DEMO_REF` surface and from
- *  other agents in the same tenant. */
+/** Stable per-agent memory namespace within a tenant — `agent:<id>`, the agent
+ *  specialization of `subjectMemoryScope`. */
 export function agentMemoryScope(agentId: string): string {
-  return `agent:${agentId}`;
+  return subjectMemoryScope({ kind: 'agent', id: agentId });
 }
 
-/** Count entries in a scope carrying `tag`. Used to count user-curated notes
- *  (ADR 0038) distinctly from dispatch turn summaries that share the same
- *  namespace — the `AgentMemoryPort.read` projection drops tags, so callers that
- *  need a by-tag count read the store's tag-aware list directly here (the per-agent
- *  memory module stays the single owner of namespace access). Tenant-scoped. */
+/** Build an `AgentMemoryPort` bound to one tenant (the dispatch read/write port). */
+export const createAgentMemoryPort = createSubjectMemoryPort;
+
+/** Count entries in a scope carrying `tag` (tenant-scoped, tag-aware). */
 export function countAgentMemoryByTag(tenantId: string, scope: string, tag: string): number {
-  return listMemoryEntries(tenantId, scope, { tag }).length;
-}
-
-/**
- * Build an `AgentMemoryPort` bound to one tenant. `read(scope)` returns the
- * scope's entries newest-first (the store's natural order, TTL-filtered);
- * `write(scope, entry)` appends a durable entry. Both are best-effort from the
- * dispatcher's perspective — it already degrades gracefully on a throw.
- */
-export function createAgentMemoryPort(tenantId: string): AgentMemoryPort {
-  // The tenant-scoped vector surface (CTI-1: the cosine store buckets by
-  // tenantId, so a query can't reach another tenant's vectors). Built once per
-  // port; the underlying state is process-global so writes persist across ports.
-  const vector = buildHostSurfaceBundle({ tenantId }).db.vector;
-
-  // Content-trust (ADR 0038 §C) rides the `MEMORY_UNTRUSTED_TAG` tag: a turn
-  // summary derived from untrusted knowledge is tagged on write → surfaced as
-  // `contentTrust:'untrusted'` on read so dispatch FENCES it (never recalls it as
-  // trusted). Carried on BOTH read paths: recency reads the durable tag; RAG reads
-  // a mirrored `metadata.contentTrust` on the vector (the query path drops tags).
-  const trustOf = (tags: readonly string[]): 'trusted' | 'untrusted' =>
-    tags.includes(MEMORY_UNTRUSTED_TAG) ? 'untrusted' : 'trusted';
-
-  const recency = (scope: string): Array<{ content: string; contentTrust: 'trusted' | 'untrusted' }> =>
-    listMemoryEntries(tenantId, scope).map((e) => ({ content: e.content, contentTrust: trustOf(e.tags) }));
-
-  return {
-    async read(scope: string, query?: string): Promise<ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }>> {
-      // RAG path: rank by embedding cosine similarity to the query. Embed at the
-      // SAME dimension used on write (DEFAULT_EMBEDDING_DIMS) so cosine is valid.
-      if (query && query.trim().length > 0) {
-        try {
-          const res = await vector.query({
-            namespace: scope,
-            vector: embedText(query, DEFAULT_EMBEDDING_DIMS),
-            topK: RAG_TOP_K,
-          });
-          const matches = (res.matches ?? []) as Array<{ metadata?: { content?: unknown; contentTrust?: unknown } }>;
-          const ranked = matches
-            .map((m) => m.metadata)
-            .filter((md): md is { content: string; contentTrust?: unknown } => typeof md?.content === 'string')
-            .map((md) => ({ content: md.content, contentTrust: md.contentTrust === 'untrusted' ? ('untrusted' as const) : ('trusted' as const) }));
-          if (ranked.length > 0) return ranked;
-          // Vector store empty for this scope (e.g. entries seeded pre-A5) → recency.
-        } catch {
-          /* fall through to recency on any vector-store error */
-        }
-      }
-      return recency(scope);
-    },
-    async write(scope: string, entry: { content: string; tags?: string[] }): Promise<void> {
-      // SR-1 (RFC 0004): scrub secret-shaped tokens BEFORE the durable write + the
-      // embed — a turn summary or curated note may echo a credential/API key the
-      // turn handled. This is the single chokepoint for every per-agent memory write
-      // (turn summaries via persistTurnSummary + notes via addNote), so the
-      // no-credentials-in-memory invariant holds without relying on each caller.
-      const content = scrubSecretShaped(entry.content);
-      const row = writeMemoryEntry(tenantId, scope, {
-        content,
-        ...(entry.tags ? { tags: entry.tags } : {}),
-      });
-      // Index for RAG recall — best-effort; a vector-store failure never loses the
-      // durable write above. id mirrors the memory-store row id when present.
-      // Mirror content-trust onto the vector metadata so the RAG read path (which
-      // can't see durable tags) can still fence untrusted-derived entries.
-      try {
-        await vector.upsert({
-          namespace: scope,
-          items: [{
-            id: row?.id ?? `mem_${randomUUID().slice(0, 12)}`,
-            vector: embedText(content, DEFAULT_EMBEDDING_DIMS),
-            metadata: { content, contentTrust: trustOf(entry.tags ?? []) },
-          }],
-        });
-      } catch {
-        /* best-effort index */
-      }
-    },
-  };
+  return countSubjectMemoryByTag(tenantId, scope, tag);
 }

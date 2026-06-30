@@ -46,9 +46,14 @@ export interface PendingApproval {
   persona: string;
   workflowId: string;
   /** Discriminator; absent ⇒ 'run-proposal' (back-compat). */
-  kind?: 'run-proposal' | 'assistant-action';
+  kind?: 'run-proposal' | 'assistant-action' | 'content-publish';
   /** Set for assistant-action approvals — the typed draft this gate decides. */
   actionId?: string;
+  /** Set for content-publish approvals (ADR 0066) — the CMS page this gate
+   *  publishes on claim / returns to draft on reject. */
+  orgId?: string;
+  pageId?: string;
+  pageTitle?: string;
   /** Embedded card metadata for assistant-action rows (null if the action
    *  vanished). Absent for run-proposals. */
   action?: AssistantActionView | null;

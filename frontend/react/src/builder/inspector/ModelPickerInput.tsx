@@ -4,6 +4,7 @@
  * is selected (the dependency via dependsOn → sibling provider field).
  */
 
+import { useTranslation } from 'react-i18next';
 import { PROVIDERS } from '../../byok/lib/providers.js';
 import { ArrowLeftIcon, ImageIcon, WrenchIcon } from '../../ui/icons/index.js';
 
@@ -18,10 +19,11 @@ interface Props {
 }
 
 export function ModelPickerInput({ value, onChange, providerId, required }: Props): JSX.Element {
+  const { t } = useTranslation('builder');
   if (!providerId) {
     return (
       <select disabled>
-        <option>Pick a provider first…</option>
+        <option>{t('pickProviderFirst')}</option>
       </select>
     );
   }
@@ -30,7 +32,7 @@ export function ModelPickerInput({ value, onChange, providerId, required }: Prop
   if (models.length === 0) {
     return (
       <select disabled>
-        <option>No models declared for {providerId}</option>
+        <option>{t('noModelsForProvider', { provider: providerId })}</option>
       </select>
     );
   }
@@ -48,16 +50,16 @@ export function ModelPickerInput({ value, onChange, providerId, required }: Prop
           type="text"
           value={value}
           onChange={(e) => onChange(e.target.value || undefined)}
-          placeholder="custom model id"
+          placeholder={t('customModelIdPlaceholder')}
           className="u-flex-1"
         />
         <button
           type="button"
           className="secondary modelpicker-list-btn"
           onClick={() => onChange(undefined)}
-          title="Switch back to the declared-model dropdown"
+          title={t('modelListButtonTitle')}
         >
-          <ArrowLeftIcon size={12} /> list
+          <ArrowLeftIcon size={12} /> {t('modelListButton')}
         </button>
       </div>
     );
@@ -82,37 +84,41 @@ export function ModelPickerInput({ value, onChange, providerId, required }: Prop
           onChange(next || undefined);
         }}
       >
-        <option value="">{required ? 'Pick a model…' : '(use run-time inputs)'}</option>
+        <option value="">{required ? t('pickModel') : t('useRunTimeInputs')}</option>
         {models.map((m) => (
           <option key={m.id} value={m.id}>
-            {m.label}{m.recommended ? ' (recommended)' : ''}
+            {m.recommended ? t('modelRecommendedSuffix', { label: m.label }) : m.label}
           </option>
         ))}
-        <option value="__custom__">Other… (fine-tune / snapshot / beta)</option>
+        <option value="__custom__">{t('modelOtherOption')}</option>
       </select>
       {selectedModel && <ModelCapabilityBadges capabilities={selectedModel.capabilities} />}
     </>
   );
 }
 
-const CAP_BADGE: Record<string, { glyph: React.ReactNode; label: string }> = {
+const CAP_BADGE: Record<string, { glyph: React.ReactNode; labelKey: string }> = {
   // RFC 0055 §A — surface what the chosen model can do (esp. vision) so the
   // user knows before relying on it. `text` is universal, so it's omitted.
-  vision: { glyph: <ImageIcon size={12} />, label: 'Vision' },
-  tools: { glyph: <WrenchIcon size={12} />, label: 'Tools' },
-  structured: { glyph: '⌗', label: 'Structured' },
+  vision: { glyph: <ImageIcon size={12} />, labelKey: 'capVision' },
+  tools: { glyph: <WrenchIcon size={12} />, labelKey: 'capTools' },
+  structured: { glyph: '⌗', labelKey: 'capStructured' },
 };
 
 function ModelCapabilityBadges({ capabilities }: { capabilities: readonly string[] }): JSX.Element | null {
+  const { t } = useTranslation('builder');
   const shown = capabilities.filter((c) => c in CAP_BADGE);
   if (shown.length === 0) return null;
   return (
-    <div className="model-cap-badges" role="list" aria-label="Model capabilities">
-      {shown.map((c) => (
-        <span key={c} className="model-cap-pill" role="listitem" title={`This model supports ${CAP_BADGE[c]!.label.toLowerCase()}`}>
-          <span aria-hidden="true">{CAP_BADGE[c]!.glyph}</span> {CAP_BADGE[c]!.label}
-        </span>
-      ))}
+    <div className="model-cap-badges" role="list" aria-label={t('modelCapabilitiesAria')}>
+      {shown.map((c) => {
+        const label = t(CAP_BADGE[c]!.labelKey);
+        return (
+          <span key={c} className="model-cap-pill" role="listitem" title={t('modelCapPillTitle', { capability: label.toLowerCase() })}>
+            <span aria-hidden="true">{CAP_BADGE[c]!.glyph}</span> {label}
+          </span>
+        );
+      })}
     </div>
   );
 }

@@ -8,31 +8,34 @@
  */
 import { useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { toast } from '../../ui/toast.js';
 
-/** Human copy for the callback's `reason` codes. */
-const OAUTH_ERROR_COPY: Record<string, string> = {
-  consent_denied: 'Consent was declined.',
-  invalid_state: 'The consent session expired — please try again.',
-  missing_params: 'The provider response was incomplete — please try again.',
-  exchange_failed: 'Could not complete the token exchange. Please try again.',
-};
+/** i18n keys for the callback's `reason` codes. */
+const OAUTH_ERROR_KEY = {
+  consent_denied: 'callbackConsentDenied',
+  invalid_state: 'callbackInvalidState',
+  missing_params: 'callbackMissingParams',
+  exchange_failed: 'callbackExchangeFailed',
+} as const;
 
 export function useOAuthCallbackToast(): void {
+  const { t } = useTranslation('connections');
   const [searchParams, setSearchParams] = useSearchParams();
   useEffect(() => {
     const connected = searchParams.get('connected');
     const connectError = searchParams.get('connectError');
     if (!connected && !connectError) return;
-    if (connected) toast.success(`${connected} connected.`);
+    if (connected) toast.success(t('callbackConnected', { provider: connected }));
     else if (connectError) {
       const reason = searchParams.get('reason') ?? '';
-      toast.error(OAUTH_ERROR_COPY[reason] ?? `Could not connect ${connectError}.`);
+      const key = OAUTH_ERROR_KEY[reason as keyof typeof OAUTH_ERROR_KEY];
+      toast.error(key ? t(key) : t('callbackGenericError', { provider: connectError }));
     }
     const next = new URLSearchParams(searchParams);
     next.delete('connected');
     next.delete('connectError');
     next.delete('reason');
     setSearchParams(next, { replace: true });
-  }, [searchParams, setSearchParams]);
+  }, [searchParams, setSearchParams, t]);
 }

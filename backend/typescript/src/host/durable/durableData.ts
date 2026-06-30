@@ -20,18 +20,54 @@ import type {
 } from '../inMemorySurfaces.js';
 import { requireDurableStorage } from './durableStore.js';
 import { cosine, tokenize, assertSafeFilter, matchesFilter, project, applySort } from './queryHelpers.js';
+import { createLogger } from '../../observability/logger.js';
 
+const log = createLogger('host.durable.data');
 const enc = encodeURIComponent;
 type Doc = Record<string, unknown>;
 
 interface VectorEntry { id: string; vector: number[]; metadata?: Record<string, unknown> }
 interface SearchDoc { id: string; fields: Record<string, string | number | boolean> }
 
+/**
+ * Apply `mutate` to the doc at `key` atomically via compare-and-swap, retrying
+ * on a concurrent write (ENG-5). Closes the read-modify-write lost-update where
+ * two concurrent nosql updates to the same doc both read the original and the
+ * later kvSet clobbered the earlier. Re-checks the filter on each attempt so a
+ * doc that a concurrent write moved out of the match set is skipped. Returns
+ * true iff a modification was committed.
+ */
+async function casUpdateDoc(key: string, filter: Doc, mutate: (d: Doc) => Doc): Promise<boolean> {
+  for (let attempt = 0; attempt < 8; attempt++) {
+    const raw = await requireDurableStorage().kvGet(key);
+    if (raw === null) return false; // deleted concurrently
+    let cur: Doc;
+    try {
+      cur = JSON.parse(raw) as Doc;
+    } catch {
+      return false;
+    }
+    if (!matchesFilter(cur, filter)) return false; // moved out of the match set
+    const next = mutate({ ...cur });
+    const { swapped } = await requireDurableStorage().kvCompareAndSwap(key, raw, JSON.stringify(next));
+    if (swapped) return true;
+    // else: a concurrent writer won; re-read and retry.
+  }
+  log.warn('durable_nosql_update_cas_exhausted', { key });
+  return false;
+}
+
 async function listParsed<T>(prefix: string): Promise<Array<{ key: string; value: T }>> {
   const rows = await requireDurableStorage().kvList(prefix);
   const out: Array<{ key: string; value: T }> = [];
   for (const r of rows) {
-    try { out.push({ key: r.key, value: JSON.parse(r.value) as T }); } catch { /* skip corrupt */ }
+    try {
+      out.push({ key: r.key, value: JSON.parse(r.value) as T });
+    } catch {
+      // Skip a corrupt row but surface it — silently dropping records made
+      // count/list quietly under-report (ENG-4).
+      log.warn('durable_data_corrupt_record_skipped', { key: r.key });
+    }
   }
   return out;
 }
@@ -136,17 +172,23 @@ export function createDurableNosql(scope: BundleScope): NoSqlSurface {
       const unset = u.$unset as Doc | undefined;
       const rows = await listParsed<Doc>(prefix(datasource, collection));
       const matches = rows.filter((r) => matchesFilter(r.value, f));
-      for (const { key, value: d } of matches) {
-        Object.assign(d, set);
-        if (unset) for (const k of Object.keys(unset)) delete d[k];
-        await storage().kvSet(key, JSON.stringify(d));
+      let modified = 0;
+      for (const { key } of matches) {
+        // Atomic per-doc update (CAS + retry) instead of read-modify-kvSet,
+        // so concurrent updates to the same doc don't lose writes (ENG-5).
+        const ok = await casUpdateDoc(key, f, (d) => {
+          Object.assign(d, set);
+          if (unset) for (const k of Object.keys(unset)) delete d[k];
+          return d;
+        });
+        if (ok) modified++;
       }
       if (matches.length === 0 && upsert === true) {
         const id = `doc_${randomUUID()}`;
         await storage().kvSet(`${prefix(datasource, collection)}${enc(id)}`, JSON.stringify({ ...f, ...set, _id: id }));
         return { matched: 0, modified: 0, upsertedId: id };
       }
-      return { matched: matches.length, modified: matches.length };
+      return { matched: matches.length, modified };
     },
     async delete({ datasource, collection, filter }) {
       const f = (filter as Doc) ?? {};

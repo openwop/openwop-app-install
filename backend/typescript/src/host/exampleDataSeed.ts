@@ -153,20 +153,22 @@ const RETIRED_DEMO_PERSONAS: readonly { persona: string; roleKey: ExampleRoleKey
 ];
 
 /**
- * Reconcile away the retired legacy personas (ADR 0032). Cascade-deletes only a
- * roster entry that is BOTH a retired persona name AND still carries that
- * persona's original retired roleKey — i.e. an untouched, demo-owned legacy
- * member. A user-renamed persona (name changed), a user-re-roled one (roleKey
- * changed), and a user-deleted one (absent) are all left alone — preserving the
- * "never resurrect, never clobber user curation" contract (ADR 0025 / 0032).
- * Returns the number pruned. Idempotent: a second run finds nothing.
+ * Reconcile away the retired legacy personas (ADR 0032). Cascade-deletes a roster
+ * entry whose persona NAME matches a retired one — regardless of `roleKey` drift
+ * (an earlier version required name+roleKey, which left a re-roled legacy persona
+ * stranded and surfacing in the agent inventory / chat welcome row; 2026-06-15).
+ * The retired names (Sally/Marcus/Priya/Devon/Nora) don't collide with the ten
+ * work-twins or the advisor personas, so the only thing a name-match can catch
+ * besides a demo-owned legacy member is a user who coincidentally used one of
+ * those exact names — an accepted trade-off for demo reconciliation. A user who
+ * RENAMED a legacy persona (name no longer retired) and a user-deleted one are
+ * still left alone. Returns the number pruned. Idempotent.
  */
 async function pruneRetiredDemoPersonas(tenantId: string, storage: Storage): Promise<number> {
-  const retiredByName = new Map(RETIRED_DEMO_PERSONAS.map((r) => [r.persona.toLowerCase(), r.roleKey]));
+  const retiredNames = new Set(RETIRED_DEMO_PERSONAS.map((r) => r.persona.toLowerCase()));
   let pruned = 0;
   for (const entry of await listRoster(tenantId)) {
-    const wantRole = retiredByName.get(entry.persona.toLowerCase());
-    if (wantRole && entry.roleKey === wantRole) {
+    if (retiredNames.has(entry.persona.toLowerCase())) {
       await deleteRosterMemberCascade(tenantId, storage, entry.rosterId);
       pruned += 1;
     }

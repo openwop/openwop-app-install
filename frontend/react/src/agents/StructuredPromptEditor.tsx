@@ -13,18 +13,22 @@
  */
 
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { MarkdownEditor } from '../ui/MarkdownEditor.js';
 
-interface SectionDef { heading: string; hint: string }
+// `heading` is the structural Markdown token (`## Role`) that parsePrompt /
+// composePrompt round-trip — it is NOT a display string and stays in English.
+// `headingKey` / `hintKey` drive the localized labels shown to the author.
+interface SectionDef { heading: string; headingKey: string; hintKey: string }
 
 const SECTIONS: readonly SectionDef[] = [
-  { heading: 'Role', hint: 'One line — who this agent is and the job it owns.' },
-  { heading: 'Responsibilities', hint: 'What it should do — the tasks it owns.' },
-  { heading: 'Voice', hint: 'Tone and style when it writes or replies.' },
-  { heading: 'Tools', hint: 'Which tools / integrations it may use.' },
-  { heading: 'Escalation Rules', hint: 'When to pause and hand off to a human.' },
-  { heading: 'Guardrails', hint: 'What it must NOT do.' },
-  { heading: 'Examples', hint: 'Sample situations → the ideal response.' },
+  { heading: 'Role', headingKey: 'promptSectionRoleHeading', hintKey: 'promptSectionRoleHint' },
+  { heading: 'Responsibilities', headingKey: 'promptSectionResponsibilitiesHeading', hintKey: 'promptSectionResponsibilitiesHint' },
+  { heading: 'Voice', headingKey: 'promptSectionVoiceHeading', hintKey: 'promptSectionVoiceHint' },
+  { heading: 'Tools', headingKey: 'promptSectionToolsHeading', hintKey: 'promptSectionToolsHint' },
+  { heading: 'Escalation Rules', headingKey: 'promptSectionEscalationHeading', hintKey: 'promptSectionEscalationHint' },
+  { heading: 'Guardrails', headingKey: 'promptSectionGuardrailsHeading', hintKey: 'promptSectionGuardrailsHint' },
+  { heading: 'Examples', headingKey: 'promptSectionExamplesHeading', hintKey: 'promptSectionExamplesHint' },
 ];
 
 const HEADINGS = SECTIONS.map((s) => s.heading);
@@ -81,6 +85,7 @@ export function StructuredPromptEditor({
   onChange: (value: string) => void;
   autosaveKey?: string;
 }): JSX.Element {
+  const { t } = useTranslation('agents');
   // Parse once on mount — the parent re-seeds by remounting (key), not by
   // pushing a new `value` mid-edit, so we never re-parse over live edits.
   const initial = useMemo(() => parsePrompt(value), [value]);
@@ -91,7 +96,7 @@ export function StructuredPromptEditor({
   const [preamble, setPreamble] = useState(initial.preamble);
   const [text, setText] = useState(value);
 
-  const emit = (t: string) => { setText(t); onChange(t); };
+  const emit = (next: string) => { setText(next); onChange(next); };
 
   const setSection = (heading: string, body: string) => {
     const next = { ...bodies, [heading]: body };
@@ -116,8 +121,8 @@ export function StructuredPromptEditor({
       <div className="u-flex u-justify-between u-items-center u-gap-2 u-wrap u-mb-2">
         <span className="muted u-fs-12">
           {mode === 'guided'
-            ? 'Fill the sections that apply — empty ones are omitted.'
-            : 'Editing the full prompt as Markdown.'}
+            ? t('promptGuidedHint')
+            : t('promptRawHint')}
         </span>
         <div className="u-iflex u-gap-1">
           <button
@@ -126,7 +131,7 @@ export function StructuredPromptEditor({
             aria-pressed={mode === 'guided'}
             onClick={switchToGuided}
           >
-            Guided sections
+            {t('promptGuidedSections')}
           </button>
           <button
             type="button"
@@ -134,7 +139,7 @@ export function StructuredPromptEditor({
             aria-pressed={mode === 'raw'}
             onClick={() => setMode('raw')}
           >
-            Raw Markdown
+            {t('promptRawMarkdown')}
           </button>
         </div>
       </div>
@@ -147,27 +152,27 @@ export function StructuredPromptEditor({
           monospace
           autosaveKey={autosaveKey}
           placeholder={'## Role\n\nYou are …\n\n## Responsibilities\n\n- …'}
-          ariaLabel="System prompt (Markdown)"
+          ariaLabel={t('promptSystemPromptAria')}
         />
       ) : (
         <div className="u-flex u-flex-col u-gap-3">
           {preamble.trim() ? (
             <div>
-              <div className="u-fs-13 u-fw-600">Intro</div>
-              <p className="structprompt-hint">Text before the sections.</p>
-              <MarkdownEditor value={preamble} onChange={setPreambleBody} rows={3} compact ariaLabel="Intro" />
+              <div className="u-fs-13 u-fw-600">{t('promptIntro')}</div>
+              <p className="structprompt-hint">{t('promptIntroHint')}</p>
+              <MarkdownEditor value={preamble} onChange={setPreambleBody} rows={3} compact ariaLabel={t('promptIntro')} />
             </div>
           ) : null}
           {SECTIONS.map((s) => (
             <div key={s.heading}>
-              <div className="u-fs-13 u-fw-600">{s.heading}</div>
-              <p className="structprompt-hint">{s.hint}</p>
+              <div className="u-fs-13 u-fw-600">{t(s.headingKey)}</div>
+              <p className="structprompt-hint">{t(s.hintKey)}</p>
               <MarkdownEditor
                 value={bodies[s.heading] ?? ''}
                 onChange={(v) => setSection(s.heading, v)}
                 rows={3}
                 compact
-                ariaLabel={s.heading}
+                ariaLabel={t(s.headingKey)}
               />
             </div>
           ))}

@@ -10,11 +10,13 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   clearNetworkEntries,
   subscribeNetworkEntries,
   type NetworkEntry,
 } from './networkRecorder.js';
+import { formatNumber, formatTime } from '../i18n/format.js';
 import { XIcon } from '../ui/icons/index.js';
 
 type FilterKind = 'all' | 'rest' | 'sse' | 'errors';
@@ -25,6 +27,7 @@ interface Props {
 }
 
 export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
+  const { t } = useTranslation('devtools');
   const [entries, setEntries] = useState<readonly NetworkEntry[]>([]);
   const [filter, setFilter] = useState<FilterKind>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -70,18 +73,18 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
         className="netpanel"
         role="dialog"
         aria-modal="true"
-        aria-label="Network inspector"
+        aria-label={t('inspectorLabel')}
       >
         <header className="netpanel-head">
           <div className="netpanel-head-title">
-            <strong>Network</strong>
-            <span className="muted">· {counts.total} call{counts.total === 1 ? '' : 's'}</span>
+            <strong>{t('network')}</strong>
+            <span className="muted">{t('callCount', { count: counts.total })}</span>
           </div>
           <div className="netpanel-head-actions">
-            <button className="secondary" onClick={clearNetworkEntries} title="Clear the buffer">
-              Clear
+            <button className="secondary" onClick={clearNetworkEntries} title={t('clearTitle')}>
+              {t('clear')}
             </button>
-            <button className="secondary" onClick={onClose} aria-label="Close network panel">
+            <button className="secondary" onClick={onClose} aria-label={t('closePanel')}>
               <XIcon size={14} />
             </button>
           </div>
@@ -89,14 +92,14 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
 
         <div className="netpanel-toolbar">
           <select value={filter} onChange={(e) => setFilter(e.target.value as FilterKind)}>
-            <option value="all">All ({counts.total})</option>
-            <option value="rest">REST ({counts.rest})</option>
-            <option value="sse">SSE ({counts.sse})</option>
-            <option value="errors">Errors ({counts.errors})</option>
+            <option value="all">{t('filterAll', { count: counts.total })}</option>
+            <option value="rest">{t('filterRest', { count: counts.rest })}</option>
+            <option value="sse">{t('filterSse', { count: counts.sse })}</option>
+            <option value="errors">{t('filterErrors', { count: counts.errors })}</option>
           </select>
           <input
             type="search"
-            placeholder="Filter by path…"
+            placeholder={t('filterByPath')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -106,8 +109,8 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
           {filtered.length === 0 ? (
             <p className="muted netpanel-empty">
               {entries.length === 0
-                ? 'No network activity yet. Use the app and calls will appear here.'
-                : 'No calls match the current filter.'}
+                ? t('noActivity')
+                : t('noMatch')}
             </p>
           ) : (
             filtered.slice().reverse().map((e) => (
@@ -122,7 +125,7 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
         </div>
 
         <footer className="netpanel-foot muted">
-          Buffer holds the last 200 calls. Cleared on reload.
+          {t('bufferNote')}
         </footer>
       </aside>
     </>
@@ -138,6 +141,7 @@ function NetworkRow({
   expanded: boolean;
   onToggle(): void;
 }): JSX.Element {
+  const { t } = useTranslation('devtools');
   const statusCls = entry.error
     ? 'netpanel-row-status-err'
     : entry.ok === false
@@ -155,12 +159,14 @@ function NetworkRow({
       >
         <span className="netpanel-row-method">{entry.method}</span>
         <span className={`netpanel-row-status ${statusCls}`}>
-          {entry.error ? 'ERR' : entry.status ?? '…'}
+          {entry.error ? t('errShort') : entry.status ?? '…'}
         </span>
         <span className="netpanel-row-path" title={entry.url}>{entry.path}</span>
         <span className="netpanel-row-meta">
           {entry.kind === 'sse' && <span className="netpanel-row-sse">SSE</span>}
-          {entry.durationMs !== undefined ? `${entry.durationMs}ms` : '…'}
+          {entry.durationMs !== undefined
+            ? formatNumber(entry.durationMs, { style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' })
+            : '…'}
         </span>
       </button>
       {expanded && (
@@ -168,15 +174,15 @@ function NetworkRow({
           {entry.error && (
             <div className="alert error u-mb-1-5">{entry.error}</div>
           )}
-          <Field label="URL" value={entry.url} mono />
+          <Field label={t('urlLabel')} value={entry.url} mono />
           <Field
-            label="Started"
-            value={new Date(entry.startedAt).toLocaleTimeString(undefined, { hour12: false })}
+            label={t('startedLabel')}
+            value={formatTime(entry.startedAt, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
           />
-          {entry.requestBody && <Field label="Request body" value={prettyJson(entry.requestBody)} mono multiline />}
+          {entry.requestBody && <Field label={t('requestBodyLabel')} value={prettyJson(entry.requestBody)} mono multiline />}
           {entry.responseBody && (
             <Field
-              label={`Response body${entry.responseTruncated ? ' (truncated)' : ''}`}
+              label={entry.responseTruncated ? t('responseBodyTruncatedLabel') : t('responseBodyLabel')}
               value={prettyJson(entry.responseBody)}
               mono
               multiline
@@ -184,12 +190,12 @@ function NetworkRow({
           )}
           {entry.sseEvents && entry.sseEvents.length > 0 && (
             <div className="netpanel-field">
-              <div className="netpanel-field-label">SSE events ({entry.sseEvents.length})</div>
+              <div className="netpanel-field-label">{t('sseEventsLabel', { count: entry.sseEvents.length })}</div>
               <ol className="netpanel-sse-list">
                 {entry.sseEvents.map((ev, i) => (
                   <li key={i}>
                     <span className="netpanel-sse-at">
-                      +{ev.at - entry.startedAt}ms
+                      +{formatNumber(ev.at - entry.startedAt, { style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' })}
                     </span>
                     <code>{ev.data.slice(0, 200)}{ev.data.length > 200 ? '…' : ''}</code>
                   </li>

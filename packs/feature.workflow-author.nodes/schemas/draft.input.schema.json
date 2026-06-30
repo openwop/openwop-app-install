@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openwop.dev/packs/feature.workflow-author.nodes/draft.input.schema.json",
+  "title": "Workflow Author Draft Input",
+  "type": "object",
+  "required": ["intent"],
+  "properties": {
+    "intent": { "type": "string", "description": "The natural-language automation intent to author a workflow for." },
+    "provider": { "type": "string", "description": "Optional LLM provider override (default: anthropic)." },
+    "model": { "type": "string", "description": "Optional LLM model override (default: claude-sonnet-4-6)." },
+    "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 5, "description": "Max draft→validate repair attempts (default 3)." }
+  },
+  "additionalProperties": false
+}

@@ -9,8 +9,9 @@
  * The workflow list lives at /builder (WorkflowsDashboard).
  */
 
-import { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { NodePalette } from './palette/NodePalette.js';
 import { BuilderCanvas } from './canvas/BuilderCanvas.js';
 import { Inspector } from './inspector/Inspector.js';
@@ -24,6 +25,7 @@ import { createRun } from '../client/runsClient.js';
 import { subscribeToRun } from '../client/streamsClient.js';
 import type { SavedWorkflow } from './schema/workflow.js';
 import { CheckIcon } from '../ui/icons/index.js';
+import { ErrorBoundary } from '../ui/ErrorBoundary.js';
 import {
   useHostLimits,
   collectPreflightIssues,
@@ -33,6 +35,7 @@ import {
   type LimitIssue,
 } from './builderShellHelpers.js';
 import { BuilderToolbar } from './BuilderToolbar.js';
+import { CreateWithAiPanel } from './CreateWithAiPanel.js';
 import { PublishHelpBanner } from './PublishHelpBanner.js';
 import { PreflightBanner } from './PreflightBanner.js';
 import { RunOverlayBanner } from './RunOverlayBanner.js';
@@ -42,6 +45,7 @@ interface Props {
 }
 
 export function BuilderShell({ onNewWorkflow }: Props) {
+  const { t } = useTranslation('builder');
   const nav = useNavigate();
   const workflowId = useBuilderStore((s) => s.workflowId);
   const name = useBuilderStore((s) => s.name);
@@ -70,7 +74,30 @@ export function BuilderShell({ onNewWorkflow }: Props) {
   >(null);
   // Success summary from the last Validate click; null when none/cleared.
   const [validateOk, setValidateOk] = useState<string | null>(null);
+  // "Create with AI" drawer (ADR 0072/0073) — slides down from the header.
+  // `aiOpen` drives the slide; `aiHasOpened` keeps the embedded chat mounted
+  // after the first open (so reopen resumes and the slide-up can animate).
+  const [aiOpen, setAiOpen] = useState(false);
+  const [aiHasOpened, setAiHasOpened] = useState(false);
   const hostLimits = useHostLimits();
+
+  // ADR 0137 — an accepted Ambient Work Graph suggestion arrives in router state.
+  // Synthesize an authoring prompt from the recurring pattern + auto-open the AI drawer,
+  // so "Make a workflow" actually hands the work to the Workflow Architect.
+  const location = useLocation();
+  const seed = (location.state as { workGraphSeed?: { name?: string; toolSequence?: string[]; sampleGoal?: string } } | null)?.workGraphSeed;
+  const seedPrompt = useMemo(() => {
+    if (!seed?.toolSequence?.length) return undefined;
+    const steps = seed.toolSequence.join(' → ');
+    const goal = seed.sampleGoal ?? seed.name;
+    return t('aiSeedPrompt', { steps, goal: goal ?? steps, defaultValue: `Create a workflow that performs these steps in order: ${steps}.${goal ? ` Goal: ${goal}.` : ''}` });
+  }, [seed, t]);
+  useEffect(() => {
+    if (!seedPrompt) return;
+    setAiHasOpened(true); setAiOpen(true);
+    // Clear the history state so a refresh/back doesn't re-trigger the seeded turn.
+    nav('.', { replace: true, state: {} });
+  }, [seedPrompt, nav]);
 
   // Subscribe to the overlaid run's SSE stream and fold each event into
   // the store so the canvas paints node status live. Re-subscribes when
@@ -114,7 +141,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       try {
         JSON.parse(raw);
       } catch {
-        setError('Default inputs is not valid JSON.');
+        setError(t('defaultInputsInvalidJson'));
         return;
       }
     }
@@ -127,9 +154,11 @@ export function BuilderShell({ onNewWorkflow }: Props) {
     const nN = snap.nodes.length;
     const eN = snap.edges.length;
     setValidateOk(
-      `Valid — ${nN} node${nN === 1 ? '' : 's'}, ${eN} edge${eN === 1 ? '' : 's'}. ` +
-        `No cycles, default inputs parse, and the host can run every node.` +
-        formatAdvertisedLimits(hostLimits),
+      t('validSummary', {
+        nodes: t('validNode', { count: nN }),
+        edges: t('validEdge', { count: eN }),
+        limits: formatAdvertisedLimits(hostLimits),
+      }),
     );
   }
 
@@ -159,7 +188,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         try {
           inputs = JSON.parse(raw) as Record<string, unknown>;
         } catch {
-          throw new Error('Default inputs is not valid JSON.');
+          throw new Error(t('defaultInputsInvalidJson'));
         }
       }
       await registerWorkflow(def);
@@ -277,7 +306,7 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         const { name, nodes, edges, defaultInputs } = fromCanonicalDefinition(raw);
         imported = {
           id,
-          name: `${name} (imported)`,
+          name: t('workflowNameSuffixImported', { name }),
           version: '1.0.0',
           nodes,
           edges,
@@ -289,11 +318,11 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         // Builder SavedWorkflow shape (this builder's "Export" output).
         const parsed = raw as Partial<SavedWorkflow>;
         if (!Array.isArray(parsed.nodes) || !Array.isArray(parsed.edges)) {
-          throw new Error('Not an OpenWOP workflow export (missing nodes/edges).');
+          throw new Error(t('errNotOpenwopExport'));
         }
         imported = {
           id,
-          name: parsed.name ? `${parsed.name} (imported)` : 'Imported workflow',
+          name: parsed.name ? t('workflowNameSuffixImported', { name: parsed.name }) : t('importedWorkflow'),
           version: parsed.version ?? '1.0.0',
           nodes: parsed.nodes,
           edges: parsed.edges,
@@ -327,7 +356,14 @@ export function BuilderShell({ onNewWorkflow }: Props) {
         onNewWorkflow={onNewWorkflow}
         onValidate={onValidate}
         onRun={() => onRun()}
+        aiOpen={aiOpen}
+        onCreateWithAi={() => { setAiHasOpened(true); setAiOpen((v) => !v); }}
       />
+      <div className="builder-ai-drawer" data-open={aiOpen ? 'true' : 'false'} aria-hidden={!aiOpen}>
+        <div className="builder-ai-drawer-inner">
+          {aiHasOpened && <CreateWithAiPanel onClose={() => setAiOpen(false)} {...(seedPrompt ? { seedPrompt } : {})} />}
+        </div>
+      </div>
       {error && <div className="alert error builder-toolbar-error">{error}</div>}
       {validateOk && (
         <div className="alert success builder-toolbar-error" role="status">
@@ -347,7 +383,12 @@ export function BuilderShell({ onNewWorkflow }: Props) {
       {overlay && <RunOverlayBanner />}
       <div className="builder-body">
         <NodePalette />
-        <BuilderCanvas />
+        {/* BLD-6: corrupt node data (e.g. a NaN position from a bad import or
+            localStorage row) makes xyflow throw — without a boundary that
+            white-screens the whole builder. Contain the crash to the canvas. */}
+        <ErrorBoundary label="builder canvas">
+          <BuilderCanvas />
+        </ErrorBoundary>
         <Inspector />
       </div>
     </div>

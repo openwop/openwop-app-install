@@ -11,8 +11,10 @@
  *   import { brand } from '../brand/brand.js';
  *   <h1>{brand.productName}</h1>
  *
- * Brand is fixed at build time, so a plain module singleton is correct —
- * no React context / provider is needed.
+ * These are the BUILD-TIME defaults (the first-paint / fallback identity). At
+ * runtime, `BrandProvider` (ADR 0170) hydrates this singleton from the super-admin
+ * app brand via `hydrateBrandSingleton`, and `useBrand()` re-renders consumers when
+ * an override loads. Read `useBrand()` (not the raw import) where live updates matter.
  */
 import { BRAND_DEFAULTS, coalesce, optional, type BrandConfig } from './defaults.js';
 

@@ -1,0 +1,31 @@
+{
+  "name": "feature.workflow-author.agents",
+  "version": "1.0.0",
+  "description": "AI Workflow Author agent pack (ADR 0072 / ADR 0014) — a manifest agent whose tools are feature.workflow-author.nodes over the ctx.features['workflow-author'] surface. From the AI chat it reads the node catalog, authors a connected schema-valid WorkflowDefinition, and registers it so it opens in the builder. Tool-allowlisted to the workflow-author feature surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "workflow-author", "agent", "meta-workflow", "builder"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.workflow-author.agents.workflow-architect",
+      "persona": "RESEARCH",
+      "label": "Workflow Architect",
+      "description": "Turns a natural-language automation intent into a runnable workflow: reads the closed-world node catalog, drafts a connected node/edge DAG, validates it, and registers it — grounded via feature.workflow-author.nodes over ctx.features['workflow-author']. Never invents node types; the human reviews the result in the builder.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/workflow-architect.md",
+      "toolAllowlist": [
+        "openwop:feature.workflow-author.nodes.draft",
+        "openwop:feature.workflow-author.nodes.validate",
+        "openwop:feature.workflow-author.nodes.persist"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

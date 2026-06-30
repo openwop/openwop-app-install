@@ -164,7 +164,8 @@ export function openSqliteStorage(dbPath: string): Storage {
     ORDER BY created_at DESC LIMIT 1
   `);
   const resolveInterruptStmt = db.prepare(`
-    UPDATE interrupts SET resolved_at = ?, resolved_value = ? WHERE interrupt_id = ?
+    UPDATE interrupts SET resolved_at = ?, resolved_value = ?
+    WHERE interrupt_id = ? AND resolved_at IS NULL
   `);
   const listOpenInterruptsAllStmt = db.prepare(`
     SELECT * FROM interrupts WHERE resolved_at IS NULL ORDER BY created_at ASC LIMIT ?
@@ -320,6 +321,17 @@ export function openSqliteStorage(dbPath: string): Storage {
        WHERE tenant_id = ? AND date = ? AND provider_id = ?`,
   );
 
+  const incrMediaUsageStmt = db.prepare(`
+    INSERT INTO media_provider_usage (tenant_id, date, tts_chars, stt_bytes)
+    VALUES (@tenant, @date, @ttsChars, @sttBytes)
+    ON CONFLICT(tenant_id, date) DO UPDATE SET
+      tts_chars = tts_chars + excluded.tts_chars,
+      stt_bytes = stt_bytes + excluded.stt_bytes
+  `);
+  const getMediaUsageStmt = db.prepare(
+    `SELECT tts_chars, stt_bytes FROM media_provider_usage WHERE tenant_id = ? AND date = ?`,
+  );
+
   const getEnvelopeCorrelationStmt = db.prepare(
     `SELECT outcome, envelope_type, recorded_at FROM envelope_correlations
        WHERE run_id = ? AND correlation_id = ?`,
@@ -332,18 +344,18 @@ export function openSqliteStorage(dbPath: string): Storage {
 
   // ── chat sessions (Phase 2C.1) ─────────────────────────────────────
   const listChatSessionsStmt = db.prepare(`
-    SELECT session_id, tenant_id, title, created_at, updated_at, message_count
+    SELECT session_id, tenant_id, title, title_source, created_at, updated_at, message_count
     FROM chat_sessions
     WHERE tenant_id = ?
     ORDER BY updated_at DESC
     LIMIT ?
   `);
   const createChatSessionStmt = db.prepare(`
-    INSERT INTO chat_sessions (session_id, tenant_id, title, created_at, updated_at, message_count)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO chat_sessions (session_id, tenant_id, title, title_source, created_at, updated_at, message_count)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `);
   const getChatSessionStmt = db.prepare(`
-    SELECT session_id, tenant_id, title, created_at, updated_at, message_count
+    SELECT session_id, tenant_id, title, title_source, created_at, updated_at, message_count
     FROM chat_sessions
     WHERE tenant_id = ? AND session_id = ?
   `);
@@ -352,6 +364,7 @@ export function openSqliteStorage(dbPath: string): Storage {
   const updateChatSessionStmt = db.prepare(`
     UPDATE chat_sessions
        SET title = COALESCE(?, title),
+           title_source = COALESCE(?, title_source),
            updated_at = COALESCE(?, updated_at),
            message_count = COALESCE(?, message_count)
      WHERE tenant_id = ? AND session_id = ?
@@ -360,14 +373,44 @@ export function openSqliteStorage(dbPath: string): Storage {
     DELETE FROM chat_sessions WHERE tenant_id = ? AND session_id = ?
   `);
   const listChatMessagesStmt = db.prepare(`
-    SELECT message_id, session_id, role, content, meta, created_at
+    SELECT message_id, session_id, role, content, meta, author_subject, created_at
     FROM chat_messages
     WHERE session_id = ?
     ORDER BY created_at ASC, message_id ASC
   `);
+  // Reverse-pagination variants (ADR 0043 Phase 3b): most-recent-first so a
+  // bounded page returns the newest messages; the caller reverses to ASC. The
+  // row-value comparison `(created_at, message_id) < (?, ?)` pages strictly
+  // older than the cursor, deterministic even when timestamps collide.
+  const listChatMessagesRecentStmt = db.prepare(`
+    SELECT message_id, session_id, role, content, meta, author_subject, created_at
+    FROM chat_messages
+    WHERE session_id = ?
+    ORDER BY created_at DESC, message_id DESC
+    LIMIT ?
+  `);
+  const listChatMessagesBeforeStmt = db.prepare(`
+    SELECT message_id, session_id, role, content, meta, author_subject, created_at
+    FROM chat_messages
+    WHERE session_id = ? AND (created_at, message_id) < (?, ?)
+    ORDER BY created_at DESC, message_id DESC
+    LIMIT ?
+  `);
   const appendChatMessageStmt = db.prepare(`
-    INSERT INTO chat_messages (message_id, session_id, role, content, meta, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO chat_messages (message_id, session_id, role, content, meta, author_subject, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `);
+  // ADR 0102 Phase 2 — read a single message's author for the edit-authz gate.
+  const getChatMessageAuthorStmt = db.prepare(`
+    SELECT author_subject FROM chat_messages WHERE session_id = ? AND message_id = ?
+  `);
+  // Update an existing message's content/meta in place (ADR 0067 — a run-backed
+  // workflow_run message's state grows across its lifecycle and must be re-saved,
+  // not re-appended). `created_at` is immutable so the thread order is stable.
+  const updateChatMessageStmt = db.prepare(`
+    UPDATE chat_messages
+       SET content = ?, meta = ?
+     WHERE session_id = ? AND message_id = ?
   `);
   // Atomic counter bump — paired with appendChatMessageStmt in a single
   // transaction so concurrent appends don't lose increments. The route
@@ -708,7 +751,10 @@ export function openSqliteStorage(dbPath: string): Storage {
     },
 
     async resolveInterrupt(interruptId, resolvedValue, resolvedAt) {
-      resolveInterruptStmt.run(resolvedAt, JSON.stringify(resolvedValue ?? null), interruptId);
+      // CONDITIONAL on resolved_at IS NULL — info.changes is 1 iff this call
+      // won the resolve, 0 if it was already resolved (ENG-6).
+      const info = resolveInterruptStmt.run(resolvedAt, JSON.stringify(resolvedValue ?? null), interruptId);
+      return info.changes > 0;
     },
 
     async listOpenInterrupts(runId) {
@@ -1067,6 +1113,18 @@ export function openSqliteStorage(dbPath: string): Storage {
       return { inputTokens: row.input_tokens, outputTokens: row.output_tokens };
     },
 
+    async incrementMediaUsage(tenantId, dateUtc, ttsChars, sttBytes) {
+      incrMediaUsageStmt.run({ tenant: tenantId, date: dateUtc, ttsChars, sttBytes });
+    },
+
+    async getMediaUsage(tenantId, dateUtc) {
+      const row = getMediaUsageStmt.get(tenantId, dateUtc) as
+        | { tts_chars: number; stt_bytes: number }
+        | undefined;
+      if (!row) return { ttsChars: 0, sttBytes: 0 };
+      return { ttsChars: row.tts_chars, sttBytes: row.stt_bytes };
+    },
+
     async getEnvelopeCorrelation(runId, correlationId) {
       const row = getEnvelopeCorrelationStmt.get(runId, correlationId) as
         | { outcome: string; envelope_type: string; recorded_at: string }
@@ -1095,6 +1153,7 @@ export function openSqliteStorage(dbPath: string): Storage {
         session_id: string;
         tenant_id: string;
         title: string;
+        title_source: string | null;
         created_at: string;
         updated_at: string;
         message_count: number;
@@ -1103,6 +1162,7 @@ export function openSqliteStorage(dbPath: string): Storage {
         sessionId: r.session_id,
         tenantId: r.tenant_id,
         title: r.title,
+        ...(r.title_source ? { titleSource: r.title_source as ChatSessionRecord['titleSource'] } : {}),
         createdAt: r.created_at,
         updatedAt: r.updated_at,
         messageCount: r.message_count,
@@ -1114,6 +1174,7 @@ export function openSqliteStorage(dbPath: string): Storage {
         record.sessionId,
         record.tenantId,
         record.title,
+        record.titleSource ?? null,
         record.createdAt,
         record.updatedAt,
         record.messageCount,
@@ -1126,6 +1187,7 @@ export function openSqliteStorage(dbPath: string): Storage {
             session_id: string;
             tenant_id: string;
             title: string;
+            title_source: string | null;
             created_at: string;
             updated_at: string;
             message_count: number;
@@ -1136,6 +1198,7 @@ export function openSqliteStorage(dbPath: string): Storage {
         sessionId: row.session_id,
         tenantId: row.tenant_id,
         title: row.title,
+        ...(row.title_source ? { titleSource: row.title_source as ChatSessionRecord['titleSource'] } : {}),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
         messageCount: row.message_count,
@@ -1145,6 +1208,7 @@ export function openSqliteStorage(dbPath: string): Storage {
     async updateChatSession(tenantId, sessionId, patch) {
       updateChatSessionStmt.run(
         patch.title ?? null,
+        patch.titleSource ?? null,
         patch.updatedAt ?? null,
         patch.messageCount ?? null,
         tenantId,
@@ -1157,21 +1221,26 @@ export function openSqliteStorage(dbPath: string): Storage {
       return info.changes > 0;
     },
 
-    async listChatSessionMessages(sessionId) {
-      const rows = listChatMessagesStmt.all(sessionId) as Array<{
-        message_id: string;
-        session_id: string;
-        role: string;
-        content: string;
-        meta: string | null;
-        created_at: string;
-      }>;
+    async listChatSessionMessages(sessionId, opts) {
+      type Row = { message_id: string; session_id: string; role: string; content: string; meta: string | null; author_subject: string | null; created_at: string };
+      let rows: Row[];
+      if (opts?.limit !== undefined) {
+        // Bounded page: fetch the most-recent `limit` (optionally before the
+        // cursor) DESC, then reverse to ASC so the thread reads top-to-bottom.
+        rows = (opts.before
+          ? listChatMessagesBeforeStmt.all(sessionId, opts.before.createdAt, opts.before.messageId, opts.limit)
+          : listChatMessagesRecentStmt.all(sessionId, opts.limit)) as Row[];
+        rows.reverse();
+      } else {
+        rows = listChatMessagesStmt.all(sessionId) as Row[];
+      }
       return rows.map((r): ChatMessageRecord => ({
         messageId: r.message_id,
         sessionId: r.session_id,
         role: r.role as ChatMessageRecord['role'],
         content: r.content,
         meta: r.meta,
+        authorSubject: r.author_subject,
         createdAt: r.created_at,
       }));
     },
@@ -1190,22 +1259,34 @@ export function openSqliteStorage(dbPath: string): Storage {
           record.role,
           record.content,
           record.meta,
+          record.authorSubject,
           record.createdAt,
         );
         bumpChatSessionStmt.run(record.createdAt, record.sessionId);
       })();
     },
 
+    async updateChatMessageContent(sessionId, messageId, content, meta) {
+      const info = updateChatMessageStmt.run(content, meta ?? null, sessionId, messageId);
+      return info.changes > 0;
+    },
+
+    async getChatMessageAuthor(sessionId, messageId) {
+      const row = getChatMessageAuthorStmt.get(sessionId, messageId) as { author_subject: string | null } | undefined;
+      return row ? { authorSubject: row.author_subject } : undefined;
+    },
+
     async insertNotification(record) {
       db.prepare(
         `INSERT INTO notifications (
-          notification_id, tenant_id, type, priority, status,
+          notification_id, tenant_id, recipient_user_id, recipient_role, type, priority, status,
           title, message, run_id, workflow_id, node_id,
           interrupt_id, action_url, metadata,
           created_at, read_at, archived_at
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
       ).run(
-        record.notificationId, record.tenantId, record.type, record.priority, record.status,
+        record.notificationId, record.tenantId, record.recipientUserId ?? null, record.recipientRole ?? null,
+        record.type, record.priority, record.status,
         record.title, record.message,
         record.runId ?? null, record.workflowId ?? null, record.nodeId ?? null,
         record.interruptId ?? null, record.actionUrl ?? null,
@@ -1214,12 +1295,28 @@ export function openSqliteStorage(dbPath: string): Storage {
       );
     },
 
-    async listNotifications({ tenantId, status, includeArchived, ascending, limit = 100 }) {
+    async listNotifications({ tenantId, recipientUserId, recipientRoles, status, includeArchived, ascending, limit = 100 }) {
       const wantStatuses: readonly string[] | null = status
         ? (Array.isArray(status) ? status : [status as string])
         : null;
       const conditions: string[] = ['tenant_id = ?'];
       const params: unknown[] = [tenantId];
+      // ADR 0050 — when a recipient is given, return that user's addressed rows,
+      // the tenant's TRUE broadcasts (recipient_user_id IS NULL AND recipient_role
+      // IS NULL), and role-addressed rows whose role the caller holds (Phase 3).
+      // A role row is NEVER a plain broadcast → default-deny when roles is empty.
+      // Omitting recipientUserId returns every tenant row (admin / pre-0050 callers).
+      if (recipientUserId) {
+        const roles = recipientRoles ?? [];
+        let clause = '(recipient_user_id = ? OR (recipient_user_id IS NULL AND (recipient_role IS NULL';
+        params.push(recipientUserId);
+        if (roles.length > 0) {
+          clause += ` OR recipient_role IN (${roles.map(() => '?').join(', ')})`;
+          for (const r of roles) params.push(r);
+        }
+        clause += ')))';
+        conditions.push(clause);
+      }
       if (wantStatuses && wantStatuses.length > 0) {
         conditions.push(`status IN (${wantStatuses.map(() => '?').join(', ')})`);
         for (const s of wantStatuses) params.push(s);
@@ -1260,14 +1357,30 @@ export function openSqliteStorage(dbPath: string): Storage {
       return row ? rowToNotificationSqlite(row) : null;
     },
 
-    async markAllNotificationsRead(tenantId, now) {
+    async markAllNotificationsRead(tenantId, now, recipientUserId, recipientRoles) {
+      // ADR 0050 — when scoped to a recipient, clear only the rows that user can
+      // see (their addressed rows + true broadcasts + role rows they hold, Phase 3),
+      // never another member's addressed or unheld-role items.
+      const params: unknown[] = [now, tenantId];
+      let recipientClause = '';
+      if (recipientUserId) {
+        const roles = recipientRoles ?? [];
+        recipientClause = 'AND (recipient_user_id = ? OR (recipient_user_id IS NULL AND (recipient_role IS NULL';
+        params.push(recipientUserId);
+        if (roles.length > 0) {
+          recipientClause += ` OR recipient_role IN (${roles.map(() => '?').join(', ')})`;
+          for (const r of roles) params.push(r);
+        }
+        recipientClause += ')))';
+      }
       const r = db.prepare(
         `UPDATE notifications
             SET status = 'read',
                 read_at = COALESCE(read_at, ?)
           WHERE tenant_id = ?
-            AND status = 'unread'`,
-      ).run(now, tenantId);
+            AND status = 'unread'
+            ${recipientClause}`,
+      ).run(...params);
       return r.changes;
     },
 
@@ -1290,16 +1403,17 @@ export function openSqliteStorage(dbPath: string): Storage {
       // keys + user-agent without a duplicate row. Mirrors postgres.
       db.prepare(
         `INSERT INTO push_subscriptions (
-          subscription_id, tenant_id, endpoint, p256dh_key, auth_key,
+          subscription_id, tenant_id, user_id, endpoint, p256dh_key, auth_key,
           user_agent, created_at, last_used_at
-        ) VALUES (?,?,?,?,?,?,?,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?)
         ON CONFLICT(endpoint) DO UPDATE SET
           p256dh_key = excluded.p256dh_key,
           auth_key = excluded.auth_key,
           user_agent = excluded.user_agent,
-          tenant_id = excluded.tenant_id`,
+          tenant_id = excluded.tenant_id,
+          user_id = excluded.user_id`,
       ).run(
-        record.subscriptionId, record.tenantId, record.endpoint,
+        record.subscriptionId, record.tenantId, record.userId ?? null, record.endpoint,
         record.p256dhKey, record.authKey,
         record.userAgent ?? null,
         record.createdAt, record.lastUsedAt ?? null,
@@ -1755,6 +1869,19 @@ export function openSqliteStorage(dbPath: string): Storage {
       };
     },
 
+    // ── app metadata (ADR 0052) ──
+    async getAppMeta(key) {
+      const row = db.prepare(`SELECT value FROM __app_meta WHERE key = ?`).get(key) as
+        | { value: string } | undefined;
+      return row ? row.value : null;
+    },
+    async setAppMeta(key, value) {
+      db.prepare(
+        `INSERT INTO __app_meta (key, value, updated_at) VALUES (?,?,?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      ).run(key, value, new Date().toISOString());
+    },
+
     async close() {
       pubsub.removeAllListeners();
       db.close();
@@ -1908,6 +2035,7 @@ function rowToPushSubscriptionSqlite(r: Record<string, unknown>): PushSubscripti
   return {
     subscriptionId: r.subscription_id as string,
     tenantId: r.tenant_id as string,
+    userId: (r.user_id as string | null) ?? undefined,
     endpoint: r.endpoint as string,
     p256dhKey: r.p256dh_key as string,
     authKey: r.auth_key as string,
@@ -1927,6 +2055,8 @@ function rowToNotificationSqlite(r: Record<string, unknown>): NotificationRecord
   return {
     notificationId: r.notification_id as string,
     tenantId: r.tenant_id as string,
+    recipientUserId: (r.recipient_user_id as string | null) ?? undefined,
+    recipientRole: (r.recipient_role as string | null) ?? undefined,
     type: r.type as string,
     priority: r.priority as NotificationRecord['priority'],
     status: r.status as NotificationRecord['status'],

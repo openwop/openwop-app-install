@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getCapabilities } from '../client/runsClient.js';
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
 import { McpToolsPanel } from '../mcp/McpToolsPanel.js';
@@ -87,18 +88,18 @@ interface Caps {
  *  an air-gapped / fork deployment can point at its own badge mirror via
  *  `VITE_OPENWOP_SITE_URL` (the badge SVGs ship in this repo's
  *  `public/badge/` for same-origin serving). */
-const KNOWN_BADGE_HOSTS: ReadonlyArray<{ match: RegExp; file: string; label: string }> = [
-  { match: /postgres/i, file: 'postgres.svg', label: 'Postgres reference host' },
-  { match: /sqlite/i, file: 'sqlite.svg', label: 'SQLite reference host' },
-  { match: /python/i, file: 'python-in-memory.svg', label: 'Python in-memory reference host' },
-  { match: /in.?memory|workflow.?engine/i, file: 'in-memory.svg', label: 'In-memory reference host' },
+const KNOWN_BADGE_HOSTS: ReadonlyArray<{ match: RegExp; file: string; labelKey: string }> = [
+  { match: /postgres/i, file: 'postgres.svg', labelKey: 'badgePostgres' },
+  { match: /sqlite/i, file: 'sqlite.svg', labelKey: 'badgeSqlite' },
+  { match: /python/i, file: 'python-in-memory.svg', labelKey: 'badgePython' },
+  { match: /in.?memory|workflow.?engine/i, file: 'in-memory.svg', labelKey: 'badgeInMemory' },
 ];
 
-function matchBadgeFor(implName?: string): { url: string; label: string } | null {
+function matchBadgeFor(implName?: string): { url: string; labelKey: string } | null {
   if (!implName) return null;
   for (const entry of KNOWN_BADGE_HOSTS) {
     if (entry.match.test(implName)) {
-      return { url: `${config.siteBaseUrl}/badge/${entry.file}`, label: entry.label };
+      return { url: `${config.siteBaseUrl}/badge/${entry.file}`, labelKey: entry.labelKey };
     }
   }
   return null;
@@ -111,6 +112,7 @@ interface CatalogResp {
 }
 
 export function CapabilitiesPanel() {
+  const { t } = useTranslation('discovery');
   const [caps, setCaps] = useState<Caps | null>(null);
   const [catalog, setCatalog] = useState<CatalogResp | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -157,12 +159,19 @@ export function CapabilitiesPanel() {
   return (
     <section className="page-stack">
       <PageHeader
-        eyebrow="Discovery"
-        title="Host capabilities"
-        lede={<>What this host can actually run from the installed packs. Coverage is (runnable / total) where "runnable" means every required host surface is advertised. The remainder will return <code>HOST_CAPABILITY_MISSING</code> if executed here — the workflow still serializes and ships, so deploying to a fuller host stays cheap.</>}
+        eyebrow={t('eyebrow')}
+        title={t('title')}
+        lede={t('lede')}
       />
 
       {error && <Notice variant="error">{error}</Notice>}
+
+      {/* Plain-language framing — the headline (can this host run my work?) is up
+          top; the raw protocol advertisement below is for operators who need it. */}
+      <Notice variant="info">
+        <strong>{t('explainTitle')}</strong>
+        <p className="u-mt-1 u-mb-0">{t('explainBody')}</p>
+      </Notice>
 
       {/* ── Host identity & coverage tier ─────────────────────────────────
           The page's headline question — "can this host run my workflow,
@@ -170,21 +179,19 @@ export function CapabilitiesPanel() {
       <ConformanceProfilesCard caps={caps} />
 
       <div className="surface-card">
-        <h2>Pack coverage</h2>
+        <h2>{t('packCoverage')}</h2>
         <p className="muted u-mb-3">
-          The single number that answers "can this host run my workflow?" — runnable nodes over the
-          full installed catalog. Toggle <strong>Blocked</strong> to scope the table to only the
-          surfaces that are gating execution.
+          {t('packCoverageHelpPrefix')}<strong>{t('packCoverageHelpBlocked')}</strong>{t('packCoverageHelpSuffix')}
         </p>
         {catalog ? (
           <>
             <KeyFigureBand
-              ariaLabel="Pack coverage"
+              ariaLabel={t('coverageAriaLabel')}
               {...(blocked > 0 ? { activeKey: coverageFilter, onToggle: (k: string) => setCoverageFilter((p) => (p === k ? null : k)) } : {})}
               figures={[
-                { key: 'runnable', label: 'Runnable', value: runnable.length, glyph: <CheckIcon size={13} /> },
-                { key: 'total', label: 'Total nodes', value: nodes.length, glyph: <BoxesIcon size={13} /> },
-                { key: 'blocked', label: 'Blocked', value: blocked, tone: blocked > 0 ? 'attention' : 'default', glyph: <ZapIcon size={13} /> },
+                { key: 'runnable', label: t('figureRunnable'), value: runnable.length, glyph: <CheckIcon size={13} /> },
+                { key: 'total', label: t('figureTotalNodes'), value: nodes.length, glyph: <BoxesIcon size={13} /> },
+                { key: 'blocked', label: t('figureBlocked'), value: blocked, tone: blocked > 0 ? 'attention' : 'default', glyph: <ZapIcon size={13} /> },
               ]}
             />
             {blockedRows.length > 0 ? (
@@ -194,26 +201,26 @@ export function CapabilitiesPanel() {
               (coverageFilter === null || coverageFilter === 'blocked') ? (
                 <div className="u-mt-4">
                   <DataTable
-                    caption="Nodes blocked by surface"
+                    caption={t('blockedTableCaption')}
                     density="compact"
                     rows={blockedRows}
                     rowKey={(r) => r.surface}
                     initialSort={{ key: 'nodes', dir: 'desc' }}
                     columns={[
-                      { key: 'surface', header: 'Blocked by surface', render: (r) => <code>{r.surface}</code>, sortValue: (r) => r.surface },
-                      { key: 'nodes', header: 'Nodes', align: 'right', render: (r) => <span className="chip chip--warning">{r.nodes}</span>, sortValue: (r) => r.nodes },
+                      { key: 'surface', header: t('colBlockedBySurface'), render: (r) => <code>{r.surface}</code>, sortValue: (r) => r.surface },
+                      { key: 'nodes', header: t('colNodes'), align: 'right', render: (r) => <span className="chip chip--warning">{r.nodes}</span>, sortValue: (r) => r.nodes },
                     ]}
                   />
                 </div>
               ) : (
-                <p className="muted u-mt-3 u-fs-13">All {runnable.length} runnable nodes clear every required surface. Select <strong>Blocked</strong> to see the {blocked} that don't.</p>
+                <p className="muted u-mt-3 u-fs-13">{t('allRunnableClearPrefix', { count: runnable.length })}<strong>{t('allRunnableClearBlocked')}</strong>{t('allRunnableClearSuffix', { blocked })}</p>
               )
             ) : (
               <div className="u-mt-4">
                 <StateCard
                   icon={<CheckIcon size={20} />}
-                  title="Every installed node is runnable here"
-                  body="No node in the catalog is missing a host surface — this host can execute the full pack set."
+                  title={t('everyNodeRunnableTitle')}
+                  body={t('everyNodeRunnableBody')}
                 />
               </div>
             )}
@@ -225,27 +232,24 @@ export function CapabilitiesPanel() {
 
       {/* ── Surfaces & envelopes tier ─────────────────────────────────── */}
       <div className="surface-card">
-        <h2>Host surfaces</h2>
+        <h2>{t('hostSurfaces')}</h2>
         <p className="muted">
-          Live render of <code>capabilities.hostSurfaces</code>. The
-          <em> implementation</em> column tells you what's backing each surface
-          — values like <code>in-memory</code> or <code>sqlite-in-memory</code>
-          mean the surface is non-durable. Phase 6 swaps these with real-backend
-          adapters from <code>examples/hosts/postgres</code>.
+          {t('hostSurfacesHelpPrefix')}<code>capabilities.hostSurfaces</code>{t('hostSurfacesHelpImplLead')}
+          <em> {t('hostSurfacesHelpImplEm')}</em>{t('hostSurfacesHelpImplMid')}<code>in-memory</code>{t('hostSurfacesHelpImplOr')}<code>sqlite-in-memory</code>{t('hostSurfacesHelpImplTail')}<code>examples/hosts/postgres</code>{t('hostSurfacesHelpEnd')}
         </p>
         {caps ? (
           <DataTable
-            caption="Host surfaces"
+            caption={t('surfacesTableCaption')}
             density="compact"
             rows={surfaces}
             rowKey={(s) => s.name}
             initialSort={{ key: 'supported', dir: 'asc' }}
-            empty={<StateCard icon={<BoxesIcon size={20} />} title="No host surfaces advertised" body={<>This host's <code>capabilities.hostSurfaces</code> is empty.</>} />}
+            empty={<StateCard icon={<BoxesIcon size={20} />} title={t('noSurfacesTitle')} body={<>{t('noSurfacesBodyPrefix')}<code>capabilities.hostSurfaces</code>{t('noSurfacesBodySuffix')}</>} />}
             columns={[
-              { key: 'name', header: 'Surface', render: (s) => <code>{s.name}</code>, sortValue: (s) => s.name },
-              { key: 'supported', header: 'Supported', align: 'center', render: (s) => (s.supported ? <span className="u-text-success"><CheckIcon size={14} /></span> : <span className="u-ink-3"><CircleIcon size={14} /></span>), sortValue: (s) => (s.supported ? 0 : 1) },
-              { key: 'implementation', header: 'Implementation', render: (s) => (s.implementation ? <code>{s.implementation}</code> : <span className="muted">—</span>), sortValue: (s) => s.implementation ?? '' },
-              { key: 'note', header: 'Note', render: (s) => <span className="muted">{s.note ?? ''}</span>, cellClassName: 'muted' },
+              { key: 'name', header: t('colSurface'), render: (s) => <code>{s.name}</code>, sortValue: (s) => s.name },
+              { key: 'supported', header: t('colSupported'), align: 'center', render: (s) => (s.supported ? <span className="u-text-success"><CheckIcon size={14} /></span> : <span className="u-ink-3"><CircleIcon size={14} /></span>), sortValue: (s) => (s.supported ? 0 : 1) },
+              { key: 'implementation', header: t('colImplementation'), render: (s) => (s.implementation ? <code>{s.implementation}</code> : <span className="muted">{t('emDash')}</span>), sortValue: (s) => s.implementation ?? '' },
+              { key: 'note', header: t('colNote'), render: (s) => <span className="muted">{s.note ?? ''}</span>, cellClassName: 'muted' },
             ]}
           />
         ) : (
@@ -254,27 +258,23 @@ export function CapabilitiesPanel() {
       </div>
 
       <div className="surface-card">
-        <h2>Envelope discipline</h2>
+        <h2>{t('envelopeDiscipline')}</h2>
         <p className="muted">
-          What this host promises about LLM-emission envelopes — the inbound
-          payload shape every AI node serves into the run.
-          When a row reads <code>—</code>, the host hasn't advertised that surface yet.
+          {t('envelopeHelp')}
         </p>
         <p className="muted u-fs-12 u-mt-0">
-          When the reliability events below fire on a run, they surface live in the AI chat as
-          inline chips inside the assistant bubble (retries, refusals, truncations, model
-          substitutions, prose-to-JSON coercions, partial-payload recoveries).
+          {t('envelopeHelp2')}
         </p>
         {caps ? (
           <DataTable
-            caption="Envelope discipline"
+            caption={t('envelopeTableCaption')}
             density="compact"
-            rows={envelopeRows(caps)}
+            rows={envelopeRows(caps, t)}
             rowKey={(r) => r.key}
             columns={[
-              { key: 'key', header: 'Surface', render: (r) => <code>{r.key}</code> },
-              { key: 'value', header: 'Value', render: (r) => r.value },
-              { key: 'note', header: 'Note', render: (r) => <span className="muted">{r.note}</span>, cellClassName: 'muted' },
+              { key: 'key', header: t('colSurface'), render: (r) => <code>{r.key}</code> },
+              { key: 'value', header: t('colValue'), render: (r) => r.value },
+              { key: 'note', header: t('colNote'), render: (r) => <span className="muted">{r.note}</span>, cellClassName: 'muted' },
             ]}
           />
         ) : (
@@ -283,24 +283,21 @@ export function CapabilitiesPanel() {
       </div>
 
       <div className="surface-card">
-        <h2>Model capabilities</h2>
+        <h2>{t('modelCapabilities')}</h2>
         <p className="muted">
-          What each
-          installed provider/model can do (function-calling, vision, streaming, etc.), and whether
-          this host will silently substitute a fallback model when the workflow asks for a capability
-          the configured model lacks. Substitution is observable via the <code>model.capability.substituted</code> event.
+          {t('modelCapabilitiesHelpPrefix')}<code>model.capability.substituted</code>{t('modelCapabilitiesHelpSuffix')}
         </p>
         {caps ? (
           caps.capabilities?.modelCapabilities ? (
             <>
               <div className="u-flex u-gap-2 u-items-center cap-chip-list u-mb-3">
                 <span className={`chip ${caps.capabilities.modelCapabilities.supported ? 'chip--success' : 'chip--muted'}`}>
-                  {caps.capabilities.modelCapabilities.supported ? 'Advertised' : 'Not advertised'}
+                  {caps.capabilities.modelCapabilities.supported ? t('advertised') : t('notAdvertised')}
                 </span>
                 <span className={`chip ${caps.capabilities.modelCapabilities.substitutionSupported ? 'chip--accent' : 'chip--muted'}`}>
-                  Substitution {caps.capabilities.modelCapabilities.substitutionSupported ? 'on' : 'off'}
+                  {caps.capabilities.modelCapabilities.substitutionSupported ? t('substitutionOn') : t('substitutionOff')}
                 </span>
-                <span className="chip chip--muted">{caps.capabilities.modelCapabilities.advertised?.length ?? 0} declared</span>
+                <span className="chip chip--muted">{t('declaredCount', { count: caps.capabilities.modelCapabilities.advertised?.length ?? 0 })}</span>
               </div>
               {caps.capabilities.modelCapabilities.advertised?.length ? (
                 <div className="cap-chip-list">
@@ -313,8 +310,8 @@ export function CapabilitiesPanel() {
           ) : (
             <StateCard
               icon={<ZapIcon size={20} />}
-              title="Model capabilities not advertised"
-              body={<>This host doesn't declare <code>modelCapabilities</code> yet, so capability-substitution behavior is unknown.</>}
+              title={t('modelCapsNotAdvertisedTitle')}
+              body={<>{t('modelCapsNotAdvertisedBodyPrefix')}<code>modelCapabilities</code>{t('modelCapsNotAdvertisedBodySuffix')}</>}
             />
           )
         ) : (
@@ -323,11 +320,9 @@ export function CapabilitiesPanel() {
       </div>
 
       <div className="surface-card">
-        <h2>Input modalities</h2>
+        <h2>{t('inputModalities')}</h2>
         <p className="muted">
-          The
-          perception modalities this host accepts as <code>callAI</code> ContentParts. <code>text</code> is always valid; a
-          non-text modality is only accepted when advertised here, else the call is rejected with <code>unsupported_modality</code>.
+          {t('inputModalitiesHelpPrefix')}<code>callAI</code>{t('inputModalitiesHelpMid')}<code>{t('inputModalitiesHelpTextEm')}</code>{t('inputModalitiesHelpAfterText')}<code>unsupported_modality</code>{t('inputModalitiesHelpSuffix')}
         </p>
         {caps ? (
           caps.capabilities?.aiProviders?.input?.modalities?.length ? (
@@ -339,8 +334,8 @@ export function CapabilitiesPanel() {
           ) : (
             <StateCard
               icon={<ImageIcon size={20} />}
-              title="No non-text modalities advertised"
-              body={<>This host doesn't declare <code>aiProviders.input.modalities</code> yet — only <code>text</code> ContentParts are accepted.</>}
+              title={t('noModalitiesTitle')}
+              body={<>{t('noModalitiesBodyPrefix')}<code>aiProviders.input.modalities</code>{t('noModalitiesBodyMid')}<code>text</code>{t('noModalitiesBodySuffix')}</>}
             />
           )
         ) : (
@@ -352,13 +347,13 @@ export function CapabilitiesPanel() {
       <A2APeerPanel />
 
       <div className="surface-card">
-        <h2>Raw advertisement</h2>
+        <h2>{t('rawAdvertisement')}</h2>
         <p className="muted">
-          Full <code>GET /.well-known/openwop</code> payload.
+          {t('rawAdvertisementHelpPrefix')}<code>GET /.well-known/openwop</code>{t('rawAdvertisementHelpSuffix')}
         </p>
         {caps ? (
           // tabIndex=0 so the scrollable JSON is keyboard-reachable.
-          <pre tabIndex={0} aria-label="Raw capabilities JSON">{JSON.stringify(caps, null, 2)}</pre>
+          <pre tabIndex={0} aria-label={t('rawCapsAriaLabel')}>{JSON.stringify(caps, null, 2)}</pre>
         ) : (
           !error && <SkeletonRows rows={5} columns={['80%', '60%', '70%', '50%', '65%']} />
         )}
@@ -371,28 +366,28 @@ interface EnvelopeRow { key: string; value: JSX.Element; note: JSX.Element }
 
 /** Flatten the envelope-discipline advertisement into table rows so it renders
  *  through the shared <DataTable> register (was a bespoke cap-table). */
-function envelopeRows(caps: Caps): EnvelopeRow[] {
+function envelopeRows(caps: Caps, t: (key: string) => string): EnvelopeRow[] {
   const env = caps.capabilities?.envelopes;
   return [
     {
       key: 'envelopes.reasoning.supported',
       value: boolGlyph(env?.reasoning?.supported),
-      note: <>optional <code>reasoning</code> string on envelope payloads</>,
+      note: <>{t('envReasoningSupportedNoteLead')} <code>reasoning</code> {t('envReasoningSupportedNoteTail')}</>,
     },
     {
       key: 'envelopes.reasoning.promptDirective',
-      value: env?.reasoning?.promptDirective ? <code>{env.reasoning.promptDirective}</code> : <span className="muted">—</span>,
-      note: <>how aggressively the host prompts the model to populate it</>,
+      value: env?.reasoning?.promptDirective ? <code>{env.reasoning.promptDirective}</code> : <span className="muted">{t('emDash')}</span>,
+      note: <>{t('envReasoningDirectiveNote')}</>,
     },
     {
       key: 'envelopes.tierOneSubsetCompliance',
-      value: env?.tierOneSubsetCompliance ? <code>{env.tierOneSubsetCompliance}</code> : <span className="muted">—</span>,
-      note: <>host's posture on the OpenAI ∩ Anthropic ∩ Gemini schema subset</>,
+      value: env?.tierOneSubsetCompliance ? <code>{env.tierOneSubsetCompliance}</code> : <span className="muted">{t('emDash')}</span>,
+      note: <>{t('envTierOneNote')}</>,
     },
     {
       key: 'envelopes.reliability.supported',
       value: boolGlyph(env?.reliability?.supported),
-      note: <>host emits retry / refusal / truncation events</>,
+      note: <>{t('envReliabilitySupportedNote')}</>,
     },
     {
       key: 'envelopes.reliability.events',
@@ -400,20 +395,20 @@ function envelopeRows(caps: Caps): EnvelopeRow[] {
         <span className="cap-chip-list">
           {env.reliability.events.map((e) => <span key={e} className="chip chip--muted">{e}</span>)}
         </span>
-      ) : <span className="muted">—</span>,
-      note: <>which reliability event types this host actually emits</>,
+      ) : <span className="muted">{t('emDash')}</span>,
+      note: <>{t('envReliabilityEventsNote')}</>,
     },
     {
       key: 'envelopes.reliability.completion.distinguishesTruncation',
       value: boolGlyph(env?.reliability?.completion?.distinguishesTruncation),
-      note: <>host branches retry strategy on truncation vs schema-violation</>,
+      note: <>{t('envTruncationNote')}</>,
     },
     {
       key: 'envelopes.reliability.completion.truncationBudgetMultiplier',
       value: typeof env?.reliability?.completion?.truncationBudgetMultiplier === 'number'
         ? <code>×{env.reliability.completion.truncationBudgetMultiplier}</code>
-        : <span className="muted">—</span>,
-      note: <>how much extra output budget the host gives on a truncation retry</>,
+        : <span className="muted">{t('emDash')}</span>,
+      note: <>{t('envTruncationBudgetNote')}</>,
     },
   ];
 }
@@ -426,6 +421,7 @@ function envelopeRows(caps: Caps): EnvelopeRow[] {
  *  Implementation row so an operator can copy the exact `{name, version, vendor}`
  *  for a bug report. Leads the page as the host-identity surface. */
 function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
+  const { t } = useTranslation('discovery');
   const impl = caps?.implementation ?? {};
   const interruptProfiles = caps?.capabilities?.profiles ?? [];
   const authProfiles = caps?.capabilities?.auth?.profiles ?? [];
@@ -433,35 +429,35 @@ function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
   const badge = matchBadgeFor(impl.name);
   return (
     <div className="surface-card">
-      <h2 className="u-flex u-gap-2 u-items-center"><span className="u-ink-3" aria-hidden="true"><ShieldIcon size={18} /></span> Conformance &amp; profiles</h2>
+      <h2 className="u-flex u-gap-2 u-items-center"><span className="u-ink-3" aria-hidden="true"><ShieldIcon size={18} /></span> {t('conformanceAndProfiles')}</h2>
       <p className="muted">
-        The connected host's identity + every profile it advertises through{' '}
-        <code>capabilities.profiles[]</code> and <code>capabilities.auth.profiles[]</code>{' '}
-        — the surfaces an external implementer can rely on. See the{' '}
+        {t('conformanceHelpPrefix')}{' '}
+        <code>capabilities.profiles[]</code>{t('conformanceHelpAnd')}<code>capabilities.auth.profiles[]</code>{' '}
+        {t('conformanceHelpMid')}{' '}
         <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer">
-          conformance leaderboard
+          {t('conformanceLeaderboardLink')}
         </a>{' '}
-        for the cross-host pass-rate matrix.
+        {t('conformanceHelpSuffix')}
       </p>
       <table className="cap-table">
         <tbody>
           <tr>
-            <th className="cap-table-label">Implementation</th>
+            <th className="cap-table-label">{t('implementationLabel')}</th>
             <td>
               {caps ? (
                 <>
-                  {impl.name ? <code>{impl.name}</code> : <span className="muted">—</span>}
-                  {impl.version ? <> <span className="muted">v{impl.version}</span></> : null}
-                  {impl.vendor ? <> <span className="muted">· {impl.vendor}</span></> : null}
+                  {impl.name ? <code>{impl.name}</code> : <span className="muted">{t('emDash')}</span>}
+                  {impl.version ? <> <span className="muted">{t('versionPrefix', { version: impl.version })}</span></> : null}
+                  {impl.vendor ? <> <span className="muted">{t('vendorPrefix', { vendor: impl.vendor })}</span></> : null}
                 </>
-              ) : <span className="muted">—</span>}
+              ) : <span className="muted">{t('emDash')}</span>}
             </td>
           </tr>
           <tr>
-            <th className="cap-table-label">Profiles claimed ({allProfiles.length})</th>
+            <th className="cap-table-label">{t('profilesClaimed', { count: allProfiles.length })}</th>
             <td>
               {allProfiles.length === 0 ? (
-                <span className="muted">none advertised</span>
+                <span className="muted">{t('noneAdvertised')}</span>
               ) : (
                 <div className="cap-chip-list">
                   {allProfiles.map((p) => (
@@ -472,17 +468,17 @@ function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
             </td>
           </tr>
           <tr>
-            <th className="cap-table-label">Reference-host badge</th>
+            <th className="cap-table-label">{t('referenceHostBadge')}</th>
             <td>
               {badge ? (
-                <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer" title={badge.label}>
-                  <img className="cap-badge-img" src={badge.url} alt={`${badge.label} conformance badge`} />
+                <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer" title={t(badge.labelKey)}>
+                  <img className="cap-badge-img" src={badge.url} alt={t('badgeAlt', { label: t(badge.labelKey) })} />
                 </a>
               ) : (
                 <span className="muted">
-                  No published badge for this implementation. Hosts that match a reference (in-memory, sqlite, postgres, python) get one inline; see the{' '}
-                  <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer">leaderboard</a>{' '}
-                  for all published hosts.
+                  {t('noBadgePrefix')}
+                  <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer">{t('leaderboard')}</a>{' '}
+                  {t('noBadgeSuffix')}
                 </span>
               )}
             </td>

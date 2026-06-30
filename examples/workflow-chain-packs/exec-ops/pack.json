@@ -1,0 +1,112 @@
+{
+  "name": "core.openwop.workflows.exec-ops",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0149). The Executive / Chief-of-Staff cluster: Daily Executive Briefing, Meeting Prep & Attendee Dossier, and Board / Investor Update Pack. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.analytics) and, where a workflow touches an external system, binds a connection pack via core.openwop.http.openapi-call (connectionRef) — so a configured connection runs live and an unconfigured one surfaces a connect prompt rather than failing. Every external send is gated by core.chat.approvalGate; the read-only briefing is ungated. All tenant-specific values are run parameters (replay-deterministic). Resolves fully on hosts that ship the feature + http/mcp + chat packs (the OpenWOP reference app); the connection bindings are configured by the operator under Access & data → Connections.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "exec-ops.daily-briefing",
+      "version": "1.0.0",
+      "label": "Daily Executive Briefing",
+      "description": "Synthesize a daily briefing from the pipeline, usage analytics, and open tasks: priorities, revenue deltas, risks, blockers, and next actions. Read-only digest — no external send, so no approval gate. Pair with a scheduled trigger (e.g. 06:30 local) registered by the operator.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "focusAreas": { "type": "string", "default": "revenue, pipeline risk, and blockers", "description": "What the briefing should emphasize." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "pipeline", "typeId": "feature.crm.nodes.list-deals", "name": "Pipeline", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "metrics", "typeId": "feature.analytics.nodes.query", "name": "Usage analytics", "position": { "x": 0, "y": 140 }, "config": {}, "inputs": {} },
+          { "id": "tasks", "typeId": "feature.crm.nodes.list-tasks", "name": "Open tasks", "position": { "x": 0, "y": 280 }, "config": {}, "inputs": {} },
+          { "id": "brief", "typeId": "core.ai.chatCompletion", "name": "Synthesize briefing", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "You are a chief of staff. From the pipeline, usage analytics, and open tasks, produce a concise daily executive briefing emphasizing {{params.focusAreas}}: today's priorities, revenue deltas, risks, blockers, and recommended next actions." }, "inputs": {} },
+          { "id": "deliver", "typeId": "core.openwop.integration.notification-push", "name": "Deliver briefing", "position": { "x": 600, "y": 140 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "pipeline", "to": "brief" },
+          { "from": "metrics", "to": "brief" },
+          { "from": "tasks", "to": "brief" },
+          { "from": "brief", "to": "deliver" }
+        ]
+      },
+      "outputs": {
+        "briefing": { "type": "string", "description": "The daily executive briefing." }
+      }
+    },
+    {
+      "chainId": "exec-ops.meeting-prep",
+      "version": "1.0.0",
+      "label": "Meeting Prep & Attendee Dossier",
+      "description": "Ahead of a meeting, read the calendar event (Microsoft 365) and the attendee's company profile, then synthesize a dossier with an agenda and suggested objectives. Pair with a scheduled trigger N hours before the event.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["attendeeCompanyId"],
+        "properties": {
+          "attendeeCompanyId": { "type": "string", "description": "The CRM company id of the meeting attendee/account." },
+          "meetingContext": { "type": "string", "default": "", "description": "Optional extra context about the meeting." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "calendar", "typeId": "core.openwop.http.openapi-call", "name": "Read calendar event (M365)", "position": { "x": 0, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.microsoft365", "operationId": "listCalendarEvents" }, "inputs": {} },
+          { "id": "company", "typeId": "feature.crm.nodes.get-company", "name": "Get attendee company", "position": { "x": 0, "y": 160 }, "config": { "companyId": "{{params.attendeeCompanyId}}" }, "inputs": {} },
+          { "id": "dossier", "typeId": "core.ai.chatCompletion", "name": "Write dossier + agenda", "position": { "x": 320, "y": 80 }, "config": { "systemPrompt": "You are an executive assistant. Using the upcoming calendar event and the attendee company profile, write a meeting dossier: who/what/why, a proposed agenda, and 3 suggested objectives. Context: {{params.meetingContext}}" }, "inputs": {} },
+          { "id": "deliver", "typeId": "core.openwop.integration.notification-push", "name": "Send to organizer", "position": { "x": 600, "y": 80 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "calendar", "to": "dossier" },
+          { "from": "company", "to": "dossier" },
+          { "from": "dossier", "to": "deliver" }
+        ]
+      },
+      "outputs": {
+        "dossier": { "type": "string", "description": "The attendee dossier + agenda." }
+      }
+    },
+    {
+      "chainId": "exec-ops.board-update",
+      "version": "1.0.0",
+      "label": "Board / Investor Update Pack",
+      "description": "Assemble a monthly board/investor update: pull KPIs (analytics), pipeline (CRM), and finance figures (NetSuite), draft a narrative with variance commentary, gate it for exec review, then deliver. Pair with a monthly scheduled trigger.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["period"],
+        "properties": {
+          "period": { "type": "string", "description": "The reporting period, e.g. '2026-05' or 'May 2026'." },
+          "audience": { "type": "string", "default": "the board", "description": "Who the update is for." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "kpis", "typeId": "feature.analytics.nodes.query", "name": "KPIs", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "pipeline", "typeId": "feature.crm.nodes.list-deals", "name": "Pipeline", "position": { "x": 0, "y": 140 }, "config": {}, "inputs": {} },
+          { "id": "finance", "typeId": "core.openwop.http.openapi-call", "name": "Finance figures (NetSuite)", "position": { "x": 0, "y": 280 }, "config": { "connectionRef": "core.openwop.connections.netsuite", "operationId": "getFinancialSummary" }, "inputs": {} },
+          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft narrative + variance", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "You are a finance/strategy lead. For {{params.period}}, draft a board/investor update for {{params.audience}}: KPIs, pipeline, finance figures, narrative, and variance vs prior period with commentary." }, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Exec review", "position": { "x": 600, "y": 140 }, "config": {}, "inputs": {} },
+          { "id": "deliver", "typeId": "core.openwop.integration.notification-push", "name": "Distribute pack", "position": { "x": 880, "y": 140 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "kpis", "to": "draft" },
+          { "from": "pipeline", "to": "draft" },
+          { "from": "finance", "to": "draft" },
+          { "from": "draft", "to": "review" },
+          { "from": "review", "to": "deliver" }
+        ]
+      },
+      "outputs": {
+        "updatePack": { "type": "string", "description": "The exec-reviewed board/investor update." }
+      }
+    }
+  ]
+}

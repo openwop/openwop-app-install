@@ -24,6 +24,19 @@ export function sanitizeForErrorMessage(input: string): string {
 }
 
 /**
+ * Sanitizer for OBJECT KEY NAMES (DATA-6). Applies only the HIGH-SIGNAL
+ * patterns — a real JWT or `sk_`/`pk_`-style token that landed as a key — and
+ * deliberately NOT the broad ≥32-char base64 rule, so a legitimate long field
+ * name (e.g. a 40-char snake_case identifier) is not falsely redacted. Token
+ * VALUES still get the full scrub via `sanitizeForErrorMessage`.
+ */
+export function sanitizeKeyName(key: string): string {
+  return key
+    .replace(JWT_RE, '<redacted:jwt>')
+    .replace(PROVIDER_KEY_PREFIXES, '<redacted:provider_key>');
+}
+
+/**
  * Recursively walk a value and sanitize any string fields. Returns the
  * structural sibling of the input (strings replaced; arrays + objects
  * recursed; everything else returned as-is).
@@ -42,7 +55,11 @@ function sanitizeWalk(value: unknown): unknown {
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = sanitizeWalk(v);
+      // DATA-6: sanitize the KEY too, not just the value — a credential-shaped
+      // string can land as an object key (e.g. an echoed map keyed by a token),
+      // which would otherwise bypass the value-only scrub. Keys use the
+      // high-signal-only scrub so a long legitimate field name isn't redacted.
+      out[sanitizeKeyName(k)] = sanitizeWalk(v);
     }
     return out;
   }

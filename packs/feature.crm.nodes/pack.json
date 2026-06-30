@@ -1,10 +1,10 @@
 {
   "name": "feature.crm.nodes",
-  "version": "1.0.0",
-  "description": "CRM feature node pack — contact-triage nodes shipped by the CRM feature package (ADR 0001 §4 reference feature). The two variants (basic / enriched) back the CRM toggle's A/B bindings.",
+  "version": "1.1.0",
+  "description": "CRM feature node pack (ADR 0001 §4 / ADR 0014) — contact-triage nodes (the two basic/enriched variants back the CRM toggle's A/B bindings) PLUS read nodes over the ctx.features.crm surface (companies / deals / tasks) so a workflow can read CRM data. Reads are role:action (recorded → replay/fork-safe), tenant+org-guarded (CTI-1).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "crm", "triage"],
+  "keywords": ["feature", "crm", "triage", "companies", "deals", "tasks"],
   "engines": { "openwop": ">=1.0.0 <2.0.0" },
   "nodes": [
     {
@@ -24,6 +24,51 @@
       "category": "integration",
       "role": "pure",
       "capabilities": ["cacheable"]
+    },
+    {
+      "typeId": "feature.crm.nodes.list-companies",
+      "version": "1.0.0",
+      "label": "CRM: List Companies",
+      "description": "Lists an org's CRM companies over ctx.features.crm.listCompanies. Inputs: { orgId, q? }. Output: { companies }. Tenant+org-guarded (CTI-1).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.get-company",
+      "version": "1.0.0",
+      "label": "CRM: Get Company",
+      "description": "Fetches one CRM company by id over ctx.features.crm.getCompany. Inputs: { orgId, companyId }. Output: { company } (null when absent). Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.list-deals",
+      "version": "1.0.0",
+      "label": "CRM: List Deals",
+      "description": "Lists an org's CRM deals over ctx.features.crm.listDeals. Inputs: { orgId, pipelineId?, stageId?, companyId?, q? }. Output: { deals }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.get-deal",
+      "version": "1.0.0",
+      "label": "CRM: Get Deal",
+      "description": "Fetches one CRM deal by id over ctx.features.crm.getDeal. Inputs: { orgId, dealId }. Output: { deal } (null when absent). Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.list-tasks",
+      "version": "1.0.0",
+      "label": "CRM: List Tasks",
+      "description": "Lists an org's CRM tasks over ctx.features.crm.listTasks. Inputs: { orgId, status?, dealId? }. Output: { tasks }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

@@ -101,6 +101,9 @@ resource pg 'Microsoft.DBforPostgreSQL/flexibleServers@2023-06-01-preview' = {
     administratorLogin: dbAdminUser
     administratorLoginPassword: dbAdminPassword
     storage: { storageSizeGB: 32 }
+    // PROD-HARDENING (CC-6): eval default. For production set
+    // highAvailability.mode = 'ZoneRedundant' (with a non-Burstable SKU) so a
+    // zone loss doesn't take the database offline.
     highAvailability: { mode: 'Disabled' }
   }
 }
@@ -111,6 +114,11 @@ resource pgDb 'Microsoft.DBforPostgreSQL/flexibleServers/databases@2023-06-01-pr
 }
 
 // Allow Azure services (incl. Container Apps) to reach the server.
+// PROD-HARDENING (CC-6): the 0.0.0.0 "AllowAzureServices" rule is an eval
+// convenience — it admits ALL Azure tenants, not just this deployment. For
+// production, remove this rule and use VNet integration + a Private Endpoint
+// (delegated subnet) so the database is not reachable from the shared Azure
+// backbone.
 resource pgFirewall 'Microsoft.DBforPostgreSQL/flexibleServers/firewallRules@2023-06-01-preview' = {
   parent: pg
   name: 'AllowAzureServices'

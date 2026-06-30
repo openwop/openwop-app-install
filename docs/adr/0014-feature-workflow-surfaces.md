@@ -62,6 +62,19 @@ logic, wired by **one composer**:
    (`/.well-known/openwop`, RFC 0073), gated by node `peerDependencies`, and
    **toggle-aware** (a tenant with the feature OFF refuses workflows requiring it).
    Namespace `host.openwop-app.<feature>` (non-normative); RFC-promotion path documented.
+
+   > **Correction (2026-06-18, ADR 0064 work).** The surface gate
+   > (`host/featureSurfaces.ts`) keyed enablement on `resolveOne(id)`, which
+   > returns `null` for a feature with **no** registered toggle default — i.e. an
+   > **always-on** feature (ADR 0027). The gate read that `null` as "disabled" and
+   > refused `ctx.features.<id>` on every call, so the surfaces of `cms`,
+   > `assistant`, and `agent-knowledge` were dead through the real runtime path
+   > (their node packs' calls always threw `host_capability_disabled`); existing
+   > tests masked it by invoking the raw surface builders, not the gated bundle.
+   > Fixed: a feature with no toggle default is always-on substrate and skips the
+   > gate. "Toggle-aware" therefore means *toggled features* refuse when OFF;
+   > always-on features (no toggle to be OFF) are unconditionally available.
+   > Regression-locked by `test/feature-surface-gate.test.ts` (both branches).
 5. **Security inherited, not reinvented.** Surface calls enforce the SAME tenant
    isolation (CTI-1), org-RBAC scope, BYOK redaction (SR-1 before any value
    reaches a node), and egress policy as the REST face — a node is lower-trust

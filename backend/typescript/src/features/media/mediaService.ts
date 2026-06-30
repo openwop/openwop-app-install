@@ -171,6 +171,17 @@ export async function createAsset(input: {
   return a;
 }
 
+/** All assets in a tenant, ACROSS orgs — for the cross-source artifact Library (ADR 0083).
+ *  Access is enforced PER-ORG by the caller (artifactProjection.listArtifacts).
+ *  NOTE: the `media:asset` collection name is ALSO used by the host byte-store
+ *  (`inMemorySurfaces._mediaAssets`, token-keyed raw bytes) — a pre-existing namespace
+ *  overlap. `listAssets(tenant,org)` is shielded by its org filter; this tenant-wide scan is
+ *  not, so we filter to real library assets (those carrying an `assetId` + `orgId`); the
+ *  byte-store rows have neither. */
+export async function listAssetsForTenant(tenantId: string): Promise<MediaAsset[]> {
+  return (await assets.list()).filter((a) => a.tenantId === tenantId && typeof a.assetId === 'string' && typeof a.orgId === 'string');
+}
+
 export async function listAssets(
   tenantId: string,
   orgId: string,
@@ -196,6 +207,15 @@ export async function listAssets(
 export async function getAsset(tenantId: string, orgId: string, assetId: string): Promise<MediaAsset | null> {
   const a = await assets.get(assetId);
   return a && a.tenantId === tenantId && a.orgId === orgId ? a : null;
+}
+
+/** Tenant-scoped point lookup (ADR 0069) — resolves an asset by id without the
+ *  caller knowing its org; the artifact workbench derives org FROM the record
+ *  then authorizes against it. Tenant-isolated; never returns a foreign tenant's
+ *  asset. */
+export async function getAssetByIdForTenant(tenantId: string, assetId: string): Promise<MediaAsset | null> {
+  const a = await assets.get(assetId);
+  return a && a.tenantId === tenantId ? a : null;
 }
 
 export async function updateAsset(

@@ -7,6 +7,7 @@
  * ?orgId=&resourceType=&resourceId= (the notification actionUrl lands here).
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
@@ -16,9 +17,20 @@ import { listPages } from '../cms/cmsClient.js';
 import { listCollections } from '../kb/kbClient.js';
 import { CommentsPanel } from './CommentsPanel.js';
 import {
-  listOrgs, RESOURCE_TYPES, RESOURCE_LABEL,
+  listOrgs, RESOURCE_TYPES,
   type Org, type ResourceType,
 } from './commentsClient.js';
+
+// Dynamic-key maps (ResourceType → catalog key) so a persisted enum value never
+// leaks into the UI; `t(MAP[rt])` resolves the localized label.
+const RESOURCE_TYPE_KEY: Record<ResourceType, string> = {
+  cms_page: 'resourceTypeCmsPage',
+  kb_collection: 'resourceTypeKbCollection',
+};
+const NO_RESOURCES_KEY: Record<ResourceType, string> = {
+  cms_page: 'noResourcesCmsPage',
+  kb_collection: 'noResourcesKbCollection',
+};
 
 interface ResourceOpt { id: string; label: string }
 const initial = (): { orgId: string; resourceType: ResourceType; resourceId: string } => {
@@ -32,6 +44,7 @@ const initial = (): { orgId: string; resourceType: ResourceType; resourceId: str
 };
 
 export function CommentsPage(): JSX.Element {
+  const { t } = useTranslation('comments');
   const access = useFeatureAccess('comments');
   const seed = useMemo(initial, []);
   const [orgs, setOrgs] = useState<Org[] | null>(null);
@@ -57,31 +70,31 @@ export function CommentsPage(): JSX.Element {
 
   if (access.loading) return <Skeleton />;
   if (!access.enabled) {
-    return <StateCard icon={<LockIcon />} title="Comments is not enabled" body="Ask an administrator to enable the Comments feature for this tenant." />;
+    return <StateCard icon={<LockIcon />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />;
   }
 
   const orgPicker = orgs && orgs.length > 0 ? (
-    <select value={orgId} onChange={(e) => setOrgId(e.target.value)} className="u-w-auto" aria-label="Organization">{orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}</select>
+    <select value={orgId} onChange={(e) => setOrgId(e.target.value)} className="u-w-auto" aria-label={t('orgPickerLabel')}>{orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}</select>
   ) : undefined;
 
   return (
     <div className="u-gap-3 u-flex u-flex-col">
-      <PageHeader eyebrow="Workspace" title="Comments" lede="Threaded comments on your CMS pages and KB collections." actions={orgPicker} />
+      <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={orgPicker} />
 
       {!orgs ? <Skeleton /> : orgs.length === 0 ? (
-        <StateCard icon={<GlobeIcon />} title="No organizations" body="Create an organization first — comments belong to an org's resources." />
+        <StateCard icon={<GlobeIcon />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
       ) : (
         <>
           <div className="surface-card u-p-4 surface-form">
-            <label className="u-grid u-gap-1"><span className="u-label-sm">Resource type</span>
-              <select value={resourceType} onChange={(e) => setResourceType(e.target.value as ResourceType)} aria-label="Resource type">
-                {RESOURCE_TYPES.map((t) => <option key={t} value={t}>{RESOURCE_LABEL[t]}</option>)}
+            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('resourceTypeLabel')}</span>
+              <select value={resourceType} onChange={(e) => setResourceType(e.target.value as ResourceType)} aria-label={t('resourceTypeLabel')}>
+                {RESOURCE_TYPES.map((rt) => <option key={rt} value={rt}>{t(RESOURCE_TYPE_KEY[rt])}</option>)}
               </select>
             </label>
-            <label className="u-grid u-gap-1"><span className="u-label-sm">Resource</span>
+            <label className="u-grid u-gap-1"><span className="u-label-sm">{t('resourceLabel')}</span>
               {!resources ? <Skeleton /> : (
-                <select value={resourceId} onChange={(e) => setResourceId(e.target.value)} aria-label="Resource" disabled={resources.length === 0}>
-                  {resources.length === 0 ? <option value="">No {RESOURCE_LABEL[resourceType].toLowerCase()}s in this org</option>
+                <select value={resourceId} onChange={(e) => setResourceId(e.target.value)} aria-label={t('resourceLabel')} disabled={resources.length === 0}>
+                  {resources.length === 0 ? <option value="">{t(NO_RESOURCES_KEY[resourceType])}</option>
                     : resources.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
                 </select>
               )}
@@ -91,7 +104,7 @@ export function CommentsPage(): JSX.Element {
           {resourceId ? (
             <CommentsPanel orgId={orgId} resourceType={resourceType} resourceId={resourceId} />
           ) : (
-            <StateCard icon={<MessageSquareIcon />} title="Pick a resource" body="Choose a CMS page or KB collection above to view and add comments." />
+            <StateCard icon={<MessageSquareIcon />} title={t('pickResourceTitle')} body={t('pickResourceBody')} />
           )}
         </>
       )}

@@ -8,18 +8,25 @@
  * Bubbles with `meta.error` render in a warn-tinted state.
  */
 
-import { memo, useState } from 'react';
+import { memo, useState, type CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ChatMessage } from './hooks/useChatSession.js';
 import { messageText } from './hooks/useChatSession.js';
 import { MessageRenderer } from './MessageRenderer.js';
 import { ThoughtsDisclosure } from './ThoughtsDisclosure.js';
+import { ThinkingIndicator } from './ThinkingIndicator.js';
+import { useStreamCadence } from './hooks/useStreamCadence.js';
 import { ToolCallCard, HandoffIndicator, DecisionBadge, VerificationCard } from './AgentEventCards.js';
 import { EnvelopeEventsTimeline, hasEnvelopeEvents } from './EnvelopeEventsTimeline.js';
 import { EnvelopeInspector } from './EnvelopeInspector.js';
 import { ReasoningDisclosure } from './ReasoningDisclosure.js';
 import { ErrorCard } from './ErrorCard.js';
 import { formatUsd, turnCostUsd } from './lib/cost.js';
+import { formatNumber } from '../i18n/format.js';
 import { CheckIcon, GlobeIcon, RotateCwIcon, ThumbsDownIcon, ThumbsUpIcon } from '../ui/icons/index.js';
+import { AgentAvatar } from '../agents/AgentAvatar.js';
+import { roleThemeForAgent } from '../agents/roleTemplates.js';
+import { slugToName } from './lib/agentMentions.js';
 
 function hasContent(content: ChatMessage['content']): boolean {
   if (typeof content === 'string') return content.length > 0;
@@ -33,6 +40,11 @@ interface Props {
   onRegenerate?: (messageId: string) => void;
   /** Record / clear positive / negative feedback on this assistant bubble. */
   onFeedback?: (messageId: string, feedback: 'positive' | 'negative' | null) => void;
+  /** ADR 0117 Phase 4 — branch a new conversation seeded through THIS turn. Passed as
+   *  a STABLE callback + a number (not a per-item closure) so MessageBubble's memo
+   *  isn't defeated during streaming. */
+  onBranchFrom?: (fromSeq: number) => void;
+  branchSeq?: number;
   /** Open the BYOK settings wizard (called from the error card's
    *  "Open BYOK settings" CTA when credentials are missing/expired). */
   onReconfigureBYOK?: () => void;
@@ -47,11 +59,16 @@ function MessageActions({
   message,
   onRegenerate,
   onFeedback,
+  onBranchFrom,
+  branchSeq,
 }: {
   message: ChatMessage;
   onRegenerate?: (id: string) => void;
   onFeedback?: (id: string, fb: 'positive' | 'negative' | null) => void;
+  onBranchFrom?: (fromSeq: number) => void;
+  branchSeq?: number;
 }): JSX.Element {
+  const { t } = useTranslation('chat');
   const [copied, setCopied] = useState(false);
 
   async function copy(): Promise<void> {
@@ -66,24 +83,35 @@ function MessageActions({
 
   return (
     <div className="message-actions msgbubble-actions">
-      <button type="button" className="msgbubble-action-btn" onClick={copy} aria-label="Copy message">
+      <button type="button" className="msgbubble-action-btn" onClick={copy} aria-label={t('copyMessage')}>
         {copied ? (
           <span className="u-iflex u-items-center u-gap-1">
-            <CheckIcon size={13} /> Copied
+            <CheckIcon size={13} /> {t('copied')}
           </span>
-        ) : 'Copy'}
+        ) : t('copy')}
       </button>
       {onRegenerate && (
         <button
           type="button"
           className="msgbubble-action-btn"
           onClick={() => onRegenerate(message.id)}
-          aria-label="Regenerate response"
-          title="Re-run the prior user message"
+          aria-label={t('regenerateResponse')}
+          title={t('rerunPriorMessage')}
         >
           <span className="u-iflex u-items-center u-gap-1">
-            <RotateCwIcon size={13} /> Regenerate
+            <RotateCwIcon size={13} /> {t('regenerate')}
           </span>
+        </button>
+      )}
+      {onBranchFrom && branchSeq != null && (
+        <button
+          type="button"
+          className="msgbubble-action-btn"
+          onClick={() => onBranchFrom(branchSeq)}
+          aria-label={t('branchFromHere')}
+          title={t('branchFromHereTitle')}
+        >
+          {t('branch')}
         </button>
       )}
       {onFeedback && (
@@ -94,7 +122,7 @@ function MessageActions({
             onClick={() =>
               onFeedback(message.id, message.feedback === 'positive' ? null : 'positive')
             }
-            aria-label="Good response"
+            aria-label={t('goodResponse')}
             aria-pressed={message.feedback === 'positive'}
           >
             <ThumbsUpIcon size={13} strokeWidth={1.75} />
@@ -105,7 +133,7 @@ function MessageActions({
             onClick={() =>
               onFeedback(message.id, message.feedback === 'negative' ? null : 'negative')
             }
-            aria-label="Bad response"
+            aria-label={t('badResponse')}
             aria-pressed={message.feedback === 'negative'}
           >
             <ThumbsDownIcon size={13} strokeWidth={1.75} />
@@ -116,10 +144,29 @@ function MessageActions({
   );
 }
 
-function MessageBubbleInner({ message, onRegenerate, onFeedback, onReconfigureBYOK }: Props): JSX.Element {
+function MessageBubbleInner({ message, onRegenerate, onFeedback, onBranchFrom, branchSeq, onReconfigureBYOK }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const isError = !!message.meta?.error;
+
+  // Data-cadenced motion: the thinking heartbeat + streaming caret share one
+  // tempo derived from how fast content + reasoning are actually arriving.
+  // Hook runs unconditionally (before the isSystem early return) per rules-of-hooks.
+  const streamLen = messageText(message).length + (message.thoughts?.content.length ?? 0);
+  const cadence = useStreamCadence(streamLen, !!message.isStreaming);
+
+  // Attribution: which agent produced this assistant turn. The default OpenWOP
+  // Assistant carries no agentId, so no header — only a named agent (e.g. a
+  // council advisor) gets the avatar + name, so a reply is never an unattributed
+  // blob. Name is the humanized @handle; the persona tagline is the secondary line.
+  const attribution = (!isUser && !isSystem && !isError && (message.agentSlug || message.agentId))
+    ? {
+        name: slugToName(message.agentSlug ?? message.agentId ?? ''),
+        tagline: message.agentPersona,
+        roleTheme: roleThemeForAgent(message.agentId, []),
+      }
+    : null;
 
   if (isSystem) {
     // System messages (from slash-command handlers like /help) render
@@ -153,18 +200,27 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onReconfigureBY
         // whiteSpace + wordBreak applied inside MessageRenderer's text segments
         // so code blocks can use their own `white-space: pre` formatting.
       }}>
+        {attribution && (
+          <div className="msgbubble-attribution">
+            <AgentAvatar persona={attribution.name} roleTheme={attribution.roleTheme} size={22} showBadge={false} alt="" />
+            <span className="msgbubble-attribution-text">
+              <span className="msgbubble-attribution-name">{attribution.name}</span>
+              {attribution.tagline ? <span className="msgbubble-attribution-tagline">{attribution.tagline}</span> : null}
+            </span>
+          </div>
+        )}
         {!isUser && message.thoughts && (
           <ThoughtsDisclosure thoughts={message.thoughts} />
         )}
         {hasContent(message.content)
           ? <MessageRenderer content={message.content} markdown={!isUser} rendering={isUser ? undefined : message.meta?.rendering} />
           : message.isStreaming && !message.thoughts
-            ? <span className="u-o-60">Thinking…</span>
+            ? <ThinkingIndicator durationVar={cadence} />
             : isError
-              ? <span className="u-o-70">No response — see error below.</span>
+              ? <span className="u-o-70">{t('noResponseSeeError')}</span>
               : null}
         {message.isStreaming && hasContent(message.content) && (
-          <span className="msgbubble-cursor" />
+          <span className="msgbubble-cursor" aria-hidden style={{ '--msg-caret-dur': cadence } as CSSProperties} />
         )}
         {message.meta?.error && (
           <ErrorCard
@@ -204,10 +260,10 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onReconfigureBY
               <span>{message.meta.provider}/{message.meta.model}</span>
             )}
             {message.meta.inputTokens != null && (
-              <span> · in {message.meta.inputTokens}</span>
+              <span>{t('tokensIn', { count: formatNumber(message.meta.inputTokens) })}</span>
             )}
             {message.meta.outputTokens != null && (
-              <span> · out {message.meta.outputTokens}</span>
+              <span>{t('tokensOut', { count: formatNumber(message.meta.outputTokens) })}</span>
             )}
             {(() => {
               const cost = turnCostUsd(message.meta);
@@ -215,13 +271,18 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onReconfigureBY
             })()}
             {message.meta.citations && message.meta.citations.length > 0 && (
               <span className="u-iflex u-items-center u-gap-1 u-ml-1">
-                · <GlobeIcon size={11} /> {message.meta.citations.length} source{message.meta.citations.length === 1 ? '' : 's'}
+                · <GlobeIcon size={11} /> {t('sources', { count: message.meta.citations.length })}
               </span>
             )}
           </div>
         )}
-        {!isUser && !message.isStreaming && !isError && hasContent(message.content) && (onRegenerate || onFeedback) && (
-          <MessageActions message={message} {...(onRegenerate ? { onRegenerate } : {})} {...(onFeedback ? { onFeedback } : {})} />
+        {!isUser && !message.isStreaming && !isError && hasContent(message.content) && (onRegenerate || onFeedback || (onBranchFrom && branchSeq != null)) && (
+          <MessageActions
+            message={message}
+            {...(onRegenerate ? { onRegenerate } : {})}
+            {...(onFeedback ? { onFeedback } : {})}
+            {...(onBranchFrom && branchSeq != null ? { onBranchFrom, branchSeq } : {})}
+          />
         )}
         {/* Wire-shape inspector — collapsed by default; opens to show
             every `agent.*` + `envelope.*` event the turn emitted. */}
@@ -233,7 +294,12 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onReconfigureBY
             {message.meta.citations.map((c, i) => {
               let host = '';
               try { host = new URL(c.url).host.replace(/^www\./, ''); } catch { host = c.url; }
-              return (
+              // Citation URLs come from provider web-search results — only ever link
+              // out over http(s). A non-web scheme (e.g. javascript:) renders as inert
+              // text, never an href (defence-in-depth alongside React + CSP).
+              const safe = /^https?:\/\//i.test(c.url);
+              const label = `[${i + 1}] ${c.title ?? host}`;
+              return safe ? (
                 <a
                   key={`${i}-${c.url}`}
                   href={c.url}
@@ -242,8 +308,12 @@ function MessageBubbleInner({ message, onRegenerate, onFeedback, onReconfigureBY
                   title={c.title ?? c.url}
                   className="msgbubble-citation"
                 >
-                  [{i + 1}] {c.title ?? host}
+                  {label}
                 </a>
+              ) : (
+                <span key={`${i}-${c.url}`} title={c.title ?? c.url} className="msgbubble-citation">
+                  {label}
+                </span>
               );
             })}
           </div>

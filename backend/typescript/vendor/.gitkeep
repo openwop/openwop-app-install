@@ -1,0 +1,2 @@
+# Keeps the vendor dir tracked so the Docker COPY never fails; the CPython-WASI
+# runtime binary (*.wasm) is gitignored and synced via scripts/sync-pythonwasm.sh.

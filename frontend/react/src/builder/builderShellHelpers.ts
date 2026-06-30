@@ -8,6 +8,8 @@
 import { useEffect, useState } from 'react';
 import { getCapabilities } from '../client/runsClient.js';
 import { catalogEntry } from './palette/catalogRegistry.js';
+import i18n from '../i18n/index.js';
+import { formatNumber } from '../i18n/format.js';
 
 /** Host-advertised engine limits from `capabilities.limits` (RFC 0009 +
  *  RFC 0058). Optional fields are absent when the host doesn't advertise. */
@@ -96,7 +98,10 @@ export function collectLimitIssues(
       kind: 'maxNodeExecutions',
       advertised: cap,
       actual: executableCount,
-      message: `Workflow has ${executableCount} executable nodes; the host caps a run at ${cap} node executions. The run will breach the engine ceiling and fail (cap.breached → HOST_CAPABILITY_MISSING).`,
+      message: i18n.t('builder:limitMaxNodeExecutionsMessage', {
+        actual: formatNumber(executableCount),
+        cap: formatNumber(cap),
+      }),
     });
   }
   return issues;
@@ -108,12 +113,16 @@ export function collectLimitIssues(
 export function formatAdvertisedLimits(limits: HostLimits | null): string {
   if (!limits) return '';
   const parts: string[] = [];
-  if (typeof limits.maxNodeExecutions === 'number') parts.push(`up to ${limits.maxNodeExecutions} node executions`);
+  if (typeof limits.maxNodeExecutions === 'number') {
+    parts.push(i18n.t('builder:limitNodeExecutions', { n: formatNumber(limits.maxNodeExecutions) }));
+  }
   if (typeof limits.maxRunDurationMs === 'number') {
     const sec = Math.round(limits.maxRunDurationMs / 1000);
-    parts.push(`up to ${sec}s wall-clock`);
+    parts.push(i18n.t('builder:limitWallClock', { seconds: formatNumber(sec) }));
   }
-  if (typeof limits.maxLoopIterations === 'number') parts.push(`up to ${limits.maxLoopIterations} loop iterations`);
+  if (typeof limits.maxLoopIterations === 'number') {
+    parts.push(i18n.t('builder:limitLoopIterations', { n: formatNumber(limits.maxLoopIterations) }));
+  }
   if (parts.length === 0) return '';
-  return ` Host limits in effect: ${parts.join(', ')}.`;
+  return i18n.t('builder:hostLimitsInEffect', { parts: parts.join(', ') });
 }

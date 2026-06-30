@@ -17,13 +17,24 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { getSetCookies } from './headerCookies.js';
 import { createApp } from '../src/index.js';
-import { levelForSpecLevel } from '../src/host/agentProfileService.js';
+import {
+  levelForSpecLevel,
+  specLevelForLevel,
+  syncAgentProfileAutonomy,
+  upsertAgentProfile,
+  getAgentProfile,
+  activateAgentCapability,
+  setAgentKnowledge,
+  setAgentTwin,
+  resolveAgentToolPermissions,
+  backfillProfileReadPermissions,
+} from '../src/host/agentProfileService.js';
 
-const PORT = 18744;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 let n = 0;
 
@@ -40,14 +51,14 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_ENFORCE_BEARER;
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -134,40 +145,135 @@ describe('agent profile autonomy mapping (pure)', () => {
     expect(levelForSpecLevel('execute-with-approval')).toBe('guided');
     expect(levelForSpecLevel('autonomous-within-policy')).toBe('auto');
   });
+
+  it('specLevelForLevel inverts the map, preserving draft-only for review (ADR 0101)', () => {
+    expect(specLevelForLevel('guided')).toBe('execute-with-approval');
+    expect(specLevelForLevel('auto')).toBe('autonomous-within-policy');
+    expect(specLevelForLevel('review')).toBe('recommend');
+    expect(specLevelForLevel('review', 'draft-only')).toBe('draft-only');
+    expect(specLevelForLevel('review', 'recommend')).toBe('recommend');
+  });
+});
+
+describe('backfillProfileReadPermissions (ADR 0102 migration)', () => {
+  it('adds missing read tokens to profiles with permissions, idempotently; leaves permission-less profiles ungated', async () => {
+    const t = 'tenant-backfill';
+    const withPerms = 'host:bf-perms';
+    const noPerms = 'host:bf-noperms';
+    await upsertAgentProfile(t, withPerms, {
+      roleKey: 'r', permissions: { read: ['crm.read'], write: ['kanban.card.write'], never: ['email.send'] },
+      autonomy: { specLevel: 'recommend' },
+    });
+    await upsertAgentProfile(t, noPerms, { roleKey: 'r', autonomy: { specLevel: 'recommend' } }); // no permissions block
+
+    const tokens = ['openwop:ai', 'openwop:core'];
+    const n = await backfillProfileReadPermissions(tokens);
+    expect(n).toBeGreaterThanOrEqual(1);
+    // tokens appended to read; write + never untouched
+    expect((await getAgentProfile(t, withPerms))?.permissions).toEqual({
+      read: ['crm.read', 'openwop:ai', 'openwop:core'], write: ['kanban.card.write'], never: ['email.send'],
+    });
+    // a profile with NO permissions stays ungated (untouched)
+    expect((await getAgentProfile(t, noPerms))?.permissions).toBeUndefined();
+    // idempotent: re-run leaves the already-covered profile exactly as-is
+    await backfillProfileReadPermissions(tokens);
+    expect((await getAgentProfile(t, withPerms))?.permissions?.read).toEqual(['crm.read', 'openwop:ai', 'openwop:core']);
+  });
+});
+
+describe('resolveAgentToolPermissions (ADR 0102 wiring)', () => {
+  it('returns the profile permissions for a standing (host:) agent, undefined otherwise', async () => {
+    const t = 'tenant-perms';
+    const id = 'host:perm-agent';
+    await upsertAgentProfile(t, id, {
+      roleKey: 'r',
+      permissions: { read: ['crm.read'], write: [], never: ['email.send'] },
+      autonomy: { specLevel: 'recommend' },
+    });
+    expect(await resolveAgentToolPermissions(t, id)).toEqual({ read: ['crm.read'], write: [], never: ['email.send'] });
+    // a pack/manifest agent (no host: prefix) has no profile → ungated
+    expect(await resolveAgentToolPermissions(t, 'pack.researcher')).toBeUndefined();
+    // cross-tenant → fail-closed undefined
+    expect(await resolveAgentToolPermissions('other-tenant', id)).toBeUndefined();
+    // host: agent with no profile → undefined
+    expect(await resolveAgentToolPermissions(t, 'host:missing')).toBeUndefined();
+  });
+});
+
+describe('agent profile autonomy sync + data preservation (ADR 0101)', () => {
+  it('syncAgentProfileAutonomy moves the stored level + specLevel in lockstep', async () => {
+    const t = 'tenant-sync';
+    const id = 'host:sync-1';
+    await upsertAgentProfile(t, id, { roleKey: 'r', autonomy: { specLevel: 'recommend' } });
+    expect((await getAgentProfile(t, id))?.autonomy).toMatchObject({ level: 'review', specLevel: 'recommend' });
+
+    await syncAgentProfileAutonomy(t, id, 'auto');
+    expect((await getAgentProfile(t, id))?.autonomy).toMatchObject({ level: 'auto', specLevel: 'autonomous-within-policy' });
+
+    // No profile / cross-tenant → no-op (fail-closed), never throws.
+    await syncAgentProfileAutonomy(t, 'host:absent', 'guided');
+    await syncAgentProfileAutonomy('other-tenant', id, 'guided');
+    expect((await getAgentProfile(t, id))?.autonomy.level).toBe('auto');
+  });
+
+  it('a full-replace PUT preserves subsystem-owned capabilities / knowledge / twin', async () => {
+    const t = 'tenant-preserve';
+    const id = 'host:preserve-1';
+    // Seed the subsystem-owned fields the governance editor never resends.
+    await activateAgentCapability(t, id, 'assistant', { roleKey: 'r', autonomy: { specLevel: 'recommend' } });
+    await setAgentKnowledge(t, id, { collectionIds: ['kb-1'], memoryWritable: true }, { roleKey: 'r', autonomy: { specLevel: 'recommend' } });
+    await setAgentTwin(t, id, { userId: 'user-7', linkedBy: 'admin-1', linkedAt: '2026-06-22T00:00:00Z' }, { roleKey: 'r', autonomy: { specLevel: 'recommend' } });
+
+    // A guardrails save (no capabilities/knowledge/twin in the input) must NOT wipe them.
+    await upsertAgentProfile(t, id, { roleKey: 'r', permissions: { read: [], write: [], never: ['email.send'] }, autonomy: { specLevel: 'recommend' } });
+    const after = await getAgentProfile(t, id);
+    expect(after?.capabilities).toContain('assistant');
+    expect(after?.knowledge?.collectionIds).toEqual(['kb-1']);
+    expect(after?.twin?.userId).toBe('user-7');
+    expect(after?.permissions?.never).toEqual(['email.send']);
+  });
 });
 
 describe('agent profile routes — happy path', () => {
-  it('PUT creates the profile and derives autonomy.level from specLevel; GET round-trips it', async () => {
+  it('PUT derives the profile autonomy from roster.autonomyLevel (ADR 0101 SSoT), not the body; GET round-trips', async () => {
     const a = await newTenantClient();
-    const id = await makeAgent(a, 'Fin Close Twin');
+    const id = await makeAgent(a, 'Fin Close'); // default roster autonomy = auto
 
+    // The body's autonomy is IGNORED — `roster.autonomyLevel` is the single source
+    // of truth (owned by the Edit-details modal). The default 'auto' derives the
+    // `autonomous-within-policy` spec level, regardless of the body's `draft-only`.
     const put = await a<ProfileResp>('PUT', `/v1/host/openwop-app/agents/${id}/profile`, SAMPLE_BODY);
     expect(put.status).toBe(200);
     const putBody = bodyOf(put);
     expect(putBody.profileId).toBe(id);
     expect(putBody.roleKey).toBe('finance-close');
-    // draft-only → review (derived, since the body omitted `level`).
-    expect(putBody.autonomy.specLevel).toBe('draft-only');
-    expect(putBody.autonomy.level).toBe('review');
+    expect(putBody.autonomy.level).toBe('auto');
+    expect(putBody.autonomy.specLevel).toBe('autonomous-within-policy');
+
+    // Move the single source of truth → the profile follows it.
+    const patched = await a<{ rosterId: string }>('PATCH', `/v1/host/openwop-app/roster/${id}`, { autonomyLevel: 'review' });
+    expect(patched.status).toBe(200);
 
     const get = await a<ProfileResp>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
     expect(get.status).toBe(200);
     const getBody = bodyOf(get);
     expect(getBody.configParameters?.materialityThreshold).toBe(5000);
-    expect(getBody.autonomy.level).toBe('review');
+    expect(getBody.autonomy.level).toBe('review'); // synced from the roster PATCH
   });
 
-  it('PUT honors an explicit autonomy.level over the derived one + is idempotent (replace)', async () => {
+  it('PUT ignores the body autonomy.level — roster.autonomyLevel is authoritative; replace is idempotent', async () => {
     const a = await newTenantClient();
-    const id = await makeAgent(a, 'Explicit Level Twin');
+    const id = await makeAgent(a, 'Explicit Level');
+    const setLevel = await a<{ rosterId: string }>('PATCH', `/v1/host/openwop-app/roster/${id}`, { autonomyLevel: 'guided' });
+    expect(setLevel.status).toBe(200);
 
     const first = await a<ProfileResp>('PUT', `/v1/host/openwop-app/agents/${id}/profile`, {
       ...SAMPLE_BODY,
-      autonomy: { specLevel: 'draft-only', level: 'guided' },
+      autonomy: { specLevel: 'draft-only', level: 'auto' },
     });
     expect(first.status).toBe(200);
     const firstBody = bodyOf(first);
-    // Explicit level wins over the draft-only→review mapping.
+    // The body asked for `auto`; the roster says `guided` → the SSoT wins (ADR 0101).
     expect(firstBody.autonomy.level).toBe('guided');
 
     const second = await a<ProfileResp>('PUT', `/v1/host/openwop-app/agents/${id}/profile`, {
@@ -206,21 +312,20 @@ describe('agent profile routes — auth required', () => {
   // middleware (before the route runs) — proving auth is required on the
   // profile surface. (The cookie instance above can't show this: it mints an
   // anon session for a credential-less request.)
-  const AUTH_PORT = 18745;
-  const AUTH_BASE = `http://127.0.0.1:${AUTH_PORT}`;
+  let AUTH_BASE: string;
   let authServer: http.Server;
 
   beforeAll(async () => {
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({
-      port: AUTH_PORT,
+      port: 0,
       storageDsn: 'memory://',
       serviceName: 'test',
       serviceVersion: '0.0.1',
       enableConsoleTracer: false,
     });
     await new Promise<void>((res) => {
-      authServer = app.listen(AUTH_PORT, res);
+      authServer = app.listen(0, () => { AUTH_BASE = `http://127.0.0.1:${(authServer.address() as AddressInfo).port}`; res(); });
     });
   });
   afterAll(async () => {

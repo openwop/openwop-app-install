@@ -9,11 +9,12 @@
  * wordmark text already names the product to assistive tech, so the image
  * is decorative and must not be announced twice.
  */
-import { brand } from './brand.js';
 import { BRAND_DEFAULTS } from './defaults.js';
 import { OpenwopLogo } from './OpenwopLogo.js';
+import { useBrand } from './BrandProvider.js';
 
 export function BrandMark() {
+  const brand = useBrand(); // re-renders when a super-admin override loads (ADR 0170)
   const { pre, emphasis, sub } = brand.brandMark;
   // Default OpenWOP mark → inline `currentColor` SVG so it follows the in-app
   // theme toggle (manual `html.theme-dark` AND system), not just the OS. A

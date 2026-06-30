@@ -13,25 +13,26 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { getNotificationEmitter } from '../src/notifications/emitter.js';
 
 let server: http.Server;
-const PORT = 18746;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -149,6 +150,29 @@ describe('approval inbox — agents propose, humans dispose', () => {
     expect(mine).toBeTruthy();
     expect(mine.status).toBe('pending');
     expect(mine.rosterId).toBe(ava.rosterId);
+  });
+
+  it('queues escalation notifications to the agent contacts when a proposal is created (ADR 0101 Phase 2)', async () => {
+    const captured: Array<{ recipientUserId: string; actionUrl?: string; metadata?: Record<string, unknown> }> = [];
+    const unsub = getNotificationEmitter().subscribe((n) => {
+      if (n.type === 'agent.escalation') {
+        captured.push({ recipientUserId: n.recipientUserId ?? '', actionUrl: n.actionUrl, metadata: n.metadata as Record<string, unknown> | undefined });
+      }
+    });
+    try {
+      const cleo = (await roster()).find((r) => r.persona === 'Cleo')!; // review-mode, escalation contact 'cs-manager'
+      await api(`/v1/host/openwop-app/roster/${cleo.rosterId}`, { method: 'PATCH', body: JSON.stringify({ autonomyLevel: 'review' }) });
+      const checked = await api<CheckResult>(`/v1/host/openwop-app/roster/${cleo.rosterId}/check`, { method: 'POST', body: '{}' });
+      expect(checked.body.proposed).toBe(true);
+      // 'cs-manager' has no bound User, so it canonicalizes to itself and is notified.
+      const esc = captured.find((r) => r.recipientUserId === 'cs-manager');
+      expect(esc).toBeTruthy();
+      expect(esc?.actionUrl).toBe('/inbox');
+      expect(esc?.metadata?.rosterId).toBe(cleo.rosterId);
+      expect(esc?.metadata?.approvalId).toBe(checked.body.approvalId);
+    } finally {
+      unsub();
+    }
   });
 
   it('a re-check proposes the NEXT card, never a duplicate for the same card', async () => {

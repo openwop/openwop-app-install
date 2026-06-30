@@ -1,0 +1,21 @@
+{
+  "name": "feature.tool-output-compaction.nodes",
+  "version": "1.0.0",
+  "description": "Tool-output compaction node (ADR 0099) — an explicit mid-graph node that compacts a verbose JSON payload over the ctx.features['tool-output-compaction'] surface (one shared kernel). Structure-preserving by default; optional lossy array-elision. Pure + deterministic ⇒ recorded output is replay-safe.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "tool-output-compaction", "tokens", "compaction"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.tool-output-compaction.nodes.compact",
+      "version": "1.0.0",
+      "label": "Compact Tool Output",
+      "description": "Compacts a JSON string (minify + drop empty fields; optional lossy array-elision) to cut token spend before it reaches a model. Non-JSON passes through untouched. Over ctx.features['tool-output-compaction'].",
+      "category": "transform",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

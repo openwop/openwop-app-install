@@ -20,8 +20,15 @@ export interface CardContext {
   runId: string;
   /** The node id that emitted the suspension or artifact, when applicable. */
   nodeId?: string;
+  /** Friendly name of that node (the gate's builder label, e.g. "Legal review"),
+   *  when the run carries a nodeId→name map. Lets a card identify WHICH gate it
+   *  is instead of leaving the reviewer to decode a raw `approval_3` node id. */
+  nodeName?: string;
   /** The tenant id; for sample purposes `'demo'`. */
   tenantId: string;
+  /** The initiating workflow's human name, when known — lets an interrupt card
+   *  say "from <Workflow>" instead of leaving the reviewer without context. */
+  workflowName?: string;
 }
 
 export interface CardProps {

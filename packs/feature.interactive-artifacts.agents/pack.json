@@ -1,0 +1,42 @@
+{
+  "name": "feature.interactive-artifacts.agents",
+  "version": "1.0.0",
+  "description": "Visualizer agent (ADR 0128). Turns a request into an interactive diagram / chart / HTML canvas rendered in the EXISTING chat artifact workbench — composes the existing AI chat + the feature.interactive-artifacts.nodes pack; no new chat surface. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/feature.interactive-artifacts.agents",
+  "repository": "https://github.com/openwop/openwop-app",
+  "keywords": ["feature", "agents", "interactive-artifacts", "visualizer", "mermaid", "chart"],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.interactive-artifacts.agents.default",
+      "persona": "Visualizer",
+      "label": "Visualizer",
+      "description": "Turns a request into an interactive diagram, chart, or HTML canvas rendered live in the artifact workbench. Uses openwop:feature.interactive-artifacts.nodes.render.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/visualizer.md",
+      "toolAllowlist": [
+        "openwop:feature.interactive-artifacts.nodes.render"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.8
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

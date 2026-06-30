@@ -1,0 +1,21 @@
+{
+  "name": "feature.advisory-board.nodes",
+  "version": "1.0.0",
+  "description": "Board of Advisors feature node pack (ADR 0040 / ADR 0014) — a single READ node over the ctx.features['advisory-board'] surface shipped by the Board of Advisors feature package. list-boards lists the workspace's SHARED advisory boards (cohort: boardId, name, handle, advisors) so a workflow can enumerate councils. The boardroom CONVERSATION itself runs on the existing AI chat (chat.turn, ADR 0040 § Correction 2026-06-15), NOT a node-side convene. Read-only — role:action (recorded → replay/fork-safe); tenant-internal (shared boards only).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "advisory-board", "advisors", "council"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.advisory-board.nodes.list-boards",
+      "version": "1.0.0",
+      "label": "Advisory Board: List Boards",
+      "description": "Lists the workspace's shared advisory boards (boardId, name, handle, advisors) over ctx.features['advisory-board'].listBoards. Output: { boards }. Tenant-internal (shared boards only). Read-only.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

@@ -17,6 +17,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -31,22 +32,21 @@ import {
 import type { NotificationRecord, RunRecord } from '../src/types.js';
 
 let server: http.Server;
-const PORT = 18686;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -192,6 +192,47 @@ describe('storage: notification round-trip (sqlite memory)', () => {
     expect(yList.length).toBe(1);
     await storage.close();
   });
+
+  // ADR 0050 Phase 3 — role-addressed broadcast, leak-safe.
+  it('recipientRole: a role row is visible ONLY to role-holders (no broadcast leak)', async () => {
+    const storage = openSqliteStorage(':memory:');
+    const now = new Date().toISOString();
+    const base = { tenantId: 'T', type: 'system.alert', priority: 'low' as const, status: 'unread' as const, title: 't', message: 'm', createdAt: now };
+    await storage.insertNotification({ ...base, notificationId: 'broadcast' });                          // true broadcast
+    await storage.insertNotification({ ...base, notificationId: 'role-admin', recipientRole: 'admin' }); // role-addressed
+    await storage.insertNotification({ ...base, notificationId: 'addr-u1', recipientUserId: 'u1' });     // addressed
+
+    // A role-holder sees the broadcast + the admin row (not u1's addressed row).
+    const admin = await storage.listNotifications({ tenantId: 'T', recipientUserId: 'u2', recipientRoles: ['admin'] });
+    expect(admin.map((n) => n.notificationId).sort()).toEqual(['broadcast', 'role-admin']);
+
+    // A NON-holder sees ONLY the true broadcast — the role row must NOT leak.
+    const member = await storage.listNotifications({ tenantId: 'T', recipientUserId: 'u3', recipientRoles: [] });
+    expect(member.map((n) => n.notificationId)).toEqual(['broadcast']);
+
+    // The addressed user sees the broadcast + their own row, not the role row.
+    const u1 = await storage.listNotifications({ tenantId: 'T', recipientUserId: 'u1', recipientRoles: [] });
+    expect(u1.map((n) => n.notificationId).sort()).toEqual(['addr-u1', 'broadcast']);
+    await storage.close();
+  });
+
+  it('recipientRole: markAllNotificationsRead clears a role row only for a holder', async () => {
+    const storage = openSqliteStorage(':memory:');
+    const now = new Date().toISOString();
+    await storage.insertNotification({
+      notificationId: 'role-admin', tenantId: 'T', recipientRole: 'admin', type: 'system.alert',
+      priority: 'low', status: 'unread', title: 't', message: 'm', createdAt: now,
+    });
+    // A non-holder's mark-all-read leaves the admin row unread.
+    await storage.markAllNotificationsRead('T', now, 'u9', []);
+    const before = await storage.listNotifications({ tenantId: 'T' });
+    expect(before.find((n) => n.notificationId === 'role-admin')?.status).toBe('unread');
+    // A holder clears it.
+    await storage.markAllNotificationsRead('T', now, 'u1', ['admin']);
+    const after = await storage.listNotifications({ tenantId: 'T' });
+    expect(after.find((n) => n.notificationId === 'role-admin')?.status).toBe('read');
+    await storage.close();
+  });
 });
 
 describe('routes: /v1/host/openwop-app/notifications', () => {
@@ -310,5 +351,56 @@ describe('notify helpers: secret redaction (SR-1 defense-in-depth)', () => {
     expect(list[0]!.message).not.toContain('abcdefghijklmnopqrstuv');
     expect(list[0]!.message).toContain('Bearer ***');
     await storage.close();
+  });
+});
+
+describe('emitter: signal() — non-persisted broadcast (ADR 0074)', () => {
+  it('fans out a review.updated frame to subscribers WITHOUT persisting it', async () => {
+    const storage = openSqliteStorage(':memory:');
+    ensureNotificationEmitterInstalled(storage);
+    const emitter = getNotificationEmitter();
+
+    const received: NotificationRecord[] = [];
+    const unsubscribe = emitter.subscribe((n) => received.push(n));
+
+    const frame = emitter.signal({
+      tenantId: 'sig-tenant',
+      type: 'review.updated',
+      priority: 'low',
+      title: 'review updated',
+      message: '',
+      runId: 'r-9',
+      nodeId: 'approval_3',
+      interruptId: 'int-9',
+      metadata: { reviewId: 'interrupt:int-9', status: 'resolved' },
+    });
+    unsubscribe();
+
+    // Fanned out to the live subscriber...
+    expect(received.length).toBe(1);
+    expect(received[0]!.type).toBe('review.updated');
+    expect(received[0]!.notificationId).toBe(frame.notificationId);
+    expect((received[0]!.metadata as { status?: string }).status).toBe('resolved');
+
+    // ...but never written to the durable inbox (no storage growth, no bell row).
+    const persisted = await storage.listNotifications({ tenantId: 'sig-tenant', includeArchived: true });
+    expect(persisted.length).toBe(0);
+    await storage.close();
+  });
+
+  it('broadcast frame omits recipientUserId so it reaches every tenant member', () => {
+    const storage = openSqliteStorage(':memory:');
+    ensureNotificationEmitterInstalled(storage);
+    const frame = getNotificationEmitter().signal({
+      tenantId: 'sig-tenant-2',
+      type: 'review.updated',
+      priority: 'low',
+      title: 'review updated',
+      message: '',
+    });
+    // No recipientUserId ⇒ the stream route's per-recipient filter passes it to
+    // all subscribers of the tenant (ADR 0050 broadcast channel).
+    expect(frame.recipientUserId).toBeUndefined();
+    void storage.close();
   });
 });

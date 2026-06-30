@@ -11,9 +11,42 @@
     <script>
       try {
         var d = '{{BRAND_DEFAULT_THEME}}';
-        var t = localStorage.getItem('openwop.theme') || d;
+        var bt = JSON.parse(localStorage.getItem('openwop.brand') || '{}');
+        var defMode = (bt.theme && bt.theme.defaultMode) || d; // runtime brand default overrides the build-time one
+        var t = localStorage.getItem('openwop.theme') || defMode;
         if (t === 'dark') document.documentElement.classList.add('theme-dark');
         else if (t === 'light') document.documentElement.classList.add('theme-light');
+        // ADR 0170 — pre-paint the cached runtime brand (super-admin override) so a
+        // re-branded install paints its colors/title/favicon with no flash. The
+        // BrandProvider refreshes this from /public-brand after load.
+        // MIRROR: the `map` below duplicates COLOR_TOKEN in src/brand/applyBrand.ts
+        // (this inline script runs before the bundle, so it can't import it) — keep
+        // both in sync per the mirror contract on PublicBrandIdentity.
+        var b = bt;
+        var r = document.documentElement, c = b.colors || {};
+        var map = { accent: '--clay', paper: '--paper', paper2: '--paper-2', ink: '--ink', ink2: '--ink-2', rule: '--rule' };
+        for (var k in map) if (c[k]) r.style.setProperty(map[k], c[k]);
+        // ADR 0171 — apply the cached GENERATED token maps (light + dark) via a style
+        // element so a custom theme paints with no flash. MIRROR: duplicates
+        // applyGeneratedTokens() in src/brand/applyBrand.ts (this runs before the bundle).
+        try {
+          var tk = JSON.parse(localStorage.getItem('openwop.brand.tokens') || 'null');
+          if (tk && (tk.light || tk.dark)) {
+            var safe = /^[^;{}<>]+$/;
+            var mk = function (sel, m) {
+              var s = '';
+              for (var k2 in (m || {})) if (k2.indexOf('--') === 0 && typeof m[k2] === 'string' && safe.test(m[k2])) s += k2 + ':' + m[k2] + ';';
+              return s ? sel + '{' + s + '}' : '';
+            };
+            var st = document.createElement('style');
+            st.id = 'openwop-brand-theme';
+            st.textContent = mk(':root', tk.light) + mk(':root.theme-dark', tk.dark);
+            document.head.appendChild(st);
+          }
+        } catch (e2) {}
+        if (b.documentTitle || b.productName) document.title = b.documentTitle || b.productName;
+        var fav = b.logo && b.logo.faviconSrc;
+        if (fav) { var li = document.querySelector('link[rel="icon"]'); if (li) li.setAttribute('href', fav); }
       } catch (e) {}
     </script>
     <!-- The title / favicon / fonts placeholders below are stamped at

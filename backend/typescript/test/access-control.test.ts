@@ -11,6 +11,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import {
@@ -26,21 +27,20 @@ import {
 } from '../src/host/accessControlService.js';
 
 let server: http.Server;
-const PORT = 18244;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -291,6 +291,24 @@ describe('access-control — protocol-safety guardrails (service unit)', () => {
     const miss = await resolveEffectiveAccess('iso-C', { subject: 'nobody@c' });
     expect(miss.basis).toBe('none');
     expect(miss.scopes).toEqual([]);
+  });
+
+  it('demo mode: an unknown subject is its own tenant owner (single-user sandbox), granting workspace:read for /advisors', async () => {
+    // Regression: anonymous demo users hit /advisors → requireTenantScope(workspace:read)
+    // → resolveEffectiveAccess({ subject: principalId }) with no member record →
+    // previously 403'd ('none'). In demo mode the tenant IS the principal, so the
+    // subject is the de-facto owner. Outside demo mode the assertion above keeps
+    // fail-closed behavior.
+    const prev = process.env.OPENWOP_DEMO_MODE;
+    process.env.OPENWOP_DEMO_MODE = 'true';
+    try {
+      const demo = await resolveEffectiveAccess('iso-demo', { subject: 'anon:demo-session' });
+      expect(demo.basis).toBe('tenant-owner');
+      expect(demo.scopes).toContain('workspace:read');
+    } finally {
+      if (prev === undefined) delete process.env.OPENWOP_DEMO_MODE;
+      else process.env.OPENWOP_DEMO_MODE = prev;
+    }
   });
 
   it('drops unknown role ids when computing scopes (fail-closed union)', () => {

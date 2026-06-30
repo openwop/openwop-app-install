@@ -20,6 +20,13 @@ import { timeoutApprovalGateIfDue } from '../executor/approvalGateTimeout.js';
 import { createLogger } from '../observability/logger.js';
 import { createHostAdapterSuite, type HostAdapterSuite } from '../host/index.js';
 import { handleConversationResolve } from '../host/conversationExchange.js';
+import { startWorkflowRun } from '../host/runStarter.js';
+import { AGENT_MENTION_WORKFLOW_ID, agentMentionConfigurable } from '../host/agentMentionWorkflows.js';
+import { appendDecision, tallyDecisions, clearDecisions, evaluateQuorumTally, type DecisionOutcome } from '../host/reviewDecisionLedger.js';
+import { resolveEffectiveAccess } from '../host/accessControlService.js';
+import { isEligibleApprover } from '../host/approverResolution.js';
+import { requireProtocolScope } from '../host/protocolAuthorization.js';
+import { emitReviewUpdatedSignal } from '../notifications/notify.js';
 
 const log = createLogger('routes.interrupts');
 
@@ -107,6 +114,13 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
 
   app.post('/v1/runs/:runId/interrupts/:nodeId', async (req, res, next) => {
     try {
+      // RFC 0049 (ADR 0006 Phase 3) — resolving a run's interrupt exposes run
+      // state, so gate on `runs:read` exactly as `GET /v1/runs/:runId` and the
+      // unified `/reviews` action route do. No-op unless the host enforces
+      // scopes; when it does, this is the access floor for the node route (the
+      // only resolve path that previously lacked it). Quorum eligibility +
+      // capability-token checks still apply below.
+      await requireProtocolScope(req, 'runs:read');
       const { runId, nodeId } = req.params;
       const interrupt = await storage.getInterruptByNode(runId, nodeId);
       if (!interrupt) throw new OpenwopError('interrupt_not_found', 'no open interrupt for this node', 404);
@@ -133,6 +147,39 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
         const result = await handleConversationResolve(
           storage, interrupt, (req.body as { resumeValue?: unknown })?.resumeValue,
           (id, val) => resolveAndResume(storage, hostSuite, id, val),
+          // ADR 0089 — inject the provider policy resolver so a tool-bearing
+          // @mentioned agent can run its tool loop (the loop's adapter needs it).
+          {
+            policyResolver: hostSuite.providerPolicyResolver,
+            // ADR 0089 Phase 4 (Option B) — dispatch a deep-investigation
+            // @mentioned agent's tool loop as a SEPARATE persisted run via the
+            // standard run path (the synthetic `openwop-app.agent-mention`
+            // workflow). The conversation embeds it as a `workflow_run` bubble.
+            startAgentMentionRun: ({ tenantId, agentId, task, provider, model, credentialRef, metadata }) => {
+              // BYOK fix (review): a non-managed credentialRef must be REGISTERED in
+              // `configurable.credentialRefs` so `prepareRunSecrets` resolves it into the
+              // nested run's secret scope (the adapter's resolveCredential reads it).
+              // Passing it only via `inputs` left BYOK deep-investigation runs throwing
+              // `byok_required_but_unresolved`.
+              const configurable = agentMentionConfigurable(credentialRef);
+              return startWorkflowRun(
+                { storage, hostSuite },
+                {
+                  tenantId,
+                  workflowId: AGENT_MENTION_WORKFLOW_ID,
+                  inputs: {
+                    agentId,
+                    task,
+                    ...(provider ? { provider } : {}),
+                    ...(model ? { model } : {}),
+                    ...(credentialRef ? { credentialRef } : {}),
+                  },
+                  ...(Object.keys(configurable).length > 0 ? { configurable } : {}),
+                  ...(metadata ? { metadata } : {}),
+                },
+              );
+            },
+          },
         );
         const cRun = await storage.getRun(runId);
         res.json({ runId, nodeId, status: cRun?.status ?? 'waiting-input', conversation: { operation: result.operation, turns: result.turns.length } });
@@ -140,7 +187,25 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
       }
       const body = req.body as ResolveInterruptRequest;
       validateResumeValue(interrupt, body?.resumeValue);
-      await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue);
+      // ADR 0070 — the vote identity is the authenticated USER session
+      // (`req.userId`): we pin it (eligibility-enforced) and IGNORE the client
+      // `voter` field (anti-spoofing). A bare API-key / bearer principal with NO
+      // user session is the RFC 0093 capability-token transport — the token
+      // authorizes ACCESS, and the body `voter` declares WHICH approver (distinct
+      // voters on one token), so we DON'T pin the single principal id (that would
+      // dedup every token vote into one). An anon cookie session (no `userId`,
+      // `session:`/`anon:` principal) is NEITHER — it fails closed on a quorum
+      // gate (see `assertTokenQuorumVote`); the API-key path sets a `bearer:`
+      // principal id (middleware/auth.ts).
+      const reviewerRef = req.userId;
+      const isCapabilityToken = !reviewerRef && (req.principal?.principalId?.startsWith('bearer:') ?? false);
+      await resolveAndResume(
+        storage,
+        hostSuite,
+        interrupt.interruptId,
+        body?.resumeValue,
+        reviewerRef ? { subjectRef: reviewerRef } : { capabilityToken: isCapabilityToken },
+      );
       const run = await storage.getRun(runId);
       res.json({ runId, nodeId, status: run?.status ?? 'running' });
     } catch (err) {
@@ -171,7 +236,10 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
           );
         }
       }
-      await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue);
+      // The URL token was cryptographically matched to THIS interrupt — the RFC
+      // 0093 capability-token path (the token is the authorization; body `voter`
+      // declares the approver, approverRefs-constrained in `assertTokenQuorumVote`).
+      await resolveAndResume(storage, hostSuite, interrupt.interruptId, body?.resumeValue, { capabilityToken: true });
       const run = await storage.getRun(interrupt.runId);
       res.json({ runId: interrupt.runId, nodeId: interrupt.nodeId, status: run?.status });
     } catch (err) {
@@ -247,7 +315,9 @@ export function registerInterruptRoutes(app: Express, deps: Deps): void {
  * Ajv into the route layer; richer JSON-Schema validation can stack
  * later as resume contracts grow.
  */
-function validateResumeValue(
+// Exported (ADR 0068) so the unified /reviews action surface validates an
+// interrupt resume through the SAME contract the interrupt routes use.
+export function validateResumeValue(
   interrupt: { kind: string; data: unknown; resumeSchema?: unknown },
   resumeValue: unknown,
 ): void {
@@ -297,13 +367,10 @@ function checkExternalEventCorrelation(
   return null;
 }
 
-/** Per-interrupt vote ledger for quorum gates per
- *  `interrupt-profiles.md §openwop-interrupt-quorum`. In-memory by
- *  design — votes are ephemeral per suspend cycle; if the host
- *  process restarts, the run resumes from the persisted interrupt
- *  with vote count zero (acceptable: spec requires the votes to be
- *  visible during the gate's lifetime, not durable across restarts). */
-const quorumVotes = new Map<string, { accepts: string[]; rejects: string[] }>();
+// Quorum votes live in the DURABLE `review:decision` ledger (ADR 0070 —
+// host/reviewDecisionLedger.ts), keyed `(interruptId, reviewerRef)`, so they
+// survive restart, are correct across instances, and dedup per reviewer. The
+// final gate transition stays the `storage.resolveInterrupt` CAS (one winner).
 
 /** Per-run resume serialization queue. See `resolveAndResume` below
  *  for the race this guards against. Keyed by runId; each entry is
@@ -321,7 +388,7 @@ const runResumeChains = new Map<string, Promise<void>>();
  *  emit `approval.overridden { principal, reason }` + an audit entry per
  *  `interrupt-profiles.md` §"Approval gate". */
 interface QuorumVoteResult {
-  outcome: 'accept-quorum-met' | 'reject-majority' | 'pending' | 'accept-override';
+  outcome: 'accept-quorum-met' | 'reject-quorum' | 'pending' | 'accept-override';
   override?: { principal: string; reason: string };
 }
 
@@ -330,14 +397,16 @@ interface QuorumVoteResult {
  *   - outcome 'accept-override' → an override principal bypassed quorum
  *     (only when the gate config sets `overrideBypassesQuorum: true` —
  *     RFC 0093 §D.2; default false ⇒ the override counts as ONE vote)
- *   - outcome 'reject-majority' → gate fails with rejection
+ *   - outcome 'reject-quorum' → gate fails with rejection (per the gate's
+ *     rejectionPolicy: 'any' default ⇒ one reject vetoes; 'majority' ⇒ > half)
  *   - outcome 'pending' → record vote, return 200 to client, DON'T resume
  *   - null → not a quorum gate; caller proceeds with normal resume */
-function recordQuorumVote(
+async function recordQuorumVote(
   interruptId: string,
   interruptData: unknown,
   resumeValue: unknown,
-): QuorumVoteResult | null {
+  reviewerRef: string | undefined,
+): Promise<QuorumVoteResult | null> {
   const data = (interruptData ?? {}) as {
     requiredApprovals?: number;
     rejectionPolicy?: string;
@@ -349,6 +418,14 @@ function recordQuorumVote(
     : 0;
   if (requiredApprovals === 0) return null; // not a quorum gate
   const rv = (resumeValue ?? {}) as { action?: string; voter?: string; override?: unknown; reason?: unknown };
+
+  // The vote IDENTITY (ADR 0070): the authenticated reviewer when present;
+  // otherwise the legacy client `voter` (the signed-token path, where the token
+  // is the capability) or an anon counter. NEVER trust `voter` over an
+  // authenticated reviewer — eligibility was already enforced upstream.
+  const tally = await tallyDecisions(interruptId);
+  const fallbackVoter = typeof rv.voter === 'string' ? rv.voter : `anon-${tally.accepts.length + tally.rejects.length + 1}`;
+  const voter = reviewerRef ?? fallbackVoter;
 
   // Override path (RFC 0093 §D.2 + interrupt-profiles.md §"Approval gate").
   // A vote takes the override path when it says so (`action: 'override'` or
@@ -368,54 +445,149 @@ function recordQuorumVote(
         { field: 'reason' },
       );
     }
-    const principal = typeof rv.voter === 'string' ? rv.voter : 'unknown';
-    const override = { principal, reason: rv.reason };
+    const override = { principal: voter, reason: rv.reason };
     if (data.overrideBypassesQuorum === true) {
-      // Opt-in bypass: a single override accept resolves the gate.
+      // Opt-in bypass: a single override accept resolves the gate. Record the
+      // decision (audited as an override) before resolving.
+      await appendDecision({ gateId: interruptId, reviewerRef: voter, outcome: 'override_approved', reason: rv.reason, decidedAt: new Date().toISOString() });
       return { outcome: 'accept-override', override };
     }
-    // Default (false/absent): the override principal's grant counts as ONE
-    // quorum vote — fall through to the ordinary accept bookkeeping below,
-    // still carrying the override marker for the event + audit trail.
-    const tally = tallyVote(interruptId, requiredApprovals, data.rejectionPolicy, 'accept', principal);
-    return { outcome: tally, override };
+    // Default (false/absent): the override grant counts as ONE quorum vote —
+    // recorded as `override_approved` so it is auditable as an override.
+    const outcome = await tallyVote(interruptId, requiredApprovals, data.rejectionPolicy, 'override_approved', voter, rv.reason);
+    return { outcome, override };
   }
 
   if (rv.action !== 'accept' && rv.action !== 'reject') return null;
-  const voter = typeof rv.voter === 'string' ? rv.voter : `anon-${(quorumVotes.get(interruptId)?.accepts.length ?? 0) + (quorumVotes.get(interruptId)?.rejects.length ?? 0) + 1}`;
-  return { outcome: tallyVote(interruptId, requiredApprovals, data.rejectionPolicy, rv.action, voter) };
+  const outcome: DecisionOutcome = rv.action === 'accept' ? 'approved' : 'rejected';
+  return { outcome: await tallyVote(interruptId, requiredApprovals, data.rejectionPolicy, outcome, voter) };
 }
 
-/** Ledger bookkeeping shared by the ordinary-vote and override-as-one-vote
- *  paths. Returns the gate's post-vote disposition. */
-function tallyVote(
+/** Append the reviewer's decision to the DURABLE ledger (overwrite-by-reviewer =
+ *  dedup), then evaluate the gate over the full ledger. The final transition
+ *  itself stays the `storage.resolveInterrupt` CAS in `resolveAndResume`. */
+async function tallyVote(
   interruptId: string,
   requiredApprovals: number,
   rejectionPolicy: string | undefined,
-  action: 'accept' | 'reject',
+  outcome: DecisionOutcome,
   voter: string,
-): 'accept-quorum-met' | 'reject-majority' | 'pending' {
-  let ledger = quorumVotes.get(interruptId);
-  if (!ledger) {
-    ledger = { accepts: [], rejects: [] };
-    quorumVotes.set(interruptId, ledger);
-  }
-  if (action === 'accept') ledger.accepts.push(voter);
-  else ledger.rejects.push(voter);
-
-  // Resolution checks.
-  if (ledger.accepts.length >= requiredApprovals) return 'accept-quorum-met';
-  if (rejectionPolicy === 'majority') {
-    // Majority rejection = more than half of requiredApprovals
-    // rejected. For requiredApprovals=3, majority-reject = 2 rejects.
-    const majorityThreshold = Math.floor(requiredApprovals / 2) + 1;
-    if (ledger.rejects.length >= majorityThreshold) return 'reject-majority';
-  }
+  reason?: string,
+): Promise<'accept-quorum-met' | 'reject-quorum' | 'pending'> {
+  await appendDecision({ gateId: interruptId, reviewerRef: voter, outcome, ...(reason ? { reason } : {}), decidedAt: new Date().toISOString() });
+  const tally = await tallyDecisions(interruptId);
+  // Single source of truth for the threshold + rejection math (ADR 0070).
+  const verdict = evaluateQuorumTally(tally, {
+    requiredApprovals,
+    rejectionPolicy: rejectionPolicy === 'majority' ? 'majority' : 'any',
+  });
+  if (verdict === 'accept') return 'accept-quorum-met';
+  if (verdict === 'reject') return 'reject-quorum';
   return 'pending';
 }
 
-function clearQuorumVotes(interruptId: string): void {
-  quorumVotes.delete(interruptId);
+async function clearQuorumVotes(interruptId: string): Promise<void> {
+  await clearDecisions(interruptId);
+}
+
+/**
+ * Eligibility gate (ADR 0070) — enforced ONLY when the host knows the
+ * authenticated reviewer (the token path stays capability-based). A vote is
+ * accepted iff the reviewer is on the gate's explicit `approverRefs`; a gate
+ * with NO explicit approver list is an OPEN quorum gate (any authenticated
+ * reviewer may vote — the gate counts distinct identities, deduped by subject).
+ * An OVERRIDE additionally requires one of the gate's `overrideScopes`.
+ * Visible-but-ineligible → 403 (the route already 404s a non-visible interrupt).
+ *
+ * **Why empty-list = open (not scope-gated).** The `openwop-interrupt-quorum`
+ * profile (`interrupt-profiles.md`) is pure vote-COUNTING to a threshold +
+ * `rejectionPolicy`; per-subject AUTHORIZATION is the SEPARATE
+ * `openwop-interrupt-auth-required` profile. The conformance fixture
+ * `conformance-interrupt-quorum` (empty `approversList`, three voters, an
+ * API-key caller) asserts an open gate accepts votes; requiring an
+ * `approvals:respond` scope here previously 403'd that scenario and blocked the
+ * (honest) discovery claim. An empty-list gate is still far stronger than the
+ * pre-0070 in-memory `voter`-from-body counter (real identity, no spoofing,
+ * durable dedup); authors who want an ACL set `approverRefs`.
+ *
+ * NOTE — the pre-execution **approval** quorum path (`host/approvalDecision.ts`
+ * `evaluateQuorum`) DELIBERATELY differs: there an empty list still requires the
+ * `approvals:respond` scope (higher-stakes, no conformance obligation). The two
+ * are intentionally asymmetric; keep them that way.
+ */
+async function assertEligibleApprover(
+  storage: Storage,
+  interrupt: InterruptRecord,
+  reviewerRef: string,
+  resumeValue: unknown,
+): Promise<void> {
+  const data = (interrupt.data ?? {}) as { requiredApprovals?: number; approverRefs?: unknown; approversList?: unknown; approverGroupRefs?: unknown; approverRoleRefs?: unknown; overrideScopes?: unknown };
+  const requiredApprovals = typeof data.requiredApprovals === 'number' && data.requiredApprovals > 1 ? data.requiredApprovals : 0;
+  if (requiredApprovals === 0) return; // not a quorum gate — no eligibility gate
+  const run = await storage.getRun(interrupt.runId);
+  const tenantId = run?.tenantId ?? 'default';
+  const access = await resolveEffectiveAccess(tenantId, { subject: reviewerRef });
+
+  const rv = (resumeValue ?? {}) as { action?: string; override?: unknown };
+  const isOverride = rv.action === 'override' || (rv.action === 'accept' && rv.override === true);
+  const overrideScopes = Array.isArray(data.overrideScopes) ? data.overrideScopes.filter((s): s is string => typeof s === 'string') : [];
+  if (isOverride && overrideScopes.length > 0) {
+    if (!overrideScopes.some((s) => (access.scopes as readonly string[]).includes(s))) {
+      throw new OpenwopError('forbidden', 'Override requires one of the gate\'s override scopes.', 403, { interruptId: interrupt.interruptId });
+    }
+    return;
+  }
+  // Eligibility (ADR 0075 §D1) — explicit subjects (`approverRefs`, or the legacy
+  // `approversList`) ∪ group members ∪ role holders, resolved through the single
+  // approver authority against the run's fail-closed org (`run.metadata.approverOrgId`,
+  // §D3) and CANONICALIZED to userIds so a group member's `oidc:` subject matches
+  // the bound-user reviewer's userId (§D6). An empty set ⇒ open quorum gate (any
+  // authenticated reviewer may vote — the `openwop-interrupt-quorum` contract).
+  const subjects = (Array.isArray(data.approverRefs) ? data.approverRefs : Array.isArray(data.approversList) ? data.approversList : [])
+    .filter((r): r is string => typeof r === 'string');
+  const groupRefs = Array.isArray(data.approverGroupRefs) ? data.approverGroupRefs.filter((r): r is string => typeof r === 'string') : [];
+  const roleRefs = Array.isArray(data.approverRoleRefs) ? data.approverRoleRefs.filter((r): r is string => typeof r === 'string') : [];
+  const approverOrgId = (run?.metadata as Record<string, unknown> | undefined)?.approverOrgId;
+  const { eligible, openGate } = await isEligibleApprover(
+    reviewerRef,
+    { approverRefs: subjects, approverGroupRefs: groupRefs, approverRoleRefs: roleRefs },
+    { tenantId, ...(typeof approverOrgId === 'string' ? { orgId: approverOrgId } : {}) },
+  );
+  if (!openGate && !eligible) {
+    throw new OpenwopError('forbidden', 'You are not an eligible approver for this gate.', 403, { interruptId: interrupt.interruptId });
+  }
+}
+
+/**
+ * Quorum eligibility for a caller with NO bound user identity (ADR 0070). Two
+ * cases for a quorum gate (`requiredApprovals > 1`):
+ *   - `isCapabilityToken` (a signed RFC 0093 interrupt token, or a bearer /
+ *     API-key principal): the token IS the authorization, and its body `voter`
+ *     declares the approver. When the gate lists explicit approvers, that `voter`
+ *     MUST be one of them — otherwise a single token could satisfy a restricted
+ *     N-approver gate with fabricated voter ids. An OPEN gate (empty list) admits
+ *     any `voter`, matching the `openwop-interrupt-quorum` conformance contract.
+ *   - otherwise (anon cookie session / no principal): a quorum vote fails closed
+ *     — the node route has no per-run owner check, so eligibility is the only
+ *     authorization on this path, and an anonymous caller is not an approver.
+ * No-op for a non-quorum interrupt (the clarification / single-approver / token
+ * resume paths are unchanged).
+ */
+function assertTokenQuorumVote(interrupt: InterruptRecord, resumeValue: unknown, isCapabilityToken: boolean): void {
+  const data = (interrupt.data ?? {}) as { requiredApprovals?: number; approverRefs?: unknown; approversList?: unknown };
+  const requiredApprovals = typeof data.requiredApprovals === 'number' && data.requiredApprovals > 1 ? data.requiredApprovals : 0;
+  if (requiredApprovals === 0) return; // not a quorum gate
+  if (!isCapabilityToken) {
+    throw new OpenwopError('forbidden', 'Voting on a quorum gate requires an authenticated approver or a valid interrupt token.', 403, { interruptId: interrupt.interruptId });
+  }
+  const explicit = Array.isArray(data.approverRefs) ? data.approverRefs : Array.isArray(data.approversList) ? data.approversList : [];
+  const approverRefs = explicit.filter((r): r is string => typeof r === 'string');
+  if (approverRefs.length === 0) return; // open gate — any voter id is admissible
+  const rv = (resumeValue ?? {}) as { voter?: unknown };
+  const voter = typeof rv.voter === 'string' ? rv.voter : undefined;
+  if (!voter || !approverRefs.includes(voter)) {
+    throw new OpenwopError('forbidden', 'The `voter` is not an eligible approver for this gate.', 403, { interruptId: interrupt.interruptId });
+  }
 }
 
 /** Test-only seam: awaits the per-run resume chain so a regression
@@ -437,26 +609,69 @@ export async function __awaitRunResumeChainForTests(runId: string): Promise<void
 
 /** Test-only seam: exports `resolveAndResume` for regression coverage
  *  of the per-run serialization fix. Production callers go through
- *  the registered HTTP routes above. */
+ *  the registered HTTP routes above. Resolves as the RFC 0093 capability-token
+ *  path (the signed-token route's posture), which these tests simulate. */
 export const __resolveAndResumeForTests = (
   storage: Storage,
   hostSuite: HostAdapterSuite,
   interruptId: string,
   resumeValue: unknown,
-): Promise<void> => resolveAndResume(storage, hostSuite, interruptId, resumeValue);
+): Promise<void> => resolveAndResume(storage, hostSuite, interruptId, resumeValue, { capabilityToken: true });
 
-async function resolveAndResume(
+// Exported (ADR 0068) so the unified /reviews action surface resolves an
+// interrupt through the SAME quorum/resume/replay path as the interrupt routes —
+// the projection never re-implements resume.
+export async function resolveAndResume(
   storage: Storage,
   hostSuite: HostAdapterSuite,
   interruptId: string,
   resumeValue: unknown,
+  reviewer?: { subjectRef?: string; capabilityToken?: boolean },
 ): Promise<void> {
   const interrupt = await storage.getInterrupt(interruptId);
   if (!interrupt) throw new OpenwopError('interrupt_not_found', 'interrupt missing on resume', 404);
 
-  // Quorum-gate handling: accumulate votes until threshold met.
+  // ADR 0074 — broadcast a `review.updated` cache hint at each terminal outcome
+  // so every live review surface reconciles. The interrupt record carries no
+  // tenant, so resolve it from the run (a keyed point lookup). Best-effort: the
+  // helper swallows emission failures (a cache hint must not break a resume).
+  const signalReview = async (
+    status: string,
+    policy?: { requiredApprovals: number; approvals: number; rejections: number },
+  ): Promise<void> => {
+    const ownerRun = await storage.getRun(interrupt.runId);
+    // Fail closed: without a run we can't determine the tenant, so don't
+    // broadcast (the cache hint is best-effort, and an orphaned interrupt has
+    // no live surface to update anyway).
+    if (!ownerRun) return;
+    emitReviewUpdatedSignal({
+      tenantId: ownerRun.tenantId,
+      reviewId: `interrupt:${interruptId}`,
+      status,
+      runId: interrupt.runId,
+      nodeId: interrupt.nodeId,
+      interruptId,
+      ...(policy ? { policy } : {}),
+    });
+  };
+
+  // ADR 0070 — gate a quorum vote on WHO is voting, in three tiers:
+  //   (a) a bound authenticated USER (`subjectRef`): pin the identity and enforce
+  //       `assertEligibleApprover` (approverRefs membership / approvals:respond);
+  //   (b) an RFC 0093 CAPABILITY TOKEN (a signed interrupt token, or a bearer /
+  //       API-key principal with no bound user): the token authorizes access and
+  //       the body `voter` declares the approver — but it MUST name a listed
+  //       approver when the gate declares an explicit list (`assertTokenQuorumVote`);
+  //   (c) anon / no identity: a quorum vote fails closed.
+  // (Non-quorum interrupts — clarification, single-approver, conversation — are
+  // untouched: both helpers no-op when `requiredApprovals <= 1`.)
+  const reviewerRef = reviewer?.subjectRef;
+  if (reviewerRef) await assertEligibleApprover(storage, interrupt, reviewerRef, resumeValue);
+  else await assertTokenQuorumVote(interrupt, resumeValue, reviewer?.capabilityToken === true);
+
+  // Quorum-gate handling: accumulate votes (durable ledger) until threshold met.
   // Returns null when not a quorum gate (fall-through to normal resume).
-  const quorumResult = recordQuorumVote(interruptId, interrupt.data, resumeValue);
+  const quorumResult = await recordQuorumVote(interruptId, interrupt.data, resumeValue, reviewerRef);
   const quorumOutcome = quorumResult?.outcome ?? null;
   // RFC 0093 §D.2 — the override path (whether it bypassed quorum or counted
   // as one vote) MUST emit `approval.overridden { principal, reason }` AND
@@ -490,36 +705,44 @@ async function resolveAndResume(
     // Vote recorded but quorum not met. Emit a partial-vote event so
     // callers polling the event log can see the progress. The
     // interrupt stays open; the run stays in waiting-approval.
+    const ledger = await tallyDecisions(interruptId);
     await getEventLog().append({
       runId: interrupt.runId,
       nodeId: interrupt.nodeId,
       type: 'interrupt.vote.recorded',
-      payload: { interruptId, kind: interrupt.kind, ledger: quorumVotes.get(interruptId) },
+      payload: { interruptId, kind: interrupt.kind, ledger },
     });
+    // ADR 0074 — still pending; broadcast the updated quorum progress so other
+    // surfaces re-render the counts without a full refetch.
+    const required = (interrupt.data as { requiredApprovals?: number } | null)?.requiredApprovals;
+    await signalReview('pending', typeof required === 'number'
+      ? { requiredApprovals: required, approvals: ledger.accepts.length, rejections: ledger.rejects.length }
+      : undefined);
     return;
   }
-  if (quorumOutcome === 'reject-majority') {
-    clearQuorumVotes(interruptId);
+  if (quorumOutcome === 'reject-quorum') {
+    await clearQuorumVotes(interruptId);
     // Fail the gate. Mark interrupt resolved with the rejection,
     // then mark the run failed. We don't resume execution.
-    await storage.resolveInterrupt(interruptId, { action: 'reject', reason: 'quorum-majority-reject' }, new Date().toISOString());
+    await storage.resolveInterrupt(interruptId, { action: 'reject', reason: 'quorum-reject' }, new Date().toISOString());
     await getEventLog().append({
       runId: interrupt.runId,
       nodeId: interrupt.nodeId,
       type: 'run.failed',
       payload: {
-        error: { code: 'approval_rejected', message: 'Quorum gate failed: majority rejected.' },
+        error: { code: 'approval_rejected', message: 'Quorum gate failed: rejected.' },
       },
     });
     await storage.updateRun(interrupt.runId, {
       status: 'failed',
       completedAt: new Date().toISOString(),
-      error: { code: 'approval_rejected', message: 'Quorum gate failed: majority rejected.' },
+      error: { code: 'approval_rejected', message: 'Quorum gate failed: rejected.' },
     });
+    await signalReview('rejected'); // ADR 0074 — gate failed; surfaces clear the card
     return;
   }
   if (quorumOutcome === 'accept-quorum-met' || quorumOutcome === 'accept-override') {
-    clearQuorumVotes(interruptId);
+    await clearQuorumVotes(interruptId);
     // Fall through to the normal resume path below.
   }
 
@@ -530,6 +753,7 @@ async function resolveAndResume(
     type: 'node.interrupt.resolved',
     payload: { interruptId, kind: interrupt.kind },
   });
+  await signalReview('resolved'); // ADR 0074 — review resolved; surfaces mark it done
 
   // Synchronous validation (preserves the pre-existing 404 / 500
   // behaviour on the HTTP response path). These reads aren't racy —

@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ProviderConfig, ProviderModel } from './lib/providers.js';
 import { TextField } from '../ui/Field.js';
+import { formatNumber } from '../i18n/format.js';
 
 // ── Step 2: model grid ─────────────────────────────────────────────────
 
@@ -15,6 +17,7 @@ export function ModelGrid({
   onPick: (m: ProviderModel) => void;
   onBack: () => void;
 }): JSX.Element {
+  const { t } = useTranslation('byok');
   const [customMode, setCustomMode] = useState(false);
   const [customId, setCustomId] = useState('');
   const [customError, setCustomError] = useState<string | null>(null);
@@ -22,7 +25,7 @@ export function ModelGrid({
   function submitCustom(): void {
     const id = customId.trim();
     if (!id) {
-      setCustomError('Model id is required.');
+      setCustomError(t('modelIdRequired'));
       return;
     }
     // Construct a synthetic ProviderModel. Capabilities + context
@@ -38,8 +41,8 @@ export function ModelGrid({
 
   return (
     <div>
-      <h2 className="u-m-0 u-fs-14">Pick a model</h2>
-      <p className="muted u-mt-1 u-fs-12">From <strong>{provider.label}</strong></p>
+      <h2 className="u-m-0 u-fs-14">{t('pickAModel')}</h2>
+      <p className="muted u-mt-1 u-fs-12">{t('fromProvider')} <strong>{provider.label}</strong></p>
       <div className="u-flex u-flex-col u-gap-2 u-mt-3">
         {provider.models.map((m) => (
           <button
@@ -53,8 +56,8 @@ export function ModelGrid({
           >
             <div className="u-flex u-w-full u-items-center u-gap-2">
               <span className="u-fw-600 u-fs-13">{m.label}</span>
-              {m.recommended && <span className="status-badge u-text-success">recommended</span>}
-              <span className="muted u-ml-auto u-fs-11">{(m.contextWindow / 1000).toFixed(0)}K ctx</span>
+              {m.recommended && <span className="status-badge u-text-success">{t('recommended')}</span>}
+              <span className="muted u-ml-auto u-fs-11">{t('contextWindowSuffix', { n: formatNumber(m.contextWindow / 1000, { maximumFractionDigits: 0 }) })}</span>
             </div>
             <div className="u-flex u-gap-1-5 u-mt-1-5 u-wrap">
               {m.capabilities.map((c) => (
@@ -62,7 +65,7 @@ export function ModelGrid({
               ))}
               {m.cost && (
                 <span className="status-badge muted u-fs-10">
-                  ${m.cost.input * 1000}/1M in · ${m.cost.output * 1000}/1M out
+                  {t('costPerMillion', { input: formatNumber(m.cost.input * 1000), output: formatNumber(m.cost.output * 1000) })}
                 </span>
               )}
             </div>
@@ -79,38 +82,38 @@ export function ModelGrid({
             onClick={() => setCustomMode(true)}
           >
             <div className="u-flex u-w-full u-items-center u-gap-2">
-              <span className="u-fw-600 u-fs-13">Other…</span>
-              <span className="muted u-ml-auto u-fs-11">enter model id manually</span>
+              <span className="u-fw-600 u-fs-13">{t('otherModel')}</span>
+              <span className="muted u-ml-auto u-fs-11">{t('enterModelIdManually')}</span>
             </div>
             <div className="muted u-fs-11 u-mt-1-5">
-              For preview releases, fine-tunes, snapshots, or any model not in the list above.
+              {t('otherModelDesc')}
             </div>
           </button>
         ) : (
           <div className="card modelgrid-custom-card">
-            <div className="u-fw-600 u-fs-13 u-mb-2">Custom model</div>
+            <div className="u-fw-600 u-fs-13 u-mb-2">{t('customModel')}</div>
             <TextField
-              label="Model id (as the provider expects it)"
+              label={t('customModelIdLabel')}
               value={customId}
               onChange={(e) => { setCustomId(e.target.value); setCustomError(null); }}
               onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submitCustom(); } }}
-              placeholder={provider.customModelPlaceholder ?? 'provider-model-id'}
+              placeholder={provider.customModelPlaceholder ?? t('customModelPlaceholderDefault')}
               autoFocus
               spellCheck={false}
-              help={provider.customModelHelp ?? `Whatever model id ${provider.label}'s API accepts.`}
+              help={provider.customModelHelp ?? t('customModelHelpDefault', { provider: provider.label })}
             />
             {customError && <div className="alert error u-fs-12">{customError}</div>}
             <div className="button-row">
-              <button type="button" onClick={submitCustom} disabled={!customId.trim()}>Use this model</button>
+              <button type="button" onClick={submitCustom} disabled={!customId.trim()}>{t('useThisModel')}</button>
               <button type="button" className="secondary" onClick={() => { setCustomMode(false); setCustomId(''); setCustomError(null); }}>
-                Cancel
+                {t('cancel')}
               </button>
             </div>
           </div>
         )}
       </div>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={onBack}>Back</button>
+        <button type="button" className="secondary" onClick={onBack}>{t('back')}</button>
       </div>
     </div>
   );

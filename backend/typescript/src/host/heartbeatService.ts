@@ -24,8 +24,9 @@ import { listRoster, recordHeartbeat, autonomyOf, type RosterEntry } from './ros
 import { resolveConnectionReadiness } from './connectionReadiness.js';
 import { resolveAgentPolicy } from './agentPolicyResolver.js';
 import { getAgentProfile } from './agentProfileService.js';
-import { listBoards, listCards, moveCard, setCardLastRun, notifyBoardChanged } from './kanbanService.js';
+import { listBoardsForSubject, listCards, moveCard, setCardLastRun, notifyBoardChanged } from './kanbanService.js';
 import { createApproval, hasPendingApprovalForCard } from './approvalService.js';
+import { emitEscalationNotifications } from './escalationNotify.js';
 import { checkAutonomousRunBudget } from './runBudgetService.js';
 import { getInstanceId } from './instanceId.js';
 import { createLogger } from '../observability/logger.js';
@@ -68,7 +69,7 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
   const heartbeatEntry = await recordHeartbeat(entry.rosterId);
   const lastHeartbeatAt = heartbeatEntry?.lastHeartbeatAt;
 
-  const boards = (await listBoards(entry.tenantId)).filter((b) => b.rosterId === entry.rosterId);
+  const boards = await listBoardsForSubject(entry.tenantId, { kind: 'agent', id: entry.rosterId });
   for (const board of boards) {
     const todoColumn = board.columns.find((c) => c.id === 'todo' || c.name.toLowerCase() === 'to do');
     if (!todoColumn) continue;
@@ -132,6 +133,19 @@ export async function runHeartbeatOnce(deps: StartRunDeps, entry: RosterEntry): 
             ? `Run ${workflowId} on “${card.title}”`
             : `Run ${workflowId} on “${card.title}” (held for review — missing connection${readiness.missing.length > 1 ? 's' : ''}: ${readiness.missing.join(', ')})`,
         });
+        // ADR 0101 Phase 2 — ping the agent's escalation contacts that a proposal
+        // needs review (best-effort; never blocks the proposal). Fires once per
+        // proposal (the hasPendingApprovalForCard guard above prevents re-propose).
+        if (profile?.escalation?.contacts?.length) {
+          await emitEscalationNotifications({
+            tenantId: entry.tenantId,
+            rosterId: entry.rosterId,
+            persona: entry.persona,
+            contacts: profile.escalation.contacts,
+            cardTitle: card.title,
+            approvalId: approval.approvalId,
+          });
+        }
         return {
           picked: true,
           proposed: true,

@@ -147,26 +147,24 @@ export function resolveAgentPolicy(args: {
     return { verdict: 'guided', reason: 'autonomy-level' };
   }
 
-  // 4b. Effective level `auto`. The `withinPolicyActions` allowlist gates auto
-  //     ONLY for an agent whose autonomy COMES FROM `autonomous-within-policy`
-  //     — that is the spec level whose whole contract is "act autonomously, but
-  //     only within this allowlist" (ADR 0031 mapping table). For that agent the
-  //     allowlist is authoritative: on-list → auto; off-list → review; and an
-  //     EMPTY or ABSENT allowlist permits NOTHING to auto-run (conservative /
-  //     fail-closed — "within policy" with no policy = no autonomy).
-  //
-  //     An agent that is `auto` for any OTHER reason — a manual roster-level
-  //     override, or a profile without the within-policy spec level — has no
-  //     within-policy contract to apply, so its (readiness-gated) auto passes
-  //     through unchanged. This keeps the existing "set a twin to auto → it
-  //     runs directly" guarantee (approvals.test.ts) honest while making the
-  //     `autonomous-within-policy` allowlist the real gate it claims to be.
-  if (profile.autonomy.specLevel !== 'autonomous-within-policy') {
-    return { verdict: 'auto', reason: 'autonomy-level' };
-  }
+  // 4b. Effective level `auto` — the ROSTER autonomy level (`roster.autonomyLevel`,
+  //     owned by the Edit-details modal, read by the heartbeat via `autonomyOf`)
+  //     is now the SINGLE autonomy source of truth (ADR 0101). At `auto` the
+  //     `withinPolicyActions` allowlist is the ONLY gate, keyed on that level —
+  //     NOT on the (decoupled, now display-only) `profile.autonomy.specLevel`:
+  //       - a NON-EMPTY allowlist RESTRICTS auto: on-list → auto, off-list → review;
+  //       - an EMPTY/ABSENT allowlist does NOT restrict: the agent runs ("auto =
+  //         run immediately", the Edit-modal contract + the approvals.test.ts
+  //         "set a twin to auto → it runs directly" regression).
+  //     Keying the gate on the decoupled `specLevel` was the bug ADR 0101 fixes
+  //     (a twin at auto whose stale specLevel disagreed would bypass its allowlist);
+  //     and the old `autonomous-within-policy + empty allowlist = fail-closed` edge
+  //     is retired — to restrict auto you set an allowlist.
   const allowlist = profile.autonomy.withinPolicyActions ?? [];
-  if (allowlist.includes(actionClass)) {
-    return { verdict: 'auto', reason: 'within-policy' };
+  if (allowlist.length > 0) {
+    return allowlist.includes(actionClass)
+      ? { verdict: 'auto', reason: 'within-policy' }
+      : { verdict: 'review', reason: 'not-within-policy' };
   }
-  return { verdict: 'review', reason: 'not-within-policy' };
+  return { verdict: 'auto', reason: 'autonomy-level' };
 }

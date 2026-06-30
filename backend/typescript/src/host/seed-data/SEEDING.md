@@ -18,6 +18,9 @@ host-extension stores.
 |---|---|---|
 | `exampleAgents.json` | The five example personas (roster entries), each with a role, board cards, schedules, and an org-chart position | `../exampleDataSeed.ts` → `seedDemoAgents()` |
 | `workforces.json` | The five governed workforces (purpose/policy, agent cluster, decision boundaries). Each carries an optional `historyRunCount` — when `> 0` the workforce ships that many synthetic runs (telemetry + the graduation curve); when absent/0 it's a stand-up template with no sample history. | `../workforceService.ts` → `seedWorkforceEntities()` + `seedWorkforceHistory()` |
+| `featurePages.json` | The public, **host-global** "Features" CMS page (ADR 0027) documenting every feature the app offers — grouped feature entries (name + tagline + `appPath`, optional add-on flag) plus hero/intro/CTA copy. Authored in the typed-section model and published at **`/p/features`**. | `../featuresPage.ts` → `ensureFeaturesPage()` |
+
+> **Host-global vs per-tenant.** `featurePages.json` (like the system home page) seeds **host-global** content into the reserved system-site org (`host-site`, ADR 0027) — shared across the whole deployment, not per tenant. Its seeder's `clear()` is a deliberate no-op (clearing per-tenant would remove the public page for everyone), and it's published via the normal CMS publish transition (not a raw status write). After editing `featurePages.json`, bump `SEED_VERSION` in `../featuresPage.ts` so a redeploy refreshes the live page — but only while it has never been hand-edited in the CMS (a human edit freezes it).
 
 > The runnable workflow definitions a persona's portfolio points at live in
 > `../exampleWorkflows.ts` (executable node graphs, not brand content). Their

@@ -7,6 +7,7 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { EnvelopeRefusal } from '../types.js';
 
 const PREVIEW_LEN = 240;
@@ -16,15 +17,16 @@ interface Props {
 }
 
 export function RefusalCard({ refusal }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   const [expanded, setExpanded] = useState(false);
   const text = refusal.refusalText ?? '';
   const isLong = text.length > PREVIEW_LEN;
   const visible = expanded || !isLong ? text : text.slice(0, PREVIEW_LEN) + '…';
   return (
-    <div className="env-chip env-chip-warning" role="status" aria-label="Model refused to answer">
-      <span className="env-chip-tag">REFUSAL</span>
+    <div className="env-chip env-chip-warning" role="status" aria-label={t('refusalTitle')}>
+      <span className="env-chip-tag">{t('refusalBadge')}</span>
       <span className="env-chip-text">
-        <span className="env-chip-mono">{refusal.provider}/{refusal.model}</span> declined
+        <span className="env-chip-mono">{refusal.provider}/{refusal.model}</span> {t('declined')}
         {refusal.safetyCategory ? (
           <> · <span className="env-chip-pill">{refusal.safetyCategory}</span></>
         ) : null}
@@ -34,7 +36,7 @@ export function RefusalCard({ refusal }: Props): JSX.Element {
           {visible}
           {isLong ? (
             <button type="button" className="env-chip-toggle" onClick={() => setExpanded((v) => !v)}>
-              {expanded ? 'collapse' : 'show full'}
+              {expanded ? t('collapse') : t('showFull')}
             </button>
           ) : null}
         </blockquote>

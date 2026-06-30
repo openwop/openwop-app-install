@@ -14,6 +14,7 @@
  */
 
 import { catalogEntry } from '../palette/catalogRegistry.js';
+import i18n from '../../i18n/index.js';
 import type {
   BuilderEdge,
   BuilderNode,
@@ -136,8 +137,8 @@ export function serializeWithIdMap(wf: SavedWorkflow): SerializeResult {
   if (executableNodes.length === 0) {
     throw new SerializeError(
       wf.nodes.length === 0
-        ? 'Workflow has no nodes.'
-        : 'Workflow has no executable nodes — every node is a client-only annotation (e.g. sticky notes).',
+        ? i18n.t('builder:errWorkflowNoNodes')
+        : i18n.t('builder:errWorkflowNoExecutableNodes'),
     );
   }
   const wfExec: SavedWorkflow = { ...wf, nodes: executableNodes, edges: executableEdges };
@@ -146,17 +147,17 @@ export function serializeWithIdMap(wf: SavedWorkflow): SerializeResult {
 
 function serializeExecutable(wf: SavedWorkflow): SerializeResult {
   if (wf.nodes.length === 0) {
-    throw new SerializeError('Workflow has no nodes.');
+    throw new SerializeError(i18n.t('builder:errWorkflowNoNodes'));
   }
 
   // Verify every edge references known nodes before topo-sorting.
   const nodeIds = new Set(wf.nodes.map((n) => n.id));
   for (const e of wf.edges) {
     if (!nodeIds.has(e.source)) {
-      throw new SerializeError(`Edge "${e.id}" references unknown source node.`, e.source);
+      throw new SerializeError(i18n.t('builder:errEdgeUnknownSource', { edgeId: e.id }), e.source);
     }
     if (!nodeIds.has(e.target)) {
-      throw new SerializeError(`Edge "${e.id}" references unknown target node.`, e.target);
+      throw new SerializeError(i18n.t('builder:errEdgeUnknownTarget', { edgeId: e.id }), e.target);
     }
   }
 
@@ -168,7 +169,7 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
   const sortResult = topoSort(wf.nodes, wf.edges);
   if ('cycleNodeId' in sortResult) {
     throw new SerializeError(
-      `Workflow contains a cycle reaching node "${sortResult.cycleNodeId}".`,
+      i18n.t('builder:errWorkflowCycle', { nodeId: sortResult.cycleNodeId }),
       sortResult.cycleNodeId,
     );
   }
@@ -184,7 +185,7 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
     if (sources.length === 0) {
       // Should be unreachable because topo would have flagged the cycle, but
       // defensive — surfaces clearly if the algorithm changes.
-      throw new SerializeError('Workflow has no source nodes (every node has an incoming edge).');
+      throw new SerializeError(i18n.t('builder:errWorkflowNoSourceNodes'));
     }
     // BFS from all sources.
     const outgoing = new Map<string, string[]>(wf.nodes.map((n) => [n.id, []]));
@@ -201,8 +202,8 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
       const orphan = wf.nodes.find((n) => !reachable.has(n.id));
       throw new SerializeError(
         orphan
-          ? `Node "${orphan.name}" is disconnected from every source.`
-          : 'Some nodes are disconnected from every source.',
+          ? i18n.t('builder:errNodeDisconnected', { name: orphan.name })
+          : i18n.t('builder:errNodesDisconnected'),
         orphan?.id,
       );
     }
@@ -229,7 +230,7 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
   const backendNodes: BackendNode[] = wf.nodes.map((n, i) => {
     const entry = catalogEntry(n.kind);
     if (!entry) {
-      throw new SerializeError(`Unknown node kind "${n.kind}".`, n.id);
+      throw new SerializeError(i18n.t('builder:errUnknownNodeKind', { kind: n.kind }), n.id);
     }
     const safeKind = entry.kind.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 50);
     const nodeId = `${safeKind}_${i}`;
@@ -251,7 +252,7 @@ function serializeExecutable(wf: SavedWorkflow): SerializeResult {
     const targetNodeId = builderIdToBackend.get(e.target);
     if (!sourceNodeId || !targetNodeId) {
       // Already validated above; defensive.
-      throw new SerializeError(`Edge "${e.id}" failed backend-id resolution.`, e.source);
+      throw new SerializeError(i18n.t('builder:errEdgeBackendIdResolution', { edgeId: e.id }), e.source);
     }
     const out: BackendEdge = {
       edgeId: e.id,

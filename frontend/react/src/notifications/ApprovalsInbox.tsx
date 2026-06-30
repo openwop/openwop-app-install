@@ -22,7 +22,9 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
+import { formatDateTime } from '../i18n/format.js';
 import { DataTable, type DataColumn } from '../ui/DataTable.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
 import { Notice } from '../ui/Notice.js';
@@ -40,6 +42,7 @@ import { workflowName } from '../agents/roleTemplates.js';
 import { relativeTime } from '../agents/agentViewModel.js';
 
 const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant-action' || !!a.actionId;
+const isContentPublish = (a: PendingApproval): boolean => a.kind === 'content-publish';
 
 /** SECURITY — source URLs come from provider-derived (explicitly untrusted)
  *  content; only http(s) schemes may bind to an href (a `javascript:` URL
@@ -64,6 +67,7 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
   onReject: () => void;
   onSaveEdit: (draft: string) => Promise<void>;
 }): JSX.Element {
+  const { t } = useTranslation('notifications');
   const action = approval.action;
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(action?.draft ?? '');
@@ -79,10 +83,10 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
         </header>
         <span className="action-bar">
           <button type="button" className="primary btn-sm" disabled={busy} onClick={onApprove}>
-            <CheckIcon size={13} /> Approve
+            <CheckIcon size={13} /> {t('approveLabel')}
           </button>
           <button type="button" className="secondary btn-sm" disabled={busy} onClick={onReject}>
-            <XIcon size={13} /> Reject
+            <XIcon size={13} /> {t('rejectLabel')}
           </button>
         </span>
       </article>
@@ -100,27 +104,27 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
           // (DESIGN.md §5.3) — chips, not run-state strings: high reads danger,
           // medium warning, low neutral (never success-green).
           <span className={`chip ${action.riskLevel === 'high' ? 'chip--danger' : action.riskLevel === 'medium' ? 'chip--warning' : 'chip--muted'}`}>
-            risk: {action.riskLevel}
+            {t('riskChip', { level: action.riskLevel })}
           </span>
         ) : null}
-        {action.derivedFromUntrusted ? <span className="chip chip--muted">derived from connected (untrusted) content</span> : null}
-        {action.editedAt ? <span className="chip chip--muted">edited {new Date(action.editedAt).toLocaleString()}</span> : null}
+        {action.derivedFromUntrusted ? <span className="chip chip--muted">{t('derivedFromUntrusted')}</span> : null}
+        {action.editedAt ? <span className="chip chip--muted">{t('editedAt', { when: formatDateTime(action.editedAt) })}</span> : null}
       </header>
-      {destination ? <p className="muted u-m-0">To: {destination}</p> : null}
+      {destination ? <p className="muted u-m-0">{t('destinationTo', { destination })}</p> : null}
       {editing ? (
-        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={5} aria-label="Edit draft" />
+        <textarea value={draft} onChange={(e) => setDraft(e.target.value)} rows={5} aria-label={t('editDraftLabel')} />
       ) : (
         <p className="u-m-0">{action.draft}</p>
       )}
       {action.recipientDiff ? (
         <p className="muted u-m-0">
-          Recipients: {action.recipientDiff.before.join(', ') || '—'} → <strong>{action.recipientDiff.after.join(', ') || '—'}</strong>
+          {t('recipientsPrefix')}{action.recipientDiff.before.join(', ') || t('recipientsEmpty')} → <strong>{action.recipientDiff.after.join(', ') || t('recipientsEmpty')}</strong>
         </p>
       ) : null}
-      {action.reason ? <p className="muted u-m-0">Why: {action.reason}</p> : null}
+      {action.reason ? <p className="muted u-m-0">{t('whyPrefix', { reason: action.reason })}</p> : null}
       {action.sourceRefs && action.sourceRefs.length > 0 ? (
         <p className="muted u-m-0">
-          Sources:{' '}
+          {t('sourcesPrefix')}
           {action.sourceRefs.map((s, i) => (
             <span key={`${s.externalId}-${i}`}>
               {i > 0 ? ' · ' : ''}
@@ -132,18 +136,18 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
       <span className="action-bar">
         {editing ? (
           <>
-            <button type="button" className="primary btn-sm" disabled={busy} onClick={() => { void onSaveEdit(draft).then(() => setEditing(false)); }}>Save edit</button>
-            <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => { setDraft(action.draft); setEditing(false); }}>Cancel</button>
+            <button type="button" className="primary btn-sm" disabled={busy} onClick={() => { void onSaveEdit(draft).then(() => setEditing(false)); }}>{t('saveEdit')}</button>
+            <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => { setDraft(action.draft); setEditing(false); }}>{t('common:cancel')}</button>
           </>
         ) : (
           <>
             <button type="button" className="primary btn-sm" disabled={busy} onClick={onApprove}>
-              <CheckIcon size={13} /> Approve
+              <CheckIcon size={13} /> {t('approveLabel')}
             </button>
             <button type="button" className="secondary btn-sm" disabled={busy} onClick={onReject}>
-              <XIcon size={13} /> Reject
+              <XIcon size={13} /> {t('rejectLabel')}
             </button>
-            <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => setEditing(true)}>Edit</button>
+            <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => setEditing(true)}>{t('common:edit')}</button>
           </>
         )}
       </span>
@@ -152,6 +156,7 @@ function ActionCard({ approval, busy, onApprove, onReject, onSaveEdit }: {
 }
 
 export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX.Element {
+  const { t } = useTranslation('notifications');
   const nav = useNavigate();
   const [items, setItems] = useState<PendingApproval[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -173,9 +178,11 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
     try {
       const { runId } = await claimApproval(a.approvalId);
       toast.success(
-        isAssistantAction(a)
-          ? `Approved — ${a.persona} will carry it out.`
-          : `Approved — ${a.persona} is running it now.`,
+        isContentPublish(a)
+          ? t('toastApprovedPublished')
+          : isAssistantAction(a)
+            ? t('toastApprovedCarry', { persona: a.persona })
+            : t('toastApprovedRunning', { persona: a.persona }),
       );
       await refresh();
       onResolved?.();
@@ -183,63 +190,63 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
       // returns { actionId } and has no run page (it decides the draft in place).
       if (runId) nav(`/runs/${encodeURIComponent(runId)}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not claim the proposal.');
+      toast.error(err instanceof Error ? err.message : t('toastCouldNotClaim'));
     } finally {
       setBusy(null);
     }
-  }, [refresh, onResolved, nav]);
+  }, [refresh, onResolved, nav, t]);
 
   const reject = useCallback(async (a: PendingApproval) => {
     setBusy(a.approvalId);
     try {
       await rejectApproval(a.approvalId);
-      toast.info('Proposal dismissed.');
+      toast.info(t('toastProposalDismissed'));
       await refresh();
       onResolved?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Could not reject the proposal.');
+      toast.error(err instanceof Error ? err.message : t('toastCouldNotReject'));
     } finally {
       setBusy(null);
     }
-  }, [refresh, onResolved]);
+  }, [refresh, onResolved, t]);
 
   const saveEdit = useCallback(async (a: PendingApproval, draft: string) => {
     if (!a.actionId) return;
     setBusy(a.approvalId);
     try {
       await editAssistantAction(a.actionId, { draft });
-      toast.success('Draft updated — it will face you again for approval.');
+      toast.success(t('toastDraftUpdated'));
       await refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Edit failed.');
+      toast.error(err instanceof Error ? err.message : t('toastEditFailed'));
       throw err;
     } finally {
       setBusy(null);
     }
-  }, [refresh]);
+  }, [refresh, t]);
 
   const columns: DataColumn<PendingApproval>[] = [
     {
       key: 'persona',
-      header: 'Agent',
+      header: t('approvalsColAgent'),
       width: '140px',
       render: (a) => <strong>{a.persona}</strong>,
       sortValue: (a) => a.persona,
     },
     {
       key: 'proposal',
-      header: 'Proposes to',
+      header: t('approvalsColProposes'),
       width: '1fr',
       render: (a) => (
         <div>
-          <div>Run <strong>{workflowName(a.workflowId)}</strong></div>
-          {a.cardTitle && <div className="muted u-fs-12">on “{a.cardTitle}”</div>}
+          <div><Trans t={t} i18nKey="approvalsRunWorkflow" values={{ name: workflowName(a.workflowId) }} components={{ 1: <strong /> }} /></div>
+          {a.cardTitle && <div className="muted u-fs-12">{t('approvalsOnCard', { title: a.cardTitle })}</div>}
         </div>
       ),
     },
     {
       key: 'createdAt',
-      header: 'Proposed',
+      header: t('approvalsColProposed'),
       width: '120px',
       cellClassName: 'muted',
       render: (a) => relativeTime(a.createdAt),
@@ -253,10 +260,10 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
       render: (a) => (
         <div className="action-bar u-justify-end">
           <button type="button" className="btn-accent-solid btn-sm" onClick={() => void claim(a)} disabled={busy === a.approvalId}>
-            <CheckIcon size={13} /> Approve &amp; run
+            <CheckIcon size={13} /> {t('approveAndRun')}
           </button>
           <button type="button" className="secondary" onClick={() => void reject(a)} disabled={busy === a.approvalId}>
-            <XIcon size={13} /> Reject
+            <XIcon size={13} /> {t('rejectLabel')}
           </button>
         </div>
       ),
@@ -271,26 +278,25 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
       <div className="card u-flex u-items-center u-gap-2 u-fs-12">
         <ScaleIcon size={14} />
         <span className="muted">
-          No agent proposals awaiting sign-off. Set an agent&apos;s autonomy to <strong>review</strong> (on its Roster
-          card) to route its heartbeat picks here.
+          {t('approvalsEmpty')}
         </span>
       </div>
     );
   }
 
   const actions = items?.filter(isAssistantAction) ?? [];
-  const runs = items?.filter((a) => !isAssistantAction(a)) ?? [];
+  const contentPublish = items?.filter(isContentPublish) ?? [];
+  const runs = items?.filter((a) => !isAssistantAction(a) && !isContentPublish(a)) ?? [];
 
   return (
     <div className="card">
       <div className="u-flex u-items-center u-gap-2 u-mb-2">
         <ScaleIcon size={16} />
-        <h2 className="u-flex-1 u-m-0">Awaiting sign-off</h2>
-        {items && items.length > 0 && <span className="chip chip--warning">{items.length} pending</span>}
+        <h2 className="u-flex-1 u-m-0">{t('approvalsTitle')}</h2>
+        {items && items.length > 0 && <span className="chip chip--warning">{t('approvalsPending', { count: items.length })}</span>}
       </div>
       <p className="muted approvals-lede">
-        Proposals from your agents — they picked up work or drafted an action but won&apos;t act without you.
-        Approving a run starts it; approving a drafted action carries it out. Nothing is sent until you approve it.
+        {t('approvalsLede')}
       </p>
 
       {error && <Notice variant="error">{error}</Notice>}
@@ -298,6 +304,29 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
         <SkeletonRows rows={2} columns={['140px', '1fr', '120px', '200px']} />
       ) : (
         <div className="u-grid u-gap-3">
+          {contentPublish.length > 0 && (
+            <div className="u-grid u-gap-2">
+              <h3 className="u-m-0 u-fs-12 muted">{t('approvalsContentGroup')}</h3>
+              {contentPublish.map((a) => (
+                // u-grid stacks the action-bar below the proposal so the row
+                // degrades gracefully on narrow viewports (matches ActionCard).
+                <article key={a.approvalId} className="surface-card u-grid u-gap-2">
+                  <div className="u-flex u-items-center u-gap-2">
+                    <span className="u-flex-1">{a.proposal}</span>
+                    <span className="muted u-fs-12">{relativeTime(a.createdAt)}</span>
+                  </div>
+                  <span className="action-bar">
+                    <button type="button" className="primary btn-sm" disabled={busy === a.approvalId} onClick={() => void claim(a)}>
+                      <CheckIcon size={13} /> {t('approveLabel')}
+                    </button>
+                    <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}>
+                      <XIcon size={13} /> {t('rejectLabel')}
+                    </button>
+                  </span>
+                </article>
+              ))}
+            </div>
+          )}
           {actions.length > 0 && (
             <div className="u-grid u-gap-2">
               {actions.map((a) => (
@@ -318,7 +347,7 @@ export function ApprovalsInbox({ onResolved }: { onResolved?: () => void }): JSX
               rows={runs}
               rowKey={(a) => a.approvalId}
               density="compact"
-              caption="Pending agent run proposals awaiting human sign-off"
+              caption={t('approvalsTableCaption')}
             />
           )}
         </div>

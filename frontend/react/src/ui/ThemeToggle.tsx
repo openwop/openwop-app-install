@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { brand } from '../brand/brand.js';
 import { SunIcon, MoonIcon, MonitorIcon } from './icons/index.js';
 
@@ -28,13 +29,14 @@ function readTheme(): Theme {
   return brand.defaultTheme;
 }
 
-const OPTIONS: { value: Theme; label: string; Icon: typeof SunIcon }[] = [
-  { value: 'system', label: 'System theme', Icon: MonitorIcon },
-  { value: 'light', label: 'Light theme', Icon: SunIcon },
-  { value: 'dark', label: 'Dark theme', Icon: MoonIcon },
+const OPTIONS: { value: Theme; labelKey: string; Icon: typeof SunIcon }[] = [
+  { value: 'system', labelKey: 'themeSystem', Icon: MonitorIcon },
+  { value: 'light', labelKey: 'themeLight', Icon: SunIcon },
+  { value: 'dark', labelKey: 'themeDark', Icon: MoonIcon },
 ];
 
 export function ThemeToggle(): JSX.Element {
+  const { t } = useTranslation('ui');
   const [theme, setTheme] = useState<Theme>(readTheme);
 
   useEffect(() => {
@@ -43,8 +45,10 @@ export function ThemeToggle(): JSX.Element {
   }, [theme]);
 
   return (
-    <div className="theme-toggle segmented" role="group" aria-label="Theme">
-      {OPTIONS.map(({ value, label, Icon }) => (
+    <div className="theme-toggle segmented" role="group" aria-label={t('themeGroupLabel')}>
+      {OPTIONS.map(({ value, labelKey, Icon }) => {
+        const label = t(labelKey);
+        return (
         <button
           key={value}
           type="button"
@@ -55,7 +59,8 @@ export function ThemeToggle(): JSX.Element {
         >
           <Icon size={14} />
         </button>
-      ))}
+        );
+      })}
     </div>
   );
 }

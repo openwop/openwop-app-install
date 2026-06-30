@@ -35,6 +35,10 @@ import { composeBriefing } from './briefing.js';
 import { decideActionViaApproval } from './actionApproval.js';
 import { buildAssistantHealth } from './health.js';
 import { requireSuperadmin } from '../../host/superadmin.js';
+import { findAssistantAgent } from './capability.js';
+import { randomUUID } from 'node:crypto';
+import { ensureConversationMeta, findByDmKey, dmKeyOf, userRef, type ConversationMeta } from '../../host/conversationStore.js';
+import { readMarkersOf } from '../../host/conversationReadState.js';
 
 // Graduated off the feature toggle (2026-06-11, feature.ts § Correction) — the
 // Chief of Staff is a real roster agent and its surfaces serve unconditionally
@@ -66,6 +70,65 @@ export function registerAssistantRoutes(deps: RouteDeps): void {
         next(err);
       }
     };
+
+  // ── Workspace conversation (ADR 0043 Phase 6 — W-A) ──────────────────
+  // POST → open-or-resume the SINGLE workspace conversation for this user: a
+  // type:'workspace' chat whose participant is the tenant's assistant-capability
+  // agent (ADR 0023), so the existing chat.turn + per-agent-knowledge path
+  // (ADR 0038) routes turns to the assistant with workspace context. Deduped on
+  // (owner, workspace:<tenant>) — distinct from a plain 1:1 DM with the same
+  // assistant. 404 when no assistant agent is configured (no orphan workspace
+  // chat with nothing to route to). The route lives in THIS feature (not core
+  // chatSessions) because resolving the assistant is a feature concern (ADR 0001).
+  app.post('/v1/host/openwop-app/assistant/workspace-conversation', wrap(async (req, res) => {
+    const tenantId = tenantOf(req);
+    const assistant = await findAssistantAgent(tenantId);
+    const agentId = assistant?.agentRef?.agentId;
+    if (!agentId) {
+      throw new OpenwopError('not_found', 'No workspace assistant is configured for this workspace.', 404);
+    }
+    const owner = req.userId ?? req.principal?.principalId;
+    const ownerSubject = owner ? userRef(owner) : `tenant:${tenantId}`;
+    const dmKey = dmKeyOf(ownerSubject, `workspace:${tenantId}`);
+    // Project into the conversation-header shape the rail consumes, joining each
+    // participant's read marker (ADR 0043 — read state lives in its own store)
+    // into `participants[].lastReadAt`, mirroring core `toConversation`. Without
+    // this, a RESUMED workspace conversation's header would briefly read as
+    // unread until the next list refresh.
+    const project = (
+      session: { sessionId: string; title: string; createdAt: string; updatedAt: string; messageCount: number },
+      meta: ConversationMeta,
+      readBySubject?: ReadonlyMap<string, string>,
+    ): Record<string, unknown> => ({
+      ...session,
+      tenantId,
+      type: meta.type,
+      ...(meta.ownerUserId ? { ownerUserId: meta.ownerUserId } : {}),
+      participants: meta.participants.map((p) => {
+        const lastReadAt = readBySubject?.get(p.subjectRef) ?? p.lastReadAt;
+        return lastReadAt ? { ...p, lastReadAt } : p;
+      }),
+    });
+
+    const existing = await findByDmKey(tenantId, dmKey);
+    if (existing) {
+      const session = await storage.getChatSession(tenantId, existing.conversationId);
+      if (session) { res.json(project(session, existing, await readMarkersOf(tenantId, existing.conversationId))); return; }
+      // Stale meta (session gone) — fall through and recreate.
+    }
+
+    const sessionId = randomUUID();
+    const title = 'Workspace';
+    const ts = new Date().toISOString();
+    await storage.createChatSession({ sessionId, tenantId, title, createdAt: ts, updatedAt: ts, messageCount: 0 });
+    const meta = await ensureConversationMeta(tenantId, sessionId, {
+      type: 'workspace',
+      ...(owner ? { ownerUserId: owner } : {}),
+      participants: [`agent:${agentId}`],
+      dmKey,
+    });
+    res.status(201).json(project({ sessionId, title, createdAt: ts, updatedAt: ts, messageCount: 0 }, meta));
+  }));
 
   // ── Projects ──
   app.get('/v1/host/openwop-app/assistant/projects', wrap(async (req, res) => {

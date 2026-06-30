@@ -30,6 +30,7 @@
  */
 
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { predictWarm } from '../devtools/lastSuccess.js';
 import { DEV_FALLBACK_BASE_URL } from '../client/baseUrlDefault.js';
 
@@ -48,6 +49,7 @@ const HARD_TIMEOUT_MS = 40 * 1000;
 type Phase = 'loading-warm' | 'loading-cold' | 'still-waking' | 'resting';
 
 export function BackendStatusCard({ error, backendUrl }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   // Initial guess: predict cold/warm from the last-success cache. The
   // elapsed timer + error prop will override as new evidence arrives.
   const initialPhase: Phase = predictWarm() ? 'loading-warm' : 'loading-cold';
@@ -70,19 +72,19 @@ export function BackendStatusCard({ error, backendUrl }: Props): JSX.Element {
   }, [error]);
 
   const headline =
-    phase === 'loading-warm' ? 'Loading'
-    : phase === 'loading-cold' ? 'Waking up the server'
-    : phase === 'still-waking' ? 'Still waking up'
-    : 'The server is resting';
+    phase === 'loading-warm' ? t('backendLoading')
+    : phase === 'loading-cold' ? t('backendWaking')
+    : phase === 'still-waking' ? t('backendStillWaking')
+    : t('backendResting');
 
   const body =
     phase === 'loading-warm'
-      ? 'Reading your provider config from the host.'
+      ? t('backendBodyWarm')
       : phase === 'loading-cold'
-        ? 'The Cloud Run server spins down between visits to keep hosting costs low. First load takes 10–30 seconds.'
+        ? t('backendBodyCold')
         : phase === 'still-waking'
-          ? 'Cold start is taking longer than usual. Hang tight — usually under a minute.'
-          : 'The Cloud Run server spins down between visits to keep hosting costs low. Please refresh your browser.';
+          ? t('backendBodyColdLong')
+          : t('backendBodyError');
 
   const showDots = phase !== 'resting';
 
@@ -100,7 +102,7 @@ export function BackendStatusCard({ error, backendUrl }: Props): JSX.Element {
         <p className="backend-resting-body">{body}</p>
         {(error || phase === 'resting') && (
           <details className="backend-resting-detail">
-            <summary>Technical detail</summary>
+            <summary>{t('technicalDetail')}</summary>
             <p>
               {error && (
                 <>
@@ -108,7 +110,7 @@ export function BackendStatusCard({ error, backendUrl }: Props): JSX.Element {
                   <br />
                 </>
               )}
-              Backend URL:{' '}
+              {t('backendUrlLabel')}
               <code>{backendUrl ?? DEV_FALLBACK_BASE_URL}</code>
             </p>
           </details>

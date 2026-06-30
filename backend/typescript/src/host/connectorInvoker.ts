@@ -31,7 +31,6 @@ import { OpenwopError } from '../types.js';
 import { getProvider } from '../features/connections/providerRegistry.js';
 import { brokeredFetch, type AuthScheme, type BrokeredEgressDeps } from './brokeredEgress.js';
 import { stampConnectionUse } from './connectionInjection.js';
-import type { ConnectorInvoker } from './index.js';
 
 const log = createLogger('host.connectors');
 
@@ -67,6 +66,13 @@ export interface ConnectorInvokeResult {
   error?: string;
 }
 
+/** Precise shape `createConnectorInvoker` returns — structurally assignable to the
+ *  looser `ConnectorInvoker` host slot (whose `invoke` returns `Promise<unknown>`),
+ *  but typed concretely so node-facing callers (ctx.connectors) get a typed result. */
+export interface ConcreteConnectorInvoker {
+  invoke(connectorId: string, args: unknown): Promise<ConnectorInvokeResult>;
+}
+
 function isConnectorInvokeArgs(args: unknown): args is ConnectorInvokeArgs {
   if (typeof args !== 'object' || args === null) return false;
   const a = args as Partial<ConnectorInvokeArgs>;
@@ -83,7 +89,7 @@ function isConnectorInvokeArgs(args: unknown): args is ConnectorInvokeArgs {
  * (`storage` is the only persistent dependency — the run context arrives per-call
  * in `args`).
  */
-export function createConnectorInvoker(deps: { storage: BrokeredEgressDeps['storage'] }): ConnectorInvoker {
+export function createConnectorInvoker(deps: { storage: BrokeredEgressDeps['storage'] }): ConcreteConnectorInvoker {
   return {
     async invoke(connectorId: string, args: unknown): Promise<ConnectorInvokeResult> {
       // First cut: a connector id IS a registered Connections provider id.
@@ -103,6 +109,19 @@ export function createConnectorInvoker(deps: { storage: BrokeredEgressDeps['stor
           400,
           { connectorId },
         );
+      }
+
+      // ADR 0076 P3 — host-side read-only gate (defense-in-depth). For a provider
+      // declared `readOnly`, fail closed on unambiguously-mutating verbs before the
+      // secret is ever touched. Method default mirrors brokeredFetch (absent ⇒ GET).
+      // Intentionally PERMISSIVE to GET/POST (read APIs like BigQuery jobs.query are
+      // POST-with-a-body) — so this cannot catch a mutating POST; the primary control
+      // is the provider's missing write scope + provider-side enforcement.
+      if (provider.readOnly) {
+        const method = (args.request.method ?? 'GET').toUpperCase();
+        if (method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
+          return { ok: false, error: 'connector_read_only' };
+        }
       }
 
       const egressDeps: BrokeredEgressDeps = {

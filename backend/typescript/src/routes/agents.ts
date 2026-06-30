@@ -13,17 +13,24 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Express, Request } from 'express';
+import type { Express, NextFunction, Request, Response } from 'express';
+import { createLogger } from '../observability/logger.js';
+import { sanitizeForErrorMessage } from '../middleware/sanitize.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
 import { runAgentDispatch, runAgentDispatchLive, AgentNotFoundError, type AgentDispatchRequest, type CallAi } from '../host/agentDispatch.js';
+import { stampRunStartContext } from '../host/runStartContext.js';
+import { readCompactionDecision } from '../executor/compaction.js';
 import { createAiProvidersAdapter, assertModalitiesAdvertised, INPUT_MODALITIES, AiProviderError } from '../aiProviders/aiProvidersHost.js';
 import type { AiCallRequest } from '../executor/types.js';
+import { dispatchChat, type ChatMessage } from '../providers/dispatch.js';
+import { getHostTestCompatEndpoint, COMPAT_PROVIDER_ID } from '../host/compatEndpoints.js';
 import { createAgentToolProvider, builtinAgentToolIds } from '../host/agentToolProvider.js';
 import { advertisedCapabilitySet, mergeDegraded } from '../host/agentCapabilities.js';
 import { gradeSuite, type EvalTask } from '../host/agentEvalGrader.js';
 import { evalSuiteEnabled } from '../host/workforceEval.js';
 import { createAgentMemoryPort, agentMemoryScope } from '../host/agentMemoryAdapter.js';
 import { resolveAgentKnowledgeRetrieve } from '../host/agentKnowledgeComposition.js';
+import { getBorrowedRecallResolver } from '../host/twinRecallSurface.js';
 import { handleA2aRequest, type A2aJsonRpcRequest } from '../host/a2aServer.js';
 import { getPublishedAgentCard } from '../host/a2aSurface.js';
 import {
@@ -155,6 +162,8 @@ function tenantForInventory(req: Request): string {
   return (req as AgentReqLike).tenantId ?? 'default';
 }
 
+const log = createLogger('routes.agents');
+
 export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): void {
   // RFC 0092 §B — seed a demo agent whose `requiresCapabilities` names a key this
   // host does not advertise, so the `agent-capability-degraded-projection`
@@ -211,6 +220,19 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // sets `live: true` AND the host wired an AI adapter (deps.hostSuite). Live
   // turns default to the managed tier so no BYOK is required.
   app.post('/v1/host/openwop-app/agents/:agentId/dispatch', async (req, res) => {
+    // CTI-1 (AGENTRT-2): gate dispatch on the SAME tenant visibility as the GET
+    // routes. Without this a caller could INVOKE another tenant's user-authored
+    // agent (its private manifest — system prompt, tool allowlist) by id even
+    // though the GET-by-id route hides it. Resolve through storage, then 404 on
+    // "not yours" with the same message as "absent" so cross-tenant existence is
+    // never leaked. Built-in/pack agents (no ownerTenant) stay universally
+    // dispatchable; an unresolved id falls through to AgentNotFoundError → 404.
+    const dispatchTenant = tenantForInventory(req);
+    const gateAgent = await getAgentRegistry().resolve(req.params.agentId);
+    if (gateAgent && !visibleTo(gateAgent, dispatchTenant)) {
+      res.status(404).json({ error: 'not_found', message: `agent '${req.params.agentId}' is not installed on this host` });
+      return;
+    }
     const body = (req.body ?? {}) as Partial<AgentDispatchRequest> & { live?: boolean };
     const reqShape: AgentDispatchRequest = {
       agentId: req.params.agentId,
@@ -246,13 +268,35 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         // private memory) into the turn, from host-owned primitives. `undefined`
         // (no `knowledge` capability / no binding) ⇒ dispatch is unchanged.
         const knowledgeRetrieve = await resolveAgentKnowledgeRetrieve(tenantId, reqShape.agentId, memory, memoryScope);
+        // ADR 0044 Phase 2 — when this agent is a granted twin, compose its OWNER's
+        // corpus (live grant gate via the host seam the `twin` feature fills). The
+        // result is fenced STRUCTURALLY by dispatch (`borrowedRetrieve` → untrusted
+        // block). Absent / not-granted / toggle-off ⇒ undefined ⇒ no cross read.
+        const borrowedResolver = getBorrowedRecallResolver();
+        const borrowedRetrieve = borrowedResolver ? await borrowedResolver(tenantId, reqShape.agentId) : undefined;
+        // ADR 0099 §residuals — this dispatch is RUNLESS (no run.metadata to read),
+        // so resolve the compaction decision here via the SAME core run-start seam
+        // (no feature import, no new seam) and pass it in. Toggle off ⇒ undefined ⇒
+        // identity. Per-agent lossy only matches when the manifest agentId is also a
+        // profile (roster) id; otherwise the tenant lossless default applies.
+        // Cost: one toggle resolution per LIVE dispatch — negligible beside the
+        // model round-trip this path is about to make.
+        const compactionMeta = await stampRunStartContext({}, { tenantId, agentId: reqShape.agentId });
+        const compaction = readCompactionDecision(compactionMeta);
         const result = await runAgentDispatchLive(
-          { ...reqShape, availableTools: reqShape.availableTools ?? [...builtinAgentToolIds()] },
+          {
+            ...reqShape,
+            availableTools: reqShape.availableTools ?? [...builtinAgentToolIds()],
+            ...(compaction ? { compaction } : {}),
+          },
           {
             callAI: adapter.callAI,
             callAIWithTools: adapter.callAIWithTools,
             resolveTool: toolProvider.resolveTool,
             executeTool: toolProvider.executeTool,
+            // ADR 0102 — lets the tool loop resolve this standing agent's tool
+            // permissions for the per-tool gate (shadow-logged until enabled).
+            tenantId,
             // A4 — cross-run agent memory (RFC 0004). Injected unconditionally;
             // dispatch's `memoryEnabled` gate only reads/writes when the agent's
             // manifest declares `memoryShape.longTerm`, so agents without it are
@@ -260,6 +304,7 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
             memory,
             memoryScope,
             ...(knowledgeRetrieve ? { knowledgeRetrieve } : {}),
+            ...(borrowedRetrieve ? { borrowedRetrieve } : {}),
           },
         );
         res.status(200).json(result);
@@ -271,7 +316,13 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
         res.status(404).json({ error: 'agent_not_found', message: err.message });
         return;
       }
-      res.status(500).json({ error: 'dispatch_error', message: err instanceof Error ? err.message : String(err) });
+      // API-1 / DATA-6: this inline error path bypasses the central
+      // errorEnvelope sanitizer, so log the raw error server-side for triage
+      // and return a credential-scrubbed message — a dispatch-internal
+      // err.message must not become a secret-leak channel in the response body.
+      const raw = err instanceof Error ? err.message : String(err);
+      log.error('agent_dispatch_error', { error: raw });
+      res.status(500).json({ error: 'dispatch_error', message: sanitizeForErrorMessage(raw) });
     }
   });
 
@@ -321,18 +372,23 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // (never silently dropped). Deterministic + replay-safe — the guard is pure, so
   // the seam needs no model call to prove the contract. A `string` content stays
   // valid forever (back-compat).
-  app.post('/v1/host/openwop-app/ai/call', (req, res) => {
+  const aiCallText = (messages: AiCallRequest['messages']): string => {
+    const out: string[] = [];
+    for (const m of messages) {
+      if (typeof m.content === 'string') { out.push(m.content); continue; }
+      for (const p of m.content) if (p.type === 'text') out.push(p.text);
+    }
+    return out.join('\n') || 'probe';
+  };
+  const aiCallSeam = async (req: Request, res: Response): Promise<void> => {
     const body = (req.body ?? {}) as { messages?: unknown; provider?: unknown; model?: unknown };
     if (!Array.isArray(body.messages) || body.messages.length === 0) {
       res.status(400).json({ error: 'validation_error', message: 'messages[] (non-empty) is required' });
       return;
     }
-    // Build the minimal AiCallRequest the guard inspects (it only reads `messages`).
-    const callReq = {
-      provider: typeof body.provider === 'string' ? body.provider : 'anthropic',
-      model: typeof body.model === 'string' ? body.model : 'managed-default',
-      messages: body.messages as AiCallRequest['messages'],
-    } as AiCallRequest;
+    const provider = typeof body.provider === 'string' ? body.provider : 'anthropic';
+    const model = typeof body.model === 'string' ? body.model : 'managed-default';
+    const callReq = { provider, model, messages: body.messages as AiCallRequest['messages'] } as AiCallRequest;
     try {
       assertModalitiesAdvertised(callReq);
     } catch (err) {
@@ -343,15 +399,195 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
       res.status(400).json({ error: { code: 'invalid_request', message: err instanceof Error ? err.message : String(err) } });
       return;
     }
-    // Modalities all advertised → accepted (the RFC 0091 §A path). Report the
-    // distinct modalities seen so the caller/steward can confirm the gate ran.
+    // RFC 0108 / ADR 0121 — a dispatch against the advertised `compat` self-hosted
+    // class MUST reach a real endpoint (succeed OR transport-error), never a
+    // capability/provider-not-* error (§A.2). Routes to the configured
+    // OPENWOP_TEST_COMPAT_ENDPOINT; the URL is never echoed (§D — the dispatcher
+    // scrubs it from any error → `compat_transport_error`).
+    if (provider === COMPAT_PROVIDER_ID || provider.startsWith(`${COMPAT_PROVIDER_ID}:`)) {
+      const baseUrl = getHostTestCompatEndpoint();
+      if (!baseUrl) {
+        res.status(502).json({ error: { code: 'compat_transport_error', message: 'compat_transport_error' } });
+        return;
+      }
+      const messages: ChatMessage[] = [{ role: 'user', content: aiCallText(callReq.messages) }];
+      try {
+        const r = await dispatchChat({ provider: 'compat', model, apiKey: '', baseUrl, messages });
+        res.status(200).json({ ok: true, accepted: true, provider: 'compat', completion: r.completion });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e); // §D-scrubbed
+        res.status(502).json({ error: { code: 'compat_transport_error', message } });
+      }
+      return;
+    }
+    // Default (RFC 0091 §A modality gate): report the distinct modalities seen.
     const seen = new Set<string>();
     for (const m of callReq.messages) {
       if (typeof m.content === 'string') { seen.add('text'); continue; }
       for (const part of m.content) seen.add(part.type === 'file' ? 'document' : part.type);
     }
     res.status(200).json({ ok: true, accepted: true, advertised: INPUT_MODALITIES, modalities: [...seen] });
-  });
+  };
+  app.post('/v1/host/openwop-app/ai/call', aiCallSeam);
+  app.post('/v1/host/sample/ai/call', aiCallSeam);
+
+  // RFC 0105 §A/§C — speech-synthesis conformance seam. The published
+  // `speech-synthesis-roundtrip` scenario POSTs the LOCKED envelope
+  // ({ text, voiceId }) and expects { audio: { url XOR base64, mimeType,
+  // voiceId (echoed), ... }, ... }. This thin seam calls the SAME
+  // `ctx.callSpeechSynthesizer` adapter the product route uses, over an
+  // ad-hoc managed scope (no persisted run, empty BYOK secrets — the managed
+  // MiniMax tier needs none), so the scenario proves the contract
+  // non-vacuously. Registered under BOTH the app-canonical prefix and the
+  // spec-canonical `/v1/host/sample/ai/*` the vendored suite drives.
+  const callSpeechSynthesizerSeam = async (req: Request, res: Response): Promise<void> => {
+    if (!deps.hostSuite) {
+      res.status(404).json({ error: 'not_found', message: 'aiProviders adapter not wired' });
+      return;
+    }
+    const body = (req.body ?? {}) as { text?: unknown; voiceId?: unknown; stream?: unknown };
+    const text = typeof body.text === 'string' ? body.text : '';
+    const voiceId = typeof body.voiceId === 'string' ? body.voiceId : '';
+    if (text.length === 0) {
+      res.status(400).json({ error: { code: 'invalid_request', message: 'text (non-empty string) required' } });
+      return;
+    }
+    if (voiceId.length === 0) {
+      res.status(400).json({ error: { code: 'invalid_request', message: 'voiceId (non-empty string) required' } });
+      return;
+    }
+    // RFC 0106 §C streaming arm (ADR 0109 P3): collect the `voice.synthesis_chunk`
+    // metadata-only run-events so the gated `voice-synthesis-streaming` scenario can
+    // assert them non-vacuously. Only attached to the response when stream:true, so
+    // the RFC 0105 speech-synthesis-roundtrip (no stream) is byte-for-byte unchanged.
+    const wantStream = body.stream === true;
+    const events: Array<{ type: string; payload: unknown }> = [];
+    let seq = 0;
+    const tenantId = (req as AgentReqLike).tenantId ?? 'default';
+    const adapter = createAiProvidersAdapter({
+      runId: `speech-seam:${randomUUID()}`,
+      nodeId: 'ai.call-speech-synthesizer',
+      tenantId,
+      attempt: 1,
+      secrets: {},
+      policyResolver: deps.hostSuite.providerPolicyResolver,
+      ...(wantStream ? { emit: async (type: string, payload: unknown) => { seq += 1; events.push({ type, payload }); return { eventId: `speech-seam-evt-${seq}`, sequence: seq }; } } : {}),
+    });
+    try {
+      // In the conformance harness (test seam ON, no managed MiniMax key) route
+      // to the deterministic `mock` TTS path so the roundtrip runs non-vacuously;
+      // prod (test seam OFF) routes to the real managed MiniMax provider.
+      const useMockTts = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
+      const result = await adapter.callSpeechSynthesizer({ text, voiceId, ...(wantStream ? { stream: true } : {}), ...(useMockTts ? { provider: 'mock' as const } : {}) });
+      res.status(200).json(wantStream ? { ...result, events } : result);
+    } catch (err) {
+      if (err instanceof AiProviderError) {
+        // ADR 0106 — a budget/quota exhaustion is a 429 (retry after the daily
+        // reset), NOT a 502 (which would falsely read as a provider outage).
+        if (err.code === 'media_budget_exceeded') {
+          res.status(429).json({ error: { code: err.code, message: err.message, details: err.details } });
+          return;
+        }
+        const clientError = err.code === 'invalid_request' || err.code === 'content_too_long' || err.code === 'speech_synthesis_unsupported';
+        res.status(clientError ? 400 : 502).json({ error: { code: err.code, message: err.message, details: err.details } });
+        return;
+      }
+      res.status(500).json({ error: { code: 'internal_error', message: err instanceof Error ? err.message : String(err) } });
+    }
+  };
+  app.post('/v1/host/openwop-app/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
+  app.post('/v1/host/sample/ai/call-speech-synthesizer', callSpeechSynthesizerSeam);
+
+  // RFC 0106 §B (ADR 0109 P1) — the `ctx.callTranscriber` test seam. Exercises
+  // the same per-node adapter `ctx.callTranscriber` uses, with a COLLECTING
+  // `emit` so the behavioral conformance can assert the canonical `voice.*`
+  // taxonomy + `contentTrust:'untrusted'` non-vacuously. Registered under both
+  // the app-canonical prefix and the spec-canonical `/v1/host/sample/ai/*`.
+  const callTranscriberSeam = async (req: Request, res: Response): Promise<void> => {
+    if (!deps.hostSuite) {
+      res.status(404).json({ error: 'not_found', message: 'aiProviders adapter not wired' });
+      return;
+    }
+    const body = (req.body ?? {}) as { audio?: { streamRef?: unknown; url?: unknown }; languageCode?: unknown };
+    const streamRef = typeof body.audio?.streamRef === 'string' ? body.audio.streamRef : '';
+    const url = typeof body.audio?.url === 'string' ? body.audio.url : '';
+    if (streamRef.length === 0 && url.length === 0) {
+      res.status(400).json({ error: { code: 'invalid_request', message: 'audio.streamRef OR audio.url (non-empty string) required' } });
+      return;
+    }
+    const tenantId = (req as AgentReqLike).tenantId ?? 'default';
+    const events: Array<{ type: string; payload: unknown }> = [];
+    let seq = 0;
+    const adapter = createAiProvidersAdapter({
+      runId: `transcriber-seam:${randomUUID()}`,
+      nodeId: 'ai.call-transcriber',
+      tenantId,
+      attempt: 1,
+      secrets: {},
+      policyResolver: deps.hostSuite.providerPolicyResolver,
+      emit: async (type, payload) => {
+        seq += 1;
+        events.push({ type, payload });
+        return { eventId: `transcriber-seam-evt-${seq}`, sequence: seq };
+      },
+    });
+    try {
+      const useMock = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
+      const audio = streamRef.length > 0 ? { streamRef } : { url };
+      const result = await adapter.callTranscriber({
+        audio,
+        ...(typeof body.languageCode === 'string' ? { languageCode: body.languageCode } : {}),
+        ...(useMock ? { provider: 'mock' as const } : {}),
+      });
+      // RFC 0106 §B: the seam response IS the settled TranscriptResult
+      // (`finalText`/`atMs`/`language`) at the TOP LEVEL, with the durable
+      // `voice.*` run-events alongside as `events` — the shape the gated
+      // `voice-transcription-streaming` / `voice-streamref-tenant-bound`
+      // conformance scenarios read (`res.json.finalText`, `res.json.events`).
+      res.status(200).json({ ...result, events });
+    } catch (err) {
+      if (err instanceof AiProviderError) {
+        const clientError = err.code === 'invalid_request' || err.code === 'transcription_unsupported';
+        res.status(clientError ? 400 : 502).json({ error: { code: err.code, message: err.message, details: err.details } });
+        return;
+      }
+      res.status(500).json({ error: { code: 'internal_error', message: err instanceof Error ? err.message : String(err) } });
+    }
+  };
+  app.post('/v1/host/openwop-app/ai/call-transcriber', callTranscriberSeam);
+  app.post('/v1/host/sample/ai/call-transcriber', callTranscriberSeam);
+
+  // RFC 0106 §D/§F (ADR 0109 P4) — the barge-in / cancellation seam. A live mic
+  // SESSION is host-internal per RFC 0106 §E, but the WIRE CONTRACT the
+  // `realtimeVoice.bargeIn` capability promises is demonstrable deterministically:
+  // assistant playback (voice.synthesis_chunk) → user speech overlaps → the host
+  // emits `voice.barge_in`, CANCELS the in-flight synthesis (stops emitting chunks),
+  // and emits `voice.cancelled` — with NO `voice.synthesis_chunk` after the cancel.
+  // That is the §F `voice-bargein-no-partial-leak` invariant, shown non-vacuously
+  // (the dropped chunks are halted, never leaked). The same lifecycle is what the
+  // mic-on-chat session (P5) emits over a real stream. No secrets, no tenant data,
+  // no side effects — a pure scripted demonstration of the cancellation semantics.
+  const voiceBargeInSeam = (req: Request, res: Response): void => {
+    const body = (req.body ?? {}) as { chunks?: unknown; bargeInAtSeq?: unknown };
+    const totalChunks = typeof body.chunks === 'number' && body.chunks > 0 ? Math.min(Math.floor(body.chunks), 16) : 4;
+    const bargeAt = typeof body.bargeInAtSeq === 'number' && body.bargeInAtSeq >= 0 ? Math.min(Math.floor(body.bargeInAtSeq), totalChunks - 1) : 1;
+    const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+    const emit = (type: string, payload: Record<string, unknown>): void => { events.push({ type, payload }); };
+
+    // Assistant playback up to (and including) the moment the user cuts in.
+    for (let seq = 0; seq <= bargeAt; seq += 1) {
+      emit('voice.synthesis_chunk', { seq, mimeType: 'audio/mpeg', durationMs: 240, url: `https://host/v1/host/openwop-app/assets/turn-chunk-${seq}` });
+    }
+    // User speech overlaps playback → probable barge-in.
+    emit('voice.barge_in', { atMs: 1000 + bargeAt * 240 });
+    // The host CANCELS the in-flight synthesis: chunks bargeAt+1..totalChunks-1 are
+    // halted (NOT emitted, NOT leaked) → cancelled. No partial output crosses the wire.
+    emit('voice.cancelled', { atMs: 1010 + bargeAt * 240, reason: 'barge_in' });
+
+    res.status(200).json({ events, droppedChunks: totalChunks - 1 - bargeAt });
+  };
+  app.post('/v1/host/openwop-app/voice/barge-in', voiceBargeInSeam);
+  app.post('/v1/host/sample/voice/barge-in', voiceBargeInSeam);
 
   // RFC 0090 §B — verifier turn + gating. This seam runs the host's real RFC 0090
   // commit gate (host/agentDispatch.ts runVerifier, verifierGating) over a
@@ -400,8 +636,9 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
   // back to a registry-synthesized card so a tenant that hasn't published one
   // still discovers a real agent surface (not a dead stub). Env-gated
   // (OPENWOP_A2A_SERVER_ENABLED, mirrors the MCP-server seam + the honest
-  // host.a2a advertisement flip); 404 when off. JSON-RPC only — no
-  // `/.well-known/agent-card.json` (deferred to an a2a-integration discussion).
+  // host.a2a advertisement flip); 404 when off. JSON-RPC `agent/getCard` AND a
+  // GET-able static card at `/.well-known/agent-card.json` (below) both serve
+  // the v0.3 AgentCard.
   app.post('/v1/host/openwop-app/a2a', (req, res) => {
     if (process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
       res.status(404).json({ error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
@@ -422,28 +659,54 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     })
       // JSON-RPC transport is always HTTP 200; method/params errors live in the body.
       .then((rpc) => res.status(200).json(rpc))
-      .catch((err) =>
+      .catch((err) => {
+        // JSON-RPC internal error: scrub the raw message before returning it
+        // (it crosses the wire in the body even though the HTTP status is 200).
+        const raw = err instanceof Error ? err.message : String(err);
+        log.error('a2a_jsonrpc_internal_error', { error: raw });
         res
           .status(200)
-          .json({ jsonrpc: '2.0', id: (req.body as { id?: string | number })?.id ?? 0, error: { code: -32603, message: err instanceof Error ? err.message : String(err) } }),
-      );
+          .json({ jsonrpc: '2.0', id: (req.body as { id?: string | number })?.id ?? 0, error: { code: -32603, message: sanitizeForErrorMessage(raw) } });
+      });
+  });
+
+  // RFC 0076/0100 — GET-able A2A v0.3 AgentCard at the standard discovery path.
+  // The `a2a.agentCardUrl` advertisement (discovery.ts) points HERE, so the
+  // honesty bar holds: a cross-host peer can plain-GET the card without a
+  // credential (this path is in auth.ts PUBLIC_PATH_PREFIXES), and it resolves
+  // to the same v0.3 doc `synthesizeAgentCard` feeds the JSON-RPC `agent/getCard`
+  // (protocolVersion:'0.3' + skills). Gated on OPENWOP_A2A_SERVER_ENABLED — 404
+  // when the host is not exposing itself as an A2A agent, mirroring the slot.
+  app.get('/.well-known/agent-card.json', (req, res) => {
+    if (process.env.OPENWOP_A2A_SERVER_ENABLED !== 'true') {
+      res.status(404).json({ error: 'not_found', message: 'a2a server endpoint disabled (set OPENWOP_A2A_SERVER_ENABLED=true)' });
+      return;
+    }
+    const tenantId = (req as AgentReqLike).tenantId ?? 'default';
+    res.status(200).json(getPublishedAgentCard(tenantId) ?? synthesizeAgentCard(req));
   });
 
   // ── RFC 0100 §2/§4 — durable A2A Task host-sample conformance seams ──────────
-  // Non-normative seams (the `/v1/host/openwop-app/*` extension namespace) that drive
-  // the REAL durable-task store (a2aTaskStore — ADR 0035), not a parallel stub:
-  // `tasks/start` starts a genuine approval-gated run and binds taskId==runId;
-  // `tasks/{id}` reads the persisted DurableCollection projection; `push-config`
-  // runs the caller URL through the same RFC 0093 egress guard the push path
-  // uses. Gated on `OPENWOP_A2A_DURABLE_TASKS` (the same flag that flips the
+  // Non-normative seams that drive the REAL durable-task store (a2aTaskStore —
+  // ADR 0035), not a parallel stub: `tasks/start` starts a genuine
+  // approval-gated run and binds taskId==runId; `tasks/{id}` reads the persisted
+  // DurableCollection projection; `push-config` runs the caller URL through the
+  // same RFC 0093 egress guard the push path uses. Gated on
+  // `OPENWOP_A2A_DURABLE_TASKS` (the same flag that flips the
   // `a2a.durableTasks`/`pushNotifications` advertisement in discovery.ts, so the
   // seam is served iff the capability is advertised); 404 otherwise — the
   // conformance behavioral legs soft-skip on 404/403.
+  //
+  // Each handler is mounted at BOTH the app-canonical
+  // `/v1/host/openwop-app/a2a/*` prefix AND the spec-canonical
+  // `/v1/host/sample/a2a/*` prefix the vendored 1.34.0 conformance driver hits
+  // literally (`driver.post('/v1/host/sample/a2a/tasks/start')` …) — mirroring
+  // the RFC 0106 transcriber dual-mount above. Same handler, two paths.
 
   // Start a backing run paused at a HITL approval gate and persist its durable
   // Task projection (`input-required`/approval), so a later `tasks/get` returns
   // live state after the original connection is gone (RFC 0100 §2).
-  app.post('/v1/host/openwop-app/a2a/tasks/start', async (req, res, next) => {
+  const a2aTasksStartSeam = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (!durableTasksEnabled() || !deps.storage || !deps.hostSuite) {
         res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
@@ -471,11 +734,13 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     } catch (err) {
       next(err);
     }
-  });
+  };
+  app.post('/v1/host/openwop-app/a2a/tasks/start', a2aTasksStartSeam);
+  app.post('/v1/host/sample/a2a/tasks/start', a2aTasksStartSeam);
 
   // Read the persisted durable Task projection (RFC 0100 §2 / §3 `tasks/get`).
   // Returns the A2ATaskState record shape (top-level `state` + `runId`).
-  app.get('/v1/host/openwop-app/a2a/tasks/:taskId', async (req, res, next) => {
+  const a2aTasksGetSeam = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (!durableTasksEnabled()) {
         res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
@@ -492,12 +757,14 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     } catch (err) {
       next(err);
     }
-  });
+  };
+  app.get('/v1/host/openwop-app/a2a/tasks/:taskId', a2aTasksGetSeam);
+  app.get('/v1/host/sample/a2a/tasks/:taskId', a2aTasksGetSeam);
 
   // Register a push-config (RFC 0100 §4). The caller URL MUST pass the RFC 0093
   // webhook-egress SSRF guard before any push — a private/loopback target is
   // refused with 400 (a2a-push-egress-ssrf), before the task lookup.
-  app.post('/v1/host/openwop-app/a2a/tasks/push-config', async (req, res, next) => {
+  const a2aPushConfigSeam = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       if (!durableTasksEnabled()) {
         res.status(404).json({ error: 'not_found', message: 'a2a durable tasks disabled (set OPENWOP_A2A_SERVER_ENABLED=true OPENWOP_A2A_DURABLE_TASKS=true)' });
@@ -529,7 +796,9 @@ export function registerAgentRoutes(app: Express, deps: AgentRoutesDeps = {}): v
     } catch (err) {
       next(err);
     }
-  });
+  };
+  app.post('/v1/host/openwop-app/a2a/tasks/push-config', a2aPushConfigSeam);
+  app.post('/v1/host/sample/a2a/tasks/push-config', a2aPushConfigSeam);
 }
 
 /** Durable A2A tasks are wired iff the A2A server is on AND durable tasks are
@@ -560,13 +829,16 @@ function synthesizeAgentCard(req: Request): unknown {
     url: `${base}/v1/host/openwop-app/a2a`,
     version: '1.0.0',
     protocolVersion: '0.3',
-    // ADR 0035 / RFC 0100 — the A2A AgentCard `capabilities` reflect the durable
-    // wiring: streaming (tasks/resubscribe) + pushNotifications are honest only
-    // when OPENWOP_A2A_DURABLE_TASKS is set, mirroring the `a2a` discovery slot.
-    capabilities:
-      process.env.OPENWOP_A2A_DURABLE_TASKS === 'true'
-        ? { streaming: true, pushNotifications: true }
-        : { streaming: false, pushNotifications: false },
+    // ADR 0035 / RFC 0100 — the A2A AgentCard `capabilities` mirror the `a2a`
+    // discovery slot. `pushNotifications` is honest only when durable Tasks are
+    // wired (OPENWOP_A2A_DURABLE_TASKS). `streaming` (tasks/resubscribe) is
+    // DECOUPLED onto its own OPENWOP_A2A_STREAMING flag (default off) — the
+    // server serves resubscribe but we don't advertise it until conformance
+    // ships a resubscribe witness, so `streaming:true` isn't a vacuous claim.
+    capabilities: {
+      streaming: process.env.OPENWOP_A2A_STREAMING === 'true',
+      pushNotifications: process.env.OPENWOP_A2A_DURABLE_TASKS === 'true',
+    },
     defaultInputModes: ['text/plain'],
     defaultOutputModes: ['text/plain'],
     skills,

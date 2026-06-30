@@ -41,3 +41,18 @@ export async function registerWorkflow(body: RegisterBody): Promise<{ workflowId
   }
   return res.json() as Promise<{ workflowId: string; nodeCount: number }>;
 }
+
+/**
+ * Fetch a server-registered workflow definition by id (the spec
+ * `GET /v1/workflows/:id`). Returns the canonical WorkflowDefinition, or null on
+ * 404. Lets the builder open a workflow that lives only server-side — e.g. one
+ * authored by the Workflow Architect (ADR 0073) — not just localStorage ones.
+ */
+export async function fetchRegisteredWorkflow(workflowId: string): Promise<unknown | null> {
+  const res = await fetch(`${config.baseUrl}/v1/workflows/${encodeURIComponent(workflowId)}`, fetchOpts({
+    headers: authedHeaders(),
+  }));
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`load_workflow_failed (${res.status})`);
+  return res.json();
+}

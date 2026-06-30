@@ -17,13 +17,12 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let pack: any;
 let server: http.Server;
-const PORT = 18200;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, res); });
   const kb = getToggleDefault('kb');
   if (kb) await saveConfig({ ...kb, status: 'on' }, 'test');
   // @ts-expect-error — untyped .mjs pack module (loaded the way the runtime does)

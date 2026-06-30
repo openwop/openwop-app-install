@@ -436,6 +436,22 @@
       },
       "additionalProperties": false
     },
+    "connections": {
+      "type": "object",
+      "description": "RFC 0095 (`Draft`). Connection packs — portable, registry-distributable provider definitions (`kind: \"connection\"`, `connection-pack-manifest.schema.json`) that the RFC 0045/0047 `provider` string resolves against. Only useful alongside `oauth.supported` (RFC 0047) or `credentials.supported` (RFC 0046); a host SHOULD NOT advertise this block without at least one of those.",
+      "required": ["packsSupported"],
+      "properties": {
+        "supported": {
+          "type": "boolean",
+          "description": "OPTIONAL convenience flag mirroring the other capability families. RFC 0095 keys behavior on `packsSupported`; hosts MAY also advertise `supported` for family-shape uniformity."
+        },
+        "packsSupported": {
+          "type": "boolean",
+          "description": "RFC 0095 §C. When `true`, the host installs `kind: \"connection\"` registry packs and MUST implement the §B.6 resolution contract: an RFC 0045 connector's `auth.provider` (or an RFC 0047 `host.oauth` provider string) resolves against the installed connection pack whose `provider.id` matches, with installed-vs-built-in precedence per SemVer §11 and `connection_provider_unresolved` / `connection_provider_conflict` diagnostics. When `false` or absent, connection packs are not loaded and provider resolution stays implementation-defined."
+        }
+      },
+      "additionalProperties": false
+    },
     "credentials": {
       "type": "object",
       "description": "RFC 0046 (`Draft`). Portable credential resolution + lifecycle contract — sibling to `secrets`, first-class store-at-rest + workspace sharing + two-key-overlap rotation. A pack references a credential by `{ ref, scope }` (see `credential-reference.schema.json`); the host resolves it into the node sandbox ONLY — never into inputs, persisted variables, channels, any run.* event payload, the debug bundle, or replay state (SECURITY invariant `credential-payload-redaction`). Supersedes the informal BYOK annex; the `secrets` advertisement stays valid.",
@@ -549,6 +565,23 @@
       "items": { "type": "string", "minLength": 1 },
       "uniqueItems": true,
       "description": "Optional v1 host-advertised opaque capability ids that NodeModules may declare in `NodeModule.requires`. Naming convention: dotted, domain-scoped (`chat.sendPrompt`, `canvas.write`, `secrets.byok`). Provider value shapes are documented per-capability alongside consumers, NOT in the protocol package — the protocol owns the *check*, not domain provider contracts. A client that submits a workflow whose nodes declare a `requires` entry SHOULD first verify the host advertises that capability; a host that lacks a capability MUST refuse to dispatch nodes that declare it, terminating the run with `RunSnapshot.error.code = 'capability_not_provided'`. See `capabilities.md` §\"Runtime capabilities\"."
+    },
+    "multiPartyConversation": {
+      "type": "object",
+      "description": "RFC 0101 — Multi-party group conversation (shared transcript + speaker attribution). When advertised with `supported: true`, the host honors the RFC 0101 normative contract: (1) it accepts an OPTIONAL `participants: AgentRef[]` roster on `conversation.opened` (`conversation-event.schema.json`); (2) it REQUIRES a `speakerId` (the roster INSTANCE id, `host:<id>` per RFC 0086) on every `role: 'agent'` turn; and (3) when a `participants` roster is present it MUST reject a turn whose `speakerId` is not a roster member. Absent block ⇒ no advertisement: the host runs single-agent conversations (RFC 0005) and treats `participants`/`speakerId` as opaque, unenforced fields. Advertising `supported: true` without honoring (1)+(2)+(3) is a dishonest wire claim (`OPENWOP_REQUIRE_BEHAVIOR=true` fails the gated conformance scenarios). Host product policy — turn-taking order, round count, synchronous vs. async rounds — stays NON-normative (RFC 0101 §Spec); only roster membership, agent-turn attribution, and this capability are normative. Requires `conversationPrimitive: true` (RFC 0005) — this block extends the single-agent conversation primitive, it does not replace it.",
+      "required": ["supported"],
+      "additionalProperties": false,
+      "properties": {
+        "supported": {
+          "type": "boolean",
+          "description": "RFC 0101. Host enforces the multi-party roster + speaker-attribution contract. When `false` or absent, RFC 0101 conformance scenarios soft-skip and the host applies no roster/attribution enforcement."
+        },
+        "maxParticipants": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "RFC 0101. OPTIONAL host ceiling on the size of the `conversation.opened.participants` roster. A multi-party council has at least 2 participants. When advertised, the host MUST reject a `conversation.opened` whose `participants` array exceeds this count. Absent ⇒ the host does not bound the roster size on the wire."
+        }
+      }
     },
     "multiAgent": {
       "type": "object",
@@ -729,6 +762,10 @@
           "uniqueItems": true,
           "description": "Subset of `supported` for which BYOK is permitted. Empty array → all calls use platform-managed keys; non-empty → clients MAY pass `ai.credentialRef` in `RunOptions.configurable` for matching providers."
         },
+        "speechSynthesis": {
+          "const": "supported",
+          "description": "RFC 0105. When present (value MUST be the string `\"supported\"`), the host exposes `ctx.callSpeechSynthesizer({ text, voiceId, mimeType?, format?, languageCode?, ... })` returning a binary audio asset (host-served `url` OR inline `base64` + `mimeType`), paralleling `aiProviders.imageGeneration`. Absent ⇒ no TTS; a call MUST be rejected with `speech_synthesis_unsupported` (never a no-op). Voices are referenced by an opaque host-resolved `voiceId`; the spec does NOT enumerate voices. TTS provider ids are advertised via the existing `aiProviders.supported[]` (the call's `provider?` MUST be a member); there is no `speechSynthesis` sub-field for providers. Per-host model/voice routing is a host choice."
+        },
         "input": {
           "type": "object",
           "additionalProperties": false,
@@ -786,9 +823,49 @@
           "minimum": 0,
           "default": 262144,
           "description": "RFC 0055 §C rule 2 — optional cap (bytes) on inline base64 in `media.*` envelope payloads. A `media.{image,audio,file}` asset above this size MUST be served by a tenant-scoped `url` reference rather than inlined (bounds event-log + replay-payload size). Default 256 KiB (262144) when absent. A host MAY set 0 to force URL references for all emitted media."
+        },
+        "realtimeVoice": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "RFC 0106. Optional real-time voice profile. Absent ⇒ no live voice (a call to `ctx.callTranscriber` MUST be rejected with `transcription_unsupported`, and `stream:true` on `ctx.callSpeechSynthesizer` with `streaming_unsupported`). `ctx.callTranscriber` resolves a `Promise` at `turn_commit` with the settled final transcript and emits the interim/final/endpoint signals as `voice.*` run-events on the durable event log (the single canonical record); the streaming synthesis arm resolves a `Promise` at completion and announces clause-boundary chunks as `voice.synthesis_chunk` metadata run-events (bytes by `streamRef`/`url`, not inlined past the host cap).",
+          "properties": {
+            "transcription": {
+              "const": "streaming",
+              "description": "When present (value MUST be `\"streaming\"`), the host exposes `ctx.callTranscriber(...)` (streaming STT). `turnDetection` and `bargeIn` require `transcription`."
+            },
+            "synthesis": {
+              "const": "streaming",
+              "description": "When present (value MUST be `\"streaming\"`), the RFC 0105 `ctx.callSpeechSynthesizer` request honors `stream: true` (chunked synthesis). REQUIRES `aiProviders.speechSynthesis: \"supported\"` (enforced by the if/then closure on `aiProviders`)."
+            },
+            "turnDetection": {
+              "enum": ["vad", "semantic"],
+              "description": "Endpointing sophistication. `vad` = silence-threshold endpointing only; `semantic` = a turn detector that emits `voice.endpoint_candidate` distinct from `voice.turn_commit`. Requires `transcription`."
+            },
+            "bargeIn": {
+              "const": "supported",
+              "description": "When present, the host MUST emit `voice.barge_in` on overlapping speech during playback and `voice.cancelled` when it actually cancels downstream work. Requires `transcription`."
+            }
+          },
+          "dependentRequired": {
+            "turnDetection": ["transcription"],
+            "bargeIn": ["transcription"]
+          }
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "$comment": "RFC 0106 §A closure: realtimeVoice.synthesis (streaming TTS) requires the whole-file TTS surface aiProviders.speechSynthesis to be advertised.",
+          "if": {
+            "type": "object",
+            "required": ["realtimeVoice"],
+            "properties": {
+              "realtimeVoice": { "type": "object", "required": ["synthesis"] }
+            }
+          },
+          "then": { "required": ["speechSynthesis"] }
+        }
+      ]
     },
     "testing": {
       "type": "object",
@@ -1103,6 +1180,54 @@
           "type": "boolean",
           "default": false,
           "description": "RFC 0063 (`Active`). When `true`, host honors the optional `outputAttestation` block on `core.subWorkflow`: computes a content checksum (RFC 8785 JCS + SHA-256, the `replay.md` recipe) over a child's harvested outputs and surfaces it as the additive optional `attestation` object on the existing `core.workflowChain.event { phase: 'output.harvested' }` (RFC 0037) BEFORE applying `outputMapping`; when the config sets `requireApproval: true`, suspends the parent via an `approval` interrupt (RFC 0051) before merge and fails closed (no `accept`/`edit-accept` ⇒ no merge). Reuses RFC 0051's `approval` kind + RFC 0049 scopes for `principalScope` — no new interrupt kind, event type, or error code. Hosts that omit / `false` this flag treat `outputAttestation` as inert (blind merge, today's behavior)."
+        },
+        "proposals": {
+          "type": "object",
+          "description": "RFC 0096 (`Active`). Reviewable learning — the host synthesizes reusable artifacts (skills/packs/templates/automations) from run/tool traces as INERT, reviewable drafts that MUST NOT influence the resolution, planning, or execution of any run until an authorized principal activates them. A host advertising this serves the `/v1/host/sample/proposals` surface (promotable to `/v1/proposals`) and emits the content-free `proposal.created` / `proposal.activated` events. Activation is delegated to RFC 0051 approval-gate or RFC 0049 RBAC — no new authorization path. On `apply` the installed artifact MUST byte-match the last-persisted `artifact` (no silent re-synthesis). Hosts that omit this block do not synthesize proposals; the conformance scenarios skip cleanly.",
+          "additionalProperties": false,
+          "required": ["artifactKinds", "activation"],
+          "properties": {
+            "artifactKinds": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["agent-pack", "workflow-chain-pack", "prompt-template", "automation"] },
+              "uniqueItems": true,
+              "description": "Which reusable artifact kinds the host can propose. `agent-pack` (RFC 0003), `workflow-chain-pack` (RFC 0013), `prompt-template` (RFC 0027), `automation` (RFC 0052 scheduled job)."
+            },
+            "duplicationDetection": {
+              "type": "boolean",
+              "default": false,
+              "description": "When `true`, the host populates `Proposal.duplicateOf` with an existing artifact ref the proposal restates/overlaps (the 'Curator' duplication signal)."
+            },
+            "activation": {
+              "type": "string",
+              "enum": ["approval-gate", "direct-rbac"],
+              "description": "`approval-gate`: `apply` MUST drive an RFC 0051 gate (role/scope/quorum, audited override) and MUST NOT install unless granted/overridden. `direct-rbac`: `apply` requires only the RFC 0049 scope the host advertises for activation."
+            }
+          }
+        },
+        "goals": {
+          "type": "object",
+          "description": "RFC 0097 (`Active`). Standing goals — a durable objective with explicit completion criteria, evaluated by a host-side judge (RFC 0090 verifier or host evaluator), that keeps an agent working across turns/runs until the judge is satisfied, a declared RFC 0058 bound is crossed, or the agent escalates (RFC 0044). A host advertising this serves `/v1/host/sample/goals` (promotable to `/v1/goals`) and emits the content-free `goal.evaluated` / `goal.closed` events. Completion MUST be the judge's verdict — a client MUST NOT set `state: satisfied` directly. Continuation MUST be bounded. Hosts that omit this block do not run standing goals; the conformance scenarios skip cleanly.",
+          "additionalProperties": false,
+          "required": ["judge", "continuation"],
+          "properties": {
+            "judge": {
+              "type": "string",
+              "enum": ["verifier", "host"],
+              "description": "`verifier`: completion is an RFC 0090 verifier verdict. `host`: an opaque host evaluator."
+            },
+            "continuation": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["schedule", "commitment", "heartbeat", "manual"] },
+              "uniqueItems": true,
+              "description": "How a goal re-engages work between judge checks. `schedule` (RFC 0052), `commitment` (RFC 0068), `heartbeat` (RFC 0060), `manual`."
+            },
+            "requiresBounds": {
+              "type": "boolean",
+              "default": true,
+              "description": "When `true` (default), a goal MUST declare valid RFC 0058 `bounds` before it may activate; a `POST /goals` without bounds returns 422. The host MUST stop continuation and set `state: bound-exceeded` when any declared bound (iteration count / accumulated cost / wall-clock deadline) is crossed."
+            }
+          }
         }
       },
       "additionalProperties": true
@@ -1450,7 +1575,31 @@
             "backoff": { "type": "string", "enum": ["none", "fixed", "exponential"], "description": "Backoff strategy between attempts." }
           }
         },
-        "sources": { "type": "array", "uniqueItems": true, "items": { "type": "string", "enum": ["webhook", "schedule", "queue", "email", "form"] }, "description": "Which trigger sources bridge uniformly. A source listed here MUST have a registerable `TriggerSubscription` driven through the four-state machine AND emit the two `trigger.*` events for that source — the list MUST NOT over-claim a source the host has as a feature but does not wire as a durable trigger subscription. A consumer MUST tolerate any subset." }
+        "sources": { "type": "array", "uniqueItems": true, "items": { "type": "string", "enum": ["webhook", "schedule", "queue", "email", "form"] }, "description": "Which trigger sources bridge uniformly. A source listed here MUST have a registerable `TriggerSubscription` driven through the four-state machine AND emit the two `trigger.*` events for that source — the list MUST NOT over-claim a source the host has as a feature but does not wire as a durable trigger subscription. A consumer MUST tolerate any subset." },
+        "ingestion": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "RFC 0099 §F.3 (additive). External-event ingestion advertisement — which of `sources[]` the host actually ingests from EXTERNALLY-originated events (`webhook`/`email`/`form`), normalizing each to a `TriggerEvent` (`trigger-event.schema.json`) and starting a run. Absent ⇒ the host does NOT externally-ingest (today's behavior — schedule/queue only). A source in `externalSources[]` MUST actually accept an external event, normalize it, and start a run — over-claiming is a dishonest advertisement. A consumer MUST tolerate any subset.",
+          "properties": {
+            "externalSources": { "type": "array", "uniqueItems": true, "items": { "type": "string", "enum": ["webhook", "email", "form"] }, "description": "Which of `sources[]` are EXTERNALLY ingested per RFC 0099. The honesty gate — each MUST normalize to a `TriggerEvent` and start a run." },
+            "maxBodyBytes": { "type": "integer", "minimum": 1, "description": "Inbound body cap (webhook body / email / form), reusing the RFC 0076 §B response-cap discipline." },
+            "verification": { "type": "array", "uniqueItems": true, "items": { "type": "string", "enum": ["webhook-signature", "email-dmarc", "form-origin"] }, "description": "Which source-authenticity checks the host performs. An advertised check MUST actually be performed (RFC 0099 §F.3 / UQ1)." },
+            "registrationEndpoint": { "type": "boolean", "description": "`true` ⇒ the host serves `POST /v1/trigger-subscriptions` (RFC 0099 §F.2) for portable external-event subscription creation." }
+          }
+        }
+      }
+    },
+    "a2a": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "RFC 0100 (`Active`). The host exposes itself as an A2A (Agent2Agent) agent. `supported: true` alone ⇒ the SYNCHRONOUS `message/send` → poll `tasks/get` round-trip already specified by `a2a-integration.md` (today's behavior — no regression). The optional `streaming`/`pushNotifications`/`durableTasks` flags gate the RFC 0100 async/durable additions (resubscribe re-attach, push config, persisted `A2ATaskState` so `tasks/get` returns live state after disconnect). Absent block ⇒ no A2A advertisement.",
+      "required": ["supported", "agentCardUrl"],
+      "properties": {
+        "supported": { "type": "boolean", "description": "Host exposes itself as an A2A agent." },
+        "agentCardUrl": { "type": "string", "format": "uri", "description": "The A2A 0.3 well-known agent card URL (`/.well-known/agent-card.json`)." },
+        "streaming": { "type": "boolean", "description": "Host supports `message/stream` + `tasks/resubscribe` (A2A `capabilities.streaming`). Gates the RFC 0100 §3 resubscribe re-attach." },
+        "pushNotifications": { "type": "boolean", "description": "Host supports A2A push-notification config (A2A `capabilities.push_notifications`). Gates the RFC 0100 §4 push contract; a caller-supplied `pushConfig.url` is SSRF-validated (`a2a-push-egress-ssrf`)." },
+        "durableTasks": { "type": "boolean", "description": "RFC 0100 §2. Host PERSISTS the projected Task (`A2ATaskState`) per backing run; `tasks/get` returns live state after disconnect. Absent/false ⇒ synchronous round-trip only." }
       }
     },
     "budget": {
@@ -1963,6 +2112,85 @@
         }
       },
       "additionalProperties": false
+    },
+    "content": {
+      "type": "object",
+      "description": "RFC 0103 (spec/v1/localized-content.md). Localized authored content (pages → sections) advertisement. Reuses the i18n annex's Accept-Language/Content-Language negotiation; it does NOT redeclare negotiation. Requires `i18n.supported: true`. `baseLocale` MUST equal `capabilities.i18n.defaultLocale`; `({baseLocale} ∪ supportedLocales)` MUST be a subset of `capabilities.i18n.supportedLocales`; `baseLocale` MUST NOT appear in `supportedLocales`. Hosts that omit this block serve no content surface; the conformance scenarios skip cleanly.",
+      "additionalProperties": false,
+      "required": ["supported", "baseLocale", "supportedLocales"],
+      "properties": {
+        "supported": {
+          "type": "boolean",
+          "description": "Host serves the localized-content surface (`GET /v1/content/pages/{slug}` + tenant-scoped admin CRUD). Requires `i18n.supported: true`."
+        },
+        "baseLocale": {
+          "type": "string",
+          "pattern": "^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8}){0,3}$",
+          "description": "The locale section `data` is authored in. MUST equal `capabilities.i18n.defaultLocale`."
+        },
+        "supportedLocales": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-zA-Z]{2,3}(-[a-zA-Z0-9]{2,8}){0,3}$"
+          },
+          "description": "BCP 47 tags the host has authored content translations for. MUST NOT contain `baseLocale`; `({baseLocale} ∪ supportedLocales)` MUST be a subset of `i18n.supportedLocales`."
+        }
+      }
+    },
+    "portability": {
+      "type": "object",
+      "description": "RFC 0098 (`Active`). Export/import of a tenant's reusable estate (agents 0070, packs 0003/0013, prompt templates 0027, connection *refs* 0045/0095, schedules 0052, roster/org-chart 0086/0087). An export bundle carries NO credential values — only refs to be re-bound at the destination (RFC 0046/0079). Import maps the estate onto the destination's RFC 0048 identity, MUST offer a no-write dry-run plan, MUST be idempotent, and is gated by an RFC 0049 scope. A host advertising this serves `/v1/host/sample/{export,import}` (promotable to `/v1/{export,import}`) and emits the content-free `import.applied` event. Hosts that omit this block neither export nor import; the conformance scenarios skip cleanly.",
+      "additionalProperties": false,
+      "properties": {
+        "export": {
+          "type": "boolean",
+          "default": false,
+          "description": "Host can emit an export bundle for the caller's tenant/workspace via `GET /export`."
+        },
+        "import": {
+          "type": "boolean",
+          "default": false,
+          "description": "Host can import an export bundle via `POST /import`. When `true`, `dryRun` MUST also be `true` (a no-write plan preview is mandatory)."
+        },
+        "kinds": {
+          "type": "array",
+          "items": { "type": "string", "enum": ["agent", "pack", "prompt-template", "connection-ref", "schedule", "roster", "org-chart"] },
+          "uniqueItems": true,
+          "description": "Estate kinds this host can export/import."
+        },
+        "dryRun": {
+          "type": "boolean",
+          "default": true,
+          "description": "Import supports a no-write plan preview (`POST /import?dryRun=true`). MUST be true if `import` is true."
+        }
+      },
+      "if": { "properties": { "import": { "const": true } }, "required": ["import"] },
+      "then": { "properties": { "dryRun": { "const": true } }, "required": ["dryRun"] }
+    },
+    "interrupt": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "RFC 0104 (`Active`). Interrupt-surface capabilities. Currently advertises portable HITL approver routing on the `kind: \"approval\"` InterruptPayload.",
+      "properties": {
+        "approverRouting": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["supported"],
+          "description": "RFC 0104. When `supported: true`, the host surfaces the OPTIONAL, ADVISORY `approverGroupRefs` / `approverRoleRefs` / `audience` fields on the approval InterruptPayload unchanged, resolves the ref kinds it advertises against its own identity/RBAC, ENFORCES eligibility at resolve time (the refs stay advisory metadata for clients; enforcement is host-side), and SHOULD route notifications to the resolved union. Refs are opaque to the engine and snapshotted at decision time for deterministic replay. Hosts that omit this block (or set `supported: false`) ignore the fields and remain conformant. Advertise only what the host actually resolves (`refKinds`) and honors (`audience`).",
+          "properties": {
+            "supported": { "type": "boolean", "description": "Host honors the RFC 0104 approver-routing fields." },
+            "refKinds": {
+              "type": "array",
+              "items": { "type": "string", "enum": ["group", "role"] },
+              "uniqueItems": true,
+              "description": "Which approver ref kinds the host actually resolves. `group` ⇒ honors `approverGroupRefs`; `role` ⇒ honors `approverRoleRefs`. Absent ⇒ the host resolves neither (advisory-only passthrough). Capability honesty: advertise only the kinds the host's resolver supports."
+            },
+            "audience": { "type": "boolean", "default": false, "description": "Host honors the `audience` notification-targeting override. Absent/`false` ⇒ the host notifies the resolved eligible union and ignores `audience`." }
+          }
+        }
+      }
     }
   },
   "additionalProperties": true

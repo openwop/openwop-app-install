@@ -33,6 +33,8 @@
  */
 
 import { randomUUID } from 'node:crypto';
+import { insertRunWithStartContext } from './runInsert.js';
+import { seedRunVariables } from './variablesRuntime.js';
 import Ajv2020 from 'ajv/dist/2020.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from './index.js';
@@ -44,10 +46,11 @@ import {
   findResourceByUri,
   findSamplingHandler,
   findToolByName,
+  isToolAllowed,
   listPrompts,
   listResources,
   listResourceTemplates,
-  listTools,
+  listToolsForPrincipal,
 } from './mcpServerRegistry.js';
 import {
   rpcError,
@@ -106,7 +109,7 @@ export async function dispatch(
         return rpcSuccess(id, {});
       }
       case 'tools/list':
-        return rpcSuccess(id, { tools: toolsListView() });
+        return rpcSuccess(id, { tools: await toolsListView(deps.principal) });
       case 'tools/call':
         return await dispatchToolsCall(id, params, deps);
       case 'resources/list':
@@ -152,8 +155,11 @@ function initializeResult(): Record<string, unknown> {
   };
 }
 
-function toolsListView(): unknown[] {
-  return listTools().map((t) => ({
+async function toolsListView(principal: Principal): Promise<unknown[]> {
+  // ADR 0087 — authorization-scoped: a caller sees only the tools their auth +
+  // feature toggles permit (gated tools hidden from anon / toggle-off callers).
+  const tools = await listToolsForPrincipal(principal);
+  return tools.map((t) => ({
     name: t.name,
     description: t.description ?? '',
     inputSchema: t.inputSchema,
@@ -198,10 +204,25 @@ async function dispatchToolsCall(
   params: Record<string, unknown>,
   deps: RouterDeps,
 ): Promise<JsonRpcResponse> {
+  const startedAt = Date.now();
   const name = typeof params.name === 'string' ? params.name : null;
   if (!name) return rpcError(id, RPC_INVALID_PARAMS, 'tools/call requires params.name');
   const tool = findToolByName(name);
-  if (!tool) return rpcError(id, RPC_INVALID_PARAMS, `tool '${name}' not exposed`);
+  // ADR 0087 — fail-closed + uniform: a tool the caller isn't authorized for is
+  // indistinguishable from a non-existent one (no existence leak via the error).
+  if (!tool || !(await isToolAllowed(tool, deps.principal))) {
+    // MCP-2 — observability for a security-sensitive external surface: the WIRE
+    // error stays uniform (`not exposed`), but the LOG distinguishes unknown vs
+    // unauthorized so an operator can see denial RATE + abuse on the MCP door
+    // (the repo's log-as-metric convention; a denied call creates no run, so it
+    // is otherwise untraced).
+    log.info('mcp_tool_denied', {
+      toolName: name,
+      reason: tool ? 'unauthorized' : 'unknown_tool',
+      principalId: deps.principal.principalId,
+    });
+    return rpcError(id, RPC_INVALID_PARAMS, `tool '${name}' not exposed`);
+  }
 
   const args: Record<string, unknown> =
     params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
@@ -229,6 +250,15 @@ async function dispatchToolsCall(
     workflowId: tool.workflowId,
     inputs: args,
     trustBoundary: 'untrusted',
+  });
+
+  // MCP-2 — one structured line per executed tool call (count + latency +
+  // outcome), the SRE-alertable signal for the external MCP door.
+  log.info('mcp_tool_call', {
+    toolName: name,
+    workflowId: tool.workflowId,
+    outcome: runResult.status,
+    durationMs: Date.now() - startedAt,
   });
 
   // Pack the run's terminal outputs as CallToolResult per RFC 0020 §C.
@@ -475,7 +505,14 @@ async function runWorkflowSync(input: {
     createdAt: now,
     updatedAt: now,
   };
-  await deps.storage.insertRun(run);
+  await insertRunWithStartContext(deps.storage, run);
+
+  // Seed the run's variable bag from the inbound inputs (the MCP `arguments`) per the
+  // workflow's `variables[]`, so `{type:'variable'}` node inputs resolve — the
+  // subWorkflowDispatcher precedent. Without this, an expose-tool workflow whose
+  // backing node reads tool args via variables (e.g. the ADR 0087 notebook tools)
+  // would see them undefined (executeRun only HYDRATES a previously-seeded bag).
+  seedRunVariables(runId, wf.definition.variables, inputs);
 
   const exec = await executeRun(deps.storage, run, wf.definition, {
     policyResolver: deps.hostSuite.providerPolicyResolver,

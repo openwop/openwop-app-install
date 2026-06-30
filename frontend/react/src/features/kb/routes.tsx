@@ -7,15 +7,19 @@ const KnowledgeBasePage = lazy(() => import('./KnowledgeBasePage.js').then((m) =
 
 const routes: FeatureRoute[] = [
   {
+    // Moved out of the workspace rail into the admin "Access & data" group
+    // (2026-06-17, user request) — it sits with Organizations / Keys / Example
+    // data (org-scoped data stores). KB is now always-on (toggle removed; ADR
+    // 0010/0024 graduation), so the nav entry is ungated.
     path: '/kb',
     element: <KnowledgeBasePage />,
-    tier: 'workspace',
+    tier: 'admin',
     nav: {
-      group: 'Workspace',
+      group: 'Access & data',
       label: 'Knowledge Base',
       icon: DatabaseIcon,
       hint: 'Document collections + semantic search (RAG)',
-      featureId: 'kb',
+      
     },
   },
 ];

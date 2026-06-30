@@ -31,11 +31,13 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { filterCommands, type CommandRegistration } from './registry/CommandRegistry.js';
+import { Trans, useTranslation } from 'react-i18next';
+import { filterCommands, resolveDescription, type CommandRegistration } from './registry/CommandRegistry.js';
 import {
   detectSlashTrigger,
   filterMentions,
   listWorkflowMentions,
+  refreshWorkflowMentionCache,
   type WorkflowMentionEntry,
 } from './lib/workflowMentions.js';
 
@@ -57,6 +59,7 @@ interface Props {
 }
 
 export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Element | null {
+  const { t } = useTranslation('chat');
   const trimmed = text.trimStart();
   // Trigger on a `/` token at the trailing position, allowing an optional
   // leading `@agent ` hand-off prefix so "@devon /" still opens the picker
@@ -66,9 +69,19 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
   const prefix = trigger?.prefix ?? '';
   const query = trigger?.query ?? '';
 
+  // When the picker opens, refresh the backend-owned workflow cache (ADR 0163
+  // follow-on) and bump a tick so the freshly-fetched entries re-render. The
+  // fetch is debounced by the open-edge: it only fires when the picker becomes
+  // visible, not on every keystroke.
+  const [, setRefreshTick] = useState(0);
+  useEffect(() => {
+    if (!shouldShow) return;
+    void refreshWorkflowMentionCache().then(() => setRefreshTick((t) => t + 1));
+  }, [shouldShow]);
+
   // Re-source on every render so a newly-saved workflow shows up
   // without needing a route remount. `listWorkflowMentions()`
-  // touches localStorage but the list is tiny.
+  // merges the backend-owned cache + localStorage but the list is tiny.
   const allWorkflows = listWorkflowMentions();
   const commandMatches = useMemo(
     // After an "@agent " hand-off, only workflows make sense (you can't `/clear`
@@ -152,7 +165,7 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
         ref={listRef}
         className="slashac-empty"
       >
-        No commands or workflows match <code>{trimmed}</code>. Try <code>/help</code>.
+        <Trans i18nKey="noCommandsMatch" ns="chat" values={{ query: trimmed }} components={{ 1: <code />, 3: <code /> }} />
       </div>
     );
   }
@@ -161,10 +174,10 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
     <div
       ref={listRef}
       role="listbox"
-      aria-label="Slash commands and workflows"
+      aria-label={t('slashCommandsAria')}
       className="slashac-listbox"
     >
-      {commandMatches.length > 0 && <Subhead label="Commands" />}
+      {commandMatches.length > 0 && <Subhead label={t('commandsSection')} />}
       {commandMatches.map((cmd, i) => (
         <CommandRow
           key={`cmd:${cmd.name}`}
@@ -174,7 +187,7 @@ export function SlashAutocomplete({ text, onPick, onDismiss }: Props): JSX.Eleme
           onHover={() => setSelectedIdx(i)}
         />
       ))}
-      {workflowMatches.length > 0 && <Subhead label="Workflows" />}
+      {workflowMatches.length > 0 && <Subhead label={t('workflowsSection')} />}
       {workflowMatches.map((wf, wIdx) => {
         // wf's index in the flat `rows` array: all commands precede
         // any workflow, so its index is `commandMatches.length + wIdx`.
@@ -229,7 +242,7 @@ function CommandRow({
         <code className="u-fw-600 u-fs-12">{cmd.name}</code>
         {cmd.usage && <code className="muted u-fs-11">{cmd.usage}</code>}
       </div>
-      <div className="muted u-fs-11">{cmd.description}</div>
+      <div className="muted u-fs-11">{resolveDescription(cmd.description)}</div>
     </div>
   );
 }

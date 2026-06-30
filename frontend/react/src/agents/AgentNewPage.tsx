@@ -21,6 +21,8 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   createUserAgent,
@@ -28,6 +30,8 @@ import {
   type CreateUserAgentInput,
 } from '../client/agentsClient.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { TextField, TextareaField, SelectField, CheckboxField } from '../ui/Field.js';
+import { ArrowLeftIcon } from '../ui/icons/index.js';
 
 const MODEL_CLASSES = ['chat', 'reasoning', 'coding', 'extraction'] as const;
 type ModelClass = (typeof MODEL_CLASSES)[number];
@@ -59,6 +63,7 @@ const INITIAL: FormState = {
 };
 
 export function AgentNewPage(): JSX.Element {
+  const { t } = useTranslation('agents');
   const [form, setForm] = useState<FormState>(INITIAL);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -82,9 +87,9 @@ export function AgentNewPage(): JSX.Element {
         if (cancelled || !agent) return;
         setForm((prev) => ({
           ...prev,
-          persona: `${agent.persona} (fork)`,
+          persona: t('newForkSuffixedName', { name: agent.persona }),
           label: agent.label && agent.label !== agent.persona
-            ? `${agent.label} (fork)`
+            ? t('newForkSuffixedName', { name: agent.label })
             : prev.label,
           description: agent.description ?? prev.description,
           modelClass: (MODEL_CLASSES.includes(agent.modelClass as ModelClass)
@@ -104,9 +109,9 @@ export function AgentNewPage(): JSX.Element {
       }
     })();
     return () => { cancelled = true; };
-  }, [forkSource]);
+  }, [forkSource, t]);
 
-  const validation = useMemo(() => validate(form), [form]);
+  const validation = useMemo(() => validate(form, t), [form, t]);
 
   async function onSubmit(e: React.FormEvent): Promise<void> {
     e.preventDefault();
@@ -130,126 +135,115 @@ export function AgentNewPage(): JSX.Element {
     <section>
       <div className="u-mb-3">
         <Link to="/agents" className="u-fs-12 u-ink-3">
-          ← All agents
+          <ArrowLeftIcon size={12} /> {t('newBack')}
         </Link>
       </div>
       <PageHeader
-        eyebrow="Agents"
-        title={forkSource ? 'Fork agent' : 'Author new agent'}
+        eyebrow={t('newEyebrow')}
+        title={forkSource ? t('newForkTitle') : t('newAuthorTitle')}
         lede={
           forkSource
-            ? `Customize a copy of an existing agent. System prompts aren't projected over the read API — you'll write a new one.`
-            : `Define a persona, give it a system prompt, and pick a model class. The agent shows up in the @-mention picker for every chat in this tenant.`
+            ? t('newForkLede')
+            : t('newAuthorLede')
         }
       />
 
       <form onSubmit={onSubmit} className="u-flex u-flex-col u-gap-3">
-        <Field label="Persona" hint="Short name. Becomes the @-mention slug + the chat panel label.">
-          <input
-            type="text"
-            value={form.persona}
-            onChange={(e) => setForm({ ...form, persona: e.target.value })}
-            maxLength={64}
-            required
-            placeholder="e.g. Code Reviewer"
-            className="agentnew-input"
-          />
-        </Field>
+        <TextField
+          label={t('newPersona')}
+          help={t('newPersonaHint')}
+          value={form.persona}
+          onChange={(e) => setForm({ ...form, persona: e.target.value })}
+          maxLength={64}
+          required
+          placeholder={t('newPersonaPlaceholder')}
+        />
 
-        <Field label="Label" hint="Longer display name. Defaults to the persona when blank.">
-          <input
-            type="text"
-            value={form.label}
-            onChange={(e) => setForm({ ...form, label: e.target.value })}
-            maxLength={80}
-            placeholder="e.g. Diff-aware code review agent"
-            className="agentnew-input"
-          />
-        </Field>
+        <TextField
+          label={t('newLabel')}
+          help={t('newLabelHint')}
+          value={form.label}
+          onChange={(e) => setForm({ ...form, label: e.target.value })}
+          maxLength={80}
+          placeholder={t('newLabelPlaceholder')}
+        />
 
-        <Field label="Description" hint="One-line summary shown in the agents list.">
-          <textarea
-            value={form.description}
-            onChange={(e) => setForm({ ...form, description: e.target.value })}
-            maxLength={280}
-            rows={2}
-            placeholder="What this agent is for and when to use it."
-            className="agentnew-input agentnew-textarea"
-          />
-        </Field>
+        <TextareaField
+          label={t('newDescription')}
+          help={t('newDescriptionHint')}
+          value={form.description}
+          onChange={(e) => setForm({ ...form, description: e.target.value })}
+          maxLength={280}
+          rows={2}
+          placeholder={t('newDescriptionPlaceholder')}
+        />
 
-        <Field label="Model class" hint="Which capability tier this agent expects (chat = general, reasoning = thinking budget, coding = code-aware, extraction = structured-output).">
-          <select
-            value={form.modelClass}
-            onChange={(e) => setForm({ ...form, modelClass: e.target.value as ModelClass })}
-            className="agentnew-input"
-          >
-            {MODEL_CLASSES.map((mc) => (
-              <option key={mc} value={mc}>{mc}</option>
-            ))}
-          </select>
-        </Field>
-
-        <Field
-          label="System prompt"
-          hint="The agent's personality + behavior contract. Prepended as the system message on every turn routed through this agent."
+        <SelectField
+          label={t('newModelClass')}
+          help={t('newModelClassHint')}
+          value={form.modelClass}
+          onChange={(e) => setForm({ ...form, modelClass: e.target.value as ModelClass })}
         >
-          <textarea
-            value={form.systemPrompt}
-            onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })}
-            maxLength={16000}
-            rows={12}
-            required
-            placeholder="You are a senior reviewer. Cite file:line for every finding. Bias toward..."
-            className="agentnew-input agentnew-prompt"
-          />
-        </Field>
+          {MODEL_CLASSES.map((mc) => (
+            <option key={mc} value={mc}>{mc}</option>
+          ))}
+        </SelectField>
 
-        <Field label="Tool allowlist" hint="Comma-separated capability ids. Empty = pure-completion agent with no function-call surface.">
-          <input
-            type="text"
-            value={form.toolAllowlistRaw}
-            onChange={(e) => setForm({ ...form, toolAllowlistRaw: e.target.value })}
-            placeholder="openwop:core.files.read, openwop:core.openwop.http.fetch"
-            className="agentnew-input agentnew-mono"
-          />
-        </Field>
+        <TextareaField
+          className="agentnew-prompt-field"
+          label={t('newSystemPrompt')}
+          help={t('newSystemPromptHint')}
+          value={form.systemPrompt}
+          onChange={(e) => setForm({ ...form, systemPrompt: e.target.value })}
+          maxLength={16000}
+          rows={12}
+          required
+          placeholder={t('newSystemPromptPlaceholder')}
+        />
 
-        <Field label="Memory shape" hint="Which memory tiers this agent uses. Inert today on the reference app — surfaced for forward-compat.">
+        <TextField
+          className="agentnew-mono-field"
+          label={t('newToolAllowlist')}
+          help={t('newToolAllowlistHint')}
+          value={form.toolAllowlistRaw}
+          onChange={(e) => setForm({ ...form, toolAllowlistRaw: e.target.value })}
+          placeholder="openwop:core.files.read, openwop:core.openwop.http.fetch"
+        />
+
+        <div className="field" role="group" aria-labelledby="agentnew-memshape-label">
+          <span className="field-label" id="agentnew-memshape-label">{t('newMemoryShape')}</span>
           <div className="u-flex u-gap-4 u-mt-1">
-            <Checkbox
+            <CheckboxField
               checked={form.scratchpad}
-              onChange={(v) => setForm({ ...form, scratchpad: v })}
-              label="Scratchpad"
+              onChange={(e) => setForm({ ...form, scratchpad: e.target.checked })}
+              label={t('newMemoryScratchpad')}
             />
-            <Checkbox
+            <CheckboxField
               checked={form.conversation}
-              onChange={(v) => setForm({ ...form, conversation: v })}
-              label="Conversation"
+              onChange={(e) => setForm({ ...form, conversation: e.target.checked })}
+              label={t('newMemoryConversation')}
             />
-            <Checkbox
+            <CheckboxField
               checked={form.longTerm}
-              onChange={(v) => setForm({ ...form, longTerm: v })}
-              label="Long-term"
+              onChange={(e) => setForm({ ...form, longTerm: e.target.checked })}
+              label={t('newMemoryLongTerm')}
             />
           </div>
-        </Field>
+          <div className="field-help">{t('newMemoryShapeHint')}</div>
+        </div>
 
-        <Field
-          label="Confidence threshold"
-          hint="0.0-1.0. The agent declares decisions below this score as low-confidence. Leave blank to skip."
-        >
-          <input
-            type="number"
-            value={form.confidenceThresholdRaw}
-            onChange={(e) => setForm({ ...form, confidenceThresholdRaw: e.target.value })}
-            min={0}
-            max={1}
-            step={0.05}
-            placeholder="0.7"
-            className="agentnew-input agentnew-w120"
-          />
-        </Field>
+        <TextField
+          className="agentnew-w120-field"
+          type="number"
+          label={t('newConfidenceThreshold')}
+          help={t('newConfidenceThresholdHint')}
+          value={form.confidenceThresholdRaw}
+          onChange={(e) => setForm({ ...form, confidenceThresholdRaw: e.target.value })}
+          min={0}
+          max={1}
+          step={0.05}
+          placeholder="0.7"
+        />
 
         {error && (
           <div
@@ -266,13 +260,13 @@ export function AgentNewPage(): JSX.Element {
             className="primary"
             disabled={!validation.ok || isSubmitting}
           >
-            {isSubmitting ? 'Saving…' : forkSource ? 'Save fork' : 'Create agent'}
+            {isSubmitting ? t('newSaving') : forkSource ? t('newSaveFork') : t('newCreateAgent')}
           </button>
           <Link
             to="/agents"
             className="agentnew-cancel"
           >
-            Cancel
+            {t('newCancel')}
           </Link>
         </div>
       </form>
@@ -280,66 +274,29 @@ export function AgentNewPage(): JSX.Element {
   );
 }
 
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}): JSX.Element {
-  return (
-    <label className="u-flex u-flex-col u-gap-1">
-      <span className="u-fs-12 u-fw-500">{label}</span>
-      {hint && (
-        <span className="muted agentnew-hint">{hint}</span>
-      )}
-      {children}
-    </label>
-  );
-}
-
-function Checkbox({
-  checked,
-  onChange,
-  label,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  label: string;
-}): JSX.Element {
-  return (
-    <label className="u-flex u-items-center u-gap-1-5 u-fs-13">
-      <input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      {label}
-    </label>
-  );
-}
-
 type ValidationResult =
   | { ok: true; input: CreateUserAgentInput }
   | { ok: false; reason: string };
 
-function validate(form: FormState): ValidationResult {
+function validate(form: FormState, t: TFunction): ValidationResult {
   if (form.persona.trim().length === 0) {
-    return { ok: false, reason: 'Persona is required.' };
+    return { ok: false, reason: t('newErrorPersonaRequired') };
   }
   if (form.systemPrompt.trim().length === 0) {
-    return { ok: false, reason: 'System prompt is required.' };
+    return { ok: false, reason: t('newErrorPromptRequired') };
   }
   const toolAllowlist = form.toolAllowlistRaw
     .split(',')
     .map((s) => s.trim())
     .filter((s) => s.length > 0);
   if (toolAllowlist.length > 32) {
-    return { ok: false, reason: 'Tool allowlist supports at most 32 entries.' };
+    return { ok: false, reason: t('newErrorTooManyTools') };
   }
   let confidenceThreshold: number | undefined;
   if (form.confidenceThresholdRaw.trim().length > 0) {
     const n = Number(form.confidenceThresholdRaw);
     if (!Number.isFinite(n) || n < 0 || n > 1) {
-      return { ok: false, reason: 'Confidence threshold must be a number between 0 and 1.' };
+      return { ok: false, reason: t('newErrorConfidenceRange') };
     }
     confidenceThreshold = n;
   }

@@ -15,6 +15,7 @@
  * @see spec/v1/ai-envelope.md §"Reasoning field (normative)"
  */
 
+import { useTranslation } from 'react-i18next';
 import { InfoIcon } from '../ui/icons/index.js';
 
 interface Props {
@@ -22,6 +23,7 @@ interface Props {
 }
 
 export function ReasoningDisclosure({ reasoning }: Props): JSX.Element | null {
+  const { t } = useTranslation('chat');
   const trimmed = reasoning.trim();
   if (!trimmed) return null;
   return (
@@ -32,7 +34,7 @@ export function ReasoningDisclosure({ reasoning }: Props): JSX.Element | null {
          *  handles pseudo-element content differently. aria-hidden because
          *  the text label "Why this answer" already conveys meaning. */}
         <span aria-hidden="true" className="reasoning-disclosure-icon"><InfoIcon size={14} /></span>{' '}
-        Why this answer
+        {t('whyThisAnswer')}
       </summary>
       <div className="reasoning-disclosure-body">{trimmed}</div>
     </details>

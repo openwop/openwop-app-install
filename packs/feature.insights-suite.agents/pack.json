@@ -1,0 +1,61 @@
+{
+  "name": "feature.insights-suite.agents",
+  "version": "1.0.0",
+  "description": "Insights & Drafting Agent Suite agent pack (ADR 0078 / RFC 0070) — three role-scoped manifest agents driven through the existing chat: Financial (Actual-vs-Plan variance analysis), Communication (in-voice recognition drafting, never auto-send), Talent (9-box readiness). Each is tool-allowlisted to the suite's nodes + the ADR 0076 read-only connectors + KB retrieval; none can write or send.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "insights-suite", "agent", "financial", "communication", "talent"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.insights-suite.agents.financial",
+      "persona": "RESEARCH",
+      "label": "Financial Analyst",
+      "description": "Reads store financials read-only (BigQuery), computes Actual-vs-Plan variance for sales/margin/labor/shrink, and surfaces off-plan hot spots with the exact SQL for 'Verify Source'. Never writes; flags figures for human review.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/financial.md",
+      "toolAllowlist": [
+        "openwop:core.bigquery.query",
+        "openwop:feature.insights-suite.nodes.variance-compute",
+        "openwop:knowledge.search"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.7 }
+    },
+    {
+      "agentId": "feature.insights-suite.agents.communication",
+      "persona": "RESEARCH",
+      "label": "Communication Drafter",
+      "description": "Drafts authentic, in-voice recognition messages (work anniversaries, milestones) by retrieving the principal's past messages as style exemplars. ALWAYS a draft for approval — never sends. Humble, gratitude-led tone; bans corporate buzzwords.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/communication.md",
+      "toolAllowlist": [
+        "openwop:knowledge.search",
+        "openwop:core.workday.query",
+        "openwop:core.email.draft"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    },
+    {
+      "agentId": "feature.insights-suite.agents.talent",
+      "persona": "RESEARCH",
+      "label": "Talent Advisor",
+      "description": "Reads talent/development data read-only, computes 9-box performance×potential readiness, and prepares talent-review insight for direct reports and two levels down. Read-only HRIS; never writes.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/talent.md",
+      "toolAllowlist": [
+        "openwop:core.workday.query",
+        "openwop:feature.insights-suite.nodes.talent-score",
+        "openwop:knowledge.search"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.7 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

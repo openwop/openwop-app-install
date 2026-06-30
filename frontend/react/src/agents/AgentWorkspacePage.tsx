@@ -5,55 +5,64 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
+import { handleTablistKeyDown } from '../ui/rovingTabs.js';
+import type { TFunction } from 'i18next';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { checkAgent, deleteRosterEntry, updateRosterEntry } from './rosterClient.js';
+import { checkAgent, deleteRosterEntry, updateRosterEntry, getAgentProfile } from './rosterClient.js';
 import { loadAgentView, statusMeta, relativeTime, type AgentView } from './agentViewModel.js';
 import { workflowName, roleThemeForAgent } from './roleTemplates.js';
-import { PlayIcon, ColumnsIcon, AlertIcon, PinIcon } from '../ui/icons/index.js';
+import { PlayIcon, ColumnsIcon, AlertIcon, PinIcon, CheckIcon, ChevronDownIcon, ArrowLeftIcon, PencilIcon } from '../ui/icons/index.js';
 import type { KanbanCard, KanbanColumn } from '../kanban/kanbanClient.js';
 import { AgentBoardPanel } from './AgentBoardPanel.js';
 import { AgentWorkflowPortfolioPanel } from './AgentWorkflowPortfolioPanel.js';
 import { AgentSchedulesPanel } from './AgentSchedulesPanel.js';
 import { AgentInstructionsPanel } from './AgentInstructionsPanel.js';
-import { AgentProfilePanel } from './AgentProfilePanel.js';
+import { AgentVoicePanel } from './AgentVoicePanel.js';
+import { AgentTwinPanel } from '../features/twin/AgentTwinPanel.js';
 import { AgentKnowledgePanel } from '../features/agent-knowledge/AgentKnowledgePanel.js';
-import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
+import { AgentMemoryTab } from '../features/agent-knowledge/AgentMemoryTab.js';
 import { AgentIntegrationsPanel } from './AgentIntegrationsPanel.js';
 import { AgentConnectionStatusPanel } from './AgentConnectionStatusPanel.js';
 import { AgentActivityTab } from './AgentActivityTab.js';
 import { RecurringTasksPanel } from './RecurringTasksPanel.js';
 import { AgentHealthPanel } from './AgentHealthPanel.js';
 import { AgentAvatar } from './AgentAvatar.js';
-import { getMyProfile, setAgentPinned } from '../features/profiles/profilesClient.js';
+import { getMyProfile, setAgentPinned, setChatAgentPinned } from '../features/profiles/profilesClient.js';
 import { AvatarEditor } from './AvatarEditor.js';
+import { AgentDetailsEditor } from './AgentDetailsEditor.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Markdown } from '../ui/Markdown.js';
 
 /** Human label for an autonomous-heartbeat cadence (ms). 0/absent ⇒ manual. */
-function formatHeartbeat(intervalMs: number | undefined): string {
-  if (!intervalMs || intervalMs <= 0) return 'manual';
+function formatHeartbeat(intervalMs: number | undefined, t: TFunction): string {
+  if (!intervalMs || intervalMs <= 0) return t('wsHeartbeatManual');
   const mins = Math.round(intervalMs / 60_000);
-  if (mins < 60) return `every ${mins}m`;
+  if (mins < 60) return t('wsHeartbeatMinutes', { minutes: mins });
   const hrs = Math.round(mins / 60);
-  return `every ${hrs}h`;
+  return t('wsHeartbeatHours', { hours: hrs });
 }
 
-type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'profile' | 'knowledge' | 'integrations' | 'activity';
-const TABS: ReadonlyArray<{ key: TabKey; label: string; featureId?: string }> = [
-  { key: 'overview', label: 'Overview' },
-  { key: 'workflows', label: 'Workflows' },
-  { key: 'board', label: 'Board' },
-  { key: 'schedules', label: 'Recurring tasks' },
-  { key: 'instructions', label: 'Instructions' },
-  { key: 'profile', label: 'Profile' },
-  // ADR 0038 — the per-agent knowledge tab, shown only when the feature is on.
-  { key: 'knowledge', label: 'Knowledge', featureId: 'agent-knowledge' },
-  { key: 'integrations', label: 'Integrations' },
-  { key: 'activity', label: 'Activity' },
+type TabKey = 'overview' | 'workflows' | 'board' | 'schedules' | 'instructions' | 'knowledge' | 'memory' | 'integrations' | 'activity';
+const TABS: ReadonlyArray<{ key: TabKey; labelKey: string }> = [
+  { key: 'overview', labelKey: 'wsTabOverview' },
+  { key: 'workflows', labelKey: 'wsTabWorkflows' },
+  { key: 'board', labelKey: 'wsTabBoard' },
+  { key: 'schedules', labelKey: 'wsTabSchedules' },
+  // ADR 0101 — the former Profile tab is folded into Instructions as "Guardrails".
+  { key: 'instructions', labelKey: 'wsTabInstructions' },
+  // ADR 0038 — per-agent knowledge & memory (always-on since 2026-06-16).
+  { key: 'knowledge', labelKey: 'wsTabKnowledge' },
+  // ADR 0041 — the per-agent memory browser.
+  { key: 'memory', labelKey: 'wsTabMemory' },
+  { key: 'integrations', labelKey: 'wsTabIntegrations' },
+  { key: 'activity', labelKey: 'wsTabActivity' },
 ];
 
 export function AgentWorkspacePage(): JSX.Element {
+  const { t } = useTranslation('agents');
   const { agentId: rosterId } = useParams<{ agentId: string }>();
   const navigate = useNavigate();
   const [view, setView] = useState<AgentView | null>(null);
@@ -62,6 +71,7 @@ export function AgentWorkspacePage(): JSX.Element {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [editingAvatar, setEditingAvatar] = useState(false);
+  const [editingDetails, setEditingDetails] = useState(false);
   // Bumped on board-affecting actions (Check now) so the embedded board refetches.
   const [boardRefresh, setBoardRefresh] = useState(0);
   // Tab lives in the URL (?tab=board) so refresh / back / share preserve it.
@@ -77,10 +87,10 @@ export function AgentWorkspacePage(): JSX.Element {
     }, { replace: true });
   };
 
-  // ADR 0038 — the Knowledge tab is shown only when the agent-knowledge feature
-  // resolves enabled for the caller (the same toggle the panel + backend gate on).
-  const agentKnowledge = useFeatureAccess('agent-knowledge');
-  const visibleTabs = TABS.filter((t) => !t.featureId || (t.featureId === 'agent-knowledge' && agentKnowledge.enabled));
+  // ADR 0038 — Knowledge + Memory are always-on (graduated off the toggle
+  // 2026-06-16); every tab is visible. The backend remains the authority
+  // (RBAC + IDOR + profile policy on each knowledge call).
+  const visibleTabs = TABS;
 
   const refresh = useCallback(async () => {
     if (!rosterId) return;
@@ -95,6 +105,7 @@ export function AgentWorkspacePage(): JSX.Element {
   // caller's own profile; the Sidebar reads the same source, so a pin here
   // shows up there after the profile refetch a pin triggers there.
   const [pinned, setPinned] = useState(false);
+  const [chatPinned, setChatPinned] = useState(false);
   const [pinBusy, setPinBusy] = useState(false);
 
   useEffect(() => {
@@ -116,25 +127,36 @@ export function AgentWorkspacePage(): JSX.Element {
     if (!rosterId) return undefined;
     let cancelled = false;
     void getMyProfile()
-      .then((p) => { if (!cancelled) setPinned((p.pinnedAgentIds ?? []).includes(rosterId)); })
+      .then((p) => {
+        if (cancelled) return;
+        setPinned((p.pinnedAgentIds ?? []).includes(rosterId));
+        setChatPinned((p.pinnedChatAgentIds ?? []).includes(rosterId));
+      })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [rosterId]);
 
-  const onTogglePin = useCallback(async () => {
+  const onTogglePin = useCallback(async (target: 'sidebar' | 'chat') => {
     if (!rosterId) return;
     setPinBusy(true);
     try {
-      await setAgentPinned(rosterId, !pinned);
-      setPinned((v) => !v);
-      // Tell the Sidebar to re-read its pinned list.
-      window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
+      if (target === 'sidebar') {
+        await setAgentPinned(rosterId, !pinned);
+        setPinned((v) => !v);
+        // Tell the Sidebar to re-read its pinned list.
+        window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
+      } else {
+        await setChatAgentPinned(rosterId, !chatPinned);
+        setChatPinned((v) => !v);
+        // Tell the chat welcome panel to re-read its pinned agents.
+        window.dispatchEvent(new Event('openwop:pinned-chat-agents-changed'));
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not update pin.');
+      setError(err instanceof Error ? err.message : t('wsUpdatePinError'));
     } finally {
       setPinBusy(false);
     }
-  }, [rosterId, pinned]);
+  }, [rosterId, pinned, chatPinned, t]);
 
   const onCheckNow = async () => {
     if (!view) return;
@@ -143,7 +165,9 @@ export function AgentWorkspacePage(): JSX.Element {
     setError(null);
     try {
       const result = await checkAgent(view.entry.rosterId);
-      setNotice(result.picked ? `${view.entry.persona} picked up “${result.cardTitle}” and started a run.` : `No eligible To Do tasks (${result.reason ?? 'idle'}).`);
+      setNotice(result.picked
+        ? t('wsCheckPickedUp', { persona: view.entry.persona, title: result.cardTitle })
+        : t('wsNoEligible', { reason: result.reason ?? t('wsIdle') }));
       await refresh();
       setBoardRefresh((n) => n + 1); // make the Board tab reflect the moved card immediately
       if (result.picked) setTab('board');
@@ -169,9 +193,7 @@ export function AgentWorkspacePage(): JSX.Element {
   // a clean removal — and the silent demo auto-seed will NOT resurrect it.
   const onDelete = async () => {
     if (!view) return;
-    if (!window.confirm(
-      `Delete ${view.entry.persona}? This removes the agent and its board, schedules, and pending approvals. It can't be undone.`,
-    )) return;
+    if (!(await confirm({ title: t('wsDeleteConfirm', { persona: view.entry.persona }), danger: true, confirmLabel: t('common:delete') }))) return;
     setBusy(true);
     setError(null);
     try {
@@ -181,6 +203,15 @@ export function AgentWorkspacePage(): JSX.Element {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false); // stay on the page so the user can retry; on success we navigate away
     }
+  };
+
+  // Persisted the edit-details dialog: close it, refresh the header/tabs from
+  // the server, and confirm. The PATCH already landed inside the dialog.
+  const onDetailsSaved = async () => {
+    setError(null);
+    setEditingDetails(false);
+    await refresh();
+    setNotice(t('wsDetailsUpdated'));
   };
 
   // Save (string data-URI) or clear (null) the profile photo, then refresh so
@@ -193,22 +224,22 @@ export function AgentWorkspacePage(): JSX.Element {
       await updateRosterEntry(view.entry.rosterId, { avatarUrl });
       setEditingAvatar(false);
       await refresh();
-      setNotice(avatarUrl ? `Updated ${view.entry.persona}'s profile photo.` : `Removed ${view.entry.persona}'s profile photo.`);
+      setNotice(avatarUrl ? t('wsAvatarUpdated', { persona: view.entry.persona }) : t('wsAvatarRemoved', { persona: view.entry.persona }));
     } catch (err) {
       // Keep the editor open so the user can retry / shrink an oversized image.
       setError(err instanceof Error ? err.message : String(err));
     }
   };
 
-  if (loading) return <section className="u-p-4"><StateCard title="Loading agent…" loading /></section>;
+  if (loading) return <section className="u-p-4"><StateCard title={t('wsLoadingAgent')} loading /></section>;
   if (!view) {
     return (
       <section className="u-p-4">
         <StateCard
           icon={<AlertIcon size={20} />}
-          title="Agent not found"
-          body="This coworker may have been removed or the link is out of date."
-          action={<Link to="/agents" className="secondary btn-sm">Back to agents</Link>}
+          title={t('wsNotFoundTitle')}
+          body={t('wsNotFoundBody')}
+          action={<Link to="/agents" className="secondary btn-sm">{t('wsBackToAgents')}</Link>}
         />
       </section>
     );
@@ -220,37 +251,71 @@ export function AgentWorkspacePage(): JSX.Element {
 
   return (
     <section>
-      <Link to="/agents" className="u-fs-12 muted">← All agents</Link>
+      <Link to="/agents" className="u-fs-12 muted"><ArrowLeftIcon size={12} /> {t('backToAgents')}</Link>
 
       {/* Header */}
       <div className="agentws-header">
         <AgentAvatar persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} size={48} onEdit={() => setEditingAvatar(true)} />
         <div className="u-flex-1 u-minw-200">
-          <h1 className="u-m-0">{entry.persona}</h1>
-          <div className="muted">{entry.label ?? 'Agent'}</div>
+          <h1 className="u-m-0 u-flex u-items-center u-gap-2 u-wrap">
+            {entry.persona}
+            <button
+              type="button"
+              className="secondary btn-sm u-iflex u-items-center u-gap-1"
+              onClick={() => setEditingDetails(true)}
+              title={t('wsEditDetailsTitle', { persona: entry.persona })}
+            >
+              <PencilIcon size={13} /> {t('wsEditDetails')}
+            </button>
+          </h1>
+          <div className="muted">{entry.label ?? t('agent')}</div>
         </div>
         <div className="action-bar">
-          <button
-            type="button"
-            className={pinned ? 'btn-accent' : 'secondary'}
-            disabled={pinBusy}
-            aria-pressed={pinned}
-            onClick={() => void onTogglePin()}
-            title={pinned ? 'Unpin from the sidebar' : 'Pin to the sidebar for quick access'}
-          >
-            <PinIcon size={14} style={{ verticalAlign: '-2px', marginInlineEnd: '4px' }} />
-            {pinned ? 'Pinned' : 'Pin'}
-          </button>
+          <details className="pin-menu">
+            <summary
+              className={pinned || chatPinned ? 'btn-accent' : 'secondary'}
+              aria-haspopup="menu"
+              title={t('wsPinTitle')}
+            >
+              <PinIcon size={14} style={{ verticalAlign: '-2px', marginInlineEnd: '4px' }} />
+              {pinned || chatPinned ? t('wsPinned') : t('wsPin')}
+              <ChevronDownIcon size={14} style={{ verticalAlign: '-2px', marginInlineStart: '4px' }} />
+            </summary>
+            <div className="pin-menu-panel surface-card" role="menu">
+              <button
+                type="button"
+                className="account-menu-item"
+                role="menuitemcheckbox"
+                aria-checked={pinned}
+                disabled={pinBusy}
+                onClick={() => void onTogglePin('sidebar')}
+              >
+                <span className="account-menu-item-icon" aria-hidden>{pinned ? <CheckIcon size={16} /> : <PinIcon size={16} />}</span>
+                {pinned ? t('wsPinnedToSidebar') : t('wsPinToSidebar')}
+              </button>
+              <button
+                type="button"
+                className="account-menu-item"
+                role="menuitemcheckbox"
+                aria-checked={chatPinned}
+                disabled={pinBusy}
+                onClick={() => void onTogglePin('chat')}
+              >
+                <span className="account-menu-item-icon" aria-hidden>{chatPinned ? <CheckIcon size={16} /> : <PinIcon size={16} />}</span>
+                {chatPinned ? t('wsPinnedToChat') : t('wsPinToChat')}
+              </button>
+            </div>
+          </details>
           <span className={`chip ${sm.chip}`} title={sm.help}>{sm.label}</span>
           <span
             className="chip chip--muted"
             title={
               entry.heartbeatIntervalMs && entry.heartbeatIntervalMs > 0
-                ? 'A background daemon runs this agent’s “Check now” automatically on this cadence; you can also trigger it manually.'
-                : 'This agent checks for work when you click “Check now”, plus on any enabled schedule.'
+                ? t('wsHeartbeatTitleAuto')
+                : t('wsHeartbeatTitleManual')
             }
           >
-            Heartbeat: {formatHeartbeat(entry.heartbeatIntervalMs)}
+            {t('wsHeartbeatLabel', { cadence: formatHeartbeat(entry.heartbeatIntervalMs, t) })}
           </span>
         </div>
       </div>
@@ -261,29 +326,29 @@ export function AgentWorkspacePage(): JSX.Element {
           className="primary"
           onClick={() => void onCheckNow()}
           disabled={busy || !entry.enabled}
-          title={`Run the heartbeat: let ${entry.persona} pick up the next To Do task and start its workflow.`}
+          title={t('wsCheckNowTitle', { persona: entry.persona })}
         >
-          {busy ? 'Checking…' : 'Check now'}
+          {busy ? t('wsChecking') : t('wsCheckNow')}
         </button>
-        <button type="button" className="secondary" onClick={() => setTab('board')}>Add task</button>
-        <button type="button" className="secondary" onClick={() => setTab('workflows')}>Run workflow</button>
-        <button type="button" className="secondary" onClick={() => void onTogglePause()}>{entry.enabled ? 'Pause' : 'Resume'}</button>
-        <button type="button" className="secondary" onClick={() => setTab('instructions')}>Instructions</button>
+        <button type="button" className="secondary" onClick={() => setTab('board')}>{t('wsAddTask')}</button>
+        <button type="button" className="secondary" onClick={() => setTab('workflows')}>{t('wsRunWorkflow')}</button>
+        <button type="button" className="secondary" onClick={() => void onTogglePause()}>{entry.enabled ? t('wsPause') : t('wsResume')}</button>
+        <button type="button" className="secondary" onClick={() => setTab('instructions')}>{t('wsInstructions')}</button>
         <button
           type="button"
           className="secondary u-text-danger"
           onClick={() => void onDelete()}
           disabled={busy}
-          title={`Delete ${entry.persona} and its board, schedules, and pending approvals`}
+          title={t('wsDeleteTitle', { persona: entry.persona })}
         >
-          Delete
+          {t('wsDelete')}
         </button>
         <span className="muted u-fs-12">
           {entry.lastHeartbeatAt
-            ? `Last checked ${relativeTime(entry.lastHeartbeatAt)}`
-            : 'Not checked yet'}
+            ? t('wsLastChecked', { when: relativeTime(entry.lastHeartbeatAt) })
+            : t('wsNotChecked')}
           {view.nextSchedule
-            ? ` · next scheduled run: ${String(view.nextSchedule.metadata?.label ?? view.nextSchedule.cronExpr)}`
+            ? t('wsNextScheduled', { label: String(view.nextSchedule.metadata?.label ?? view.nextSchedule.cronExpr) })
             : ''}
         </span>
       </div>
@@ -293,17 +358,18 @@ export function AgentWorkspacePage(): JSX.Element {
 
       {/* Tabs — the canonical editorial tab strip (DESIGN.md §5 `.tabs`/`.tab`),
           symmetric with the user profile's tabs (ADR 0025). */}
-      <div className="tabs u-mb-4 u-wrap" role="tablist">
-        {visibleTabs.map((t) => (
+      <div className="tabs u-mb-4 u-wrap" role="tablist" onKeyDown={handleTablistKeyDown}>
+        {visibleTabs.map((tabItem) => (
           <button
-            key={t.key}
+            key={tabItem.key}
             type="button"
             role="tab"
-            aria-selected={tab === t.key}
+            aria-selected={tab === tabItem.key}
+            tabIndex={tab === tabItem.key ? 0 : -1}
             className="tab"
-            onClick={() => setTab(t.key)}
+            onClick={() => setTab(tabItem.key)}
           >
-            {t.label}
+            {t(tabItem.labelKey)}
           </button>
         ))}
       </div>
@@ -312,22 +378,33 @@ export function AgentWorkspacePage(): JSX.Element {
       {tab === 'workflows' ? <AgentWorkflowPortfolioPanel entry={entry} jobs={view.jobs} board={view.board} onChanged={() => void refresh()} /> : null}
       {tab === 'board' ? (view.board ? <AgentBoardPanel boardId={view.board.id} persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} workflows={entry.workflows} refreshSignal={boardRefresh} onChanged={() => void refresh()} /> : <NoBoard persona={entry.persona} />) : null}
       {tab === 'schedules' ? <AgentSchedulesPanel entry={entry} /> : null}
-      {tab === 'instructions' ? <AgentInstructionsPanel entry={entry} onChanged={() => void refresh()} /> : null}
-      {tab === 'profile' ? <AgentProfilePanel rosterId={entry.rosterId} roleKey={entry.roleKey} persona={entry.persona} /> : null}
+      {tab === 'instructions' ? (
+        <div className="u-flex u-flex-col u-gap-4">
+          <AgentInstructionsPanel entry={entry} onChanged={() => void refresh()} />
+          <AgentVoicePanel rosterId={entry.rosterId} />
+        </div>
+      ) : null}
       {tab === 'knowledge' ? <AgentKnowledgePanel rosterId={entry.rosterId} persona={entry.persona} /> : null}
+      {tab === 'memory' ? <AgentMemoryTab rosterId={entry.rosterId} persona={entry.persona} /> : null}
       {tab === 'integrations' ? (
         <div className="u-flex u-flex-col u-gap-4">
           <AgentConnectionStatusPanel rosterId={entry.rosterId} />
           <AgentIntegrationsPanel boardId={view.board?.id ?? null} persona={entry.persona} onChanged={() => void refresh()} />
+          {/* ADR 0044 — the "Twin of …" agent↔person recall link (self-gates on
+              the twin-recall toggle). Relocated here from the removed Profile tab
+              (ADR 0101) — it's an integration-style link, not a governance guardrail. */}
+          <AgentTwinPanel rosterId={entry.rosterId} persona={entry.persona} />
         </div>
       ) : null}
       {tab === 'activity' ? <AgentActivityTab rosterId={entry.rosterId} persona={entry.persona} refreshSignal={boardRefresh} /> : null}
 
       {/* ADR 0023 — the Chief of Staff's recurring tasks (perception loops) +
-          operating-health metrics, shown at the bottom of its workspace. Only
-          this agent owns loops/health; the health panel self-hides for
-          non-admins (the endpoint is superadmin-gated). */}
-      {entry.roleKey === 'chief-of-staff' ? (
+          operating-health metrics. These are at-a-glance summaries ("what it
+          runs on a schedule" + "how it's doing"), so they belong on the
+          Overview tab only — previously they rendered after the tab switch and
+          repeated at the bottom of EVERY tab. Only this agent owns loops/health;
+          the health panel self-hides for non-admins (superadmin-gated endpoint). */}
+      {entry.roleKey === 'chief-of-staff' && tab === 'overview' ? (
         <div className="u-mt-4 u-grid u-gap-4">
           <RecurringTasksPanel />
           <AgentHealthPanel persona={entry.persona} />
@@ -335,10 +412,10 @@ export function AgentWorkspacePage(): JSX.Element {
       ) : null}
 
       <details className="u-mt-5">
-        <summary className="muted u-fs-12 u-cursor-pointer">Advanced protocol details</summary>
+        <summary className="muted u-fs-12 u-cursor-pointer">{t('wsAdvancedSummary')}</summary>
         <p className="muted u-fs-12 u-mt-2">
-          {entry.persona} runs manifest agent <code>{entry.agentRef.agentId}</code> · roster id <code>{entry.rosterId}</code>.
-          {' '}<button type="button" className="secondary btn-sm" onClick={() => navigate('/roster')}>Open raw roster</button>
+          {t('wsAdvancedDetail', { persona: entry.persona, agentId: entry.agentRef.agentId, rosterId: entry.rosterId })}
+          {' '}<button type="button" className="secondary btn-sm" onClick={() => navigate('/roster')}>{t('wsOpenRawRoster')}</button>
         </p>
       </details>
 
@@ -350,16 +427,25 @@ export function AgentWorkspacePage(): JSX.Element {
           onSave={onSaveAvatar}
         />
       ) : null}
+
+      {editingDetails ? (
+        <AgentDetailsEditor
+          entry={entry}
+          onClose={() => setEditingDetails(false)}
+          onSaved={() => { void onDetailsSaved(); }}
+        />
+      ) : null}
     </section>
   );
 }
 
 function NoBoard({ persona }: { persona: string }): JSX.Element {
+  const { t } = useTranslation('agents');
   return (
     <StateCard
       icon={<ColumnsIcon size={20} />}
-      title="No task board yet"
-      body={`${persona} has no task board yet.`}
+      title={t('wsNoBoardTitle')}
+      body={t('wsNoBoardBody', { persona })}
     />
   );
 }
@@ -392,6 +478,7 @@ function PriorityPanel({
   onCheckNow: () => void;
   busy: boolean;
 }): JSX.Element {
+  const { t } = useTranslation('agents');
   const { entry, board, cards, nextSchedule } = view;
   const todoCol = board?.columns.find((c) => colMatches(c, 'todo'));
   const workingCol = board?.columns.find((c) => colMatches(c, 'working'));
@@ -408,41 +495,41 @@ function PriorityPanel({
     <div className="surface-card agentws-priority-card">
       <div className="u-flex u-gap-4 u-wrap">
         <div className="agentws-cell">
-          <div className="agentws-stat-label">Next up</div>
+          <div className="agentws-stat-label">{t('wsNextUp')}</div>
           {topTodo ? (
             <>
               <div className="u-fw-600 u-fs-14">
                 {topTodo.title}
-                {topTodo.priority === 'high' ? <span className="chip chip--danger agentws-high-chip">High</span> : null}
+                {topTodo.priority === 'high' ? <span className="chip chip--danger agentws-high-chip">{t('wsHigh')}</span> : null}
               </div>
               <button type="button" className="primary btn-sm u-mt-1-5" onClick={onCheckNow} disabled={busy || !entry.enabled}>
-                {busy ? 'Checking…' : 'Pick up now'}
+                {busy ? t('wsChecking') : t('wsPickUpNow')}
               </button>
             </>
           ) : (
-            <div className="muted u-fs-13">No pending tasks. <button type="button" className="secondary btn-sm" onClick={() => onGoto('board')}>Add a task</button></div>
+            <div className="muted u-fs-13">{t('wsNoPendingTasks')} <button type="button" className="secondary btn-sm" onClick={() => onGoto('board')}>{t('wsAddATask')}</button></div>
           )}
         </div>
         <div className="agentws-cell">
-          <div className="agentws-stat-label">In progress</div>
+          <div className="agentws-stat-label">{t('wsInProgress')}</div>
           {running ? (
             <div className="u-fs-14">
               <div className="u-fw-600">{running.title}</div>
-              {running.lastRunId ? <Link to={`/runs/${running.lastRunId}`} className="u-iflex u-items-center u-gap-1 u-fs-13 u-mt-1"><PlayIcon size={12} /> View run</Link> : null}
+              {running.lastRunId ? <Link to={`/runs/${running.lastRunId}`} className="u-iflex u-items-center u-gap-1 u-fs-13 u-mt-1"><PlayIcon size={12} /> {t('wsViewRun')}</Link> : null}
             </div>
           ) : (
-            <div className="muted u-fs-13">Nothing running.</div>
+            <div className="muted u-fs-13">{t('wsNothingRunning')}</div>
           )}
         </div>
         <div className="agentws-cell">
-          <div className="agentws-stat-label">Next scheduled</div>
+          <div className="agentws-stat-label">{t('wsNextScheduledLabel')}</div>
           {nextSchedule ? (
             <div className="u-fs-14">
               <div className="u-fw-600">{workflowName(nextSchedule.workflowId ?? entry.workflows[0] ?? '')}</div>
               <div className="muted u-fs-13 u-mt-1">{String(nextSchedule.metadata?.label ?? nextSchedule.cronExpr)}</div>
             </div>
           ) : (
-            <div className="muted u-fs-13">No schedule. <button type="button" className="secondary btn-sm" onClick={() => onGoto('schedules')}>Add one</button></div>
+            <div className="muted u-fs-13">{t('wsNoSchedule')} <button type="button" className="secondary btn-sm" onClick={() => onGoto('schedules')}>{t('wsAddOne')}</button></div>
           )}
         </div>
       </div>
@@ -451,45 +538,74 @@ function PriorityPanel({
 }
 
 function OverviewTab({ view, onGoto, onCheckNow, busy }: { view: AgentView; onGoto: (t: TabKey) => void; onCheckNow: () => void; busy: boolean }): JSX.Element {
+  const { t } = useTranslation('agents');
   const { entry, laneCounts, nextSchedule } = view;
   return (
     <>
     <PriorityPanel view={view} onGoto={onGoto} onCheckNow={onCheckNow} busy={busy} />
     <div className="agentws-overview-grid">
       <div className="agentws-overview-card">
-        <strong>What {entry.persona} does</strong>
+        <strong>{t('wsWhatDoes', { persona: entry.persona })}</strong>
         {entry.description
           ? <Markdown className="u-fs-14">{entry.description}</Markdown>
-          : <p className="u-fs-14 u-mb-0">{`${entry.label ?? 'Agent'} — assign a role description in Instructions.`}</p>}
+          : <p className="u-fs-14 u-mb-0">{t('wsRoleNoDescription', { label: entry.label ?? t('agent') })}</p>}
       </div>
       <div className="agentws-overview-card">
-        <strong>Workflow portfolio</strong>
-        <p className="u-fs-14">{entry.workflows.length === 0 ? 'No workflows yet.' : `${entry.workflows.length} assigned.`}</p>
+        <strong>{t('wsWorkflowPortfolio')}</strong>
+        <p className="u-fs-14">{entry.workflows.length === 0 ? t('wsNoWorkflowsYet') : t('wsWorkflowsAssigned', { count: entry.workflows.length })}</p>
         <ul className="agentws-portfolio-list">
           {entry.workflows.slice(0, 4).map((w) => <li key={w}>{workflowName(w)}</li>)}
         </ul>
-        <button type="button" className="secondary u-fs-12 u-mt-1-5" onClick={() => onGoto('workflows')}>Manage workflows</button>
+        <button type="button" className="secondary u-fs-12 u-mt-1-5" onClick={() => onGoto('workflows')}>{t('wsManageWorkflows')}</button>
       </div>
       <div className="agentws-overview-card">
-        <strong>Task board</strong>
-        <p className="u-fs-14 u-mb-1-5">{laneCounts.todo} To Do · {laneCounts.working} Working · {laneCounts.waiting} Waiting · {laneCounts.done} Done</p>
-        <button type="button" className="secondary u-fs-12" onClick={() => onGoto('board')}>Open board</button>
+        <strong>{t('wsTaskBoard')}</strong>
+        <p className="u-fs-14 u-mb-1-5">{t('wsLaneCounts', { todo: laneCounts.todo, working: laneCounts.working, waiting: laneCounts.waiting, done: laneCounts.done })}</p>
+        <button type="button" className="secondary u-fs-12" onClick={() => onGoto('board')}>{t('wsOpenBoard')}</button>
       </div>
       <div className="agentws-overview-card">
-        <strong>Schedule</strong>
-        <p className="u-fs-14 u-mb-1-5">{nextSchedule ? String(nextSchedule.metadata?.label ?? nextSchedule.cronExpr) : 'No schedule yet.'}</p>
-        <button type="button" className="secondary u-fs-12" onClick={() => onGoto('schedules')}>Manage schedules</button>
+        <strong>{t('wsSchedule')}</strong>
+        <p className="u-fs-14 u-mb-1-5">{nextSchedule ? String(nextSchedule.metadata?.label ?? nextSchedule.cronExpr) : t('wsNoScheduleYet')}</p>
+        <button type="button" className="secondary u-fs-12" onClick={() => onGoto('schedules')}>{t('wsManageSchedules')}</button>
       </div>
+      {/* ADR 0101 Phase 3 — the agent's declared success metrics, surfaced from
+          its guardrails profile. Self-hides when none are declared. */}
+      <AgentMetricsCard rosterId={entry.rosterId} />
       <div className="agentws-overview-card agentws-card-full">
-        <strong>Next steps</strong>
+        <strong>{t('wsNextSteps')}</strong>
         <ul className="agentws-next-steps-list">
-          <li>Add a task to {entry.persona}'s board.</li>
-          <li>Assign another workflow from the library.</li>
-          <li>Schedule a workflow to run on a timer.</li>
-          <li>Connect Discord so teammates can assign {entry.persona} work from chat.</li>
+          <li>{t('wsNextStepAddTask', { persona: entry.persona })}</li>
+          <li>{t('wsNextStepAssign')}</li>
+          <li>{t('wsNextStepSchedule')}</li>
+          <li>{t('wsNextStepDiscord', { persona: entry.persona })}</li>
         </ul>
       </div>
     </div>
     </>
+  );
+}
+
+/** The agent's declared success metrics (agentProfile.metrics), shown on the
+ *  Overview tab. Self-fetches + self-hides when there are none (ADR 0101 §3) —
+ *  display-only; these are the KPIs to watch, not enforced values. */
+function AgentMetricsCard({ rosterId }: { rosterId: string }): JSX.Element | null {
+  const { t } = useTranslation('agents');
+  const [metrics, setMetrics] = useState<string[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void getAgentProfile(rosterId)
+      .then((p) => { if (!cancelled) setMetrics(p?.metrics ?? []); })
+      .catch(() => { /* no profile / not readable → render nothing */ });
+    return () => { cancelled = true; };
+  }, [rosterId]);
+  if (metrics.length === 0) return null;
+  return (
+    <div className="agentws-overview-card agentws-card-full">
+      <strong>{t('wsSuccessMetrics')}</strong>
+      <p className="u-fs-13 muted u-mt-1 u-mb-1-5">{t('wsSuccessMetricsHint')}</p>
+      <div className="u-flex u-gap-2 u-wrap">
+        {metrics.map((m) => <span key={m} className="chip chip--muted">{m}</span>)}
+      </div>
+    </div>
   );
 }

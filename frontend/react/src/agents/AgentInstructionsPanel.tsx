@@ -14,6 +14,7 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { updateRosterEntry, type RosterEntry } from './rosterClient.js';
 import { updateUserAgent } from '../client/agentsClient.js';
@@ -21,8 +22,10 @@ import { Notice } from '../ui/Notice.js';
 import { MarkdownEditor } from '../ui/MarkdownEditor.js';
 import { Markdown } from '../ui/Markdown.js';
 import { StructuredPromptEditor } from './StructuredPromptEditor.js';
+import { AgentGuardrailsPanel } from './AgentGuardrailsPanel.js';
 
 export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntry; onChanged: () => void }): JSX.Element {
+  const { t } = useTranslation('agents');
   const navigate = useNavigate();
   const agentId = entry.agentRef.agentId;
   const isUserAuthored = agentId.startsWith('user.');
@@ -46,7 +49,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
     try {
       await updateRosterEntry(entry.rosterId, { description });
       try { window.localStorage.removeItem(`owp.draft.desc.${entry.rosterId}`); } catch { /* ignore */ }
-      setNotice('Saved.');
+      setNotice(t('instrSaved'));
       onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -65,7 +68,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
       try { window.localStorage.removeItem(`owp.draft.prompt.${agentId}`); } catch { /* ignore */ }
       setSavedPrompt(updated.systemPrompt);
       setSystemPrompt('');
-      setNotice('Instructions updated.');
+      setNotice(t('instrUpdated'));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -78,9 +81,9 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success">{notice}</Notice> : null}
 
-      <div className="u-block u-fw-600 u-mb-1">What this agent does</div>
+      <div className="u-block u-fw-600 u-mb-1">{t('instrWhatThisDoes')}</div>
       <p className="muted u-fs-13 u-mt-0">
-        A short description of {entry.persona}'s role — shown on the dashboard and overview.
+        {t('instrDescriptionHint', { persona: entry.persona })}
       </p>
       <MarkdownEditor
         value={description}
@@ -88,22 +91,22 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
         rows={3}
         maxLength={600}
         autosaveKey={`owp.draft.desc.${entry.rosterId}`}
-        placeholder={`e.g. **${entry.persona}** routes leads and follows up on opportunities.`}
-        ariaLabel={`${entry.persona}'s role description`}
+        placeholder={t('instrDescriptionPlaceholder', { persona: entry.persona })}
+        ariaLabel={t('instrRoleDescriptionAria', { persona: entry.persona })}
       />
       <div className="agentinstr-save-row">
-        <button type="button" className="primary" onClick={() => void onSaveDescription()} disabled={saving}>Save</button>
+        <button type="button" className="primary" onClick={() => void onSaveDescription()} disabled={saving}>{t('instrSaveDescription')}</button>
       </div>
 
-      <div className="u-block u-fw-600 u-mb-1">Instructions</div>
+      <div className="u-block u-fw-600 u-mb-1">{t('instrInstructions')}</div>
       <p className="muted u-fs-13 u-mt-0">
-        These instructions shape how {entry.persona} behaves when running workflows or replying in chat.
+        {t('instrInstructionsHint', { persona: entry.persona })}
       </p>
 
       {isUserAuthored ? (
         <>
           <p className="muted u-fs-12 u-mt-0">
-            For security, the current instructions aren't shown here — saving replaces them.
+            {t('instrSecurityNote')}
           </p>
           <StructuredPromptEditor
             value={systemPrompt}
@@ -111,11 +114,11 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
             autosaveKey={`owp.draft.prompt.${agentId}`}
           />
           <div className="u-mt-1-5">
-            <button type="button" className="primary" onClick={() => void onSavePrompt()} disabled={saving || !systemPrompt.trim()}>Save instructions</button>
+            <button type="button" className="primary" onClick={() => void onSavePrompt()} disabled={saving || !systemPrompt.trim()}>{t('instrSaveInstructions')}</button>
           </div>
           {savedPrompt ? (
             <div className="agentinstr-saved">
-              <div className="muted u-fs-12">Saved instructions:</div>
+              <div className="muted u-fs-12">{t('instrSavedInstructions')}</div>
               <div className="surface-card agentinstr-saved-card">
                 <Markdown>{savedPrompt}</Markdown>
               </div>
@@ -127,25 +130,38 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
           {isForkable ? (
             <>
               <p className="u-mt-0 u-fs-14">
-                {entry.persona} runs an installed agent template (<code>{agentId}</code>). Its instructions are read-only here.
+                {t('instrReadonlyForkable', { persona: entry.persona, agentId })}
               </p>
               <button type="button" className="secondary" onClick={() => navigate(`/agents/fork?fork=${encodeURIComponent(agentId)}`)}>
-                Fork to customize
+                {t('instrForkToCustomize')}
               </button>
             </>
           ) : (
             <>
               <p className="u-mt-0 u-fs-14">
-                {entry.persona} is a built-in example agent — its underlying instructions aren't editable here. Create your
-                own agent to write custom instructions from scratch.
+                {t('instrReadonlyBuiltIn', { persona: entry.persona })}
               </p>
               <button type="button" className="secondary" onClick={() => navigate('/agents/new')}>
-                Create your own agent
+                {t('instrCreateYourOwn')}
               </button>
             </>
           )}
         </div>
       )}
+
+      {/* Guardrails (ADR 0101) — the enforced governance fields, folded in from
+          the former Profile tab. Autonomy itself is owned by the Edit-details
+          modal (roster.autonomyLevel); this only surfaces the policy guardrails. */}
+      <div className="agentinstr-guardrails">
+        <div className="u-block u-fw-600 u-mb-1">{t('guardrailsHeading')}</div>
+        <p className="muted u-fs-13 u-mt-0">{t('guardrailsSubhead', { persona: entry.persona })}</p>
+        <AgentGuardrailsPanel
+          rosterId={entry.rosterId}
+          roleKey={entry.roleKey}
+          persona={entry.persona}
+          autonomyLevel={entry.autonomyLevel ?? 'auto'}
+        />
+      </div>
     </div>
   );
 }

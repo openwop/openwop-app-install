@@ -42,7 +42,15 @@ import {
   viewAsset,
 } from './mediaService.js';
 
-const MAX_DECODED_BYTES = 8 * 1024 * 1024; // 8 MiB of actual asset content
+// Decoded-bytes cap for an inline upload. Default 32 MiB (was 8 MiB) so
+// NotebookLM-style audio/video transcription sources (ADR 0085) fit — a short
+// recording or a compressed podcast clip routinely exceeds 8 MiB. Overridable via
+// OPENWOP_MAX_UPLOAD_DECODED_BYTES for operators with larger media; very long
+// recordings should still ride the URL-served path / be segmented (ADR 0085 OQ-3).
+const MAX_DECODED_BYTES = process.env.OPENWOP_MAX_UPLOAD_DECODED_BYTES
+  ? Math.max(1024 * 1024, Number(process.env.OPENWOP_MAX_UPLOAD_DECODED_BYTES) || 0)
+  : 32 * 1024 * 1024;
+const MAX_DECODED_MIB = Math.round(MAX_DECODED_BYTES / (1024 * 1024));
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /** Validate an upload's bytes + type and return the decoded size. Rejects
@@ -55,7 +63,7 @@ function validateUpload(contentBase64: string, contentType: string): number {
   const decodedBytes = Buffer.byteLength(contentBase64, 'base64');
   if (decodedBytes > MAX_DECODED_BYTES) {
     // `validation_error` is the closest canonical code; the 413 status carries the size semantics.
-    throw new OpenwopError('validation_error', 'Asset exceeds the maximum size (8 MiB).', 413, { maxBytes: MAX_DECODED_BYTES });
+    throw new OpenwopError('validation_error', `Asset exceeds the maximum size (${MAX_DECODED_MIB} MiB).`, 413, { maxBytes: MAX_DECODED_BYTES });
   }
   if (!isAllowedUploadMime(contentType)) {
     throw new OpenwopError('validation_error', `contentType must be one of: ${allowedUploadMimeList()}`, 415, { contentType });

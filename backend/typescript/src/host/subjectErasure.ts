@@ -9,6 +9,10 @@
  * it just fans out to whoever registered.
  */
 
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.subjectErasure');
+
 export type SubjectEraser = (tenantId: string, subjectKey: string) => Promise<void>;
 
 const erasers: SubjectEraser[] = [];
@@ -19,11 +23,29 @@ export function registerSubjectEraser(fn: SubjectEraser): void {
 }
 
 /** Fan out a data-subject erasure to every registered feature (best-effort — one
- *  feature's failure must not block the others). */
-export async function eraseSubject(tenantId: string, subjectKey: string): Promise<void> {
-  for (const fn of erasers) {
-    try { await fn(tenantId, subjectKey); } catch { /* best-effort: keep erasing */ }
+ *  feature's failure must not block the others). Returns the number of erasers
+ *  that FAILED so the caller can react; each failure is also logged so a GDPR
+ *  erasure that didn't fully complete leaves an audit trail (SEC-4) instead of
+ *  silently swallowing — previously a failed eraser was invisible. */
+export async function eraseSubject(tenantId: string, subjectKey: string): Promise<{ total: number; failed: number }> {
+  let failed = 0;
+  for (let i = 0; i < erasers.length; i++) {
+    try {
+      await erasers[i]!(tenantId, subjectKey);
+    } catch (err) {
+      failed++;
+      log.error('subject_eraser_failed', {
+        tenantId,
+        subjectKey,
+        eraserIndex: i,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
+  if (failed > 0) {
+    log.warn('subject_erasure_incomplete', { tenantId, subjectKey, failed, total: erasers.length });
+  }
+  return { total: erasers.length, failed };
 }
 
 /** Test-only: clear registered erasers. */

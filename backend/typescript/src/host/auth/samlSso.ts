@@ -14,7 +14,53 @@
  *
  * @see docs/adr/0002-users-authentication.md  @see ../openwop/RFCS/0050 (openwop-auth-saml)
  */
-import { SAML, type SamlConfig } from '@node-saml/node-saml';
+import { SAML, ValidateInResponseTo, type SamlConfig, type CacheProvider, type CacheItem } from '@node-saml/node-saml';
+import type { Storage } from '../../storage/storage.js';
+
+/** How long a pending SP-initiated AuthnRequest id stays replay-valid. */
+const SAML_REQUEST_TTL_MS = 10 * 60 * 1000;
+
+/**
+ * Durable, multi-instance-safe replay cache backing node-saml's
+ * `validateInResponseTo` (SEC-1). The SP-initiated login mints an AuthnRequest
+ * id here; the ACS rejects any `SAMLResponse` whose `InResponseTo` isn't a
+ * known, unconsumed id — so a captured-and-replayed assertion fails even within
+ * its signature-validity window. Backed by the shared kv Storage (NOT process
+ * memory), so the request may be minted on one instance and consumed on
+ * another (Cloud Run scale-out). Single-use: the id is removed on consume.
+ */
+/** The kv subset the replay cache needs — a full `Storage` satisfies it. */
+type KvStore = Pick<Storage, 'kvGet' | 'kvSet' | 'kvDelete'>;
+
+export function createSamlReplayCache(storage: KvStore): CacheProvider {
+  const k = (key: string | null) => `saml:reqid:${key ?? ''}`;
+  return {
+    async saveAsync(key: string, value: string): Promise<CacheItem | null> {
+      const item: CacheItem = { value, createdAt: Date.now() };
+      await storage.kvSet(k(key), JSON.stringify(item));
+      return item;
+    },
+    async getAsync(key: string): Promise<string | null> {
+      const raw = await storage.kvGet(k(key));
+      if (!raw) return null;
+      let item: CacheItem;
+      try {
+        item = JSON.parse(raw) as CacheItem;
+      } catch {
+        return null;
+      }
+      if (Date.now() - item.createdAt > SAML_REQUEST_TTL_MS) {
+        await storage.kvDelete(k(key));
+        return null;
+      }
+      return item.value;
+    },
+    async removeAsync(key: string | null): Promise<string | null> {
+      await storage.kvDelete(k(key));
+      return key;
+    },
+  };
+}
 
 export interface SamlSettings {
   /** Okta SSO URL (where SP-initiated AuthnRequests go). */
@@ -58,7 +104,7 @@ export function samlConfigured(): boolean {
   return samlSettings() !== null;
 }
 
-function client(s: SamlSettings): SAML {
+function client(s: SamlSettings, storage?: Storage): SAML {
   const cfg: SamlConfig = {
     idpCert: s.idpCert,
     issuer: s.issuer,
@@ -71,13 +117,26 @@ function client(s: SamlSettings): SAML {
     wantAuthnResponseSigned: false,
     // Accept whatever NameID format the IdP is configured to send (email / unspecified).
     identifierFormat: null,
+    // Replay protection (SEC-1): when a durable cache is available, validate
+    // the assertion's InResponseTo against minted-and-unconsumed AuthnRequest
+    // ids. `ifPresent` so SP-initiated flows (which carry InResponseTo) get
+    // replay protection while IdP-initiated flows (no InResponseTo) still work.
+    ...(storage
+      ? {
+          validateInResponseTo: ValidateInResponseTo.ifPresent,
+          requestIdExpirationPeriodMs: SAML_REQUEST_TTL_MS,
+          cacheProvider: createSamlReplayCache(storage),
+        }
+      : {}),
   };
   return new SAML(cfg);
 }
 
-/** SP-initiated: the Okta redirect URL carrying a (relay-stated) AuthnRequest. */
-export async function samlAuthorizeUrl(s: SamlSettings, relayState: string): Promise<string> {
-  return client(s).getAuthorizeUrlAsync(relayState, undefined, {});
+/** SP-initiated: the Okta redirect URL carrying a (relay-stated) AuthnRequest.
+ *  Pass `storage` so the minted AuthnRequest id is persisted for replay
+ *  validation at the ACS (SEC-1). */
+export async function samlAuthorizeUrl(s: SamlSettings, relayState: string, storage?: Storage): Promise<string> {
+  return client(s, storage).getAuthorizeUrlAsync(relayState, undefined, {});
 }
 
 export interface SamlIdentity {
@@ -103,8 +162,9 @@ export async function samlValidate(
   s: SamlSettings,
   samlResponse: string,
   relayState?: string,
+  storage?: Storage,
 ): Promise<SamlIdentity> {
-  const { profile } = await client(s).validatePostResponseAsync({
+  const { profile } = await client(s, storage).validatePostResponseAsync({
     SAMLResponse: samlResponse,
     ...(relayState ? { RelayState: relayState } : {}),
   });

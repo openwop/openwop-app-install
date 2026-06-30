@@ -9,8 +9,10 @@
  * Adds NO new store and NO parallel architecture (ADR 0038 § "PRD-vs-architecture
  * corrections"). The dispatch-retrieval composition lives in the HOST route layer
  * (`host/agentKnowledgeComposition.ts`) reading host-owned primitives, so there
- * is no feature→core up-import. A `agent-knowledge` toggle, OFF by default,
- * tenant-bucketed (the roster is tenant-scoped).
+ * is no feature→core up-import. ALWAYS-ON: graduated off its `agent-knowledge`
+ * toggle 2026-06-16 (ADR 0038 § Correction) — per-agent knowledge is core agent
+ * infrastructure, like `profiles` / Personal Memory; routes gate on identity +
+ * IDOR + RBAC + profile policy, not a toggle.
  *
  * @see docs/adr/0038-per-agent-knowledge-memory.md
  */
@@ -42,16 +44,8 @@ export const agentKnowledgeFeature: BackendFeature = {
   // Face 2 (ADR 0014 Phase 1): the typed, READ-ONLY `ctx.features.agent-knowledge`
   // workflow surface (advertised at /.well-known/openwop via the surface registry).
   surface: { id: 'agent-knowledge', build: buildAgentKnowledgeSurface },
-  toggleDefault: {
-    id: 'agent-knowledge',
-    label: 'Agent Knowledge',
-    description:
-      'Per-agent knowledge & memory (ADR 0038). Bind KB collections (cited documents) and add private notes/facts (recalled memory) to a specific agent, composed into its dispatch retrieval each turn. Documents reuse the Knowledge Base feature; notes reuse the agent\'s RFC-0004 memory namespace. Curation is gated by workspace:read/write + per-agent IDOR + the agent\'s ADR 0036 profile policy. OFF by default.',
-    category: 'Agents',
-    status: 'off',
-    bucketUnit: 'tenant',
-    salt: 'agent-knowledge',
-  },
+  // No `toggleDefault` — graduated to always-on (§ header). The id is retired in
+  // features/index.ts RETIRED_TOGGLE_IDS so a stale durable override is cleared.
   // Face 3 (ADR 0014 Phase 2): the node pack over ctx.features.agentKnowledge —
   // `retrieve` (read) + `ingest` (KB-document write; ADR 0038 §B trigger→workflow
   // auto-ingest). No agent pack (this is agent infrastructure, not an AI surface).

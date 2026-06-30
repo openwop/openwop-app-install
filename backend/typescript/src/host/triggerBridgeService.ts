@@ -98,6 +98,29 @@ interface DedupRow {
 
 const DEFAULT_RETRY: RetryPolicy = { maxAttempts: 3, backoff: 'fixed' };
 
+/**
+ * Base inter-attempt delay (ms) for the retry loop. Defaults to 0 under a
+ * test runner (so the suite stays fast) and to a real value otherwise, so a
+ * transient downstream failure no longer burns every attempt in microseconds
+ * (INT-2). Operators tune it with `OPENWOP_TRIGGER_RETRY_BASE_MS`.
+ */
+const RETRY_BASE_MS = (() => {
+  const raw = process.env.OPENWOP_TRIGGER_RETRY_BASE_MS;
+  if (raw !== undefined) {
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? n : 250;
+  }
+  return process.env.VITEST || process.env.NODE_ENV === 'test' ? 0 : 250;
+})();
+
+/** Delay before the next attempt per the subscription's backoff strategy. */
+function backoffDelayMs(attempt: number, backoff: RetryPolicy['backoff']): number {
+  if (RETRY_BASE_MS === 0 || backoff === 'none') return 0;
+  if (backoff === 'fixed') return RETRY_BASE_MS;
+  // exponential: base * 2^(attempt-1), capped at 30s.
+  return Math.min(RETRY_BASE_MS * 2 ** (attempt - 1), 30_000);
+}
+
 /** Dedup retention window (section C-1: the idempotency.md Layer-1 >=24h
  *  floor). A `dedupKey` older than this is evicted and a re-delivery is
  *  treated as fresh. Overridable in tests via `__setDedupRetentionMs`. */
@@ -264,8 +287,13 @@ export async function deliver(input: {
         outcome: last ? 'dead-lettered' : 'retrying',
         at: nowIso(),
       });
-      // Sample-grade: retry immediately (no real backoff sleep, so tests stay
-      // fast); a production host honors `retryPolicy.backoff`.
+      // Back off before the next attempt per the subscription's policy
+      // (0ms under test runners; see RETRY_BASE_MS). Skipped after the last
+      // attempt, which falls through to dead-letter below.
+      if (!last) {
+        const delay = backoffDelayMs(attempt, sub.retryPolicy.backoff);
+        if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+      }
     }
   }
   // section C-2 exhaustion -> section B dead-letter (routed to the RFC 0053 sink in prod).

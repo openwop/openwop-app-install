@@ -5,8 +5,10 @@
  * a synthetic OIDC issuer):
  *   - POST /v1/host/openwop-app/users/auth/oidc/bind find-or-creates a durable User for
  *     the verified oidc:<sub> and is idempotent;
- *   - it re-keys an existing membership seeded under oidc:<sub> to the canonical
- *     user:<userId> (the personal-workspace owner member, deterministic id);
+ *   - the FIRST unbound touch already provisions the personal-owner member under
+ *     the CANONICAL user:<userId> (ADR 0003 canonical-identity fix), so bind is a
+ *     no-op re-key (rekeyed=0) — no duplicate owner/board accrues per auth channel;
+ *     the re-key path stays as a safety net for legacy oidc:<sub> memberships;
  *   - after bind, the bound user-tier cookie makes the OIDC bearer resolve the
  *     stable user:<userId> subject (membership keys on it);
  *   - bind without an OIDC bearer is refused.
@@ -15,6 +17,7 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createSign, generateKeyPairSync, createHash, type KeyObject } from 'node:crypto';
 import express from 'express';
@@ -23,13 +26,13 @@ import { _resetOidcVerifier } from '../src/middleware/auth.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { listMembers, isWorkspaceMember } from '../src/host/accessControlService.js';
+import { getBoard, personalBoardId } from '../src/host/kanbanService.js';
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
 }
 
-const PORT = 18672;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const AUD = 'openwop-test-aud';
 let server: http.Server;
 let issuerServer: http.Server;
@@ -68,8 +71,8 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   _resetOidcVerifier();
 
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const def = getToggleDefault('users');
   if (def) await saveConfig({ ...def, status: 'on' }, 'test');
 });
@@ -114,32 +117,39 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     expect(res.status).toBe(401);
   });
 
-  it('binds an OIDC subject to a durable User (idempotent) + re-keys the personal-owner member', async () => {
+  it('first unbound touch provisions the owner member under the CANONICAL user:<userId>; bind is then a no-op re-key', async () => {
     const sub = 'firebase-uid-bind-1';
     const oidcSubject = `oidc:${sub}`;
     const personalTenant = personalTenantOfSub(sub);
     const c = client(mint(sub));
 
-    // First touch seeds the personal workspace under the UNBOUND subject oidc:<sub>.
+    // First touch (unbound OIDC bearer) provisions the personal workspace. With
+    // the canonical-identity fix (ADR 0003), the personal-owner member + board are
+    // keyed on the caller's ONE durable user:<userId> from the START — never the
+    // volatile oidc:<sub> — so no duplicate owner / "My Board" accrues per auth
+    // channel (the bug: two "My Board"s + a stray principal on /users).
     expect((await c.get('/v1/host/openwop-app/me/workspaces')).status).toBe(200);
-    expect(await isWorkspaceMember(oidcSubject, personalTenant)).toBe(true);
+    expect(await isWorkspaceMember(oidcSubject, personalTenant)).toBe(false);
+    const owners0 = (await listMembers(personalTenant, personalTenant)).filter((m) => m.roles.includes('owner'));
+    expect(owners0.length).toBe(1);
+    expect(owners0[0]!.subject).toMatch(/^user:/);
 
-    // Bind: creates the durable User + re-keys the owner member to user:<userId>.
+    // Bind: resolves the SAME canonical durable user; the owner member is already
+    // canonical, so there is NOTHING to re-key (the re-key path stays as a safety
+    // net for legacy memberships seeded under oidc:<sub> before this fix).
     const bind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
     expect(bind.status, JSON.stringify(bind.body)).toBe(200);
     expect(bind.body.bound).toBe(true);
     const userId = bind.body.user.userId as string;
     expect(userId).toMatch(/^user:/);
-    expect(bind.body.rekeyed).toBe(1); // the personal-owner member moved
+    expect(owners0[0]!.subject).toBe(userId); // first-touch owner WAS the canonical id
+    expect(bind.body.rekeyed).toBe(0);
 
-    // The owner member now keys on the canonical user:<userId>, not oidc:<sub>.
+    // The owner member keys on the canonical user:<userId>, never oidc:<sub>.
     expect(await isWorkspaceMember(userId, personalTenant)).toBe(true);
     expect(await isWorkspaceMember(oidcSubject, personalTenant)).toBe(false);
-    const owners = (await listMembers(personalTenant, personalTenant)).filter((m) => m.roles.includes('owner'));
-    expect(owners.length).toBe(1);
-    expect(owners[0]!.subject).toBe(userId);
 
-    // Idempotent: a second bind resolves the SAME userId, nothing left to re-key.
+    // Idempotent: a second bind resolves the SAME userId, still nothing to re-key.
     const bind2 = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
     expect(bind2.body.user.userId).toBe(userId);
     expect(bind2.body.rekeyed).toBe(0);
@@ -188,5 +198,33 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     const shared = me.body.workspaces.find((w: any) => w.workspaceId === ws);
     expect(shared?.roles).toContain('owner');
     expect(await isWorkspaceMember(userId, ws)).toBe(true);
+  });
+
+  // Regression for the duplicate "My Board" bug: the SAME human reaching the host
+  // first over an UNBOUND bearer then over a BOUND cookie must get exactly ONE
+  // personal board. Pre-fix, the provisioning choke point keyed the board on the
+  // raw callerSubject (oidc:<sub> when unbound), so a second board accrued; the fix
+  // keys it on the canonical user:<userId> at both touches.
+  it('the same human across unbound bearer + bound cookie gets exactly ONE personal board', async () => {
+    const sub = 'firebase-uid-board-dedupe';
+    const personalTenant = personalTenantOfSub(sub);
+    const c = client(mint(sub));
+
+    // Unbound first touch provisions the personal board (durable via personalTenant).
+    const b1 = await c.get('/v1/host/openwop-app/kanban/boards/personal');
+    expect(b1.status, JSON.stringify(b1.body)).toBe(200);
+
+    // Bind, then touch again on the bound channel.
+    const userId = (await c.post('/v1/host/openwop-app/users/auth/oidc/bind')).body.user.userId as string;
+    const b2 = await c.get('/v1/host/openwop-app/kanban/boards/personal');
+    expect(b2.status).toBe(200);
+
+    // Both touches resolve the SAME canonical-owner board…
+    const canonicalBoardId = personalBoardId(personalTenant, userId);
+    expect(b1.body.board.id).toBe(canonicalBoardId);
+    expect(b2.body.board.id).toBe(canonicalBoardId);
+    // …and the oidc:<sub>-keyed duplicate board was NEVER created.
+    expect(await getBoard(canonicalBoardId)).not.toBeNull();
+    expect(await getBoard(personalBoardId(personalTenant, `oidc:${sub}`))).toBeNull();
   });
 });

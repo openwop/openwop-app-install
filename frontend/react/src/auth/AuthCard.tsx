@@ -11,6 +11,7 @@
  * host's OIDC bearer path already verifies.
  */
 import { useEffect, useState } from 'react';
+import { Trans, useTranslation } from 'react-i18next';
 import { TextField } from '../ui/Field.js';
 import { config, authedHeaders, fetchOpts } from '../client/config.js';
 import {
@@ -33,6 +34,7 @@ export function AuthCard({
   passwordEnabled: boolean;
   onAuthed: () => void | Promise<void>;
 }): JSX.Element {
+  const { t } = useTranslation('auth');
   const [view, setView] = useState<View>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -74,7 +76,7 @@ export function AuthCard({
   });
 
   const doSignup = () => run(async () => {
-    if (password !== confirm) { setError('Passwords do not match.'); return; }
+    if (password !== confirm) { setError(t('passwordsDoNotMatch')); return; }
     await signUpWithEmail(email, password, displayName.trim() || undefined);
     // Firebase sends the verification email; the account is already signed in.
     // Land on the `verify` view (rather than closing) so the user sees the
@@ -86,7 +88,7 @@ export function AuthCard({
 
   const doResend = () => run(async () => {
     await sendVerifyEmail();
-    setNotice('Verification email sent — check your inbox.');
+    setNotice(t('verificationEmailSent'));
   });
 
   const doForgot = () => run(async () => {
@@ -98,7 +100,7 @@ export function AuthCard({
       if ((e as { code?: string })?.code !== 'auth/user-not-found') throw e;
     }
     setView('signin');
-    setNotice('If that email has an account, a password-reset link is on its way.');
+    setNotice(t('resetLinkOnItsWay'));
   });
 
   const submit = (e: React.FormEvent) => {
@@ -114,13 +116,13 @@ export function AuthCard({
 
       {samlEnabled ? (
         <button type="button" className="signin-provider" onClick={ssoLogin}>
-          Sign in with SSO
+          {t('signInWithSso')}
         </button>
       ) : null}
 
       {passwordEnabled && (
         <>
-          {oidc ? <div className="auth-divider"><span>or</span></div> : null}
+          {oidc ? <div className="auth-divider"><span>{t('or')}</span></div> : null}
 
           {notice ? <div className="alert info" role="status">{notice}</div> : null}
           {error ? <div className="alert error" role="alert">{error}</div> : null}
@@ -135,65 +137,69 @@ export function AuthCard({
                   <path d="m8.5 13.5 2.2 2.2L16 11" />
                 </svg>
               </span>
-              <h4 className="auth-verify-title">Check your inbox</h4>
+              <h4 className="auth-verify-title">{t('checkYourInbox')}</h4>
               <p className="auth-verify-body">
-                We sent a verification link to <span className="auth-verify-email">{email}</span>.
-                You're already signed in — verify whenever you like.
+                <Trans
+                  t={t}
+                  i18nKey="verifyBody"
+                  values={{ email }}
+                  components={{ 0: <span className="auth-verify-email" /> }}
+                />
               </p>
               <div className="auth-verify-actions">
                 <button type="button" className="btn-primary" onClick={() => { void onAuthed(); }}>
-                  Continue
+                  {t('continue')}
                 </button>
                 <button type="button" className="btn-ghost" onClick={doResend} disabled={busy}>
-                  {busy ? '…' : 'Resend verification email'}
+                  {busy ? '…' : t('resendVerificationEmail')}
                 </button>
               </div>
             </div>
           ) : (
             <>
               <form className="u-grid u-gap-4" onSubmit={submit}>
-                <TextField label="Email" type="email" autoComplete="email" required
-                  value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" />
+                <TextField label={t('emailLabel')} type="email" autoComplete="email" required
+                  value={email} onChange={(e) => setEmail(e.target.value)} placeholder={t('emailPlaceholder')} />
 
                 {view === 'signup' && (
-                  <TextField label="Name" autoComplete="name"
+                  <TextField label={t('nameLabel')} autoComplete="name"
                     value={displayName} onChange={(e) => setDisplayName(e.target.value)}
-                    placeholder="Ada Lovelace" help="Optional — shown on your account." />
+                    placeholder={t('namePlaceholder')} help={t('nameHelp')} />
                 )}
 
                 {(view === 'signin' || view === 'signup') && (
-                  <TextField label="Password" type="password" required
+                  <TextField label={t('passwordLabel')} type="password" required
                     autoComplete={view === 'signin' ? 'current-password' : 'new-password'}
                     value={password} onChange={(e) => setPassword(e.target.value)}
-                    help={view === 'signup' ? 'At least 6 characters.' : undefined} />
+                    help={view === 'signup' ? t('passwordHelp') : undefined} />
                 )}
 
                 {view === 'signup' && (
-                  <TextField label="Confirm password" type="password" required autoComplete="new-password"
+                  <TextField label={t('confirmPasswordLabel')} type="password" required autoComplete="new-password"
                     value={confirm} onChange={(e) => setConfirm(e.target.value)} />
                 )}
 
                 <button className="btn-primary" type="submit" disabled={busy}>
                   {busy ? '…'
-                    : view === 'signin' ? 'Sign in'
-                    : view === 'signup' ? 'Create account'
-                    : 'Send reset link'}
+                    : view === 'signin' ? t('signIn')
+                    : view === 'signup' ? t('createAccount')
+                    : t('sendResetLink')}
                 </button>
               </form>
 
               <div className="auth-switch muted">
                 {view === 'signin' && (
                   <>
-                    <button type="button" className="btn-link" onClick={() => { setView('forgot'); setError(null); setNotice(null); }}>Forgot password?</button>
-                    <span> · New here? </span>
-                    <button type="button" className="btn-link" onClick={() => { setView('signup'); setError(null); setNotice(null); }}>Create an account</button>
+                    <button type="button" className="btn-link" onClick={() => { setView('forgot'); setError(null); setNotice(null); }}>{t('forgotPassword')}</button>
+                    <span>{t('newHere')}</span>
+                    <button type="button" className="btn-link" onClick={() => { setView('signup'); setError(null); setNotice(null); }}>{t('createAnAccount')}</button>
                   </>
                 )}
                 {view === 'signup' && (
-                  <button type="button" className="btn-link" onClick={() => { setView('signin'); setError(null); setNotice(null); }}>Already have an account? Sign in</button>
+                  <button type="button" className="btn-link" onClick={() => { setView('signin'); setError(null); setNotice(null); }}>{t('alreadyHaveAccount')}</button>
                 )}
                 {view === 'forgot' && (
-                  <button type="button" className="btn-link" onClick={() => { setView('signin'); setError(null); setNotice(null); }}>Back to sign in</button>
+                  <button type="button" className="btn-link" onClick={() => { setView('signin'); setError(null); setNotice(null); }}>{t('backToSignIn')}</button>
                 )}
               </div>
             </>

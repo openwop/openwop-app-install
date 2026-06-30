@@ -37,20 +37,36 @@ import type {
   AiCallResult,
   AiToolCallRequest,
   AiToolCallResult,
+  SpeechSynthesisRequest,
+  SpeechSynthesisResult,
+  TranscribeRequest,
+  TranscriptResult,
+  ImageGenerationRequest,
+  ImageGenerationResult,
 } from '../executor/types.js';
+import { dispatchImageGeneration, imageProviderConfigured } from '../host/imageProviderAdapter.js';
+import { checkImageBudget, recordImages } from '../host/imageGenBudget.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../host/index.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
 import { dispatchAnthropicToolsRound, type ToolsRoundRequest, type ToolsRoundResult } from '../providers/dispatchAnthropicTools.js';
-import { dispatchOpenAIToolsRound, dispatchGoogleToolsRound } from '../providers/dispatchProviderTools.js';
+import { dispatchOpenAIToolsRound, dispatchGoogleToolsRound, dispatchMiniMaxToolsRound } from '../providers/dispatchProviderTools.js';
 import { embedText, DEFAULT_EMBEDDING_DIMS, LOCAL_EMBEDDING_MODEL } from './localEmbedding.js';
 import {
   dispatchManagedChat,
   isManagedCredentialRef,
   managedProviderIdFromRef,
+  resolveManagedSpeechKey,
   ManagedProviderError,
 } from '../providers/managedProvider.js';
+import { dispatchSpeechMiniMax, dispatchSpeechOpenAI, dispatchSpeechGoogle, dispatchSpeechElevenLabs } from '../providers/dispatchSpeech.js';
+import { storeMediaAsset, resolveMediaAsset } from '../host/inMemorySurfaces.js';
+import { AUDIO_TRANSCRIPTION_SYSTEM_PROMPT, AUDIO_TRANSCRIPTION_USER_PROMPT } from './mediaTranscriptionPrompts.js';
 import { emitCost } from '../observability/costEmitter.js';
+import { checkMediaBudget, recordMediaUsage } from './mediaBudget.js';
+import { getStreamAudioResolver } from './streamAudio.js';
 import { buildProviderUsagePayloadFromTokens } from '../providers/usageEmitter.js';
+import { compactToolSchema } from '../providers/toolSchemaCompaction.js';
+import { contextEconomy } from '../host/contextEconomy.js';
 import { getInvocationLog } from '../executor/invocationLog.js';
 import { createLogger } from '../observability/logger.js';
 // RFC 0030 §A reasoning-directive synthesis lifted to @openwop/openwop@^1.1.3.
@@ -82,13 +98,26 @@ const log = createLogger('aiProviders.host');
 // what the test seam pre-programs via `POST /v1/host/openwop-app/test/mock-ai/
 // program` keyed by (runId, nodeId), so a tenant that hasn't seeded a
 // program for its run gets empty completions.
-const SUPPORTED_PROVIDERS: readonly ProviderId[] = ['anthropic', 'openai', 'google', 'mock'];
+// `minimax` is advertised in discovery `aiProviders.supported[]` (RFC 0105 §A —
+// the speech `provider?` arg MUST be in supported[]) and is genuinely routable:
+// dispatch.ts has a `minimax` chat case, and the speech path routes it via the
+// managed MiniMax T2A key — so listing it here keeps the advertised supported[]
+// honest across both callAI and callSpeechSynthesizer.
+const SUPPORTED_PROVIDERS: readonly ProviderId[] = ['anthropic', 'openai', 'google', 'minimax', 'mock'];
 
 /** Anthropic is the only provider with a wired tool-calling path
  *  (`providers/dispatchAnthropicTools.ts`). Advertised via
  *  `capabilities.aiProviders.toolCalling.providers` so packs that
  *  request tools on other providers fail with a clear, gated error. */
-const TOOL_CALLING_PROVIDERS: readonly ProviderId[] = ['anthropic', 'openai', 'google'];
+const TOOL_CALLING_PROVIDERS: readonly ProviderId[] = ['anthropic', 'openai', 'google', 'minimax'];
+
+/** True iff this host can offer native tool-calling for `provider` (the advertised
+ *  `aiProviders.toolCalling.providers`). Lets a caller (e.g. the chat conversation)
+ *  fall back to a plain completion instead of failing when the run's provider has
+ *  no tool-calling path. */
+export function providerSupportsToolCalling(provider: string): boolean {
+  return (TOOL_CALLING_PROVIDERS as readonly string[]).includes(provider);
+}
 
 /** Route a single tool-calling round to the provider-specific dispatcher. All
  *  return the shared `ToolsRoundResult` shape (A3). */
@@ -98,6 +127,8 @@ function toolsRoundDispatcher(provider: string): (req: ToolsRoundRequest) => Pro
       return dispatchOpenAIToolsRound;
     case 'google':
       return dispatchGoogleToolsRound;
+    case 'minimax':
+      return dispatchMiniMaxToolsRound;
     default:
       return dispatchAnthropicToolsRound;
   }
@@ -145,6 +176,16 @@ async function emitProviderUsage(
   model: string,
   inputTokens: number | undefined,
   outputTokens: number | undefined,
+  /** ADR 0148 A2 — set the wire-legal `providerUsage.cacheHit` (already in the
+   *  RFC 0026 schema) when a prompt-cache READ occurred this call. The finer
+   *  token split stays internal (OTel span); it is NOT added to the payload
+   *  (schema is additionalProperties:false). */
+  cacheHit?: boolean,
+  /** RFC 0116 — cost-only prompt-prefix cache token split (provider-reported).
+   *  Emitted on the wire-legal `providerUsage.cacheReadTokens`/`cacheWriteTokens`
+   *  (1.43.0 schema); cost-only, NOT replay-asserted. */
+  cacheReadTokens?: number,
+  cacheWriteTokens?: number,
 ): Promise<void> {
   if (!scope.emit) return;
   if (typeof inputTokens !== 'number' || typeof outputTokens !== 'number') return;
@@ -153,6 +194,9 @@ async function emitProviderUsage(
     const payload = buildProviderUsagePayloadFromTokens(provider, model, inputTokens, outputTokens, {
       nodeId: scope.nodeId,
       ...(traceId ? { traceId } : {}),
+      ...(cacheHit ? { cacheHit: true } : {}),
+      ...(typeof cacheReadTokens === 'number' ? { cacheReadTokens } : {}),
+      ...(typeof cacheWriteTokens === 'number' ? { cacheWriteTokens } : {}),
     });
     await scope.emit('provider.usage', payload);
   } catch (err) {
@@ -203,25 +247,238 @@ export type AiProviderErrorCode =
   // truncation-retry-exhaustion terminal (unchanged).
   | 'envelope_invalid'
   | 'envelope_truncation_unrecoverable'
-  | 'envelope_refusal';
+  | 'envelope_refusal'
+  // RFC 0105 §C — speech-synthesis error codes. `speech_synthesis_unsupported`
+  // = requested provider has no wired speech path; `speech_synthesis_failed`
+  // = the provider call failed; `content_too_long` = `text` exceeds the host's
+  // char cap.
+  | 'speech_synthesis_unsupported'
+  | 'speech_synthesis_failed'
+  | 'content_too_long'
+  // RFC 0106 §C — real-time transcription error code. `transcription_unsupported`
+  // = `ctx.callTranscriber` invoked but no streaming-STT path is wired for the
+  // requested provider (never a no-op).
+  | 'transcription_unsupported'
+  // ADR 0106 — per-org media-generation budget exceeded (TTS chars / STT bytes).
+  | 'media_budget_exceeded';
 
 /** Factory: build a per-call adapter for one node dispatch. */
 export function createAiProvidersAdapter(scope: AdapterScope): {
   callAI(req: AiCallRequest): Promise<AiCallResult>;
   callAIWithTools(req: AiToolCallRequest): Promise<AiToolCallResult>;
+  callSpeechSynthesizer(req: SpeechSynthesisRequest): Promise<SpeechSynthesisResult>;
+  callTranscriber(req: TranscribeRequest): Promise<TranscriptResult>;
+  callImageGenerator(req: ImageGenerationRequest): Promise<ImageGenerationResult>;
 } {
   return {
     callAI: (req) => callAI(scope, req),
     callAIWithTools: (req) => callAIWithTools(scope, req),
+    callSpeechSynthesizer: (req) => callSpeechSynthesizer(scope, req),
+    callTranscriber: (req) => callTranscriber(scope, req),
+    callImageGenerator: (req) => callImageGenerator(scope, req),
   };
+}
+
+/** Parse the opaque token from a host media-asset URL
+ *  (`…/v1/host/openwop-app/assets/<token>`). Returns null for anything else —
+ *  callTranscriber's `audio.url` is the host's own asset surface (the RFC 0106
+ *  `streamRef → mediaRef` finalize seam), NOT an arbitrary external URL, so no
+ *  SSRF fetch is performed: the bytes are resolved from tenant-scoped storage. */
+function parseAssetToken(url: string): string | null {
+  const m = url.match(/\/assets\/([A-Za-z0-9_-]{1,512})\/?$/);
+  return m ? m[1] : null;
+}
+
+/** RFC 0106 §B/§D — emit the canonical `voice.*` turn over `scope.emit` (the C1
+ *  single-taxonomy, replay-safe durable-log path) and return the committed turn.
+ *  Shared by the deterministic stub and the real managed-transcription path so
+ *  the wire shape is produced in exactly ONE place. `voice.transcript` carries
+ *  `contentTrust:'untrusted'` (RFC 0106 §F `voice-transcript-untrusted`). The
+ *  interim/endpoint atMs values are synthesized around the settled `finalText`
+ *  (a stateless host has no true streaming timeline; the EVENT shape is what the
+ *  wire contract requires). */
+async function emitVoiceTurn(scope: AdapterScope, finalText: string, language: string): Promise<TranscriptResult> {
+  const COMMIT_AT_MS = 1650;
+  if (scope.emit) {
+    // The interim events + timings below are ILLUSTRATIVE, not a real streaming
+    // timeline: the managed `callAI` returns only the settled transcript, so the
+    // "interim" `prefix` (first 60%) is synthesized to model the settling shape the
+    // §B wire contract describes. Only the committed `finalText` at `turn_commit` is
+    // durable/replayable; interim text + `atMs` are observational (RFC 0106 R5).
+    const cut = Math.max(1, Math.floor(finalText.length * 0.6));
+    const prefix = finalText.slice(0, cut).trimEnd();
+    await scope.emit('voice.speech_start', { atMs: 120 });
+    await scope.emit('voice.transcript', { text: prefix, isFinal: false, atMs: 600, contentTrust: 'untrusted' });
+    await scope.emit('voice.transcript', { text: finalText, isFinal: false, committedPrefix: prefix, stability: 0.7, atMs: 1100, contentTrust: 'untrusted' });
+    await scope.emit('voice.endpoint_candidate', { atMs: 1400, confidence: 0.6 });
+    await scope.emit('voice.transcript', { text: finalText, isFinal: true, formatted: true, atMs: 1600, contentTrust: 'untrusted' });
+    await scope.emit('voice.turn_commit', { atMs: COMMIT_AT_MS, finalText });
+  }
+  return { finalText, atMs: COMMIT_AT_MS, language };
+}
+
+/** RFC 0106 §C (ADR 0109 P3) — emit `voice.synthesis_chunk` METADATA-ONLY
+ *  run-events for a streaming-synthesis call. The audio bytes live at the
+ *  tenant-scoped asset `url` (NEVER inline on the log — the C2/G8 budget rule);
+ *  the chunks reference it. P3 stub: a single clause chunk over the finished
+ *  whole-file asset; a real clause-by-clause streamer emits N chunks as they
+ *  synthesize, behind this same shape. */
+async function emitSynthesisChunks(
+  scope: AdapterScope,
+  audio: { url?: string; mimeType: string; durationSeconds?: number },
+): Promise<void> {
+  if (!scope.emit) return;
+  const durationMs = audio.durationSeconds != null ? Math.round(audio.durationSeconds * 1000) : undefined;
+  await scope.emit('voice.synthesis_chunk', {
+    seq: 0,
+    mimeType: audio.mimeType,
+    ...(durationMs != null ? { durationMs } : {}),
+    ...(audio.url ? { url: audio.url } : {}),
+    final: true,
+  });
+}
+
+/**
+ * RFC 0106 §B — real-time transcription (`ctx.callTranscriber`). ADR 0109.
+ *
+ * One call = one turn: resolves at `voice.turn_commit` with the settled
+ * `finalText`; the interim / speech_start / endpoint_candidate / turn_commit
+ * signals are emitted as the canonical `voice.*` run-events on the DURABLE log
+ * (the C1 single-taxonomy, replay-safe path; `voice.transcript` carries
+ * `contentTrust:'untrusted'`, RFC 0106 §F).
+ *
+ * Paths:
+ *   - `provider:'mock'` + `OPENWOP_TEST_SEAM_ENABLED` (P1) — the deterministic
+ *     stub (fixed scripted turn), so the shape/behavioral conformance runs
+ *     non-vacuously with no provider key. Defense-in-depth: gated here too, not
+ *     only at the agents.ts seam.
+ *   - `audio.url` (P2) — a host MEDIA-ASSET url (the `streamRef → mediaRef`
+ *     finalize seam). The bytes are resolved from tenant-scoped storage and
+ *     transcribed through the host's existing managed multimodal `callAI` audio
+ *     path (RFC 0091 audio-in / ADR 0085) — a REAL transcript, then the same
+ *     `voice.*` turn. Composes the existing STT; does not fork it.
+ *   - `audio.streamRef` on a non-mock call (P2) — HONEST `transcription_unsupported`:
+ *     true live streaming needs persistent media transport, which RFC 0106 §E
+ *     leaves host-internal and is NOT wired on a stateless host. The advertised
+ *     `realtimeVoice.transcription` stays truthful under OPENWOP_REQUIRE_BEHAVIOR
+ *     (ADR 0085 advertise+accept-in-lockstep): the host accepts a finite-audio
+ *     turn, and says so plainly when it cannot.
+ */
+async function callTranscriber(scope: AdapterScope, req: TranscribeRequest): Promise<TranscriptResult> {
+  const hasStream = typeof req.audio?.streamRef === 'string' && req.audio.streamRef.length > 0;
+  const hasUrl = typeof req.audio?.url === 'string' && req.audio.url.length > 0;
+  // EXACTLY ONE of streamRef / url. Inline base64 + a finite-blob mediaRef are
+  // rejected for a live stream (RFC 0106 §B.1) — the `audio` arg carries neither.
+  if (hasStream === hasUrl) {
+    throw new AiProviderError(
+      'invalid_request',
+      'callTranscriber requires EXACTLY ONE of `audio.streamRef` / `audio.url` (a live stream cannot be inline bytes).',
+      { field: 'audio' },
+    );
+  }
+
+  const provider = req.provider ?? 'minimax';
+  const language = req.languageCode ?? 'en-US';
+
+  // P1 deterministic stub — gated (defense-in-depth) so a prod `provider:'mock'`
+  // cannot fake the capability.
+  if (provider === 'mock' && process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+    return emitVoiceTurn(scope, 'book a table for two', language);
+  }
+
+  // P1 (ADR 0138) — true live streaming (a `streamRef`). Transport is host-internal
+  // (RFC 0106 §E) and lives in the `voice` feature; it registers a `StreamAudioResolver`
+  // (streamAudio.ts) that yields the buffered utterance for the streamRef. When a
+  // resolver is wired, resolve the bytes + tenant-bind (§F `voice-streamref-tenant-bound`)
+  // and transcribe via the SAME managed path as finite audio. When NO transport is wired,
+  // stay an honest `transcription_unsupported` — the advertisement is DERIVED, never a
+  // no-op (ADR 0085 advertise-in-lockstep; ADR 0138 finding #3).
+  if (hasStream) {
+    const streamResolver = getStreamAudioResolver();
+    if (!streamResolver) {
+      throw new AiProviderError(
+        'transcription_unsupported',
+        'Live streaming transcription (`audio.streamRef`) needs a host-internal media transport (RFC 0106 §E), which is not wired on this host. Finalize the stream to a host media asset and pass its `audio.url` (the streamRef→mediaRef seam) for managed transcription.',
+        { provider, capability: 'aiProviders.realtimeVoice.transcription' },
+      );
+    }
+    const buffered = await streamResolver(req.audio.streamRef as string);
+    // Collapse unknown-streamRef + cross-tenant into one error so the response is not an
+    // existence oracle for another tenant's live handles (§F `voice-streamref-tenant-bound`).
+    if (!buffered || buffered.tenantId !== scope.tenantId) {
+      throw new AiProviderError('invalid_request', 'No buffered audio for `audio.streamRef`.', { field: 'audio.streamRef' });
+    }
+    const finalText = await transcribeManaged(scope, req, buffered.contentBase64, buffered.contentType);
+    return emitVoiceTurn(scope, finalText, language);
+  }
+
+  // P2 real path — finite audio resolved from a tenant-scoped host media asset,
+  // transcribed via the existing managed multimodal `callAI` (RFC 0091 audio-in).
+  const token = parseAssetToken(req.audio.url as string);
+  if (!token) {
+    throw new AiProviderError(
+      'invalid_request',
+      '`audio.url` must be a host media-asset URL (…/v1/host/openwop-app/assets/<token>) — callTranscriber does not fetch arbitrary external URLs.',
+      { field: 'audio.url' },
+    );
+  }
+  const asset = await resolveMediaAsset(token);
+  // `media-asset-url-tenant-scoped` invariant (RFC 0055): the token is an unguessable
+  // capability, but `callTranscriber` resolves it on behalf of a tenant-scoped run, so
+  // it MUST bind the asset to the caller's tenant — otherwise a leaked token would let
+  // one tenant transcribe another's audio and land the transcript on its own run log.
+  // Collapse not-found + cross-tenant into one error so the response is not an
+  // existence oracle for another tenant's tokens.
+  if (!asset || asset.tenantId !== scope.tenantId) {
+    throw new AiProviderError('invalid_request', 'Media asset not found for `audio.url`.', { field: 'audio.url' });
+  }
+  const finalText = await transcribeManaged(scope, req, asset.contentBase64, asset.contentType);
+  return emitVoiceTurn(scope, finalText, language);
+}
+
+/** Transcribe audio bytes via the host's managed multimodal `callAI` audio path
+ *  (RFC 0091 audio-in / ADR 0085) — the ONE place finite + live-finalized audio
+ *  is turned into text, so the STT path is composed, never forked. Google/Gemini
+ *  is the host's audio-capable default (ADR 0085's `transcribe-source` node); a
+ *  caller MAY override via `req.provider`/`req.model`. */
+async function transcribeManaged(
+  scope: AdapterScope,
+  req: TranscribeRequest,
+  contentBase64: string,
+  contentType: string,
+): Promise<string> {
+  // Deterministic transcript under the test seam — exercises the resolver / buffer /
+  // tenant-bind path (and the finite-asset path) with no provider key, gated so a prod
+  // build can never fake it. Encodes the byte count so a test can prove the audio flowed.
+  if (process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+    return `live transcript (${Buffer.from(contentBase64, 'base64').length} bytes)`;
+  }
+  const aiResult = await callAI(scope, {
+    provider: req.provider && req.provider !== 'mock' ? req.provider : 'google',
+    model: req.model ?? 'gemini-2.5-flash',
+    messages: [
+      { role: 'system', content: AUDIO_TRANSCRIPTION_SYSTEM_PROMPT },
+      { role: 'user', content: [
+        { type: 'text', text: AUDIO_TRANSCRIPTION_USER_PROMPT },
+        { type: 'audio', mimeType: contentType, dataBase64: contentBase64 },
+      ] },
+    ],
+    ...(req.credentialRef ? { credentialRef: req.credentialRef } : {}),
+  });
+  return (aiResult.content ?? '').trim();
 }
 
 // ── Core flow ─────────────────────────────────────────────────────
 
 /** A9 / RFC 0091 — input modalities this host's `callAI` accepts as ContentParts.
  *  `file` parts map to the `document` modality; the dispatch layer forwards
- *  image/document to provider-native vision/document blocks. */
-export const INPUT_MODALITIES: readonly string[] = ['text', 'image', 'document'];
+ *  image/document to provider-native vision/document blocks. `audio` parts are
+ *  forwarded to provider-native audio blocks (Gemini / GPT-4o-audio class) and
+ *  power notebook audio/video source transcription (ADR 0085 Phase 1) — adding it
+ *  here flips both the advertisement (discovery derives from this constant) and the
+ *  acceptance (assertModalitiesAdvertised) together, so there is no dishonest-wire
+ *  window where audio is advertised but rejected, or accepted but unadvertised. */
+export const INPUT_MODALITIES: readonly string[] = ['text', 'image', 'document', 'audio'];
 const PART_TO_MODALITY: Record<string, string> = { text: 'text', image: 'image', file: 'document', audio: 'audio' };
 
 /** Reject a ContentPart whose modality the host doesn't advertise, rather than
@@ -304,11 +561,24 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
     return { ...cached, credentialRefHashed };
   }
 
+  // ADR 0079 §Phase 4 — stream the plain reply's token deltas onto the run event
+  // log as canonical `ai.message.chunk` events, so a surface tailing this run's
+  // SSE renders progressively (the same event the chat consumer already reads).
+  // Transient (stream-only, no channel reducer folds it); the node's structured
+  // result remains authoritative. OPT-IN per call (`req.stream`) so non-interactive
+  // batch/agent nodes don't append one durable event per token for no consumer
+  // (architect review HIGH — write amplification). Best-effort + emit-capable scope.
+  const emit = scope.emit;
+  const streamDelta = req.stream && emit
+    ? async (delta: string): Promise<void> => {
+        try { await emit('ai.message.chunk', { chunk: delta, isLast: false }); } catch { /* best-effort delta */ }
+      }
+    : undefined;
   const result = await wrapInSpan(scope, req.provider, req.model, async () => {
     if (req.responseSchema) {
       return dispatchStructured(scope, req, credentialCleartext);
     }
-    return dispatchPlain(scope, req, credentialCleartext);
+    return dispatchPlain(scope, req, credentialCleartext, streamDelta);
   });
 
   // Emit cost AFTER dispatch returns (real usage figures only).
@@ -360,6 +630,7 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
   const { cleartext: credentialCleartext, refUsed } = resolveCredential(scope, req.provider, req.credentialRef);
   const credentialRefHashed = sha256Hex(refUsed);
 
+  const toolDietOn = contextEconomy().toolDiet; // ADR 0148 A3
   const result = await wrapInSpan(scope, req.provider, req.model, async () => {
     const dispatchRound = toolsRoundDispatcher(req.provider);
     return mapDispatchErrors(req.provider, () =>
@@ -369,11 +640,15 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
           apiKey: credentialCleartext,
           messages: toChatMessages(req),
           ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+          // ADR 0148 A3 — tool-surface diet: strip non-functional schema
+          // annotations before the catalog reaches the model (gated; off ⇒
+          // unchanged). Sibling site: host/conversationToolLoop.ts (managed chat).
           tools: req.tools.map((t) => ({
             name: t.name,
             description: t.description,
-            inputSchema: t.inputSchema,
+            inputSchema: compactToolSchema(t.inputSchema, toolDietOn),
           })),
+          ...(req.webSearch ? { webSearch: true } : {}),
           signal,
         }),
       ),
@@ -393,11 +668,12 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
   // billing reconciliation captures per-call records inside multi-turn
   // tool flows. The pack orchestrates subsequent rounds; each round
   // re-enters this function and emits its own event.
-  await emitProviderUsage(scope, req.provider, req.model, result.inputTokens, result.outputTokens);
+  await emitProviderUsage(scope, req.provider, req.model, result.inputTokens, result.outputTokens, (result.cachedReadTokens ?? 0) > 0, result.cachedReadTokens, result.cacheWriteTokens);
 
   const aiResult: AiToolCallResult = {
     content: result.text,
     toolCalls: result.toolUses,
+    ...(result.citations && result.citations.length > 0 ? { citations: result.citations } : {}),
     usage: {
       inputTokens: result.inputTokens,
       outputTokens: result.outputTokens,
@@ -457,6 +733,289 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
     }
     throw err;
   }
+}
+
+// ── Speech synthesis (RFC 0105) ───────────────────────────────────
+
+/** Generous host-side char cap. RFC 0105 advertises NO normative char
+ *  cap; this is an abuse backstop, not a wire constraint. Exceeding it
+ *  fails with `content_too_long`. */
+const MAX_SPEECH_CHARS = 50_000;
+
+/** Providers with a wired speech-synthesis dispatch path. MiniMax T2A is the
+ *  MANAGED provider (server-held key); OpenAI (`/audio/speech`) + Google Gemini
+ *  TTS (`generateContent` AUDIO) are BYOK (the caller's own key — this host has no
+ *  managed key for them). Anthropic is deliberately absent — Claude has NO speech-
+ *  synthesis API, so advertising it would be a dishonest wire claim. `mock` is a
+ *  conformance-only deterministic path (no network/credential) the speech seam
+ *  selects under OPENWOP_TEST_SEAM_ENABLED so the speech-synthesis-roundtrip
+ *  scenario runs non-vacuously in the `memory://` harness. */
+const SPEECH_PROVIDERS: readonly string[] = ['minimax', 'openai', 'google', 'elevenlabs', 'mock'];
+
+/** Providers whose speech path has a MANAGED server-held key on this host. Only
+ *  MiniMax is managed; OpenAI/Google speech is BYOK-only (a managed request without
+ *  a BYOK credential fails honestly rather than mis-routing to the MiniMax key). */
+const MANAGED_SPEECH_PROVIDERS: readonly string[] = ['minimax', 'mock'];
+
+/** A tiny deterministic synthetic audio payload (an MP3/ID3 header is enough —
+ *  the conformance scenario asserts the result SHAPE, not decodable audio). */
+const MOCK_SPEECH_AUDIO_B64 = 'SUQzBAAAAAAAF1RTU0UAAAANAAADTGF2ZjU4Ljc2LjEwMA==';
+
+/**
+ * RFC 0105 — synthesize one speaker turn (text-to-speech). Validates the
+ * request, resolves the credential (managed MiniMax by default, BYOK +
+ * policy for an explicit provider), dispatches to MiniMax T2A, stores the
+ * returned audio as a tenant-scoped media asset, and returns an
+ * `audio.url` result. The cleartext key never crosses the return boundary.
+ */
+// ── ADR 0115 — text-to-image generation ─────────────────────────────────────
+const IMAGE_PROVIDERS = ['openai', 'google', 'mock'] as const;
+const MANAGED_IMAGE_PROVIDERS: string[] = []; // no managed image key on this host (BYOK-only) until a provider is configured
+const MAX_IMAGE_PROMPT_CHARS = 4_000;
+const MAX_IMAGES_PER_CALL = 4;
+/** ADR 0115 §honesty — advertise `imageGeneration:{supported:true}` ONLY when the
+ *  operator has opted in (a real provider is configured). Default false →
+ *  production-honest (the mock alone is test-seam-only). Mirrors the compat
+ *  provider's `OPENWOP_COMPAT_PROVIDER_ENABLED` honest-flip. */
+export function imageGenerationAdvertised(): boolean {
+  return process.env.OPENWOP_IMAGE_PROVIDER_ENABLED === 'true';
+}
+
+// 1×1 transparent PNG — the deterministic test-seam asset (no network/credential).
+const MOCK_IMAGE_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMEAQDWUFLAAAAAAElFTkSuQmCC';
+
+async function callImageGenerator(
+  scope: AdapterScope,
+  req: ImageGenerationRequest,
+): Promise<ImageGenerationResult> {
+  const startedAt = Date.now();
+  if (typeof req.prompt !== 'string' || req.prompt.trim().length === 0) {
+    throw new AiProviderError('invalid_request', 'Image generation requires a non-empty `prompt`.', { field: 'prompt' });
+  }
+  if (req.prompt.length > MAX_IMAGE_PROMPT_CHARS) {
+    throw new AiProviderError('content_too_long', `Image prompt exceeds the host cap of ${MAX_IMAGE_PROMPT_CHARS} characters.`, { max: MAX_IMAGE_PROMPT_CHARS, length: req.prompt.length });
+  }
+  const n = Math.min(Math.max(1, typeof req.n === 'number' ? req.n : 1), MAX_IMAGES_PER_CALL);
+  const provider = req.provider ?? 'openai';
+  if (!IMAGE_PROVIDERS.includes(provider as (typeof IMAGE_PROVIDERS)[number])) {
+    throw new AiProviderError('host_capability_missing', `Image generation not supported for provider "${provider}".`, { provider, capability: 'aiProviders.imageGeneration' });
+  }
+
+  // Deterministic mock (test seam only — DEFENSE-IN-DEPTH: a node forwarding
+  // provider:'mock' in prod must not fake an advertised capability; in prod it
+  // falls through to managed resolution → honest image_generation_unsupported).
+  if (provider === 'mock' && process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+    const images: ImageGenerationResult['images'] = [];
+    for (let i = 0; i < n; i++) {
+      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_IMAGE_PNG_B64, contentType: 'image/png' });
+      images.push({ url: stored.url, mimeType: 'image/png', metadata: { model: 'mock-image-1', provider, ...(req.seed != null ? { seed: req.seed } : {}) } });
+    }
+    return { images, totalTimeMs: Date.now() - startedAt, usage: { images: n } };
+  }
+
+  // Credential resolution. An explicit non-managed credentialRef routes through
+  // policy + BYOK (mirroring callAI/TTS). No managed image key exists on this host
+  // yet, so a managed request fails honestly rather than mis-routing another key.
+  if (req.credentialRef && !isManagedCredentialRef(req.credentialRef)) {
+    await enforcePolicy(scope, provider, req.model ?? '', req.credentialRef);
+    // The concrete provider HTTP dispatch (OpenAI gpt-image / Google Imagen) lands
+    // with the first wired provider; the BYOK credential is resolved host-side and
+    // never crosses back into the node (Phase 1 establishes the seam + mock).
+    resolveCredential(scope, provider, req.credentialRef);
+  } else if (!MANAGED_IMAGE_PROVIDERS.includes(provider)) {
+    throw new AiProviderError(
+      'host_capability_missing',
+      `Image generation for provider "${provider}" requires a BYOK credential on this host (no managed image key is configured).`,
+      { provider, capability: 'aiProviders.imageGeneration' },
+    );
+  }
+  // ADR 0115 Phase 3 — the real external-provider dispatch, present ONLY when the
+  // operator opted in + wired an endpoint (else honest-off below). The returned
+  // base64 is stored host-side as a Media asset; raw bytes never cross the result
+  // boundary; the endpoint is §D-private (the adapter scrubs it from any error).
+  if (imageProviderConfigured(provider)) {
+    // ADR 0115 Phase 5 — per-tenant daily image budget, checked BEFORE the metered
+    // provider call (over ⇒ no dispatch, no charge), recorded by images returned.
+    const day = new Date().toISOString().slice(0, 10);
+    const budget = await checkImageBudget(scope.tenantId, day);
+    if (!budget.allowed) {
+      throw new AiProviderError('provider_rate_limited', `Daily image-generation budget reached (${budget.used}/${budget.max}).`, { used: budget.used, max: budget.max });
+    }
+    // ADR 0115 Phase 6 — the adapter resolves the per-PROVIDER endpoint + key from
+    // `provider`, so `openai` and `google` (Imagen) route to their own configured
+    // endpoints (or the shared generic one). Inert until the operator configures it.
+    const raws = await dispatchImageGeneration({
+      prompt: req.prompt,
+      provider,
+      ...(req.model ? { model: req.model } : {}),
+      ...(req.size ? { size: req.size } : {}),
+      n: Math.min(n, budget.remaining), // never exceed the remaining budget
+    });
+    const images: ImageGenerationResult['images'] = [];
+    for (const raw of raws) {
+      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+      images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(req.model ? { model: req.model } : {}), ...(req.seed != null ? { seed: req.seed } : {}) } });
+    }
+    await recordImages(scope.tenantId, day, images.length);
+    return { images, totalTimeMs: Date.now() - startedAt, usage: { images: images.length } };
+  }
+
+  // Honest-off: no provider wired on this host.
+  throw new AiProviderError('host_capability_missing', `Image generation provider "${provider}" is not yet wired on this host.`, { provider });
+}
+
+async function callSpeechSynthesizer(
+  scope: AdapterScope,
+  req: SpeechSynthesisRequest,
+): Promise<SpeechSynthesisResult> {
+  const startedAt = Date.now();
+  if (typeof req.text !== 'string' || req.text.length === 0) {
+    throw new AiProviderError('invalid_request', 'Speech synthesis requires a non-empty `text`.', { field: 'text' });
+  }
+  if (typeof req.voiceId !== 'string' || req.voiceId.length === 0) {
+    throw new AiProviderError('invalid_request', 'Speech synthesis requires a non-empty `voiceId`.', { field: 'voiceId' });
+  }
+  if (req.text.length > MAX_SPEECH_CHARS) {
+    throw new AiProviderError(
+      'content_too_long',
+      `Speech synthesis text exceeds the host cap of ${MAX_SPEECH_CHARS} characters (got ${req.text.length}).`,
+      { max: MAX_SPEECH_CHARS, length: req.text.length },
+    );
+  }
+
+  // ADR 0106 — per-org daily TTS budget (the AGGREGATE ceiling above the per-call
+  // MAX_SPEECH_CHARS cap). No-op when the budget is unset (default). Check before
+  // the paid dispatch; record actual chars after success.
+  const ttsBudget = await checkMediaBudget(scope.tenantId, 'tts', req.text.length);
+  if (ttsBudget.exceeded) {
+    throw new AiProviderError(
+      'media_budget_exceeded',
+      `Daily text-to-speech budget reached (${ttsBudget.cap} characters; ${ttsBudget.used} used). Resets at 00:00 UTC.`,
+      { kind: 'tts', cap: ttsBudget.cap, used: ttsBudget.used },
+    );
+  }
+
+  const provider = req.provider ?? 'minimax';
+  if (!SPEECH_PROVIDERS.includes(provider)) {
+    throw new AiProviderError(
+      'speech_synthesis_unsupported',
+      `Speech synthesis not supported for provider "${provider}" (this host routes TTS via: [${SPEECH_PROVIDERS.map((p) => `'${p}'`).join(', ')}]).`,
+      { provider, capability: 'aiProviders.speechSynthesis' },
+    );
+  }
+
+  // Conformance-only deterministic TTS (no network, no credential). Stores a
+  // tiny synthetic asset and returns the locked RFC 0105 §A result shape so the
+  // speech-synthesis-roundtrip scenario passes non-vacuously where no managed
+  // MiniMax key exists. DEFENSE-IN-DEPTH: gated on OPENWOP_TEST_SEAM_ENABLED here
+  // too (not only at the agents.ts seam) — `callSpeechSynthesizer` is exposed to
+  // every workflow node as `ctx.callSpeechSynthesizer`, so without this gate a
+  // node forwarding `provider:'mock'` could fake an advertised capability in
+  // prod. With the gate, a prod `provider:'mock'` falls through to managed
+  // resolution → honest `speech_synthesis_unsupported`. Real MiniMax unchanged.
+  if (provider === 'mock' && process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+    const storedMock = await storeMediaAsset(scope.tenantId, {
+      contentBase64: MOCK_SPEECH_AUDIO_B64,
+      contentType: 'audio/mpeg',
+    });
+    const mockResult: SpeechSynthesisResult = {
+      audio: {
+        url: storedMock.url,
+        mimeType: 'audio/mpeg',
+        voiceId: req.voiceId,
+        ...(req.seed != null ? { seed: req.seed } : {}),
+        metadata: { model: 'mock-tts-1', provider, generationTimeMs: 0 },
+      },
+      totalTimeMs: Date.now() - startedAt,
+      usage: { characters: req.text.length },
+    };
+    if (req.stream === true) await emitSynthesisChunks(scope, mockResult.audio);
+    return mockResult;
+  }
+
+  // Credential resolution. An explicit non-managed credentialRef routes through
+  // policy + BYOK (mirroring callAI) for ANY supported speech provider. Otherwise
+  // only MiniMax has a managed server-held key on this host — OpenAI/Google speech
+  // is BYOK-only, so a managed request for them fails honestly rather than
+  // mis-routing the MiniMax key.
+  let apiKey: string;
+  if (req.credentialRef && !isManagedCredentialRef(req.credentialRef)) {
+    await enforcePolicy(scope, provider, req.model ?? '', req.credentialRef);
+    apiKey = resolveCredential(scope, provider, req.credentialRef).cleartext;
+  } else if (MANAGED_SPEECH_PROVIDERS.includes(provider)) {
+    const managed = await resolveManagedSpeechKey();
+    if (!managed) {
+      throw new AiProviderError(
+        'speech_synthesis_unsupported',
+        'No managed speech credential is configured on this host (set MINIMAX_API_KEY).',
+        { provider },
+      );
+    }
+    apiKey = managed;
+  } else {
+    throw new AiProviderError(
+      'speech_synthesis_unsupported',
+      `Speech synthesis for provider "${provider}" is BYOK on this host — supply a credentialRef (no managed key is configured for it).`,
+      { provider, capability: 'aiProviders.speechSynthesis' },
+    );
+  }
+
+  // Route to the provider's dispatch path (all share the DispatchSpeech shape).
+  const dispatchArgs = {
+    apiKey,
+    ...(req.model ? { model: req.model } : {}),
+    text: req.text,
+    voiceId: req.voiceId,
+    ...(req.speed != null ? { speed: req.speed } : {}),
+    ...(req.languageCode ? { languageCode: req.languageCode } : {}),
+  };
+  const dispatchFor = provider === 'openai'
+    ? dispatchSpeechOpenAI
+    : provider === 'google'
+      ? dispatchSpeechGoogle
+      : provider === 'elevenlabs'
+        ? dispatchSpeechElevenLabs
+        : dispatchSpeechMiniMax;
+
+  let dispatched;
+  try {
+    dispatched = await runWithTimeout(scope, (signal) => dispatchFor({ ...dispatchArgs, signal }));
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AiProviderError('provider_timed_out', 'Speech provider call exceeded the configured timeout.', { provider });
+    }
+    throw new AiProviderError('speech_synthesis_failed', 'Speech provider call failed.', {
+      provider,
+      upstreamMessage: (err instanceof Error ? err.message : String(err)).slice(0, 200),
+    });
+  }
+
+  const stored = await storeMediaAsset(scope.tenantId, {
+    contentBase64: dispatched.contentBase64,
+    contentType: dispatched.mimeType,
+  });
+
+  // ADR 0106 — record the actual TTS chars against the per-org daily budget
+  // (best-effort, no-op when the budget is unset).
+  await recordMediaUsage(scope.tenantId, 'tts', req.text.length);
+
+  const result: SpeechSynthesisResult = {
+    audio: {
+      url: stored.url,
+      mimeType: dispatched.mimeType,
+      voiceId: req.voiceId,
+      ...(req.seed != null ? { seed: req.seed } : {}),
+      metadata: {
+        model: dispatched.model,
+        provider,
+        generationTimeMs: dispatched.generationTimeMs,
+      },
+    },
+    totalTimeMs: Date.now() - startedAt,
+    usage: { characters: req.text.length },
+  };
+  if (req.stream === true) await emitSynthesisChunks(scope, result.audio);
+  return result;
 }
 
 // ── Pipeline stages ───────────────────────────────────────────────
@@ -602,6 +1161,10 @@ async function dispatchPlain(
   scope: AdapterScope,
   req: AiCallRequest,
   apiKey: string,
+  // ADR 0079 §Phase 4 — when present, stream the reply's token deltas. Passed
+  // ONLY from callAI's plain-text branch; the structured/NL-to-format callers
+  // omit it (streaming a JSON body mid-parse-retry is noise, not progress).
+  onDelta?: (delta: string) => Promise<void>,
 ): Promise<AiCallResult> {
   const result = await mapDispatchErrors(req.provider, () =>
     runWithTimeout(scope, async (signal) => {
@@ -612,6 +1175,7 @@ async function dispatchPlain(
         messages: toChatMessages(req),
         ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
         signal,
+        ...(onDelta ? { onDelta } : {}),
         // RFC 0032/0033 — the conformance-only `mock` provider reads
         // its pre-programmed response queue keyed by `nodeId`. Real
         // providers ignore this extension field. See `dispatchMock.ts`.
@@ -622,6 +1186,9 @@ async function dispatchPlain(
         usage: {
           inputTokens: raw.usage?.inputTokens,
           outputTokens: raw.usage?.outputTokens,
+          // ADR 0148 A2 — carry the prompt-cache read count through so the
+          // emit site can set the wire-legal `providerUsage.cacheHit`.
+          ...(raw.usage?.cachedReadTokens != null ? { cachedReadTokens: raw.usage.cachedReadTokens } : {}),
         },
         finishReason: normalizeFinishReason(raw.finishReason),
         model: raw.model,
@@ -633,7 +1200,7 @@ async function dispatchPlain(
   // `dispatchStructured`'s parse-retry loop — which calls dispatchPlain
   // up to STRUCTURED_OUTPUT_RETRIES + 1 times — emits one event per
   // attempt rather than collapsing N invocations into a single event.
-  await emitProviderUsage(scope, req.provider, req.model, result.usage?.inputTokens, result.usage?.outputTokens);
+  await emitProviderUsage(scope, req.provider, req.model, result.usage?.inputTokens, result.usage?.outputTokens, (result.usage?.cachedReadTokens ?? 0) > 0, result.usage?.cachedReadTokens, undefined);
   return result;
 }
 

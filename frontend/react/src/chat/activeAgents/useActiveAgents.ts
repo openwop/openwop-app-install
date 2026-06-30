@@ -33,7 +33,7 @@ import type { AgentMentionEntry } from '../lib/agentMentions.js';
 import {
   DEFAULT_ASSISTANT_ID,
   DEFAULT_ASSISTANT_ROW,
-} from './ActiveAgentsPanel.js';
+} from './constants.js';
 import type { ActiveAgentRow } from './types.js';
 
 export interface UseActiveAgentsResult {
@@ -47,6 +47,11 @@ export interface UseActiveAgentsResult {
   /** Used by phase D3's `@`-mention submit path. Returns the agentId
    *  that's now current — caller can include it on the dispatch. */
   activateAgent: (entry: AgentMentionEntry) => string;
+  /** Replace the lineup wholesale from a conversation's stored participants
+   *  (ADR 0043 — derive on open so the lineup survives a cross-device reload).
+   *  Resets the routing voice to the default assistant; membership is the
+   *  server's, the routing choice is the user's. */
+  setLineup: (rows: readonly ActiveAgentRow[]) => void;
   /** Used by the panel's row-click. */
   switchTo: (agentId: string) => void;
   /** Used by the panel's `×` button. */
@@ -93,6 +98,13 @@ export function useActiveAgents(
     return resolvedAgentId;
   }, [setSession]);
 
+  const setLineup = useCallback((rows: readonly ActiveAgentRow[]): void => {
+    setSession((s) => ({
+      ...s,
+      activeAgents: { lineup: [...rows], currentAgentId: null },
+    }));
+  }, [setSession]);
+
   const switchTo = useCallback((agentId: string): void => {
     setSession((s) => {
       const existing = s.activeAgents?.lineup ?? [];
@@ -131,5 +143,5 @@ export function useActiveAgents(
     });
   }, [setSession]);
 
-  return { lineup, currentAgentId, activateAgent, switchTo, remove };
+  return { lineup, currentAgentId, activateAgent, setLineup, switchTo, remove };
 }

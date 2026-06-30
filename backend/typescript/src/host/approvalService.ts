@@ -40,7 +40,15 @@ export interface PendingApproval {
    *  branches here instead of starting `workflowId` (execution is T6). */
   actionId?: string;
   /** Discriminator for renderers; absent ⇒ 'run-proposal' (back-compat). */
-  kind?: 'run-proposal' | 'assistant-action';
+  kind?: 'run-proposal' | 'assistant-action' | 'content-publish';
+  /** ADR 0066 — when `kind: 'content-publish'`, this approval gates a CMS page's
+   *  publish (`draft → in_review → published`). `rosterId`/`persona`/`workflowId`
+   *  are empty (no agent, no run); the decide path is the CMS feature's
+   *  content-approval handler, which transitions the page. The SAME queue +
+   *  inbox + CAS resolve (ADR 0025 §4 "no new approval store"). */
+  orgId?: string;
+  pageId?: string;
+  pageTitle?: string;
   /** The board card the proposal originated from (the "cited source"). */
   boardId?: string;
   cardId?: string;
@@ -55,6 +63,29 @@ export interface PendingApproval {
   runId?: string;
   /** Optional reviewer note captured at claim/reject time. */
   note?: string;
+  /** Multi-approver / quorum policy (ADR 0070). Absent OR `requiredApprovals <= 1`
+   *  ⇒ the legacy single-decision path (a claim/reject resolves immediately).
+   *  When `requiredApprovals > 1`, each claim/reject is an eligibility-checked VOTE
+   *  recorded in the durable `review:decision` ledger keyed by `approvalId`; the
+   *  final transition (run start / reject) fires exactly once when policy is met. */
+  policy?: ApprovalPolicy;
+}
+
+export interface ApprovalPolicy {
+  requiredApprovals: number;
+  /** Eligible approver subject refs; empty (and no group/role refs) ⇒ any holder
+   *  of `approvals:respond`. */
+  approverRefs?: string[];
+  /** ADR 0075 §D2 — accessControl group refs whose members are eligible. Resolved
+   *  LIVE to subjects at decision time (ADR 0075 §D3), tenant/org-scoped (§D5).
+   *  Host-extension only — NOT on the OpenWOP wire (interrupt-path portability is
+   *  RFC 0104). */
+  approverGroupRefs?: string[];
+  /** ADR 0075 §D2 — accessControl role refs (built-in or custom) whose effective
+   *  holders are eligible. Same live, tenant/org-scoped resolution as groups. */
+  approverRoleRefs?: string[];
+  /** How rejections fail the gate. Default: a single reject fails it. */
+  rejectionPolicy?: 'any' | 'majority';
 }
 
 const approvals = new DurableCollection<PendingApproval>('approval', (a) => a.approvalId);
@@ -121,6 +152,8 @@ export async function createApproval(input: {
   cardId?: string;
   cardTitle?: string;
   proposal: string;
+  /** Multi-approver / quorum policy (ADR 0070). Omit for the single-decision gate. */
+  policy?: ApprovalPolicy;
 }): Promise<PendingApproval> {
   const approval: PendingApproval = {
     approvalId: `appr:${randomUUID()}`,
@@ -132,6 +165,7 @@ export async function createApproval(input: {
     cardId: input.cardId,
     cardTitle: input.cardTitle,
     proposal: input.proposal,
+    ...(input.policy ? { policy: input.policy } : {}),
     status: 'pending',
     createdAt: nowIso(),
   };
@@ -228,6 +262,67 @@ export function getAssistantActionProjector(): AssistantActionProjector | null {
   return actionProjector;
 }
 
+/**
+ * Create a CMS content-publish approval (ADR 0066). Same durable queue + CAS
+ * resolve as run proposals/assistant actions — a CMS editor is one more proposer
+ * on the single loop. No agent, no run: `rosterId`/`persona`/`workflowId` are
+ * empty; the decide path is the CMS feature's content-approval handler, which
+ * transitions the page. NOT a second approval store (ADR 0025 §4).
+ */
+export async function createContentApproval(input: {
+  tenantId: string;
+  orgId: string;
+  pageId: string;
+  pageTitle: string;
+  proposal: string;
+  /** Multi-approver / quorum policy (ADR 0070). Omit for the single-decision gate. */
+  policy?: ApprovalPolicy;
+}): Promise<PendingApproval> {
+  const approval: PendingApproval = {
+    approvalId: `appr:${randomUUID()}`,
+    tenantId: input.tenantId,
+    rosterId: '',
+    persona: '',
+    workflowId: '',
+    kind: 'content-publish',
+    orgId: input.orgId,
+    pageId: input.pageId,
+    pageTitle: input.pageTitle,
+    proposal: input.proposal,
+    ...(input.policy ? { policy: input.policy } : {}),
+    status: 'pending',
+    createdAt: nowIso(),
+  };
+  await approvals.put(approval);
+  await indexApproval(approval);
+  return approval;
+}
+
+/**
+ * The content-publish decision handler, registered by the CMS FEATURE at boot
+ * (core owns the hook; the feature depends on core, never the reverse — the
+ * same discipline as the assistant-action handler). The approvals routes call
+ * this for `kind: 'content-publish'` approvals so the inbox claim/reject path
+ * and the CMS publish flow share ONE implementation. The handler enforces org
+ * RBAC (`host:members:manage`) + IDOR and transitions the page.
+ */
+export type ContentApprovalHandler = (
+  tenantId: string,
+  approvalId: string,
+  outcome: 'approved' | 'rejected',
+  opts: { decidedByUserId?: string; note?: string },
+) => Promise<{ approval: PendingApproval; changed: boolean } | null>;
+
+let contentApprovalHandler: ContentApprovalHandler | null = null;
+
+export function registerContentApprovalHandler(fn: ContentApprovalHandler): void {
+  contentApprovalHandler = fn;
+}
+
+export function getContentApprovalHandler(): ContentApprovalHandler | null {
+  return contentApprovalHandler;
+}
+
 export async function getApproval(approvalId: string): Promise<PendingApproval | null> {
   return approvals.get(approvalId);
 }
@@ -250,6 +345,12 @@ export async function listApprovals(tenantId: string, status?: ApprovalStatus): 
  *  to avoid re-proposing the same card on every poll. */
 export async function hasPendingApprovalForCard(tenantId: string, cardId: string): Promise<boolean> {
   return (await listApprovals(tenantId, 'pending')).some((a) => a.cardId === cardId);
+}
+
+/** True when this CMS page already has a pending content-publish approval —
+ *  used by `submit` to avoid fanning out duplicate approvals (ADR 0066). */
+export async function hasPendingApprovalForPage(tenantId: string, pageId: string): Promise<boolean> {
+  return (await listApprovals(tenantId, 'pending')).some((a) => a.kind === 'content-publish' && a.pageId === pageId);
 }
 
 /** Resolve an approval (claim → approved, reject → rejected). The `pending`
@@ -291,6 +392,34 @@ export function resolveApproval(
     await pruneResolved(approval.tenantId);
     return { approval: next, changed: true };
   });
+}
+
+/** Re-open a just-resolved approval back to `pending` (ADR 0066 compensation).
+ *  The content-publish decide path resolves the approval BEFORE the page
+ *  transition (the CAS gates the side effect); if the transition then fails
+ *  (the page left `in_review`, or was deleted), this restores the approval so a
+ *  failed decide never consumes it — the row never lies about what happened.
+ *  Idempotent + CAS-guarded; a no-op if the row is already pending/gone. */
+export async function reopenApproval(approvalId: string): Promise<void> {
+  await withApprovalLock(approvalId, async () => {
+    const a = await approvals.get(approvalId);
+    if (!a || a.status === 'pending') return;
+    const { resolvedAt: _resolvedAt, ...rest } = a;
+    const reopened: PendingApproval = { ...rest, status: 'pending' };
+    const swapped = await approvals.compareAndSwap(a, reopened);
+    if (swapped) await indexApproval(reopened, a.status);
+  });
+}
+
+/** Reject any pending content-publish approval for a page (ADR 0066). Called
+ *  when an admin moves the page out of `in_review` through the direct
+ *  reject/unpublish routes while the approval gate is ON, so the inbox row
+ *  doesn't orphan (the page is the single source of truth for its status). */
+export async function rejectPendingApprovalForPage(tenantId: string, pageId: string, note: string): Promise<void> {
+  const pending = (await listApprovals(tenantId, 'pending')).filter(
+    (a) => a.kind === 'content-publish' && a.pageId === pageId,
+  );
+  for (const a of pending) await resolveApproval(a.approvalId, { status: 'rejected', note });
 }
 
 /** Attach the started run to an already-approved approval (post-dispatch). */

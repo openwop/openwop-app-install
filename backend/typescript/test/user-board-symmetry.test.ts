@@ -12,19 +12,20 @@ import {
   getPersonalBoard,
   personalBoardId,
   boardOwner,
+  boardSubject,
+  listBoardsForSubject,
   createBoard,
   listBoards,
 } from '../src/host/kanbanService.js';
 
 describe('ADR 0025 — personal boards + polymorphic owner', () => {
   let server: http.Server;
-  const PORT = 18951;
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, res);
     });
   });
   afterAll(async () => {
@@ -47,6 +48,23 @@ describe('ADR 0025 — personal boards + polymorphic owner', () => {
 
     const agentBoard = await createBoard({ tenantId: 'user:alice', name: "Sally's board", rosterId: 'host:sally-1' });
     expect(boardOwner(agentBoard)).toEqual({ kind: 'agent', rosterId: 'host:sally-1' });
+  });
+
+  it('ADR 0045 — listBoardsForSubject returns only that subject\'s boards (canonical owner query)', async () => {
+    const T = 'tenant:subj';
+    await ensurePersonalBoard(T, 'user:bob');
+    await createBoard({ tenantId: T, name: 'Agent board', rosterId: 'host:agent-9' });
+
+    const userBoards = await listBoardsForSubject(T, { kind: 'user', id: 'user:bob' });
+    expect(userBoards).toHaveLength(1);
+    expect(boardSubject(userBoards[0]!)).toEqual({ kind: 'user', id: 'user:bob' });
+
+    const agentBoards = await listBoardsForSubject(T, { kind: 'agent', id: 'host:agent-9' });
+    expect(agentBoards).toHaveLength(1);
+    expect(boardSubject(agentBoards[0]!)).toEqual({ kind: 'agent', id: 'host:agent-9' });
+
+    // No cross-subject bleed.
+    expect(await listBoardsForSubject(T, { kind: 'user', id: 'user:nobody' })).toHaveLength(0);
   });
 
   it('getPersonalBoard is tenant-isolated', async () => {

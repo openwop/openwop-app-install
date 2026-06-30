@@ -36,6 +36,7 @@ import {
   type SurfaceKey,
 } from './surfaceBackends.js';
 import { redactForCompaction } from '../byok/textRedaction.js';
+import { budgetByChars } from './memoryBudget.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { createA2aSurface, type A2aSurface } from './a2aSurface.js';
 import { createKanbanSurface, type KanbanSurface } from './kanbanSurface.js';
@@ -1119,6 +1120,17 @@ export interface MemoryRow {
 export interface MemoryListOpts {
   limit?: number;
   tag?: string;
+  /** RFC 0113 — bound the cumulative SIZE of the returned set. An entry whose
+   *  inclusion would exceed the budget is OMITTED whole (never truncated);
+   *  ≥1 entry is always kept. The unit is content chars (advertised as
+   *  `memory.injectionBudget.tokenCounter: "chars"`) — the SAME `budgetByChars`
+   *  primitive ADR 0148 A4 uses, so there is one budget model, not two. */
+  tokenBudget?: number;
+  /** RFC 0113 — ranking before the budget cut. Only `'recency'` is honored:
+   *  this host does not advertise `memory.search` `modes:["semantic"]`, so per
+   *  RFC 0113 it offers recency-only and does NOT expose `'relevance'`. An
+   *  unknown value falls back to recency (graceful, never errors). */
+  rank?: 'recency';
 }
 
 /** The demo's single per-tenant memoryRef. Real hosts derive memoryRefs
@@ -1146,15 +1158,18 @@ function notExpired(row: MemoryRow, nowMs: number): boolean {
 export function writeMemoryEntry(
   tenantId: string,
   memoryRef: string,
-  input: { content: string; tags?: string[]; ttlSeconds?: number },
+  input: { content: string; tags?: string[]; ttlSeconds?: number; id?: string; createdAt?: string },
 ): MemoryRow {
   if (!_initialized) throw new Error('initInMemorySurfaces() must be called first');
   const now = Date.now();
   const row: MemoryRow = {
-    id: `mem_${randomUUID().slice(0, 12)}`,
+    // An explicit `id`/`createdAt` lets a durable-backed caller (subject-memory
+    // notes, ADR 0041) keep the in-memory recall row aligned with its durable
+    // source-of-truth row, so a later delete hits the same id across both stores.
+    id: input.id ?? `mem_${randomUUID().slice(0, 12)}`,
     content: input.content,
     tags: input.tags ?? [],
-    createdAt: new Date(now).toISOString(),
+    createdAt: input.createdAt ?? new Date(now).toISOString(),
     ...(typeof input.ttlSeconds === 'number' && input.ttlSeconds > 0
       ? { expiresAt: new Date(now + input.ttlSeconds * 1000).toISOString() }
       : {}),
@@ -1190,9 +1205,19 @@ export function listMemoryEntries(
   const now = Date.now();
   const all = (memoryBucket(tenantId).get(memoryRef) ?? []).filter((r) => notExpired(r, now));
   const tagged = opts.tag ? all.filter((r) => r.tags.includes(opts.tag!)) : all;
+  // Recency rank (newest first). `rank` only honors 'recency' (see MemoryListOpts).
   const sorted = [...tagged].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const limit = Math.min(opts.limit ?? MEMORY_HARD_MAX, MEMORY_HARD_MAX);
-  return sorted.slice(0, limit);
+  const limited = sorted.slice(0, limit);
+  // RFC 0113 — apply the injection budget AFTER ranking+limit, reusing the SAME
+  // primitive as ADR 0148 A4 (one budget model). Drops over-budget entries whole;
+  // keeps ≥1. SR-1 redaction + CTI-1 tenant-scoping already hold on these rows
+  // (write-time redaction + tenant bucket), and budgeting only NARROWS the set,
+  // so neither invariant is widened.
+  if (typeof opts.tokenBudget === 'number' && opts.tokenBudget > 0) {
+    return budgetByChars(limited, opts.tokenBudget, (r) => r.content.length);
+  }
+  return limited;
 }
 
 /** RFC 0004 read side. Single tenant-scoped entry, or null when absent/expired. */
@@ -1337,8 +1362,19 @@ interface MediaAssetEntry {
 }
 
 /** token → entry, one durable row per asset (read-through, multi-instance
- *  correct). Tokens are globally unique + carry their own tenantId. */
-const _mediaAssets = new DurableCollection<MediaAssetEntry>('media:asset', (e) => e.token);
+ *  correct). Tokens are globally unique + carry their own tenantId.
+ *
+ *  Collection name `media:bytes` (ADR 0083 review #2): the byte-store previously
+ *  shared the `media:asset` name with `mediaService.assets` (the assetId-keyed library
+ *  metadata), overlapping one KV prefix. The byte-store now owns `media:bytes`; existing
+ *  rows under the legacy `media:asset` prefix are read-fallback'd + migrated-on-read by
+ *  `resolveMediaAsset` (zero-downtime, self-healing — no big-bang migration that could
+ *  orphan a served URL). */
+const _mediaAssets = new DurableCollection<MediaAssetEntry>('media:bytes', (e) => e.token);
+/** LEGACY byte-store location (pre-#2) — read-fallback + drain only. A `.get(token)` here
+ *  matches only a byte-store row (token-keyed); the assetId-keyed metadata rows that also
+ *  live under `media:asset` never collide with a capability token, so this is safe. */
+const _legacyMediaBytes = new DurableCollection<MediaAssetEntry>('media:asset', (e) => e.token);
 /** LLM-emitted media (RFC 0055) is ephemeral — a short TTL keeps the store
  *  small. User-uploaded chat attachments override this with a longer TTL
  *  (see UPLOADED_ASSET_TTL_MS in routes/mediaAssets.ts) so a fork/replay of
@@ -1398,10 +1434,21 @@ export async function storeMediaAsset(
  *  `media-asset-url-tenant-scoped` invariant (the token is unguessable, so a
  *  cross-tenant read requires already holding tenant A's token). */
 export async function resolveMediaAsset(token: string): Promise<MediaAssetEntry | null> {
-  const e = await _mediaAssets.get(token);
-  if (!e) return null;
+  let e = await _mediaAssets.get(token);
+  if (!e) {
+    // #2 — fall back to the legacy `media:asset` byte-store + MIGRATE on read: an asset
+    // minted before the rename keeps serving, and is moved into `media:bytes` so the legacy
+    // prefix drains over time. Migration failure is non-fatal (we still serve the legacy row).
+    const legacy = await _legacyMediaBytes.get(token);
+    if (!legacy) return null;
+    e = legacy;
+    if (e.expiresAtMs > Date.now()) {
+      try { await _mediaAssets.put(e); await _legacyMediaBytes.delete(token); } catch { /* serve anyway */ }
+    }
+  }
   if (e.expiresAtMs <= Date.now()) {
-    await _mediaAssets.delete(token);
+    await _mediaAssets.delete(token).catch(() => undefined);
+    await _legacyMediaBytes.delete(token).catch(() => undefined);
     return null;
   }
   return e;
@@ -1411,9 +1458,10 @@ export async function resolveMediaAsset(token: string): Promise<MediaAssetEntry 
  *  assets on demand rather than waiting for TTL expiry). Tenant-checked: a token
  *  is only removable by its owning tenant. No-op for an unknown/foreign token. */
 export async function deleteMediaAsset(tenantId: string, token: string): Promise<boolean> {
-  const e = await _mediaAssets.get(token);
+  const e = (await _mediaAssets.get(token)) ?? (await _legacyMediaBytes.get(token)); // #2 — both locations
   if (!e || e.tenantId !== tenantId) return false;
-  await _mediaAssets.delete(token);
+  await _mediaAssets.delete(token).catch(() => undefined);
+  await _legacyMediaBytes.delete(token).catch(() => undefined);
   return true;
 }
 

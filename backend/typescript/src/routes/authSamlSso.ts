@@ -18,6 +18,7 @@ import { createLogger } from '../observability/logger.js';
 import { issueUserSession } from '../middleware/auth.js';
 import { upsertFromPrincipal } from '../features/users/usersService.js';
 import { samlSettings, samlAuthorizeUrl, samlValidate, samlMetadata } from '../host/auth/samlSso.js';
+import type { Storage } from '../storage/storage.js';
 
 const log = createLogger('routes.authSamlSso');
 
@@ -26,13 +27,14 @@ function safeReturnTo(v: unknown): string {
   return typeof v === 'string' && v.startsWith('/') && !v.startsWith('//') ? v : '/';
 }
 
-export function registerSamlSsoRoutes(app: Express): void {
+export function registerSamlSsoRoutes(app: Express, deps: { storage?: Storage } = {}): void {
+  const storage = deps.storage;
   // SP-initiated: bounce the browser to the IdP with a relay-stated AuthnRequest.
   app.get('/v1/host/openwop-app/auth/saml/sso/login', async (req, res, next) => {
     try {
       const s = samlSettings();
       if (!s) throw new OpenwopError('not_found', 'SAML SSO is not configured on this host.', 404, {});
-      const url = await samlAuthorizeUrl(s, safeReturnTo(req.query.returnTo));
+      const url = await samlAuthorizeUrl(s, safeReturnTo(req.query.returnTo), storage);
       res.redirect(url);
     } catch (err) { next(err); }
   });
@@ -50,7 +52,7 @@ export function registerSamlSsoRoutes(app: Express): void {
 
         let identity;
         try {
-          identity = await samlValidate(s, body.SAMLResponse, body.RelayState);
+          identity = await samlValidate(s, body.SAMLResponse, body.RelayState, storage);
         } catch (e) {
           // Rejected assertion (bad signature / expired / wrong audience / forged).
           log.warn('saml_sso_rejected', { reason: e instanceof Error ? e.message : 'invalid' });

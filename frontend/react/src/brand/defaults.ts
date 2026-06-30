@@ -93,6 +93,68 @@ export const BRAND_DEFAULTS: BrandConfig = {
 };
 
 /**
+ * Curated font pairings for the Appearance editor (ADR 0170) — a known-good
+ * display/body/mono triple + the Google Fonts `<link>` that loads them. Beats a
+ * free-form URL field (which risks an unloaded family). Color/typography literals
+ * live here because this module is the brand SSoT (allowlisted in
+ * check-tsx-color-literals).
+ */
+export interface FontPairing { id: string; name: string; serif: string; sans: string; mono: string; fontsHref: string }
+const GMONO = 'family=Geist+Mono:wght@400;500';
+export const FONT_PAIRINGS: FontPairing[] = [
+  {
+    id: 'editorial', name: 'Editorial (default)',
+    serif: '"Instrument Serif", "Times New Roman", serif',
+    sans: '"Geist", ui-sans-serif, system-ui, sans-serif',
+    mono: '"Geist Mono", ui-monospace, "SF Mono", Menlo, monospace',
+    fontsHref: `https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&${GMONO}&display=swap`,
+  },
+  {
+    id: 'grotesk', name: 'Modern grotesk',
+    serif: '"Fraunces", Georgia, serif',
+    sans: '"Inter", ui-sans-serif, system-ui, sans-serif',
+    mono: '"Geist Mono", ui-monospace, monospace',
+    fontsHref: `https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600&family=Inter:wght@400;500;600;700&${GMONO}&display=swap`,
+  },
+  {
+    id: 'humanist', name: 'Warm humanist',
+    serif: '"Newsreader", Georgia, serif',
+    sans: '"Figtree", ui-sans-serif, system-ui, sans-serif',
+    mono: '"Geist Mono", ui-monospace, monospace',
+    fontsHref: `https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,600&family=Figtree:wght@400;500;600;700&${GMONO}&display=swap`,
+  },
+];
+
+/** The clay-ramp derivations (mirrors `styles/global.css` :root) as inline CSS
+ *  vars, so the Appearance editor's preview can SCOPE a candidate accent: spread
+ *  `{ '--clay': accent, ...CLAY_RAMP_DERIVATIONS }` onto a preview container and the
+ *  derived ramp recomputes from that accent (relative-color), recoloring only the
+ *  preview, not the live `:root`. Kept here (the brand SSoT, allowlisted) so no
+ *  `oklch(` literal lands in component code. */
+export const CLAY_RAMP_DERIVATIONS: Record<string, string> = {
+  '--clay-soft': 'oklch(from var(--clay) l c h / 0.10)',
+  '--clay-text': 'oklch(from var(--clay) calc(l - 0.12) calc(c + 0.02) h)',
+  '--clay-strong': 'oklch(from var(--clay) calc(l - 0.12) calc(c + 0.02) h)',
+  '--clay-rule': 'oklch(from var(--clay) l c h / 0.35)',
+  '--clay-wash': 'oklch(from var(--clay) l c h / 0.04)',
+  '--clay-glow': 'oklch(from var(--clay) l c h / 0.50)',
+  '--clay-bg-hi': 'oklch(from var(--clay) l c h / 0.06)',
+};
+
+/** Named SEED-SETS (ADR 0171) — starting points for the generative theme, NOT
+ *  hardcoded ramps. Each carries an accent seed + a font pairing, and OPTIONALLY a
+ *  neutral seed that tints the generated surfaces (omit → the stock AA-tuned grays).
+ *  The editor feeds these into the theme generator (theme/generate.ts), so an
+ *  operator begins from a designed identity, then customizes freely. `accent`/
+ *  `neutralSeed` are oklch (token-safe). */
+export interface BrandPreset { id: string; name: string; accent: string; neutralSeed?: string; fontPairing: string }
+export const BRAND_PRESETS: BrandPreset[] = [
+  { id: 'clay', name: 'Clay (default)', accent: 'oklch(58% 0.13 40)', fontPairing: 'editorial' },
+  { id: 'slate', name: 'Cool slate', accent: 'oklch(58% 0.11 245)', neutralSeed: 'oklch(60% 0.012 245)', fontPairing: 'grotesk' },
+  { id: 'forest', name: 'Forest', accent: 'oklch(56% 0.12 150)', neutralSeed: 'oklch(60% 0.012 150)', fontPairing: 'humanist' },
+];
+
+/**
  * The `VITE_BRAND_*` env-var name for each overridable field. Shared by
  * the client config and the Vite HTML plugin so the two never drift on
  * which variable feeds which field.

@@ -23,6 +23,7 @@ import {
   createBoard, getBoard, listCards, getCard, createCard, updateCardFields, moveCard,
   type KanbanCard,
 } from './kanbanService.js';
+import { emitAssignmentNotification, withdrawAssignmentNotification } from './kanbanAssignmentNotify.js';
 
 const log = createLogger('host.kanban');
 
@@ -105,13 +106,37 @@ export function createKanbanSurface(scope: BundleScope): KanbanSurface {
       };
     },
 
-    async taskAssign({ taskId, assigneeId, comment, idempotencyKey }) {
+    async taskAssign({ taskId, assigneeId, notifyAssignee, comment, idempotencyKey }) {
+      // Note (ADR 0049): this surface is the TRUSTED internal path (agents /
+      // workflow nodes), so it does not re-validate `assigneeId` against
+      // workspace membership the way the untrusted REST assign route does. It is
+      // still tenant-safe by construction: the notification is emitted with
+      // `tenantId = scope.tenantId`, so an `assigneeId` that isn't a real member
+      // of this tenant simply never matches anyone's tenant-scoped inbox (a
+      // harmless no-op) — it can never reach a user in a different tenant.
       const ck = idemKey(`assign:${idempotencyKey}`);
       const cached = _idem.get(ck) as { previousAssigneeId?: string; assignedAt: string } | undefined;
       if (cached) return cached;
       const card = await getCard(taskId);
       const previousAssigneeId = card?.assigneeId;
-      await updateCardFields(taskId, { assigneeId, ...(comment ? { assignmentReason: comment } : {}) });
+      // Assigning a person clears any pending role-addressed state (ADR 0049 D2).
+      await updateCardFields(taskId, {
+        assigneeId,
+        assigneeRole: null,
+        ...(comment ? { assignmentReason: comment } : {}),
+      });
+      // ADR 0049 — honor `notifyAssignee` (previously declared but DROPPED).
+      // Default ON: an assignment that doesn't reach the assignee is useless.
+      if (card && notifyAssignee !== false && assigneeId && assigneeId !== previousAssigneeId) {
+        const board = await getBoard(card.boardId);
+        await emitAssignmentNotification({
+          tenantId, card, assigneeId, comment,
+          ...(board?.name ? { boardName: board.name } : {}),
+        });
+        if (previousAssigneeId) {
+          await withdrawAssignmentNotification({ tenantId, cardId: card.id, recipientUserId: previousAssigneeId });
+        }
+      }
       const out = { ...(previousAssigneeId ? { previousAssigneeId } : {}), assignedAt: new Date().toISOString() };
       _idem.set(ck, out);
       return out;

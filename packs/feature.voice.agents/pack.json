@@ -1,0 +1,30 @@
+{
+  "name": "feature.voice.agents",
+  "version": "1.0.0",
+  "description": "Voice mode agent pack (ADR 0138) — a feature-bound manifest agent tuned for SPOKEN, full-duplex conversation on the existing chat. Brevity- and turn-taking-tuned: short spoken-first replies, explicit confirmation before any side-effecting action, no long lists or markdown that doesn't read aloud well. Chat-drivability = agent + nodes (ADR 0058); the agent rides the ONE chat (no second chat) and its per-agent voice is set in agent settings (agentProfile.configParameters.voice).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "voice", "speech", "agent", "conversation"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.voice.agents.assistant",
+      "persona": "GENERAL",
+      "label": "Voice Assistant",
+      "description": "A conversational assistant tuned for voice mode: concise spoken-first replies, one idea at a time, explicit confirmation before acting. Reads aloud well (no tables/long lists/markdown noise). Rides the ONE chat; its spoken voice is configured per-agent in agent settings.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/voice-assistant.md",
+      "toolAllowlist": [
+        "openwop:knowledge.search",
+        "openwop:ai.research.web"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": true, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

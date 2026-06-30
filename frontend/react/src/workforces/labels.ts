@@ -1,22 +1,52 @@
 /**
  * Human-facing labels for the workforce lifecycle + autonomy enums
  * (DESIGN.md §5.3 — never leak the raw wire token to the operator). The
- * client enums are insider vocabulary ("shadow" / "auto"); these give each a
- * title-case label and a one-line gloss for a tooltip / legend.
+ * client enums are insider vocabulary ("shadow" / "auto"); the operator-facing
+ * copy is externalized to the `workforces` i18n catalog. This module is a
+ * pure (hook-free) layer, so it maps each enum value to its catalog KEY; a
+ * React caller resolves it with `t(...)` from `useTranslation('workforces')`.
  */
 import type { AutonomyLevel, WorkforceStatus } from '../client/workforcesClient.js';
 
-const STATUS: Record<WorkforceStatus, { label: string; gloss: string }> = {
-  shadow: { label: 'Shadow', gloss: 'Runs alongside humans, takes no real action' },
-  piloting: { label: 'Piloting', gloss: 'Acting on live work, with human review' },
-  production: { label: 'Production', gloss: 'Bounded-autonomous within policy, live' },
+/** Lifecycle status → catalog keys for its operator label + one-line gloss. */
+const STATUS_KEYS: Record<WorkforceStatus, { label: string; gloss: string }> = {
+  shadow: { label: 'statusShadowLabel', gloss: 'statusShadowGloss' },
+  piloting: { label: 'statusPilotingLabel', gloss: 'statusPilotingGloss' },
+  production: { label: 'statusProductionLabel', gloss: 'statusProductionGloss' },
 };
 
-const AUTONOMY: Record<AutonomyLevel, { label: string; gloss: string }> = {
-  review: { label: 'Review', gloss: 'Every decision waits for human approval' },
-  guided: { label: 'Guided', gloss: 'Acts, but routes key decisions for review' },
-  auto: { label: 'Auto', gloss: 'Bounded-autonomous within its policy' },
+/** Autonomy level → catalog keys for its operator label + one-line gloss. */
+const AUTONOMY_KEYS: Record<AutonomyLevel, { label: string; gloss: string }> = {
+  review: { label: 'autonomyReviewLabel', gloss: 'autonomyReviewGloss' },
+  guided: { label: 'autonomyGuidedLabel', gloss: 'autonomyGuidedGloss' },
+  auto: { label: 'autonomyAutoLabel', gloss: 'autonomyAutoGloss' },
 };
+
+/** Journey stage → catalog keys for its operator label + one-line gloss. */
+const JOURNEY_KEYS: Record<WorkforceStatus, { label: string; gloss: string }> = {
+  shadow: { label: 'journeyShadowLabel', gloss: 'journeyShadowGloss' },
+  piloting: { label: 'journeyPilotingLabel', gloss: 'journeyPilotingGloss' },
+  production: { label: 'journeyProductionLabel', gloss: 'journeyProductionGloss' },
+};
+
+export function statusLabelKey(s: WorkforceStatus): string {
+  return STATUS_KEYS[s]?.label ?? s;
+}
+export function statusGlossKey(s: WorkforceStatus): string {
+  return STATUS_KEYS[s]?.gloss ?? '';
+}
+export function autonomyLabelKey(a: AutonomyLevel): string {
+  return AUTONOMY_KEYS[a]?.label ?? a;
+}
+export function autonomyGlossKey(a: AutonomyLevel): string {
+  return AUTONOMY_KEYS[a]?.gloss ?? '';
+}
+export function journeyLabelKey(s: WorkforceStatus): string {
+  return JOURNEY_KEYS[s]?.label ?? s;
+}
+export function journeyGlossKey(s: WorkforceStatus): string {
+  return JOURNEY_KEYS[s]?.gloss ?? '';
+}
 
 /** Status → chip class, mapped once so a workforce status reads the same way
  *  on the gallery card and the detail header (DESIGN.md §4.5 rule 7). */
@@ -28,38 +58,21 @@ export function statusChipClass(s: WorkforceStatus): string {
   }
 }
 
-export function statusLabel(s: WorkforceStatus): string {
-  return STATUS[s]?.label ?? s;
-}
-export function statusGloss(s: WorkforceStatus): string {
-  return STATUS[s]?.gloss ?? '';
-}
-export function autonomyLabel(a: AutonomyLevel): string {
-  return AUTONOMY[a]?.label ?? a;
-}
-export function autonomyGloss(a: AutonomyLevel): string {
-  return AUTONOMY[a]?.gloss ?? '';
-}
-
 /**
  * The trust journey — the plain-language spine of the whole /workforces UX.
  * A workforce earns autonomy in three stages; `status` is its current stage.
- * These labels (not the wire enums) are what the operator sees.
+ * Operator-facing labels/glosses live in the catalog (resolve via
+ * `journeyLabelKey` / `journeyGlossKey`); this array carries only the ordered
+ * wire statuses that drive the rail.
  */
-export const JOURNEY: ReadonlyArray<{ status: WorkforceStatus; label: string; gloss: string }> = [
-  { status: 'shadow', label: 'Watching', gloss: 'Watches your team work and learns — takes no real action yet.' },
-  { status: 'piloting', label: 'Assisting', gloss: 'Acts on live work, with a human reviewing exceptions.' },
-  { status: 'production', label: 'Running on its own', gloss: 'Runs autonomously within its policy guardrails.' },
+export const JOURNEY: ReadonlyArray<{ status: WorkforceStatus }> = [
+  { status: 'shadow' },
+  { status: 'piloting' },
+  { status: 'production' },
 ];
 
 /** 0 = Watching, 1 = Assisting, 2 = Running on its own. */
 export function journeyIndex(s: WorkforceStatus): number {
   const i = JOURNEY.findIndex((j) => j.status === s);
   return i < 0 ? 0 : i;
-}
-export function journeyLabel(s: WorkforceStatus): string {
-  return JOURNEY[journeyIndex(s)]?.label ?? s;
-}
-export function journeyGloss(s: WorkforceStatus): string {
-  return JOURNEY[journeyIndex(s)]?.gloss ?? '';
 }

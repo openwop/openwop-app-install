@@ -22,8 +22,10 @@
  */
 
 import { useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { resolveByToken, type OpenInterrupt } from '../client/interruptsClient.js';
+import i18n from '../i18n/index.js';
 
 interface ConversationTurn {
   messageId: string;
@@ -51,17 +53,25 @@ interface Props {
   onResolved(): void;
 }
 
+/** Maps a conversation turn role to its display key. */
+const TURN_ROLE_KEYS: Record<ConversationTurn['role'], string> = {
+  user: 'turnRoleUser',
+  agent: 'turnRoleAgent',
+  system: 'turnRoleSystem',
+};
+
 export function RunConversationPanel({ events, activeInterrupt, onResolved }: Props) {
+  const { t } = useTranslation('runs');
   const conversations = useMemo(() => groupConversations(events), [events]);
   // Suppress the panel entirely when the host hasn't surfaced any
   // conversation events. Keeps RunDetailPage uncluttered for the common
   // case (reference hosts don't advertise the primitive today).
   if (conversations.length === 0) return null;
   return (
-    <section className="card" aria-label="Multi-turn conversations">
-      <h2>Conversations</h2>
+    <section className="card" aria-label={t('conversationsAria')}>
+      <h2>{t('conversationsHeading')}</h2>
       <p className="muted runconv-subhead">
-        Multi-turn dialog driven by <code>core.conversationGate</code>.
+        {t('conversationsSubheadPre')}<code>core.conversationGate</code>{t('conversationsSubheadPost')}
       </p>
       {conversations.map((c) => (
         <ConversationCard
@@ -84,6 +94,7 @@ function ConversationCard({
   activeInterrupt: OpenInterrupt | null;
   onResolved(): void;
 }) {
+  const { t } = useTranslation('runs');
   const { conversationId, agentId, capabilities, turns, closed, outcome } = conversation;
   // The active interrupt belongs to this conversation only when its
   // payload carries a matching `conversationId`. Open interrupts of
@@ -93,30 +104,30 @@ function ConversationCard({
     <div className="conversation-card">
       <div className="conversation-card__head">
         <strong className="conversation-card__id">{conversationId}</strong>
-        {agentId && <span className="muted u-fs-12">agent <code>{agentId}</code></span>}
+        {agentId && <span className="muted u-fs-12">{t('conversationAgentLabel')} <code>{agentId}</code></span>}
         {capabilities.length > 0 && (
           <span className="muted u-fs-12">
-            caps: {capabilities.map((c) => <code key={c} className="u-mr-1">{c}</code>)}
+            {t('conversationCapsLabel')} {capabilities.map((c) => <code key={c} className="u-mr-1">{c}</code>)}
           </span>
         )}
-        {closed && <span className="badge runconv-closed-badge">closed</span>}
+        {closed && <span className="badge runconv-closed-badge">{t('conversationClosedBadge')}</span>}
       </div>
       <ol className="conversation-turn-list">
-        {turns.map((t) => (
-          <li key={t.messageId} className={`conversation-turn conversation-turn--${t.role}`}>
+        {turns.map((turn) => (
+          <li key={turn.messageId} className={`conversation-turn conversation-turn--${turn.role}`}>
             <span className="conversation-turn__role">
-              {t.role}
-              <span className="muted u-fs-11"> #{t.turnIndex}</span>
+              {t(TURN_ROLE_KEYS[turn.role])}
+              <span className="muted u-fs-11"> #{turn.turnIndex}</span>
             </span>
             <span className="conversation-turn__content">
-              {renderContent(t.content)}
+              {renderContent(turn.content)}
             </span>
           </li>
         ))}
       </ol>
       {closed && outcome !== undefined && (
         <details className="u-mb-2">
-          <summary className="muted u-fs-12">Final outcome</summary>
+          <summary className="muted u-fs-12">{t('finalOutcome')}</summary>
           <pre className="runconv-outcome-pre">
             {JSON.stringify(outcome, null, 2)}
           </pre>
@@ -136,6 +147,7 @@ function ResumeForm({
   interrupt: OpenInterrupt;
   onResolved(): void;
 }) {
+  const { t } = useTranslation('runs');
   const kind = interrupt.kind;
   // `conversation.exchange` resume shape is constrained by the
   // optional `outcomeSchema` on the suspend's data; absent the
@@ -169,14 +181,14 @@ function ResumeForm({
   if (kind === 'conversation.close') {
     return (
       <div className="alert conversation-close-banner">
-        <strong className="u-fs-13">Confirm close</strong>
+        <strong className="u-fs-13">{t('confirmClose')}</strong>
         <p className="muted runconv-close-copy">
-          The agent is asking to close this conversation. Confirm to emit <code>conversation.closed</code>.
+          {t('confirmCloseBodyPre')}<code>conversation.closed</code>{t('confirmCloseBodyPost')}
         </p>
         {error && <div className="alert error u-fs-12 u-mb-1-5">{error}</div>}
         <div className="button-row">
           <button type="button" onClick={() => void submit(undefined)} disabled={submitting}>
-            {submitting ? 'Closing…' : 'Confirm close'}
+            {submitting ? t('closing') : t('confirmClose')}
           </button>
         </div>
       </div>
@@ -191,7 +203,7 @@ function ResumeForm({
           ? safeParseJson(text)
           : text;
         if (hasSchema && payload === SAFE_PARSE_INVALID) {
-          setError('Resume value is not valid JSON (the suspend declared an outcomeSchema, so the value MUST be a JSON document).');
+          setError(t('resumeInvalidJson'));
           return;
         }
         // Best-effort client-side outcomeSchema check — only the
@@ -210,13 +222,13 @@ function ResumeForm({
     >
       {prompt && (
         <div className="muted u-fs-12 u-mb-1">
-          <strong>Agent:</strong> {prompt}
+          <strong>{t('agentPromptLabel')}</strong> {prompt}
         </div>
       )}
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder={hasSchema ? 'JSON matching outcomeSchema…' : 'Your reply…'}
+        placeholder={hasSchema ? t('resumeJsonPlaceholder') : t('resumeReplyPlaceholder')}
         rows={3}
         className="runconv-resume-textarea"
         style={{ fontFamily: hasSchema ? 'var(--mono)' : 'inherit' }}
@@ -225,7 +237,7 @@ function ResumeForm({
       {error && <div className="alert error u-fs-12 u-mt-1">{error}</div>}
       <div className="button-row u-mt-1-5">
         <button type="submit" disabled={submitting || text.trim().length === 0}>
-          {submitting ? 'Sending…' : 'Send turn'}
+          {submitting ? t('sending') : t('sendTurn')}
         </button>
       </div>
     </form>
@@ -339,7 +351,10 @@ function topLevelTypeMismatch(value: unknown, schema: Record<string, unknown> | 
   const actual = jsonTypeOf(value);
   if (allowed.includes(actual)) return null;
   if (actual === 'number' && allowed.includes('integer') && Number.isInteger(value)) return null;
-  return `Resume value top-level type is "${actual}"; the outcomeSchema requires ${allowed.map((s) => `"${s}"`).join(' or ')}.`;
+  return i18n.t('runs:resumeTypeMismatch', {
+    actual,
+    required: allowed.map((s) => `"${s}"`).join(' or '),
+  });
 }
 
 function jsonTypeOf(v: unknown): 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null' {

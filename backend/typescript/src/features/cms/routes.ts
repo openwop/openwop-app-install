@@ -13,17 +13,27 @@
 import type { Request, Response, NextFunction } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireOrgScope, requireString, optionalString } from '../featureRoute.js';
+import { requireOrgScope, requireFeatureEnabled, requireString, optionalString } from '../featureRoute.js';
+import { resolveOne } from '../../host/featureToggles/service.js';
+import { createContentApproval, hasPendingApprovalForPage, rejectPendingApprovalForPage } from '../../host/approvalService.js';
+import { LOCALE_RE } from '../../host/i18n/index.js';
+import { translateSectionData } from './translate.js';
+import { ManagedProviderError } from '../../providers/managedProvider.js';
 import {
   createPage,
   deletePage,
+  getContentLanguageSettings,
   getPage,
   getPublishedBySlug,
   listPages,
+  localizePage,
   listVersions,
   restoreVersion,
   transitionPage,
+  updateContentLanguageSettings,
   updatePage,
+  SECTION_TYPES,
+  type SectionType,
   type WorkflowAction,
 } from './cmsService.js';
 
@@ -47,7 +57,16 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       const { user, orgId } = await requireOrgScope(req,'workspace:read');
       const hit = await getPublishedBySlug(user.tenantId, orgId, req.params.slug);
       if (!hit) throw new OpenwopError('not_found', 'No published page at that slug.', 404, { slug: req.params.slug });
-      res.json(hit);
+      // ADR 0064 — resolve sections for the locale negotiated from Accept-Language
+      // (published-only is already enforced upstream). When the org has authored
+      // no locales this returns base `data` verbatim (byte-identical). The
+      // negotiated locale is a RESPONSE concern only — set on Content-Language,
+      // never written to any log/event (RFC 0103 §F).
+      const settings = await getContentLanguageSettings(user.tenantId, orgId);
+      const { page, locale } = localizePage(hit.page, req.headers['accept-language'], settings);
+      res.setHeader('Content-Language', locale);
+      res.setHeader('Vary', 'Accept-Language, Accept-Encoding');
+      res.json({ ...hit, page });
     } catch (err) {
       next(err);
     }
@@ -78,6 +97,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
     try {
       const { user, orgId } = await requireOrgScope(req,'workspace:write');
       const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown };
+      const settings = await getContentLanguageSettings(user.tenantId, orgId);
       const page = await createPage({
         tenantId: user.tenantId,
         orgId,
@@ -85,6 +105,7 @@ export function registerCmsRoutes(deps: RouteDeps): void {
         ...(optionalString(body.slug) ? { slug: String(body.slug) } : {}),
         sections: body.sections,
         createdBy: user.userId,
+        baseLocale: settings.baseLocale,
       });
       res.status(201).json(page);
     } catch (err) {
@@ -103,7 +124,8 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       if (!current) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       if (current.status !== 'draft') await requireOrgScope(req,'host:members:manage');
       const body = (req.body ?? {}) as { title?: unknown; slug?: unknown; sections?: unknown };
-      const patch: { title?: string; slug?: string; sections?: unknown } = {};
+      const settings = await getContentLanguageSettings(user.tenantId, orgId);
+      const patch: { title?: string; slug?: string; sections?: unknown; baseLocale?: string } = { baseLocale: settings.baseLocale };
       if (typeof body.title === 'string') patch.title = body.title;
       if (typeof body.slug === 'string') patch.slug = body.slug;
       if (body.sections !== undefined) patch.sections = body.sections;
@@ -141,12 +163,93 @@ export function registerCmsRoutes(deps: RouteDeps): void {
         next(err);
       }
     };
-  app.post(`${BASE}/pages/:pageId/submit`, transition('submit', 'workspace:write'));
-  app.post(`${BASE}/pages/:pageId/approve`, transition('approve', 'host:members:manage'));
-  app.post(`${BASE}/pages/:pageId/reject`, transition('reject', 'host:members:manage'));
-  app.post(`${BASE}/pages/:pageId/publish`, transition('publish', 'host:members:manage'));
+  // ADR 0066 — when `cms-approval-gate` is ON for the tenant, `submit` ALSO
+  // queues a content-publish approval in the shared ApprovalsInbox (idempotent:
+  // one open approval per page), and the direct `approve` route DEFERS to that
+  // queue (publishing goes through the inbox). OFF ⇒ byte-identical to today.
+  const approvalGateOn = async (tenantId: string): Promise<boolean> => {
+    const a = await resolveOne('cms-approval-gate', { tenantId });
+    return !!a?.enabled;
+  };
+  app.post(`${BASE}/pages/:pageId/submit`, async (req, res, next) => {
+    try {
+      const { user, orgId } = await requireOrgScope(req, 'workspace:write');
+      const updated = await transitionPage(user.tenantId, orgId, req.params.pageId, 'submit', user.userId);
+      if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
+      if (await approvalGateOn(user.tenantId) && !(await hasPendingApprovalForPage(user.tenantId, updated.pageId))) {
+        await createContentApproval({
+          tenantId: user.tenantId,
+          orgId,
+          pageId: updated.pageId,
+          pageTitle: updated.title,
+          proposal: `Publish CMS page "${updated.title}"`,
+        });
+      }
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+  app.post(`${BASE}/pages/:pageId/approve`, async (req, res, next) => {
+    try {
+      const { user, orgId } = await requireOrgScope(req, 'host:members:manage');
+      if (await approvalGateOn(user.tenantId)) {
+        throw new OpenwopError(
+          'conflict',
+          'Publishing is gated on approval — approve this page from the Approvals inbox.',
+          409,
+          { pageId: req.params.pageId, gate: 'cms-approval-gate' },
+        );
+      }
+      const updated = await transitionPage(user.tenantId, orgId, req.params.pageId, 'approve', user.userId);
+      if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+  // `reject`/`unpublish` move a page out of `in_review`/`published`. When the gate
+  // is ON they ALSO resolve (reject) any pending content-publish approval for the
+  // page, so the inbox row doesn't orphan (review MEDIUM-3 — the page status is
+  // the single source of truth).
+  const transitionWithApprovalCleanup = (action: WorkflowAction) =>
+    async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      try {
+        const { user, orgId } = await requireOrgScope(req, 'host:members:manage');
+        const updated = await transitionPage(user.tenantId, orgId, req.params.pageId, action, user.userId);
+        if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
+        if (await approvalGateOn(user.tenantId)) {
+          await rejectPendingApprovalForPage(user.tenantId, updated.pageId, `Superseded by direct ${action}.`);
+        }
+        res.json(updated);
+      } catch (err) {
+        next(err);
+      }
+    };
+  app.post(`${BASE}/pages/:pageId/reject`, transitionWithApprovalCleanup('reject'));
+  app.post(`${BASE}/pages/:pageId/unpublish`, transitionWithApprovalCleanup('unpublish'));
   app.post(`${BASE}/pages/:pageId/archive`, transition('archive', 'host:members:manage'));
-  app.post(`${BASE}/pages/:pageId/unpublish`, transition('unpublish', 'host:members:manage'));
+  // `publish` is the direct admin-publish path (from draft or in_review). When the
+  // gate is ON it is a publish bypass, so it 409s like `approve` — the inbox is
+  // the only publish path for a gated org (review: close the publish bypass).
+  app.post(`${BASE}/pages/:pageId/publish`, async (req, res, next) => {
+    try {
+      const { user, orgId } = await requireOrgScope(req, 'host:members:manage');
+      if (await approvalGateOn(user.tenantId)) {
+        throw new OpenwopError(
+          'conflict',
+          'Publishing is gated on approval — publish this page from the Approvals inbox.',
+          409,
+          { pageId: req.params.pageId, gate: 'cms-approval-gate' },
+        );
+      }
+      const updated = await transitionPage(user.tenantId, orgId, req.params.pageId, 'publish', user.userId);
+      if (!updated) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
 
   // Restore a past version into the draft (admin/owner).
   app.post(`${BASE}/pages/:pageId/restore/:versionId`, async (req, res, next) => {
@@ -155,6 +258,68 @@ export function registerCmsRoutes(deps: RouteDeps): void {
       const restored = await restoreVersion(user.tenantId, orgId, req.params.pageId, req.params.versionId, user.userId);
       if (!restored) throw new OpenwopError('not_found', 'Page not found.', 404, { pageId: req.params.pageId });
       res.json(restored);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── Content language settings (ADR 0064) ──
+  // Read is workspace:read (the editor needs the locale set). Write is the
+  // admin tier AND gated on the `cms-localization` toggle (default OFF) — so an
+  // org can't author locales unless localization is enabled for it; with no
+  // authored locales, delivery stays byte-identical to the non-localized CMS.
+  app.get(`${BASE}/language-settings`, async (req, res, next) => {
+    try {
+      const { user, orgId } = await requireOrgScope(req,'workspace:read');
+      res.json(await getContentLanguageSettings(user.tenantId, orgId));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.put(`${BASE}/language-settings`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, 'cms-localization', 'Content localization');
+      const { user, orgId } = await requireOrgScope(req,'host:members:manage');
+      const body = (req.body ?? {}) as { baseLocale?: unknown; supportedLocales?: unknown; autoTranslateOnPublish?: unknown };
+      res.json(await updateContentLanguageSettings(user.tenantId, orgId, body, user.userId));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ── AI translate-from-base (ADR 0064 Phase 3) ──
+  // Translate a section's base `data` into a target locale via the managed
+  // (free-tier) provider; the output is sanitized like a stored overlay. Toggle-
+  // + write-gated. Managed-provider unavailable → 503 (the editor degrades to
+  // copy-from-base + manual editing). The returned overlay is a DRAFT the editor
+  // reviews before saving.
+  app.post(`${BASE}/translate-section`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, 'cms-localization', 'Content localization');
+      const { user } = await requireOrgScope(req,'workspace:write');
+      const b = (req.body ?? {}) as { sectionType?: unknown; data?: unknown; targetLocale?: unknown };
+      const sectionType = String(b.sectionType ?? '');
+      if (!SECTION_TYPES.includes(sectionType as SectionType)) {
+        throw new OpenwopError('validation_error', `sectionType must be one of: ${SECTION_TYPES.join(', ')}`, 400, { sectionType: b.sectionType });
+      }
+      const targetLocale = String(b.targetLocale ?? '');
+      if (!LOCALE_RE.test(targetLocale)) {
+        throw new OpenwopError('validation_error', 'Invalid targetLocale (expected BCP-47, e.g. "es", "pt-BR").', 400, { targetLocale });
+      }
+      const data = (typeof b.data === 'object' && b.data !== null ? b.data : {}) as Record<string, unknown>;
+      try {
+        const overlay = await translateSectionData(user.tenantId, sectionType as SectionType, data, targetLocale);
+        res.json({ overlay });
+      } catch (err) {
+        // ONLY a managed-provider failure (not configured / capped / sign-in) is
+        // a graceful 503 the editor degrades from. An unexpected internal error
+        // must NOT be masked as "translation unavailable" — let it 500.
+        if (err instanceof ManagedProviderError) {
+          throw new OpenwopError('host_capability_missing', 'Automatic translation is unavailable right now — edit the translation manually.', 503, { reason: err.message });
+        }
+        throw err;
+      }
     } catch (err) {
       next(err);
     }

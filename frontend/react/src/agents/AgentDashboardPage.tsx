@@ -14,6 +14,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { checkAgent, seedExampleAgents } from './rosterClient.js';
 import { listApprovals, type PendingApproval } from './approvalsClient.js';
 import { getCapabilities } from '../client/runsClient.js';
@@ -27,10 +28,10 @@ import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { KeyFigureBand } from '../ui/KeyFigure.js';
 import { PageHeader } from '../ui/PageHeader.js';
-import { BotIcon, AlertIcon, BoxesIcon, ListIcon } from '../ui/icons/index.js';
+import { BotIcon, AlertIcon } from '../ui/icons/index.js';
+import { ViewToggle, useViewMode } from '../ui/ViewToggle.js';
 
 type SortKey = 'attention' | 'name';
-type ViewMode = 'tiles' | 'list';
 
 // How much each agent wants the operator's eyes (highest first). "Waiting on a
 // human" outranks everything; an idle agent with a full To Do queue outranks an
@@ -49,11 +50,12 @@ function attentionScore(v: AgentView): number {
 }
 
 function ConceptStrip(): JSX.Element {
+  const { t } = useTranslation('agents');
   const steps = [
-    { n: '1', label: 'Create an agent' },
-    { n: '2', label: 'Assign workflows' },
-    { n: '3', label: 'Tasks arrive on their board' },
-    { n: '4', label: 'Heartbeat picks up work' },
+    { n: '1', label: t('dashStep1') },
+    { n: '2', label: t('dashStep2') },
+    { n: '3', label: t('dashStep3') },
+    { n: '4', label: t('dashStep4') },
   ];
   return (
     <div className="agentdash-concept-strip">
@@ -68,6 +70,7 @@ function ConceptStrip(): JSX.Element {
 }
 
 export function AgentDashboardPage(): JSX.Element {
+  const { t } = useTranslation('agents');
   const navigate = useNavigate();
   const [views, setViews] = useState<AgentView[]>([]);
   // Per-agent approvals power the quick-look drawer's "waiting on you" peek
@@ -106,7 +109,9 @@ export function AgentDashboardPage(): JSX.Element {
   const [statusFilter, setStatusFilter] = useState<'all' | AgentStatus>('all');
   const [roleFilter, setRoleFilter] = useState('all');
   const [sortKey, setSortKey] = useState<SortKey>('attention');
-  const [viewMode, setViewMode] = useState<ViewMode>('tiles');
+  // Grid (profile tiles) is the default; the dense list toggles in for a big
+  // fleet. The shared <ViewToggle> persists the choice per-surface.
+  const [viewMode, setViewMode] = useViewMode('agents', 'grid');
 
   // Role families present in the current roster (for the role filter dropdown).
   const roleOptions = useMemo(() => {
@@ -192,9 +197,9 @@ export function AgentDashboardPage(): JSX.Element {
     try {
       const result = await checkAgent(rosterId);
       if (result.picked) {
-        setNotice(`${persona} picked up “${result.cardTitle}” and started a run.`);
+        setNotice(t('dashPickedUp', { persona, title: result.cardTitle }));
       } else {
-        setNotice(`${persona} found no eligible To Do tasks (${result.reason ?? 'idle'}).`);
+        setNotice(t('dashNoEligible', { persona, reason: result.reason ?? t('dashIdle') }));
       }
       await refresh();
     } catch (err) {
@@ -217,29 +222,6 @@ export function AgentDashboardPage(): JSX.Element {
     }
   };
 
-  const ViewToggle = (
-    <div className="action-bar u-ml-auto" role="group" aria-label="View mode">
-      <button
-        type="button"
-        className={viewMode === 'tiles' ? 'primary btn-sm' : 'secondary btn-sm'}
-        aria-pressed={viewMode === 'tiles'}
-        title="Tiles"
-        onClick={() => setViewMode('tiles')}
-      >
-        <BoxesIcon size={14} aria-hidden /> Tiles
-      </button>
-      <button
-        type="button"
-        className={viewMode === 'list' ? 'primary btn-sm' : 'secondary btn-sm'}
-        aria-pressed={viewMode === 'list'}
-        title="List"
-        onClick={() => setViewMode('list')}
-      >
-        <ListIcon size={14} aria-hidden /> List
-      </button>
-    </div>
-  );
-
   const onOpenRow = (view: AgentView) => (tab?: string) => {
     if (tab === 'workflows') {
       // Editing flow — the full workspace, not the quick look.
@@ -256,11 +238,11 @@ export function AgentDashboardPage(): JSX.Element {
   return (
     <section>
       <PageHeader
-        eyebrow="Agents"
-        title="Digital workforce"
-        lede="The named agents on staff — digital twins for company roles, each with workflows, a schedule, and a task board. Manage who's on staff and what they own; anything that needs your decision waits in the Inbox."
+        eyebrow={t('templatesEyebrow')}
+        title={t('dashTitle')}
+        lede={t('dashLede')}
         actions={
-          <button type="button" className="btn-accent-solid" onClick={() => setHiring(true)}>+ Hire an agent</button>
+          <button type="button" className="btn-accent-solid" onClick={() => setHiring(true)}>{t('dashHireAgent')}</button>
         }
       />
 
@@ -268,19 +250,19 @@ export function AgentDashboardPage(): JSX.Element {
       {notice ? <Notice variant="success">{notice}</Notice> : null}
 
       {loading ? (
-        <StateCard loading title="Loading your agents…" />
+        <StateCard loading title={t('dashLoading')} />
       ) : views.length === 0 ? (
         <>
         <ConceptStrip />
         <StateCard
           icon={<BotIcon size={26} />}
-          title="Agents are named digital coworkers"
-          body="Like Sally in Sales Ops or Marcus in Support. Give each one a role, workflows, and a task board, then watch work arrive and get picked up."
+          title={t('dashEmptyTitle')}
+          body={t('dashEmptyBody')}
           action={
             <>
-              <button type="button" className="primary" onClick={() => navigate('/agents/new')}>Create from template</button>
+              <button type="button" className="primary" onClick={() => navigate('/agents/new')}>{t('dashCreateFromTemplate')}</button>
               <button type="button" className="secondary" onClick={() => void onLoadDemo()} disabled={seeding}>
-                {seeding ? 'Loading…' : 'Load example agents'}
+                {seeding ? t('dashLoadingDemo') : t('dashLoadExample')}
               </button>
             </>
           }
@@ -292,58 +274,63 @@ export function AgentDashboardPage(): JSX.Element {
               count and narrows the roster to it (the shared <KeyFigureBand>,
               DESIGN.md §4.5). */}
           <KeyFigureBand
-            ariaLabel="Workforce key figures — click to filter"
+            ariaLabel={t('dashKeyFiguresAria')}
             activeKey={statusFilter}
             onToggle={(key) => setStatusFilter(key as 'all' | AgentStatus)}
             figures={[
-              { key: 'all', label: 'On staff', value: figures.staff },
-              { key: 'working', label: 'Working now', value: figures.working },
+              { key: 'all', label: t('dashFigureOnStaff'), value: figures.staff },
+              { key: 'working', label: t('dashFigureWorking'), value: figures.working },
               {
                 key: 'waiting',
-                label: 'Waiting on you',
+                label: t('dashFigureWaiting'),
                 value: figures.waiting,
                 ...(figures.waiting > 0 ? { tone: 'attention' as const, glyph: <AlertIcon size={11} aria-hidden /> } : {}),
               },
-              { key: 'active', label: 'Idle & ready', value: figures.ready },
+              { key: 'active', label: t('dashFigureReady'), value: figures.ready },
             ]}
           />
 
-          <div className="filterbar" role="group" aria-label="Filter, sort, and view agents">
+          <div className="filterbar" role="group" aria-label={t('dashFilterGroup')}>
             {views.length > 3 ? (
               <>
                 <input
                   type="search"
                   className="ui-input filterbar-search"
-                  placeholder="Search by name or role…"
-                  aria-label="Search agents"
+                  placeholder={t('dashSearchPlaceholder')}
+                  aria-label={t('dashSearchAria')}
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                 />
                 {roleOptions.length > 1 ? (
-                  <select className="ui-input filterbar-select" aria-label="Filter by role" value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
-                    <option value="all">All roles</option>
+                  <select className="ui-input filterbar-select" aria-label={t('dashFilterRoleAria')} value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
+                    <option value="all">{t('dashAllRoles')}</option>
                     {roleOptions.map((r) => (
                       <option key={r.key} value={r.key}>{r.label}</option>
                     ))}
                   </select>
                 ) : null}
-                <select className="ui-input filterbar-select" aria-label="Sort agents" value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)}>
-                  <option value="attention">Sort: Needs attention</option>
-                  <option value="name">Sort: Name</option>
+                <select className="ui-input filterbar-select" aria-label={t('dashSortAria')} value={sortKey} onChange={(e) => setSortKey(e.target.value as SortKey)}>
+                  <option value="attention">{t('dashSortAttention')}</option>
+                  <option value="name">{t('dashSortName')}</option>
                 </select>
               </>
             ) : null}
-            {ViewToggle}
+            <ViewToggle
+              value={viewMode}
+              onChange={setViewMode}
+              className="u-ml-auto"
+              labels={{ grid: t('dashTiles'), list: t('dashList') }}
+            />
           </div>
 
           {visible.length === 0 ? (
             <StateCard
               icon={<BotIcon size={26} />}
-              title="No agents match"
-              body="Try clearing the search or filters."
-              action={<button type="button" className="secondary" onClick={() => { setQuery(''); setStatusFilter('all'); setRoleFilter('all'); }}>Clear filters</button>}
+              title={t('dashNoMatchTitle')}
+              body={t('dashNoMatchBody')}
+              action={<button type="button" className="secondary" onClick={() => { setQuery(''); setStatusFilter('all'); setRoleFilter('all'); }}>{t('dashClearFilters')}</button>}
             />
-          ) : viewMode === 'tiles' ? (
+          ) : viewMode === 'grid' ? (
             <div className="card-grid">
               {visible.map((view) => (
                 <AgentTile

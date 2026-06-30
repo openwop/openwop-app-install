@@ -1,0 +1,30 @@
+{
+  "name": "feature.campaign-connectors.nodes",
+  "version": "1.0.0",
+  "description": "Campaign Connectors node pack (ADR 0159 / ADR 0014) — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (pull a platform's performance through the Connections broker; honest-off with `connector_not_configured` until the broker reach is wired — ADR 0037 day-1 matrix). Over ctx.features['campaign-connectors'].",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-connectors", "performance", "csv", "marketing"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-connectors.nodes.import-csv",
+      "version": "1.0.0",
+      "label": "Connectors: Import CSV",
+      "description": "Imports a platform CSV export into the campaign performance store (dedup by platform|campaign|adSet|date, computed metrics). Inputs: { orgId, csv, defaultPlatform?, campaignId? }. Output: { imported, deduped, invalid, issues }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-connectors.nodes.sync",
+      "version": "1.0.0",
+      "label": "Connectors: Sync (live)",
+      "description": "Pulls a platform's performance through the Connections broker. Honest-off: returns `connector_not_configured` until the broker reach is wired (ADR 0037). Inputs: { orgId, platform }. Output: { synced } or a structured not-configured failure.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

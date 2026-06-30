@@ -166,7 +166,19 @@
         "core.workflowChain.confidence-escalated",
         "connector.authorized",
         "connector.auth_expired",
-        "authorization.decided"
+        "authorization.decided",
+        "proposal.created",
+        "proposal.activated",
+        "goal.evaluated",
+        "goal.closed",
+        "import.applied",
+        "voice.speech_start",
+        "voice.transcript",
+        "voice.endpoint_candidate",
+        "voice.turn_commit",
+        "voice.synthesis_chunk",
+        "voice.barge_in",
+        "voice.cancelled"
       ]
     }
   }

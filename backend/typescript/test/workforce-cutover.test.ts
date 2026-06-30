@@ -4,6 +4,7 @@
  * always-available rollback.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { seedWorkforceEntities } from '../src/host/workforceService.js';
@@ -12,15 +13,14 @@ const HERO = 'workforce.finance.invoice-exception';
 
 describe('workforce cutover gate', () => {
   let server: http.Server;
-  const PORT = 18244;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
 
   beforeAll(async () => {
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({
-      port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
+      port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
     });
-    await new Promise<void>((res) => { server = app.listen(PORT, res); });
+    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
     // Seed the entity only (no run history → not graduated → production gated).
     await seedWorkforceEntities();
   });

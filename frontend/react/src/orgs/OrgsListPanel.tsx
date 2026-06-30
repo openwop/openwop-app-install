@@ -5,6 +5,7 @@
  */
 
 import type { FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { Organization } from '../client/accessClient.js';
 import { StateCard } from '../ui/StateCard.js';
 import { BriefcaseIcon, TrashIcon } from '../ui/icons/index.js';
@@ -30,15 +31,16 @@ export function OrgsListPanel({
   onDeleteOrg,
   can,
 }: OrgsListPanelProps): JSX.Element {
+  const { t } = useTranslation('orgs');
   return (
     <div className="orgslist-col">
-      <h2 className="u-fs-16">Organizations</h2>
+      <h2 className="u-fs-16">{t('orgsHeading')}</h2>
       <form onSubmit={onCreateOrg} className="action-bar u-mb-3">
-        <input value={orgName} onChange={(e) => setOrgName(e.target.value)} placeholder="New organization name" aria-label="New organization name" />
-        <button type="submit" className="primary" disabled={!orgName.trim() || !can('host:org:manage')} title={can('host:org:manage') ? undefined : 'Requires host:org:manage'}>Create</button>
+        <input value={orgName} onChange={(e) => setOrgName(e.target.value)} placeholder={t('newOrgPlaceholder')} aria-label={t('newOrgAriaLabel')} />
+        <button type="submit" className="primary" disabled={!orgName.trim() || !can('host:org:manage')} title={can('host:org:manage') ? undefined : t('createOrgRequiresScope')}>{t('common:create')}</button>
       </form>
       {orgs.length === 0 ? (
-        <StateCard icon={<BriefcaseIcon size={32} />} title="No organizations yet" body="Create one to add teams and members." />
+        <StateCard icon={<BriefcaseIcon size={32} />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
       ) : (
         orgs.map((o) => (
           // Clickable card, but NOT role="button": it contains its own
@@ -63,7 +65,7 @@ export function OrgsListPanel({
               <button
                 type="button"
                 className="secondary"
-                aria-label={`Delete ${o.name}`}
+                aria-label={t('deleteOrgAriaLabel', { name: o.name })}
                 disabled={!can('host:org:manage')}
                 onClick={(e) => {
                   e.stopPropagation();

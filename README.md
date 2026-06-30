@@ -1,4 +1,4 @@
-> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `e7dd266`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
+> **Published white-label install bundle.** Auto-synced from `openwop/openwop-app` (source `8b3fa006`). Clone or download the release zip, then follow **[WHITE-LABEL.md](./frontend/react/WHITE-LABEL.md)** to deploy your own. Generated — PRs here are not merged; development happens upstream.
 
 # openwop-app — OpenWOP Application
 
@@ -47,7 +47,7 @@ A deployable reference application demonstrating the full vertical slice of an O
 
 ## What this app is NOT
 
-- **Not a fifth reference host.** Conformance is owned by `examples/hosts/postgres/` (production-profile, 91.9% of 850 scenarios). This app targets ~70% — that figure is a **2026-05-15, suite-v1.1.0-era estimate**; the app has since wired the full `host.{kanban,chat,canvas,knowledge,webResearch,launchStudio,a2a,triggers,db.nosql}` vendor-surface set + the normative `ctx.interrupt`/`ctx.suspend` primitive, so it now stubs fewer surfaces than that figure implies (un-re-measured against the current suite).
+- **Not a fifth reference host.** Conformance is owned by `examples/hosts/postgres/` (production-profile, 91.9% of 850 scenarios). **Re-measured 2026-06-23 against `@openwop/openwop-conformance` v1.34.0** (full-catalog basis, `OPENWOP_CONFORMANCE_ROOT=../openwop`): this app passes **2105 / 2195 scenarios with 0 host-attributable failures**, the remaining 89 being capability-gated soft-skips for surfaces it intentionally stubs (production-profile audit chain, sandbox isolation, durable-webhook queue, …). See the pass-matrix under "Conformance" below.
 - **Not normative.** Reference implementation of an OpenWOP host; not part of the v1.1 spec corpus.
 - **Not coupled to one cloud.** The single container image runs on any platform, and [`deploy/`](./deploy/README.md) ships ready-made packs for **Docker Compose** (the cloud-free default), **Fly.io**, **Render/Railway**, **AWS**, **Azure**, and **Google Cloud**. Storage, BYOK key-wrapping (KMS), identity (OIDC), and object storage are env-selected behind interfaces; the cloud SDKs are *optional* dependencies loaded only when chosen. Real KMS backends exist for **AWS KMS**, **Azure Key Vault**, and **Google Cloud KMS** (`OPENWOP_BYOK_KMS_KEY=aws-kms:… / azure-keyvault:… / projects/…`), plus a portable local-AES fallback.
 - **Not a fork of the production-grade postgres host.** It deliberately omits the audit-log integrity profile, durable webhook queue, multi-region partition handling, and other production concerns outside this app's scope.
@@ -119,7 +119,20 @@ cd backend/typescript
 npm run test:conformance
 ```
 
-Honest pass-matrix vs. `@openwop/openwop-conformance` v1.1.0 — a **2026-05-15-era snapshot**. The app has since wired 9 vendor host surfaces + the `ctx.interrupt`/`ctx.suspend` primitive, which adds capability coverage but has **not been re-measured** against the current suite; treat the counts below as a floor, not the current state:
+Honest pass-matrix vs. `@openwop/openwop-conformance` **v1.34.0** — **measured 2026-06-23**
+(full-catalog basis, `OPENWOP_CONFORMANCE_ROOT=../openwop`; supersedes the prior
+v1.1.0 / 2026-05-15 snapshot):
+
+> **2105 passed · 89 capability-gated skips · 0 host-attributable failures** — of 2195
+> scenarios (370 files). The lone non-pass was a measurement artifact, not a defect:
+> `spec-corpus-validity` flagged a broken link in `plans/named-workflow-agents-and-org-chart.md`,
+> an **untracked orphan file** left on disk in the local sibling `../openwop` checkout but
+> already deleted from the canonical corpus (`origin/main` post-migration). Against a clean
+> `origin/main` it does not exist, so the corpus check passes there too — **0 real failures,
+> host or corpus**. The 89 skips are capability-gated soft-skips for surfaces this sample
+> host intentionally stubs.
+
+The per-family breakdown stays qualitative:
 
 | Suite | Pass | Skip-equivalent | Reason for skip |
 |---|---|---|---|
@@ -128,8 +141,10 @@ Honest pass-matrix vs. `@openwop/openwop-conformance` v1.1.0 — a **2026-05-15-
 | `openwop-interrupts` | ✅ all | — | — |
 | `openwop-replay-fork` | ✅ all | — | — |
 | `openwop-node-packs` | ✅ all | — | — |
+| `openwop-realtime-voice` (RFC 0106) | ✅ all | — | non-vacuous via the test-seam arm (ADR 0109) |
 | `openwop-audit-log-integrity` | — | ❌ all | Stubbed auth; no Ed25519 checkpoint signing |
 | `openwop-production-profile` | — | ❌ all | This app doesn't claim production-profile (no SLA, no claim acquisition) |
+| `openwop-sandbox-isolation` | — | ❌ all | No pack sandbox (no process/network/env isolation gate) |
 | `openwop-durable-webhooks` | partial | partial | Demonstrates HMAC delivery; Cloud Tasks queue stubbed |
 
 ## Deploy to Cloud Run

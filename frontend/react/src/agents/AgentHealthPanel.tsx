@@ -24,6 +24,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { getAssistantHealth, type AssistantHealth } from '../features/assistant/assistantClient.js';
 import { relativeTime } from './agentViewModel.js';
+import { formatDateTime } from '../i18n/format.js';
 import {
   AlertIcon, CheckIcon, ClockIcon, InboxIcon, LinkIcon,
   PencilIcon, QuoteIcon, SendIcon, SparklesIcon, ThumbsUpIcon,
@@ -150,8 +151,8 @@ export function AgentHealthView({ health, persona = 'this agent' }: { health: As
       <header className="agenthealth-head">
         <div className="u-grid u-gap-1">
           <h2 className="u-m-0">Agent health</h2>
-          <p className="muted u-m-0 u-fs-12" title={generated.toLocaleString()}>
-            Operating metrics · admin-only · generated {relativeTime(health.generatedAt) ?? generated.toLocaleString()}
+          <p className="muted u-m-0 u-fs-12" title={formatDateTime(generated)}>
+            Operating metrics · admin-only · generated {relativeTime(health.generatedAt) ?? formatDateTime(generated)}
           </p>
         </div>
       </header>

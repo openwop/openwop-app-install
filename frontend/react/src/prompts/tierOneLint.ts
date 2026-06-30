@@ -22,6 +22,7 @@
  * @see spec/v1/structured-output-subset.md
  */
 
+import i18n from '../i18n/index.js';
 import type { PromptTemplate } from './types.js';
 
 export interface TierOneFinding {
@@ -39,7 +40,7 @@ export function lintPromptForTierOne(p: PromptTemplate): TierOneFinding[] {
   if (/(^|[\s"'\[,{])oneOf(\s|"|'|\:)/.test(text)) {
     findings.push({
       rule: 'no-oneOf',
-      label: '`oneOf` — Gemini silently drops; prefer `anyOf` or discriminator union',
+      label: i18n.t('prompts:lintNoOneOf'),
     });
   }
 
@@ -51,7 +52,7 @@ export function lintPromptForTierOne(p: PromptTemplate): TierOneFinding[] {
   if (hasObjectType && !hasAdditionalPropertiesFalse) {
     findings.push({
       rule: 'object-needs-additionalProperties-false',
-      label: 'object schema missing `additionalProperties: false` — required for OpenAI strict',
+      label: i18n.t('prompts:lintObjectNeedsAdditionalPropertiesFalse'),
     });
   }
 

@@ -30,8 +30,13 @@ import type { AgentRef } from '../executor/types.js';
 import { getChildParentNodeId } from '../executor/subWorkflowDispatcher.js';
 import { snapshotCostRollup } from '../observability/costEmitter.js';
 import { executeRun } from '../executor/executor.js';
+import { buildRunRecord, dispatchRunInBackground } from '../host/runDispatch.js';
+import { insertRunWithStartContext } from '../host/runInsert.js';
+import { approvalGatesWithGroupRole, validateApproverResolvability } from '../host/approverResolution.js';
+import { listOrgs } from '../host/accessControlService.js';
 import { CROSS_HOST_CAUSATION_HOST_ID, isPhase3Enabled } from './discovery.js';
 import { getEventLog } from '../executor/eventLog.js';
+import { runEtag, ifNoneMatchSatisfied, sendNegotiatedRunJson } from '../host/restTransport.js';
 import { detectAndRecordReplayDivergence } from '../executor/replayDivergence.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
 import { createLogger } from '../observability/logger.js';
@@ -40,6 +45,7 @@ import { notifyRunTerminal } from '../executor/runLifecycle.js';
 import { isManagedCredentialRef, MANAGED_DEFAULTING_TYPE_IDS } from '../providers/managedProvider.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
+import { loadReadableRun } from '../host/runAccess.js';
 import { scrubSecretShaped } from '../host/redactSecrets.js';
 
 const log = createLogger('routes.runs');
@@ -151,9 +157,23 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
       // refuse with `validation_error + details.requiredCapability` at
       // run-create (one of the two boundaries the spec allows). The
       // workflow-register handler does the same check at register time.
+      // ADR 0075 §D4 — HITL approver pre-flight + fail-closed org stamp. Resolved
+      // here so it can flow into the run metadata; used by the interrupt-path
+      // group/role eligibility + targeting once they promote (RFC 0104).
+      let approverOrgId: string | undefined;
       if (wf) {
         const refusal = capabilityGatedTypeIdRefusal(wf.definition.nodes);
         if (refusal) throw refusal;
+        // Scan approval gates that name group/role approvers; resolve the run's
+        // org FAIL-CLOSED (the tenant's sole accessControl org, else none — never
+        // guessed) and reject at create if any such approver resolves to nobody,
+        // so a workflow can't suspend forever at a gate with no reachable human.
+        const groupRoleGates = approvalGatesWithGroupRole(wf.definition.nodes);
+        if (groupRoleGates.length > 0) {
+          const tenantOrgs = await listOrgs(tenantId);
+          approverOrgId = tenantOrgs.length === 1 ? tenantOrgs[0]!.orgId : undefined;
+          await validateApproverResolvability(groupRoleGates, { tenantId, ...(approverOrgId ? { orgId: approverOrgId } : {}) });
+        }
         // Managed-provider preflight: workflows that include any node
         // pinned to a `managed:*` credentialRef (the "Try it free" tile
         // and any future managed tile) require a signed-in user — the
@@ -256,28 +276,33 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         idempotencyBodyHashes.set(idempotencyKey, bodyHash);
       }
 
-      const runId = randomUUID();
       const now = new Date().toISOString();
       // ADR 0024 §4/D2 — stamp the AUTHENTICATED human onto the run so node
       // execution can resolve per-user credentials + `connections:use` as the
       // run owner. Host-authoritative: derived from the principal, overriding any
       // client-supplied metadata.actingUserId (a caller MUST NOT name another user).
       const actingUserId = req.userId ?? principal.principalId;
-      const run: RunRecord = {
-        runId,
+      // Core seam (host/runDispatch.ts) — the one RunRecord constructor, shared
+      // with the workflow-author draft route.
+      const run = buildRunRecord({
         workflowId: body.workflowId,
         tenantId,
         scopeId: body.scopeId,
-        status: 'pending',
         inputs: body.inputs ?? null,
-        metadata: { ...((body.metadata as Record<string, unknown>) ?? {}), actingUserId },
+        metadata: {
+          ...((body.metadata as Record<string, unknown>) ?? {}),
+          // ADR 0075 §D3/§D4 — the run's resolved approver org, read verbatim by
+          // group/role eligibility + targeting (replay-safe; never re-resolved).
+          ...(approverOrgId ? { approverOrgId } : {}),
+        },
+        actingUserId,
         configurable: (body.configurable as Record<string, unknown>) ?? {},
         callbackUrl: body.callbackUrl,
         idempotencyKey,
-        createdAt: now,
-        updatedAt: now,
-      };
-      await storage.insertRun(run);
+        now,
+      });
+      const runId = run.runId;
+      await insertRunWithStartContext(storage, run);
       // Seed the per-run variable bag from workflow defaults +
       // request inputs. Per `host/variablesRuntime.ts`: `inputs[name]`
       // overrides `variables[].defaultValue` by variable name; vars
@@ -318,19 +343,8 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
 
       res.status(201).json(response);
 
-      // Dispatch inline. Real impls hand off to Cloud Tasks / Pub/Sub / SQS
-      // so the HTTP response returns immediately and the dispatcher runs
-      // separately. setImmediate keeps the single-instance.
-      setImmediate(() => {
-        executeRun(storage, run, wf.definition, {
-          policyResolver: hostSuite.providerPolicyResolver,
-        }).catch((err) => {
-          log.error('inline dispatch failed', {
-            runId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-      });
+      // Dispatch inline (core seam, shared with the workflow-author draft route).
+      dispatchRunInBackground({ storage, run, definition: wf.definition, hostSuite });
     } catch (err) {
       next(err);
     }
@@ -413,9 +427,22 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
 
   app.get('/v1/runs/:runId', async (req, res, next) => {
     try {
-      await requireProtocolScope(req, 'runs:read'); // RFC 0049 (ADR 0006 Phase 3) — no-op unless enforced
-      const run = await storage.getRun(req.params.runId);
-      if (!run) throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
+      // Scope seam (RFC 0049) + tenant ownership — adds the tenant check this
+      // read previously lacked (architecture review #1).
+      const run = await loadReadableRun(req, storage, req.params.runId);
+      // RFC 0115 — conditional GET. The ETag is a STRONG validator over the
+      // run's latest persisted event-log sequence (architect pin: not a
+      // wall-clock / cached projection), so it advances on every observable
+      // transition and is stable while none occurs. Evaluate `If-None-Match`
+      // FIRST and short-circuit a `304` before the snapshot projection + the
+      // O(N) tenant-sibling scan below, so an unchanged poll is cheap.
+      const etag = runEtag(run.runId, await storage.getMaxSequence(run.runId));
+      res.setHeader('ETag', etag);
+      res.setHeader('Vary', 'Accept-Encoding');
+      if (ifNoneMatchSatisfied(req, etag)) {
+        res.status(304).end();
+        return;
+      }
       const snapshot = projectRunSnapshot(run);
       // Surface the current open interrupt (if any) for waiting-*
       // runs per `interrupt.md §Signed-token callback`. The first
@@ -448,7 +475,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
           };
         }
       }
-      res.json(snapshot);
+      // RFC 0115 — negotiate `Content-Encoding` (gzip/zstd where the runtime
+      // supports it); the decoded body is byte-identical to the identity JSON.
+      sendNegotiatedRunJson(req, res, snapshot);
     } catch (err) {
       next(err);
     }
@@ -890,7 +919,9 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
         configurable: { ...sourceRun.configurable, ...(body.runOptionsOverlay ?? {}) },
         idempotencyKey: undefined,
       };
-      await storage.insertRun(forkedRun);
+      // ADR 0099 — fork preserves the source's frozen decision (stamp never
+      // overwrites an existing key); a fork that never had one stays uncompacted.
+      await insertRunWithStartContext(storage, forkedRun);
 
       // Replay events up to fromSeq into the new run, then re-dispatch.
       // Sample-grade: copies events as-is. Real impls re-execute pure
@@ -963,9 +994,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
 
   app.get('/v1/runs/:runId/events/poll', async (req, res, next) => {
     try {
-      await requireProtocolScope(req, 'runs:read'); // RFC 0049 (ADR 0006 Phase 3) — no-op unless enforced
-      const run = await storage.getRun(req.params.runId);
-      if (!run) throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
+      const run = await loadReadableRun(req, storage, req.params.runId);
       // Accept both `lastSequence` (spec-canonical per rest-endpoints.md)
       // and the sample's legacy `fromSeq`. `lastSequence=N` returns
       // events with sequence > N, so we add 1 when reading it. Beyond-
@@ -992,9 +1021,7 @@ export function registerRunRoutes(app: Express, deps: Deps): void {
   // contract deterministically.
   app.get('/v1/runs/:runId/debug-bundle', async (req, res, next) => {
     try {
-      await requireProtocolScope(req, 'runs:read'); // RFC 0049 (ADR 0006 Phase 3) — no-op unless enforced
-      const run = await storage.getRun(req.params.runId);
-      if (!run) throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
+      const run = await loadReadableRun(req, storage, req.params.runId);
       const allEvents = await storage.listEvents(run.runId, { fromSeq: 0, limit: 100_000 });
       const cap = req.query.maxEvents !== undefined ? Number(req.query.maxEvents) : Number.POSITIVE_INFINITY;
       const events = Number.isFinite(cap) && cap >= 0 ? allEvents.slice(0, cap) : allEvents;
@@ -1105,9 +1132,13 @@ function validateAgainstSchema(schema: Record<string, unknown>, value: unknown):
     const first = (validate.errors ?? [])[0];
     return first ? `${first.instancePath || '(root)'}: ${first.message ?? 'invalid'}` : 'schema mismatch';
   } catch (err) {
-    // Compilation error → don't block the request; treat as no schema.
-    // eslint-disable-next-line no-console
-    console.warn('[configurableSchema] compile error, skipping validation:', err instanceof Error ? err.message : err);
+    // Compilation error → fail OPEN (the spec says SHOULD validate, not MUST),
+    // but surface it through the structured logger so a malformed configurable
+    // schema that's silently skipping validation is visible to ops (DATA-7),
+    // not buried in a console.warn.
+    log.warn('configurable_schema_compile_failed_skipping_validation', {
+      error: err instanceof Error ? err.message : String(err),
+    });
     return null;
   }
 }

@@ -14,6 +14,9 @@
  * @see ../client/exampleDataClient.ts
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
+import { formatNumber } from '../i18n/format.js';
 import { Notice } from '../ui/Notice.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
@@ -37,21 +40,29 @@ function actionChip(action: StepResult['action']): string {
   }
 }
 
+const ACTION_LABEL = {
+  created: 'actionCreated',
+  cleared: 'actionCleared',
+  error: 'actionError',
+  skipped: 'actionSkipped',
+} as const;
+
 function ResultList({ result }: { result: RunResult }): JSX.Element {
+  const { t } = useTranslation('settings');
   const { summary } = result;
   return (
     <div className="u-mt-3" role="status" aria-live="polite">
-      {result.dryRun ? <Notice variant="info">Dry run — nothing was written.</Notice> : null}
+      {result.dryRun ? <Notice variant="info">{t('dryRunNotice')}</Notice> : null}
       <div className="action-bar u-gap-2 u-wrap u-mb-2">
-        {summary.created > 0 ? <span className="chip chip--success">{summary.created} created</span> : null}
-        {summary.cleared > 0 ? <span className="chip chip--accent">{summary.cleared} cleared</span> : null}
-        {summary.skipped > 0 ? <span className="chip chip--muted">{summary.skipped} skipped</span> : null}
-        {summary.errors > 0 ? <span className="chip chip--danger">{summary.errors} errors</span> : null}
+        {summary.created > 0 ? <span className="chip chip--success">{t('summaryCreated', { count: summary.created, n: formatNumber(summary.created) })}</span> : null}
+        {summary.cleared > 0 ? <span className="chip chip--accent">{t('summaryCleared', { count: summary.cleared, n: formatNumber(summary.cleared) })}</span> : null}
+        {summary.skipped > 0 ? <span className="chip chip--muted">{t('summarySkipped', { count: summary.skipped, n: formatNumber(summary.skipped) })}</span> : null}
+        {summary.errors > 0 ? <span className="chip chip--danger">{t('summaryErrors', { count: summary.errors, n: formatNumber(summary.errors) })}</span> : null}
       </div>
       <ul className="demodata-result-list">
         {result.results.map((r) => (
           <li key={r.step} className="action-bar u-gap-2 u-items-center">
-            <span className={actionChip(r.action)}>{r.action}</span>
+            <span className={actionChip(r.action)}>{t(ACTION_LABEL[r.action])}</span>
             <strong>{r.label}</strong>
             <span className="demodata-muted">{r.message}</span>
           </li>
@@ -62,6 +73,7 @@ function ResultList({ result }: { result: RunResult }): JSX.Element {
 }
 
 export function ExampleDataPage(): JSX.Element {
+  const { t } = useTranslation('settings');
   const [steps, setSteps] = useState<ExampleDataStep[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dryRun, setDryRun] = useState(false);
@@ -104,8 +116,8 @@ export function ExampleDataPage(): JSX.Element {
 
   const onClear = async () => {
     const ids = [...selected];
-    const label = ids.length ? ids.join(', ') : 'all example data';
-    if (!window.confirm(`Clear ${label}? This removes the example entities for your tenant (your own agents are not touched).`)) return;
+    const label = ids.length ? ids.join(', ') : t('clearAllFallback');
+    if (!(await confirm({ title: t('clearConfirm', { label }), danger: true }))) return;
     setBusy('clear'); setError(null); setResult(null);
     try {
       const r = await clearExampleData(ids.length ? { steps: ids } : {});
@@ -124,26 +136,23 @@ export function ExampleDataPage(): JSX.Element {
   return (
     <section>
       <PageHeader
-        eyebrow="Settings"
-        title="Example data"
-        lede="Load sample data so the dashboards have something to show — agents, workforces, and their history. Everything here is explicit and clearly example data; a clean install starts empty."
+        eyebrow={t('exampleDataEyebrow')}
+        title={t('exampleDataTitle')}
+        lede={t('exampleDataLede')}
       />
 
       {error ? <Notice variant="error">{error}</Notice> : null}
 
       <div className="surface-card u-mt-3">
-        <h2 className="u-fs-16 u-mt-0">Example data types</h2>
-        <p className="demodata-muted">
-          Idempotent and non-destructive: each type is created only where it&rsquo;s missing, so loading
-          never duplicates and never touches data you created yourself. Scoped to your tenant.
-        </p>
+        <h2 className="u-fs-16 u-mt-0">{t('typesHeading')}</h2>
+        <p className="demodata-muted">{t('typesIntro')}</p>
 
         {steps === null ? (
           <div className="u-grid u-gap-2 u-mt-2">
             <Skeleton height={44} /><Skeleton height={44} />
           </div>
         ) : steps.length === 0 ? (
-          <StateCard icon={<DatabaseIcon />} title="No example data types registered" body="This host advertises no seedable example data." />
+          <StateCard icon={<DatabaseIcon />} title={t('noTypesTitle')} body={t('noTypesBody')} />
         ) : (
           <ul className="u-list-none u-mbox-t2 u-p-0 u-grid u-gap-2">
             {steps.map((s) => (
@@ -153,13 +162,13 @@ export function ExampleDataPage(): JSX.Element {
                     type="checkbox"
                     checked={selected.has(s.id)}
                     onChange={() => toggle(s.id)}
-                    aria-label={`Select ${s.label}`}
+                    aria-label={t('selectAria', { label: s.label })}
                     className="demodata-check"
                   />
                   <span className="u-flex-1 u-minw-0">
                     <span className="action-bar u-gap-2 u-items-center">
                       <strong>{s.label}</strong>
-                      <span className={s.count > 0 ? 'chip chip--success' : 'chip chip--muted'}>{s.count} present</span>
+                      <span className={s.count > 0 ? 'chip chip--success' : 'chip chip--muted'}>{t('countPresent', { n: formatNumber(s.count) })}</span>
                     </span>
                     <span className="demodata-desc">{s.description}</span>
                   </span>
@@ -171,19 +180,19 @@ export function ExampleDataPage(): JSX.Element {
 
         <div className="action-bar u-gap-3 u-wrap u-mt-3 u-items-center">
           <label className="demodata-dryrun-label">
-            <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="u-w-auto u-flex-auto" /> Dry run (preview)
+            <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="u-w-auto u-flex-auto" /> {t('dryRunLabel')}
           </label>
           <button type="button" className="btn-accent-solid" disabled={busy !== null || (steps?.length ?? 0) === 0} onClick={() => void onSeed(true)}>
-            <DatabaseIcon size={14} /> {busy === 'seed' ? 'Loading…' : 'Load all example data'}
+            <DatabaseIcon size={14} /> {busy === 'seed' ? t('common:loading') : t('loadAllExampleData')}
           </button>
           <button type="button" className="btn" disabled={busy !== null || selected.size === 0} onClick={() => void onSeed(false)}>
-            <CheckIcon size={14} /> Load selected ({selected.size})
+            <CheckIcon size={14} /> {t('loadSelected', { n: formatNumber(selected.size) })}
           </button>
           <button type="button" className="btn" disabled={busy !== null || (steps?.length ?? 0) === 0} onClick={() => void refresh()}>
-            <RotateCwIcon size={14} /> Refresh
+            <RotateCwIcon size={14} /> {t('common:refresh')}
           </button>
-          <button type="button" className="secondary" disabled={busy !== null} onClick={() => void onClear()} title="Remove example entities (your own agents are untouched)">
-            <TrashIcon size={14} /> {busy === 'clear' ? 'Clearing…' : 'Clear example data'}
+          <button type="button" className="secondary" disabled={busy !== null} onClick={() => void onClear()} title={t('clearTitle')}>
+            <TrashIcon size={14} /> {busy === 'clear' ? t('clearing') : t('clearExampleData')}
           </button>
         </div>
 

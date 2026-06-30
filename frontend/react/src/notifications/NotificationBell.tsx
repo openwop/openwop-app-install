@@ -7,17 +7,19 @@
  * then takes on `--color-accent` so the user notices peripherally.
  */
 
+import { useTranslation } from 'react-i18next';
 import { useNotificationStore } from './notificationStore.js';
 
 export function NotificationBell(): JSX.Element {
+  const { t } = useTranslation('notifications');
   const unreadCount = useNotificationStore((s) => s.unreadCount);
   const togglePanel = useNotificationStore((s) => s.togglePanel);
   const panelOpen = useNotificationStore((s) => s.panelOpen);
   const hasUnread = unreadCount > 0;
 
   const label = hasUnread
-    ? `Notifications (${unreadCount} unread)`
-    : 'Notifications';
+    ? t('bellLabelUnread', { count: unreadCount })
+    : t('bellLabel');
 
   return (
     <button

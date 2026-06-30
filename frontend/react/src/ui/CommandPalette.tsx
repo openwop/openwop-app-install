@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { NAV, type IconCmp } from '../chrome/navItems.js';
+import { useTranslation } from 'react-i18next';
+import { type IconCmp } from '../chrome/navItems.js';
+import { useResolvedNav } from '../chrome/navConfig/NavConfigProvider.js';
 import { useFeatureVisible, useFeatureBadge } from '../featureToggles/FeatureAccessContext.js';
 import { SearchIcon, PlayIcon, BotIcon, ScaleIcon, DatabaseIcon } from './icons/index.js';
 
@@ -24,23 +26,19 @@ interface Command {
 }
 
 // Quick actions beyond raw navigation — the verbs an operator reaches for.
-const ACTIONS: Command[] = [
-  { id: 'act-new-run', label: 'Create a run', hint: 'Submit a workflow on this host', group: 'Actions', icon: PlayIcon, to: '/runs' },
-  { id: 'act-new-agent', label: 'New agent', hint: 'Create a named AI coworker', group: 'Actions', icon: BotIcon, to: '/agents/new' },
-  { id: 'act-compare', label: 'Compare runs', hint: 'Diff two run executions', group: 'Actions', icon: ScaleIcon, to: '/compare' },
-  { id: 'act-reseed', label: 'Re-seed example data', hint: 'Reset the built-in example roster', group: 'Actions', icon: DatabaseIcon, to: '/example-data' },
-];
-
-const COMMANDS: Command[] = [
-  ...NAV.flatMap((g) => g.items.map((it) => ({
-    id: `nav-${it.to}`, label: it.label, hint: it.hint, group: g.label, icon: it.icon, to: it.to,
-    ...(it.featureId ? { featureId: it.featureId } : {}),
-  }))),
-  ...ACTIONS,
+// Labels/hints carry their ui-catalog keys; resolved per render so they
+// follow the active locale (the `group` label is shared across these rows).
+interface ActionSpec { id: string; labelKey: string; hintKey: string; icon: IconCmp; to: string }
+const ACTIONS: readonly ActionSpec[] = [
+  { id: 'act-new-run', labelKey: 'cmdkActNewRunLabel', hintKey: 'cmdkActNewRunHint', icon: PlayIcon, to: '/runs' },
+  { id: 'act-new-agent', labelKey: 'cmdkActNewAgentLabel', hintKey: 'cmdkActNewAgentHint', icon: BotIcon, to: '/agents/new' },
+  { id: 'act-compare', labelKey: 'cmdkActCompareLabel', hintKey: 'cmdkActCompareHint', icon: ScaleIcon, to: '/compare' },
+  { id: 'act-reseed', labelKey: 'cmdkActReseedLabel', hintKey: 'cmdkActReseedHint', icon: DatabaseIcon, to: '/example-data' },
 ];
 
 export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JSX.Element | null {
   const nav = useNavigate();
+  const { t } = useTranslation('ui');
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
@@ -80,16 +78,31 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
   // rail hides (ADR §3.4).
   const isVisible = useFeatureVisible();
   const badgeFor = useFeatureBadge();
+  // The palette mirrors the LIVE, resolved menu (ADR 0139): items already
+  // reflect the tenant+user layout overrides and are feature-gated, so a hidden
+  // or disabled destination is never jump-to-able.
+  const { workspace, admin } = useResolvedNav();
+  const commands = useMemo<Command[]>(() => [
+    ...[...workspace, ...admin].flatMap((g) => g.items.map((it) => ({
+      id: `nav-${it.to}`, label: it.label, hint: it.hint, group: g.label, icon: it.icon, to: it.to,
+      ...(it.featureId ? { featureId: it.featureId } : {}),
+    }))),
+    ...ACTIONS.map((a) => ({
+      id: a.id, label: t(a.labelKey), hint: t(a.hintKey), group: t('cmdkActionsGroup'), icon: a.icon, to: a.to,
+    })),
+  ], [t, workspace, admin]);
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const visible = COMMANDS.filter((c) => isVisible(c.featureId));
+    const visible = commands.filter((c) => isVisible(c.featureId));
     if (!q) return visible;
     return visible.filter((c) => c.label.toLowerCase().includes(q) || c.hint.toLowerCase().includes(q) || c.group.toLowerCase().includes(q));
-  }, [query, isVisible]);
+  }, [query, isVisible, commands]);
 
-  const activate = useCallback((cmd: Command | undefined) => {
+  const activate = useCallback((cmd: Command | undefined, keepOpen = false) => {
     if (!cmd) return;
-    close();
+    // Shift+Enter navigates but leaves the palette open so an operator can
+    // jump again without re-opening it (DS-3); a plain Enter/click closes.
+    if (!keepOpen) close();
     nav(cmd.to);
   }, [close, nav]);
 
@@ -97,7 +110,7 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
     if (e.key === 'ArrowDown') { e.preventDefault(); setActive((i) => Math.min(i + 1, results.length - 1)); return; }
     if (e.key === 'ArrowUp') { e.preventDefault(); setActive((i) => Math.max(i - 1, 0)); return; }
-    if (e.key === 'Enter') { e.preventDefault(); activate(results[active]); return; }
+    if (e.key === 'Enter') { e.preventDefault(); activate(results[active], e.shiftKey); return; }
   }
 
   // Keep the active row scrolled into view.
@@ -120,7 +133,7 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
         className="cmdk-panel"
         role="dialog"
         aria-modal="true"
-        aria-label="Command palette"
+        aria-label={t('cmdkLabel')}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="cmdk-input-row">
@@ -129,20 +142,20 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
             ref={inputRef}
             type="text"
             className="cmdk-input"
-            placeholder="Jump to a page or action…"
-            aria-label="Search commands"
+            placeholder={t('cmdkPlaceholder')}
+            aria-label={t('cmdkSearchLabel')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onInputKey}
             autoComplete="off"
             spellCheck={false}
           />
-          <kbd className="cmdk-esc">esc</kbd>
+          <kbd className="cmdk-esc">{t('cmdkEsc')}</kbd>
         </div>
         {results.length === 0 ? (
-          <div className="cmdk-empty">No matches for “{query}”.</div>
+          <div className="cmdk-empty">{t('cmdkNoMatches', { query })}</div>
         ) : (
-          <ul className="cmdk-list" ref={listRef} role="listbox" aria-label="Commands">
+          <ul className="cmdk-list" ref={listRef} role="listbox" aria-label={t('cmdkListLabel')}>
             {results.map((cmd, idx) => {
               const Icon = cmd.icon;
               const badge = badgeFor(cmd.featureId);
@@ -165,9 +178,10 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
           </ul>
         )}
         <div className="cmdk-foot">
-          <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
-          <span><kbd>↵</kbd> open</span>
-          <span><kbd>⌘</kbd><kbd>K</kbd> toggle</span>
+          <span><kbd>↑</kbd><kbd>↓</kbd> {t('cmdkFootNavigate')}</span>
+          <span><kbd>↵</kbd> {t('cmdkFootOpen')}</span>
+          <span><kbd>⇧</kbd><kbd>↵</kbd> {t('cmdkFootOpenStay')}</span>
+          <span><kbd>⌘</kbd><kbd>K</kbd> {t('cmdkFootToggle')}</span>
         </div>
       </div>
     </div>

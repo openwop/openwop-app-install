@@ -4,7 +4,7 @@
  * (MiniMax-M2.7, DeepSeek-R1, qwen3-think, etc.) emit chain-of-thought
  * inline; this splitter routes the reasoning to a distinct channel
  * (typically `agent.reasoned` events) while letting the visible
- * answer flow normally to `onDelta` / `node.message`.
+ * answer flow normally to `onDelta` / `ai.message.chunk`.
  *
  * State machine: tracks whether the cursor is inside a think block,
  * holds a tail slice large enough to recognize a complete tag

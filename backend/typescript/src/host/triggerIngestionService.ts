@@ -34,6 +34,7 @@
  */
 
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { insertRunWithStartContext } from './runInsert.js';
 import { fetch as undiciFetch } from 'undici';
 import type { RunRecord } from '../types.js';
 import type { HostAdapterSuite } from './index.js';
@@ -425,7 +426,7 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
         createdAt: now,
         updatedAt: now,
       };
-      await deps.storage.insertRun(run);
+      await insertRunWithStartContext(deps.storage, run);
       setImmediate(() => {
         executeRun(deps.storage, run, wf.definition, {
           policyResolver: deps.hostSuite.providerPolicyResolver,

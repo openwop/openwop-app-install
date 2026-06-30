@@ -8,6 +8,7 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the install delegate so the test never hits a live registry — we assert the
@@ -27,8 +28,7 @@ import {
 } from '../src/features/marketplace/reviewService.js';
 import { buildMarketplaceSurface } from '../src/features/marketplace/surface.js';
 
-const PORT = 18913;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 
 beforeAll(async () => {
@@ -37,8 +37,8 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN; // keep the superadmin gate honest
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'marketplace']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -236,8 +236,14 @@ describe('Marketplace: ctx.features.marketplace surface (read-only; install excl
 
     const all = (await surf.listings({})) as { listings: Array<{ packName: string }> };
     expect(Array.isArray(all.listings)).toBe(true);
-    const hits = (await surf.search({ query: 'marketplace' })) as { listings: Array<{ packName: string }> };
-    expect(hits.listings.every((l) => /marketplace/i.test(`${l.packName}`))).toBe(true);
+    // Search matches name/title/description/category (surface.ts `matches`), not
+    // packName alone — e.g. an agent pack may say "top-installed in marketplace"
+    // in its description. Assert every hit matches across THOSE fields (the search
+    // contract), and that search actually narrows the full set.
+    type Hit = { packName: string; title?: string; description?: string; category?: string };
+    const hits = (await surf.search({ query: 'marketplace' })) as { listings: Hit[] };
+    expect(hits.listings.length).toBeLessThanOrEqual(all.listings.length);
+    expect(hits.listings.every((l) => /marketplace/i.test(`${l.packName} ${l.title ?? ''} ${l.description ?? ''} ${l.category ?? ''}`))).toBe(true);
   });
 
   it('feature.marketplace.nodes.search runs over a stub ctx.features.marketplace', async () => {

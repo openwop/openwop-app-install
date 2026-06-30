@@ -14,14 +14,17 @@
  * @see ../client/workspaceClient.ts, ../../../backend/typescript/src/routes/workspaces.ts
  */
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { brand } from '../brand/brand.js';
+import { useBrand } from '../brand/BrandProvider.js';
 import { BuildingIcon, ChevronRightIcon, SettingsIcon } from '../ui/icons/index.js';
 import { listMyWorkspaces, switchWorkspace, createWorkspace, type WorkspaceSummary } from '../client/workspaceClient.js';
 
 const NEW = '__new__';
 
 export function WorkspaceSwitcher(): JSX.Element {
+  const { t } = useTranslation('chrome');
+  const brand = useBrand(); // live runtime brand (ADR 0170)
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [active, setActive] = useState<string>('');
   const [busy, setBusy] = useState(false);
@@ -66,10 +69,10 @@ export function WorkspaceSwitcher(): JSX.Element {
   // static affordance so the chrome never looks broken.
   if (workspaces.length === 0) {
     return (
-      <Link to="/orgs" className="app-workspace-switcher" title="Workspace + organizations">
+      <Link to="/orgs" className="app-workspace-switcher" title={t('workspaceAndOrgs')}>
         <span className="app-workspace-icon" aria-hidden><BuildingIcon size={16} /></span>
         <span className="app-workspace-meta">
-          <span className="app-workspace-eyebrow">Workspace</span>
+          <span className="app-workspace-eyebrow">{t('workspace')}</span>
           <span className="app-workspace-name">{brand.instanceName}</span>
         </span>
         <span className="app-workspace-caret" aria-hidden><ChevronRightIcon size={14} /></span>
@@ -79,30 +82,30 @@ export function WorkspaceSwitcher(): JSX.Element {
 
   return (
     <div className="app-workspace-block">
-      <div className="app-workspace-switcher" title="Switch workspace">
+      <div className="app-workspace-switcher" title={t('switchWorkspace')}>
         <span className="app-workspace-icon" aria-hidden><BuildingIcon size={16} /></span>
         <span className="app-workspace-meta">
-          <span className="app-workspace-eyebrow">Workspace</span>
+          <span className="app-workspace-eyebrow">{t('workspace')}</span>
           <select
             className="app-workspace-select"
-            aria-label="Active workspace"
+            aria-label={t('activeWorkspace')}
             value={active}
             disabled={busy}
             onChange={(e) => onChange(e.target.value)}
           >
             {workspaces.map((w) => (
               <option key={w.workspaceId} value={w.workspaceId}>
-                {w.name}{w.kind === 'personal' ? ' · personal' : ''}
+                {w.name}{w.kind === 'personal' ? ` · ${t('personal')}` : ''}
               </option>
             ))}
-            <option value={NEW}>+ New workspace…</option>
+            <option value={NEW}>{t('newWorkspaceOption')}</option>
           </select>
         </span>
         <Link
           to="/orgs"
           className="app-workspace-manage"
-          aria-label="Manage workspace members and roles"
-          title="Members & roles"
+          aria-label={t('manageMembersRoles')}
+          title={t('membersAndRoles')}
         >
           <SettingsIcon size={14} />
         </Link>
@@ -110,8 +113,8 @@ export function WorkspaceSwitcher(): JSX.Element {
       {creating && (
         <input
           className="app-workspace-create"
-          aria-label="New workspace name"
-          placeholder="New workspace — Enter to create, Esc to cancel"
+          aria-label={t('newWorkspaceName')}
+          placeholder={t('newWorkspacePlaceholder')}
           autoFocus
           value={newName}
           disabled={busy}

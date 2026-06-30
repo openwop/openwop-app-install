@@ -10,11 +10,14 @@
  * so the workspace page renders it solely for `roleKey === 'chief-of-staff'`.
  */
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { listLoops, setLoopEnabled, type AssistantLoop } from '../features/assistant/assistantClient.js';
 import { StatusBadge } from '../ui/StatusBadge.js';
 import { toast } from '../ui/toast.js';
+import { formatDateTime } from '../i18n/format.js';
 
 export function RecurringTasksPanel(): JSX.Element {
+  const { t } = useTranslation('agents');
   const [loops, setLoops] = useState<AssistantLoop[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -22,8 +25,8 @@ export function RecurringTasksPanel(): JSX.Element {
   const load = useCallback(() => {
     void listLoops()
       .then(setLoops)
-      .catch((e) => setError(e instanceof Error ? e.message : 'Could not load recurring tasks.'));
-  }, []);
+      .catch((e) => setError(e instanceof Error ? e.message : t('recurringLoadError')));
+  }, [t]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -32,24 +35,23 @@ export function RecurringTasksPanel(): JSX.Element {
       setBusy(loop.loopId);
       try {
         await setLoopEnabled(loop.loopId, !loop.enabled);
-        toast.success(loop.enabled ? `${loop.label} paused.` : `${loop.label} enabled.`);
+        toast.success(loop.enabled ? t('recurringPaused', { label: loop.label }) : t('recurringEnabled', { label: loop.label }));
         load();
       } catch (e) {
-        toast.error(e instanceof Error ? e.message : 'Could not update the task.');
+        toast.error(e instanceof Error ? e.message : t('recurringUpdateError'));
       } finally {
         setBusy(null);
       }
     },
-    [load],
+    [load, t],
   );
 
   return (
     <article className="surface-card u-grid u-gap-2">
       <header>
-        <h2>Recurring tasks</h2>
+        <h2>{t('recurringTitle')}</h2>
         <p className="muted">
-          Standing work this agent runs on a schedule. Each is a scheduler job (also in the Schedules tab); enabling a perception
-          task needs a Google connection (Admin → Connections).
+          {t('recurringLede')}
         </p>
       </header>
       {error ? <p className="muted">{error}</p> : null}
@@ -60,11 +62,11 @@ export function RecurringTasksPanel(): JSX.Element {
               <strong>{loop.label}</strong>
               <span className="muted u-block">{loop.description}</span>
               <span className="muted u-block u-text-sm">
-                {loop.lastRunAt ? `Last run ${new Date(loop.lastRunAt).toLocaleString()}` : 'Never run'}
-                {loop.enabled && loop.nextFireAt ? ` · next ${new Date(loop.nextFireAt).toLocaleString()}` : ''}
+                {loop.lastRunAt ? t('recurringLastRun', { when: formatDateTime(loop.lastRunAt) }) : t('recurringNeverRun')}
+                {loop.enabled && loop.nextFireAt ? t('recurringNext', { when: formatDateTime(loop.nextFireAt) }) : ''}
               </span>
             </span>
-            <StatusBadge status={loop.enabled ? 'active' : 'paused'} label={loop.enabled ? 'On' : 'Off'} />
+            <StatusBadge status={loop.enabled ? 'active' : 'paused'} label={loop.enabled ? t('recurringOn') : t('recurringOff')} />
             <button
               type="button"
               className={loop.enabled ? 'secondary' : 'btn-accent'}
@@ -72,11 +74,11 @@ export function RecurringTasksPanel(): JSX.Element {
               aria-pressed={loop.enabled}
               onClick={() => void toggle(loop)}
             >
-              {loop.enabled ? 'Pause' : 'Enable'}
+              {loop.enabled ? t('recurringPause') : t('recurringEnable')}
             </button>
           </li>
         ))}
-        {loops !== null && loops.length === 0 ? <li className="muted">No recurring tasks configured.</li> : null}
+        {loops !== null && loops.length === 0 ? <li className="muted">{t('recurringEmpty')}</li> : null}
       </ul>
     </article>
   );

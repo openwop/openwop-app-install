@@ -227,10 +227,16 @@ export function subscribeToNotifications(handlers: NotificationStreamHandlers): 
           headers: {
             Accept: 'text/event-stream',
             'Cache-Control': 'no-cache',
-            ...(isBearer ? authedHeaders() : {}),
+            // authedHeaders() in BOTH modes: cookie mode is cross-origin to
+            // *.run.app where the openwop.session cookie doesn't travel, so a
+            // signed-in user must send their Firebase ID token here too — else
+            // the stream authenticates as an unrelated cross-origin session and
+            // the tenant filter shows none of their notifications until that
+            // session promotes. Anon (no token) still rides the cookie below.
+            ...authedHeaders(),
           },
-          // Cookie mode (prod, cross-origin Cloud Run) authenticates via the
-          // `openwop.session` cookie — same path the run-event stream proved.
+          // Cookie mode (prod, cross-origin Cloud Run) also rides the
+          // `openwop.session` cookie as a fallback for anon callers.
           credentials: isBearer ? 'same-origin' : 'include',
           signal: abort.signal,
         });

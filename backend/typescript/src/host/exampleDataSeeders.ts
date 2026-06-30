@@ -17,12 +17,23 @@ import type { Storage } from '../storage/storage.js';
 import { clearExampleAgents, countExampleAgents, seedExampleAgents } from './exampleDataSeed.js';
 import { seedAdvisoryBoards, countAdvisors, clearAdvisoryBoards } from './advisoryBoardSeed.js';
 import { ensureSystemSite, getSystemHomePage } from './systemSite.js';
+import { ensureFeaturesPage, getFeaturesPage } from './featuresPage.js';
 import {
   clearWorkforceHistory,
   countWorkforceRuns,
   seedWorkforceEntities,
   seedWorkforceHistory,
 } from './workforceService.js';
+import {
+  countWorkflowAuthorShowcase,
+  seedWorkflowAuthorShowcase,
+  clearWorkflowAuthorShowcase,
+} from './workflowAuthorSeed.js';
+import {
+  countStrategyShowcase,
+  seedStrategyShowcase,
+  clearStrategyShowcase,
+} from './strategyShowcaseSeed.js';
 
 export type SeedAction = 'created' | 'skipped' | 'error' | 'cleared';
 
@@ -157,8 +168,65 @@ const workforcesSeeder: ExampleDataSeeder = {
   },
 };
 
+const featurePagesSeeder: ExampleDataSeeder = {
+  id: 'features-page',
+  label: 'Features page',
+  description: 'The public, CMS-driven "Features" page documenting every feature the app offers (ADR 0027), published at /p/features. Host-global content — shared across the deployment, not per-tenant — so it is shown for visibility but not cleared from here.',
+  async count() {
+    // Host-global: the reserved system-site features page. 1 when present, else 0.
+    return (await getFeaturesPage()) ? 1 : 0;
+  },
+  async seed() {
+    // Idempotent ensure of the published, host-global features page.
+    const before = (await getFeaturesPage()) ? 1 : 0;
+    await ensureFeaturesPage();
+    return { created: before === 0 ? 1 : 0, details: { hostGlobal: true } };
+  },
+  async clear() {
+    // Host-global content: never cleared per-tenant (it would remove the public
+    // features page for the whole deployment). Shown for visibility only.
+    return { cleared: 0, details: { hostGlobal: true, note: 'host-global; not cleared per-tenant' } };
+  },
+};
+
+const workflowAuthorSeeder: ExampleDataSeeder = {
+  id: 'workflow-author-examples',
+  label: 'AI-authored workflows',
+  description: 'Showcase workflows that look like AI Workflow Author output (ADR 0072) — runnable graphs built from deterministic demo nodes, badged illustrative — so a visitor sees what "Create with AI" produces. Host-global (workflows are keyed by id, not per-tenant).',
+  async count() {
+    return countWorkflowAuthorShowcase();
+  },
+  async seed() {
+    return seedWorkflowAuthorShowcase();
+  },
+  async clear() {
+    return clearWorkflowAuthorShowcase();
+  },
+};
+
+const strategyShowcaseSeeder: ExampleDataSeeder = {
+  id: 'strategy-showcase',
+  label: 'Strategy showcase',
+  description: 'A coherent fictional company ("Northwind AI") across Strategy + Priority Matrix + Board of Advisors: scored priority lists, strategies linked to those priorities, and a Board of Directors that carries the org strategies as context — so the board (or the Strategy Analyst) can access and analyze the whole plan. Requires the Strategy, Priority Matrix, and Board of Advisors features to be enabled.',
+  dependsOn: ['advisors'],
+  async count(tenantId) {
+    return countStrategyShowcase(tenantId);
+  },
+  async seed(tenantId, storage) {
+    const r = await seedStrategyShowcase(tenantId, storage);
+    return {
+      created: r.created,
+      details: r.skipped ? { skipped: r.skipped } : r.details,
+    };
+  },
+  async clear(tenantId, storage) {
+    const r = await clearStrategyShowcase(tenantId, storage);
+    return { cleared: r.cleared, details: r.details };
+  },
+};
+
 /** The registry. Order = seed order (dependencies first). */
-export const EXAMPLE_DATA_SEEDERS: readonly ExampleDataSeeder[] = [agentsSeeder, advisorsSeeder, workforcesSeeder, cmsHomepageSeeder];
+export const EXAMPLE_DATA_SEEDERS: readonly ExampleDataSeeder[] = [agentsSeeder, advisorsSeeder, workforcesSeeder, cmsHomepageSeeder, featurePagesSeeder, workflowAuthorSeeder, strategyShowcaseSeeder];
 
 export interface ExampleDataStepStatus {
   id: string;

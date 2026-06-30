@@ -103,6 +103,32 @@ export function ensureLocalPacksMounted(): MountResult {
     if (!existsSync(join(src, 'pack.json'))) continue;
 
     const dest = join(destDir, entry);
+
+    // A symlink at the destination is a PRIOR dev-mount (registry installs are
+    // real directories carrying `.openwop-installed.json` — never symlinks). If it
+    // already points at THIS repo it's a no-op. Otherwise it's stale: either
+    // DANGLING (a removed worktree, e.g. under /tmp) or pointing at ANOTHER
+    // checkout's `packs/` (the parallel-worktree hazard). `existsSync` follows the
+    // link, so a dangling one reads as ABSENT and the create below would throw
+    // EEXIST and skip the pack — silently breaking every node/agent/surface it
+    // ships. Re-point any stale symlink at this repo so the running instance always
+    // mounts its OWN vendored packs (a symlink is never a signed registry dir, so
+    // this can't clobber one). Fixes node-pack/runtime tests that otherwise fail
+    // on a machine whose ~/.openwop-packs links into other/removed checkouts.
+    const destLink = symlinkTarget(dest);
+    if (destLink !== null) {
+      if (destLink === src) { skipped.push(entry); continue; }
+      try {
+        rmSync(dest, { force: true });
+        symlinkSync(src, dest, 'dir');
+        mounted.push(entry);
+        log.info('re-pointed stale local-pack symlink to this repo (parallel-worktree hygiene)', { pack: entry, was: destLink });
+      } catch (err) {
+        log.warn('local pack mount failed', { pack: entry, error: err instanceof Error ? err.message : String(err) });
+      }
+      continue;
+    }
+
     if (existsSync(dest)) {
       // Idempotent: if a previous boot already shadowed this pack, the
       // dest is now a symlink into the repo. Nothing to do.
@@ -166,6 +192,17 @@ export function ensureLocalPacksMounted(): MountResult {
     destDir,
   });
   return { mounted, skipped, shadowed, disabled: false };
+}
+
+/** The link target if `p` is a symlink (dangling or not), else null. Unlike
+ *  `existsSync`, this does NOT follow the link — so a dangling dev-mount left by a
+ *  removed worktree is detected rather than mistaken for an absent destination. */
+function symlinkTarget(p: string): string | null {
+  try {
+    return lstatSync(p).isSymbolicLink() ? readlinkSync(p) : null;
+  } catch {
+    return null;
+  }
 }
 
 function isSymlinkToRepo(dest: string, expectedTarget: string): boolean {

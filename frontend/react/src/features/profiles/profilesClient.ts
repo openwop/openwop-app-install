@@ -5,6 +5,7 @@
  */
 
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { cachedRead } from '../../client/requestCache.js';
 import { blobToBase64 } from '../../chat/hooks/useAudioRecorder.js';
 import type { AgentActivityItem } from '../../agents/rosterClient.js';
 
@@ -47,6 +48,8 @@ export interface Profile {
   workflows: string[];
   /** Roster member ids pinned to the sidebar (ADR 0023). */
   pinnedAgentIds: string[];
+  /** Roster member ids pinned to the AI-chat welcome "hand it to an agent" row. */
+  pinnedChatAgentIds?: string[];
   completeness: number;
   emailVerified?: boolean;
   displayName?: string;
@@ -87,8 +90,12 @@ export interface ProfilePatch {
 }
 
 export async function getMyProfile(): Promise<Profile> {
-  const res = await fetch(`${base}/me`, fetchOpts({ headers: authedHeaders() }));
-  return asJson<Profile>(res, 'getMyProfile');
+  // Read on mount by the welcome card and every chat session. Coalesce concurrent
+  // reads (TTL 0 = in-flight-only); updateMyProfile reflects on the next read.
+  return cachedRead('profiles.me', 0, async () => {
+    const res = await fetch(`${base}/me`, fetchOpts({ headers: authedHeaders() }));
+    return asJson<Profile>(res, 'getMyProfile');
+  });
 }
 
 export async function updateMyProfile(patch: ProfilePatch): Promise<Profile> {
@@ -117,6 +124,12 @@ export async function setMySkills(skills: { name: string; proficiency: number }[
 export async function setAgentPinned(rosterId: string, pinned: boolean): Promise<Profile> {
   const res = await fetch(`${base}/me/pinned-agents/${encodeURIComponent(rosterId)}`, fetchOpts({ method: pinned ? 'PUT' : 'DELETE', headers: authedHeaders() }));
   return asJson<Profile>(res, 'setAgentPinned');
+}
+
+/** Pin or unpin an agent to the AI-chat welcome "hand it to an agent" row. */
+export async function setChatAgentPinned(rosterId: string, pinned: boolean): Promise<Profile> {
+  const res = await fetch(`${base}/me/pinned-chat-agents/${encodeURIComponent(rosterId)}`, fetchOpts({ method: pinned ? 'PUT' : 'DELETE', headers: authedHeaders() }));
+  return asJson<Profile>(res, 'setChatAgentPinned');
 }
 
 export async function setMyWorkflows(workflows: string[]): Promise<Profile> {

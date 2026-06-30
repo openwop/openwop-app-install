@@ -35,6 +35,7 @@ import {
   getWorkspace,
 } from '../host/accessControlService.js';
 import { ensurePersonalBoard } from '../host/kanbanService.js';
+import { resolveCallerUser } from '../features/users/usersGuards.js';
 import { createLogger } from '../observability/logger.js';
 
 const wsLog = createLogger('routes.workspaces');
@@ -71,12 +72,18 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
       // an ephemeral entry without persisting.
       if (personal) {
         if (isDurableCaller(req)) {
-          const ws = await ensurePersonalWorkspace({ tenantId: personal, ownerSubject: subject });
-          // ADR 0025 — give every durable user their own kanban board at the same
-          // idempotent choke point, so a human is a board-owning orchestration
-          // principal exactly like a seeded roster agent. Best-effort: a board
-          // hiccup must never block listing the workspace.
-          await ensurePersonalBoard(personal, subject).catch((err) =>
+          // ADR 0003 — provision the personal workspace + board under the caller's
+          // ONE canonical durable user (the same identity `/me` resolves), NOT the
+          // raw `callerSubject`. The subject falls back to the volatile channel
+          // principal (`oidc:<sub>` bearer / `session:<sid>`) when the session
+          // isn't bound, and `ensurePersonalWorkspace`/`ensurePersonalBoard` key
+          // the owner member + board id on it — so keying on the subject mints a
+          // SEPARATE owner + "My Board" per channel (the duplicate-board / split-
+          // principal fragmentation ADR 0003 eliminates). The canonical userId is
+          // stable across channels, so provisioning is genuinely idempotent.
+          const ownerId = (await resolveCallerUser(req)).userId;
+          const ws = await ensurePersonalWorkspace({ tenantId: personal, ownerSubject: ownerId });
+          await ensurePersonalBoard(personal, ownerId).catch((err) =>
             wsLog.warn('personal_board_provision_failed', { tenantId: personal, error: err instanceof Error ? err.message : String(err) }),
           );
           out.push({

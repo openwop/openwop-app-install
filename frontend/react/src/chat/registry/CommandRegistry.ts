@@ -29,10 +29,19 @@ export interface CommandContext {
 
 export type CommandHandler = (args: string, ctx: CommandContext) => Promise<boolean> | boolean;
 
+/** A command description: a string, or a getter so it re-resolves on locale
+ *  switch (registry entries are defined once at import). */
+export type CommandDescription = string | (() => string);
+
+/** Resolve a {@link CommandDescription} to its current-locale string. */
+export function resolveDescription(d: CommandDescription): string {
+  return typeof d === 'function' ? d() : d;
+}
+
 export interface CommandRegistration {
   /** Includes the leading slash: '/clear', '/help'. */
   name: string;
-  description: string;
+  description: CommandDescription;
   aliases?: readonly string[];
   /** Optional one-line usage hint shown in autocomplete: '/run <workflowId>'. */
   usage?: string;
@@ -86,7 +95,7 @@ export function filterCommands(query: string): readonly CommandRegistration[] {
   if (q.length === 0) return listCommands();
   return listCommands().filter((reg) => {
     if (reg.name.slice(1).toLowerCase().includes(q)) return true;
-    if (reg.description.toLowerCase().includes(q)) return true;
+    if (resolveDescription(reg.description).toLowerCase().includes(q)) return true;
     if (reg.aliases?.some((a) => a.slice(1).toLowerCase().includes(q))) return true;
     return false;
   });

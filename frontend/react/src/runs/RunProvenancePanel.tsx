@@ -20,9 +20,12 @@
  */
 
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import type { RunEventDoc, RunSnapshot } from '@openwop/openwop';
 import { ScaleIcon, SparklesIcon, ClockIcon, InfoIcon, ChevronRightIcon } from '../ui/icons/index.js';
+import i18n from '../i18n/index.js';
+import { formatNumber, formatDateTime } from '../i18n/format.js';
 
 interface Props {
   events: readonly RunEventDoc[];
@@ -185,32 +188,33 @@ export function summarizeProvenance(
 
 function fmtDuration(ms?: number): string | null {
   if (ms == null) return null;
-  if (ms < 1000) return `${ms} ms`;
+  if (ms < 1000) return i18n.t('runs:durationMs', { n: formatNumber(ms) });
   const s = ms / 1000;
-  if (s < 60) return `${s.toFixed(1)} s`;
+  if (s < 60) return i18n.t('runs:durationSeconds', { n: formatNumber(s, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) });
   const m = Math.floor(s / 60);
-  return `${m}m ${Math.round(s % 60)}s`;
+  return i18n.t('runs:durationMinutes', { m: formatNumber(m), s: formatNumber(Math.round(s % 60)) });
 }
 
 /** The human-action chip — encodes "agents propose, humans dispose" for a
  *  finished run: a gate that's open, one a human resolved, or no gate at all. */
 function humanChip(human: ProvenanceSummary['human']): { cls: string; label: string } {
-  if (human.open) return { cls: 'chip--warning chip--pulse', label: 'Awaiting human' };
-  if (human.resumes > 0) return { cls: 'chip--success', label: `Human resolved ${human.resumes}` };
-  if (human.interrupts > 0) return { cls: 'chip--muted', label: `${human.interrupts} gate, unresolved` };
-  return { cls: 'chip--muted', label: 'Autonomous — no human gate' };
+  if (human.open) return { cls: 'chip--warning chip--pulse', label: i18n.t('runs:provAwaitingHuman') };
+  if (human.resumes > 0) return { cls: 'chip--success', label: i18n.t('runs:provHumanResolved', { count: human.resumes }) };
+  if (human.interrupts > 0) return { cls: 'chip--muted', label: i18n.t('runs:provGateUnresolved', { count: human.interrupts }) };
+  return { cls: 'chip--muted', label: i18n.t('runs:provAutonomous') };
 }
 
 function jsonPreview(v: unknown): string {
   try {
     const s = JSON.stringify(v, null, 2);
-    return s.length > 4000 ? `${s.slice(0, 4000)}\n… (truncated)` : s;
+    return s.length > 4000 ? `${s.slice(0, 4000)}\n${i18n.t('runs:jsonTruncated')}` : s;
   } catch {
     return String(v);
   }
 }
 
 export function RunProvenancePanel({ events, snapshot }: Props) {
+  const { t } = useTranslation('runs');
   const p = useMemo(() => summarizeProvenance(events, snapshot), [events, snapshot]);
   if (p.eventCount === 0) return null;
 
@@ -223,7 +227,7 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
     <div className="card">
       <div className="u-flex u-items-center u-gap-2">
         <ScaleIcon size={16} />
-        <h2 className="u-flex-1 u-m-0">Provenance</h2>
+        <h2 className="u-flex-1 u-m-0">{t('provenance')}</h2>
         <span className={`chip ${human.cls}`}>{human.label}</span>
       </div>
 
@@ -231,35 +235,35 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
       <dl className="runprov-timing-dl">
         {p.workflowId && (
           <>
-            <dt className="muted">Workflow</dt>
+            <dt className="muted">{t('provWorkflow')}</dt>
             <dd className="u-m-0 u-mono">{p.workflowId}</dd>
           </>
         )}
         {p.startedAt && (
           <>
-            <dt className="muted">Started</dt>
+            <dt className="muted">{t('provStarted')}</dt>
             <dd className="u-m-0 u-iflex u-items-center u-gap-1">
-              <ClockIcon size={12} /> {new Date(p.startedAt).toLocaleString()}
+              <ClockIcon size={12} /> {formatDateTime(p.startedAt)}
               {duration && <span className="muted"> · {duration}</span>}
             </dd>
           </>
         )}
         {p.engineVersion && (
           <>
-            <dt className="muted">Engine</dt>
+            <dt className="muted">{t('provEngine')}</dt>
             <dd className="u-m-0 u-mono">{p.engineVersion}</dd>
           </>
         )}
         {(p.causationId || p.parentRunId) && (
           <>
-            <dt className="muted">Caused by</dt>
+            <dt className="muted">{t('provCausedBy')}</dt>
             <dd className="u-m-0">
               {p.parentRunId ? (
                 <Link to={`/runs/${encodeURIComponent(p.parentRunId)}`} className="inline-link u-iflex u-items-center u-gap-0-5">
-                  parent run <ChevronRightIcon size={12} />
+                  {t('provParentRun')} <ChevronRightIcon size={12} />
                 </Link>
               ) : (
-                <span className="u-mono" title="causation id">{p.causationId}</span>
+                <span className="u-mono" title={t('provCausationIdTitle')}>{p.causationId}</span>
               )}
             </dd>
           </>
@@ -271,13 +275,13 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
         <div className="u-mt-3 u-flex u-wrap u-gap-1-5 u-items-center">
           <SparklesIcon size={13} />
           {p.models.map((m) => (
-            <span key={`${m.provider}::${m.model}`} className="chip chip--ai" title={`${m.calls} call(s)`}>
-              {m.provider}/{m.model}{m.calls > 1 ? ` ×${m.calls}` : ''}
+            <span key={`${m.provider}::${m.model}`} className="chip chip--ai" title={t('provModelCalls', { count: m.calls })}>
+              {m.provider}/{m.model}{m.calls > 1 ? ` ×${formatNumber(m.calls)}` : ''}
             </span>
           ))}
           {p.substituted && (
-            <span className="chip chip--warning" title="A requested model class was downgraded (model.capability.substituted)">
-              substituted
+            <span className="chip chip--warning" title={t('provSubstitutedTitle')}>
+              {t('provSubstituted')}
             </span>
           )}
         </div>
@@ -286,10 +290,13 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
       {/* Reasoning trace summary */}
       {(p.reasoningSteps > 0 || p.decisions > 0 || p.toolCalls > 0) && (
         <p className="muted runprov-reasoning-line">
-          {p.reasoningSteps > 0 && `${p.reasoningSteps} reasoning step${p.reasoningSteps === 1 ? '' : 's'}`}
-          {p.decisions > 0 && `${p.reasoningSteps > 0 ? ' · ' : ''}${p.decisions} decision${p.decisions === 1 ? '' : 's'}`}
-          {p.confidence && ` (confidence ${p.confidence.min.toFixed(2)}–${p.confidence.max.toFixed(2)})`}
-          {p.toolCalls > 0 && ` · ${p.toolCalls} tool call${p.toolCalls === 1 ? '' : 's'}`}
+          {p.reasoningSteps > 0 && t('provReasoningSteps', { count: p.reasoningSteps })}
+          {p.decisions > 0 && `${p.reasoningSteps > 0 ? ' · ' : ''}${t('provDecisions', { count: p.decisions })}`}
+          {p.confidence && ` ${t('provConfidence', {
+            min: formatNumber(p.confidence.min, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+            max: formatNumber(p.confidence.max, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+          })}`}
+          {p.toolCalls > 0 && ` · ${t('provToolCalls', { count: p.toolCalls })}`}
         </p>
       )}
 
@@ -298,13 +305,13 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
         <div className="runprov-io-stack">
           {hasInputs && (
             <details>
-              <summary className="muted u-fs-12 u-cursor-pointer">Inputs</summary>
+              <summary className="muted u-fs-12 u-cursor-pointer">{t('provInputs')}</summary>
               <pre className="u-mono u-fs-12 u-overflow-auto u-mbox-t1">{jsonPreview(p.inputs)}</pre>
             </details>
           )}
           {hasOutput && (
             <details>
-              <summary className="muted u-fs-12 u-cursor-pointer">Output</summary>
+              <summary className="muted u-fs-12 u-cursor-pointer">{t('provOutput')}</summary>
               <pre className="u-mono u-fs-12 u-overflow-auto u-mbox-t1">{jsonPreview(p.output)}</pre>
             </details>
           )}
@@ -313,7 +320,7 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
 
       <p className="muted runprov-caveat">
         <InfoIcon size={12} style={{ flexShrink: 0, marginTop: 1 }} />
-        Derived from this run&apos;s event log — a transparent provenance trail, not a signed attestation record.
+        {t('provCaveat')}
       </p>
     </div>
   );

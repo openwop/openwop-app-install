@@ -38,14 +38,18 @@ export type BrokeredPostOutcome =
   | { outcome: 'request_failed'; timedOut: boolean }
   | { outcome: 'sent'; res: Awaited<ReturnType<typeof undiciFetch>>; provenance: ConnectionUseProvenance };
 
-/** How the resolved secret is placed in the `Authorization` header.
+/** How the resolved secret is placed in the auth header (default `Authorization`,
+ *  overridable via `authHeaderName`).
  *  - `bearer` → `Bearer <secret>` (Slack oauth2 token, SendGrid / Expo api_key).
  *  - `basic`  → `Basic <base64(secret)>` (the secret IS the `user:pass` pair,
- *    e.g. Twilio's `AccountSid:AuthToken`). */
-export type AuthScheme = 'bearer' | 'basic';
+ *    e.g. Twilio's `AccountSid:AuthToken`).
+ *  - `raw`    → `<secret>` verbatim, no prefix (e.g. TikTok's `Access-Token` header). */
+export type AuthScheme = 'bearer' | 'basic' | 'raw';
 
 function authHeader(scheme: AuthScheme, secret: string): string {
-  return scheme === 'basic' ? `Basic ${Buffer.from(secret).toString('base64')}` : `Bearer ${secret}`;
+  if (scheme === 'basic') return `Basic ${Buffer.from(secret).toString('base64')}`;
+  if (scheme === 'raw') return secret;
+  return `Bearer ${secret}`;
 }
 
 /**
@@ -66,6 +70,16 @@ export async function brokeredPost(
     body: string;
     contentType?: string;
     authScheme?: AuthScheme;
+    /** Where the broker writes its resolved secret — default `authorization`; some
+     *  providers want it under a different header (e.g. TikTok's `Access-Token`).
+     *  MUST be a hardcoded strategy constant, never derived from caller/agent input. */
+    authHeaderName?: string;
+    /** Additional STATIC, non-secret-via-the-broker headers the caller needs (e.g.
+     *  Google Ads' app-level `developer-token` / `login-customer-id`). The broker
+     *  remains the SOLE authority for the credential: any case-variant of the
+     *  auth-header-name / `content-type` here is stripped before merge, so a caller
+     *  can never override the broker's token or smuggle a second auth header. */
+    extraHeaders?: Record<string, string>;
   },
 ): Promise<BrokeredPostOutcome> {
   const resolved = await resolveConnectionCredential({
@@ -81,10 +95,22 @@ export async function brokeredPost(
   if (!url.startsWith('https://') && !webhookPrivateEgressAllowed()) {
     return { outcome: 'insecure_base' };
   }
+  // The broker owns the auth header (whatever its name) + content-type. Strip every
+  // case-variant of those from caller extras (a plain object keeps `Access-Token` and
+  // `access-token` distinct; undici lowercases at send, so an unstripped variant would
+  // survive as a SECOND auth header). The case-insensitive strip — not the set-last —
+  // is what protects the credential.
+  const authName = (opts.authHeaderName ?? 'authorization').trim().toLowerCase();
+  const safeExtra = Object.fromEntries(
+    Object.entries(opts.extraHeaders ?? {}).filter(([k]) => {
+      const n = k.trim().toLowerCase();
+      return n !== authName && n !== 'content-type';
+    }),
+  );
   try {
     const res = await undiciFetch(url, {
       method: 'POST',
-      headers: { 'content-type': opts.contentType ?? 'application/json; charset=utf-8', authorization: authHeader(opts.authScheme ?? 'bearer', resolved.secret) },
+      headers: { 'content-type': opts.contentType ?? 'application/json; charset=utf-8', ...safeExtra, [authName]: authHeader(opts.authScheme ?? 'bearer', resolved.secret) },
       body: opts.body,
       dispatcher: webhookEgressDispatcher(),
       redirect: 'error',
@@ -120,6 +146,12 @@ export async function brokeredFetch(
     body?: string;
     contentType?: string;
     authScheme?: AuthScheme;
+    /** `'manual'` RETURNS a 3xx instead of erroring — for reading a pre-authenticated
+     *  download `Location` (e.g. Box `/content`) WITHOUT following it. `'manual'` does
+     *  NOT follow the redirect, so the credentialed request only ever reaches the
+     *  `apiHosts`-pinned host; the caller MUST fetch the `Location` un-credentialed
+     *  (the token is never sent to the redirect target). Default keeps `'error'`. */
+    redirect?: 'manual';
   },
 ): Promise<BrokeredFetchOutcome> {
   // Resolve the destination host up front so we can pin it BEFORE resolving a
@@ -167,7 +199,9 @@ export async function brokeredFetch(
       },
       ...(opts.body !== undefined ? { body: opts.body } : {}),
       dispatcher: webhookEgressDispatcher(),
-      redirect: 'error',
+      // `'manual'` returns the 3xx (caller reads Location, never follows with the token);
+      // default `'error'` refuses to follow a token-bearing redirect at all.
+      redirect: opts.redirect === 'manual' ? 'manual' : 'error',
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
     return { outcome: 'sent', res, provenance: resolved.provenance };

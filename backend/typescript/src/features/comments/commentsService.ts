@@ -14,8 +14,15 @@ import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { cleanString } from '../../host/boundedStrings.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
+import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
 import { getPage } from '../cms/cmsService.js';
 import { getCollection } from '../kb/kbService.js';
+
+// ADR 0081 P5 — a comment's `body` is author free-text (may name/quote people); declare
+// it for log-masking (ADR 0077). `authorId` is an opaque principal id (RFC 0048), not PII.
+declarePiiFields('comments.comment', ['body']);
 
 export type ResourceType = 'cms_page' | 'kb_collection';
 export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection'];
@@ -60,7 +67,8 @@ const TARGETS: Record<ResourceType, CommentTarget> = {
   },
 };
 
-const comments = new DurableCollection<Comment>('comments:thread', (c) => c.commentId);
+// GOV-1: `tenantOf` arms the tenant secondary index (bounded retention-purge scan).
+const comments = new DurableCollection<Comment>('comments:thread', (c) => c.commentId, undefined, (c) => c.tenantId);
 
 export function isResourceType(v: unknown): v is ResourceType {
   return typeof v === 'string' && (RESOURCE_TYPES as readonly string[]).includes(v);
@@ -181,4 +189,38 @@ export async function deleteComment(
 }
 
 /** Test-only: clear the comment store. */
+// ADR 0081 P5 — time-based retention (ADR 0077 seam). Delete this tenant's comment
+// threads NOT touched within the window — age on `updatedAt` (an active thread keeps
+// being touched; a year-dormant thread's free-text body is the stale PII). No-op on a
+// falsy tenant / non-PII classification (fail-closed).
+registerRetentionPurger({
+  feature: 'comments',
+  async purge(tenantId, classification, cutoffIso) {
+    if (!tenantId || classification !== 'confidential-pii') return 0;
+    return purgeRowsByAge('comments', await comments.listForTenantIndexed(tenantId), tenantId, cutoffIso,
+      (c) => ({ tenantId: c.tenantId, updatedAt: c.updatedAt, id: c.commentId }),
+      (id) => comments.delete(id));
+  },
+});
+
+// GDPR data-subject erasure (subject-erasure seam, ADR 0077 / ADR 0081 follow-up): a
+// comment's free-text `body` is the subject's PII and `authorId` is the opaque principal
+// (RFC 0048), so when a DSAR `subjectKey` is that userId, delete every comment authored by
+// the subject. Tenant-scoped, fail-closed on a falsy subject. Returns the count removed.
+// Orphan trade-off (intentional, matches the retention purger + ADR 0081 P5): erasing an
+// author's root comment leaves others' replies with a dangling `parentId` — they still
+// render via `listThread`, just lose their anchor. Subject erasure correctly takes
+// priority over thread cosmetics; we do NOT re-parent or tombstone.
+export async function deleteSubjectComments(tenantId: string, subjectKey: string): Promise<number> {
+  if (!subjectKey) return 0;
+  let removed = 0;
+  for (const c of await comments.list()) {
+    if (c.tenantId === tenantId && c.authorId === subjectKey) { await comments.delete(c.commentId); removed += 1; }
+  }
+  return removed;
+}
+
+const commentsEraser = async (tenantId: string, subjectKey: string): Promise<void> => { await deleteSubjectComments(tenantId, subjectKey); };
+registerSubjectEraser(commentsEraser);
+
 export async function __resetCommentsStore(): Promise<void> { await comments.__clear(); }

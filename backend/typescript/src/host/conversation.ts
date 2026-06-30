@@ -14,6 +14,11 @@ export interface ConversationTurnAgent {
   agentId: string;
   agentSharing?: 'isolated' | 'shared' | string;
   memoryRef?: string;
+  /** RFC 0109 (ADR 0124 Phase 2d) — OPTIONAL model provenance: which model produced this
+   *  `role:'agent'` turn. NON-SECRET (provider + model identifiers only — the SR-1 guard);
+   *  read verbatim on `:fork`. Stamped only when the host advertises
+   *  `conversationTurnModelProvenance.supported`. */
+  model?: { provider: string; model: string };
 }
 
 /** One turn in a multi-turn conversation (`conversation-turn.schema.json`). */
@@ -33,6 +38,13 @@ export interface ConversationTurn {
   role: 'user' | 'agent' | 'system';
   /** AgentRef for `role: 'agent'` turns. */
   agent?: ConversationTurnAgent;
+  /** RFC 0101 — the stable speaker identity of this turn (the agent INSTANCE id,
+   *  i.e. the roster member's agentId). REQUIRED on `role: 'agent'` turns of a
+   *  multi-party conversation that declares a participant roster on
+   *  `conversation.opened`; a turn whose `speakerId` is not a declared participant
+   *  MUST be rejected. Additive: absent on legacy 1:1 turns. Mirrors `from` for an
+   *  agent turn but is the explicit, attributed field (not the dual-use `from`). */
+  speakerId?: string;
   /** 0-based monotonic index within the conversation. */
   turnIndex: number;
 }
@@ -60,6 +72,7 @@ export function makeTurn(input: {
   to?: string | undefined;
   groupId?: string | undefined;
   agent?: ConversationTurnAgent | undefined;
+  speakerId?: string | undefined;
 }): ConversationTurn {
   return {
     messageId: turnMessageId(input.conversationId, input.turnIndex, input.role),
@@ -71,5 +84,6 @@ export function makeTurn(input: {
     ...(input.to !== undefined ? { to: input.to } : {}),
     ...(input.groupId !== undefined ? { groupId: input.groupId } : {}),
     ...(input.agent !== undefined ? { agent: input.agent } : {}),
+    ...(input.speakerId !== undefined ? { speakerId: input.speakerId } : {}),
   };
 }

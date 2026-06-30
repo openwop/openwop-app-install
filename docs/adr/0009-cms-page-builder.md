@@ -139,6 +139,15 @@ Registered in `FRONTEND_FEATURES`; the `npm run build` gate must pass.
    workflow + suspending/resolving an interrupt is a larger, wire-adjacent
    integration with no added authority for the content surface. Recorded as a
    follow-on.
+
+   > **Correction (2026-06-18, ADR 0066).** This follow-on is now scoped — but
+   > the framing here was wrong. The right primitive is NOT the run-scoped wire
+   > interrupt (`core.approvalGate`, which would force CMS publish to become a
+   > workflow run), but the host's **run-independent approval queue**
+   > (`host/approvalService.ts`) that already backs the ApprovalsInbox — extended
+   > with a `kind:'content-publish'` variant per the ADR 0025 §4 "no new approval
+   > store" precedent. The "approval needs a run" tension dissolves; no RFC. See
+   > **ADR 0066**.
 2. **A generic `content-block` store shared with CRM custom fields.** Rejected —
    sections are a typed, ordered, render-targeted structure with their own
    schemas + sanitization; conflating them with CRM key/value custom fields would
@@ -151,9 +160,11 @@ Registered in `FRONTEND_FEATURES`; the `npm run build` gate must pass.
 
 ## Open questions
 
-- [ ] **Interrupt-backed approval.** Promote the RBAC gate to emit an
-  `approval`-kind interrupt run (audited, resumable) when a deployment wants the
-  full workflow-engine trail. The state machine is the seam.
+- [x] **Interrupt-backed approval.** Scoped in **ADR 0066** — delivered via the
+  host's run-independent approval queue (`host/approvalService.ts`,
+  `kind:'content-publish'`), NOT a run-scoped interrupt. The run-scoped
+  `core.approvalGate` path remains available if a deployment later wants the full
+  workflow-engine trail; the state machine is still the seam.
 - [ ] **Slug uniqueness scope.** Unique per (org) today; a multi-site-per-org
   model would scope slugs per site — revisit if a `site` entity lands.
 - [ ] **Section-asset GC.** A media asset referenced only by an archived page

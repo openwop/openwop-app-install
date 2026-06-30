@@ -10,6 +10,7 @@
  */
 import { useEffect, useState } from 'react';
 import { getFeedbackCapability, listAnnotations, type Annotation } from '../client/feedbackClient.js';
+import i18n from '../i18n/index.js';
 
 export interface RunReview {
   flagged: boolean; // ≥1 flag signal
@@ -38,9 +39,9 @@ export function needsReview(r: RunReview): boolean {
 /** Human-readable reason(s) a run is in the review queue (for a tooltip). */
 export function reviewReason(r: RunReview): string {
   const parts: string[] = [];
-  if (r.flagged) parts.push('flagged');
-  if (r.lowRated) parts.push('low-rated');
-  if (r.corrected) parts.push('corrected');
+  if (r.flagged) parts.push(i18n.t('runs:reviewReasonFlagged'));
+  if (r.lowRated) parts.push(i18n.t('runs:reviewReasonLowRated'));
+  if (r.corrected) parts.push(i18n.t('runs:reviewReasonCorrected'));
   return parts.join(' · ');
 }
 

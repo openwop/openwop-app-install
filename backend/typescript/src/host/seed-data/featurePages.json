@@ -1,0 +1,129 @@
+{
+  "_note": "Brand-authorable content for the public, host-global 'Features' CMS page (ADR 0027). Seeded by host/featuresPage.ts → published at /p/features. Shape: hero, about (richText), howItWorks (numbered steps), groups[] (each a card grid: eyebrow + heading + lede + features[{name, tagline, appPath, icon, optional?}]), stats[], cta. `icon` is a slug from the ui/icons set, mapped in SectionRenderer's ICON_BY_SLUG. Written for a first-time visitor who knows nothing about the app: orient first (what is it / how it works / start here), then the full catalog. Bump featuresPage.ts SEED_VERSION after editing so a redeploy refreshes the live page (only while it has never been hand-edited in the CMS).",
+  "title": "Features",
+  "slug": "features",
+  "hero": {
+    "eyebrow": "Everything OpenWOP can do",
+    "heading": "One place to put AI to work.",
+    "subheading": "Build AI agents and automated workflows that handle real tasks — then run, watch, and stay in control of all of it. New here? Start with the three essentials, and switch on the rest when you need them.",
+    "ctaLabel": "Try it free — no signup",
+    "ctaUrl": "/chat",
+    "ctaLabel2": "Read the open standard",
+    "ctaUrl2": "https://openwop.dev"
+  },
+  "about": {
+    "eyebrow": "New here? Start with this",
+    "heading": "What is OpenWOP?",
+    "body": "OpenWOP is a place to put AI to work on real tasks — answering questions, drafting documents, updating records, and running multi-step jobs on a schedule.\n\nYou build two things: **agents** (AI coworkers, each with a job to do) and **workflows** (the steps they follow). Then you run them, watch every step, and decide what needs your sign-off. It's a working app *and* an open standard, so what you build stays yours — portable, not locked to one vendor. Everything below is built in; features marked **optional** are add-ons you can switch on when you need them."
+  },
+  "howItWorks": {
+    "eyebrow": "How it works",
+    "heading": "From a plain-language ask to work done.",
+    "steps": [
+      { "title": "Say what you need", "text": "Ask an agent in plain language, the way you'd message a colleague." },
+      { "title": "It does the work", "text": "The agent runs a workflow — steps you design on a visual canvas, or use ready-made." },
+      { "title": "Watch it happen", "text": "Follow every step live, and replay any run to see exactly what it did." },
+      { "title": "Stay in control", "text": "Approve anything sensitive before it runs. Your data and AI keys stay yours." }
+    ]
+  },
+  "groups": [
+    {
+      "eyebrow": "Start here",
+      "heading": "The three essentials",
+      "lede": "New here? These three are the heart of it — everything else builds on them.",
+      "features": [
+        { "name": "Chat", "tagline": "Talk to your agents in plain language and start work from one place.", "appPath": "/chat", "icon": "chat" },
+        { "name": "Agents", "tagline": "Named AI coworkers — each with its own job, schedule, and to-do board.", "appPath": "/agents", "icon": "bot" },
+        { "name": "Workflows", "tagline": "Design multi-step automations on a drag-and-drop canvas.", "appPath": "/builder", "icon": "workflow" }
+      ]
+    },
+    {
+      "eyebrow": "Plan & organize",
+      "heading": "Keep work moving",
+      "lede": "Containers, boards, and channels to organize what your agents and your team are doing.",
+      "features": [
+        { "name": "Projects", "tagline": "Group work into containers with their own board, memory, and workflows.", "appPath": "/projects", "icon": "folder" },
+        { "name": "Boards", "tagline": "Plan work on a kanban board where a card can trigger a run.", "appPath": "/boards", "icon": "board" },
+        { "name": "Inbox", "tagline": "One place for everything that needs you — approvals, blockers, and alerts.", "appPath": "/inbox", "icon": "inbox" },
+        { "name": "Channels", "tagline": "Team channels for real-time messaging alongside your agents.", "appPath": "/channels", "icon": "channels", "optional": true },
+        { "name": "Scheduled chats", "tagline": "Schedule recurring agent check-ins — digests, monitors, standups.", "appPath": "/scheduled-chats", "icon": "clock", "optional": true }
+      ]
+    },
+    {
+      "eyebrow": "Run & govern",
+      "heading": "See and control the work",
+      "lede": "Watch every run as it happens, set the guardrails, and keep a human in the loop.",
+      "features": [
+        { "name": "Mission Control", "tagline": "Watch your whole fleet of runs live, in one view.", "appPath": "/mission", "icon": "monitor" },
+        { "name": "Runs", "tagline": "Review every run's history and detail — and replay it.", "appPath": "/runs", "icon": "play" },
+        { "name": "Workforces", "tagline": "Govern clusters of agents with a shared purpose, limits, and telemetry.", "appPath": "/workforces", "icon": "boxes" },
+        { "name": "Agent templates", "tagline": "Install ready-made agents and packs.", "appPath": "/agents/templates", "icon": "package" },
+        { "name": "Org chart", "tagline": "Map your roster and reporting lines.", "appPath": "/roster", "icon": "roster" },
+        { "name": "Capabilities", "tagline": "See exactly what this host supports.", "appPath": "/capabilities", "icon": "shield" },
+        { "name": "Memory", "tagline": "Inspect what your agents remember, attributed per tenant.", "appPath": "/memory", "icon": "database" },
+        { "name": "Model leaderboard", "tagline": "Rank model quality from real feedback, head-to-head.", "appPath": "/leaderboard", "icon": "star", "optional": true },
+        { "name": "Usage", "tagline": "Track token usage and cost per model.", "appPath": "/usage", "icon": "activity", "optional": true }
+      ]
+    },
+    {
+      "eyebrow": "Knowledge & content",
+      "heading": "Give agents what they need to know",
+      "lede": "Feed agents trusted sources, and turn their work into documents, pages, and plans.",
+      "features": [
+        { "name": "Knowledge Base", "tagline": "Upload documents and get answers with cited sources you can check.", "appPath": "/kb", "icon": "book", "optional": true },
+        { "name": "Notebooks", "tagline": "Research notebooks — gather sources, take notes, and ask grounded questions.", "appPath": "/notebooks", "icon": "pencil", "optional": true },
+        { "name": "Podcasts", "tagline": "Turn a notebook into a multi-speaker audio overview you can listen to.", "appPath": "/podcasts", "icon": "mic", "optional": true },
+        { "name": "Documents", "tagline": "Draft business documents from templates — SOWs, PRDs, RFPs, agendas.", "appPath": "/documents", "icon": "file", "optional": true },
+        { "name": "Prompts", "tagline": "Save reusable prompt templates with variables.", "appPath": "/prompts", "icon": "sparkles" },
+        { "name": "Media", "tagline": "Keep your images and files in one shared asset library.", "appPath": "/media", "icon": "image" },
+        { "name": "CMS", "tagline": "Build pages with a typed page builder — this page was made with it.", "appPath": "/cms", "icon": "grid" },
+        { "name": "Publishing", "tagline": "Put pages on a public site with search-engine basics handled.", "appPath": "/publishing", "icon": "globe" },
+        { "name": "Priority Matrix", "tagline": "Score and rank ideas, then plan what to do next.", "appPath": "/priority-matrix", "icon": "clipboard", "optional": true },
+        { "name": "Strategy", "tagline": "Set objectives and OKRs that tie your projects, priorities, and advisors together.", "appPath": "/strategy", "icon": "flag", "optional": true },
+        { "name": "Board of Advisors", "tagline": "Convene councils of advisor agents for a second opinion.", "appPath": "/advisors", "icon": "scale", "optional": true }
+      ]
+    },
+    {
+      "eyebrow": "Customers & growth",
+      "heading": "Reach and serve customers",
+      "lede": "Optional add-ons to run sales, support, and marketing where your agents already work.",
+      "features": [
+        { "name": "CRM", "tagline": "Track contacts, companies, and deals in one pipeline.", "appPath": "/crm", "icon": "briefcase", "optional": true },
+        { "name": "Customer Success", "tagline": "Keep customer-success accounts healthy and on track.", "appPath": "/csm", "icon": "lifebuoy", "optional": true },
+        { "name": "Forms", "tagline": "Publish forms that drop new leads straight into your CRM.", "appPath": "/forms", "icon": "list", "optional": true },
+        { "name": "Email", "tagline": "Run templated email campaigns to your contacts.", "appPath": "/email", "icon": "megaphone", "optional": true },
+        { "name": "Analytics", "tagline": "See traffic and conversions on your public pages.", "appPath": "/analytics", "icon": "activity", "optional": true },
+        { "name": "Consent", "tagline": "Handle region-aware consent and data-subject requests (GDPR).", "appPath": "/consent", "icon": "lock", "optional": true },
+        { "name": "Comments", "tagline": "Add threaded comments to pages and collections.", "appPath": "/comments", "icon": "comments", "optional": true }
+      ]
+    },
+    {
+      "eyebrow": "Platform & access",
+      "heading": "Run it your way",
+      "lede": "Connect your tools, bring your own AI keys, and manage who can do what.",
+      "features": [
+        { "name": "Connections", "tagline": "Securely link Google, Slack, Zoom, and more.", "appPath": "/connections", "icon": "plug" },
+        { "name": "Keys", "tagline": "Bring your own provider keys — encrypted and under your control.", "appPath": "/keys", "icon": "key" },
+        { "name": "Organizations", "tagline": "Manage orgs, teams, members, and roles.", "appPath": "/orgs", "icon": "building" },
+        { "name": "Users", "tagline": "Manage accounts and identity.", "appPath": "/users", "icon": "user" },
+        { "name": "Feature toggles", "tagline": "Turn features on, off, or beta — and split traffic.", "appPath": "/feature-toggles", "icon": "settings" },
+        { "name": "CLI", "tagline": "Drive the platform from your terminal.", "appPath": "/cli", "icon": "terminal" },
+        { "name": "Marketplace", "tagline": "Browse and install signed feature packs.", "appPath": "/marketplace", "icon": "package", "optional": true },
+        { "name": "Sharing", "tagline": "Share pages and collections with public links.", "appPath": "/sharing", "icon": "link", "optional": true }
+      ]
+    }
+  ],
+  "stats": [
+    { "value": "Free", "label": "to try — no signup needed" },
+    { "value": "40+", "label": "features, built in and ready" },
+    { "value": "Open", "label": "standard — no vendor lock-in" },
+    { "value": "Yours", "label": "data, agents & AI keys" }
+  ],
+  "cta": {
+    "eyebrow": "Get started",
+    "heading": "See it for yourself.",
+    "subheading": "Explore the live app — no setup required — or read the open standard behind it.",
+    "label": "Open the live demo →",
+    "url": "/chat"
+  }
+}

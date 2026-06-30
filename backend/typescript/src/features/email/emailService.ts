@@ -54,9 +54,20 @@ export async function getTemplate(tenantId: string, orgId: string, templateId: s
   const t = await templates.get(templateId);
   return t && t.tenantId === tenantId && t.orgId === orgId ? t : null;
 }
-export async function createTemplate(input: { tenantId: string; orgId: string; name: string; subject: string; body: string; createdBy: string }): Promise<EmailTemplate> {
+export async function createTemplate(input: { tenantId: string; orgId: string; name: string; subject: string; body: string; createdBy: string; templateId?: string }): Promise<EmailTemplate> {
+  // Idempotent on a caller-supplied deterministic id (mirrors cmsService.createPage's
+  // pageId short-circuit) so a replay/fork of a publish node never duplicates a template.
+  if (input.templateId) {
+    const prior = await getTemplate(input.tenantId, input.orgId, input.templateId);
+    if (prior) return prior;
+  }
   const now = new Date().toISOString();
-  const t: EmailTemplate = { templateId: `tpl:${randomUUID()}`, ...input, createdAt: now, updatedAt: now };
+  const t: EmailTemplate = {
+    templateId: input.templateId ?? `tpl:${randomUUID()}`,
+    tenantId: input.tenantId, orgId: input.orgId,
+    name: input.name, subject: input.subject, body: input.body,
+    createdBy: input.createdBy, createdAt: now, updatedAt: now,
+  };
   await templates.put(t);
   return t;
 }
@@ -80,10 +91,16 @@ export async function getCampaign(tenantId: string, orgId: string, campaignId: s
   const c = await campaigns.get(campaignId);
   return c && c.tenantId === tenantId && c.orgId === orgId ? c : null;
 }
-export async function createCampaign(input: { tenantId: string; orgId: string; templateId: string; stage?: ContactStage; createdBy: string }): Promise<Campaign> {
+export async function createCampaign(input: { tenantId: string; orgId: string; templateId: string; stage?: ContactStage; createdBy: string; campaignId?: string }): Promise<Campaign> {
+  // Idempotent on a caller-supplied deterministic id — a re-run/fork of a publish
+  // node returns the existing campaign instead of minting a duplicate (replay-safe).
+  if (input.campaignId) {
+    const prior = await getCampaign(input.tenantId, input.orgId, input.campaignId);
+    if (prior) return prior;
+  }
   const now = new Date().toISOString();
   const c: Campaign = {
-    campaignId: `cmp:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId, templateId: input.templateId,
+    campaignId: input.campaignId ?? `cmp:${randomUUID()}`, tenantId: input.tenantId, orgId: input.orgId, templateId: input.templateId,
     audience: { ...(input.stage ? { stage: input.stage } : {}) }, status: 'draft', createdBy: input.createdBy, createdAt: now, updatedAt: now,
   };
   await campaigns.put(c);

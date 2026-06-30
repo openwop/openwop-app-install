@@ -6,8 +6,10 @@
  * step is one click from a fork. Pure composition of existing surfaces.
  */
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { RunAgentTrace } from './RunAgentTrace.js';
+import { formatNumber } from '../i18n/format.js';
 
 interface Props {
   events: readonly RunEventDoc[];
@@ -16,6 +18,7 @@ interface Props {
 }
 
 export function RunStepInspector({ events, seq, onForkFrom }: Props) {
+  const { t } = useTranslation('runs');
   const atSeq = useMemo(() => events.filter((e) => e.sequence === seq), [events, seq]);
   const upToHere = useMemo(
     () => events.filter((e) => e.sequence <= seq).sort((a, b) => a.sequence - b.sequence),
@@ -26,17 +29,17 @@ export function RunStepInspector({ events, seq, onForkFrom }: Props) {
     <div className="card" data-run-step-inspector>
       <div className="u-flex u-items-center u-gap-2 u-wrap">
         <h2 className="u-m-0 u-flex-1">
-          Step inspector <span className="muted u-fs-12 u-fw-400">· at #{seq}</span>
+          {t('stepInspector')} <span className="muted u-fs-12 u-fw-400">{t('stepInspectorAt', { seq: formatNumber(seq) })}</span>
         </h2>
         {onForkFrom && (
-          <button type="button" className="secondary" onClick={() => onForkFrom(seq)} title="Fork a new run from this point">
-            Fork from here
+          <button type="button" className="secondary" onClick={() => onForkFrom(seq)} title={t('forkFromHereTitle')}>
+            {t('forkFromHere')}
           </button>
         )}
       </div>
 
       {atSeq.length === 0 ? (
-        <p className="muted u-m-0">No event at #{seq}.</p>
+        <p className="muted u-m-0">{t('noEventAtSeq', { seq: formatNumber(seq) })}</p>
       ) : (
         atSeq.map((ev) => (
           <div key={ev.sequence} className="u-mt-2">
@@ -47,7 +50,7 @@ export function RunStepInspector({ events, seq, onForkFrom }: Props) {
       )}
 
       <h3 className="runstep-activity-heading">
-        Agent activity up to this point
+        {t('agentActivityUpToPoint')}
       </h3>
       <RunAgentTrace events={upToHere} />
     </div>

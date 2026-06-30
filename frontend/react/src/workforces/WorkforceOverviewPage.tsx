@@ -9,6 +9,7 @@
  * sells the value before it shows the proof.
  */
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
@@ -18,7 +19,7 @@ import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
 import { AlertIcon, ArrowLeftIcon, BotIcon, BoxesIcon, ShieldIcon, UserIcon } from '../ui/icons/index.js';
 import { TraceSearchPanel } from './TraceSearchPanel.js';
 import { AutonomyTrack } from './AutonomyTrack.js';
-import { JOURNEY, autonomyLabel, journeyGloss, journeyIndex } from './labels.js';
+import { JOURNEY, autonomyLabelKey, journeyGlossKey, journeyLabelKey, journeyIndex } from './labels.js';
 import { IllustrativeBadge } from '../ui/IllustrativeBadge.js';
 import { useFeatureVisible } from '../featureToggles/FeatureAccessContext.js';
 import {
@@ -32,9 +33,10 @@ import {
   type WorkforceMetrics,
   type WorkforceStatus,
 } from '../client/workforcesClient.js';
+import { formatCurrency, formatDate, formatDurationMs, formatNumber, formatPercent } from '../i18n/format.js';
 
 function pct(n: number): string {
-  return `${(n * 100).toFixed(1)}%`;
+  return formatPercent(n, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 function pctRound(n: number): string {
   return `${Math.round(n * 100)}%`;
@@ -42,13 +44,13 @@ function pctRound(n: number): string {
 function duration(ms: number | null): string {
   if (ms === null) return '—';
   const h = ms / 3_600_000;
-  if (h >= 1) return `${h.toFixed(1)} h`;
+  if (h >= 1) return `${formatNumber(h, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} h`;
   const m = ms / 60_000;
-  if (m >= 1) return `${m.toFixed(1)} min`;
-  return `${(ms / 1000).toFixed(1)} s`;
+  if (m >= 1) return `${formatNumber(m, { minimumFractionDigits: 1, maximumFractionDigits: 1 })} min`;
+  return formatDurationMs(ms);
 }
 function usd(n: number | null): string {
-  return n === null ? '—' : `$${n.toFixed(4)}`;
+  return n === null ? '—' : formatCurrency(n, 'USD', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
 }
 
 /** Role differentiates by glyph, never by color (DESIGN.md §5.4). */
@@ -68,6 +70,7 @@ function Outcome({ n, l }: { n: string; l: string }): JSX.Element {
 }
 
 export function WorkforceOverviewPage(): JSX.Element {
+  const { t } = useTranslation('workforces');
   const { workforceId = '' } = useParams();
   const navigate = useNavigate();
   // The "Review in Inbox" deep-link targets /inbox, which is gated on the
@@ -114,21 +117,21 @@ export function WorkforceOverviewPage(): JSX.Element {
     return () => { cancelled = true; };
   }, [workforceId]);
 
-  const back = <Link to="/workforces" className="chip"><ArrowLeftIcon size={13} /> All workforces</Link>;
+  const back = <Link to="/workforces" className="chip"><ArrowLeftIcon size={13} /> {t('allWorkforces')}</Link>;
 
   if (loading) {
-    return <div><PageHeader eyebrow="Workforce" title="Loading…" actions={back} /><Skeleton height={120} /></div>;
+    return <div><PageHeader eyebrow={t('overviewEyebrow')} title={t('loadingTitle')} actions={back} /><Skeleton height={120} /></div>;
   }
   if (notFound) {
     return (
       <div>
-        <PageHeader eyebrow="Workforce" title="Not found" actions={back} />
-        <StateCard icon={<BoxesIcon />} title="Workforce not found" body={`No workforce "${workforceId}".`} action={back} />
+        <PageHeader eyebrow={t('overviewEyebrow')} title={t('notFoundTitle')} actions={back} />
+        <StateCard icon={<BoxesIcon />} title={t('workforceNotFound')} body={t('noWorkforceNamed', { id: workforceId })} action={back} />
       </div>
     );
   }
   if (error || !wf) {
-    return <div><PageHeader eyebrow="Workforce" title="Couldn't load" actions={back} /><Notice variant="error">{error ?? 'Unknown error'}</Notice></div>;
+    return <div><PageHeader eyebrow={t('overviewEyebrow')} title={t('couldNotLoad')} actions={back} /><Notice variant="error">{error ?? t('unknownError')}</Notice></div>;
   }
 
   const idx = journeyIndex(wf.status);
@@ -142,36 +145,36 @@ export function WorkforceOverviewPage(): JSX.Element {
   return (
     <div>
       <PageHeader
-        eyebrow="Workforce"
+        eyebrow={t('overviewEyebrow')}
         title={wf.name}
         lede={wf.purpose.statement}
         actions={
           <span className="action-bar u-gap-2">
             {back}
-            <Link to={`/workforces/${encodeURIComponent(workforceId)}/migrate`} className="btn">Set-up guide →</Link>
+            <Link to={`/workforces/${encodeURIComponent(workforceId)}/migrate`} className="btn">{t('setupGuide')}</Link>
           </span>
         }
       />
 
       {isShowcase ? (
         <Notice variant="info">
-          <IllustrativeBadge detail="Synthetic showcase data — not derived from your runs" /> Showing built-in
-          <strong> showcase data</strong>. Run this workforce yourself (or load example data) to populate your own numbers.
+          <IllustrativeBadge detail={t('showcaseBadgeDetail')} /> {t('overviewShowcaseLead')}
+          <strong> {t('overviewShowcaseShowcaseData')}</strong>. {t('overviewShowcaseTail')}
         </Notice>
       ) : null}
 
       {/* HERO — where it is on the trust journey + the one forward action. */}
       <section className="surface-card u-mb-4">
-        <div className="chip chip--muted">{wf.agents.length}-agent team · {wf.businessFunction}</div>
+        <div className="chip chip--muted">{t('agentTeam', { count: wf.agents.length, businessFunction: wf.businessFunction })}</div>
         <AutonomyTrack status={wf.status} />
-        <p className="wf-gate">{journeyGloss(wf.status)}</p>
+        <p className="wf-gate">{t(journeyGlossKey(wf.status))}</p>
 
         {next ? (
           <>
             {productionGated ? (
               <p className="wf-gate">
-                To let it <strong>run on its own</strong>, it needs to prove itself first
-                {metrics ? <> — a human still steps in on <strong>{pct(metrics.overrideRate)}</strong> of runs</> : null}.
+                {t('proveFirstLead')} <strong>{t('proveFirstRunOnItsOwn')}</strong>{t('proveFirstMid')}
+                {metrics ? <> {t('proveFirstOverride')} <strong>{pct(metrics.overrideRate)}</strong> {t('proveFirstOverrideTail')}</> : null}.
               </p>
             ) : null}
             {/* Cut-over mutates the GLOBAL workforce entity (shared across
@@ -179,7 +182,7 @@ export function WorkforceOverviewPage(): JSX.Element {
                 you manage your own, not the demo's. */}
             {isShowcase ? (
               <p className="muted u-mbox-t2 u-fs-14">
-                Showcase data — autonomy controls are read-only here. Run your own workforce to manage it.
+                {t('showcaseReadOnly')}
               </p>
             ) : (
               <div className="action-bar u-gap-2 u-wrap u-mt-2 u-items-center">
@@ -188,13 +191,13 @@ export function WorkforceOverviewPage(): JSX.Element {
                   className="btn-accent-solid"
                   disabled={cutoverBusy || productionGated}
                   onClick={() => { void cutOver(next.status); }}
-                  title={productionGated ? 'Needs to graduate to bounded-autonomous first' : undefined}
+                  title={productionGated ? t('advanceGatedTitle') : undefined}
                 >
-                  Advance to {next.label} →
+                  {t('advanceTo', { label: t(journeyLabelKey(next.status)) })}
                 </button>
                 {prev ? (
-                  <button type="button" className="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }} title="Kill-switch — always available">
-                    Roll back to {prev.label}
+                  <button type="button" className="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }} title={t('rollBackTitle')}>
+                    {t('rollBackTo', { label: t(journeyLabelKey(prev.status)) })}
                   </button>
                 ) : null}
               </div>
@@ -202,10 +205,10 @@ export function WorkforceOverviewPage(): JSX.Element {
           </>
         ) : (
           <>
-            <p className="wf-gate"><strong>Running on its own</strong> within its policy guardrails.{!isShowcase ? ' Roll back any time below.' : ''}</p>
+            <p className="wf-gate"><strong>{t('runningOnItsOwnLead')}</strong> {t('runningOnItsOwnTail')}{!isShowcase ? <>{' '}{t('rollBackAnyTimeClause')}</> : null}</p>
             {!isShowcase && prev ? (
               <div className="action-bar u-mt-2">
-                <button type="button" className="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }}>Roll back to {prev.label}</button>
+                <button type="button" className="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }}>{t('rollBackTo', { label: t(journeyLabelKey(prev.status)) })}</button>
               </div>
             ) : null}
           </>
@@ -221,15 +224,15 @@ export function WorkforceOverviewPage(): JSX.Element {
         const clear = openApprovals === 0 && violations === 0 && !eligible;
         return (
           <section className="surface-card u-mb-4">
-            <h3 className="u-mt-0">Needs you</h3>
+            <h2 className="u-mt-0">{t('needsYou')}</h2>
             {clear ? (
-              <p className="muted u-m-0">All clear — nothing needs your attention right now.</p>
+              <p className="muted u-m-0">{t('needsYouClear')}</p>
             ) : (
               <div className="action-bar u-gap-2 u-wrap u-items-center">
-                {openApprovals > 0 ? <span className="chip chip--warning"><AlertIcon size={12} /> {openApprovals} awaiting approval</span> : null}
-                {eligible ? <span className="chip chip--success">ready for more autonomy</span> : null}
-                {violations > 0 ? <span className="chip chip--danger"><AlertIcon size={12} /> {violations} policy issues</span> : null}
-                {openApprovals > 0 && isVisible('notifications') ? <button type="button" className="btn-sm" onClick={() => navigate('/inbox')}>Review in Inbox →</button> : null}
+                {openApprovals > 0 ? <span className="chip chip--warning"><AlertIcon size={12} /> {t('awaitingApprovalChip', { count: openApprovals })}</span> : null}
+                {eligible ? <span className="chip chip--success">{t('readyForMoreChip')}</span> : null}
+                {violations > 0 ? <span className="chip chip--danger"><AlertIcon size={12} /> {t('policyIssuesChip', { count: violations })}</span> : null}
+                {openApprovals > 0 && isVisible('notifications') ? <button type="button" className="btn-sm" onClick={() => navigate('/inbox')}>{t('reviewInInbox')}</button> : null}
               </div>
             )}
           </section>
@@ -237,40 +240,40 @@ export function WorkforceOverviewPage(): JSX.Element {
       })() : null}
 
       {/* WHAT IT'S DONE — outcomes in business terms (the value). */}
-      <h3>What it&rsquo;s done for you</h3>
+      <h2>{t('whatItsDone')}</h2>
       {hasRuns && metrics ? (
         <div className="surface-card wf-outcomes u-mb-4">
-          <Outcome n={pctRound(Math.max(0, 1 - metrics.escalationRate))} l="cleared without escalation" />
-          <Outcome n={duration(metrics.cycleTimeP50Ms)} l="typical time per item" />
-          <Outcome n={usd(metrics.costPerClearedUsd)} l="cost per item" />
-          <Outcome n={String(metrics.totalRuns)} l="items processed" />
+          <Outcome n={pctRound(Math.max(0, 1 - metrics.escalationRate))} l={t('outcomeClearedWithoutEscalation')} />
+          <Outcome n={duration(metrics.cycleTimeP50Ms)} l={t('outcomeTypicalTime')} />
+          <Outcome n={usd(metrics.costPerClearedUsd)} l={t('outcomeCostPerItem')} />
+          <Outcome n={String(metrics.totalRuns)} l={t('outcomeItemsProcessed')} />
         </div>
       ) : (wf.historyRunCount ?? 0) > 0 ? (
         <StateCard
           icon={<BoxesIcon />}
-          title="No results yet"
-          body="This workforce ships with weeks of sample runs. Load the example data to see what it can do."
-          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/example-data')}>Load example data</button>}
+          title={t('noResultsTitle')}
+          body={t('noResultsHistoryBody')}
+          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/example-data')}>{t('loadExampleData')}</button>}
         />
       ) : (
         <StateCard
           icon={<BoxesIcon />}
-          title="No results yet"
-          body="This is a stand-up template — results appear here once the workforce runs real work."
+          title={t('noResultsTitle')}
+          body={t('noResultsTemplateBody')}
         />
       )}
 
       {/* EVIDENCE & DETAILS — the governance machinery, opt-in. */}
       <details className="surface-card u-mt-4">
-        <summary className="u-cursor-pointer u-fw-600">Evidence &amp; details</summary>
+        <summary className="u-cursor-pointer u-fw-600">{t('evidenceAndDetails')}</summary>
         <div className="wforce-details-body">
           {/* Purpose & policy */}
-          <h4 className="u-mbox-b04">What it&rsquo;s allowed to do</h4>
+          <h3 className="u-mbox-b04">{t('whatItsAllowed')}</h3>
           <div className="action-bar u-gap-2 u-wrap u-mb-2">
-            {wf.purpose.policyTags.map((t) => <span key={t} className="chip">{t}</span>)}
+            {wf.purpose.policyTags.map((tag) => <span key={tag} className="chip">{tag}</span>)}
           </div>
           <div className="u-mb-4">
-            <strong>Never does automatically:</strong>
+            <strong>{t('neverDoesAutomatically')}</strong>
             <ul className="wforce-refusal-list">
               {wf.purpose.refusalBoundaries.map((b) => <li key={b}>{b}</li>)}
             </ul>
@@ -279,19 +282,19 @@ export function WorkforceOverviewPage(): JSX.Element {
           {/* Telemetry — the signature figure band (read-only; reportorial). */}
           {hasRuns && metrics ? (() => {
             const telemetry: KeyFigureItem[] = [
-              { key: 'runs', label: `Runs · ${metrics.openApprovals} awaiting approval`, value: String(metrics.totalRuns) },
-              { key: 'cycle', label: 'Cycle time P50', value: duration(metrics.cycleTimeP50Ms) },
-              { key: 'cost', label: 'Cost / cleared', value: usd(metrics.costPerClearedUsd) },
-              { key: 'escalation', label: 'Escalation rate', value: pct(metrics.escalationRate) },
-              { key: 'override', label: 'Override rate · human step-ins', value: pct(metrics.overrideRate) },
-              { key: 'fp', label: 'False-positive', value: pct(metrics.falsePositiveRate) },
-              { key: 'recovery', label: 'Recovery rate', value: pct(metrics.recoveryRate) },
-              { key: 'violations', label: 'Policy violations', value: String(metrics.policyViolations), ...(metrics.policyViolations > 0 ? { tone: 'attention' as const } : {}) },
+              { key: 'runs', label: t('telemetryRunsLabel', { count: metrics.openApprovals }), value: String(metrics.totalRuns) },
+              { key: 'cycle', label: t('telemetryCycleLabel'), value: duration(metrics.cycleTimeP50Ms) },
+              { key: 'cost', label: t('telemetryCostLabel'), value: usd(metrics.costPerClearedUsd) },
+              { key: 'escalation', label: t('telemetryEscalationLabel'), value: pct(metrics.escalationRate) },
+              { key: 'override', label: t('telemetryOverrideLabel'), value: pct(metrics.overrideRate) },
+              { key: 'fp', label: t('telemetryFalsePositiveLabel'), value: pct(metrics.falsePositiveRate) },
+              { key: 'recovery', label: t('telemetryRecoveryLabel'), value: pct(metrics.recoveryRate) },
+              { key: 'violations', label: t('telemetryViolationsLabel'), value: String(metrics.policyViolations), ...(metrics.policyViolations > 0 ? { tone: 'attention' as const } : {}) },
             ];
             return (
               <>
-                <h4 className="u-mbox-b04">Full telemetry</h4>
-                <KeyFigureBand figures={telemetry} ariaLabel="Workforce telemetry" />
+                <h3 className="u-mbox-b04">{t('fullTelemetry')}</h3>
+                <KeyFigureBand figures={telemetry} ariaLabel={t('telemetryAriaLabel')} />
               </>
             );
           })() : null}
@@ -299,12 +302,12 @@ export function WorkforceOverviewPage(): JSX.Element {
           {/* Graduation curve */}
           {metrics && metrics.weekly.length > 1 ? (
             <section className="u-mb-4">
-              <h4 className="u-mbox-b04">How often a human stepped in, by week</h4>
+              <h3 className="u-mbox-b04">{t('overrideByWeek')}</h3>
               <div className="action-bar u-gap-3 u-wrap u-items-end">
                 {metrics.weekly.map((w) => (
                   <div key={w.week} className="u-text-center">
                     <div aria-hidden="true" className="wforce-grad-bar" style={{ height: `${Math.max(4, w.overrideRate * 200)}px` }} />
-                    <div className="u-fs-12 muted">wk {w.week + 1}</div>
+                    <div className="u-fs-12 muted">{t('weekShort', { n: w.week + 1 })}</div>
                     <div className="u-fs-12 u-tabular">{pct(w.overrideRate)}</div>
                   </div>
                 ))}
@@ -315,20 +318,20 @@ export function WorkforceOverviewPage(): JSX.Element {
           {/* Governance posture + milestones */}
           {governance ? (
             <section className="u-mb-4">
-              <h4 className="u-mbox-b04">Autonomy history</h4>
+              <h3 className="u-mbox-b04">{t('autonomyHistory')}</h3>
               <ol className="wforce-milestone-list">
                 {governance.autonomy.milestones.map((m) => (
                   <li key={`${m.toTier}-${m.runIndex}`}>
-                    <strong>{m.fromTier ? `${autonomyLabel(m.fromTier)} → ${autonomyLabel(m.toTier)}` : `started at ${autonomyLabel(m.toTier)}`}</strong>
-                    {' '}<span className="muted">· {new Date(m.atIso).toLocaleDateString()}</span>
+                    <strong>{m.fromTier ? t('milestoneTransition', { from: t(autonomyLabelKey(m.fromTier)), to: t(autonomyLabelKey(m.toTier)) }) : t('milestoneStartedAt', { tier: t(autonomyLabelKey(m.toTier)) })}</strong>
+                    {' '}<span className="muted">· {formatDate(m.atIso)}</span>
                   </li>
                 ))}
               </ol>
               <div className="action-bar u-gap-2 u-wrap">
-                <span className="chip">{governance.posture.overrides} human step-ins</span>
-                <span className="chip">{governance.posture.escalations} escalations</span>
-                <span className="chip">{governance.posture.recoveries} auto-recoveries</span>
-                <span className="chip chip--warning">{governance.posture.policyViolations} policy violations</span>
+                <span className="chip">{t('postureOverrides', { count: governance.posture.overrides })}</span>
+                <span className="chip">{t('postureEscalations', { count: governance.posture.escalations })}</span>
+                <span className="chip">{t('postureRecoveries', { count: governance.posture.recoveries })}</span>
+                <span className="chip chip--warning">{t('postureViolations', { count: governance.posture.policyViolations })}</span>
               </div>
             </section>
           ) : null}
@@ -337,7 +340,7 @@ export function WorkforceOverviewPage(): JSX.Element {
           <TraceSearchPanel workforceId={workforceId} />
 
           {/* Agent cluster */}
-          <h4 className="wforce-team-head">The team</h4>
+          <h3 className="wforce-team-head">{t('theTeam')}</h3>
           <div className="card-grid">
             {wf.agents.map((a) => (
               <div key={a.agentRef} className="surface-card">
@@ -346,9 +349,9 @@ export function WorkforceOverviewPage(): JSX.Element {
                   <span className="chip"><RoleGlyph role={a.role} /> {a.role}</span>
                 </div>
                 <dl className="u-mbox-t2 u-fs-14">
-                  <div><strong>Decides on its own:</strong> {a.decisionBoundary}</div>
-                  <div><strong>Sees:</strong> {a.dataBoundary}</div>
-                  <div><strong>On failure:</strong> {a.recoveryBehavior}</div>
+                  <div><strong>{t('decidesOnItsOwn')}</strong> {a.decisionBoundary}</div>
+                  <div><strong>{t('sees')}</strong> {a.dataBoundary}</div>
+                  <div><strong>{t('onFailure')}</strong> {a.recoveryBehavior}</div>
                 </dl>
               </div>
             ))}

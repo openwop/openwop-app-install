@@ -28,6 +28,11 @@ async function startApp(): Promise<{ port: number; close: () => Promise<void> }>
   app.use(ipRateLimitMiddleware());
   app.get('/ping', (_req, res) => res.json({ ok: true }));
   app.post('/v1/runs', runQuotaMiddleware(), (_req, res) => res.status(201).json({ ok: true }));
+  // Long-lived SSE stream routes — exempt from the per-IP burst bucket when
+  // requested as text/event-stream (the reconnect-feedback-loop fix). The
+  // handlers reply immediately so the test's fetch resolves.
+  app.get('/v1/host/openwop-app/notifications/stream', (_req, res) => res.json({ ok: true }));
+  app.get('/v1/runs/:runId/events', (_req, res) => res.json({ ok: true }));
   return new Promise((resolve) => {
     server = app.listen(0, () => {
       port = (server.address() as { port: number }).port;
@@ -204,6 +209,39 @@ describe('P0.4 rate limit', () => {
     // into the internal Map; the integration test in P0.4's existing
     // suite covers the route-level path.
     expect(true).toBe(true);
+  });
+
+  it('long-lived SSE streams are exempt from the per-IP burst bucket (reconnect feedback-loop fix)', async () => {
+    const sse = { Accept: 'text/event-stream' };
+    // Limit is 5/min, but a session-long EventStream is one connection, not a
+    // burst. Far past the budget, every SSE (re)connect to a known stream path
+    // stays 200 — so a throttled tab's reconnects can't keep it throttled.
+    for (let i = 0; i < 12; i++) {
+      const a = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/notifications/stream`, { headers: sse });
+      expect(a.status).toBe(200);
+      const b = await fetch(`http://127.0.0.1:${port}/v1/runs/run-xyz/events`, { headers: sse });
+      expect(b.status).toBe(200);
+    }
+  });
+
+  it('the SSE exemption is gated on BOTH a known stream path AND the Accept header (no header-only bypass)', async () => {
+    // Same Accept header on a NON-stream path → still counted (5/min → 429).
+    let blockedOnPing = false;
+    for (let i = 0; i < 8; i++) {
+      const r = await fetch(`http://127.0.0.1:${port}/ping`, { headers: { Accept: 'text/event-stream' } });
+      if (r.status === 429) { blockedOnPing = true; break; }
+    }
+    expect(blockedOnPing).toBe(true);
+
+    // The run-events path WITHOUT the SSE Accept header (its JSON polling mode)
+    // is NOT exempt — it stays inside the budget.
+    _resetRateLimitState();
+    let blockedOnJsonPoll = false;
+    for (let i = 0; i < 8; i++) {
+      const r = await fetch(`http://127.0.0.1:${port}/v1/runs/run-xyz/events`, { headers: { Accept: 'application/json' } });
+      if (r.status === 429) { blockedOnJsonPoll = true; break; }
+    }
+    expect(blockedOnJsonPoll).toBe(true);
   });
 
   it('OPENWOP_RATELIMIT_DISABLED bypasses all checks', async () => {

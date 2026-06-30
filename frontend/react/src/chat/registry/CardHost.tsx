@@ -5,8 +5,10 @@
  */
 
 import { Component, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { getCard } from './CardRegistry.js';
 import type { CardProps } from './types.js';
+import i18n from '../../i18n/index.js';
 
 interface ErrorBoundaryProps {
   cardType: string;
@@ -32,7 +34,7 @@ class CardErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState
     if (this.state.error) {
       return (
         <div className="alert error cardhost-alert">
-          Card <code>{this.props.cardType}</code> crashed: {this.state.error.message}
+          {i18n.t('chat:cardCrashedPrefix')}<code>{this.props.cardType}</code>{i18n.t('chat:cardCrashedSuffix')} {this.state.error.message}
         </div>
       );
     }
@@ -41,11 +43,12 @@ class CardErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState
 }
 
 export function CardHost(props: CardProps): JSX.Element {
+  const { t } = useTranslation('chat');
   const registration = getCard(props.cardType);
   if (!registration) {
     return (
       <div className="alert info cardhost-alert">
-        No card registered for <code>{props.cardType}</code>. Register one with{' '}
+        {t('noCardRegisteredPrefix')}<code>{props.cardType}</code>{t('noCardRegisteredSuffix')}
         <code>registerCard()</code>.
       </div>
     );

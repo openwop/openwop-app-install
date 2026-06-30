@@ -30,31 +30,54 @@ interface AttributedRun {
   createdAt: string;
 }
 
-/** Record a run's agent attribution in the index, if it carries one. No-op for
- *  runs with no heartbeat/schedule/kanban/approval block. */
-export async function recordRunAttribution(storage: Storage, run: AttributedRun): Promise<void> {
-  const md = (run.metadata ?? {}) as Record<string, unknown>;
+/** The agent a run is attributed to. `rosterId` is always present; `agentId`
+ *  (the manifest/profile id) is present for most but not all sources. */
+export interface RunAttribution {
+  source: (typeof ATTRIBUTION_KEYS)[number];
+  rosterId: string;
+  agentId?: string;
+}
+
+/**
+ * Find a run's agent-attribution block + its ids, if any. THE single source of
+ * the heartbeat/schedule/kanban/approval attribution-block convention — reused
+ * by the activity index AND by ADR 0099's run-insert seam (per-agent compaction)
+ * so the convention can't drift between two readers. Returns undefined for runs
+ * with no attribution (or a block missing `rosterId`).
+ */
+export function extractRunAttribution(
+  metadata: Record<string, unknown> | null | undefined,
+): RunAttribution | undefined {
+  const md = (metadata ?? {}) as Record<string, unknown>;
   for (const source of ATTRIBUTION_KEYS) {
     const block = md[source];
     if (!block || typeof block !== 'object') continue;
     const b = block as Record<string, unknown>;
-    if (typeof b.rosterId !== 'string') return; // attributed block but no member
-    const row: AgentRunAttributionRow = {
+    if (typeof b.rosterId !== 'string') return undefined; // attributed block but no member
+    return { source, rosterId: b.rosterId, ...(typeof b.agentId === 'string' ? { agentId: b.agentId } : {}) };
+  }
+  return undefined;
+}
+
+/** Record a run's agent attribution in the index, if it carries one. No-op for
+ *  runs with no heartbeat/schedule/kanban/approval block. */
+export async function recordRunAttribution(storage: Storage, run: AttributedRun): Promise<void> {
+  const attribution = extractRunAttribution(run.metadata);
+  if (!attribution) return;
+  const row: AgentRunAttributionRow = {
+    runId: run.runId,
+    tenantId: run.tenantId,
+    rosterId: attribution.rosterId,
+    source: attribution.source,
+    createdAt: run.createdAt,
+    ...(attribution.agentId ? { agentId: attribution.agentId } : {}),
+  };
+  try {
+    await storage.recordAgentRunAttribution(row);
+  } catch (err) {
+    log.warn('agent run attribution index write failed', {
       runId: run.runId,
-      tenantId: run.tenantId,
-      rosterId: b.rosterId,
-      source,
-      createdAt: run.createdAt,
-      ...(typeof b.agentId === 'string' ? { agentId: b.agentId } : {}),
-    };
-    try {
-      await storage.recordAgentRunAttribution(row);
-    } catch (err) {
-      log.warn('agent run attribution index write failed', {
-        runId: run.runId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-    return; // a run carries at most one attribution block
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }

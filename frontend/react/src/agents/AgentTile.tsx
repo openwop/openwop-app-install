@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { roleThemeForAgent } from './roleTemplates.js';
 import { statusMeta, statusRingColor, relativeTime, type AgentView } from './agentViewModel.js';
 import { AgentAvatar } from './AgentAvatar.js';
@@ -24,43 +25,44 @@ export function AgentTile({ view, busy, onOpen, onCheckNow, onChat }: {
   onCheckNow: () => void;
   onChat: () => void;
 }): JSX.Element {
+  const { t } = useTranslation('agents');
   const { entry, laneCounts, status } = view;
   const sm = statusMeta(status);
   const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows, entry.roleKey);
-  const action = primaryAction(view);
+  const action = primaryAction(view, t);
   const ActionIcon = action.Icon;
   const checked = entry.lastHeartbeatAt ? relativeTime(entry.lastHeartbeatAt) : null;
 
   return (
     <article className="surface-card u-grid u-gap-2">
-      <button type="button" className="roster-id" onClick={() => onOpen()} title={`Open ${entry.persona}'s workspace`}>
+      <button type="button" className="roster-id" onClick={() => onOpen()} title={t('openWorkspaceTitle', { persona: entry.persona })}>
         <AgentAvatar persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} size={44} showBadge={false} ring={statusRingColor(status)} />
         <span className="roster-name-wrap">
           <span className="roster-name-line">
             <span className="roster-name">{entry.persona}</span>
             <span className={`chip ${sm.chip}`} title={sm.help}><span className="chip-dot" aria-hidden />{sm.label}</span>
           </span>
-          <span className="roster-role">{entry.label ?? 'Agent'}</span>
+          <span className="roster-role">{entry.label ?? t('agent')}</span>
         </span>
       </button>
 
-      <p className="muted u-m-0 u-fs-13">{subLine(view)}</p>
+      <p className="muted u-m-0 u-fs-13">{subLine(view, t)}</p>
 
       <div className="u-flex u-items-center u-justify-between u-wrap u-gap-2">
         <AutonomyMeter autonomyLevel={entry.autonomyLevel} />
         <span className="roster-counts">
-          <span>{entry.workflows.length} workflow{entry.workflows.length === 1 ? '' : 's'}</span>
-          {laneCounts.todo > 0 ? <span>{laneCounts.todo} to do</span> : null}
-          {laneCounts.waiting > 0 ? <span className="roster-count-waiting">{laneCounts.waiting} waiting</span> : null}
-          {checked ? <span>checked {checked}</span> : null}
+          <span>{t('workflowCount', { count: entry.workflows.length })}</span>
+          {laneCounts.todo > 0 ? <span>{t('toDoCount', { count: laneCounts.todo })}</span> : null}
+          {laneCounts.waiting > 0 ? <span className="roster-count-waiting">{t('waitingCount', { count: laneCounts.waiting })}</span> : null}
+          {checked ? <span>{t('checkedAgo', { when: checked })}</span> : null}
         </span>
       </div>
 
       <div className="action-bar u-justify-end">
-        <button type="button" className="secondary btn-sm" title="Run the heartbeat now" aria-label={`Check ${entry.persona} now`} disabled={busy || !entry.enabled} onClick={onCheckNow}>
+        <button type="button" className="secondary btn-sm" title={t('checkNowTitle')} aria-label={t('checkAgentNow', { persona: entry.persona })} disabled={busy || !entry.enabled} onClick={onCheckNow}>
           <PlayIcon size={14} aria-hidden />
         </button>
-        <button type="button" className="secondary btn-sm" title={`Chat with ${entry.persona}`} aria-label={`Chat with ${entry.persona}`} onClick={onChat}>
+        <button type="button" className="secondary btn-sm" title={t('chatWithPersona', { persona: entry.persona })} aria-label={t('chatWithPersona', { persona: entry.persona })} onClick={onChat}>
           <MessageSquareIcon size={14} aria-hidden />
         </button>
         <button type="button" className={status === 'waiting' ? 'btn-accent btn-sm' : 'secondary btn-sm'} onClick={() => onOpen(action.tab)}>

@@ -20,6 +20,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
 import {
   listAvailableAgentPacks,
@@ -30,7 +32,7 @@ import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Notice } from '../ui/Notice.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
-import { PackageIcon } from '../ui/icons/index.js';
+import { PackageIcon, ArrowLeftIcon } from '../ui/icons/index.js';
 
 interface State {
   packs: readonly AgentPackSummary[];
@@ -39,6 +41,7 @@ interface State {
 }
 
 export function AgentInstallPage(): JSX.Element {
+  const { t } = useTranslation('agents');
   const [state, setState] = useState<State>({ packs: [], isLoading: true, error: null });
   const [installingName, setInstallingName] = useState<string | null>(null);
   const [installError, setInstallError] = useState<string | null>(null);
@@ -77,37 +80,36 @@ export function AgentInstallPage(): JSX.Element {
     <section>
       <div className="u-mb-3">
         <Link to="/agents" className="u-fs-12 u-ink-3">
-          ← All agents
+          <ArrowLeftIcon size={12} /> {t('installBack')}
         </Link>
       </div>
       <PageHeader
-        eyebrow="Agents"
-        title="Install from registry"
-        lede={`Agent packs available in this host's local registry mirror. Most auto-mount at boot — those rows show "Installed".`}
+        eyebrow={t('installEyebrow')}
+        title={t('installTitle')}
+        lede={t('installLede')}
       />
 
       {state.isLoading && (
         <SkeletonRows rows={4} columns={['40%', '12%', '60%']} />
       )}
       {state.error && (
-        <Notice variant="error">Couldn&apos;t load pack list: {state.error}</Notice>
+        <Notice variant="error">{t('installLoadError', { error: state.error })}</Notice>
       )}
       {installError && (
-        <Notice variant="error">Install failed: {installError}</Notice>
+        <Notice variant="error">{t('installFailed', { error: installError })}</Notice>
       )}
       {!state.isLoading && !state.error && state.packs.length === 0 && (
         <StateCard
           icon={<PackageIcon size={28} />}
-          title="No agent packs in the local registry"
+          title={t('installNoneTitle')}
           body={
             <>
-              Configure <code>OPENWOP_REGISTRY_URL</code> + restart the host to
-              fetch from the public registry.
+              {t('installNoneBody')}
             </>
           }
           action={
             <Link to="/agents" className="primary">
-              Back to all agents
+              {t('installBackToAll')}
             </Link>
           }
         />
@@ -121,6 +123,7 @@ export function AgentInstallPage(): JSX.Element {
               pack={pack}
               isInstalling={installingName === pack.name}
               onInstall={() => void onInstall(pack)}
+              t={t}
             />
           ))}
         </ul>
@@ -133,10 +136,12 @@ function PackRow({
   pack,
   isInstalling,
   onInstall,
+  t,
 }: {
   pack: AgentPackSummary;
   isInstalling: boolean;
   onInstall: () => void;
+  t: TFunction;
 }): JSX.Element {
   return (
     <li
@@ -148,7 +153,7 @@ function PackRow({
           <span className="muted agentinstall-version">v{pack.version}</span>
           {pack.installed && (
             <span className="agentinstall-installed-chip">
-              installed
+              {t('installInstalled')}
             </span>
           )}
         </div>
@@ -180,7 +185,7 @@ function PackRow({
             disabled={isInstalling}
             className="primary u-fs-12"
           >
-            {isInstalling ? 'Installing…' : 'Install'}
+            {isInstalling ? t('installInstalling') : t('installInstall')}
           </button>
         )}
       </div>

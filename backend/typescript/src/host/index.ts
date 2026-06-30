@@ -19,10 +19,12 @@ import type { Storage } from '../storage/storage.js';
 import type { Principal } from '../types.js';
 import { OpenwopError } from '../types.js';
 import type { WorkflowDefinition } from '../executor/types.js';
-import { getRegisteredWorkflow } from './workflowsRegistry.js';
+import { getRegisteredWorkflowAsync } from './workflowsRegistry.js';
+import { getBuiltinWorkflow } from './builtinWorkflows.js';
 import { getExampleWorkflow } from './exampleWorkflows.js';
 import { getWorkflowTemplate } from './workflowTemplates.js';
 import { createConnectorInvoker } from './connectorInvoker.js';
+import { AGENT_MENTION_WORKFLOW_ID, agentMentionWorkflowDefinition } from './agentMentionWorkflows.js';
 
 /**
  * Load conformance fixtures from the in-tree `conformance/fixtures/`
@@ -285,6 +287,23 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
             },
           };
         }
+        // ADR 0051 Phase 3 — A2UI structured-clarification sample. The
+        // `a2ui-clarify` node suspends with a `clarification` interrupt that
+        // carries an A2UI surface (RFC 0102 `ui.a2ui-surface` shape); the chat
+        // renders it as a real form (date / duration / reminder) instead of a
+        // textarea, and the collected field values resume the run. Runs
+        // end-to-end with no BYOK provider.
+        if (workflowId === 'openwop-app.a2ui-clarify') {
+          return {
+            workflowId,
+            definition: {
+              workflowId,
+              nodes: [
+                { nodeId: 'clarify', typeId: 'local.openwop-app.a2ui-clarify', config: { question: 'When should the kickoff be?' } },
+              ],
+            },
+          };
+        }
         // Gap D-4 — web-research sample. Chains the `core.web.search`
         // node (core.openwop.web-search pack; deterministic stub in the
         // demo since the host does not advertise host.webSearch) into a
@@ -322,6 +341,11 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
             },
           };
         }
+        // Per-turn chat (RFC 0005 predecessor). RETIRED as a live transport in
+        // ADR 0067 Phase 6 — the frontend no longer creates these runs. The
+        // definition is retained ONLY so historical/in-flight per-turn runs still
+        // replay + `:fork` against their checkpoints (the OpenWOP wire contract);
+        // deleting it would break replay of any run created before the cutover.
         if (workflowId === 'openwop-app.chat.turn') {
           return {
             workflowId,
@@ -333,10 +357,9 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
             },
           };
         }
-        // Wire-aligned multi-agent chat (RFC 0005). One long-lived conversation
-        // run per chat session: the gate opens + suspends, each user message is
-        // an `exchange`, "New chat" closes it. The per-turn `openwop-app.chat.turn`
-        // above stays the default transport until the frontend cutover lands.
+        // Wire-aligned multi-agent chat (RFC 0005) — the SOLE live chat transport.
+        // One long-lived conversation run per chat session: the gate opens +
+        // suspends, each user message is an `exchange`, "New chat" closes it.
         if (workflowId === 'openwop-app.conversation') {
           return {
             workflowId,
@@ -348,6 +371,23 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
             },
           };
         }
+        // ADR 0089 Phase 4 (Option B) — the synthetic agent-mention workflow: a
+        // one-node graph wrapping the gated agent-runner so a deep-investigation
+        // @mentioned agent's tool loop runs as a standard persisted run, embedded
+        // in chat as a `workflow_run` bubble. Resolved here in catalog source A
+        // (like the other `openwop-app.*` synthetic workflows) so it is runnable on
+        // every instance + survives restart/replay.
+        if (workflowId === AGENT_MENTION_WORKFLOW_ID) {
+          return { workflowId, definition: agentMentionWorkflowDefinition };
+        }
+        // Feature-contributed built-in workflows (ADR 0001 + ADR 0072) — a
+        // feature's always-present infrastructure workflows (e.g. the AI
+        // workflow-author meta-workflow), declared via
+        // `BackendFeature.builtinWorkflows` and registered at boot. Resolved here
+        // in catalog source A so they're runnable on every instance + survive
+        // restart, NOT the in-memory builder registry below.
+        const builtin = getBuiltinWorkflow(workflowId);
+        if (builtin) return { workflowId, definition: builtin };
         // Built-in demo role-workflows (the "AI coworkers" roster portfolios).
         // Resolved here in catalog source A — NOT the in-memory builder
         // registry — so a roster portfolio id is runnable on every instance
@@ -362,10 +402,11 @@ export function createHostAdapterSuite(deps: { storage: Storage }): HostAdapterS
         // registry below.
         const template = getWorkflowTemplate(workflowId);
         if (template) return { workflowId, definition: template };
-        // Builder-registered workflows from the in-memory registry,
-        // populated via `POST /v1/host/openwop-app/workflows`. Sample-grade
-        // (process-local). Real hosts read from storage's `workflows` table.
-        const registered = getRegisteredWorkflow(workflowId);
+        // Builder-registered workflows. Resolved via the durable-backed
+        // registry (ENG-3): a cache hit, else a storage read — so a run
+        // re-dispatched by the sweeper on ANOTHER instance can still resolve a
+        // workflow that was registered on the instance that crashed.
+        const registered = await getRegisteredWorkflowAsync(workflowId);
         if (registered) {
           return { workflowId, definition: registered };
         }

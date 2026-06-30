@@ -25,8 +25,9 @@
  */
 
 import { streamEvents, type RunEventDoc, type StreamMode } from '@openwop/openwop';
-import { config } from './config.js';
+import { authedHeaders, config } from './config.js';
 import { readSseFrames } from './sseFrames.js';
+import { telemetry } from '../platform/telemetry.js';
 
 export interface SubscribeOptions {
   modes?: readonly StreamMode[];
@@ -193,6 +194,13 @@ function subscribeViaGenerator(
         attempt += 1;
         if (attempt > MAX_RECONNECTS) {
           hooks.clearTimers();
+          // CHAT-6: a stream that dies after exhausting reconnects is otherwise
+          // invisible to ops (the caller gets an opaque Event). Report it so the
+          // "bubble spins forever" class of bug is diagnosable in production.
+          telemetry.reportError(err instanceof Error ? err : new Error('sse_stream_reconnect_exhausted'), {
+            region: 'sse-stream',
+            attempts: attempt,
+          });
           if (opts.onError) opts.onError(new Event('error'));
           return;
         }
@@ -221,6 +229,36 @@ function subscribeViaGenerator(
  *  `openwop.session` cookie rides along. Replaces the prior native EventSource
  *  + hard-coded event-type allowlist (GAP-ANALYSIS A-1): this yields every
  *  event the backend emits, so new event types need no client edit. */
+/** Mint a run-scoped stream capability SAME-ORIGIN (config.baseUrl → /api on
+ *  prod), where an anon BYOK session's cookie DOES authenticate. The token then
+ *  authorizes the cross-origin SSE for a caller who has no bearer token and
+ *  whose cookie can't follow to *.run.app. Returns null on any failure (the
+ *  caller opens the stream anyway and degrades to the prior 404). */
+async function fetchRunStreamToken(runId: string, signal?: AbortSignal): Promise<string | null> {
+  // SEC-5 — distinguish a TRANSIENT mint failure (5xx / network) from an AUTHZ one
+  // (4xx). A 4xx is terminal (the caller isn't allowed to mint) → give up
+  // immediately. A 5xx or a network error is worth ONE quick retry before falling
+  // back to the no-token stream (which then 404s). One retry only — the mint is
+  // stateless + cheap, and we must not block the live feed for long.
+  const url = `${config.baseUrl}/v1/runs/${encodeURIComponent(runId)}/events/token`;
+  const init = { method: 'GET', headers: authedHeaders(), credentials: 'include' as const, ...(signal ? { signal } : {}) };
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const res = await fetch(url, init);
+      if (res.ok) {
+        const body = (await res.json()) as { streamToken?: unknown };
+        return typeof body.streamToken === 'string' ? body.streamToken : null;
+      }
+      if (res.status < 500) return null; // 4xx — terminal authz failure, don't retry
+      // 5xx — transient; fall through to one retry.
+    } catch {
+      if (signal?.aborted) return null; // caller cancelled — don't retry
+      // network error — transient; fall through to one retry.
+    }
+  }
+  return null;
+}
+
 async function* streamEventsCredentialed(
   baseUrl: string,
   runId: string,
@@ -230,10 +268,33 @@ async function* streamEventsCredentialed(
   if (opts.streamMode) {
     params.set('streamMode', typeof opts.streamMode === 'string' ? opts.streamMode : opts.streamMode.join(','));
   }
+  // Carry the SAME identity as run creation. The SSE hits config.sseBaseUrl —
+  // on prod a DIFFERENT origin (*.run.app) than the /api same-origin path — so
+  // the openwop.session cookie does NOT travel here; a credentials-only request
+  // authenticates as an unrelated cross-origin session whose tenant lags the
+  // signed-in user's. authedHeaders() adds the cached Firebase ID token (when
+  // signed in), so the backend resolves the user's real tenant and the run-read
+  // tenant gate (ADR 0088) matches on the FIRST attempt. credentials:'include'
+  // stays as the fallback.
+  const headers: Record<string, string> = {
+    ...authedHeaders(),
+    Accept: 'text/event-stream',
+    'Cache-Control': 'no-cache',
+  };
+  if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId;
+
+  // BYOK-anon has no ID token, and an anon session can't tenant-match
+  // cross-origin (the *.run.app cookie ≠ the app-origin one). Mint a run-scoped
+  // capability SAME-ORIGIN (where the anon cookie DOES authenticate) and present
+  // it on the cross-origin stream. Skip when we already carry a bearer token
+  // (signed-in / dev) — that authenticates directly. Best-effort: on failure we
+  // open the stream anyway and let it 404 as before.
+  if (!headers.authorization) {
+    const streamToken = await fetchRunStreamToken(runId, opts.signal);
+    if (streamToken) params.set('streamToken', streamToken);
+  }
   const qs = params.toString();
   const url = `${baseUrl}/v1/runs/${encodeURIComponent(runId)}/events${qs ? `?${qs}` : ''}`;
-  const headers: Record<string, string> = { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' };
-  if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId;
 
   const internalAbort = new AbortController();
   const externalSignal = opts.signal;

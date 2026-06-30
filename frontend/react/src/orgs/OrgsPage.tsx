@@ -14,23 +14,29 @@
  *
  * @see ../client/accessClient.ts
  */
+import { useTranslation } from 'react-i18next';
 import { Notice } from '../ui/Notice.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { useHub } from '../chrome/hubContext.js';
 import { OrgsListPanel } from './OrgsListPanel.js';
 import { OrgDetailPanel } from './OrgDetailPanel.js';
 import { toggleStr } from './orgsHelpers.js';
 import { useOrgsController } from './useOrgsController.js';
 
 export function OrgsPage(): JSX.Element {
+  const { t } = useTranslation('orgs');
+  const { embedded } = useHub();
   const c = useOrgsController();
 
   return (
     <section>
-      <PageHeader
-        eyebrow="Settings"
-        title="Organizations & access"
-        lede={<>Organizations, teams, and members with role-based access. Roles map to OpenWOP authorization scopes; a member&rsquo;s authority comes from its assigned roles only — org-chart position confers none.</>}
-      />
+      {embedded ? null : (
+        <PageHeader
+          eyebrow={t('pageEyebrow')}
+          title={t('pageTitle')}
+          lede={t('pageLede')}
+        />
+      )}
       {c.error ? <Notice variant="error">{c.error}</Notice> : null}
 
       <div className="orgspage-columns">

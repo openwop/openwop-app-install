@@ -6,6 +6,8 @@
  * Mostly useful next to a TruncationCard for the same node.
  */
 
+import { useTranslation } from 'react-i18next';
+import { formatNumber } from '../../i18n/format.js';
 import type { EnvelopeRecovery } from '../types.js';
 
 interface Props {
@@ -13,13 +15,14 @@ interface Props {
 }
 
 export function RecoveryCard({ recovery }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   return (
-    <div className="env-chip env-chip-muted" role="status" aria-label="Envelope partial recovery applied">
-      <span className="env-chip-tag">RECOVERED</span>
+    <div className="env-chip env-chip-muted" role="status" aria-label={t('recoveryTitle')}>
+      <span className="env-chip-tag">{t('recoveryBadge')}</span>
       <span className="env-chip-text">
-        Partial envelope salvaged at <span className="env-chip-mono">{recovery.path}</span>
+        {t('recoveryPrefix')}<span className="env-chip-mono">{recovery.path}</span>
         {typeof recovery.byteOffset === 'number' ? (
-          <> · <span className="env-chip-mono">@{recovery.byteOffset}b</span></>
+          <> · <span className="env-chip-mono">{t('recoveryByteOffset', { offset: formatNumber(recovery.byteOffset) })}</span></>
         ) : null}
       </span>
     </div>

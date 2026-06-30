@@ -7,6 +7,8 @@
  */
 
 import { useCallback, useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
 import {
   createCard,
   deleteCard,
@@ -22,6 +24,7 @@ import { AgentAvatar } from './AgentAvatar.js';
 import type { RoleTheme } from './roleTemplates.js';
 
 export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workflows, refreshSignal, onChanged, intro }: { boardId: string; persona: string; avatarUrl?: string | undefined; roleTheme?: RoleTheme | undefined; workflows?: string[] | undefined; refreshSignal?: number | undefined; onChanged?: (() => void) | undefined; intro?: JSX.Element | undefined }): JSX.Element {
+  const { t } = useTranslation('agents');
   const [board, setBoard] = useState<KanbanBoard | null>(null);
   const [cards, setCards] = useState<KanbanCard[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -85,7 +88,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
     setNotice(null);
     try {
       const { triggeredRunId } = await patchCard(cardId, { columnId: toColumnId });
-      if (triggeredRunId) setNotice('Started a run — dropping a card into a ⚡ trigger lane fires its workflow.');
+      if (triggeredRunId) setNotice('Started a run — dropping a card into a trigger lane fires its workflow.');
       await refresh();
       onChanged?.();
     } catch (err) {
@@ -95,7 +98,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
 
   const onDeleteCard = async (cardId: string) => {
     const card = cards.find((c) => c.id === cardId);
-    if (!window.confirm(`Delete the card${card ? ` “${card.title}”` : ''}? This can't be undone.`)) return;
+    if (!(await confirm({ title: card ? t('boardDeleteCardConfirm', { title: card.title }) : t('boardDeleteCardConfirmNoTitle'), danger: true }))) return;
     try {
       await deleteCard(cardId);
       await refresh();

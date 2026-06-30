@@ -23,19 +23,18 @@ import {
   gateAutonomyByReadiness,
 } from '../src/host/connectionReadiness.js';
 
-const PORT = 18766;
 let server: { close(cb?: () => void): void };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
-  server = app.listen(PORT);
+  server = app.listen(0);
 });
 
 afterAll(async () => {

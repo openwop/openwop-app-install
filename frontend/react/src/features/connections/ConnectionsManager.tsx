@@ -10,6 +10,7 @@
  * backend serves these routes unconditionally.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { SkeletonRows } from '../../ui/Skeleton.js';
@@ -18,6 +19,7 @@ import { StatusBadge } from '../../ui/StatusBadge.js';
 import { toast } from '../../ui/toast.js';
 import { PlugIcon } from '../../ui/icons/index.js';
 import { getEffectiveAccess } from '../../client/accessClient.js';
+import { useHub } from '../../chrome/hubContext.js';
 import {
   listProviders,
   listConnections,
@@ -30,6 +32,12 @@ import {
 } from './connectionsClient.js';
 
 export function ConnectionsManager({ returnPath = '/connections' }: { returnPath?: string } = {}): JSX.Element {
+  const { t } = useTranslation('connections');
+  // Inside the Access Hub (ADR 0144) the Workspace·Personal pill scopes the view:
+  // Personal shows the caller's own connections, Workspace the org-shared ones.
+  // Outside the hub (`embedded:false`) nothing is filtered — the standalone page
+  // and the profile tab show every connection exactly as before.
+  const { embedded, scope } = useHub();
   const [providers, setProviders] = useState<Provider[] | null>(null);
   const [rows, setRows] = useState<Connection[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -42,22 +50,41 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
 
   const load = useCallback(() => {
     setError(null);
-    void Promise.all([listProviders(), listConnections()])
-      .then(([p, c]) => {
-        setProviders(p);
-        setRows(c);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load.'));
+    // FP-4: settle each resource independently — a providers failure must not
+    // also blank out the (separately-fetched) connections list, and vice versa.
+    void Promise.allSettled([listProviders(), listConnections()]).then(([pRes, cRes]) => {
+      if (pRes.status === 'fulfilled') setProviders(pRes.value);
+      if (cRes.status === 'fulfilled') setRows(cRes.value);
+      const failed = [pRes, cRes].filter((r) => r.status === 'rejected') as PromiseRejectedResult[];
+      if (failed.length > 0) {
+        const reason = failed[0]!.reason;
+        setError(reason instanceof Error ? reason.message : t('loadFailed'));
+      }
+    });
     // Only offer org-shared creation to a caller who can actually complete it
     // (host:connections:manage) — don't surface an action that would 403.
     void getEffectiveAccess()
       .then((a) => setCanManageOrg(a.scopes.includes('host:connections:manage')))
       .catch(() => setCanManageOrg(false));
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // When embedded, the scope pill — not the in-form selector — decides sharing:
+  // Personal ⇒ a user connection; Workspace ⇒ org-shared (only if the caller can
+  // manage org connections, else fall back to a user connection).
+  useEffect(() => {
+    if (embedded) setShareScope(scope === 'workspace' && canManageOrg ? 'org' : 'user');
+  }, [embedded, scope, canManageOrg]);
+
+  // Scope-filter the table only inside the hub (org-shared have an orgId; personal
+  // do not). Outside the hub, show everything (no behavior change).
+  const displayRows = useMemo(() => {
+    if (!embedded || rows === null) return rows;
+    return rows.filter((c) => (scope === 'personal' ? !c.orgId : Boolean(c.orgId)));
+  }, [embedded, scope, rows]);
 
   const selected = useMemo(() => providers?.find((p) => p.id === provider) ?? null, [providers, provider]);
 
@@ -69,13 +96,17 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
       await createConnection({ provider, kind, secret: secret.trim(), scope: shareScope });
       setSecret('');
       load();
-      toast.success(`${selected.label} connected${shareScope === 'org' ? ' for the organization' : ''}.`);
+      toast.success(
+        shareScope === 'org'
+          ? t('connectedForOrg', { label: selected.label })
+          : t('connected', { label: selected.label }),
+      );
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Connect failed.');
+      toast.error(err instanceof Error ? err.message : t('connectFailed'));
     } finally {
       setBusy(false);
     }
-  }, [selected, provider, secret, shareScope, load]);
+  }, [selected, provider, secret, shareScope, load, t]);
 
   const connectOAuth = useCallback(async (providerId: string, label: string, opts: { write?: boolean } = {}) => {
     setConnecting(providerId);
@@ -85,10 +116,10 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
       const authorizeUrl = await beginOAuth(providerId, returnPath, opts);
       window.location.assign(authorizeUrl);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : `Could not start ${label}.`);
+      toast.error(err instanceof Error ? err.message : t('couldNotStart', { label }));
       setConnecting(null);
     }
-  }, [returnPath]);
+  }, [returnPath, t]);
 
   const revoke = useCallback(
     async (id: string) => {
@@ -96,24 +127,24 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
         await revokeConnection(id);
         load();
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : 'Revoke failed.');
+        toast.error(err instanceof Error ? err.message : t('revokeFailed'));
       }
     },
-    [load],
+    [load, t],
   );
 
   const test = useCallback(
     async (c: Connection) => {
       try {
         const { ok } = await testConnection(c.connectionId);
-        if (ok) toast.success(`${c.displayName} is healthy.`);
-        else toast.error(`${c.displayName} needs to reconnect.`);
+        if (ok) toast.success(t('connectionHealthy', { name: c.displayName }));
+        else toast.error(t('connectionNeedsReconnect', { name: c.displayName }));
         load();
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : 'Test failed.');
+        toast.error(err instanceof Error ? err.message : t('testFailed'));
       }
     },
-    [load],
+    [load, t],
   );
 
   const providersById = useMemo(() => new Map((providers ?? []).map((p) => [p.id, p])), [providers]);
@@ -132,19 +163,19 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
 
   const columns = useMemo<DataColumn<Connection>[]>(
     () => [
-      { key: 'displayName', header: 'Connection', render: (c) => c.displayName },
-      { key: 'provider', header: 'Provider', render: (c) => <span className="chip">{c.provider}</span> },
+      { key: 'displayName', header: t('colConnection'), render: (c) => c.displayName },
+      { key: 'provider', header: t('colProvider'), render: (c) => <span className="chip">{c.provider}</span> },
       {
         key: 'sharing',
-        header: 'Sharing',
+        header: t('colSharing'),
         render: (c) => (
           <span className="action-bar">
-            <span className="chip chip--muted">{c.orgId ? 'Organization' : 'Personal'}</span>
-            {writeState(c).granted ? <span className="chip chip--muted">write</span> : null}
+            <span className="chip chip--muted">{c.orgId ? t('sharingOrganization') : t('sharingPersonal')}</span>
+            {writeState(c).granted ? <span className="chip chip--muted">{t('sharingWrite')}</span> : null}
           </span>
         ),
       },
-      { key: 'status', header: 'Status', render: (c) => <StatusBadge status={c.status} /> },
+      { key: 'status', header: t('colStatus'), render: (c) => <StatusBadge status={c.status} /> },
       {
         key: 'actions',
         header: '',
@@ -153,16 +184,16 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
           return (
             <span className="action-bar">
               {writeState(c).offerable && prov ? (
-                <button type="button" className="btn-ghost" onClick={() => void connectOAuth(prov.id, `${prov.label} write access`, { write: true })} aria-label={`Grant write access for ${c.displayName}`}>Grant write access</button>
+                <button type="button" className="btn-ghost" onClick={() => void connectOAuth(prov.id, t('grantWriteAccessConnect', { label: prov.label }), { write: true })} aria-label={t('grantWriteAccessLabel', { name: c.displayName })}>{t('grantWriteAccess')}</button>
               ) : null}
-              <button type="button" className="btn-ghost" onClick={() => void test(c)} aria-label={`Test ${c.displayName}`}>Test</button>
-              <button type="button" className="btn-ghost" onClick={() => void revoke(c.connectionId)} aria-label={`Revoke ${c.displayName}`}>Revoke</button>
+              <button type="button" className="btn-ghost" onClick={() => void test(c)} aria-label={t('testConnectionLabel', { name: c.displayName })}>{t('test')}</button>
+              <button type="button" className="btn-ghost" onClick={() => void revoke(c.connectionId)} aria-label={t('revokeConnectionLabel', { name: c.displayName })}>{t('revoke')}</button>
             </span>
           );
         },
       },
     ],
-    [revoke, test, connectOAuth, providersById, writeState],
+    [revoke, test, connectOAuth, providersById, writeState, t],
   );
 
   // Providers that connect via a posted secret (api_key/bearer) vs. those that
@@ -180,11 +211,8 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
       {oauthProviders.length > 0 ? (
         <div className="surface-card u-p-4 u-grid u-gap-3">
           <div className="u-grid u-gap-1">
-            <span className="u-label-sm">Connect with consent</span>
-            <p className="muted">
-              You'll be sent to the provider to approve read access, then returned here. Your tokens are stored
-              encrypted and are never shown back to you.
-            </p>
+            <span className="u-label-sm">{t('connectWithConsent')}</span>
+            <p className="muted">{t('consentBlurb')}</p>
           </div>
           <div className="action-bar">
             {oauthProviders.map((p) => (
@@ -193,61 +221,58 @@ export function ConnectionsManager({ returnPath = '/connections' }: { returnPath
                 type="button"
                 className="btn-ghost"
                 disabled={!p.oauthConfigured || connecting !== null}
-                onClick={() => void connectOAuth(p.id, `${p.label} connect`)}
-                aria-label={`Connect ${p.label}`}
-                title={p.oauthConfigured ? undefined : `${p.label} OAuth is not configured on this host`}
+                onClick={() => void connectOAuth(p.id, t('connectProviderConnect', { label: p.label }))}
+                aria-label={t('connectProvider', { label: p.label })}
+                title={p.oauthConfigured ? undefined : t('oauthNotConfiguredTitle', { label: p.label })}
               >
-                {connecting === p.id ? `Connecting ${p.label}…` : `Connect ${p.label}`}
+                {connecting === p.id ? t('connectingProvider', { label: p.label }) : t('connectProvider', { label: p.label })}
               </button>
             ))}
           </div>
           {oauthProviders.some((p) => !p.oauthConfigured) ? (
-            <p className="muted">
-              Greyed-out providers aren't configured for OAuth on this host yet — the operator must add the client
-              credentials.
-            </p>
+            <p className="muted">{t('notConfiguredHint')}</p>
           ) : null}
         </div>
       ) : null}
 
       <div className="surface-card u-p-4 surface-form">
         <label className="u-grid u-gap-1">
-          <span className="u-label-sm">Provider (API key / token)</span>
+          <span className="u-label-sm">{t('providerLabel')}</span>
           <select value={provider} onChange={(e) => setProvider(e.target.value)} disabled={loadingProviders}>
             {loadingProviders
-              ? <option value={provider}>Loading providers…</option>
+              ? <option value={provider}>{t('loadingProviders')}</option>
               : secretProviders.map((p) => (
                 <option key={p.id} value={p.id}>{p.label}</option>
               ))}
           </select>
         </label>
         <label className="u-grid u-gap-1">
-          <span className="u-label-sm">API key / token</span>
-          <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder="paste your token" autoComplete="off" />
+          <span className="u-label-sm">{t('secretLabel')}</span>
+          <input type="password" value={secret} onChange={(e) => setSecret(e.target.value)} placeholder={t('secretPlaceholder')} autoComplete="off" />
         </label>
-        {canManageOrg ? (
+        {canManageOrg && !embedded ? (
           <label className="u-grid u-gap-1">
-            <span className="u-label-sm">Shared with</span>
+            <span className="u-label-sm">{t('sharedWith')}</span>
             <select value={shareScope} onChange={(e) => setShareScope(e.target.value as 'user' | 'org')}>
-              <option value="user">Just me</option>
-              <option value="org">Organization</option>
+              <option value="user">{t('shareJustMe')}</option>
+              <option value="org">{t('shareOrganization')}</option>
             </select>
           </label>
         ) : null}
         <button type="button" className="btn-primary" disabled={busy || loadingProviders || !secret.trim()} onClick={() => void connect()}>
-          Connect
+          {t('connect')}
         </button>
       </div>
 
       <DataTable
-        rows={rows ?? []}
+        rows={displayRows ?? []}
         rowKey={(c) => c.connectionId}
         columns={columns}
-        caption="Your connections"
+        caption={t('tableCaption')}
         empty={
           rows === null
             ? <SkeletonRows rows={2} columns={[200, 110, 110, 110, 140]} />
-            : <StateCard icon={<PlugIcon />} title="No connections yet" body="Connect an app above to let your assistant read from it." />
+            : <StateCard icon={<PlugIcon />} title={t('noConnectionsTitle')} body={t('noConnectionsBody')} />
         }
       />
     </div>

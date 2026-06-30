@@ -1,4 +1,6 @@
 import { useMemo, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
+import { formatNumber } from '../i18n/format.js';
 import { ChevronDownIcon } from './icons/index.js';
 
 /**
@@ -78,6 +80,7 @@ export function DataTable<T>({
   columns, rows, rowKey, onRowClick, density = 'comfortable', caption, initialSort, empty, rowClassName,
   selectable, selected = EMPTY_SELECTION, onSelectionChange, bulkActions,
 }: Props<T>): JSX.Element {
+  const { t } = useTranslation('ui');
   const [sort, setSort] = useState<SortState | null>(initialSort ?? null);
 
   const sorted = useMemo(() => {
@@ -122,10 +125,10 @@ export function DataTable<T>({
   return (
     <>
       {selectable && bulkActions && selected.size > 0 && (
-        <div className="data-bulkbar" role="region" aria-label="Bulk actions">
-          <span className="data-bulkbar-count">{selected.size} selected</span>
+        <div className="data-bulkbar" role="region" aria-label={t('tableBulkActionsLabel')}>
+          <span className="data-bulkbar-count">{t('tableSelectedCount', { n: formatNumber(selected.size) })}</span>
           <div className="data-bulkbar-actions">{bulkActions(selectedRows)}</div>
-          <button type="button" className="data-bulkbar-clear" onClick={() => onSelectionChange?.(new Set())}>Clear</button>
+          <button type="button" className="data-bulkbar-clear" onClick={() => onSelectionChange?.(new Set())}>{t('tableClear')}</button>
         </div>
       )}
       {rows.length === 0 && empty !== undefined ? (
@@ -137,10 +140,10 @@ export function DataTable<T>({
             <thead>
               <tr>
                 {selectable && (
-                  <th className="data-col--check" aria-label="Select">
+                  <th className="data-col--check" aria-label={t('tableSelectHeader')}>
                     <input
                       type="checkbox"
-                      aria-label={allSelected ? 'Deselect all' : 'Select all'}
+                      aria-label={allSelected ? t('tableDeselectAll') : t('tableSelectAll')}
                       checked={allSelected}
                       ref={(cb) => { if (cb) cb.indeterminate = someSelected && !allSelected; }}
                       onChange={toggleAll}
@@ -164,7 +167,7 @@ export function DataTable<T>({
                       style={col.width ? { width: col.width } : undefined}
                       aria-sort={active ? (sort?.dir === 'asc' ? 'ascending' : 'descending') : 'none'}
                     >
-                      <button type="button" className="data-sort-btn" onClick={() => toggleSort(col.key)} title={col.headerTitle ?? `Sort by ${typeof col.header === 'string' ? col.header : col.key}`}>
+                      <button type="button" className="data-sort-btn" onClick={() => toggleSort(col.key)} title={col.headerTitle ?? t('tableSortBy', { column: typeof col.header === 'string' ? col.header : col.key })}>
                         <span>{col.header}</span>
                         <span className={`data-sort-caret${active ? ` is-${sort?.dir}` : ''}`} aria-hidden>
                           <ChevronDownIcon size={12} />
@@ -183,13 +186,41 @@ export function DataTable<T>({
                   <tr
                     key={key}
                     className={`${onRowClick ? 'data-row--clickable' : ''}${isSel ? ' is-selected' : ''} ${rowClassName?.(row) ?? ''}`.trim() || undefined}
-                    {...(onRowClick ? { onClick: () => onRowClick(row) } : {})}
+                    {...(onRowClick
+                      ? {
+                          onClick: () => onRowClick(row),
+                          // Roving keyboard support for clickable rows (DS-1):
+                          // Enter/Space activate; Arrow Up/Down move focus to the
+                          // adjacent clickable row. Only act when the row itself is
+                          // focused so inner controls (checkbox, links) keep their
+                          // own keys.
+                          role: 'button',
+                          tabIndex: 0,
+                          onKeyDown: (e: React.KeyboardEvent<HTMLTableRowElement>) => {
+                            if (e.target !== e.currentTarget) return;
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              onRowClick(row);
+                            } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                              e.preventDefault();
+                              const rowsEls = e.currentTarget.parentElement
+                                ? Array.from(
+                                    e.currentTarget.parentElement.querySelectorAll<HTMLTableRowElement>('tr.data-row--clickable'),
+                                  )
+                                : [];
+                              const idx = rowsEls.indexOf(e.currentTarget);
+                              const next = e.key === 'ArrowDown' ? rowsEls[idx + 1] : rowsEls[idx - 1];
+                              next?.focus();
+                            }
+                          },
+                        }
+                      : {})}
                   >
                     {selectable && (
                       <td className="data-col--check" onClick={(e) => e.stopPropagation()}>
                         <input
                           type="checkbox"
-                          aria-label="Select row"
+                          aria-label={t('tableSelectRow')}
                           checked={selected.has(key)}
                           onChange={() => toggleRow(key)}
                         />
@@ -213,10 +244,11 @@ export function DataTable<T>({
 
 /** Comfortable/compact segmented toggle — pairs with <DataTable density>. */
 export function DensityToggle({ value, onChange }: { value: 'comfortable' | 'compact'; onChange: (v: 'comfortable' | 'compact') => void }): JSX.Element {
+  const { t } = useTranslation('ui');
   return (
-    <div className="segmented" role="group" aria-label="Row density">
-      <button type="button" aria-pressed={value === 'comfortable'} onClick={() => onChange('comfortable')}>Comfortable</button>
-      <button type="button" aria-pressed={value === 'compact'} onClick={() => onChange('compact')}>Compact</button>
+    <div className="segmented" role="group" aria-label={t('tableDensityLabel')}>
+      <button type="button" aria-pressed={value === 'comfortable'} onClick={() => onChange('comfortable')}>{t('tableDensityComfortable')}</button>
+      <button type="button" aria-pressed={value === 'compact'} onClick={() => onChange('compact')}>{t('tableDensityCompact')}</button>
     </div>
   );
 }

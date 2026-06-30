@@ -1,0 +1,37 @@
+{
+  "name": "feature.cms.nodes",
+  "version": "1.1.0",
+  "description": "CMS feature node pack (ADR 0064 Phase 3 / RFC 0103) — workflow nodes over the `ctx.features.cms` surface shipped by the CMS feature (ADR 0009). `get-page` reads a published page resolved for a target locale (exact → language-family → base); `translate-section` drafts a sparse per-locale overlay for a section's base data via the run-scoped provider (ctx.callAI). Both are role:action — get-page reads the tenant CMS store; translate-section is generative — so their outputs are recorded and replay/fork read the recorded result. Generation stays in the node (run-scoped), never in the read-only surface. The overlay is sanitized on persist (the page PATCH write path), not here.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "cms", "content", "localization", "i18n", "rfc-0103"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": { "aiProviders": "supported" },
+  "nodes": [
+    {
+      "typeId": "feature.cms.nodes.get-page",
+      "version": "1.0.0",
+      "label": "CMS Get Page (localized)",
+      "description": "Fetch a published CMS page resolved for a target locale via ctx.features.cms.getPage. Inputs: { orgId, slug, locale? }. Output: { page, locale } — sections carry resolved `data` (exact → language-family → base per RFC 0103 §C); no `localizations` leaked. Published-only; null page when absent.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.cms.nodes.list-pages",
+      "version": "1.0.0",
+      "label": "CMS List Pages",
+      "description": "Lists an org's published CMS pages (pageId, slug, title, status) via ctx.features.cms.listPages. Inputs: { orgId }. Output: { pages }. Published-only; titles/slugs, not section bodies.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.cms.nodes.translate-section",
+      "version": "1.0.0",
+      "label": "CMS Translate Section",
+      "description": "Draft a sparse per-locale overlay for a section's base data via the run-scoped provider (ctx.callAI), structure-preserving JSON-in/JSON-out. Inputs: { data, targetLocale, provider?, model?, maxTokens? }. Output: { overlay, targetLocale } — a draft the editor reviews before saving; the page PATCH write path sanitizes it (anti-XSS / open-redirect).",
+      "category": "integration",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

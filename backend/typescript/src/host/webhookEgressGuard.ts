@@ -24,6 +24,9 @@
 import { lookup as dnsLookup } from 'node:dns';
 import type { LookupFunction } from 'node:net';
 import { Agent } from 'undici';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.webhookEgressGuard');
 
 /** True when the operator explicitly allows private/loopback egress
  *  (local development / tests only). Read per-call so tests can flip it. */
@@ -95,6 +98,10 @@ const guardedLookup: LookupFunction = (hostname, options, callback) => {
       const resolved = Array.isArray(address) ? address.map((a) => a.address) : [address];
       const denied = resolved.find((a) => typeof a === 'string' && isDeniedWebhookHost(a));
       if (denied) {
+        // INT-2: surface SSRF-guard denials as a structured signal (not just a
+        // thrown error the caller may swallow) so ops can see blocked egress —
+        // a denial at delivery time can indicate DNS-rebind or a misconfig.
+        log.warn('webhook_egress_denied', { hostname, resolvedAddress: denied });
         callback(new WebhookEgressDeniedError(hostname, denied), address, family);
         return;
       }

@@ -9,6 +9,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { fetchAssignments, type ResolvedAssignment } from '../client/featureTogglesClient.js';
 import { onAuthChange } from '../client/config.js';
+import { telemetry } from '../platform/telemetry.js';
 
 export interface FeatureAccess {
   status: 'on' | 'off' | 'beta';
@@ -46,9 +47,12 @@ export function FeatureAccessProvider({ children }: { children: ReactNode }): JS
         for (const a of list) map[a.id] = a;
         setById(map);
       })
-      .catch(() => {
+      .catch((err) => {
         // Resolution is best-effort presentation; on failure every feature
-        // reads as its fallback (off). Server-side gating still holds.
+        // reads as its fallback (off). Server-side gating still holds. FP-3:
+        // surface the failure to telemetry so an operator can see WHY features
+        // silently vanished for a user instead of it being invisible.
+        telemetry.reportError(err, { region: 'feature-access-resolution' });
         if (!cancelled) setById({});
       })
       .finally(() => {

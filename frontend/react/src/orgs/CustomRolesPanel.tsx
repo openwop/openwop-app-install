@@ -5,6 +5,7 @@
  */
 
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { CustomRole } from '../client/accessClient.js';
 import { PencilIcon, TrashIcon } from '../ui/icons/index.js';
 import { NEUTRAL_CHIP } from './orgUi.js';
@@ -26,24 +27,24 @@ export function CustomRolesPanel({
   customRoles, roleName, setRoleName, roleScopes, setRoleScopes, assignableScopes,
   onCreateRole, onDeleteRole, can, toggleStr,
 }: CustomRolesPanelProps): JSX.Element {
+  const { t } = useTranslation('orgs');
   return (
     <>
       <h3 className="u-fs-14 u-mt-5 u-flex u-items-center u-gap-2">
-        <PencilIcon size={15} /> Custom roles <span className="customroles-muted">· define your own</span>
+        <PencilIcon size={15} /> {t('customRolesHeading')} <span className="customroles-muted">{t('customRolesHeadingSuffix')}</span>
       </h3>
       <p className="customroles-muted">
-        Bundle any scopes into a named role, then assign it to members and groups exactly like a
-        built-in role.
+        {t('customRolesIntro')}
       </p>
       <form onSubmit={onCreateRole} className="action-bar u-wrap u-mb-2">
-        <input value={roleName} onChange={(e) => setRoleName(e.target.value)} placeholder="New role name" aria-label="New custom role name" />
+        <input value={roleName} onChange={(e) => setRoleName(e.target.value)} placeholder={t('newRolePlaceholder')} aria-label={t('newRoleAriaLabel')} />
         <button
           type="submit"
           className="primary"
           disabled={!roleName.trim() || roleScopes.size === 0 || !can('host:roles:manage')}
-          title={can('host:roles:manage') ? undefined : 'Requires host:roles:manage'}
+          title={can('host:roles:manage') ? undefined : t('createRoleRequiresScope')}
         >
-          Create role
+          {t('createRole')}
         </button>
       </form>
       <div className="u-flex u-wrap u-gap-1-5 u-mb-3">
@@ -59,19 +60,19 @@ export function CustomRolesPanel({
         ))}
       </div>
       {customRoles.length === 0 ? (
-        <p className="customroles-muted">No custom roles yet.</p>
+        <p className="customroles-muted">{t('noCustomRolesYet')}</p>
       ) : (
         customRoles.map((r) => (
           <div key={r.roleId} className="surface-card u-mb-2">
             <div className="u-flex u-justify-between u-items-baseline u-gap-2">
               <strong>{r.name}</strong>
-              <button type="button" className="secondary" disabled={!can('host:roles:manage')} onClick={() => void onDeleteRole(r)} aria-label={`Delete role ${r.name}`}>
+              <button type="button" className="secondary" disabled={!can('host:roles:manage')} onClick={() => void onDeleteRole(r)} aria-label={t('deleteRoleAriaLabel', { name: r.name })}>
                 <TrashIcon size={13} />
               </button>
             </div>
             <div className="u-flex u-wrap u-gap-1-5 u-mt-1-5">
               {r.scopes.length === 0 ? (
-                <span className="chip chip--muted">no scopes</span>
+                <span className="chip chip--muted">{t('noScopes')}</span>
               ) : (
                 r.scopes.map((s) => (
                   <span key={s} className={`${NEUTRAL_CHIP} u-fs-11`}>{s}</span>

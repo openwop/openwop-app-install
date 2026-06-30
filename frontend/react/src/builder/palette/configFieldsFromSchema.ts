@@ -33,6 +33,7 @@
  */
 
 import type { ConfigField } from './nodeCatalog.js';
+import i18n from '../../i18n/index.js';
 
 export function configFieldsFromSchema(schema: unknown): ConfigField[] {
   if (!schema || typeof schema !== 'object') return [];
@@ -88,7 +89,7 @@ export function configFieldsFromSchema(schema: unknown): ConfigField[] {
       : undefined;
     const baseDescription = typeof ps.description === 'string' ? ps.description : undefined;
     const help = itemsPattern
-      ? `${baseDescription ?? ''}${baseDescription ? ' ' : ''}(each line MUST match: ${itemsPattern})`
+      ? `${baseDescription ?? ''}${baseDescription ? ' ' : ''}${i18n.t('builder:eachLineMustMatch', { pattern: itemsPattern })}`
       : baseDescription;
     fields.push({
       key,

@@ -15,12 +15,19 @@
  * `payload.outputs.output` as the resumeValue. We just present it.
  */
 
+import { useTranslation } from 'react-i18next';
 import { BanIcon, CheckIcon, XIcon } from '../ui/icons/index.js';
 import { isRecord } from './lib/typeGuards.js';
 import type { InterruptHistoryEntry } from './types.js';
+import { formatNumber, formatDate } from '../i18n/format.js';
+import i18n from '../i18n/index.js';
 
 interface Props {
   entry: InterruptHistoryEntry;
+  /** Friendly gate name (builder label, e.g. "Legal review"). When present it
+   *  titles the row instead of the raw `approval_3` node id, which still shows
+   *  as a muted code chip in the meta line for traceability. */
+  nodeName?: string;
 }
 
 type IconKind = 'check' | 'x' | 'ban';
@@ -56,7 +63,8 @@ function StatusIcon({ kind, color }: { kind: IconKind; color: string }): JSX.Ele
   return <BanIcon size={14} style={style} />;
 }
 
-export function HitlDecisionCard({ entry }: Props): JSX.Element {
+export function HitlDecisionCard({ entry, nodeName }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   const verb = KIND_VERB[entry.kind] ?? 'Resolved';
   const icon = KIND_ICON[entry.kind] ?? 'check';
   const color = KIND_COLOR[entry.kind] ?? 'var(--color-success)';
@@ -75,9 +83,12 @@ export function HitlDecisionCard({ entry }: Props): JSX.Element {
   const effectiveColor = rejected ? 'var(--color-danger)' : color;
 
   // ARIA landmark label so screen-reader users can navigate the row
-  // as a single coherent unit ("HITL decision: Approved Clarity critic")
-  // rather than reading each chunk independently.
-  const ariaLabel = `HITL decision: ${effectiveVerb}${decisionLabel ? `, ${decisionLabel}` : ''}`;
+  // as a single coherent unit ("HITL decision: Approved Legal review")
+  // rather than reading each chunk independently. Prefer the friendly gate
+  // name; fall back to the user's pick, then to the verb alone.
+  const ariaLabel = (nodeName ?? decisionLabel)
+    ? t('hitlDecisionAriaWithLabel', { verb: effectiveVerb, label: nodeName ?? decisionLabel })
+    : t('hitlDecisionAria', { verb: effectiveVerb });
 
   return (
     <div
@@ -85,31 +96,27 @@ export function HitlDecisionCard({ entry }: Props): JSX.Element {
       aria-label={ariaLabel}
       className="hitl-card"
       style={{
-        background: `color-mix(in oklch, ${effectiveColor} 8%, transparent)`,
-        // Rejection state uses a 2px border for non-color differentiation;
-        // success / muted states use 1px. Pairs the color cue with a
-        // line-weight cue so high-contrast users still see the distinction.
-        border: `${rejected ? 2 : 1}px solid color-mix(in oklch, ${effectiveColor} 40%, var(--color-border))`,
+        background: `color-mix(in oklch, ${effectiveColor} 7%, transparent)`,
+        border: `1px solid color-mix(in oklch, ${effectiveColor} 26%, var(--color-border))`,
+        // Signature: a status-colored left accent bar — reads the outcome
+        // (approved / rejected / cancelled) at a glance, and pairs the color cue
+        // with a line-weight cue (thicker on reject) for high-contrast users.
+        borderInlineStartWidth: rejected ? '4px' : '3px',
+        borderInlineStartColor: effectiveColor,
       }}
     >
-      <div className="u-flex u-items-center u-gap-2">
-        <StatusIcon kind={effectiveIcon} color={effectiveColor} />
-        <strong style={{ color: effectiveColor }}>{effectiveVerb}</strong>
-        {decisionLabel && (
-          <span className="u-text">{decisionLabel}</span>
-        )}
-        <span className="muted u-ml-auto u-fs-11">
-          node <code>{entry.nodeId}</code>
-          {entry.resolvedAt && (
-            <> · {formatRelative(entry.resolvedAt)}</>
-          )}
+      <div className="hitl-card__row">
+        <span
+          className="hitl-card__status"
+          style={{ color: effectiveColor, background: `color-mix(in oklch, ${effectiveColor} 15%, transparent)` }}
+        >
+          <StatusIcon kind={effectiveIcon} color={effectiveColor} /> {effectiveVerb}
         </span>
+        {nodeName && <span className="hitl-card__gate">{nodeName}</span>}
+        {decisionLabel && <span className="hitl-card__pick muted">{decisionLabel}</span>}
+        {entry.resolvedAt && <span className="hitl-card__time muted">{formatRelative(entry.resolvedAt)}</span>}
       </div>
-      {comment && (
-        <div className="muted hitl-comment">
-          “{comment}”
-        </div>
-      )}
+      {comment && <div className="muted hitl-comment">“{comment}”</div>}
     </div>
   );
 }
@@ -151,9 +158,9 @@ function formatRelative(iso: string): string {
   const m = Math.floor(diffMs / 60_000);
   const h = Math.floor(diffMs / 3_600_000);
   const d = Math.floor(diffMs / 86_400_000);
-  if (m < 1) return 'just now';
-  if (m < 60) return `${m}m ago`;
-  if (h < 24) return `${h}h ago`;
-  if (d < 7) return `${d}d ago`;
-  return new Date(iso).toLocaleDateString();
+  if (m < 1) return i18n.t('chat:justNow');
+  if (m < 60) return i18n.t('chat:minutesAgo', { count: formatNumber(m) });
+  if (h < 24) return i18n.t('chat:hoursAgo', { count: formatNumber(h) });
+  if (d < 7) return i18n.t('chat:daysAgo', { count: formatNumber(d) });
+  return formatDate(new Date(iso));
 }

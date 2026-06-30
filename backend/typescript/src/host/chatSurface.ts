@@ -78,7 +78,9 @@ export function createChatSurface(scope: BundleScope): ChatSurface {
     await ensureSession(storage, sessionId, now);
     const content = JSON.stringify({ role, content: text, ...(meta ? { meta: JSON.parse(meta) } : {}) });
     try {
-      await storage.appendChatMessage({ messageId, sessionId, role, content, meta, createdAt: now });
+      // Host-written workflow activity has no human author (ADR 0102 Phase 2) →
+      // null author ⇒ owner-writable.
+      await storage.appendChatMessage({ messageId, sessionId, role, content, meta, authorSubject: null, createdAt: now });
     } catch (err) {
       // Duplicate messageId (deterministic from idempotencyKey) → idempotent
       // replay; swallow. Mirrors the route's duplicate detection across sqlite

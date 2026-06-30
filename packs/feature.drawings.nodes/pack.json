@@ -1,0 +1,20 @@
+{
+  "name": "feature.drawings.nodes",
+  "version": "1.0.0",
+  "description": "Drawings canvas producer node pack (ADR 0153 Phase 4). The `render` node emits a typed `canvas.drawing` artifact — a constrained vector scene { width?, height?, shapes[] } of typed shapes — that flows through the run-output producer (ADR 0083) and renders inline in the chat artifact workbench as safe inline SVG. Constrained typed JSON, never raw markup; pure transform; replay-safe.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "drawings", "canvas", "svg", "illustration"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.drawings.nodes.render",
+      "version": "1.0.0",
+      "label": "Render drawing",
+      "description": "Emit a `canvas.drawing` artifact. Inputs: { drawing } (or `source` JSON) = { title?, width?, height?, shapes: [{ kind, ...geometry, fill?, stroke?, ... }] }. kind ∈ rect|circle|ellipse|line|polyline|polygon|text. Output: a typed canvas.drawing artifact. Pure transform.",
+      "category": "transform",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

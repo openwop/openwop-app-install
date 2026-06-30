@@ -21,12 +21,16 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type { AuditVerifyResult, RunEventDoc } from '@openwop/openwop';
 import { getSdkClient, getCapabilities, pollEvents } from '../client/runsClient.js';
 import { ArrowLeftIcon, CheckIcon, XIcon } from '../ui/icons/index.js';
+import { Notice } from '../ui/Notice.js';
+import { formatNumber } from '../i18n/format.js';
 
 export function RunAuditPage() {
+  const { t } = useTranslation('runs');
   const { runId = '' } = useParams();
   const [auditProfile, setAuditProfile] = useState<boolean | null>(null);
   const [events, setEvents] = useState<RunEventDoc[]>([]);
@@ -119,38 +123,32 @@ export function RunAuditPage() {
   return (
     <section className="card">
       <div className="audit-page__head">
-        <h1 className="u-flex-1 u-m-0">Audit log — <code className="u-fs-14">{runId}</code></h1>
-        <Link to={`/runs/${runId}`} className="linklike u-fs-13"><ArrowLeftIcon size={13} /> Back to run</Link>
+        <h1 className="u-flex-1 u-m-0">{t('auditLogHeading')} <code className="u-fs-14">{runId}</code></h1>
+        <Link to={`/runs/${runId}`} className="inline-link u-fs-13 u-ink-3"><ArrowLeftIcon size={13} /> {t('backToRun')}</Link>
       </div>
       <p className="muted u-fs-13 u-mt-0">
-        Append-only hash chain + Merkle-rooted signed checkpoints per the{' '}
-        <code>openwop-audit-log-integrity</code> profile.
-        Verification re-runs <code>client.audit.verify(0, {lastSeq})</code>
-        on demand and the export bundles the full <code>AuditVerifyResult</code>{' '}
-        for offline re-verification via{' '}
-        <code>scripts/verify-audit-checkpoints.mjs</code>.
+        {t('auditIntroPre')}<code>openwop-audit-log-integrity</code>{t('auditIntroMid1')}<code>client.audit.verify(0, {lastSeq})</code>{t('auditIntroMid2')}<code>AuditVerifyResult</code>{t('auditIntroMid3')}<code>scripts/verify-audit-checkpoints.mjs</code>{t('auditIntroPost')}
       </p>
 
       {auditProfile === false && (
-        <div className="alert warning">
-          <strong>Host does not advertise <code>openwop-audit-log-integrity</code>.</strong>{' '}
-          The audit endpoint is unavailable. Configure the host to advertise the profile via{' '}
-          <code>auth.profiles</code> on <code>/.well-known/openwop</code> to enable verification.
-        </div>
+        <Notice variant="warning">
+          <strong>{t('auditProfileMissingPre')}<code>openwop-audit-log-integrity</code>{t('auditProfileMissingPost')}</strong>{' '}
+          {t('auditEndpointUnavailablePre')}<code>auth.profiles</code>{t('auditEndpointUnavailableMid')}<code>/.well-known/openwop</code>{t('auditEndpointUnavailablePost')}
+        </Notice>
       )}
 
       {auditProfile === true && (
         <>
-          <div className="button-row u-mb-3">
+          <div className="action-bar u-mb-3">
             <button type="button" onClick={() => void runVerify()} disabled={verifying || lastSeq === 0}>
-              {verifying ? 'Verifying…' : 'Re-verify'}
+              {verifying ? t('verifying') : t('reVerify')}
             </button>
             <button type="button" className="secondary" onClick={onDownload} disabled={!result}>
-              Download checkpoints (JSON)
+              {t('downloadCheckpoints')}
             </button>
           </div>
 
-          {error && <div className="alert error">{error}</div>}
+          {error && <Notice variant="error">{error}</Notice>}
 
           {result && (
             <>
@@ -158,33 +156,33 @@ export function RunAuditPage() {
                 className={`alert ${result.chainValid ? 'success' : 'error'} u-mb-3`}
                 role="status"
               >
-                <strong>{result.chainValid ? <><CheckIcon size={14} /> Hash chain valid</> : <><XIcon size={14} /> Hash chain INVALID</>}</strong>
+                <strong>{result.chainValid ? <><CheckIcon size={14} /> {t('hashChainValid')}</> : <><XIcon size={14} /> {t('hashChainInvalid')}</>}</strong>
                 {' — '}
-                seq {result.fromSeq}–{result.toSeq} ·{' '}
-                {result.checkpoints.length} checkpoint{result.checkpoints.length === 1 ? '' : 's'}
+                {t('auditSeqRange', { from: formatNumber(result.fromSeq), to: formatNumber(result.toSeq) })} ·{' '}
+                {t('checkpointCount', { count: result.checkpoints.length })}
                 {typeof result.checkpointsValid === 'boolean' && (
                   <>
                     {' · '}
-                    checkpoint signatures {result.checkpointsValid ? 'valid' : 'INVALID'}
+                    {result.checkpointsValid ? t('checkpointSignaturesValid') : t('checkpointSignaturesInvalid')}
                   </>
                 )}
                 {result.anomalies.length > 0 && (
                   <>
                     {' · '}
-                    {result.anomalies.length} anomal{result.anomalies.length === 1 ? 'y' : 'ies'}
+                    {t('anomalyCount', { count: result.anomalies.length })}
                   </>
                 )}
               </div>
 
               {result.anomalies.length > 0 && (
                 <div className="card audit-anomaly-card">
-                  <h2 className="u-fs-16 u-mt-0">Anomalies</h2>
+                  <h2 className="u-fs-16 u-mt-0">{t('anomaliesHeading')}</h2>
                   <table className="audit-anomaly-table">
                     <thead>
                       <tr>
-                        <th>at seq</th>
-                        <th>expected prevHash</th>
-                        <th>actual prevHash</th>
+                        <th>{t('anomalyColAtSeq')}</th>
+                        <th>{t('anomalyColExpected')}</th>
+                        <th>{t('anomalyColActual')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -202,28 +200,26 @@ export function RunAuditPage() {
 
               <div className="card u-mb-0">
                 <h2 className="u-fs-16 u-mt-0">
-                  Checkpoint timeline ({result.checkpoints.length})
+                  {t('checkpointTimeline', { count: formatNumber(result.checkpoints.length) })}
                 </h2>
                 {result.checkpoints.length === 0 ? (
                   <p className="muted u-fs-12">
-                    No signed checkpoints in this range. The host emits a checkpoint per
-                    its configured cadence (typically every <code>capabilities.audit.checkpointInterval</code>{' '}
-                    events); short or in-progress runs may not have one yet.
+                    {t('noCheckpointsPre')}<code>capabilities.audit.checkpointInterval</code>{t('noCheckpointsPost')}
                   </p>
                 ) : (
                   <ol className="audit-checkpoint-list">
                     {result.checkpoints.map((c) => (
                       <li key={c.atSequence} className="audit-checkpoint-row">
-                        <span className="muted">seq {c.atSequence}</span>
+                        <span className="muted">{t('seqPrefix', { seq: formatNumber(c.atSequence) })}</span>
                         <div>
                           <div className="audit-checkpoint-row__field">
-                            <strong>checkpoint:</strong> {c.checkpoint}
+                            <strong>{t('checkpointFieldCheckpoint')}</strong> {c.checkpoint}
                           </div>
                           <div className="audit-checkpoint-row__field">
-                            <strong>merkleRoot:</strong> {c.merkleRoot}
+                            <strong>{t('checkpointFieldMerkleRoot')}</strong> {c.merkleRoot}
                           </div>
                           <div className="audit-checkpoint-row__field">
-                            <strong>signature:</strong> {c.signature}
+                            <strong>{t('checkpointFieldSignature')}</strong> {c.signature}
                           </div>
                         </div>
                       </li>
@@ -236,7 +232,7 @@ export function RunAuditPage() {
 
           {!result && !error && auditProfile === true && (
             <p className="muted u-fs-13">
-              {lastSeq === 0 ? 'Loading run events…' : 'Running initial verification…'}
+              {lastSeq === 0 ? t('loadingRunEvents') : t('runningInitialVerification')}
             </p>
           )}
         </>

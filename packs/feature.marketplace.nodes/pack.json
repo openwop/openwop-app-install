@@ -1,6 +1,6 @@
 {
   "name": "feature.marketplace.nodes",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Marketplace feature node pack (ADR 0022 / ADR 0014) — a READ-ONLY search node over the ctx.features.marketplace surface shipped by the Marketplace feature package. Finds an installable pack by name/keyword/capability from inside a workflow. Install is deliberately NOT a node — it mutates process-global state and is admin/host:*-scoped, so it stays a privileged REST action.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,6 +12,15 @@
       "version": "1.0.0",
       "label": "Marketplace Search",
       "description": "Searches installable + installed packs by name/keyword/capability over ctx.features.marketplace. Read-only — never installs.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.marketplace.nodes.listings",
+      "version": "1.0.0",
+      "label": "Marketplace Listings",
+      "description": "Lists ALL marketplace packs + install status over ctx.features.marketplace.listings (no query filter). Output: { listings, total }. Read-only — never installs.",
       "category": "integration",
       "role": "action",
       "capabilities": []

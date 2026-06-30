@@ -6,14 +6,14 @@
  */
 
 import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
-const PORT = 18695;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 let server: http.Server;
 
 beforeAll(async () => {
@@ -21,8 +21,8 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'cms', 'kb', 'sharing']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -129,6 +129,25 @@ describe('sharing — public resolve (unauthenticated)', () => {
     expect(card.status).toBe(200);
     expect(card.body.title).toBe('Secret Draft');
     expect(card.body.description).toBe('Card description text.');
+  });
+
+  it('PUB-7: enforces a per-link view cap on content (card preview is exempt)', async () => {
+    const { owner, orgId } = await ownerWithMember('viewer');
+    const pageId = await draftPage(owner, orgId, 'Capped');
+    const token = (await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, maxViews: 2 })).body.token;
+    const anon = client();
+    expect((await anon.get(shared(token))).status).toBe(200);  // view 1
+    expect((await anon.get(shared(token))).status).toBe(200);  // view 2
+    expect((await anon.get(shared(token))).status).toBe(404);  // over the cap → uniform 404
+    // The card/preview path does NOT consume or enforce the cap (an unfurl must not burn views).
+    expect((await anon.get(shared(token, '/card'))).status).toBe(200);
+  });
+
+  it('PUB-7: rejects a non-positive / oversized maxViews at mint (400)', async () => {
+    const { owner, orgId } = await ownerWithMember('viewer');
+    const pageId = await draftPage(owner, orgId, 'BadCap');
+    expect((await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, maxViews: 0 })).status).toBe(400);
+    expect((await owner.post(links(orgId), { resourceType: 'cms_page', resourceId: pageId, maxViews: 2.5 })).status).toBe(400);
   });
 
   it('resolves a KB-collection overview by token', async () => {

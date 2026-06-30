@@ -8,12 +8,26 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { getAgentRegistry } from '../src/executor/agentRegistry.js';
-import { runAgentDispatchLive, type LiveDispatchDeps } from '../src/host/agentDispatch.js';
-import { builtinAgentToolIds, createAgentToolProvider } from '../src/host/agentToolProvider.js';
+import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
+import { runAgentDispatchLive, compileAgentTools, type LiveDispatchDeps } from '../src/host/agentDispatch.js';
+import { builtinAgentToolIds, builtinToolNamespaces, createAgentToolProvider } from '../src/host/agentToolProvider.js';
+import { evaluateToolPermission } from '../src/host/agentToolPermissions.js';
 import type { AiToolCallResult } from '../src/executor/types.js';
 
 afterEach(() => getAgentRegistry()._resetForTest());
+
+describe('builtinToolNamespaces (ADR 0102)', () => {
+  it('covers every builtin tool id and permits them under the per-tool gate', () => {
+    const namespaces = builtinToolNamespaces();
+    expect(namespaces).toEqual(expect.arrayContaining(['openwop:knowledge', 'openwop:ai', 'openwop:core', 'openwop:feature']));
+    // Every builtin tool prefix-matches one of the namespace tokens → allowed,
+    // proving the seed/backfill grant actually unblocks the host's builtins.
+    const perms = { read: [...namespaces], write: [], never: [] };
+    for (const id of builtinAgentToolIds()) {
+      expect(evaluateToolPermission(id, perms).allowed).toBe(true);
+    }
+  });
+});
 
 describe('agent tool provider (A2)', () => {
   it('exposes openwop:knowledge.search and executes it against the real surface', async () => {
@@ -72,5 +86,33 @@ describe('agent tool provider (A2)', () => {
     expect(executedResults).toHaveLength(1);
     expect(JSON.parse(executedResults[0]!)).toHaveProperty('chunks');
     expect((res.result as { content?: string }).content).toBe('Grounded answer.');
+  });
+
+  it('resolves the FULL deep-research toolset (web + http.fetch + both rag retrievers)', () => {
+    const provider = createAgentToolProvider({ tenantId: 'tenant-a' });
+    const ids = builtinAgentToolIds();
+    for (const id of ['openwop:ai.research.web', 'openwop:core.openwop.http.fetch', 'openwop:core.rag.retriever-basic', 'openwop:core.rag.retriever-contextual-compression']) {
+      expect(ids).toContain(id);
+      expect(provider.resolveTool(id)?.inputSchema).toBeTypeOf('object');
+    }
+
+    // The crux for ADR 0089: the deep-research agent's ENTIRE allowlist now
+    // §A14-intersects a non-empty tool surface, so the conversation/dispatch
+    // tool loop engages (no narration-only fallback). (Not executed here —
+    // fetch/research make live network calls; rag retrieval hits the surface.)
+    const allow = ['openwop:ai.research.web', 'openwop:core.openwop.http.fetch', 'openwop:core.rag.retriever-basic', 'openwop:core.rag.retriever-contextual-compression'];
+    const compiled = compileAgentTools(
+      { agentId: 'r', persona: 'Researcher', toolAllowlist: allow } as unknown as ResolvedAgentManifest,
+      builtinAgentToolIds(),
+      provider.resolveTool,
+    );
+    expect(compiled.map((c) => c.def.name).sort()).toEqual([...allow].sort());
+  });
+
+  it('the rag retriever ids execute against the real lexical knowledge surface', async () => {
+    const provider = createAgentToolProvider({ tenantId: 'tenant-a' });
+    const out = await provider.executeTool({ name: 'openwop:core.rag.retriever-basic', input: { query: 'workflow' } });
+    expect(out.isError).toBeFalsy();
+    expect(JSON.parse(out.content)).toHaveProperty('chunks'); // backed by the knowledge surface (no vector store needed)
   });
 });

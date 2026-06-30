@@ -14,6 +14,7 @@
 
 import { getSdkClient } from './runsClient.js';
 import { authedHeaders, config, fetchOpts } from './config.js';
+import { cachedRead } from './requestCache.js';
 import type {
   AgentInventoryEntry,
   AgentPackSummary as SdkAgentPackSummary,
@@ -28,9 +29,14 @@ export type AgentPackSummary = SdkAgentPackSummary;
  *  `capabilities.agents.manifestRuntime` — call sites care about
  *  "what can I show in the UI", not about the discovery gate. */
 export async function listAgents(): Promise<readonly AgentEntry[]> {
-  const resp = await getSdkClient().agents.list();
-  if (!resp) return [];
-  return resp.agents;
+  // Coalesce concurrent reads (every chat tab's @-mention picker mounts one) into
+  // one request. TTL 0 = in-flight-only, so a create/delete reflects on the next
+  // read — the dedup only collapses the simultaneous mount burst that 429s.
+  return cachedRead('agents.list', 0, async () => {
+    const resp = await getSdkClient().agents.list();
+    if (!resp) return [];
+    return resp.agents;
+  });
 }
 
 /** Fetch a single agent by id. Returns `null` when the host doesn't

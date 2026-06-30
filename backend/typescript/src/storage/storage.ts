@@ -113,7 +113,12 @@ export interface Storage {
   getInterrupt(interruptId: string): Promise<InterruptRecord | null>;
   getInterruptByToken(token: string): Promise<InterruptRecord | null>;
   getInterruptByNode(runId: string, nodeId: string): Promise<InterruptRecord | null>;
-  resolveInterrupt(interruptId: string, resolvedValue: unknown, resolvedAt: string): Promise<void>;
+  /** Resolve an interrupt — CONDITIONAL on it still being open (resolved_at
+   *  IS NULL). Returns true iff THIS call won the resolve (changed a row), so a
+   *  concurrent lazy-timeout + periodic-sweep (or two votes) can't both emit
+   *  `interrupt.resolved`/`run.failed` (ENG-6). An already-resolved interrupt
+   *  returns false and is left untouched. */
+  resolveInterrupt(interruptId: string, resolvedValue: unknown, resolvedAt: string): Promise<boolean>;
   listOpenInterrupts(runId: string): Promise<readonly InterruptRecord[]>;
   /** All UNRESOLVED interrupts across runs (oldest first, up to `limit`).
    *  Backs the RFC 0093 §D approval-gate timeout sweep
@@ -314,6 +319,23 @@ export interface Storage {
     dateUtc: string,
   ): Promise<{ inputTokens: number; outputTokens: number }>;
 
+  // ── media-generation usage (ADR 0106 — per-org cost governance) ──
+  /** Accumulate a tenant's media-generation usage for a UTC date — `ttsChars`
+   *  (text-to-speech characters) and `sttBytes` (speech-to-text decoded input
+   *  bytes). Tenant = workspace = org at root (ADR 0015). Upserts (adds). */
+  incrementMediaUsage(
+    tenantId: string,
+    dateUtc: string,
+    ttsChars: number,
+    sttBytes: number,
+  ): Promise<void>;
+  /** Read a tenant's accumulated media usage on a UTC date.
+   *  Returns `{ ttsChars: 0, sttBytes: 0 }` when no row exists. */
+  getMediaUsage(
+    tenantId: string,
+    dateUtc: string,
+  ): Promise<{ ttsChars: number; sttBytes: number }>;
+
   // ── envelope-correlation cache (cross-process replay safety) ──
   /**
    * Read back a previously-accepted envelope outcome for a given
@@ -365,21 +387,44 @@ export interface Storage {
    *  programming error, not a wire-level conflict). */
   createChatSession(record: ChatSessionRecord): Promise<void>;
   getChatSession(tenantId: string, sessionId: string): Promise<ChatSessionRecord | null>;
-  /** Patch the mutable fields (title, updatedAt, messageCount).
+  /** Patch the mutable fields (title, titleSource, updatedAt, messageCount).
    *  `sessionId`/`tenantId`/`createdAt` are immutable. */
   updateChatSession(
     tenantId: string,
     sessionId: string,
-    patch: Partial<Pick<ChatSessionRecord, 'title' | 'updatedAt' | 'messageCount'>>,
+    patch: Partial<Pick<ChatSessionRecord, 'title' | 'titleSource' | 'updatedAt' | 'messageCount'>>,
   ): Promise<void>;
   /** Cascade-delete: drops both the session header AND all messages.
    *  Returns true if a row was removed, false if absent (idempotent). */
   deleteChatSession(tenantId: string, sessionId: string): Promise<boolean>;
-  /** Load every message for a session in insertion order. */
-  listChatSessionMessages(sessionId: string): Promise<readonly ChatMessageRecord[]>;
+  /** Load messages for a session in insertion order (`created_at` then
+   *  `message_id`, ascending — the chat replay order).
+   *
+   *  With no `opts`, returns the full thread (unchanged legacy behavior).
+   *  With `opts.limit = N`, returns up to the N MOST-RECENT messages, ascending
+   *  — and when `opts.before` is given, the N messages strictly OLDER than that
+   *  cursor. This backs "load earlier messages" reverse pagination (ADR 0043
+   *  Phase 3b); the route layer derives the next cursor + has-more from the
+   *  result. The cursor is a `(createdAt, messageId)` tuple so messages sharing
+   *  a millisecond timestamp page deterministically. */
+  listChatSessionMessages(
+    sessionId: string,
+    opts?: { limit?: number; before?: { createdAt: string; messageId: string } },
+  ): Promise<readonly ChatMessageRecord[]>;
   /** Append a single message. Caller updates `chat_sessions.message_count`
    *  via `updateChatSession()` in the same logical operation. */
   appendChatMessage(record: ChatMessageRecord): Promise<void>;
+  /** Update an existing message's `content` (+ optional `meta`) in place, keyed by
+   *  `(sessionId, messageId)`. `created_at`/`role` are immutable (thread order is
+   *  stable). Returns true if a row was updated, false if no such message exists.
+   *  Backs re-saving a run-backed `workflow_run` message as its state evolves
+   *  (ADR 0067) — append can't (the messageId is unique). Does NOT touch
+   *  `message_count` (no new message). */
+  updateChatMessageContent(sessionId: string, messageId: string, content: string, meta: string | null): Promise<boolean>;
+  /** The `author_subject` of a single message (for the edit-authz gate, ADR 0102
+   *  Phase 2), or `undefined` if no such message exists. A present row with a null
+   *  author returns `{ authorSubject: null }` (legacy/anon ⇒ owner-writable). */
+  getChatMessageAuthor(sessionId: string, messageId: string): Promise<{ authorSubject: string | null } | undefined>;
 
   // ── notifications (PR #143) ──
   /**
@@ -396,6 +441,15 @@ export interface Storage {
   insertNotification(record: NotificationRecord): Promise<void>;
   listNotifications(filter: {
     tenantId: string;
+    /** ADR 0050 — when set, return this user's addressed rows PLUS the tenant's
+     *  broadcast rows (`recipient_user_id IS NULL`). Omit for an admin/legacy
+     *  view of every tenant row. */
+    recipientUserId?: string;
+    /** ADR 0050 Phase 3 — the caller's RBAC roles. A role-addressed row
+     *  (`recipient_role` set) is visible only when its role is in this set;
+     *  empty/absent ⇒ role rows are hidden (default-deny). Only consulted
+     *  alongside `recipientUserId` (the scoped inbox view). */
+    recipientRoles?: readonly string[];
     status?: NotificationStatus | readonly NotificationStatus[];
     /** Exclude `archived` rows by default — the inbox view doesn't
      *  surface them. Pass `includeArchived: true` from the Archived tab. */
@@ -415,8 +469,11 @@ export interface Storage {
     status: NotificationStatus,
     now: string,
   ): Promise<NotificationRecord | null>;
-  /** Mark every unread row for the tenant as read. Returns the count touched. */
-  markAllNotificationsRead(tenantId: string, now: string): Promise<number>;
+  /** Mark every unread row for the tenant as read. Returns the count touched.
+   *  ADR 0050 — when `recipientUserId` is given, only rows that user can see
+   *  (their addressed rows + tenant broadcasts) are cleared, never another
+   *  member's addressed items. */
+  markAllNotificationsRead(tenantId: string, now: string, recipientUserId?: string, recipientRoles?: readonly string[]): Promise<number>;
   deleteNotification(notificationId: string): Promise<boolean>;
   /** Drop every notification owned by a tenant (used by account-delete). */
   deleteAllTenantNotifications(tenantId: string): Promise<number>;
@@ -600,6 +657,15 @@ export interface Storage {
   publish(channel: string, payload: string): Promise<void>;
   /** Subscribe to a logical `channel`. Returns an async unsubscribe. */
   subscribe(channel: string, handler: (payload: string) => void): Promise<() => Promise<void>>;
+
+  // ── app metadata (ADR 0052) ──
+  // App-tier key/value store in `__app_meta`, distinct from the schema-version
+  // axis. Records `app_version` (fresh-vs-upgrade) + `app_migration_version`
+  // (the §D5 app-migration counter).
+  /** Read an `__app_meta` value, or null when absent. */
+  getAppMeta(key: string): Promise<string | null>;
+  /** Upsert an `__app_meta` value (stamps `updated_at`). */
+  setAppMeta(key: string, value: string): Promise<void>;
 
   // ── lifecycle ──
   close(): Promise<void>;

@@ -17,7 +17,7 @@
  */
 
 import { deleteRosterEntry, getRosterEntry } from './rosterService.js';
-import { deleteBoard, listBoards } from './kanbanService.js';
+import { deleteBoard, listBoardsForSubject } from './kanbanService.js';
 import { deleteJob, listJobsByRoster } from './schedulingService.js';
 import { deleteApprovalsForRoster } from './approvalService.js';
 import { deleteChart, getChart, putChart } from './orgChartService.js';
@@ -25,6 +25,8 @@ import { unpinAgentsForTenant } from '../features/profiles/profilesService.js';
 import { deleteAgentProfile } from './agentProfileService.js';
 import { clearMemoryScope } from './inMemorySurfaces.js';
 import { agentMemoryScope } from './agentMemoryAdapter.js';
+import { clearSubjectNotes } from './subjectMemory.js';
+import { clearTwinGrantsForAgent } from './twinService.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 
@@ -56,7 +58,7 @@ export async function deleteRosterMemberCascade(
   const entry = await getRosterEntry(rosterId);
 
   // Boards (and their cards, via deleteBoard's own cascade) bound to this member.
-  const boards = (await listBoards(tenantId)).filter((b) => b.rosterId === rosterId);
+  const boards = await listBoardsForSubject(tenantId, { kind: 'agent', id: rosterId });
   for (const b of boards) await deleteBoard(b.id);
 
   // Schedule jobs owned by this member.
@@ -110,7 +112,12 @@ export async function deleteRosterMemberCascade(
   // its per-agent memory namespace (curated notes + turn summaries), else they
   // orphan forever (storage bloat + a data-retention/erasure gap).
   const profileDeleted = await deleteAgentProfile(tenantId, rosterId);
-  const memoryEntriesCleared = clearMemoryScope(tenantId, agentMemoryScope(rosterId));
+  // Clear BOTH the durable curated notes (ADR 0041 source of truth) and the
+  // in-memory recall scope (turn summaries + the notes' recall mirror).
+  const durableNotesCleared = await clearSubjectNotes(tenantId, { kind: 'agent', id: rosterId });
+  const memoryEntriesCleared = clearMemoryScope(tenantId, agentMemoryScope(rosterId)) + durableNotesCleared;
+  // ADR 0044 — the twin link dies with the profile; clear its consent grants too.
+  await clearTwinGrantsForAgent(tenantId, rosterId);
 
   log.info('roster_member_cascade_deleted', {
     tenantId, rosterId, boards: boards.length, schedules: jobs.length, approvals, chatAgentDeleted, orgChartUpdated, profileDeleted, memoryEntriesCleared,

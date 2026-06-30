@@ -28,43 +28,38 @@
  * though one side is not yet implementable end-to-end.
  */
 
+import { useTranslation } from 'react-i18next';
+
 export function A2APeerPanel() {
+  const { t } = useTranslation('peers');
   return (
-    <div className="card">
+    <div className="surface-card">
       <h2>
-        A2A peers{' '}
+        {t('title')}{' '}
         <span className="muted u-fs-12 u-fw-400">
           (<code>spec/v1/a2a-integration.md</code>)
         </span>
       </h2>
       <p className="muted u-fs-13">
-        Agent2Agent (A2A) composition lets an openwop host appear to remote
-        callers as an A2A agent (each Workflow becomes an{' '}
-        <code>AgentSkill</code>; each run becomes a <code>Task</code>) and
-        lets workflows dispatch into remote A2A peers.{' '}
-        <strong>Not advertised by this host.</strong>
+        {t('introLead')}{' '}
+        <code>{t('introAgentSkill')}</code>{t('introMid')} <code>{t('introTask')}</code>{t('introTail')}{' '}
+        <strong>{t('notAdvertised')}</strong>
       </p>
       <p className="muted u-fs-12">
-        A2A composition is documented as <em>stable</em> in{' '}
-        <code>spec/v1/a2a-integration.md</code> but the capability
-        advertisement shape is still a candidate (the leading shape is{' '}
-        <code>{'{supported: true, agentCardUrl: "…"}'}</code>) and{' '}
-        <code>capabilities.schema.json</code> does not yet define a{' '}
-        <code>capabilities.a2a</code> block. The reference host does not
-        expose itself as an A2A agent and no <code>core.a2a.*</code>{' '}
-        NodeModule is registered, so a peer browser has nothing to
-        enumerate against today.
+        {t('statusLead')} <em>{t('statusStable')}</em> {t('statusMid1')}{' '}
+        <code>spec/v1/a2a-integration.md</code> {t('statusMid2')}{' '}
+        <code>{'{supported: true, agentCardUrl: "…"}'}</code>{t('statusMid3')}{' '}
+        <code>capabilities.schema.json</code> {t('statusMid4')}{' '}
+        <code>{t('statusBlock')}</code> {t('statusTail')} <code>core.a2a.*</code>{' '}
+        {t('statusNodeModule')}
       </p>
       <p className="muted u-fs-12">
-        Path forward — published as{' '}
-        <code>docs/myndhyve-round-2-handoff.md</code> §3: a non-steward
-        host publishing an A2A AgentCard (MyndHyve already references
-        A2A peers from <code>vendor.myndhyve.agent-orchestration</code>{' '}
-        and <code>vendor.myndhyve.ads-crew</code>) would converge a
-        concrete <code>capabilities.a2a</code> shape and unblock this
-        panel — at which point this placeholder becomes the actual peer
-        browser (Agent Card fetch → list of Skills → "drop an{' '}
-        <code>a2a.dispatch</code> node configured with this Skill" CTA).
+        {t('pathForwardLead')}{' '}
+        <code>docs/myndhyve-round-2-handoff.md</code> {t('pathForwardMid')}{' '}
+        <code>vendor.myndhyve.agent-orchestration</code>{' '}
+        {t('pathForwardAnd')} <code>vendor.myndhyve.ads-crew</code>{t('pathForwardTail')}{' '}
+        <code>{t('pathForwardShape')}</code> {t('pathForwardEnd')}{' '}
+        <code>{t('pathForwardNode')}</code> {t('pathForwardCta')}
       </p>
     </div>
   );

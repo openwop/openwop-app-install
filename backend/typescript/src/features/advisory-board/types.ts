@@ -7,11 +7,10 @@
  * board id, no shadowing). Advisors are existing roster agents (ADR 0031/0032);
  * the board stores only their ids — no parallel persona/RAG store.
  *
- * A council round is an `AdvisorySession`: a shared transcript of `CouncilTurn`s
- * (user → each advisor → moderator), each turn attributed to its speaker. Stored
- * host-side (non-normative). The resolved cohort is stamped on the session at
- * creation (the host-ext analog of the ADR §9 run.metadata stamp) so a re-read is
- * stable even if the live board is later edited.
+ * The board is a COHORT DEFINITION only. The boardroom CONVERSATION runs in the AI
+ * chat: `@@<handle>` expands the cohort into the chat's active-agents lineup and
+ * the discussion uses the existing `chat.turn` multi-agent infra (ADR 0040
+ * § Correction 2026-06-15). There is no separate transcript/session entity here.
  *
  * @see docs/adr/0040-board-of-advisors.md
  */
@@ -25,6 +24,21 @@ export type PersonaKind = 'historical' | 'fictional' | 'original' | 'living';
  *  with `workspace:read`. (A public capability-token link is a deferred follow-on.) */
 export type BoardVisibility = 'private' | 'shared';
 
+export type { TurnPolicy } from '../../host/turnPolicy.js';
+import type { TurnPolicy } from '../../host/turnPolicy.js';
+
+/**
+ * A selected context reference the board carries into its advisors' prompt
+ * (ADR 0079 Phase 5). A discriminated union so it ages as more context kinds are
+ * added; Phase 5 ships `strategy` (the strategy context packet — which itself
+ * resolves the strategy's linked projects/priorities). Resolved LIVE at
+ * board-group formation, RBAC-filtered by the convener, snapshotted onto the
+ * conversation (ADR 0079 §Correction).
+ */
+export type AdvisoryContextRef =
+  | { kind: 'strategy'; strategyId: string }
+  | { kind: 'project'; projectId: string };
+
 export interface AdvisoryBoard {
   boardId: string;            // host:advisory:<slug>
   tenantId: string;           // workspace (ADR 0015)
@@ -37,6 +51,8 @@ export interface AdvisoryBoard {
   /** Synthesizer roster id; when absent, the convene picks the workspace
    *  assistant (the `assistant`-capability agent) or falls back to no synthesis. */
   moderatorRosterId?: string;
+  /** Selected strategy context the advisors receive (ADR 0079 Phase 5). */
+  contextRefs?: AdvisoryContextRef[];
   visibility: BoardVisibility;
   /** Likeness governance: the dominant persona kind in the cohort. When `living`,
    *  `livingPersonaAck` MUST be set before the board can convene. */
@@ -44,37 +60,12 @@ export interface AdvisoryBoard {
   /** Explicit acknowledgement that simulating a living individual is understood to
    *  be a non-endorsed simulation (right-of-publicity / defamation guard). */
   livingPersonaAck?: boolean;
-  /** Turn policy — bounded for cost (ADR 0040 § Open questions: fan-out caps). */
-  turnPolicy: { rounds: number; order: 'declared' | 'round-robin'; synthesize: boolean };
+  /** Turn policy — bounded for cost (ADR 0040 § Open questions: fan-out caps).
+   *  The shared `TurnPolicy` primitive (ADR 0054 D6) — same validator + cadence
+   *  planner a project's group chat uses. */
+  turnPolicy: TurnPolicy;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
 }
 
-/** One attributed turn in a council transcript. */
-export interface CouncilTurn {
-  turnIndex: number;
-  /** Speaker id: a rosterId, the literal `'user'`, or `'moderator:<rosterId>'`. */
-  speakerId: string;
-  /** Display name (persona/label or the user's name). */
-  speakerName: string;
-  role: 'user' | 'advisor' | 'moderator';
-  content: string;
-  /** ISO-8601 — carried through a re-read unchanged. */
-  ts: string;
-  /** True when an advisor's reply was grounded in its bound knowledge (ADR 0038). */
-  grounded?: boolean;
-}
-
-export interface AdvisorySession {
-  sessionId: string;
-  boardId: string;
-  tenantId: string;
-  createdBy: string;
-  /** The cohort resolved AT FIRST CONVENE (advisor rosterIds + moderator), stamped
-   *  so the transcript stays stable if the board is later edited (ADR 0040 §9). */
-  resolvedCohort: { advisors: string[]; moderatorRosterId?: string };
-  turns: CouncilTurn[];
-  createdAt: string;
-  updatedAt: string;
-}

@@ -24,10 +24,18 @@
 #     inventory adopters need (frontend/react/.env.production.example,
 #     backend/typescript/.env.example). Adopters copy them to real .env files
 #     per WHITE-LABEL.md.
-#   - `.claude/`, `.github/`, `MIGRATION-TODO.md`, `TODO.md` — steward-internal repo meta
-#     (agent skills, the steward's CI wired to openwop-dev, migration notes).
-#     These were never inside the old `apps/workflow-engine/` subtree, so the
-#     pre-split zip never carried them; keep that boundary.
+#   - `.claude/`, `.agents/`, `.github/`, `MIGRATION-TODO.md`, `TODO.md` —
+#     steward-internal repo meta (agent skills for BOTH harnesses — `.claude/` and
+#     the `.agents/` mirror — the steward's CI wired to openwop-dev, migration
+#     notes). These were never inside the old `apps/workflow-engine/` subtree, so
+#     the pre-split zip never carried them; keep that boundary.
+#   - the steward GRADING/TRACKING reports — `CODEBASE-ASSESSMENT.md`,
+#     `UX-ASSESSMENT.md`, `LOCALIZATION-ASSESSMENT.md`, `SCREEN_POLISH.md`,
+#     `MANUAL_TESTS.md`, `NODE-PACK-AUDIT.md`. These are internal A–F readiness
+#     reports the steward's grade-*/polish-screens/manual-tests skills regenerate
+#     as features land (they name blockers, F grades, open debt) — never an
+#     adopter deliverable. Shipped code only cites them in comments, so dropping
+#     them is non-functional.
 #
 # Output (into $OUT_DIR, default ./dist-whitelabel; gitignored):
 #   $OUT_DIR/openwop-demo-app.zip
@@ -77,7 +85,11 @@ fi
 # entry matches, which is fine; only a real failure should abort. (`*` spans
 # `/` in zip's delete globs, so these catch entries at any depth.)
 zip -q -d "$ZIP" \
-  "${PREFIX}.claude/*" "${PREFIX}.github/*" "${PREFIX}MIGRATION-TODO.md" "${PREFIX}TODO.md" \
+  "${PREFIX}.claude/*" "${PREFIX}.agents/*" "${PREFIX}.github/*" \
+  "${PREFIX}MIGRATION-TODO.md" "${PREFIX}TODO.md" \
+  "${PREFIX}CODEBASE-ASSESSMENT.md" "${PREFIX}UX-ASSESSMENT.md" \
+  "${PREFIX}LOCALIZATION-ASSESSMENT.md" "${PREFIX}SCREEN_POLISH.md" \
+  "${PREFIX}MANUAL_TESTS.md" "${PREFIX}NODE-PACK-AUDIT.md" \
   || [[ $? -eq 12 ]]
 
 # Fail loudly if any REAL (non-example) .env file survived — e.g. a future
@@ -88,12 +100,37 @@ if unzip -Z1 "$ZIP" | grep -E '/\.env($|\.)' | grep -vqE '\.example$'; then
   exit 1
 fi
 
+# Snapshot the listing once and grep the VAR for every presence/absence guard
+# below — `unzip -Z1 | grep -q` lets grep close the pipe early on first match,
+# SIGPIPE-killing unzip, which `pipefail` would surface as a false "missing".
+ZIP_LISTING="$(unzip -Z1 "$ZIP")"
+
+# Fail loudly if steward agent-skill meta survived the strip — `.claude/` and its
+# `.agents/` mirror are steward-internal and must never reach an adopter bundle.
+if grep -qE "^${PREFIX}(\.claude|\.agents)/" <<<"$ZIP_LISTING"; then
+  echo "[whitelabel-zip] FATAL: steward agent-skill meta (.claude/ or .agents/) remains in the zip." >&2
+  grep -E "^${PREFIX}(\.claude|\.agents)/" <<<"$ZIP_LISTING" >&2
+  exit 1
+fi
+
+# Guard: the runtime-vendored corpora the backend loads at boot MUST be in the zip.
+# `providers.json` (model catalog the AI-chat/model-picker read), `packs/` (node /
+# agent / artifact-type / connection packs every feature surface rides on — campaign
+# studio, workflow-chain loader, etc.), `schemas/` + `conformance-fixtures/` (wire +
+# conformance). These are tracked at the repo root and the Dockerfile COPYs them, so
+# git archive includes them — but a stray gitignore/move would silently ship a bundle
+# whose backend can't boot, so assert each is present.
+echo "[whitelabel-zip] verifying runtime-vendored corpora are present"
+for path in 'providers\.json' 'packs/' 'schemas/' 'conformance-fixtures/'; do
+  if ! grep -qE "^${PREFIX}${path}" <<<"$ZIP_LISTING"; then
+    echo "[whitelabel-zip] FATAL: ${path//\\/} missing from the zip (backend would not boot)." >&2
+    exit 1
+  fi
+done
+
 # Guard: every deploy pack the /install page advertises MUST be in the zip, so a
 # stray gitignore / rename can never ship a download missing a host's recipe.
-# Snapshot the listing once (grepping the var avoids `unzip | grep -q` SIGPIPE,
-# which `pipefail` would otherwise surface as a false "missing").
 echo "[whitelabel-zip] verifying deploy packs are present"
-ZIP_LISTING="$(unzip -Z1 "$ZIP")"
 for pack in README.md compose/docker-compose.yml gcp/up.sh fly/fly.toml \
             render/render.yaml aws/main.tf azure/main.bicep; do
   if ! grep -qxF "${PREFIX}deploy/${pack}" <<<"$ZIP_LISTING"; then

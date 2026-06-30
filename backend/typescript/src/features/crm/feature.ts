@@ -46,5 +46,5 @@ export const crmFeature: BackendFeature = {
       },
     ],
   },
-  requiredPacks: [{ name: 'feature.crm.nodes', version: '1.0.0' }],
+  requiredPacks: [{ name: 'feature.crm.nodes', version: '1.1.0' }],
 };

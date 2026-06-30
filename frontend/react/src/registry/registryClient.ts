@@ -17,6 +17,7 @@
 
 import { config } from '../client/config.js';
 import { assertArrayField, assertRecord } from '../client/parse.js';
+import i18n from '../i18n/index.js';
 
 export interface PackIndexEntry {
   name: string;
@@ -78,12 +79,18 @@ export function trustTierFor(packName: string): TrustTier {
   return 'unknown';
 }
 
-export const TRUST_TIER_LABEL: Record<TrustTier, string> = {
-  official: 'Official',
-  vendor: 'Vendor',
-  community: 'Community',
-  unknown: 'Unverified',
-};
+const TRUST_TIER_LABEL_KEY: Record<TrustTier, string> = {
+  official: 'registry:trustTierOfficial',
+  vendor: 'registry:trustTierVendor',
+  community: 'registry:trustTierCommunity',
+  unknown: 'registry:trustTierUnknown',
+} as const;
+
+/** Localized human label for a trust tier. Resolved at call time so it
+ *  re-localizes when the active language changes. */
+export function trustTierLabel(tier: TrustTier): string {
+  return i18n.t(TRUST_TIER_LABEL_KEY[tier]);
+}
 
 /** Absolute URL for a registry-relative path (manifest/sig/sbom links
  *  in the index are root-relative, e.g. `/v1/packs/.../1.0.0.json`). */

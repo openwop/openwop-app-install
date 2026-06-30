@@ -86,7 +86,20 @@ export function loadMasterKey(masterKeyPath: string): Buffer {
     return cachedMasterKey;
   }
 
-  // First boot: generate + persist with owner-only perms.
+  // SEC-3: never silently auto-generate a master key in production. An
+  // ephemeral disk key minted on a fresh instance would be unrecoverable across
+  // instances/restarts and gives a false sense of at-rest protection. Production
+  // MUST supply OPENWOP_BYOK_ENCRYPTION_KEY explicitly (or use the KMS-enveloped
+  // tenant path). Fail closed rather than mint a throwaway key.
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      'BYOK local-AES master key is not configured in production. Set ' +
+        'OPENWOP_BYOK_ENCRYPTION_KEY (openssl rand -hex 32) or configure KMS — ' +
+        'refusing to auto-generate a throwaway disk key.',
+    );
+  }
+
+  // Dev/test first boot: generate + persist with owner-only perms.
   const dir = dirname(masterKeyPath);
   mkdirSync(dir, { recursive: true });
   const fresh = randomBytes(KEY_BYTES);

@@ -1,0 +1,80 @@
+/**
+ * `podcasts` namespace — user-facing copy for the Multi-speaker Podcasts feature
+ * (ADR 0086). Feature-self-contained; generic actions (delete) reuse `common`.
+ */
+export const messages = {
+  eyebrow: 'Audio',
+  title: 'Podcast Studio',
+  lede: 'Turn a research notebook into a multi-speaker narrated audio episode — define a cast and a show format, then generate.',
+
+  notEnabledTitle: 'Podcasts is not enabled',
+  notEnabledBody: 'Ask an administrator to turn on the Podcasts feature in Admin → Feature toggles.',
+  loadFailed: 'Failed to load',
+  createFailed: 'Could not create.',
+  deleteFailed: 'Could not delete.',
+  confirmDeleteSpeakerProfile: 'Delete this cast profile? This cannot be undone.',
+  confirmDeleteEpisodeProfile: 'Delete this show format? This cannot be undone.',
+  confirmDeleteEpisode: 'Delete this episode? This cannot be undone.',
+  generateFailed: 'Could not start generation.',
+  orgLabel: 'Workspace',
+  noOrgs: 'No workspace yet — create one to manage podcasts.',
+  episodeAudioLabel: 'Audio for {{title}}',
+
+  // Speaker profiles (the cast)
+  speakerProfilesTitle: 'Cast profiles',
+  noSpeakerProfiles: 'No cast profiles yet — create one below (1–4 speakers).',
+  speakerProfileNameLabel: 'Cast profile name',
+  speakerProfileNamePlaceholder: 'Two-host banter',
+  providerLabel: 'TTS provider',
+  speakerN: 'Speaker {{n}}',
+  speakerNameLabel: 'Name',
+  voiceIdLabel: 'Voice ID',
+  voiceIdPlaceholder: 'Provider voice id (e.g. female-1)',
+  personalityLabel: 'Personality (optional)',
+  personalityPlaceholder: 'Curious, warm, asks sharp questions',
+  addSpeaker: 'Add speaker',
+  removeSpeaker: 'Remove',
+  createSpeakerProfile: 'Create cast profile',
+  speakerProfileCreated: 'Cast profile created.',
+
+  // Episode (show-format) profiles
+  episodeProfilesTitle: 'Show formats',
+  noEpisodeProfiles: 'No show formats yet — create one below.',
+  segmentsN: '{{n}} segments',
+  episodeProfileNameLabel: 'Show format name',
+  episodeProfileNamePlaceholder: 'Weekly digest',
+  castLabel: 'Cast',
+  selectCast: 'Select a cast profile…',
+  segmentCountLabel: 'Segments (3–20)',
+  briefingLabel: 'Default briefing (optional)',
+  briefingPlaceholder: 'Upbeat, ~10 minutes, for an executive audience',
+  createEpisodeProfile: 'Create show format',
+  episodeProfileCreated: 'Show format created.',
+
+  // Generate
+  generateTitle: 'Generate an episode',
+  noNotebooks: 'No notebooks found — create a research notebook first (its sources become the episode content).',
+  notebookLabel: 'Notebook (source content)',
+  selectNotebook: 'Select a notebook…',
+  episodeProfileLabel: 'Show format',
+  selectEpisodeProfile: 'Select a show format…',
+  episodeTitleLabel: 'Episode title',
+  episodeTitlePlaceholder: 'Q3 research recap',
+  episodeBriefingLabel: 'Episode briefing (optional, overrides the format default)',
+  generate: 'Generate episode',
+  episodeEnqueued: 'Generating your episode — it will appear below shortly.',
+
+  // Episodes
+  episodesTitle: 'Episodes',
+  noEpisodesTitle: 'No episodes yet',
+  noEpisodesBody: 'Generate one above — it runs asynchronously and appears here when ready.',
+  episodeFailed: 'Generation failed.',
+  retry: 'Retry',
+  clipProgress: 'Turn {{current}} of {{total}}',
+  playFromStart: 'Play from start',
+  status_queued: 'Queued',
+  status_running: 'Generating…',
+  'status_awaiting-approval': 'Awaiting approval',
+  status_done: 'Ready',
+  status_failed: 'Failed',
+};

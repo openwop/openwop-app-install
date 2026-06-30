@@ -13,7 +13,15 @@
  * runaway costs.
  */
 
-import type { ChatMessage, ContentPart, DispatchRequest, DispatchResult } from './dispatch.js';
+import type { ChatMessage, ContentPart, DispatchRequest, DispatchResult, Citation } from './dispatch.js';
+import { sanitizeToolName, toolNameMap } from './dispatchProviderTools.js';
+import { contextEconomy } from '../host/contextEconomy.js';
+import {
+  cacheableAnthropicSystem,
+  withAnthropicToolCache,
+  extractAnthropicCacheTokens,
+  type AnthropicToolDef,
+} from './promptCaching.js';
 
 const MAX_TOOL_ROUNDS = 5;
 
@@ -55,8 +63,15 @@ export interface ToolsRoundRequest {
   messages: readonly ChatMessage[];
   maxTokens?: number;
   tools: readonly ToolDef[];
+  /** Enable the provider's NATIVE web search/grounding for this round (uses the
+   *  same provider key). Only honored by providers whose `providers.json`
+   *  `webSearch` flag is true (ADR 0101). */
+  webSearch?: boolean;
   /** Optional abort signal so callers can time-bound the request. */
   signal?: AbortSignal;
+  /** RFC 0116 — opaque (tenant, cachePrefixId) prefix-cache scope; namespaces
+   *  the cached prefix for cross-tenant isolation. Cost-only, replay-invariant. */
+  cachePrefixScope?: { tenant: string; cachePrefixId: string };
 }
 
 export interface ToolsRoundResult {
@@ -65,6 +80,15 @@ export interface ToolsRoundResult {
   finishReason?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /** ADR 0148 A2 — tokens served from / written to the Anthropic prompt cache
+   *  this round (0 when caching is off or below the min cacheable prefix).
+   *  Internal observability only; never on the OpenWOP wire. */
+  cachedReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** Sources from native grounding/web-search this round, when any (ADR 0101
+   *  Phase 2). Reuses the single `Citation` type the single-completion grounding
+   *  path already emits. */
+  citations?: Citation[];
 }
 
 export interface ToolsDispatchRequest extends DispatchRequest {
@@ -75,7 +99,11 @@ export interface ToolsDispatchRequest extends DispatchRequest {
 type AnthropicContentBlock =
   | { type: 'text'; text: string }
   | { type: 'tool_use'; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean };
+  | { type: 'tool_result'; tool_use_id: string; content: string; is_error?: boolean }
+  // Native web-search server tool (ADR 0101 Phase 2): the model's search query,
+  // then a result block carrying the hits.
+  | { type: 'server_tool_use'; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'web_search_tool_result'; tool_use_id: string; content: Array<{ type: string; url?: string; title?: string }> };
 
 interface AnthropicMessage {
   role: 'user' | 'assistant';
@@ -96,7 +124,18 @@ export async function dispatchAnthropicWithTools(req: ToolsDispatchRequest): Pro
   let aggregatedText = '';
   let inputTokens = 0;
   let outputTokens = 0;
+  let cachedReadTokens = 0;
+  let cacheWriteTokens = 0;
   let finishReason: string | undefined;
+
+  // ADR 0148 A2 — cache the stable system+tools prefix (identical across every
+  // round of THIS loop, so rounds 2+ are cache reads). Built once outside the loop.
+  const cacheOn = contextEconomy().providerCache;
+  const cachedTools = withAnthropicToolCache(
+    req.tools.map((t): AnthropicToolDef => ({ name: t.name, description: t.description, input_schema: t.inputSchema })),
+    cacheOn,
+  );
+  const cachedSystem = cacheableAnthropicSystem(systemMessage ? contentToText(systemMessage.content) : undefined, cacheOn, req.cachePrefixScope);
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
     const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -109,12 +148,8 @@ export async function dispatchAnthropicWithTools(req: ToolsDispatchRequest): Pro
       body: JSON.stringify({
         model: req.model,
         max_tokens: req.maxTokens ?? 4096,
-        tools: req.tools.map((t) => ({
-          name: t.name,
-          description: t.description,
-          input_schema: t.inputSchema,
-        })),
-        ...(systemMessage ? { system: contentToText(systemMessage.content) } : {}),
+        tools: cachedTools,
+        ...(cachedSystem !== undefined ? { system: cachedSystem } : {}),
         messages: log,
       }),
     });
@@ -129,6 +164,9 @@ export async function dispatchAnthropicWithTools(req: ToolsDispatchRequest): Pro
     };
     if (data.usage?.input_tokens) inputTokens += data.usage.input_tokens;
     if (data.usage?.output_tokens) outputTokens += data.usage.output_tokens;
+    const ct = extractAnthropicCacheTokens(data.usage);
+    cachedReadTokens += ct.cachedReadTokens;
+    cacheWriteTokens += ct.cacheWriteTokens;
     finishReason = data.stop_reason;
 
     const blocks = data.content ?? [];
@@ -184,7 +222,7 @@ export async function dispatchAnthropicWithTools(req: ToolsDispatchRequest): Pro
     provider: 'anthropic',
     model: req.model,
     completion: aggregatedText,
-    usage: { inputTokens, outputTokens },
+    usage: { inputTokens, outputTokens, cachedReadTokens, cacheWriteTokens },
     ...(finishReason ? { finishReason } : {}),
   };
 }
@@ -205,6 +243,23 @@ function contentToText(content: string | readonly ContentPart[]): string {
 export async function dispatchAnthropicToolsRound(req: ToolsRoundRequest): Promise<ToolsRoundResult> {
   const systemMessage = req.messages.find((m) => m.role === 'system');
   const conversation = req.messages.filter((m) => m.role !== 'system');
+  const names = toolNameMap(req.tools); // sanitized → original
+  const cacheOn = contextEconomy().providerCache;
+  // ADR 0148 A2 — assemble the full tool array (user tools + any web_search
+  // server tool) FIRST, then place the cache breakpoint on its last element, so
+  // the entire tool block is part of the cached prefix (architect must-fix:
+  // breakpoint after web_search append, not mid-array).
+  const assembledTools: AnthropicToolDef[] = [
+    ...req.tools.map((t): AnthropicToolDef => ({
+      name: sanitizeToolName(t.name),
+      description: t.description,
+      input_schema: t.inputSchema,
+    })),
+    ...(req.webSearch
+      ? [{ type: 'web_search_20250305', name: 'web_search', max_uses: 5 } satisfies AnthropicToolDef]
+      : []),
+  ];
+  const cachedSystem = cacheableAnthropicSystem(systemMessage ? contentToText(systemMessage.content) : undefined, cacheOn, req.cachePrefixScope);
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -215,12 +270,8 @@ export async function dispatchAnthropicToolsRound(req: ToolsRoundRequest): Promi
     body: JSON.stringify({
       model: req.model,
       max_tokens: req.maxTokens ?? 4096,
-      tools: req.tools.map((t) => ({
-        name: t.name,
-        description: t.description,
-        input_schema: t.inputSchema,
-      })),
-      ...(systemMessage ? { system: contentToText(systemMessage.content) } : {}),
+      tools: withAnthropicToolCache(assembledTools, cacheOn),
+      ...(cachedSystem !== undefined ? { system: cachedSystem } : {}),
       messages: conversation.map((m) => ({ role: m.role, content: contentToText(m.content) })),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
@@ -241,12 +292,22 @@ export async function dispatchAnthropicToolsRound(req: ToolsRoundRequest): Promi
     .join('');
   const toolUses = blocks
     .filter((b): b is Extract<AnthropicContentBlock, { type: 'tool_use' }> => b.type === 'tool_use')
-    .map((b) => ({ id: b.id, name: b.name, input: b.input }));
+    .map((b) => ({ id: b.id, name: names.get(b.name) ?? b.name, input: b.input }));
+  // Native web-search sources (ADR 0101 Phase 2): the result blocks carry the hits.
+  const citations = blocks
+    .filter((b): b is Extract<AnthropicContentBlock, { type: 'web_search_tool_result' }> => b.type === 'web_search_tool_result')
+    .flatMap((b) => (Array.isArray(b.content) ? b.content : []))
+    .filter((r) => r.type === 'web_search_result' && typeof r.url === 'string')
+    .map((r) => ({ url: r.url as string, ...(r.title ? { title: r.title } : {}) }));
+  const cacheTokens = extractAnthropicCacheTokens(data.usage);
   return {
     text,
     toolUses,
     ...(data.stop_reason ? { finishReason: data.stop_reason } : {}),
     ...(data.usage?.input_tokens != null ? { inputTokens: data.usage.input_tokens } : {}),
     ...(data.usage?.output_tokens != null ? { outputTokens: data.usage.output_tokens } : {}),
+    ...(cacheTokens.cachedReadTokens > 0 ? { cachedReadTokens: cacheTokens.cachedReadTokens } : {}),
+    ...(cacheTokens.cacheWriteTokens > 0 ? { cacheWriteTokens: cacheTokens.cacheWriteTokens } : {}),
+    ...(citations.length > 0 ? { citations } : {}),
   };
 }

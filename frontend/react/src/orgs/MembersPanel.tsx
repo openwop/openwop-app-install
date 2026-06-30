@@ -8,6 +8,7 @@
  */
 
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { OrgMember, EffectiveAccess } from '../client/accessClient.js';
 import { StateCard } from '../ui/StateCard.js';
 import { UserIcon, ShieldIcon, PencilIcon, TrashIcon } from '../ui/icons/index.js';
@@ -43,14 +44,15 @@ export function MembersPanel({
   assignableRoleIds, editingId, setEditingId, draftRoles, setDraftRoles, accessFor, access,
   onCreateMember, onShowAccess, startEdit, onDeleteMember, onSaveRoles, can, roleLabel, toggleStr,
 }: MembersPanelProps): JSX.Element {
+  const { t } = useTranslation('orgs');
   return (
     <>
       <h3 className="u-fs-14 u-flex u-items-center u-gap-2">
-        <UserIcon size={15} /> Members
+        <UserIcon size={15} /> {t('membersHeading')}
       </h3>
       <form onSubmit={onCreateMember} className="action-bar u-wrap u-mb-3">
-        <input value={memberName} onChange={(e) => setMemberName(e.target.value)} placeholder="Name" aria-label="Member name" />
-        <input value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} placeholder="Email (optional)" aria-label="Member email" />
+        <input value={memberName} onChange={(e) => setMemberName(e.target.value)} placeholder={t('memberNamePlaceholder')} aria-label={t('memberNameAriaLabel')} />
+        <input value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} placeholder={t('memberEmailPlaceholder')} aria-label={t('memberEmailAriaLabel')} />
         <span className="action-bar u-gap-1-5">
           {assignableRoleIds.map((role) => (
             <label key={role} className={`${NEUTRAL_CHIP} members-chip-toggle`} style={{ opacity: memberRoles.has(role) ? 1 : 0.6 }}>
@@ -64,11 +66,11 @@ export function MembersPanel({
             </label>
           ))}
         </span>
-        <button type="submit" className="primary" disabled={!memberName.trim() || !can('host:members:manage')} title={can('host:members:manage') ? undefined : 'Requires host:members:manage'}>Add member</button>
+        <button type="submit" className="primary" disabled={!memberName.trim() || !can('host:members:manage')} title={can('host:members:manage') ? undefined : t('addMemberRequiresScope')}>{t('addMember')}</button>
       </form>
 
       {members.length === 0 ? (
-        <StateCard icon={<UserIcon size={28} />} title="No members yet" body="Add a member above and assign roles." />
+        <StateCard icon={<UserIcon size={28} />} title={t('noMembersTitle')} body={t('noMembersBody')} />
       ) : (
         members.map((m) => (
           <div key={m.memberId} className="surface-card u-mb-2">
@@ -79,12 +81,12 @@ export function MembersPanel({
               </span>
               <span className="action-bar">
                 <button type="button" className="secondary" onClick={() => void onShowAccess(m)}>
-                  <ShieldIcon size={13} /> Access
+                  <ShieldIcon size={13} /> {t('accessButton')}
                 </button>
-                <button type="button" className="secondary" disabled={!can('host:members:manage')} onClick={() => startEdit(m)} aria-label={`Edit roles for ${m.displayName}`}>
-                  <PencilIcon size={13} /> Roles
+                <button type="button" className="secondary" disabled={!can('host:members:manage')} onClick={() => startEdit(m)} aria-label={t('editRolesAriaLabel', { name: m.displayName })}>
+                  <PencilIcon size={13} /> {t('rolesButton')}
                 </button>
-                <button type="button" className="secondary" disabled={!can('host:members:manage')} onClick={() => void onDeleteMember(m)} aria-label={`Remove ${m.displayName}`}>
+                <button type="button" className="secondary" disabled={!can('host:members:manage')} onClick={() => void onDeleteMember(m)} aria-label={t('removeMemberAriaLabel', { name: m.displayName })}>
                   <TrashIcon size={13} />
                 </button>
               </span>
@@ -93,7 +95,7 @@ export function MembersPanel({
             {/* role chips */}
             <div className="u-flex u-wrap u-gap-1-5 u-mt-1-5">
               {m.roles.length === 0 ? (
-                <span className="chip chip--muted">no roles</span>
+                <span className="chip chip--muted">{t('noRoles')}</span>
               ) : (
                 m.roles.map((r) => <span key={r} className={NEUTRAL_CHIP}>{roleLabel(r)}</span>)
               )}
@@ -113,8 +115,8 @@ export function MembersPanel({
                     {roleLabel(role)}
                   </label>
                 ))}
-                <button type="button" className="primary" onClick={() => void onSaveRoles(m)}>Save</button>
-                <button type="button" className="secondary" onClick={() => setEditingId(null)}>Cancel</button>
+                <button type="button" className="primary" onClick={() => void onSaveRoles(m)}>{t('common:save')}</button>
+                <button type="button" className="secondary" onClick={() => setEditingId(null)}>{t('common:cancel')}</button>
               </div>
             ) : null}
 
@@ -122,11 +124,11 @@ export function MembersPanel({
             {accessFor === m.memberId && access ? (
               <div className="u-mt-2">
                 <div className="members-muted">
-                  Effective scopes (basis: {access.basis}) — resolved from assigned roles only:
+                  {t('effectiveScopesBasis', { basis: access.basis })}
                 </div>
                 <div className="u-flex u-wrap u-gap-1-5 u-mt-1">
                   {access.scopes.length === 0 ? (
-                    <span className="chip chip--muted">no scopes (fail-closed)</span>
+                    <span className="chip chip--muted">{t('noScopesFailClosed')}</span>
                   ) : (
                     access.scopes.map((s) => (
                       <span key={s} className={NEUTRAL_CHIP}>{s}</span>

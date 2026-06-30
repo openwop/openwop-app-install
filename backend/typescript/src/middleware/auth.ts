@@ -42,7 +42,7 @@
  */
 
 import type { RequestHandler } from 'express';
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import type { Principal } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { noteTenantActivity } from '../routes/admin.js';
@@ -86,9 +86,19 @@ const PUBLIC_PATH_PREFIXES = [
   '/health',
   '/readiness',
   '/.well-known/openwop',
+  // RFC 0076/0100 — the A2A v0.3 AgentCard discovery doc. `a2a.agentCardUrl`
+  // points here; cross-host peer discovery is anonymous (no credential), so the
+  // GET must bypass auth like `/.well-known/openwop`. The route 404s unless
+  // OPENWOP_A2A_SERVER_ENABLED (agents.ts), so this exposes nothing when off.
+  '/.well-known/agent-card.json',
+  '/schemas/artifacts', // ADR 0055 — public artifact-type JSON Schemas (RFC 0075)
   '/v1/openapi.json',
   '/v1/packs',
   '/v1/interrupts',
+  // RFC 0103 normative content delivery (ADR 0064 Phase 3): GET /v1/content/pages/{slug}
+  // is anonymous, published-only. Tenant is host-resolved to the reserved system
+  // site (the G11 anonymous-tenant carve-out) — never from the request.
+  '/v1/content',
   // Production SAML SSO (ADR 0002 / RFC 0050): the SP-initiated redirect, the IdP's
   // browser-driven ACS form-POST, and the SP metadata are all PRE-AUTH (the user
   // has no session yet — the ACS is what MINTS it). The assertion's XML signature
@@ -137,6 +147,12 @@ const PUBLIC_PATH_PREFIXES = [
   // at '/' (GET /v1/host/openwop-app/public-site-config → { enabled, orgId, slug }).
   // Exposes only already-public ids; the superadmin WRITE is /v1/host/openwop-app/site-config.
   '/v1/host/openwop-app/public-site-config',
+  // ADR 0170 App brand: the PUBLIC white-label identity (logo/colors/fonts/title/
+  // theme) the anonymous SPA applies before login (it renders on the public shell +
+  // gate). GET /v1/host/openwop-app/public-brand → { identity } for the reserved app
+  // brand ONLY (no id param; identity subset — no voice/governance/secret data). The
+  // superadmin WRITE is /v1/host/openwop-app/app-brand.
+  '/v1/host/openwop-app/public-brand',
   // ADR 0013 Sharing: the PUBLIC share-link resolve surface
   // (GET /v1/host/openwop-app/shared/{token}[/card]). Unauthenticated by design — the
   // 32-byte base64url token IS the credential (like /v1/interrupts/{token} and
@@ -185,196 +201,57 @@ const PUBLIC_PATH_PREFIXES = [
 // Adopters fronting the workflow-engine with a different reverse proxy
 // can override this via OPENWOP_SESSION_COOKIE_NAME — default keeps
 // the app.openwop.dev demo working.
-const COOKIE_NAME = process.env.OPENWOP_SESSION_COOKIE_NAME || '__session';
-const COOKIE_TTL_SECONDS = 86_400; // 24h
-const REFRESH_THRESHOLD_SECONDS = 21_600; // refresh when < 6h left
+// The cookie-session crypto + shape moved to ./cookieSession.ts (SEC-6). Import
+// what the middleware uses; re-export the two functions external callers
+// (health readiness, SAML/SCIM/password routes) import from here.
+import {
+  COOKIE_NAME,
+  COOKIE_TTL_SECONDS,
+  REFRESH_THRESHOLD_SECONDS,
+  signSession,
+  verifySession,
+  mintAnonSession,
+  readCookie,
+  setSessionCookie,
+  sessionSecretConfigError,
+  issueUserSession,
+  base64urlEncode,
+  type SessionPayload,
+} from './cookieSession.js';
+export { sessionSecretConfigError, issueUserSession };
 
-interface SessionPayload {
-  sid: string;
-  tenantId: string;
-  tier: 'anon' | 'user';
-  /** Durable `User.userId` this session is bound to (ADR 0003). Present once the
-   *  caller has authenticated to a durable account (password login / signup);
-   *  absent for anon sessions. When present, the request principal becomes the
-   *  stable, opaque `user:<userId>` instead of the per-session `session:<sid>`. */
-  userId?: string;
-  /** Stable, opaque RBAC subject persisted on an OIDC-promoted session (ADR 0015
-   *  — identity coherence). The bearer path derives `oidc:<sub>`; stamping it on
-   *  the upgraded cookie means a follow-up request that DROPS the Authorization
-   *  header (SPA token-cache race, EventSource without `?apiKey=`) still resolves
-   *  the SAME subject instead of falling back to the per-session `session:<sid>`.
-   *  Without this, an OrgMember seeded against `oidc:<sub>` stops matching the
-   *  caller on cookie-only requests — the latent RBAC bug ADR 0015 §Phase 0 closes.
-   *  Distinct from `userId`: this is set when there is no durable `User` record
-   *  (the OIDC case today), `userId` when there is (password login). */
-  subject?: string;
-  /** The caller's INTRINSIC private tenant (ADR 0015), independent of the active
-   *  workspace. `tenantId` above is the ACTIVE workspace (may be a shared `ws:`
-   *  after a switch); this is always the caller's own `user:<hash>` / `anon:<sid>`
-   *  so the implicit personal-owner check stays correct across switches. */
-  personalTenant?: string;
-  iat: number;
-  exp: number;
-}
-
-function base64urlEncode(buf: Buffer): string {
-  return buf.toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
-}
-
-function base64urlDecode(s: string): Buffer {
-  let pad = s.replace(/-/g, '+').replace(/_/g, '/');
-  while (pad.length % 4 !== 0) pad += '=';
-  return Buffer.from(pad, 'base64');
+/** True in any posture that enforces real authentication. */
+function authIsEnforced(): boolean {
+  return process.env.NODE_ENV === 'production' || process.env.OPENWOP_AUTH_ENFORCE_BEARER === 'true';
 }
 
 /**
- * Pure config check for the session secret — returns a human-readable reason
- * when production requires `OPENWOP_SESSION_SECRET` but it's unset/too short,
- * else null. Shared with the `/readiness` route so the health check reflects
- * the SAME condition that makes cookie-minting throw: previously readiness
- * returned 200 while the first session-minting POST 503'd, so the health check
- * lied about a deploy that was actually broken (PRD §8.3). Dev uses an ephemeral
- * fallback, so this is null outside production.
+ * Pure config check, surfaced via `/readiness` (SEC-2). The built-in
+ * `dev-token` is withdrawn in production by `readValidKeys` (the actual
+ * security control); this only flags a deploy that has EXPLICITLY enforced
+ * bearer auth (`OPENWOP_AUTH_ENFORCE_BEARER=true`) yet configured NO bearer
+ * credential at all — neither an API key nor OIDC — i.e. one that would reject
+ * every request. It deliberately does NOT fire for a plain NODE_ENV=production
+ * COOKIE-per-visitor deploy (which legitimately has no API keys), so readiness
+ * stays green there. Returns null otherwise.
  */
-export function sessionSecretConfigError(): string | null {
-  const s = process.env.OPENWOP_SESSION_SECRET;
-  if (s && s.length >= 32) return null;
-  if (process.env.NODE_ENV === 'production') {
-    return 'OPENWOP_SESSION_SECRET must be set in production (>=32 chars) — cookie-session minting will fail without it';
-  }
-  return null;
-}
-
-function readSessionSecret(): string {
-  const s = process.env.OPENWOP_SESSION_SECRET;
-  if (s && s.length >= 32) return s;
-  const configError = sessionSecretConfigError();
-  if (configError) {
-    // Hard fail in production rather than mint cookies with a weak
-    // / predictable secret. Cookie-mode deploys MUST set this.
-    throw new Error(`${configError}. See P0.2 in the deploy plan.`);
-  }
-  // Dev fallback: stable per-process random secret. Cookies invalidate
-  // on restart, which is fine for local dev.
-  if (!process.env._OPENWOP_DEV_SESSION_SECRET) {
-    process.env._OPENWOP_DEV_SESSION_SECRET = randomBytes(32).toString('hex');
-    log.warn('OPENWOP_SESSION_SECRET unset; using ephemeral dev secret (cookies invalidate on restart)');
-  }
-  return process.env._OPENWOP_DEV_SESSION_SECRET;
-}
-
-function signSession(payload: SessionPayload): string {
-  const payloadB64 = base64urlEncode(Buffer.from(JSON.stringify(payload), 'utf8'));
-  const sig = createHmac('sha256', readSessionSecret()).update(payloadB64).digest();
-  return `${payloadB64}.${base64urlEncode(sig)}`;
-}
-
-function verifySession(cookie: string): SessionPayload | null {
-  const dot = cookie.indexOf('.');
-  if (dot <= 0 || dot === cookie.length - 1) return null;
-  const payloadB64 = cookie.slice(0, dot);
-  const sigB64 = cookie.slice(dot + 1);
-  const expected = createHmac('sha256', readSessionSecret()).update(payloadB64).digest();
-  let provided: Buffer;
-  try { provided = base64urlDecode(sigB64); } catch { return null; }
-  if (expected.length !== provided.length) return null;
-  if (!timingSafeEqual(expected, provided)) return null;
-  let payload: SessionPayload;
-  try { payload = JSON.parse(base64urlDecode(payloadB64).toString('utf8')) as SessionPayload; }
-  catch { return null; }
-  const now = Math.floor(Date.now() / 1000);
-  if (typeof payload.exp !== 'number' || payload.exp < now) return null;
-  if (typeof payload.tenantId !== 'string' || typeof payload.sid !== 'string') return null;
-  return payload;
-}
-
-function mintAnonSession(): SessionPayload {
-  const sid = base64urlEncode(randomBytes(18));
-  const now = Math.floor(Date.now() / 1000);
-  return {
-    sid,
-    tenantId: `anon:${sid}`,
-    tier: 'anon',
-    iat: now,
-    exp: now + COOKIE_TTL_SECONDS,
-  };
-}
-
-/**
- * Bind the response's session cookie to a durable user (ADR 0003, Phase 2). The
- * password login/signup routes call this on success so every subsequent request
- * carries `req.userId` + the stable, opaque `user:<userId>` principal — one
- * canonical subject for `/me`, MFA, run ownership, and (ADR 0006) RBAC.
- */
-export function issueUserSession(
-  res: import('express').Response,
-  opts: { userId: string; tenantId: string; personalTenant?: string; subject?: string },
-): void {
-  const now = Math.floor(Date.now() / 1000);
-  const session: SessionPayload = {
-    sid: base64urlEncode(randomBytes(18)),
-    tenantId: opts.tenantId,
-    tier: 'user',
-    userId: opts.userId,
-    // OIDC bind (ADR 0003 Phase 4a) carries the `oidc:<sub>` so a follow-up bearer
-    // request matches this cookie and resolves the bound `user:<userId>`. Absent
-    // for password login (no bearer to match against).
-    ...(opts.subject ? { subject: opts.subject } : {}),
-    // The caller's intrinsic tenant — defaults to the active tenant at login
-    // (their personal workspace), preserved verbatim across a later switch.
-    personalTenant: opts.personalTenant ?? opts.tenantId,
-    iat: now,
-    exp: now + COOKIE_TTL_SECONDS,
-  };
-  setSessionCookie(res, signSession(session));
-}
-
-function readCookie(header: string | undefined, name: string): string | undefined {
-  if (!header) return undefined;
-  // RFC 6265 cookie header is `k1=v1; k2=v2; …`.
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq <= 0) continue;
-    const k = part.slice(0, eq).trim();
-    if (k !== name) continue;
-    return part.slice(eq + 1).trim();
-  }
-  return undefined;
-}
-
-function setSessionCookie(res: import('express').Response, signed: string): void {
-  const secure = process.env.NODE_ENV === 'production' || process.env.OPENWOP_COOKIE_SECURE === 'true';
-  // SameSite MUST be `None` in production. The SPA streams run events via SSE
-  // directly against the underlying Cloud Run URL (`*-run.app`) — a *cross-site*
-  // request — because Firebase Hosting's `/api/**` → Cloud Run rewrite BUFFERS
-  // SSE (the CDN waits for body completion before flushing), so live `node.*` /
-  // `node.suspended` events never reach the FE through the proxy. A `SameSite=Lax`
-  // cookie is NOT sent on that cross-site request → the SSE stream has no session
-  // → no live workflow-step updates and no HITL interrupt cards. `None` lets the
-  // session cookie ride along to the direct Cloud Run origin.
-  //
-  // CSRF is held by the CORS allowlist instead: `cors.ts` emits
-  // `Access-Control-Allow-Credentials` ONLY for origins explicitly listed in
-  // `OPENWOP_CORS_ORIGINS` (never the reflect-any default), and mutations are
-  // JSON (preflighted). `None` REQUIRES `Secure`, so it is used only when the
-  // cookie is Secure (prod / HTTPS); local dev over http stays `Lax` (same-origin
-  // there, so cross-site travel is moot).
-  const sameSite = secure ? 'None' : 'Lax';
-  const parts = [
-    `${COOKIE_NAME}=${signed}`,
-    `Path=/`,
-    `Max-Age=${COOKIE_TTL_SECONDS}`,
-    `HttpOnly`,
-    `SameSite=${sameSite}`,
-  ];
-  if (secure) parts.push('Secure');
-  res.append('Set-Cookie', parts.join('; '));
+export function apiKeyConfigError(): string | null {
+  if (process.env.OPENWOP_AUTH_ENFORCE_BEARER !== 'true') return null;
+  const configured = process.env.OPENWOP_API_KEYS ?? process.env.OPENWOP_API_KEY;
+  const hasRealKey = !!configured && configured.split(',').some((s) => s.trim().length > 0);
+  if (hasRealKey) return null;
+  if (readOidcConfigFromEnv()) return null; // OIDC is the accepted bearer path
+  return 'OPENWOP_AUTH_ENFORCE_BEARER=true but no bearer credential is configured — set OPENWOP_API_KEYS (or OIDC via OPENWOP_OIDC_*); otherwise every request is rejected.';
 }
 
 function readValidKeys(): ReadonlySet<string> {
   const multi = process.env.OPENWOP_API_KEYS;
   const single = process.env.OPENWOP_API_KEY;
-  const raw = multi ?? single ?? 'dev-token';
+  // Fail closed under enforced auth: do NOT honor the built-in `dev-token`
+  // (which maps to a wildcard-tenant admin principal) when no real key is
+  // configured. The OIDC/cookie bearer paths still work; only the guessable
+  // default is withdrawn (SEC-2).
+  const raw = multi ?? single ?? (authIsEnforced() ? '' : 'dev-token');
   return new Set(raw.split(',').map((s) => s.trim()).filter((s) => s.length > 0));
 }
 

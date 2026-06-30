@@ -6,6 +6,7 @@
  * one place.
  */
 
+import { useTranslation } from 'react-i18next';
 import type { OpenInterrupt } from '../client/interruptsClient.js';
 import { ApprovalCard } from './ApprovalCard.js';
 import { ClarificationDialog } from './ClarificationDialog.js';
@@ -19,6 +20,7 @@ interface Props {
 }
 
 export function RenderInterrupt({ runId, active, onResolved }: Props) {
+  const { t } = useTranslation('interrupts');
   if (!active) return null;
   const props = {
     runId,
@@ -39,8 +41,8 @@ export function RenderInterrupt({ runId, active, onResolved }: Props) {
     default:
       return (
         <div className="alert warning">
-          Unknown interrupt kind <code>{active.kind}</code> — extend
-          <code> RenderInterrupt</code> in <code>interrupts/RenderInterrupt.tsx</code>.
+          {t('unknownKindPrefix')} <code>{active.kind}</code> {t('unknownKindMid')}
+          <code> RenderInterrupt</code> {t('unknownKindTail')} <code>interrupts/RenderInterrupt.tsx</code>.
         </div>
       );
   }

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openwop.dev/packs/feature.workflow-author.nodes/draft.output.schema.json",
+  "title": "Workflow Author Draft Output",
+  "type": "object",
+  "required": ["definition", "validation", "attempts"],
+  "properties": {
+    "definition": { "type": "object", "description": "The candidate WorkflowDefinition (workflowId, nodes, edges)." },
+    "validation": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "errors": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "attempts": { "type": "integer", "description": "How many draft→validate attempts were made." }
+  },
+  "additionalProperties": false
+}

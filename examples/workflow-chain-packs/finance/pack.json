@@ -1,0 +1,102 @@
+{
+  "name": "core.openwop.workflows.finance",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Finance cluster: Invoice → AP Processing, Month-End Close Checklist, and Expense/Budget Approval + anomaly detection. Reasons with core.ai.chatCompletion; binds the ERP (NetSuite) via core.openwop.http.openapi-call connectionRef for validation + posting; every posting/reimbursement runs through a threshold core.chat.approvalGate. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts shipping the http + ai + chat + kb + integration packs. Published under core.openwop.workflows.* (openwop-team key).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "finance.invoice-ap",
+      "version": "1.0.0",
+      "label": "Invoice → AP Processing",
+      "description": "Extract invoice line items, validate against the PO/ledger in the ERP (NetSuite), run a threshold-based approval, then post the invoice and send a payment notification.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["invoiceText"],
+        "properties": {
+          "invoiceText": { "type": "string", "description": "The invoice content (extracted text or a description)." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "extract", "typeId": "core.ai.chatCompletion", "name": "Extract line items", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Extract vendor, line items, amounts, and totals from the invoice. Invoice: {{params.invoiceText}}" }, "inputs": {} },
+          { "id": "validate", "typeId": "core.openwop.http.openapi-call", "name": "Validate vs PO (NetSuite)", "position": { "x": 320, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.netsuite", "operationId": "matchPurchaseOrder" }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 640, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "post", "typeId": "core.openwop.http.openapi-call", "name": "Post invoice (NetSuite)", "position": { "x": 960, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.netsuite", "operationId": "createVendorBill" }, "inputs": {} },
+          { "id": "notify", "typeId": "core.openwop.integration.notification-push", "name": "Payment notice", "position": { "x": 1240, "y": 0 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "extract", "to": "validate" },
+          { "from": "validate", "to": "approve" },
+          { "from": "approve", "to": "post" },
+          { "from": "post", "to": "notify" }
+        ]
+      },
+      "outputs": { "posted": { "type": "string", "description": "Posted invoice + payment notice." } }
+    },
+    {
+      "chainId": "finance.month-end-close",
+      "version": "1.0.0",
+      "label": "Month-End Close Checklist",
+      "description": "Orchestrate the close: build the task checklist, collect supporting docs from the knowledge base, draft variance notes, chase missing approvals, then produce a close-readiness report.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["period"],
+        "properties": {
+          "period": { "type": "string", "description": "Close period, e.g. '2026-05'." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "checklist", "typeId": "core.ai.chatCompletion", "name": "Close checklist", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Build the month-end close checklist for {{params.period}} across teams, with owners and dependencies." }, "inputs": {} },
+          { "id": "docs", "typeId": "feature.kb.nodes.rag", "name": "Collect supporting docs", "position": { "x": 0, "y": 140 }, "config": { "query": "month-end close supporting documents {{params.period}}" }, "inputs": {} },
+          { "id": "variance", "typeId": "core.ai.chatCompletion", "name": "Draft variance notes", "position": { "x": 320, "y": 70 }, "config": { "systemPrompt": "Draft variance commentary for {{params.period}} from the checklist status and supporting docs; flag missing items." }, "inputs": {} },
+          { "id": "chase", "typeId": "core.chat.approvalGate", "name": "Chase approvals", "position": { "x": 640, "y": 70 }, "config": {}, "inputs": {} },
+          { "id": "report", "typeId": "core.openwop.integration.notification-push", "name": "Close-readiness report", "position": { "x": 960, "y": 70 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "checklist", "to": "variance" },
+          { "from": "docs", "to": "variance" },
+          { "from": "variance", "to": "chase" },
+          { "from": "chase", "to": "report" }
+        ]
+      },
+      "outputs": { "report": { "type": "string", "description": "Close-readiness report." } }
+    },
+    {
+      "chainId": "finance.expense-approval",
+      "version": "1.0.0",
+      "label": "Expense / Budget Approval + Anomaly Detection",
+      "description": "Check an expense against policy, run a duplicate/anomaly check, route through a threshold approval chain, then reimburse via the ERP and flag outliers.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["expenseContext"],
+        "properties": {
+          "expenseContext": { "type": "string", "description": "The expense to assess (amount, category, submitter, notes)." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "check", "typeId": "core.ai.chatCompletion", "name": "Policy + anomaly check", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Assess the expense against policy and detect duplicates/anomalies. Expense: {{params.expenseContext}}" }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 320, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "reimburse", "typeId": "core.openwop.http.openapi-call", "name": "Reimburse (NetSuite)", "position": { "x": 640, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.netsuite", "operationId": "createExpenseReport" }, "inputs": {} },
+          { "id": "flag", "typeId": "core.openwop.integration.notification-push", "name": "Flag outliers", "position": { "x": 960, "y": 0 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "check", "to": "approve" },
+          { "from": "approve", "to": "reimburse" },
+          { "from": "reimburse", "to": "flag" }
+        ]
+      },
+      "outputs": { "result": { "type": "string", "description": "Approved/flagged expense." } }
+    }
+  ]
+}

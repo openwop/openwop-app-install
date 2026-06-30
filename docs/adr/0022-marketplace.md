@@ -172,3 +172,25 @@ well-known advertisement). Frontend `npm run build` green (token/CSS gates pass)
 **Open-question decision recorded:** install authority resolved to **superadmin-only**
 (`requireSuperadmin`) for v1 — install is process-global, so a per-org admin scope
 would mis-model the authority; per-tenant pack enablement remains deferred (alt. 4).
+
+> **Phase 4 (Skill Studio + install-asset UX) — gaps flagged 2026-06-24.** A
+> third-party competitive analysis (`compare.md`, June 2026, "Skill Studio" /
+> "Pack & Runtime Asset Manager", from LobeHub + Jan) surfaced two **UI-layer**
+> follow-ons on this already-implemented feature:
+>
+> - **Skill Studio (pack authoring + test).** Packs and the RFC 0078 tool catalog
+>   exist, but there is no in-app surface to **author / inspect / test** a pack-backed
+>   skill (metadata, declared nodes/agents, input/output schemas, a dry-run). Today
+>   authoring is filesystem + the signed-registry pipeline. A read-first inspector
+>   (browse an installed pack's declared surface + a sandboxed dry-run) is the safe
+>   first slice; *write* authoring would compose the signing pipeline and is a larger,
+>   separate decision (it must not bypass Ed25519 + SRI).
+> - **Install-asset UX.** Install is superadmin REST-only (resolved above). A
+>   productized install surface — **pause/resume, progress, deep-linkable install
+>   links, health/version state** (Jan's download-manager pattern) — would make the
+>   pack ecosystem feel productized rather than doc-driven, *without* changing the
+>   process-global install authority.
+>
+> Both are host-extension, **no new RFC** (the registry wire is already defined). Run
+> `/ux-review` on landing. Per-tenant pack enablement (alt. 4) stays the deferred
+> prerequisite for surfacing install to non-superadmins.

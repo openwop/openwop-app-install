@@ -1,0 +1,48 @@
+{
+  "name": "feature.code-exec.agents",
+  "version": "1.0.0",
+  "description": "Code Interpreter agent (ADR 0114). Drives the sandboxed code-execution node through chat — composes the existing AI chat + the feature.code-exec.nodes pack; no new chat system. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/feature.code-exec.agents",
+  "repository": "https://github.com/openwop/openwop-app",
+  "keywords": [
+    "feature",
+    "agents",
+    "code-exec",
+    "interpreter",
+    "sandbox"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.code-exec.agents.default",
+      "persona": "Code Interpreter",
+      "label": "Code Interpreter",
+      "description": "Runs code in a sandbox (behind a human approval gate) to compute answers, analyze data, and produce artifacts. Uses openwop:feature.code-exec.nodes.run; honest-off when no sandbox adapter is wired.",
+      "modelClass": "coding",
+      "systemPromptRef": "prompts/code-interpreter.md",
+      "toolAllowlist": [
+        "openwop:feature.code-exec.nodes.run"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.8
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

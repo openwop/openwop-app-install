@@ -10,14 +10,22 @@
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { listCollections, ragQuery, search, tenantRetrieve } from './kbService.js';
+import { getCollection, listCollections, ragQuery, resolveRetrievalMode, search, tenantRetrieve, type RetrievalMode } from './kbService.js';
 
 export function buildKbSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
-    /** Semantic search within one collection. */
+    /** Search within one collection — honors the collection's configured retrieval
+     *  mode (ADR 0113), so a workflow's kb.search inherits hybrid/rerank like every
+     *  other consumer; an explicit `mode` arg overrides per-call. */
     search: async (args) => {
-      const results = await search(tenantId, str(args.orgId), str(args.collectionId), args.query, args.topK);
+      const orgId = str(args.orgId);
+      const collectionId = str(args.collectionId);
+      const override: RetrievalMode | undefined =
+        args.mode === 'dense' || args.mode === 'hybrid' || args.mode === 'hybrid+rerank' ? args.mode : undefined;
+      const col = await getCollection(tenantId, orgId, collectionId);
+      const mode = override ?? (col ? resolveRetrievalMode(col) : 'dense');
+      const results = await search(tenantId, orgId, collectionId, args.query, args.topK, mode);
       return { results };
     },
     /** Retrieve → augmented prompt + citations (generation is the node's job). */

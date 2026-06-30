@@ -7,6 +7,7 @@
  * MessageBubble when an onReconfigureBYOK callback is in scope).
  */
 
+import { useTranslation } from 'react-i18next';
 import type { ModelCapabilityInsufficient } from '../types.js';
 
 interface Props {
@@ -15,22 +16,23 @@ interface Props {
 }
 
 export function CapabilityInsufficientCard({ ci, onReconfigure }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   return (
-    <div className="env-chip env-chip-danger" role="alert" aria-label="Model capability insufficient">
-      <span className="env-chip-tag">MODEL INSUFFICIENT</span>
+    <div className="env-chip env-chip-danger" role="alert" aria-label={t('capInsufficientTitle')}>
+      <span className="env-chip-tag">{t('capInsufficientBadge')}</span>
       <span className="env-chip-text">
-        <span className="env-chip-mono">{ci.provider}/{ci.model}</span> lacks{' '}
+        <span className="env-chip-mono">{ci.provider}/{ci.model}</span> {t('lacks')}{' '}
         {ci.missingCapabilities.map((c, i) => (
           <span key={c}>
             <span className="env-chip-pill">{c}</span>
             {i < ci.missingCapabilities.length - 1 ? ' ' : ''}
           </span>
         ))}
-        {ci.fallbackAttempted ? <> · no fallback model satisfies the requirements</> : null}
+        {ci.fallbackAttempted ? <> · {t('noFallbackModel')}</> : null}
       </span>
       {onReconfigure ? (
         <button type="button" className="env-chip-action" onClick={onReconfigure}>
-          Choose a different model
+          {t('chooseDifferentModel')}
         </button>
       ) : null}
     </div>

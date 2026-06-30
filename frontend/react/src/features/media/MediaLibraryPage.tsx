@@ -5,15 +5,19 @@
  * (the backend fail-closes — a viewer sees a 403 surfaced as a toast).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../../ui/confirm.js';
 import { PageHeader } from '../../ui/PageHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
+import { IconButton } from '../../ui/IconButton.js';
+import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
 import { toast } from '../../ui/toast.js';
 import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
 import { ImageIcon, LockIcon, PackageIcon, PlusIcon, TrashIcon } from '../../ui/icons/index.js';
+import { MediaAssetCard, MediaAssetRow } from './MediaViews.js';
 import {
-  absoluteServeUrl,
   createCollection,
   deleteAsset,
   deleteCollection,
@@ -30,6 +34,7 @@ const ALL = '__all__';
 const UNCATEGORIZED = 'none'; // matches the backend ?collectionId sentinel (server-side filter)
 
 export function MediaLibraryPage(): JSX.Element {
+  const { t } = useTranslation('media');
   const access = useFeatureAccess('media');
   const [orgs, setOrgs] = useState<Org[] | null>(null);
   const [orgId, setOrgId] = useState<string>('');
@@ -40,6 +45,7 @@ export function MediaLibraryPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [newCollection, setNewCollection] = useState('');
   const [busy, setBusy] = useState(false);
+  const [viewMode, setViewMode] = useViewMode('media', 'grid');
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   // Load orgs once the feature is enabled; default to the first.
@@ -50,8 +56,8 @@ export function MediaLibraryPage(): JSX.Element {
         setOrgs(o);
         setOrgId((cur) => cur || (o[0]?.orgId ?? ''));
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load organizations.'));
-  }, [access.enabled]);
+      .catch((err) => setError(err instanceof Error ? err.message : t('loadOrgsFailed')));
+  }, [access.enabled, t]);
 
   const loadAssets = useCallback(
     (org: string, sel: string, query: string) => {
@@ -60,9 +66,9 @@ export function MediaLibraryPage(): JSX.Element {
       if (query.trim()) filter.q = query.trim();
       void listAssets(org, filter)
         .then(setAssets)
-        .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load assets.'));
+        .catch((err) => setError(err instanceof Error ? err.message : t('loadAssetsFailed')));
     },
-    [],
+    [t],
   );
 
   // Collections reload only when the ORG changes (selected/q are reset to ALL/''
@@ -89,13 +95,13 @@ export function MediaLibraryPage(): JSX.Element {
       const c = await createCollection(orgId, newCollection.trim());
       setCollections((cur) => [...cur, c]);
       setNewCollection('');
-      toast.success('Collection created.');
+      toast.success(t('collectionCreated'));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Create failed.');
+      toast.error(err instanceof Error ? err.message : t('createFailed'));
     } finally {
       setBusy(false);
     }
-  }, [newCollection, orgId]);
+  }, [newCollection, orgId, t]);
 
   const removeCollection = useCallback(
     async (collectionId: string) => {
@@ -103,12 +109,12 @@ export function MediaLibraryPage(): JSX.Element {
         await deleteCollection(orgId, collectionId);
         setCollections((cur) => cur.filter((c) => c.collectionId !== collectionId));
         if (selected === collectionId) setSelected(ALL);
-        toast.info('Collection deleted (assets re-homed).');
+        toast.info(t('collectionDeleted'));
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : 'Delete failed.');
+        toast.error(err instanceof Error ? err.message : t('deleteFailed'));
       }
     },
-    [orgId, selected],
+    [orgId, selected, t],
   );
 
   const onUpload = useCallback(
@@ -118,31 +124,32 @@ export function MediaLibraryPage(): JSX.Element {
         const collectionId = selected !== ALL && selected !== UNCATEGORIZED ? selected : undefined;
         await uploadAsset(orgId, file, collectionId);
         loadAssets(orgId, selected, q);
-        toast.success(`Uploaded ${file.name}.`);
+        toast.success(t('uploaded', { name: file.name }));
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : 'Upload failed.');
+        toast.error(err instanceof Error ? err.message : t('uploadFailed'));
       } finally {
         setBusy(false);
       }
     },
-    [orgId, selected, q, loadAssets],
+    [orgId, selected, q, loadAssets, t],
   );
 
   const removeAsset = useCallback(
     async (assetId: string) => {
+      if (!(await confirm({ title: t('deleteAssetConfirm'), danger: true, confirmLabel: t('common:delete') }))) return;
       try {
         await deleteAsset(orgId, assetId);
         setAssets((cur) => (cur ? cur.filter((a) => a.assetId !== assetId) : cur));
       } catch (err) {
-        toast.error(err instanceof Error ? err.message : 'Delete failed.');
+        toast.error(err instanceof Error ? err.message : t('deleteFailed'));
       }
     },
-    [orgId],
+    [orgId, t],
   );
 
   if (access.loading) return <Skeleton />;
   if (!access.enabled) {
-    return <StateCard icon={<LockIcon />} title="Media library is not enabled" body="Ask an administrator to enable the Media feature for this tenant." />;
+    return <StateCard icon={<LockIcon />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />;
   }
 
   const orgActions = (
@@ -154,7 +161,7 @@ export function MediaLibraryPage(): JSX.Element {
         setQ('');
       }}
       className="u-w-auto"
-      aria-label="Organization"
+      aria-label={t('orgPickerLabel')}
     >
       {(orgs ?? []).map((o) => (
         <option key={o.orgId} value={o.orgId}>{o.name}</option>
@@ -164,49 +171,45 @@ export function MediaLibraryPage(): JSX.Element {
 
   return (
     <div>
-      <PageHeader eyebrow="Platform" title="Media Library" lede="Org-scoped assets + collections." actions={orgs && orgs.length > 0 ? orgActions : undefined} />
+      <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={orgs && orgs.length > 0 ? orgActions : undefined} />
       {error ? <Notice variant="error">{error}</Notice> : null}
 
       {!orgs ? (
         <Skeleton />
       ) : orgs.length === 0 ? (
-        <StateCard icon={<PackageIcon />} title="No organizations" body="Create an organization first — media collections belong to an org." />
+        <StateCard icon={<PackageIcon />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
       ) : (
         <div className="media-layout">
           {/* Collections sidebar */}
           <div className="surface-card u-gap-2">
-            <strong>Collections</strong>
+            <h2 className="u-fs-16 u-m-0">{t('collectionsHeading')}</h2>
             {[
-              { id: ALL, name: 'All assets' },
-              { id: UNCATEGORIZED, name: 'Uncategorized' },
+              { id: ALL, name: t('allAssets') },
+              { id: UNCATEGORIZED, name: t('uncategorized') },
             ].map((c) => (
-              <button key={c.id} type="button" className={`${selected === c.id ? 'btn-primary' : 'btn-ghost'} u-justify-start`} onClick={() => setSelected(c.id)}>
+              <button key={c.id} type="button" className={`${selected === c.id ? 'btn-accent' : 'btn-ghost'} u-justify-start`} aria-current={selected === c.id ? 'true' : undefined} onClick={() => setSelected(c.id)}>
                 {c.name}
               </button>
             ))}
             <div className="media-divider" />
             {collections.map((c) => (
               <div key={c.collectionId} className="u-flex u-gap-1 u-items-center">
-                <button type="button" className={`${selected === c.collectionId ? 'btn-primary' : 'btn-ghost'} u-justify-start u-flex-1`} onClick={() => setSelected(c.collectionId)}>
+                <button type="button" className={`${selected === c.collectionId ? 'btn-accent' : 'btn-ghost'} u-justify-start u-flex-1`} aria-current={selected === c.collectionId ? 'true' : undefined} onClick={() => setSelected(c.collectionId)}>
                   <PackageIcon /> {c.name}
                 </button>
-                <button type="button" className="btn-ghost" title="Delete collection" onClick={() => void removeCollection(c.collectionId)}>
-                  <TrashIcon />
-                </button>
+                <IconButton label={t('deleteCollectionLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={() => void removeCollection(c.collectionId)} />
               </div>
             ))}
             <div className="u-flex u-gap-1 u-mt-2">
-              <input value={newCollection} onChange={(e) => setNewCollection(e.target.value)} placeholder="New collection" />
-              <button type="button" className="btn-ghost" disabled={busy || !newCollection.trim()} onClick={() => void addCollection()}>
-                <PlusIcon />
-              </button>
+              <input value={newCollection} onChange={(e) => setNewCollection(e.target.value)} placeholder={t('newCollectionPlaceholder')} aria-label={t('newCollectionPlaceholder')} onKeyDown={(e) => { if (e.key === 'Enter') void addCollection(); }} />
+              <IconButton label={t('newCollectionPlaceholder')} icon={<PlusIcon />} className="btn-ghost" disabled={busy || !newCollection.trim()} onClick={() => void addCollection()} />
             </div>
           </div>
 
           {/* Assets */}
           <div className="u-grid u-gap-3">
+            {/* Upload control — untouched (collection-management / upload surface). */}
             <div className="action-bar">
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search by name…" className="u-flex-1" />
               <input
                 ref={fileRef}
                 type="file"
@@ -219,38 +222,46 @@ export function MediaLibraryPage(): JSX.Element {
                 }}
               />
               <button type="button" className="btn-primary" disabled={busy} onClick={() => fileRef.current?.click()}>
-                <ImageIcon /> Upload
+                <ImageIcon /> {t('upload')}
               </button>
+            </div>
+
+            {/* The ONE asset-list filterbar (search + the shared grid/list toggle). */}
+            <div className="filterbar" role="group" aria-label={t('filterGroup')}>
+              <input
+                type="search"
+                className="ui-input filterbar-search"
+                placeholder={t('searchPlaceholder')}
+                aria-label={t('filterAria')}
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+              />
+              <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
             </div>
 
             {!assets ? (
               <Skeleton />
             ) : assets.length === 0 ? (
-              <StateCard icon={<ImageIcon />} title="No assets" body="Upload a file to start this collection." />
-            ) : (
-              <div className="media-asset-grid">
+              q.trim() ? (
+                <StateCard
+                  icon={<ImageIcon />}
+                  title={t('noMatchTitle')}
+                  body={t('noMatchBody')}
+                  action={<button type="button" className="secondary" onClick={() => setQ('')}>{t('clearSearch')}</button>}
+                />
+              ) : (
+                <StateCard icon={<ImageIcon />} title={t('noAssetsTitle')} body={t('noAssetsBody')} />
+              )
+            ) : viewMode === 'grid' ? (
+              <div className="card-grid">
                 {assets.map((a) => (
-                  <div key={a.assetId} className="surface-card u-gap-2 u-p-2">
-                    <div className="media-thumb">
-                      {a.contentType.startsWith('image/') ? (
-                        <img src={absoluteServeUrl(a.serveUrl)} alt={a.name} className="media-thumb-img" />
-                      ) : (
-                        <ImageIcon />
-                      )}
-                    </div>
-                    <span className="media-asset-name" title={a.name}>{a.name}</span>
-                    <div className="u-flex u-wrap u-gap-1">
-                      {a.tags.map((t) => (
-                        <span key={t} className="chip">{t}</span>
-                      ))}
-                    </div>
-                    <div className="action-bar u-justify-between">
-                      <span className="u-label-sm">{a.usageCount > 0 ? `used ${a.usageCount}×` : 'unused'}</span>
-                      <button type="button" className="btn-ghost" title="Delete asset" onClick={() => void removeAsset(a.assetId)}>
-                        <TrashIcon />
-                      </button>
-                    </div>
-                  </div>
+                  <MediaAssetCard key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId)} />
+                ))}
+              </div>
+            ) : (
+              <div className="surface-card list-view">
+                {assets.map((a) => (
+                  <MediaAssetRow key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId)} />
                 ))}
               </div>
             )}

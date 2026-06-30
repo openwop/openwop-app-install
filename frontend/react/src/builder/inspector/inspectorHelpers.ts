@@ -55,19 +55,22 @@ export function countNonBlankLines(s: string): number {
   return s.split('\n').filter((line) => line.trim().length > 0).length;
 }
 
-export const TRIGGER_RULE_OPTIONS: { value: EdgeTriggerRule; label: string; help: string }[] = [
-  { value: 'all_success', label: 'all_success', help: 'Default. Target fires after every upstream completes successfully.' },
-  { value: 'any_success', label: 'any_success', help: 'Target fires on the first upstream success (race).' },
-  { value: 'all_complete', label: 'all_complete', help: 'Target fires after every upstream reaches a terminal state regardless of outcome.' },
-  { value: 'none_failed', label: 'none_failed', help: 'Target fires when every upstream completed AND none failed.' },
-  { value: 'any_failed', label: 'any_failed', help: 'Target fires only when an upstream fails — error-routing path.' },
+// `label` is the persisted enum value (also shown verbatim in the picker);
+// `helpKey` resolves to translated copy in the `builder` namespace.
+export const TRIGGER_RULE_OPTIONS: { value: EdgeTriggerRule; label: string; helpKey: string }[] = [
+  { value: 'all_success', label: 'all_success', helpKey: 'triggerHelpAllSuccess' },
+  { value: 'any_success', label: 'any_success', helpKey: 'triggerHelpAnySuccess' },
+  { value: 'all_complete', label: 'all_complete', helpKey: 'triggerHelpAllComplete' },
+  { value: 'none_failed', label: 'none_failed', helpKey: 'triggerHelpNoneFailed' },
+  { value: 'any_failed', label: 'any_failed', helpKey: 'triggerHelpAnyFailed' },
 ];
 
-export const CONDITION_OPS: { value: EdgeCondition['op']; label: string; needsValue: boolean }[] = [
-  { value: 'eq', label: '= (equals)', needsValue: true },
-  { value: 'neq', label: '≠ (not equal)', needsValue: true },
-  { value: 'truthy', label: 'is truthy', needsValue: false },
-  { value: 'falsy', label: 'is falsy', needsValue: false },
-  { value: 'exists', label: 'exists', needsValue: false },
-  { value: 'contains', label: 'contains', needsValue: true },
+// `labelKey` resolves to translated copy in the `builder` namespace.
+export const CONDITION_OPS: { value: EdgeCondition['op']; labelKey: string; needsValue: boolean }[] = [
+  { value: 'eq', labelKey: 'condOpEq', needsValue: true },
+  { value: 'neq', labelKey: 'condOpNeq', needsValue: true },
+  { value: 'truthy', labelKey: 'condOpTruthy', needsValue: false },
+  { value: 'falsy', labelKey: 'condOpFalsy', needsValue: false },
+  { value: 'exists', labelKey: 'condOpExists', needsValue: false },
+  { value: 'contains', labelKey: 'condOpContains', needsValue: true },
 ];

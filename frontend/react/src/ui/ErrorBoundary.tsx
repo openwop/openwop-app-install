@@ -14,6 +14,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { StateCard } from './StateCard.js';
 import { AlertIcon, RotateCwIcon } from './icons/index.js';
+import i18n from '../i18n/index.js';
 import { telemetry } from '../platform/telemetry.js';
 
 interface ErrorBoundaryProps {
@@ -24,6 +25,10 @@ interface ErrorBoundaryProps {
   label?: string;
   /** Optional custom fallback; receives the error and a reset callback. */
   fallback?: (error: Error, reset: () => void) => ReactNode;
+  /** Recovery action for the default fallback's button (UI-2). Defaults to a
+   *  full-page reload; a deploy/region can override (retry the route, nav home,
+   *  notify observability) without replacing the whole fallback UI. */
+  onRecover?: () => void;
 }
 
 interface ErrorBoundaryState {
@@ -61,17 +66,23 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     return (
       <StateCard
         icon={<AlertIcon size={26} />}
-        title="Something went wrong"
+        title={i18n.t('ui:errorTitle')}
         body={
           <>
-            {this.props.label ? `The ${this.props.label} hit an unexpected error. ` : 'This view hit an unexpected error. '}
-            You can reload to recover.
+            {this.props.label
+              ? i18n.t('ui:errorBodyRegion', { region: this.props.label })
+              : i18n.t('ui:errorBodyGeneric')}
+            {i18n.t('ui:errorBodyRecover')}
             {error.message ? <div className="errboundary-message">{error.message}</div> : null}
           </>
         }
         action={
-          <button type="button" className="btn-accent-solid btn-sm" onClick={() => window.location.reload()}>
-            <RotateCwIcon size={14} aria-hidden /> Reload
+          <button
+            type="button"
+            className="btn-accent-solid btn-sm"
+            onClick={this.props.onRecover ?? (() => window.location.reload())}
+          >
+            <RotateCwIcon size={14} aria-hidden /> {i18n.t('ui:errorReload')}
           </button>
         }
       />

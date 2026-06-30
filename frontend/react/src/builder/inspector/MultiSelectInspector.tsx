@@ -4,59 +4,60 @@
  * kinds, so we expose batch ops instead).
  */
 
+import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
 
 export function MultiSelectInspector({ ids }: { ids: string[] }) {
+  const { t } = useTranslation('builder');
   const cloneNodes = useBuilderStore.getState().cloneNodes;
   const alignNodes = useBuilderStore.getState().alignNodes;
   const removeNodes = useBuilderStore.getState().removeNodes;
   const deleteAll = () => removeNodes(ids); // one undo entry; clears selection
   return (
     <aside className="builder-inspector">
-      <h3 className="builder-inspector-title">{ids.length} nodes selected</h3>
+      <h3 className="builder-inspector-title">{t('nodesSelected', { count: ids.length })}</h3>
       <p className="muted builder-inspector-desc">
-        Batch actions apply to every selected node. Select a single node to edit
-        its configuration.
+        {t('multiSelectDesc')}
       </p>
 
       <div className="builder-inspector-divider" />
-      <div className="builder-inspector-section-label">Arrange</div>
+      <div className="builder-inspector-section-label">{t('arrange')}</div>
       <div className="form-row builder-inspector-btn-row">
         <button className="secondary" onClick={() => alignNodes(ids, 'left')}>
-          Align left
+          {t('alignLeft')}
         </button>
         <button className="secondary" onClick={() => alignNodes(ids, 'top')}>
-          Align top
+          {t('alignTop')}
         </button>
       </div>
       <div className="form-row builder-inspector-btn-row">
         <button
           className="secondary"
           disabled={ids.length < 3}
-          aria-label="Distribute horizontally"
+          aria-label={t('distributeHorizontally')}
           onClick={() => alignNodes(ids, 'distribute-h')}
         >
-          Distribute ↔
+          {t('distribute')} ↔
         </button>
         <button
           className="secondary"
           disabled={ids.length < 3}
-          aria-label="Distribute vertically"
+          aria-label={t('distributeVertically')}
           onClick={() => alignNodes(ids, 'distribute-v')}
         >
-          Distribute ↕
+          {t('distribute')} ↕
         </button>
       </div>
       <div className="muted builder-inspector-help">
-        Distribute evens out the gaps between three or more nodes.
+        {t('distributeHelp')}
       </div>
 
       <div className="builder-inspector-divider" />
       <button className="secondary" onClick={() => cloneNodes(ids)}>
-        Duplicate all ({ids.length})
+        {t('duplicateAll', { count: ids.length })}
       </button>
       <button className="secondary u-mt-2" onClick={deleteAll}>
-        Delete all ({ids.length})
+        {t('deleteAll', { count: ids.length })}
       </button>
     </aside>
   );

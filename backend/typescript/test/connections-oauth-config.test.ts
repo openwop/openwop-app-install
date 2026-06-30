@@ -7,6 +7,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
@@ -15,8 +16,7 @@ import { __resetOAuthClientStore } from '../src/features/connections/oauthClient
 
 describe('Host OAuth client config (superadmin surface)', () => {
   let server: http.Server;
-  const PORT = 18953;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
   const TOKEN = 'dev-token'; // wildcard bearer ⇒ superadmin
 
   beforeAll(async () => {
@@ -26,12 +26,12 @@ describe('Host OAuth client config (superadmin surface)', () => {
     delete process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_ID;
     delete process.env.OPENWOP_OAUTH_GOOGLE_CLIENT_SECRET;
     delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await __clearToggleStore();
     await __resetConnectionsStore();
     await __resetOAuthClientStore();
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
   afterAll(async () => {

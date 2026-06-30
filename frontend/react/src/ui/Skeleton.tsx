@@ -1,4 +1,5 @@
 import type { CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 
 /**
  * Skeleton — content-shaped loading placeholders (gap #9), replacing bare
@@ -29,8 +30,9 @@ export function Skeleton({ width, height = 14, radius, style }: {
 
 /** Skeleton rows for a <DataTable> loading state — N rows × the given widths. */
 export function SkeletonRows({ rows = 4, columns }: { rows?: number; columns: (number | string)[] }): JSX.Element {
+  const { t } = useTranslation('ui');
   return (
-    <div className="skeleton-rows" role="status" aria-label="Loading…">
+    <div className="skeleton-rows" role="status" aria-label={t('common:loading')}>
       {Array.from({ length: rows }, (_, r) => (
         <div className="skeleton-row" key={r}>
           {columns.map((w, c) => <Skeleton key={c} width={w} />)}

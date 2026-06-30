@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
 import { ROLE_TEMPLATES, roleThemeForKey } from './roleTemplates.js';
 import { IconButton } from '../ui/IconButton.js';
 import { XIcon, ArrowRightIcon } from '../ui/icons/index.js';
@@ -16,6 +17,7 @@ import { Modal } from '../ui/Modal.js';
  * the blank wizard.
  */
 export function HireAgentModal({ onClose }: { onClose: () => void }): JSX.Element {
+  const { t } = useTranslation('agents');
   const navigate = useNavigate();
   const [roleKey, setRoleKey] = useState<string | null>(null);
   const [autonomy, setAutonomy] = useState<'auto' | 'guided' | 'review'>('auto');
@@ -29,19 +31,19 @@ export function HireAgentModal({ onClose }: { onClose: () => void }): JSX.Elemen
   };
 
   return (
-    <Modal onClose={onClose} label="Hire an agent">
+    <Modal onClose={onClose} label={t('hireLabel')}>
         <div className="hire-head">
           <div>
-            <div className="hire-eyebrow">New agent</div>
-            <h2 className="hire-title">Hire an agent</h2>
+            <div className="hire-eyebrow">{t('hireEyebrow')}</div>
+            <h2 className="hire-title">{t('hireTitle')}</h2>
             <p className="hire-lede">
-              Pick a role and we&rsquo;ll prefill its workflows, instructions, and a suggested name — you finish the details in the wizard.
+              {t('hireLede')}
             </p>
           </div>
-          <IconButton label="Close" icon={<XIcon size={16} />} onClick={onClose} />
+          <IconButton label={t('drawerClose')} icon={<XIcon size={16} />} onClick={onClose} />
         </div>
 
-        <div className="hire-label">Role</div>
+        <div className="hire-label">{t('hireRole')}</div>
         <div className="hire-roles">
           {ROLE_TEMPLATES.map((r) => {
             const RoleIcon = roleThemeForKey(r.key).Icon;
@@ -65,14 +67,14 @@ export function HireAgentModal({ onClose }: { onClose: () => void }): JSX.Elemen
             className={roleKey === 'custom' ? 'hire-role is-selected' : 'hire-role'}
             onClick={() => setRoleKey('custom')}
           >
-            <span className="hire-role-title">Custom role…</span>
-            <span className="hire-role-blurb">Start from a blank wizard and define everything yourself.</span>
+            <span className="hire-role-title">{t('hireCustomRole')}</span>
+            <span className="hire-role-blurb">{t('hireCustomRoleBlurb')}</span>
           </button>
         </div>
 
-        <div className="hire-label">Starting autonomy</div>
+        <div className="hire-label">{t('hireStartingAutonomy')}</div>
         <div className="action-bar">
-          {([['review', 'Supervised — propose for review'], ['guided', 'Guided — asks on high-priority'], ['auto', 'Autonomous — run immediately']] as const).map(([value, label]) => (
+          {([['review', t('hireAutonomySupervised')], ['guided', t('hireAutonomyGuided')], ['auto', t('hireAutonomyAutonomous')]] as const).map(([value, label]) => (
             <button
               key={value}
               type="button"
@@ -86,9 +88,9 @@ export function HireAgentModal({ onClose }: { onClose: () => void }): JSX.Elemen
         </div>
 
         <div className="hire-foot action-bar">
-          <button type="button" className="secondary btn-sm" onClick={onClose}>Cancel</button>
+          <button type="button" className="secondary btn-sm" onClick={onClose}>{t('newCancel')}</button>
           <button type="button" className="btn-accent-solid btn-sm" disabled={roleKey === null} onClick={go}>
-            Continue <ArrowRightIcon size={14} aria-hidden />
+            {t('hireContinue')} <ArrowRightIcon size={14} aria-hidden />
           </button>
         </div>
     </Modal>

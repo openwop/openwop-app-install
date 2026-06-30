@@ -19,6 +19,10 @@ import type { StreamMode } from '@openwop/openwop';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError, type EventRecord } from '../types.js';
 import { getEventLog } from '../executor/eventLog.js';
+import { loadReadableRun } from '../host/runAccess.js';
+import { mintRunStreamToken } from '../host/runStreamToken.js';
+import { openSseChannel } from '../host/sseChannel.js';
+import { projectA2uiDelivery, a2uiDeltaTransportEnabled, type A2uiDeltaState, type A2uiSurfacePayload } from '../host/a2uiSurfaceDelta.js';
 
 const VALID_MODES: readonly StreamMode[] = ['values', 'updates', 'messages', 'debug'];
 
@@ -29,10 +33,29 @@ interface Deps {
 export function registerStreamRoutes(app: Express, deps: Deps): void {
   const { storage } = deps;
 
+  // Mint a run-scoped stream capability for the cross-origin SSE. SAME-ORIGIN
+  // (via /api) so an owner — including a BYOK-anon owner whose cookie can't
+  // follow to *.run.app — passes the normal tenant gate here, then presents the
+  // returned token on the cross-origin `…/events?streamToken=…` request. A
+  // non-owner 404s on loadReadableRun and never gets a token (see
+  // host/runStreamToken). Registered before the `/events` route; the extra path
+  // segment keeps them distinct regardless of order.
+  app.get('/v1/runs/:runId/events/token', async (req, res, next) => {
+    try {
+      await loadReadableRun(req, storage, req.params.runId);
+      res.json({ streamToken: mintRunStreamToken(req.params.runId) });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get('/v1/runs/:runId/events', async (req, res, next) => {
     try {
-      const run = await storage.getRun(req.params.runId);
-      if (!run) throw new OpenwopError('run_not_found', `run ${req.params.runId} not found`, 404);
+      // Authorize the READ before anything streams: scope seam (RFC 0049) +
+      // tenant ownership, the same gate the JSON poll / GET / debug-bundle use.
+      // Without it the live event stream was the one run-read path with zero
+      // authorization (architecture review #1).
+      const run = await loadReadableRun(req, storage, req.params.runId);
 
       // Stream-mode validation runs BEFORE content negotiation so that
       // bad streamMode values 400 regardless of Accept header. Otherwise
@@ -96,13 +119,9 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         fromSeq = Number(lastEventIdHeader);
       }
 
-      res.set({
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        Connection: 'keep-alive',
-        'X-Accel-Buffering': 'no',
-      });
-      res.flushHeaders();
+      // Shared SSE lifecycle (host/sseChannel): canonical headers (incl.
+      // X-Accel-Buffering), 15s heartbeat, per-tenant connection cap, teardown.
+      const channel = openSseChannel(req, res, { heartbeatMs: 15_000 });
 
       // Aggregation buffer for `?bufferMs=N`. When set, events
       // accumulate here between flushes; on each tick (or on terminal)
@@ -116,19 +135,24 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         pendingBatch.length = 0;
       };
 
+      // RFC 0114 — opt-in a2ui delta transport. Gated on the SAME predicate as
+      // the capability advert (`a2uiDeltaTransportEnabled()`), so serving and
+      // advertising can never drift (honest-advert rule). Per-connection state
+      // carries the last full surface delivered to THIS subscriber (delta is a
+      // per-subscriber choice). Not applied in the aggregation (`bufferMs>0`)
+      // path — batches carry full events; delta is a live-stream optimization.
+      const a2uiDelta =
+        req.query.a2uiDelta === '1' && a2uiDeltaTransportEnabled() && bufferMs === 0;
+      const a2uiState: A2uiDeltaState = {};
+
       // Replay buffered events.
       const buffered = await storage.listEvents(run.runId, { fromSeq, limit: 10_000 });
       for (const ev of buffered) {
         if (passesModeFilter(ev, modes)) {
           if (bufferMs > 0) pendingBatch.push(ev);
-          else writeSseEvent(res, ev);
+          else deliverEvent(res, ev, a2uiDelta, a2uiState);
         }
       }
-
-      // Heartbeat every 15s to keep proxies from dropping the connection.
-      const heartbeat = setInterval(() => {
-        res.write(': heartbeat\n\n');
-      }, 15_000);
 
       // Aggregation tick — only when bufferMs > 0. Flushes the batch
       // even if no events arrived this interval (the consumer counts
@@ -150,31 +174,31 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
               flushBatch();
             }
           } else {
-            writeSseEvent(res, ev);
+            deliverEvent(res, ev, a2uiDelta, a2uiState);
           }
         }
-        // Close the stream once we've observed a terminal event.
-        if (TERMINAL_EVENT_TYPES.has(ev.type)) {
-          unsubscribe();
-          if (aggTick) clearInterval(aggTick);
-          clearInterval(heartbeat);
-          res.end();
-        }
+        // Close the stream once we've observed a terminal event — the channel
+        // clears the heartbeat + releases the cap slot and runs the teardown
+        // below (aggregation tick + subscription).
+        if (TERMINAL_EVENT_TYPES.has(ev.type)) channel.close();
       });
 
-      req.on('close', () => {
-        clearInterval(heartbeat);
+      // Route-specific teardown — run once by the channel on client disconnect
+      // or channel.close().
+      const routeTeardown = (): void => {
         if (aggTick) clearInterval(aggTick);
         unsubscribe();
-      });
+      };
+      channel.onClose(routeTeardown);
+      // The replay `await` above is a window in which the client could have
+      // disconnected before onClose was registered; if so, tear down now (the
+      // aggTick/subscription created since would otherwise leak).
+      if (channel.closed) { routeTeardown(); return; }
 
       // If the run is already terminal, flush + close.
       if (['completed', 'failed', 'cancelled'].includes(run.status)) {
         if (bufferMs > 0) flushBatch();
-        unsubscribe();
-        if (aggTick) clearInterval(aggTick);
-        clearInterval(heartbeat);
-        res.end();
+        channel.close();
       }
     } catch (err) {
       next(err);
@@ -238,4 +262,33 @@ function writeSseEvent(res: Response, ev: EventRecord): void {
   res.write(`id: ${ev.sequence}\n`);
   res.write(`event: ${ev.type}\n`);
   res.write(`data: ${JSON.stringify(ev)}\n\n`);
+}
+
+/** True when the event carries a recorded `ui.a2ui-surface` payload. */
+function isA2uiSurfaceEvent(ev: EventRecord): ev is EventRecord & { payload: A2uiSurfacePayload } {
+  const p = ev.payload as Partial<A2uiSurfacePayload> | undefined;
+  return ev.type === 'ui.a2ui-surface' && !!p && typeof p.catalogVersion === 'string' && 'surface' in p;
+}
+
+/**
+ * RFC 0114 — deliver an event to ONE subscriber, applying the host-side a2ui
+ * delta transport when the subscriber opted in (`?a2uiDelta=1`). The RECORDED
+ * event is untouched; this only changes the bytes on THIS connection: a
+ * subsequent surface for the chain is sent as a `ui.a2ui-surface.delta` frame
+ * (transport-only, never recorded). Everyone else / the first surface / a
+ * catalog bump get the full event. Non-a2ui events pass straight through.
+ */
+function deliverEvent(res: Response, ev: EventRecord, deltaEnabled: boolean, state: A2uiDeltaState): void {
+  if (deltaEnabled && isA2uiSurfaceEvent(ev)) {
+    const decision = projectA2uiDelivery(state, ev.eventId, ev.payload, true);
+    if (decision.kind === 'delta') {
+      // Transport-only frame; distinct SSE event type so the consumer knows to
+      // apply a patch (then re-validate against the closed catalog, fail-closed).
+      res.write(`id: ${ev.sequence}\n`);
+      res.write(`event: ui.a2ui-surface.delta\n`);
+      res.write(`data: ${JSON.stringify(decision.frame)}\n\n`);
+      return;
+    }
+  }
+  writeSseEvent(res, ev);
 }

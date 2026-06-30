@@ -1,0 +1,47 @@
+{
+  "name": "feature.workflow-author.nodes",
+  "version": "1.0.0",
+  "description": "AI Workflow Author node pack (ADR 0072 / ADR 0014) — the meta-workflow building blocks that author OTHER workflows over the ctx.features['workflow-author'] surface. draft (LLM authors a graph from the live node catalog), validate (re-check against the closed-world catalog + registration contract), persist (register the validated WorkflowDefinition). Wired draft→validate→persist they are the workflow-builder brain.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "workflow-author", "meta-workflow", "authoring", "builder"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.workflow-author.nodes.draft",
+      "version": "1.0.0",
+      "label": "Workflow Author: Draft",
+      "description": "Reads the live node catalog as a closed-world menu and calls the LLM to author a candidate WorkflowDefinition for a natural-language intent, repairing on validation errors up to maxAttempts. Requires ctx.callAI + ctx.features['workflow-author'].",
+      "category": "ai",
+      "role": "action",
+      "capabilities": [],
+      "requiredModelCapabilities": ["structured-output"],
+      "fallbackModel": { "provider": "anthropic", "model": "claude-sonnet-4-6" },
+      "inputSchemaRef": "schemas/draft.input.schema.json",
+      "outputSchemaRef": "schemas/draft.output.schema.json"
+    },
+    {
+      "typeId": "feature.workflow-author.nodes.validate",
+      "version": "1.0.0",
+      "label": "Workflow Author: Validate",
+      "description": "Re-checks a candidate WorkflowDefinition against the closed-world node catalog + the shared registration contract (structural + RFC 0022 §C gate). Fails the run when invalid so persist never fires.",
+      "category": "control",
+      "role": "action",
+      "capabilities": [],
+      "inputSchemaRef": "schemas/definition.io.schema.json",
+      "outputSchemaRef": "schemas/definition.io.schema.json"
+    },
+    {
+      "typeId": "feature.workflow-author.nodes.persist",
+      "version": "1.0.0",
+      "label": "Workflow Author: Persist",
+      "description": "Registers a validated WorkflowDefinition through the shared registration path so it opens in the builder canvas. Output carries the authored workflowId.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [],
+      "inputSchemaRef": "schemas/definition.io.schema.json",
+      "outputSchemaRef": "schemas/persist.output.schema.json"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

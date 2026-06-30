@@ -230,6 +230,54 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
         kind: 'textarea',
         defaultValue: 'Please approve to continue.',
       },
+      {
+        // ADR 0075 §D8 — name WHO may approve. Subject refs (e.g. `user:alice`);
+        // empty ⇒ an open gate (any authenticated reviewer). Forwarded into
+        // interrupt.data.approverRefs and enforced for quorum gates (ADR 0070).
+        // Group/role routing on this interrupt path is RFC 0104 (Phase 2).
+        key: 'approverRefs',
+        label: 'Eligible approvers (one subject ref per line)',
+        kind: 'string-list',
+        placeholder: 'user:alice',
+        help: 'Who may approve. Leave empty for an open gate (any authenticated reviewer). For a quorum, also set Required approvals.',
+      },
+      {
+        // ADR 0075 / RFC 0104 — approve by GROUP. Resolved live to the group's
+        // members (in the run's org) at decision time. Run-create rejects if the
+        // group resolves to nobody.
+        key: 'approverGroupRefs',
+        label: 'Approver groups (one group id per line)',
+        kind: 'string-list',
+        placeholder: 'grp-finance-approvers',
+        help: 'Anyone in these accessControl groups may approve. Resolved against the run’s org; the run is rejected at start if a group has no members.',
+      },
+      {
+        // ADR 0075 / RFC 0104 — approve by ROLE (built-in or custom).
+        key: 'approverRoleRefs',
+        label: 'Approver roles (one role id per line)',
+        kind: 'string-list',
+        placeholder: 'controller',
+        help: 'Anyone holding these roles (directly or via a group) may approve. Resolved against the run’s org.',
+      },
+      {
+        key: 'requiredApprovals',
+        label: 'Required approvals',
+        kind: 'number',
+        defaultValue: 1,
+        min: 1,
+        help: '1 = single sign-off. >1 = quorum: that many distinct eligible approvers must approve (ADR 0070).',
+      },
+      {
+        key: 'rejectionPolicy',
+        label: 'Rejection policy',
+        kind: 'select',
+        defaultValue: 'any',
+        options: [
+          { value: 'any', label: 'Any rejection fails the gate' },
+          { value: 'majority', label: 'Majority must reject' },
+        ],
+        help: 'How rejections fail a quorum gate. Ignored for single sign-off.',
+      },
     ],
   },
   {

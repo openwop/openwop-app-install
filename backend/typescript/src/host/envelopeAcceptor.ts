@@ -84,8 +84,15 @@ function loadEnvelopeValidator(): ValidateFunction {
 
 function loadPayloadValidator(kind: string): ValidateFunction | null {
   if (_payloadValidators.has(kind)) return _payloadValidators.get(kind) ?? null;
-  if (!(UNIVERSAL_KINDS as readonly string[]).includes(kind)) {
-    return null; // vendor-namespaced — no in-tree schema
+  // Validate against any in-tree per-kind schema we ship — the 4 universals
+  // PLUS the advertised non-universal core kinds that carry a schema:
+  // `media.{image,audio,file}` (RFC 0055) and `ui.a2ui-surface` (RFC 0102).
+  // Vendor/host-private kinds (`vendor.*` / `private.*` / `x-*`) carry no
+  // in-tree core schema, so fast-path them to null. (The earlier
+  // universal-only guard predated the media.* + ui.* families and was stale —
+  // it silently skipped payload validation for those advertised kinds.)
+  if (kind.startsWith('vendor.') || kind.startsWith('private.') || kind.startsWith('x-')) {
+    return null;
   }
   const path = join(SCHEMAS_DIR, 'envelopes', `${kind}.schema.json`);
   try {

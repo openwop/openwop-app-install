@@ -32,9 +32,7 @@ export interface Queryable {
   ): Promise<{ rows: R[] }>;
 }
 
-export const LATEST_SCHEMA_VERSION = 22;
-
-const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
+export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
   1: async (client) => {
     await client.query(`
       CREATE TABLE IF NOT EXISTS runs (
@@ -628,7 +626,93 @@ const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = {
       ALTER TABLE interrupts ADD COLUMN expires_at TIMESTAMPTZ;
     `);
   },
+  23: async (client) => {
+    // ADR 0050 — per-recipient notification targeting. NULL = broadcast
+    // (tenant-wide, the pre-0050 behavior every existing row keeps); non-NULL
+    // = addressed to that one user. Inbox returns recipient_user_id = me OR
+    // IS NULL. Mirrors sqlite mig 26.
+    await client.query(`
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS recipient_user_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_notifications_tenant_recipient
+        ON notifications (tenant_id, recipient_user_id, created_at DESC);
+    `);
+    // ADR 0050 Phase 3 — role-addressed broadcast (visible only to role-holders).
+    await client.query(`
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS recipient_role TEXT;
+    `);
+  },
+  24: async (client) => {
+    // ADR 0050 — push subscriptions record their owning user so addressed
+    // notifications push only to that user's devices. Legacy rows keep NULL
+    // (broadcast-only). Mirrors sqlite mig 27.
+    await client.query(`
+      ALTER TABLE push_subscriptions ADD COLUMN IF NOT EXISTS user_id TEXT;
+      CREATE INDEX IF NOT EXISTS idx_push_subs_tenant_user
+        ON push_subscriptions (tenant_id, user_id);
+    `);
+  },
+  25: async (client) => {
+    // ADR 0052 §D4/§D5 — app-tier metadata, sibling to __schema_version (app
+    // version for fresh-vs-upgrade detection + the app-migration counter).
+    // Mirrors sqlite mig 28.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS __app_meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL
+      );
+    `);
+  },
+  26: async (client) => {
+    // ADR 0102 Phase 2 — per-message author for the edit-authz gate. Nullable +
+    // additive; existing rows get a null author (⇒ owner-writable). Mirrors
+    // sqlite mig 29.
+    await client.query(`ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS author_subject TEXT;`);
+  },
+  27: async (client) => {
+    // ADR 0106 — per-org daily media-generation usage (TTS chars + STT bytes) for
+    // the media cost-governance budget. Mirrors managed_provider_usage + sqlite
+    // mig 30. `date` is the UTC calendar day in YYYY-MM-DD form (TEXT to match the
+    // sqlite shape, so the Storage interface stays backend-agnostic).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS media_provider_usage (
+        tenant_id TEXT NOT NULL,
+        date TEXT NOT NULL,
+        tts_chars BIGINT NOT NULL DEFAULT 0,
+        stt_bytes BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (tenant_id, date)
+      );
+    `);
+  },
+  28: async (client) => {
+    // ADR 0050 Phase 3 (drift repair) — re-apply the role-addressed notification
+    // column. It was originally appended as a SECOND statement INSIDE mig 23, so a
+    // DB that recorded v23 before that line was added never got the column and the
+    // forward-only migrator (runs version > recorded) never re-runs 23 → the
+    // notifications list 500s with `column "recipient_role" does not exist`. This is
+    // a NEW version so every drifted DB applies it; IF NOT EXISTS makes it a no-op
+    // on DBs (incl. fresh ones) that already have it. Mirrors sqlite mig 31.
+    await client.query(`
+      ALTER TABLE notifications ADD COLUMN IF NOT EXISTS recipient_role TEXT;
+    `);
+  },
+  29: async (client) => {
+    // ADR 0151 — title provenance for conversation auto-titling. Nullable +
+    // additive; existing rows keep NULL (⇒ treated as 'default', still auto-
+    // titleable). 'auto' = LLM-titled (don't re-run), 'user' = manual rename
+    // (never overwrite). Mirrors sqlite mig 32.
+    await client.query(`
+      ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title_source TEXT;
+    `);
+  },
 };
+
+/** Highest defined migration — DERIVED from MIGRATIONS, never a hand-bumped cap.
+ *  A separate literal silently skipped a newly-added migration (the `recipient_role`
+ *  drift, #935): the runner loops `current+1 … LATEST`, so a stale cap means the
+ *  migration never executes. Deriving makes "add a migration, forget the cap"
+ *  structurally impossible. */
+export const LATEST_SCHEMA_VERSION = Math.max(...Object.keys(MIGRATIONS).map(Number));
 
 export async function applyMigrations(client: Queryable): Promise<void> {
   await client.query(`

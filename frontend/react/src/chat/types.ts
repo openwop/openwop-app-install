@@ -96,7 +96,7 @@ export interface WorkflowRunState {
   /** Resolved + currently-open interrupts in the order they appeared.
    *  Feeds the persistent `HitlDecisionCard` rendered inline once the
    *  user has resolved an interrupt — without this, the FE forgets
-   *  what the human chose as soon as `activeInterrupt` flips to null. */
+   *  what the human chose as soon as the open interrupt is cleared. */
   interruptHistory?: InterruptHistoryEntry[];
   /** True when the BE no longer has a run record for `runId` —
    *  account deletion, retention sweep, or a fresh database. The
@@ -313,8 +313,14 @@ export interface ChatMessage {
    *  model ships *with* its structured answer. Distinct from `thoughts`,
    *  which is the thinking-token stream. */
   reasoning?: string;
-  /** When set, render an interrupt card inline beneath this bubble. */
-  activeInterrupt?: OpenInterrupt | null;
+  /** Open interrupts for this message's run, rendered as inline cards
+   *  beneath the bubble. Plural because a workflow with parallel
+   *  branches can suspend on several human gates at once (e.g. a
+   *  legal + brand + risk review fan-out) — each open interrupt needs
+   *  its own card, and resolving one must not strand the others. An
+   *  assistant chat turn only ever has zero or one. Deduped by
+   *  `interruptId`. */
+  activeInterrupts?: OpenInterrupt[];
   /** Final-turn metadata for the assistant bubble. */
   meta?: {
     runId?: string | undefined;
@@ -367,6 +373,10 @@ export interface ChatMessage {
   /** Persona name of `agentId`, captured at send time so the cross-agent label
    *  (`[Persona]: …`) renders even if the agent is later uninstalled. */
   agentPersona?: string;
+  /** The responding agent's @handle (e.g. `andru-carnagie`), captured at send
+   *  time. Drives the in-bubble attribution header (avatar + name) so a council
+   *  reply isn't an unattributed blob. Humanized for the display name. */
+  agentSlug?: string;
   createdAt: string;
 }
 
@@ -391,8 +401,9 @@ export interface ChatSession {
    *  Absent on the per-turn path or a fresh session; cleared if the run dies. */
   conversationRunId?: string | undefined;
   /** Active-agents lineup for this chat (RFC 0072 §A inventory ids).
-   *  Set by phase D1's `ActiveAgentsPanel` + phase D3's `@`-mention
-   *  activation. The chat dispatcher routes through `activeAgentId`
+   *  Derived from the conversation's participants on open + the `@`-mention
+   *  activation (ADR 0043); rendered inline in the Conversations rail. The
+   *  chat dispatcher routes through `activeAgentId`
    *  when set (phase D2); when null, the default OpenWOP Assistant
    *  responds. All active agents see the whole shared chat history
    *  (group-chat model). Optional so legacy persisted sessions
@@ -425,12 +436,21 @@ export interface SendOptions {
   /** Enable provider-native web search for this turn (anthropic / openai
    *  / google all support; gated per-model via providers.json `webSearch`). */
   webSearch?: boolean | undefined;
+  /** Per-exchange model switch (ADR 0124) — the in-chat selector overrides the
+   *  run's model/provider for THIS turn only. Host-internal (not a wire change);
+   *  the backend applies it at highest precedence (override > route stamp > inputs). */
+  model?: string | undefined;
+  provider?: string | undefined;
   /** Workflow-bound tools the chat node can dispatch via the Anthropic
    *  tools API (anthropic provider only — gated upstream). Each entry
    *  is { workflowId, name, description }; the chat responder node
    *  turns these into Anthropic tool definitions and dispatches the
    *  named workflow on tool_use. */
   tools?: ReadonlyArray<{ workflowId: string; name: string; description: string }> | undefined;
+  /** Per-exchange permission mode (ADR 0150) — the composer Safe/Bypass switch. `'bypass'`
+   *  lets the agent run consequential tools (code-exec, file-write, egress) WITHOUT an approval
+   *  card; `'safe'` (default) gates them. Host-internal (not a wire change). */
+  permissionMode?: 'safe' | 'bypass' | undefined;
   /** Fully-qualified agent id from RFC 0072 §A inventory when an
    *  agent is the currently-routing voice for this chat. The
    *  chat-responder resolves the agent's `systemPrompt` from the
@@ -439,4 +459,10 @@ export interface SendOptions {
    *  OpenWOP Assistant" — the chat-responder's existing system-prompt
    *  resolution path runs unchanged. */
   activeAgentId?: string | undefined;
+  /** Explicit retrieval query for the agent's bound knowledge (ADR 0043 Phase
+   *  5B). When set, the chat responder retrieves against THIS text instead of
+   *  the latest user turn — the boardroom cadence (Phase 5A) passes the user's
+   *  original question so each advisor retrieves against the real topic, not the
+   *  "<persona>, your perspective?" hand-off prompt. Absent ⇒ latest user turn. */
+  knowledgeQuery?: string | undefined;
 }

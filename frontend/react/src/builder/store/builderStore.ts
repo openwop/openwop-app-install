@@ -16,6 +16,17 @@ import type { RunEventDoc } from '@openwop/openwop';
 import type { BuilderEdge, BuilderNode, SavedWorkflow } from '../schema/workflow.js';
 import { catalogEntry, defaultConfigFor } from '../palette/catalogRegistry.js';
 import { upsertSavedWorkflow } from '../persistence/localStore.js';
+import { saveWorkflow as saveBackendWorkflow } from '../persistence/backendStore.js';
+
+// ADR 0163 Phase 3 — write-through to the backend ownership index, DEBOUNCED so
+// canvas edits don't POST on every keystroke. localStorage stays the immediate
+// (synchronous) write; the backend sync trails the last edit by ~1.5s.
+let backendSyncTimer: ReturnType<typeof setTimeout> | undefined;
+function scheduleBackendSync(wf: SavedWorkflow): void {
+  if (backendSyncTimer) clearTimeout(backendSyncTimer);
+  backendSyncTimer = setTimeout(() => { void saveBackendWorkflow(wf); }, 1500);
+}
+import i18n from '../../i18n/index.js';
 
 const HISTORY_MAX = 30;
 
@@ -114,7 +125,7 @@ function clone(s: { nodes: BuilderNode[]; edges: BuilderEdge[] }): Snapshot {
 
 export const useBuilderStore = create<BuilderState>((set, get) => ({
   workflowId: '',
-  name: 'Untitled workflow',
+  name: i18n.t('builder:untitledWorkflow'),
   defaultInputs: '{}',
   nodes: [],
   edges: [],
@@ -396,7 +407,7 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
   persist() {
     const s = get();
     if (!s.workflowId) return;
-    upsertSavedWorkflow({
+    const wf = {
       id: s.workflowId,
       name: s.name,
       version: '1.0.0',
@@ -405,7 +416,9 @@ export const useBuilderStore = create<BuilderState>((set, get) => ({
       defaultInputs: s.defaultInputs,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
-    });
+    };
+    upsertSavedWorkflow(wf); // immediate local (offline-safe)
+    scheduleBackendSync(wf); // debounced write-through to the backend (R-D)
   },
 
   startOverlay(runId, backendIdToBuilder) {

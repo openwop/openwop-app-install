@@ -18,7 +18,7 @@
  * @see RFCS/0086-standing-agent-roster-and-workflow-portfolio.md §A/§B
  */
 
-import type { Express, Request } from 'express';
+import type { Express } from 'express';
 import { OpenwopError } from '../types.js';
 import {
   createRosterEntry,
@@ -28,11 +28,9 @@ import {
   type RosterAgentRef,
 } from '../host/rosterService.js';
 import { deleteRosterMemberCascade } from '../host/rosterCascade.js';
+import { syncAgentProfileAutonomy } from '../host/agentProfileService.js';
 import { hostExtStorage } from '../host/hostExtPersistence.js';
-
-function tenantOf(req: Request): string {
-  return (req as { tenantId?: string }).tenantId ?? 'default';
-}
+import { tenantOf } from '../host/tenantGuard.js';
 
 function parseAgentRef(value: unknown): RosterAgentRef {
   if (!value || typeof value !== 'object') {
@@ -98,6 +96,19 @@ function parseAvatarUrl(value: unknown): string | null | undefined {
   return value;
 }
 
+/** Validate the optional `heartbeatIntervalMs` field (PATCH). `undefined`
+ *  leaves it unchanged; `0` disables the autonomous heartbeat; any other value
+ *  MUST be a positive, finite number of milliseconds. */
+function parseHeartbeatIntervalMs(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new OpenwopError('validation_error', 'Field `heartbeatIntervalMs` MUST be a non-negative number of milliseconds (0 disables).', 400, {
+      field: 'heartbeatIntervalMs',
+    });
+  }
+  return value;
+}
+
 /** Validate the optional `autonomyLevel` field (POST + PATCH). `undefined`
  *  leaves it unchanged; only `'auto'` / `'review'` are accepted. */
 function parseAutonomyLevel(value: unknown): 'auto' | 'guided' | 'review' | undefined {
@@ -112,7 +123,14 @@ function parseAutonomyLevel(value: unknown): 'auto' | 'guided' | 'review' | unde
 export function registerRosterRoutes(app: Express): void {
   app.get('/v1/host/openwop-app/roster', async (req, res, next) => {
     try {
-      res.json({ roster: await listRoster(tenantOf(req)) });
+      const all = await listRoster(tenantOf(req));
+      // Advisor-subject agents (`roleKey:'advisor'`, ADR 0040) are persona-only and
+      // live ONLY in the Board of Advisors feature — they carry no board, workflows,
+      // or schedules and MUST NOT surface in the general roster (agents page, boards
+      // owner-picker, project members, pinned nav, twin grants, …). The advisory-board
+      // picker + the `@@`-convene opt back in with `?includeAdvisors=true`.
+      const roster = req.query.includeAdvisors === 'true' ? all : all.filter((r) => r.roleKey !== 'advisor');
+      res.json({ roster });
     } catch (err) {
       next(err);
     }
@@ -186,6 +204,7 @@ export function registerRosterRoutes(app: Express): void {
         label?: unknown;
         description?: unknown;
         avatarUrl?: unknown;
+        heartbeatIntervalMs?: unknown;
         autonomyLevel?: unknown;
       };
       if (body.workflows !== undefined && !Array.isArray(body.workflows)) {
@@ -193,6 +212,7 @@ export function registerRosterRoutes(app: Express): void {
           field: 'workflows',
         });
       }
+      const autonomyLevel = parseAutonomyLevel(body.autonomyLevel);
       const updated = await updateRosterEntry(req.params.rosterId, {
         persona: typeof body.persona === 'string' ? body.persona : undefined,
         workflows: Array.isArray(body.workflows) ? body.workflows.filter((w): w is string => typeof w === 'string') : undefined,
@@ -200,8 +220,17 @@ export function registerRosterRoutes(app: Express): void {
         label: typeof body.label === 'string' ? body.label : undefined,
         description: typeof body.description === 'string' ? body.description : undefined,
         avatarUrl: parseAvatarUrl(body.avatarUrl),
-        autonomyLevel: parseAutonomyLevel(body.autonomyLevel),
+        heartbeatIntervalMs: parseHeartbeatIntervalMs(body.heartbeatIntervalMs),
+        autonomyLevel,
       });
+      // ADR 0101 — `roster.autonomyLevel` is the single autonomy source of truth.
+      // When the PATCH sets it, keep the agent's profile autonomy (read by the
+      // assistant + knowledge enforcement seams) in lockstep so no seam reads a
+      // stale level. Only sync when the field was actually provided; an omitted
+      // `autonomyLevel` leaves both the roster and the profile untouched.
+      if (autonomyLevel !== undefined) {
+        await syncAgentProfileAutonomy(existing.tenantId, req.params.rosterId, autonomyLevel);
+      }
       res.json(updated);
     } catch (err) {
       next(err);

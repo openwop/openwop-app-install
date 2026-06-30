@@ -1,6 +1,6 @@
 {
   "name": "feature.analytics.nodes",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Analytics feature node pack (ADR 0014) — read nodes over the ctx.features.analytics surface. query reads a metric summary / recent events into a run (e.g. gate a branch on conversion volume). track + conversion-forward are Phase 2/3.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
@@ -12,6 +12,15 @@
       "version": "1.0.0",
       "label": "Analytics: Query",
       "description": "Reads an org's analytics summary (counts, sessions, top paths, UTM sources) over ctx.features.analytics. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.analytics.nodes.events",
+      "version": "1.0.0",
+      "label": "Analytics: Recent Events",
+      "description": "Reads an org's most recent analytics events (up to 50) over ctx.features.analytics.events. Inputs: { orgId }. Output: { events } — internal columns projected out. Tenant-guarded.",
       "category": "integration",
       "role": "action",
       "capabilities": []

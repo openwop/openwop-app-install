@@ -12,10 +12,13 @@
  */
 
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { getProvider } from '../byok/lib/providers.js';
 import { formatUsd } from '../chat/lib/cost.js';
 import { DataTable, type DataColumn } from '../ui/DataTable.js';
+import i18n from '../i18n/index.js';
+import { formatNumber } from '../i18n/format.js';
 
 interface Props {
   events: readonly RunEventDoc[];
@@ -74,7 +77,7 @@ function aggregate(events: readonly RunEventDoc[]): { rows: Row[]; total: Row } 
   }
   const rows = [...byKey.values()].sort((a, b) => b.costUsd - a.costUsd);
   const total: Row = {
-    provider: '', model: 'Total', calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0,
+    provider: '', model: i18n.t('runs:costTotalRow'), calls: 0, inputTokens: 0, outputTokens: 0, costUsd: 0,
     estimatedLocally: rows.some((r) => r.estimatedLocally),
   };
   for (const r of rows) {
@@ -92,18 +95,18 @@ function COST_COLUMNS(maxCost: number): DataColumn<Row>[] {
   return [
     {
       key: 'model',
-      header: 'Model',
+      header: i18n.t('runs:costColModel'),
       render: (r) => (
         <>
           <span className="muted">{r.provider}/</span>{r.model}
-          {r.estimatedLocally && <span className="muted" title="Cost from local rate table, not host advisory"> *</span>}
+          {r.estimatedLocally && <span className="muted" title={i18n.t('runs:costLocalRateTitle')}> *</span>}
         </>
       ),
     },
-    { key: 'calls', header: 'Calls', align: 'right', cellClassName: 'tabular-nums', render: (r) => r.calls },
-    { key: 'in', header: 'In', align: 'right', cellClassName: 'tabular-nums', render: (r) => r.inputTokens.toLocaleString() },
-    { key: 'out', header: 'Out', align: 'right', cellClassName: 'tabular-nums', render: (r) => r.outputTokens.toLocaleString() },
-    { key: 'cost', header: 'Cost', align: 'right', cellClassName: 'tabular-nums', render: (r) => formatUsd(r.costUsd) },
+    { key: 'calls', header: i18n.t('runs:costColCalls'), align: 'right', cellClassName: 'tabular-nums', render: (r) => formatNumber(r.calls) },
+    { key: 'in', header: i18n.t('runs:costColIn'), align: 'right', cellClassName: 'tabular-nums', render: (r) => formatNumber(r.inputTokens) },
+    { key: 'out', header: i18n.t('runs:costColOut'), align: 'right', cellClassName: 'tabular-nums', render: (r) => formatNumber(r.outputTokens) },
+    { key: 'cost', header: i18n.t('runs:costColCost'), align: 'right', cellClassName: 'tabular-nums', render: (r) => formatUsd(r.costUsd) },
     {
       key: 'bar',
       header: '',
@@ -114,6 +117,7 @@ function COST_COLUMNS(maxCost: number): DataColumn<Row>[] {
 }
 
 export function RunCostPanel({ events }: Props) {
+  const { t } = useTranslation('runs');
   const { rows, total } = useMemo(() => aggregate(events), [events]);
   if (rows.length === 0) return null;
   const maxCost = Math.max(...rows.map((r) => r.costUsd), 1e-9);
@@ -121,21 +125,23 @@ export function RunCostPanel({ events }: Props) {
   return (
     <div className="card">
       <div className="u-flex u-items-baseline u-gap-2">
-        <h2 className="u-flex-1">Tokens &amp; cost</h2>
+        <h2 className="u-flex-1">{t('tokensAndCost')}</h2>
         <strong className="runcost-total">{formatUsd(total.costUsd)}</strong>
         <span className="muted u-fs-12">
-          {(total.inputTokens + total.outputTokens).toLocaleString()} tokens · {total.calls} calls
+          {t('costTokensSummary', {
+            tokens: formatNumber(total.inputTokens + total.outputTokens),
+            calls: formatNumber(total.calls),
+          })}
         </span>
       </div>
       <DataTable<Row>
-        caption="Per-model token and cost rollup"
+        caption={t('costTableCaption')}
         rows={rows}
         rowKey={(r) => `${r.provider}::${r.model}`}
         columns={COST_COLUMNS(maxCost)}
       />
       <p className="muted u-fs-11 u-mt-1-5">
-        Advisory estimates — not billing. <span title="Local rate table">*</span> = computed
-        from providers.json rates where the host omitted an estimate.
+        {t('costAdvisoryPre')}<span title={t('costLocalRateTableTitle')}>*</span>{t('costAdvisoryPost')}
       </p>
     </div>
   );

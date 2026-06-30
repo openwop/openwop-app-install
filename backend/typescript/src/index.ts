@@ -12,13 +12,18 @@
  */
 
 import express, { type Express } from 'express';
-import { createTracer } from './observability/tracer.js';
+import { createTracer, shutdownTracer } from './observability/tracer.js';
 import { createLogger } from './observability/logger.js';
+import { APP_VERSION } from './version.js';
+import { recordAppVersion } from './host/appVersion.js';
+import { initHostExtPersistence } from './host/hostExtPersistence.js';
 import { traceContextMiddleware } from './middleware/traceContext.js';
 import { authMiddleware, sessionSecretConfigError } from './middleware/auth.js';
 import { ipRateLimitMiddleware } from './middleware/rateLimit.js';
 import { corsMiddleware } from './middleware/cors.js';
 import { errorEnvelopeMiddleware } from './middleware/errorEnvelope.js';
+import { requestTimeoutMiddleware } from './middleware/requestTimeout.js';
+import { jsonGzipMiddleware } from './middleware/jsonGzip.js';
 import { ensureNodesRegistered } from './bootstrap/nodes.js';
 import { ensureSuspendManagerInstalled } from './bootstrap/suspend.js';
 import { ensureEventLogInstalled } from './bootstrap/eventLog.js';
@@ -31,7 +36,10 @@ import { featurePackRefs } from './features/index.js';
 import { ensureLocalPacksMounted } from './bootstrap/mountLocalPacks.js';
 import { loadPromptPacks, defaultPromptPackRoots } from './host/promptPackLoader.js';
 import { loadConnectionPacks, defaultConnectionPackRoots } from './features/connections/connectionPackLoader.js';
+import { loadWorkflowChainPacks, defaultWorkflowChainPackRoots } from './host/workflowChainPackLoader.js';
 import { seedDefaultHostSurfaces } from './bootstrap/hostSurfaceRegistry.js';
+import { seedHostArtifactTypes } from './host/artifactTypes.js';
+import { loadArtifactTypePacks, defaultArtifactTypePackRoots } from './host/artifactTypePackLoader.js';
 import { seedShowcaseWorkforces } from './host/workforceService.js';
 import { demoMode } from './host/demoMode.js';
 import { initInMemorySurfaces } from './host/inMemorySurfaces.js';
@@ -50,6 +58,10 @@ import { startScheduleDaemon } from './host/scheduleDaemon.js';
 import { backfillApprovalIndexes } from './host/approvalService.js';
 import { pruneOrphanedConfigs } from './host/featureToggles/service.js';
 import { startConnectionsRefreshDaemon } from './features/connections/refreshDaemon.js';
+import { startKnowledgeSyncDaemon } from './features/knowledge-sync/knowledgeSyncDaemon.js';
+import { startWorkGraphDaemon } from './features/ambient-work-graph/workGraphSweep.js';
+import { listSyncSourceTenants } from './features/knowledge-sync/knowledgeSyncService.js';
+import { startRetentionSweepDaemon } from './host/retentionSweepDaemon.js';
 import { startHeartbeatDaemon } from './host/heartbeatService.js';
 import { listRosterTenants } from './host/rosterService.js';
 import { getInstanceId } from './host/instanceId.js';
@@ -60,6 +72,8 @@ import {
   bootstrapManagedProvider,
   configureManagedProvider,
 } from './providers/managedProvider.js';
+import { configureMediaBudget } from './aiProviders/mediaBudget.js';
+import { getGovernancePolicy } from './host/governanceService.js';
 import { dirname, resolve as resolvePath } from 'node:path';
 import { registerAllRoutes } from './routes/registerAllRoutes.js';
 
@@ -118,14 +132,20 @@ export function loadConfigFromEnv(): AppConfig {
     storageDsn: process.env.OPENWOP_STORAGE_DSN || 'sqlite://./data/workflow-engine.db',
     serviceName: boundServiceIdentity(
       process.env.OPENWOP_SERVICE_NAME, 'openwop-workflow-engine', 'OPENWOP_SERVICE_NAME'),
+    // ADR 0052 §D4 — the app version SSoT (`APP_VERSION`, mirrored from /VERSION)
+    // is the default; an operator MAY still override the advertised version via
+    // OPENWOP_SERVICE_VERSION (e.g. a white-label vendor build).
     serviceVersion: boundServiceIdentity(
-      process.env.OPENWOP_SERVICE_VERSION, '0.1.0', 'OPENWOP_SERVICE_VERSION'),
+      process.env.OPENWOP_SERVICE_VERSION, APP_VERSION, 'OPENWOP_SERVICE_VERSION'),
     // Surfaced in the OpenAPI discovery doc (`GET /v1/openapi.json`).
     serviceDescription: process.env.OPENWOP_SERVICE_DESCRIPTION || DEFAULT_SERVICE_DESCRIPTION,
     // Surfaced in `service.vendor` of `/.well-known/openwop`.
     serviceVendor: boundServiceIdentity(
       process.env.OPENWOP_SERVICE_VENDOR, DEFAULT_SERVICE_VENDOR, 'OPENWOP_SERVICE_VENDOR'),
-    enableConsoleTracer: process.env.OPENWOP_OTEL_CONSOLE !== 'false',
+    // Console span export is opt-IN (DATA-3): on by default it floods prod
+    // stdout with one line per span and adds synchronous per-span flush
+    // latency. Dev/debug enables it with OPENWOP_OTEL_CONSOLE=true.
+    enableConsoleTracer: process.env.OPENWOP_OTEL_CONSOLE === 'true',
   };
 }
 
@@ -141,6 +161,15 @@ export async function createApp(config: AppConfig): Promise<Express> {
   });
 
   const storage = await openStorage(config.storageDsn);
+  // Wire the host-ext durability layer BEFORE app-tier migrations run — an
+  // app migration may operate over host-ext `DurableCollection`s (e.g. the ADR
+  // 0102 agent-profile permission backfill), which require the storage ref.
+  // Idempotent: the route-module register hook calls this again with the same
+  // storage. (initHostExtPersistence only sets a module-level ref.)
+  initHostExtPersistence(storage);
+  // ADR 0052 §D4 — record the running app version (and detect a fresh install
+  // vs an upgrade-from-prior) once the schema migrations have run.
+  await recordAppVersion(storage);
   const hostSuite = createHostAdapterSuite({ storage });
 
   // Wire BYOK to sqlite + AES-256-GCM-at-rest. Master key resolution:
@@ -195,6 +224,13 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // changed, no-ops if unchanged. See providers/managedProvider.ts.
   configureManagedProvider({ storage, dataDir });
   await bootstrapManagedProvider();
+  // ADR 0106 — inject the durable store + the per-org budget override resolver
+  // (the DI seam: mediaBudget consults the governance policy without importing it).
+  // No-op accounting unless an env default OR a per-org override is set.
+  configureMediaBudget({
+    storage,
+    resolveOverride: async (tenantId) => (await getGovernancePolicy(tenantId))?.mediaBudget ?? null,
+  });
 
   // Pre-register node modules + install singletons before the first
   // request lands. Mirrors the MyndHyve workflow-runtime boot order.
@@ -203,6 +239,7 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // honest support flags. Phase-3 adapters call registerHostSurface()
   // again with `supported: true` once they're wired.
   seedDefaultHostSurfaces();
+  seedHostArtifactTypes(); // ADR 0055 — host-native artifact types (RFC 0071/0075)
 
   // Wire host surfaces (kv/table/cache/blob/queue/fs/sql/vector/messaging
   // /observability) so pack-authored nodes delegating to ctx.storage / ctx.db
@@ -324,6 +361,12 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // packs and registers each pack's provider into the ADR 0024 registry, so a
   // connector's `auth.provider` resolves against installed packs. No-op when no
   // pack roots exist (the built-in providers remain the catalog).
+  // ADR 0055 Phase 3 — register kind:'artifact-type' packs (after mount, so the
+  // repo's vendored packs are symlinked into the pack dir). Registers through the
+  // SAME host registry as native types.
+  const artifactTypePackResults = loadArtifactTypePacks({ roots: defaultArtifactTypePackRoots() });
+  if (artifactTypePackResults.registered.length > 0) log.info('artifact_type_packs_registered', { count: artifactTypePackResults.registered.length });
+
   const connectionPackResults = loadConnectionPacks({ roots: defaultConnectionPackRoots() });
   if (connectionPackResults.installed.length > 0) {
     log.info('connection_packs_loaded', {
@@ -336,6 +379,23 @@ export async function createApp(config: AppConfig): Promise<Express> {
     log.error('connection_packs_rejected', {
       count: connectionPackResults.errors.length,
       packs: connectionPackResults.errors.map((e) => ({ name: e.pack, code: e.code })),
+    });
+  }
+
+  // ADR 0152 — register kind:'workflow-chain' packs (RFC 0013). Vendored chains
+  // become available for edit-time expansion; a chain is expanded once (frozen)
+  // and persisted via the existing builder registry to run. No new catalog source.
+  const chainPackResults = loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+  if (chainPackResults.installed.length > 0) {
+    log.info('workflow_chain_packs_loaded', {
+      count: chainPackResults.installed.length,
+      packs: chainPackResults.installed.map((r) => ({ name: r.packName, version: r.packVersion, chains: r.chainIds })),
+    });
+  }
+  if (chainPackResults.errors.length > 0) {
+    log.error('workflow_chain_packs_rejected', {
+      count: chainPackResults.errors.length,
+      packs: chainPackResults.errors.map((e) => ({ name: e.pack, code: e.code })),
     });
   }
 
@@ -376,6 +436,28 @@ export async function createApp(config: AppConfig): Promise<Express> {
       (req as import('express').Request).rawBody = Buffer.from(buf);
     },
   }));
+  // Notebooks audio/video SOURCE upload (ADR 0085) carries base64-encoded media
+  // up to the ~32 MiB decoded transcription cap. 32 MiB decoded is ≈ 42.7 MB of
+  // base64, so the body limit is 48mb — comfortably above the cap so the route's
+  // own decoded-size 413 guard is REACHABLE (not co-incident with this parser
+  // limit, the way an under-sized cap becomes dead code). Scoped to the
+  // `/sources/audio` sub-route only — every other notebook route keeps the small
+  // global limit. Registered before the global parser; body-parser no-ops once
+  // req._body is set, so registration order is precedence order.
+  const notebooksAudioJson = express.json({ limit: '48mb' });
+  app.use('/v1/host/openwop-app/notebooks', (req, res, next) =>
+    req.method === 'POST' && /\/sources\/audio$/.test(req.path) ? notebooksAudioJson(req, res, next) : next(),
+  );
+  // KB FILE UPLOAD (text/PDF/DOCX → extracted text): document/source-ingest POSTs
+  // carry base64 file bytes up to the ~32 MiB decoded ingest cap (≈42.7 MB base64),
+  // so they get the same 48mb parser as audio. Scoped to the ingest endpoints only
+  // (paths ending `/documents` or `/sources`); every other route keeps the 1mb
+  // global limit. Registered before the global parser (body-parser no-ops once
+  // req._body is set, so order = precedence).
+  const fileUploadJson = express.json({ limit: '48mb' });
+  app.use('/v1/host/openwop-app', (req, res, next) =>
+    req.method === 'POST' && /\/(documents|sources)$/.test(req.path) ? fileUploadJson(req, res, next) : next(),
+  );
   app.use(express.json({ limit: '1mb' }));
 
   // CORS — MUST come before auth so OPTIONS preflight succeeds without
@@ -394,6 +476,17 @@ export async function createApp(config: AppConfig): Promise<Express> {
   // run-quota is mounted directly on POST /v1/runs in routes/runs.ts
   // (it needs the principal to scope by session).
   app.use(ipRateLimitMiddleware());
+
+  // API-4: stream-safe per-request timeout. Bounds non-streaming requests
+  // (SSE routes flush headers first, so it no-ops on them); the canonical
+  // backstop below Cloud Run's outer timeout. Disable with
+  // OPENWOP_REQUEST_TIMEOUT_MS=0.
+  app.use(requestTimeoutMiddleware());
+
+  // ADR 0148 A6 — gzip JSON responses (res.json only; SSE/media untouched).
+  // Installed before the routes so the res.json wrapper is in place. No-op unless
+  // OPENWOP_CONTEXT_ECONOMY[_TRANSPORT] is on (off by default).
+  app.use(jsonGzipMiddleware());
 
   // Expose storage + hostSuite so the server entry (main) can start the
   // background workers (durable webhook delivery + run-dispatch crash-recovery
@@ -473,6 +566,8 @@ async function main(): Promise<void> {
     } catch (err) {
       log.warn('showcase_seed_failed', { reason: err instanceof Error ? err.message : String(err) });
     }
+    // ADR 0082 — the Insights Suite demo seeder was DELETED (it seeded a parallel read model
+    // for a bespoke dashboard, both removed). Insights are now live workflow run outputs.
   } else {
     log.info('showcase_seed_skipped', { reason: 'OPENWOP_DEMO_MODE not true (clean install)' });
   }
@@ -503,6 +598,18 @@ async function main(): Promise<void> {
   // tokens before expiry so a run never pays the mint latency and a broken
   // connection surfaces as `needs-reconsent` ahead of use (fire-once per slot).
   const connectionsRefreshDaemon = startConnectionsRefreshDaemon(storage);
+  // ADR 0077 P3 — retention sweep. DESTRUCTIVE, so gate the START behind an env flag
+  // (default OFF); other daemons start unconditionally.
+  const retentionSweepDaemon = process.env.OPENWOP_RETENTION_SWEEP_ENABLED === 'true'
+    ? startRetentionSweepDaemon({ storage })
+    : null;
+  // ADR 0107 Phase 3b — make a SyncSource's cadence actually fire (drive→KB sync).
+  const knowledgeSyncDaemon = startKnowledgeSyncDaemon({ storage }, listSyncSourceTenants);
+  // ADR 0137 — opt-in ambient work-graph sweep (env-gated; per-tenant toggle checked
+  // inside; the GET route reads stored suggestions, an explicit refresh sweeps on demand).
+  const workGraphDaemon = process.env.OPENWOP_WORKGRAPH_SWEEP_ENABLED === 'true'
+    ? startWorkGraphDaemon({ storage }, listRosterTenants)
+    : null;
   for (const sig of ['SIGTERM', 'SIGINT'] as const) {
     process.once(sig, () => {
       webhookWorker.stop();
@@ -510,6 +617,12 @@ async function main(): Promise<void> {
       scheduleDaemon.stop();
       heartbeatDaemon.stop();
       connectionsRefreshDaemon.stop();
+      retentionSweepDaemon?.stop();
+      knowledgeSyncDaemon.stop();
+      workGraphDaemon?.stop();
+      // Flush buffered OTel spans before exit (DATA-4). Best-effort; don't
+      // block shutdown if the exporter is wedged.
+      void shutdownTracer();
     });
   }
 

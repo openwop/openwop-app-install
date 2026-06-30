@@ -18,6 +18,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import type React from 'react';
+import { useTranslation } from 'react-i18next';
 import { type NodeCatalogEntry } from './nodeCatalog.js';
 import { loadDynamicCatalog, useCatalog, catalogEntryByTypeId } from './catalogRegistry.js';
 import { PALETTE_MIME } from '../canvas/BuilderCanvas.js';
@@ -26,12 +27,12 @@ import { useBuilderStore } from '../store/builderStore.js';
 import { PackBrowser } from '../../registry/PackBrowser.js';
 import { ChevronRightIcon, ChevronDownIcon, XIcon } from '../../ui/icons/index.js';
 
-const CATEGORY_LABELS: Record<NodeCategory, string> = {
-  flow: 'Flow',
-  data: 'Data',
-  ai: 'AI',
-  control: 'Control',
-  integration: 'Integration',
+const CATEGORY_LABEL_KEYS: Record<NodeCategory, string> = {
+  flow: 'paletteCategoryFlow',
+  data: 'paletteCategoryData',
+  ai: 'paletteCategoryAi',
+  control: 'paletteCategoryControl',
+  integration: 'paletteCategoryIntegration',
 };
 
 const CATEGORY_ORDER: NodeCategory[] = ['flow', 'data', 'control', 'ai', 'integration'];
@@ -51,7 +52,6 @@ function subsectionKey(entry: NodeCatalogEntry): string {
  *  present so users see `flow` / `data` / `http` rather than the full
  *  reverse-DNS pack name. */
 function subsectionLabel(key: string): string {
-  if (key === BUILTIN_SUBSECTION) return 'Built-in';
   if (key.startsWith('core.openwop.')) return key.slice('core.openwop.'.length);
   if (key.startsWith('vendor.')) return key.slice('vendor.'.length);
   if (key.startsWith('community.')) return key.slice('community.'.length);
@@ -88,6 +88,7 @@ function filterAndGroup(catalog: NodeCatalogEntry[], query: string): Filtered {
 }
 
 export function NodePalette() {
+  const { t } = useTranslation('builder');
   useEffect(() => {
     loadDynamicCatalog();
   }, []);
@@ -132,22 +133,22 @@ export function NodePalette() {
     <aside className="builder-palette">
       <div className="builder-palette-header">
         <div className="u-flex u-items-center u-gap-2">
-          <h3 className="builder-palette-title u-flex-1">Nodes</h3>
+          <h3 className="builder-palette-title u-flex-1">{t('nodes')}</h3>
           <button
             type="button"
             className="secondary u-pad-2x8 u-fs-11 u-minh-0"
             onClick={() => setBrowserOpen(true)}
-            title="Browse all published packs in the live registry"
+            title={t('registryTitle')}
           >
-            Registry
+            {t('registry')}
           </button>
         </div>
-        <p className="builder-palette-hint muted">Drag onto the canvas.</p>
+        <p className="builder-palette-hint muted">{t('dragOntoCanvas')}</p>
         <div className="builder-palette-search">
           <input
             type="search"
             className="builder-palette-search-input"
-            placeholder="Search nodes…"
+            placeholder={t('searchNodesPlaceholder')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             spellCheck={false}
@@ -158,7 +159,7 @@ export function NodePalette() {
               type="button"
               className="builder-palette-search-clear"
               onClick={() => setQuery('')}
-              aria-label="Clear search"
+              aria-label={t('clearSearch')}
             >
               <XIcon size={14} />
             </button>
@@ -166,13 +167,13 @@ export function NodePalette() {
         </div>
         {searching ? (
           <p className="builder-palette-search-summary muted">
-            {totalMatches} match{totalMatches === 1 ? '' : 'es'}
+            {t('matchCount', { count: totalMatches })}
           </p>
         ) : null}
       </div>
 
       {searching && totalMatches === 0 ? (
-        <p className="builder-palette-empty muted">No nodes match.</p>
+        <p className="builder-palette-empty muted">{t('noNodesMatch')}</p>
       ) : null}
 
       {CATEGORY_ORDER.map((cat) => {
@@ -199,7 +200,7 @@ export function NodePalette() {
               <span className="builder-palette-disclosure u-iflex" aria-hidden>
                 {categoryCollapsed ? <ChevronRightIcon size={14} /> : <ChevronDownIcon size={14} />}
               </span>
-              <span className="builder-palette-group-name">{CATEGORY_LABELS[cat]}</span>
+              <span className="builder-palette-group-name">{t(CATEGORY_LABEL_KEYS[cat])}</span>
               <span className="builder-palette-group-count">{total}</span>
             </button>
 
@@ -221,18 +222,30 @@ export function NodePalette() {
                           className="builder-palette-subgroup-label"
                           onClick={() => togglePack(packCollapseKey)}
                           aria-expanded={!packCollapsed}
-                          title={subKey === BUILTIN_SUBSECTION ? 'Host-local nodes' : subKey}
+                          title={subKey === BUILTIN_SUBSECTION ? t('hostLocalNodesTitle') : subKey}
                         >
                           <span className="builder-palette-disclosure u-iflex" aria-hidden>
                             {packCollapsed ? <ChevronRightIcon size={14} /> : <ChevronDownIcon size={14} />}
                           </span>
-                          <span className="builder-palette-subgroup-name">{subsectionLabel(subKey)}</span>
+                          <span className="builder-palette-subgroup-name">{subKey === BUILTIN_SUBSECTION ? t('paletteBuiltin') : subsectionLabel(subKey)}</span>
                           <span className="builder-palette-subgroup-count">{entries.length}</span>
                         </button>
                       ) : null}
                       {packCollapsed
                         ? null
-                        : entries.map((entry) => <PaletteItem key={entry.typeId} entry={entry} />)}
+                        : entries.map((entry) => (
+                            <PaletteItem
+                              key={entry.typeId}
+                              entry={entry}
+                              onAdd={() => {
+                                // Keyboard/click parity with drag-to-canvas (and the
+                                // PackBrowser path): stagger repeated adds so they
+                                // don't stack exactly.
+                                const offset = (nodeCount % 6) * 36;
+                                addNode(entry.kind, { x: 140 + offset, y: 120 + offset });
+                              }}
+                            />
+                          ))}
                     </div>
                   );
                 })}
@@ -257,7 +270,8 @@ export function NodePalette() {
   );
 }
 
-function PaletteItem({ entry }: { entry: NodeCatalogEntry }) {
+function PaletteItem({ entry, onAdd }: { entry: NodeCatalogEntry; onAdd: () => void }) {
+  const { t } = useTranslation('builder');
   const onDragStart = (e: React.DragEvent) => {
     e.dataTransfer.setData(PALETTE_MIME, entry.kind);
     e.dataTransfer.effectAllowed = 'copy';
@@ -267,15 +281,25 @@ function PaletteItem({ entry }: { entry: NodeCatalogEntry }) {
   const titleParts = [entry.typeId];
   if (entry.description) titleParts.push(entry.description);
   if (blocked) {
-    titleParts.push(
-      `Needs host capability: ${missing.join(', ')}.\nDragging works, but execution will fail with HOST_CAPABILITY_MISSING.`,
-    );
+    titleParts.push(t('paletteItemBlockedTitle', { caps: missing.join(', ') }));
   }
   return (
     <div
       className={`builder-palette-item${blocked ? ' builder-palette-item-blocked' : ''}`}
       draggable
       onDragStart={onDragStart}
+      // Keyboard-accessible alternative to drag (WCAG 2.1.1 Keyboard / 2.5.7
+      // Dragging Movements): the item is operable as a button — Enter/Space or
+      // click adds the node to the canvas at a staggered default position.
+      // Drag stays for pointer users. `[role=button]:focus-visible` already
+      // gets the global focus ring (global.css §11).
+      role="button"
+      tabIndex={0}
+      onClick={onAdd}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onAdd(); }
+      }}
+      aria-label={t('paletteItemAddAria', { label: entry.label })}
       title={titleParts.join('\n\n')}
     >
       <span
@@ -288,9 +312,9 @@ function PaletteItem({ entry }: { entry: NodeCatalogEntry }) {
       {blocked ? (
         <span
           className="builder-palette-item-host-warn"
-          aria-label={`Needs host capability ${missing.join(', ')}`}
+          aria-label={t('paletteItemHostWarnAria', { caps: missing.join(', ') })}
         >
-          host?
+          {t('paletteItemHostWarn')}
         </span>
       ) : null}
     </div>

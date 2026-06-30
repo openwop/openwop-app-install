@@ -14,7 +14,15 @@ export interface KbCollection {
   documentCount: number;
   chunkCount: number;
   updatedAt: string;
+  /** Auto-managed by another feature (ADR 0100): kept in sync with its entities;
+   *  read-only here (hand-edits are rejected server-side). */
+  managed?: 'strategy' | 'priority-matrix';
+  /** ADR 0113 — per-collection retrieval pipeline config. */
+  retrievalConfig?: { mode?: RetrievalMode };
 }
+
+/** ADR 0113 retrieval pipeline mode. */
+export type RetrievalMode = 'dense' | 'hybrid' | 'hybrid+rerank';
 
 export interface KbDocument {
   documentId: string;
@@ -70,6 +78,12 @@ export async function createCollection(orgId: string, name: string, description?
   return asJson<KbCollection>(res, 'createCollection');
 }
 
+/** ADR 0113 — set a collection's retrieval mode (hybrid lift / local rerank). */
+export async function setRetrievalMode(orgId: string, collectionId: string, mode: RetrievalMode): Promise<KbCollection> {
+  const res = await fetch(`${col(orgId, collectionId)}/retrieval`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ mode }) }));
+  return (await asJson<{ collection: KbCollection }>(res, 'setRetrievalMode')).collection;
+}
+
 export async function deleteCollection(orgId: string, collectionId: string): Promise<void> {
   // 204 No Content is `res.ok`, so a plain !ok check is correct + clearer.
   const res = await fetch(col(orgId, collectionId), fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
@@ -84,6 +98,13 @@ export async function listDocuments(orgId: string, collectionId: string): Promis
 export async function ingestText(orgId: string, collectionId: string, title: string, text: string): Promise<KbDocument> {
   const res = await fetch(`${col(orgId, collectionId)}/documents`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ title, text }) }));
   return asJson<KbDocument>(res, 'ingestText');
+}
+
+/** Ingest an uploaded file (text/PDF/DOCX) — the bytes are extracted to text
+ *  server-side (kbService). */
+export async function ingestFile(orgId: string, collectionId: string, input: { title: string; contentBase64: string; contentType: string }): Promise<KbDocument> {
+  const res = await fetch(`${col(orgId, collectionId)}/documents`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return asJson<KbDocument>(res, 'ingestFile');
 }
 
 export async function ingestMedia(orgId: string, collectionId: string, title: string, mediaToken: string): Promise<KbDocument> {

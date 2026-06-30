@@ -22,6 +22,7 @@ import { resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { isProviderAllowed } from '../../host/governanceService.js';
 import { getProvider, type CredentialKind } from './providerRegistry.js';
 import { refreshAccessToken, type OAuthTokenMaterial } from './oauthFlow.js';
+import { mintServiceAccountToken, evictServiceAccountToken } from './serviceAccountJwt.js';
 
 const log = createLogger('connections.service');
 
@@ -53,6 +54,12 @@ export interface Connection {
 }
 
 const store = new DurableCollection<Connection>('connections:connection', (c) => c.connectionId);
+
+/** In-flight token refreshes, keyed by connectionId, so concurrent resolves of
+ *  the same expired token share ONE refresh instead of each minting (and the
+ *  later setSecret clobbering) — which matters for rotating-refresh-token
+ *  providers where a double-mint can invalidate the refresh token (FEAT-3). */
+const inFlightRefresh = new Map<string, Promise<string | null>>();
 
 const now = (): string => new Date().toISOString();
 const secretRef = (connectionId: string): string => `connection:${connectionId}`;
@@ -86,7 +93,7 @@ export async function getConnection(tenantId: string, connectionId: string): Pro
 export async function createSecretConnection(input: {
   tenantId: string;
   provider: string;
-  kind: Extract<CredentialKind, 'api_key' | 'bearer' | 'basic'>;
+  kind: Extract<CredentialKind, 'api_key' | 'bearer' | 'basic' | 'service-account-jwt'>;
   secret: string;
   displayName?: string;
   scope: ConnectionScope;
@@ -182,6 +189,8 @@ export async function revokeConnection(tenantId: string, connectionId: string): 
   const existing = await getConnection(tenantId, connectionId);
   if (!existing) return false;
   await removeSecret(secretRef(connectionId), { tenantId }).catch(() => undefined);
+  // ADR 0081 P2 — evict any in-process SA-JWT token so a minted token doesn't outlive revoke.
+  if (existing.kind === 'service-account-jwt') evictServiceAccountToken(connectionId);
   return store.delete(connectionId);
 }
 
@@ -195,16 +204,21 @@ export async function revokeConnection(tenantId: string, connectionId: string): 
  * AUTHORITY (which credential) to use, not who acts. The `provenance` field is a
  * non-wire stamp the caller records on `run.metadata.connectionUse[]`.
  */
-export async function resolveConnectionCredential(input: {
-  tenantId: string;
-  provider: string;
-  actingUserId?: string;
-  orgId?: string;
-}): Promise<{
-  connection: Connection;
-  secret: string;
-  provenance: { connectionId: string; provider: string; scopeAxis: ConnectionScope; actingUserId?: string; scopeChecked: boolean };
-} | null> {
+/** Connection-selection input shared by `resolveConnectionCredential` (which then
+ *  resolves the live secret) and `connectionExists` (which stops here). */
+interface ConnectionSelectInput { tenantId: string; provider: string; actingUserId?: string; orgId?: string }
+
+/**
+ * Pick the MOST SPECIFIC active connection for a run's acting principal AND pass
+ * the D2 authorization gate — but stop BEFORE resolving the live secret. This is
+ * the selection + authz half of `resolveConnectionCredential`, extracted so the
+ * two callers share ONE source of truth for "which connection, and may the actor
+ * use it" (no drift). It makes NO network egress — crucially, it never calls
+ * `liveSecretFor`, which can refresh an OAuth token (a network call). So a
+ * caller that only needs presence (a dry-run preview) gets a faithful answer
+ * without any egress or secret decrypt.
+ */
+async function selectAuthorizedConnection(input: ConnectionSelectInput): Promise<Connection | null> {
   // ADR 0028 — the provider allowlist is enforced HERE, the choke point every
   // consumer flows through (the http egress seam, the Slack adapter, future
   // adapters), with the same predicate the connect routes use. A policy added
@@ -233,6 +247,34 @@ export async function resolveConnectionCredential(input: {
       return null;
     }
   }
+  return chosen;
+}
+
+/**
+ * Would a real dispatch find an authorized connection for this provider/principal?
+ * Selection + D2 authz only — makes NO network egress and never decrypts/refreshes
+ * the secret (it stops before `liveSecretFor`). Used by side-effect-free previews
+ * (e.g. the ads dry-run) to surface connection-readiness WITHOUT a real call.
+ * NOTE: a `true` here means a connection row is present and the actor may use it —
+ * NOT that the live secret will resolve (KMS could be unconfigured / a refresh
+ * could fail); that residual is only knowable at real dispatch.
+ */
+export async function connectionExists(input: ConnectionSelectInput): Promise<boolean> {
+  return (await selectAuthorizedConnection(input)) !== null;
+}
+
+export async function resolveConnectionCredential(input: {
+  tenantId: string;
+  provider: string;
+  actingUserId?: string;
+  orgId?: string;
+}): Promise<{
+  connection: Connection;
+  secret: string;
+  provenance: { connectionId: string; provider: string; scopeAxis: ConnectionScope; actingUserId?: string; scopeChecked: boolean };
+} | null> {
+  const chosen = await selectAuthorizedConnection(input);
+  if (!chosen) return null;
 
   const secret = await liveSecretFor(chosen, input.tenantId);
   if (secret === null) return null;
@@ -244,8 +286,8 @@ export async function resolveConnectionCredential(input: {
       connectionId: chosen.connectionId,
       provider: chosen.provider,
       scopeAxis: scopeAxisOf(chosen),
-      // An org connection only reaches here once the connections:use gate above
-      // passed; user/workspace are self-authorized. Either way the use is checked.
+      // An org connection only reaches here once the connections:use gate in
+      // selectAuthorizedConnection passed; user/workspace are self-authorized.
       scopeChecked: true,
       ...(input.actingUserId !== undefined ? { actingUserId: input.actingUserId } : {}),
     },
@@ -274,6 +316,12 @@ async function actingUserHasOrgUse(tenantId: string, orgId: string, actingUserId
 async function liveSecretFor(connection: Connection, tenantId: string): Promise<string | null> {
   const stored = await resolveSecret(secretRef(connection.connectionId), { tenantId });
   if (stored === null) return null;
+  // ADR 0081 P2 — a service-account-jwt connection mints a short-lived access token from
+  // the BYOK SA key (the stored secret), cached in-process to expiry. The broker injects
+  // the returned token as a bearer, exactly like the oauth2 access token.
+  if (connection.kind === 'service-account-jwt') {
+    return mintServiceAccountToken(connection.connectionId, stored);
+  }
   if (connection.kind !== 'oauth2') return stored;
 
   let material: OAuthTokenMaterial;
@@ -289,29 +337,38 @@ async function liveSecretFor(connection: Connection, tenantId: string): Promise<
   if (!expired) return material.accessToken;
 
   // Past (or nearing) expiry — mint a fresh access token from the refresh token.
-  // NOTE: this on-demand path is not single-flighted, so two concurrent resolves
-  // of an expired token both mint and the later setSecret wins. Harmless for
-  // providers with stable refresh tokens (e.g. Google offline access), and the
-  // warm-refresh daemon pre-empts most expiries so this path rarely races. A
-  // rotating-refresh-token provider would want a per-connection lease here.
   if (!material.refreshToken) {
     await patchConnection(connection.connectionId, { status: 'needs-reconsent' });
     return null;
   }
-  try {
-    const refreshed = await refreshAccessToken({ provider: connection.provider, refreshToken: material.refreshToken, scopes: material.scopes });
-    await setSecret(secretRef(connection.connectionId), JSON.stringify(refreshed), { tenantId });
-    await patchConnection(connection.connectionId, { status: 'active', ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}) });
-    return refreshed.accessToken;
-  } catch (err) {
-    log.warn('oauth refresh failed — flipping to needs-reconsent', {
-      connectionId: connection.connectionId,
-      provider: connection.provider,
-      error: err instanceof Error ? err.message : String(err),
-    });
-    await patchConnection(connection.connectionId, { status: 'needs-reconsent' });
-    return null;
-  }
+
+  // Single-flight: concurrent resolves of the same expired connection coalesce
+  // onto one refresh (FEAT-3). The warm-refresh daemon pre-empts most expiries,
+  // but a burst of parallel node executions can still race here.
+  const inflight = inFlightRefresh.get(connection.connectionId);
+  if (inflight) return inflight;
+
+  const refreshToken = material.refreshToken;
+  const promise = (async (): Promise<string | null> => {
+    try {
+      const refreshed = await refreshAccessToken({ provider: connection.provider, refreshToken, scopes: material.scopes });
+      await setSecret(secretRef(connection.connectionId), JSON.stringify(refreshed), { tenantId });
+      await patchConnection(connection.connectionId, { status: 'active', ...(refreshed.expiresAt ? { expiresAt: refreshed.expiresAt } : {}) });
+      return refreshed.accessToken;
+    } catch (err) {
+      log.warn('oauth refresh failed — flipping to needs-reconsent', {
+        connectionId: connection.connectionId,
+        provider: connection.provider,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      await patchConnection(connection.connectionId, { status: 'needs-reconsent' });
+      return null;
+    } finally {
+      inFlightRefresh.delete(connection.connectionId);
+    }
+  })();
+  inFlightRefresh.set(connection.connectionId, promise);
+  return promise;
 }
 
 /**

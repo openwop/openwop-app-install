@@ -104,11 +104,17 @@ describe('resolveAgentPolicy — pure composition (ADR 0036)', () => {
     expect(off.reason).toBe('not-within-policy');
   });
 
-  it('auto with an EMPTY/ABSENT allowlist permits nothing (conservative)', () => {
+  it('auto with an EMPTY/ABSENT allowlist runs unrestricted (ADR 0101 — allowlist is the only auto gate)', () => {
+    // The allowlist RESTRICTS auto; an empty/absent one does not. `roster.autonomyLevel`
+    // is the single autonomy source of truth — "auto = run immediately" (the Edit-modal
+    // contract). To restrict auto you SET an allowlist; the old `specLevel`-keyed
+    // "empty allowlist = fail-closed" edge is retired.
     const empty = profile({ autonomy: { level: 'auto', specLevel: 'autonomous-within-policy', withinPolicyActions: [] } });
-    expect(verdict(empty, 'anything')).toBe('review');
+    expect(resolveAgentPolicy({ profile: empty, actionClass: 'anything', readiness: READY }).verdict).toBe('auto');
     const absent = profile({ autonomy: { level: 'auto', specLevel: 'autonomous-within-policy' } });
-    expect(verdict(absent, 'anything')).toBe('review');
+    const r = resolveAgentPolicy({ profile: absent, actionClass: 'anything', readiness: READY });
+    expect(r.verdict).toBe('auto');
+    expect(r.reason).toBe('autonomy-level');
   });
 
   it('composes with the readiness gate — an un-ready connection forces review even for an allowlisted auto action', () => {

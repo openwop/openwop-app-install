@@ -7,6 +7,7 @@
 
 export { ErrorBoundary } from './ErrorBoundary.js';
 export { useFocusTrap } from './useFocusTrap.js';
+export { useUnsavedChangesWarning } from './useUnsavedChangesWarning.js';
 export { StateCard } from './StateCard.js';
 export { StatusBadge, statusTone } from './StatusBadge.js';
 export { Notice, type NoticeVariant } from './Notice.js';
@@ -15,7 +16,9 @@ export { PageHeader } from './PageHeader.js';
 export { IconButton } from './IconButton.js';
 export { ModalPortal } from './ModalPortal.js';
 export { Modal } from './Modal.js';
+export { ConfirmDialog } from './ConfirmDialog.js';
 export { DataTable, DensityToggle, type DataColumn } from './DataTable.js';
+export { ViewToggle, useViewMode, type CollectionView } from './ViewToggle.js';
 export { toast, Toaster, dismiss, type ToastVariant, type ToastItem } from './toast.js';
 export { Field, TextField, TextareaField, SelectField, FormError, type FieldProps } from './Field.js';
 export { Panel, Toolbar, MetadataRow, FormRow } from './layout.js';

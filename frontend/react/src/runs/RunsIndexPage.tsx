@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useNavigate, Link, useSearchParams } from 'react-router-dom';
 import { DataTable, DensityToggle, type DataColumn } from '../ui/DataTable.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
@@ -20,10 +21,11 @@ import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
 import { FlagIcon, PlayIcon, RotateCwIcon, PlusIcon, SearchIcon } from '../ui/icons/index.js';
 import { SelectField, TextareaField } from '../ui/Field.js';
 import { demoModeCached, loadDemoMode } from '../client/demoMode.js';
+import { formatNumber, formatDateTime, formatPercent } from '../i18n/format.js';
 
 const EXAMPLE_WORKFLOWS = [
-  { id: 'openwop-app.uppercase', label: 'openwop-app.uppercase — single-node uppercase' },
-  { id: 'openwop-app.approval-gate', label: 'openwop-app.approval-gate — uppercase gated by an approval interrupt' },
+  { id: 'openwop-app.uppercase', labelKey: 'exampleWorkflowUppercase' },
+  { id: 'openwop-app.approval-gate', labelKey: 'exampleWorkflowApprovalGate' },
 ];
 
 // Outcome buckets shared by the figure band (which doubles as a status filter)
@@ -38,6 +40,7 @@ function statusBucket(status: string): RunStatusBucket | null {
 }
 
 export function RunsIndexPage() {
+  const { t } = useTranslation('runs');
   const nav = useNavigate();
   const { user, isConfigured } = useAuth();
   // Built-in example workflows are optional scaffolding — offered only on the public
@@ -47,10 +50,13 @@ export function RunsIndexPage() {
   const savedWorkflows = useMemo(() => listSavedWorkflows(), []);
   const allOptions = useMemo(
     () => [
-      ...(demo ? EXAMPLE_WORKFLOWS : []),
-      ...savedWorkflows.map((wf) => ({ id: wf.id, label: `${wf.name} — ${wf.nodes.length} nodes (saved in builder)` })),
+      ...(demo ? EXAMPLE_WORKFLOWS.map((wf) => ({ id: wf.id, label: t(wf.labelKey) })) : []),
+      ...savedWorkflows.map((wf) => ({
+        id: wf.id,
+        label: t('savedWorkflowOption', { name: wf.name, count: wf.nodes.length }),
+      })),
     ],
-    [savedWorkflows, demo],
+    [savedWorkflows, demo, t],
   );
   const [workflowId, setWorkflowId] = useState('');
   // Pick the first option once the (feature-gated) list resolves; never overwrite a
@@ -160,11 +166,11 @@ export function RunsIndexPage() {
       // middleware overrides it with the principal's tenant.
       const res = await createRun({ workflowId, tenantId: '', inputs });
       void refreshRuns();
-      toast.success(`Run created — streaming ${res.runId.slice(0, 8)}…`);
+      toast.success(t('runCreatedToast', { runId: res.runId.slice(0, 8) }));
       nav(`/runs/${res.runId}`);
     } catch (err) {
       if (err instanceof SerializeError) {
-        setError(`Saved workflow is not runnable: ${err.message}`);
+        setError(t('savedWorkflowNotRunnable', { message: err.message }));
       } else {
         setError(err instanceof Error ? err.message : String(err));
       }
@@ -174,51 +180,51 @@ export function RunsIndexPage() {
   }
 
   const tenantScope = isConfigured && user
-    ? `Signed in as ${user.displayName ?? user.email ?? user.uid}`
-    : 'Anonymous session (24h lifetime)';
+    ? t('signedInAs', { name: user.displayName ?? user.email ?? user.uid })
+    : t('anonymousSession');
 
   const runColumns = useMemo<DataColumn<RunListItem>[]>(() => [
     {
       key: 'run',
-      header: 'Run',
+      header: t('runColRun'),
       render: (r) => (
         <>
           <Link to={`/runs/${r.runId}`} onClick={(e) => e.stopPropagation()}><code>{r.runId.slice(0, 8)}…</code></Link>
           {isFlagged(r.runId) && (
             <span
               className="chip chip--danger runs-review-flag"
-              title={`Flagged for review: ${reviewReason(reviewOf(byRun.get(r.runId) ?? []))}`}
+              title={t('flaggedForReviewTitle', { reasons: reviewReason(reviewOf(byRun.get(r.runId) ?? [])) })}
             >
-              <FlagIcon size={10} /> review
+              <FlagIcon size={10} /> {t('reviewChip')}
             </span>
           )}
         </>
       ),
     },
-    { key: 'workflow', header: 'Workflow', render: (r) => r.workflowId, sortValue: (r) => r.workflowId },
-    { key: 'status', header: 'Status', render: (r) => <StatusBadge status={r.status} />, sortValue: (r) => r.status },
+    { key: 'workflow', header: t('runColWorkflow'), render: (r) => r.workflowId, sortValue: (r) => r.workflowId },
+    { key: 'status', header: t('runColStatus'), render: (r) => <StatusBadge status={r.status} />, sortValue: (r) => r.status },
     {
       key: 'started',
-      header: 'Started',
+      header: t('runColStarted'),
       cellClassName: 'muted',
-      render: (r) => (r.startedAt ? new Date(r.startedAt).toLocaleString() : '—'),
+      render: (r) => (r.startedAt ? formatDateTime(r.startedAt) : '—'),
       sortValue: (r) => (r.startedAt ? Date.parse(r.startedAt) : 0),
     },
-  ], [isFlagged, byRun]);
+  ], [isFlagged, byRun, t]);
 
   return (
     <section className="page-enter">
       <PageHeader
-        eyebrow="Runs"
-        title="Runs"
-        lede="Every workflow execution for this tenant — status, duration, and quality at a glance."
+        eyebrow={t('runsEyebrow')}
+        title={t('runsTitle')}
+        lede={t('runsLede')}
         actions={
           <>
             <button type="button" className="secondary" onClick={() => void refreshRuns()} disabled={runsLoading}>
-              <RotateCwIcon size={14} /> {runsLoading ? 'Loading…' : 'Refresh'}
+              <RotateCwIcon size={14} /> {runsLoading ? t('common:loading') : t('common:refresh')}
             </button>
             <button type="button" className="btn-accent-solid" onClick={focusCreateForm}>
-              <PlusIcon size={14} /> Create a run
+              <PlusIcon size={14} /> {t('createARun')}
             </button>
           </>
         }
@@ -233,26 +239,26 @@ export function RunsIndexPage() {
 
       <div className="surface-card">
         <div className="u-flex u-items-baseline u-justify-between u-gap-2 u-wrap">
-          <h2 className="u-m-0">{reviewOnly ? 'Flagged for review' : 'Recent runs'}</h2>
+          <h2 className="u-m-0">{reviewOnly ? t('flaggedForReview') : t('recentRuns')}</h2>
         </div>
         <div className="filterbar">
           {/* §C3 — flagged review queue. Only offered when the host advertises
               feedback; mirrors the inbox tab pattern. */}
           {feedbackOn && (
-            <div className="segmented" role="group" aria-label="Filter runs">
+            <div className="segmented" role="group" aria-label={t('filterRuns')}>
               <button type="button" aria-pressed={!reviewOnly} onClick={() => setReviewOnly(false)}>
-                All
+                {t('filterAll')}
               </button>
-              <button type="button" aria-pressed={reviewOnly} onClick={() => setReviewOnly(true)} title="Runs flagged, low-rated, or corrected">
-                <FlagIcon size={13} /> Flagged{flaggedCount > 0 ? ` (${flaggedCount})` : ''}
+              <button type="button" aria-pressed={reviewOnly} onClick={() => setReviewOnly(true)} title={t('flaggedFilterTitle')}>
+                <FlagIcon size={13} /> {t('filterFlagged')}{flaggedCount > 0 ? ` (${formatNumber(flaggedCount)})` : ''}
               </button>
             </div>
           )}
           <input
             type="search"
             className="ui-input filterbar-search"
-            placeholder="Filter by run id or workflow…"
-            aria-label="Filter runs"
+            placeholder={t('filterPlaceholder')}
+            aria-label={t('filterRuns')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
@@ -264,7 +270,7 @@ export function RunsIndexPage() {
           rowKey={(r) => r.runId}
           onRowClick={(r) => nav(`/runs/${r.runId}`)}
           density={density}
-          caption="Recent runs"
+          caption={t('recentRuns')}
           initialSort={{ key: 'started', dir: 'desc' }}
           columns={runColumns}
           empty={
@@ -273,37 +279,37 @@ export function RunsIndexPage() {
             ) : runs.length === 0 ? (
               <StateCard
                 icon={<PlayIcon size={22} />}
-                title="No runs yet"
-                body="Submit a workflow and watch it stream — status, events, and outputs land in real time."
+                title={t('noRunsYetTitle')}
+                body={t('noRunsYetBody')}
                 action={
                   <button type="button" className="btn-accent-solid" onClick={focusCreateForm}>
-                    <PlusIcon size={14} /> Create a run
+                    <PlusIcon size={14} /> {t('createARun')}
                   </button>
                 }
               />
             ) : reviewOnly ? (
               <StateCard
                 icon={<FlagIcon size={22} />}
-                title="Nothing flagged for review"
-                body="Thumbs-down, flag, or correct a run to add it to this queue."
+                title={t('nothingFlaggedTitle')}
+                body={t('nothingFlaggedBody')}
                 action={
                   <button type="button" className="secondary" onClick={() => setReviewOnly(false)}>
-                    Show all runs
+                    {t('showAllRuns')}
                   </button>
                 }
               />
             ) : (
               <StateCard
                 icon={<SearchIcon size={22} />}
-                title="No runs match this filter"
-                body="Try a different run id or workflow, or clear the status filter."
+                title={t('noRunsMatchTitle')}
+                body={t('noRunsMatchBody')}
                 action={
                   <button
                     type="button"
                     className="secondary"
                     onClick={() => { setQuery(''); setStatusFilter(null); }}
                   >
-                    Clear filter
+                    {t('clearFilter')}
                   </button>
                 }
               />
@@ -313,18 +319,18 @@ export function RunsIndexPage() {
       </div>
 
       <div className="surface-card">
-        <h2>Create a run</h2>
+        <h2>{t('createARun')}</h2>
         <p className="muted u-mt-0">
           {tenantScope}
         </p>
         <form ref={createFormRef} onSubmit={onSubmit}>
-          <SelectField label="Workflow" value={workflowId} onChange={(e) => setWorkflowId(e.target.value)}>
+          <SelectField label={t('workflowFieldLabel')} value={workflowId} onChange={(e) => setWorkflowId(e.target.value)}>
             {allOptions.map((w) => (
               <option key={w.id} value={w.id}>{w.label}</option>
             ))}
           </SelectField>
           <TextareaField
-            label="Inputs (JSON)"
+            label={t('inputsFieldLabel')}
             rows={6}
             value={inputsRaw}
             onChange={(e) => setInputsRaw(e.target.value)}
@@ -333,18 +339,17 @@ export function RunsIndexPage() {
           {error && <Notice variant="error">{error}</Notice>}
           <div className="button-row">
             <button type="submit" className="btn-accent-solid" disabled={submitting}>
-              {submitting ? 'Creating…' : <><PlusIcon size={14} /> Create run</>}
+              {submitting ? t('creating') : <><PlusIcon size={14} /> {t('createRun')}</>}
             </button>
           </div>
         </form>
       </div>
 
       <div className="surface-card">
-        <h2>About this app</h2>
+        <h2>{t('aboutThisApp')}</h2>
         <p className="muted">
-          The two seeded workflows are defined in the backend's <code>workflowCatalog</code>
-          (<code>src/host/index.ts</code>). The first runs end-to-end without HITL; the
-          second pauses at an approval gate so you can exercise the interrupt-resolution UI.
+          {t('aboutThisAppBodyPre')}<code>workflowCatalog</code>
+          {' ('}<code>src/host/index.ts</code>{t('aboutThisAppBodyPost')}
         </p>
       </div>
     </section>
@@ -379,6 +384,7 @@ function RunsSummary({
   /** Toggling a figure tile filters the table below it (§4.5 stats-are-filters). */
   onToggleStatus: (bucket: RunStatusBucket) => void;
 }) {
+  const { t } = useTranslation('runs');
   // §C2 — quality rollup derived from the shared annotation map.
   const quality = useMemo<QualityRollup | null>(() => {
     if (runs.length === 0) return null;
@@ -438,60 +444,59 @@ function RunsSummary({
   }, [runs]);
 
   if (!s) return null;
-  const pctFrac = (frac: number) => `${Math.round(frac * 100)}%`;
 
   // Outcome distribution as the signature figure band — each numeral tile also
   // FILTERS the table below (§4.5). "Mean duration" is reportorial only, so it
   // sits in a trailing non-interactive sub-figure row.
   const outcomeFigures: KeyFigureItem[] = [
-    { key: 'completed', label: 'Completed', value: s.completed },
-    { key: 'failed', label: 'Failed', value: s.failed, ...(s.failed > 0 ? { tone: 'attention' as const } : {}) },
-    { key: 'cancelled', label: 'Cancelled', value: s.cancelled },
-    { key: 'awaiting', label: 'Awaiting input', value: s.awaiting, ...(s.awaiting > 0 ? { tone: 'attention' as const } : {}) },
+    { key: 'completed', label: t('figureCompleted'), value: s.completed },
+    { key: 'failed', label: t('figureFailed'), value: s.failed, ...(s.failed > 0 ? { tone: 'attention' as const } : {}) },
+    { key: 'cancelled', label: t('figureCancelled'), value: s.cancelled },
+    { key: 'awaiting', label: t('figureAwaitingInput'), value: s.awaiting, ...(s.awaiting > 0 ? { tone: 'attention' as const } : {}) },
   ];
 
   return (
     <div className="surface-card">
       <h2 className="u-mt-0">
-        Summary <span className="muted u-fs-12 u-fw-400">· last {s.total} runs</span>
+        {t('summaryHeading')} <span className="muted u-fs-12 u-fw-400">{t('summaryLastRuns', { count: s.total })}</span>
       </h2>
       <KeyFigureBand
         figures={outcomeFigures}
         activeKey={activeStatus}
         onToggle={(k) => onToggleStatus(k as RunStatusBucket)}
-        ariaLabel="Run outcomes — select to filter the table below"
+        ariaLabel={t('runOutcomesAria')}
       />
       <dl className="run-stats">
         <div className="run-stat">
-          <dt className="run-stat-label">Mean duration</dt>
+          <dt className="run-stat-label">{t('meanDuration')}</dt>
           <dd className="run-stat-value">{s.meanMs == null ? '—' : formatDuration(s.meanMs)}</dd>
         </div>
       </dl>
       {quality && (
         <>
           <h3 className="runsidx-quality-heading">
-            Quality <span className="muted u-fs-11 u-fw-400">· {quality.runsAnnotated} of {s.total} runs annotated</span>
+            {t('qualityHeading')} <span className="muted u-fs-11 u-fw-400">{t('qualityAnnotated', { annotated: formatNumber(quality.runsAnnotated), total: formatNumber(s.total) })}</span>
           </h3>
           <dl className="run-stats">
             <div className="run-stat">
-              <dt className="run-stat-label">Mean rating</dt>
-              <dd className="run-stat-value">{quality.meanRating == null ? '—' : `${quality.meanRating.toFixed(1)} / 5`}</dd>
+              <dt className="run-stat-label">{t('statMeanRating')}</dt>
+              <dd className="run-stat-value">{quality.meanRating == null ? '—' : t('meanRatingValue', { rating: formatNumber(quality.meanRating, { minimumFractionDigits: 1, maximumFractionDigits: 1 }) })}</dd>
             </div>
             <div className={`run-stat${quality.correctionRate > 0 ? ' run-stat--warn' : ''}`}>
-              <dt className="run-stat-label">Correction rate</dt>
-              <dd className="run-stat-value">{pctFrac(quality.correctionRate)}</dd>
+              <dt className="run-stat-label">{t('correctionRate')}</dt>
+              <dd className="run-stat-value">{formatPercent(quality.correctionRate)}</dd>
             </div>
             <div className={`run-stat${quality.flagRate > 0 ? ' run-stat--danger' : ''}`}>
-              <dt className="run-stat-label">Flag rate</dt>
-              <dd className="run-stat-value">{pctFrac(quality.flagRate)}</dd>
+              <dt className="run-stat-label">{t('flagRate')}</dt>
+              <dd className="run-stat-value">{formatPercent(quality.flagRate)}</dd>
             </div>
           </dl>
           {quality.topCorrected.length > 0 && (
             <div className="u-mt-1">
-              <div className="muted u-fs-11 u-mb-1">Most-corrected nodes</div>
+              <div className="muted u-fs-11 u-mb-1">{t('mostCorrectedNodes')}</div>
               <ul className="runsidx-corrected-list">
                 {quality.topCorrected.map(([nodeId, n]) => (
-                  <li key={nodeId}><code>{nodeId}</code> — {n} correction{n === 1 ? '' : 's'}</li>
+                  <li key={nodeId}><code>{nodeId}</code> — {t('correctionCount', { count: n })}</li>
                 ))}
               </ul>
             </div>

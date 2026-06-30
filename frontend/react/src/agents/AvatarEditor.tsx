@@ -11,6 +11,8 @@
  */
 
 import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import Cropper from 'react-easy-crop';
 import type { Area, Point } from 'react-easy-crop';
 import 'react-easy-crop/react-easy-crop.css';
@@ -43,6 +45,7 @@ export function AvatarEditor({
   onSave: (avatarUrl: string | null) => void | Promise<void>;
   onCancel: () => void;
 }): JSX.Element {
+  const { t } = useTranslation('agents');
   // Object URL of the freshly-picked source image (null until one is chosen).
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [crop, setCrop] = useState<Point>({ x: 0, y: 0 });
@@ -85,11 +88,11 @@ export function AvatarEditor({
     setLocalError(null);
     if (!file) return;
     if (!file.type.startsWith('image/')) {
-      setLocalError('Choose an image file (PNG, JPEG, or WebP).');
+      setLocalError(t('avatarErrorNotImage'));
       return;
     }
     if (file.size > MAX_SOURCE_BYTES) {
-      setLocalError('That image is over 12 MB. Pick a smaller one.');
+      setLocalError(t('avatarErrorTooBig'));
       return;
     }
     if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
@@ -105,10 +108,10 @@ export function AvatarEditor({
     setSaving(true);
     setLocalError(null);
     try {
-      const dataUrl = await cropToDataUrl(imageSrc, croppedAreaPixels);
+      const dataUrl = await cropToDataUrl(imageSrc, croppedAreaPixels, t);
       await onSave(dataUrl);
     } catch (err) {
-      setLocalError(err instanceof Error ? err.message : 'Could not process that image.');
+      setLocalError(err instanceof Error ? err.message : t('avatarErrorProcess'));
       setSaving(false);
     }
   }
@@ -125,8 +128,8 @@ export function AvatarEditor({
       >
         <div className="avatared-panel">
           <header className="u-flex u-items-center u-gap-2 u-pad-3-4 u-border-b">
-            <h2 id="avatar-editor-heading" className="u-m-0 u-fs-16">{personaName}'s profile photo</h2>
-            <button type="button" className="secondary u-ml-auto u-iflex u-items-center" onClick={onCancel} aria-label="Close editor">
+            <h2 id="avatar-editor-heading" className="u-m-0 u-fs-16">{t('avatarPhotoHeading', { persona: personaName })}</h2>
+            <button type="button" className="secondary u-ml-auto u-iflex u-items-center" onClick={onCancel} aria-label={t('avatarCloseEditor')}>
               <XIcon size={14} />
             </button>
           </header>
@@ -151,7 +154,7 @@ export function AvatarEditor({
                   />
                 </div>
                 <label className="u-flex u-items-center u-gap-2 u-fs-13 muted">
-                  <span className="avatared-zoom-label">Zoom</span>
+                  <span className="avatared-zoom-label">{t('avatarZoom')}</span>
                   <input
                     type="range"
                     min={1}
@@ -159,7 +162,7 @@ export function AvatarEditor({
                     step={0.01}
                     value={zoom}
                     onChange={(e) => setZoom(Number(e.target.value))}
-                    aria-label="Zoom"
+                    aria-label={t('avatarZoom')}
                     className="u-flex-1"
                   />
                 </label>
@@ -186,8 +189,8 @@ export function AvatarEditor({
                 ) : (
                   <ImageIcon size={32} />
                 )}
-                <div className="u-fs-14 u-text">Drag an image here, or click to choose</div>
-                <div className="u-fs-12">PNG, JPEG, or WebP · up to 12 MB</div>
+                <div className="u-fs-14 u-text">{t('avatarDropHint')}</div>
+                <div className="u-fs-12">{t('avatarFormats')}</div>
                 <input
                   type="file"
                   accept="image/png,image/jpeg,image/webp"
@@ -210,18 +213,18 @@ export function AvatarEditor({
                   onClick={() => void onSave(null)}
                   disabled={saving}
                 >
-                  <TrashIcon size={13} /> Remove photo
+                  <TrashIcon size={13} /> {t('avatarRemovePhoto')}
                 </button>
               ) : null}
               <div className="u-ml-auto u-flex u-gap-2">
                 {imageSrc ? (
                   <button type="button" className="secondary" onClick={() => { setImageSrc(null); setCroppedAreaPixels(null); }} disabled={saving}>
-                    Choose another
+                    {t('avatarChooseAnother')}
                   </button>
                 ) : null}
-                <button type="button" className="secondary" onClick={onCancel} disabled={saving}>Cancel</button>
+                <button type="button" className="secondary" onClick={onCancel} disabled={saving}>{t('newCancel')}</button>
                 <button type="button" className="primary" onClick={() => void onSaveClick()} disabled={saving || !imageSrc || !croppedAreaPixels}>
-                  {saving ? 'Saving…' : 'Save photo'}
+                  {saving ? t('avatarSaving') : t('avatarSavePhoto')}
                 </button>
               </div>
             </div>
@@ -235,22 +238,22 @@ export function AvatarEditor({
 /** Draw the selected source-pixel region onto a square canvas and export a
  *  JPEG data-URI. `crop` is in natural-image pixels (react-easy-crop's
  *  `croppedAreaPixels`), so no extra scaling math is needed. */
-async function cropToDataUrl(src: string, crop: Area): Promise<string> {
-  const image = await loadImage(src);
+async function cropToDataUrl(src: string, crop: Area, t: TFunction): Promise<string> {
+  const image = await loadImage(src, t);
   const canvas = document.createElement('canvas');
   canvas.width = OUTPUT_SIZE;
   canvas.height = OUTPUT_SIZE;
   const ctx = canvas.getContext('2d');
-  if (!ctx) throw new Error('Image editing is not supported in this browser.');
+  if (!ctx) throw new Error(t('avatarErrorUnsupported'));
   ctx.drawImage(image, crop.x, crop.y, crop.width, crop.height, 0, 0, OUTPUT_SIZE, OUTPUT_SIZE);
   return canvas.toDataURL('image/jpeg', 0.85);
 }
 
-function loadImage(src: string): Promise<HTMLImageElement> {
+function loadImage(src: string, t: TFunction): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => resolve(img);
-    img.onerror = () => reject(new Error('Could not load that image.'));
+    img.onerror = () => reject(new Error(t('avatarErrorLoad')));
     img.src = src;
   });
 }

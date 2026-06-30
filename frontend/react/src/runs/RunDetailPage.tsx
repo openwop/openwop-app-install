@@ -6,6 +6,7 @@ import { subscribeToRun } from '../client/streamsClient.js';
 import { listOpenInterrupts, type OpenInterrupt } from '../client/interruptsClient.js';
 import { listAnnotations, type Annotation } from '../client/feedbackClient.js';
 import { StatusBadge } from '../ui/StatusBadge.js';
+import { handleTablistKeyDown } from '../ui/rovingTabs.js';
 import { EventStreamView } from '../streams/EventStreamView.js';
 import { RunTimeline } from './RunTimeline.js';
 import { RunStepInspector } from './RunStepInspector.js';
@@ -19,8 +20,20 @@ import { RunOpsPanel } from './RunOpsPanel.js';
 import { RunMemoryPanel } from './RunMemoryPanel.js';
 import { RunConversationPanel } from './RunConversationPanel.js';
 import { RenderInterrupt } from '../interrupts/RenderInterrupt.js';
+import { Notice } from '../ui/Notice.js';
+import { Skeleton } from '../ui/Skeleton.js';
+import { ArrowLeftIcon } from '../ui/icons/index.js';
+import { formatDuration } from './format.js';
+import { formatDateTime } from '../i18n/format.js';
+import { useTranslation } from 'react-i18next';
+import { confirm } from '../ui/confirm.js';
+
+function fmtTime(iso?: string): string {
+  return iso ? formatDateTime(iso) : '—';
+}
 
 export function RunDetailPage() {
+  const { t } = useTranslation('runs');
   const { runId = '' } = useParams();
   const nav = useNavigate();
   // §C3/§D — when this run was opened from a fork, carry a back-reference to
@@ -163,7 +176,7 @@ export function RunDetailPage() {
 
   async function onDelete() {
     if (!runId) return;
-    if (!window.confirm('Permanently delete this run? This removes its events and history and cannot be undone.')) return;
+    if (!(await confirm({ title: t('deleteRunConfirm'), danger: true, confirmLabel: t('common:delete') }))) return;
     try {
       await deleteRun(runId);
       nav('/runs');
@@ -202,49 +215,115 @@ export function RunDetailPage() {
     }
   }
 
-  if (!runId) return <div className="alert error">No run ID in URL.</div>;
+  if (!runId) return <Notice variant="error">{t('noRunIdInUrl')}</Notice>;
+
+  const duration =
+    snapshot?.startedAt && snapshot.completedAt
+      ? formatDuration(Date.parse(snapshot.completedAt) - Date.parse(snapshot.startedAt))
+      : null;
+  const isTerminal = snapshot ? ['completed', 'failed', 'cancelled'].includes(snapshot.status) : false;
 
   return (
-    <section>
-      <div className="card">
+    <section aria-labelledby="rundetail-heading">
+      <div className="u-mb-3">
+        <Link to="/runs" className="u-fs-12 u-ink-3">
+          <ArrowLeftIcon size={12} /> Runs
+        </Link>
+      </div>
+
+      <div className="surface-card rundetail-head-card">
         {forkedFrom && (
           <p className="muted rundetail-forked-from">
-            ↳ Forked from <Link to={`/runs/${forkedFrom}`}><code>{forkedFrom.slice(0, 8)}…</code></Link>
+            {t('forkedFromPrefix')}{' '}
+            <Link to={`/runs/${forkedFrom}`} className="inline-link"><code>{forkedFrom.slice(0, 8)}…</code></Link>
           </p>
         )}
-        <h2>
-          Run <code>{runId}</code>
-          {snapshot && <StatusBadge status={snapshot.status} className="rundetail-status-badge" />}
-        </h2>
-        {snapshot && (
-          <pre>{JSON.stringify(snapshot, null, 2)}</pre>
+        <div className="rundetail-head">
+          <div className="rundetail-head-titles">
+            <p className="rundetail-eyebrow">{t('runLabel')}</p>
+            <h1 id="rundetail-heading" className="rundetail-title"><code>{runId}</code></h1>
+          </div>
+          {snapshot && <StatusBadge status={snapshot.status} />}
+        </div>
+
+        {error && <Notice variant="error">{error}</Notice>}
+
+        {!snapshot && !error && (
+          <div className="rundetail-summary-loading" aria-busy="true" aria-label={t('loadingRun')}>
+            <Skeleton width="42%" />
+            <Skeleton width="68%" />
+            <Skeleton width="54%" />
+          </div>
         )}
-        {error && <div className="alert error">{error}</div>}
-        <div className="button-row">
-          <button className="secondary" onClick={onCancel} disabled={!snapshot || ['completed', 'failed', 'cancelled'].includes(snapshot.status)}>
-            Cancel run
+
+        {snapshot && (
+          <dl className="rundetail-summary">
+            <dt>{t('workflowFieldLabel')}</dt>
+            <dd><code>{snapshot.workflowId}</code></dd>
+            <dt>{t('summaryStarted')}</dt>
+            <dd>{fmtTime(snapshot.startedAt)}</dd>
+            {snapshot.completedAt ? (
+              <>
+                <dt>{t('summaryCompleted')}</dt>
+                <dd>{fmtTime(snapshot.completedAt)}{duration ? ` · ${duration}` : ''}</dd>
+              </>
+            ) : snapshot.currentNodeId ? (
+              <>
+                <dt>{t('summaryCurrentNode')}</dt>
+                <dd><code>{snapshot.currentNodeId}</code></dd>
+              </>
+            ) : null}
+            {snapshot.parentRunId && (
+              <>
+                <dt>{t('summaryParentRun')}</dt>
+                <dd>
+                  <Link to={`/runs/${snapshot.parentRunId}`} className="inline-link">
+                    <code>{snapshot.parentRunId.slice(0, 8)}…</code>
+                  </Link>
+                </dd>
+              </>
+            )}
+          </dl>
+        )}
+
+        {snapshot?.error?.message && (
+          <Notice variant="error">
+            <strong>{snapshot.error.code ?? t('runErrorFallback')}:</strong> {snapshot.error.message}
+          </Notice>
+        )}
+
+        {snapshot && (
+          <details className="rundetail-raw">
+            <summary>{t('rawSnapshotSummary')}</summary>
+            <pre>{JSON.stringify(snapshot, null, 2)}</pre>
+          </details>
+        )}
+
+        <div className="action-bar">
+          <button className="secondary" onClick={onCancel} disabled={!snapshot || isTerminal}>
+            {t('cancelRun')}
           </button>
           <button
             className="secondary"
             onClick={() => { window.location.href = `/compare?a=${encodeURIComponent(runId)}`; }}
-            title="Compare this run side-by-side with another"
+            title={t('compareRunTitle')}
           >
-            Compare…
-          </button>
-          <button
-            className="secondary"
-            onClick={onDelete}
-            title="Permanently delete this run and its history"
-          >
-            Delete run
+            {t('compareEllipsis')}
           </button>
           <button
             className="secondary"
             onClick={onDownloadDebugBundle}
             disabled={!snapshot}
-            title="Download a JSON bundle of this run's events for support / triage (spec/v1/debug-bundle.md)"
+            title={t('downloadBundleTitle')}
           >
-            Download bundle
+            {t('downloadBundle')}
+          </button>
+          <button
+            className="secondary u-text-danger"
+            onClick={onDelete}
+            title={t('deleteRunHistoryTitle')}
+          >
+            {t('deleteRun')}
           </button>
         </div>
       </div>
@@ -293,11 +372,12 @@ export function RunDetailPage() {
               <option value="debug">debug</option>
             </select>
           </label>
-          <div className="segmented" role="tablist" aria-label="Event view">
+          <div className="segmented" role="tablist" aria-label={t('eventViewAria')} onKeyDown={handleTablistKeyDown}>
             <button
               type="button"
               role="tab"
               aria-selected={eventView === 'timeline'}
+              tabIndex={eventView === 'timeline' ? 0 : -1}
               className={eventView === 'timeline' ? '' : 'secondary'}
               onClick={() => setEventView('timeline')}
             >
@@ -307,6 +387,7 @@ export function RunDetailPage() {
               type="button"
               role="tab"
               aria-selected={eventView === 'log'}
+              tabIndex={eventView === 'log' ? 0 : -1}
               className={eventView === 'log' ? '' : 'secondary'}
               onClick={() => setEventView('log')}
             >

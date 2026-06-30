@@ -1,0 +1,53 @@
+{
+  "name": "core.openwop.connections.netsuite",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Oracle NetSuite connection pack (RFC 0095) \u2014 OAuth2 provider for the NetSuite SuiteTalk REST API (ERP / finance). Reach is `openapi`: NetSuite has no first-party global MCP server, and its REST base + OAuth hosts are PER-ACCOUNT (`https://{account}.suitetalk.api.netsuite.com`), supplied per connection via instanceUrlTemplate (the schema's own NetSuite example). Carries NO secret; the operator supplies the integration/client credentials host-side (ADR 0024 \u00a77). Bound by ADR 0149 lib.finance.invoice-ap (post to ERP).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "netsuite",
+    "displayName": "Oracle NetSuite",
+    "category": "finance",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "instanceUrlTemplate": "https://{account}.suitetalk.api.netsuite.com",
+      "scopes": {
+        "read": [
+          {
+            "key": "rest.read",
+            "label": "Read REST records (ledger, POs)",
+            "scopes": [
+              "rest_webservices"
+            ]
+          }
+        ],
+        "write": [
+          {
+            "key": "rest.write",
+            "label": "Write REST records (post AP entries)",
+            "scopes": [
+              "rest_webservices"
+            ]
+          }
+        ]
+      }
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/section_158151234316.html"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http"
+    ],
+    "docsUrl": "https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help/chapter_1540391670.html",
+    "apiHosts": [
+      "netsuite.com"
+    ]
+  }
+}

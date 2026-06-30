@@ -13,6 +13,8 @@
  */
 
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { formatNumber } from '../i18n/format.js';
 import { Markdown } from './Markdown.js';
 import {
   BoldIcon,
@@ -29,7 +31,8 @@ import {
 
 interface ToolbarAction {
   key: string;
-  label: string;
+  /** ui-catalog key for the button's accessible name + tooltip. */
+  labelKey: string;
   icon: JSX.Element;
   /** Wrap the selection with `prefix`…`suffix` (inline emphasis / code). */
   wrap?: { prefix: string; suffix: string; placeholder: string };
@@ -45,16 +48,16 @@ const ICON = 14;
 
 function actions(compact: boolean): readonly ToolbarAction[] {
   const full: ToolbarAction[] = [
-    { key: 'bold', label: 'Bold', icon: <BoldIcon size={ICON} />, wrap: { prefix: '**', suffix: '**', placeholder: 'bold text' } },
-    { key: 'italic', label: 'Italic', icon: <ItalicIcon size={ICON} />, wrap: { prefix: '_', suffix: '_', placeholder: 'italic text' } },
-    { key: 'heading', label: 'Heading', icon: <HeadingIcon size={ICON} />, linePrefix: '## ' },
-    { key: 'link', label: 'Link', icon: <LinkIcon size={ICON} />, link: true },
-    { key: 'ul', label: 'Bulleted list', icon: <ListIcon size={ICON} />, linePrefix: '- ' },
-    { key: 'ol', label: 'Numbered list', icon: <ListOrderedIcon size={ICON} />, linePrefix: '1. ' },
-    { key: 'check', label: 'Checklist', icon: <CheckSquareIcon size={ICON} />, linePrefix: '- [ ] ' },
-    { key: 'quote', label: 'Quote', icon: <QuoteIcon size={ICON} />, linePrefix: '> ' },
-    { key: 'code', label: 'Inline code', icon: <CodeIcon size={ICON} />, wrap: { prefix: '`', suffix: '`', placeholder: 'code' } },
-    { key: 'codeblock', label: 'Code block', icon: <CodeBlockIcon size={ICON} />, fence: true },
+    { key: 'bold', labelKey: 'mdBold', icon: <BoldIcon size={ICON} />, wrap: { prefix: '**', suffix: '**', placeholder: 'bold text' } },
+    { key: 'italic', labelKey: 'mdItalic', icon: <ItalicIcon size={ICON} />, wrap: { prefix: '_', suffix: '_', placeholder: 'italic text' } },
+    { key: 'heading', labelKey: 'mdHeading', icon: <HeadingIcon size={ICON} />, linePrefix: '## ' },
+    { key: 'link', labelKey: 'mdLink', icon: <LinkIcon size={ICON} />, link: true },
+    { key: 'ul', labelKey: 'mdBulletedList', icon: <ListIcon size={ICON} />, linePrefix: '- ' },
+    { key: 'ol', labelKey: 'mdNumberedList', icon: <ListOrderedIcon size={ICON} />, linePrefix: '1. ' },
+    { key: 'check', labelKey: 'mdChecklist', icon: <CheckSquareIcon size={ICON} />, linePrefix: '- [ ] ' },
+    { key: 'quote', labelKey: 'mdQuote', icon: <QuoteIcon size={ICON} />, linePrefix: '> ' },
+    { key: 'code', labelKey: 'mdInlineCode', icon: <CodeIcon size={ICON} />, wrap: { prefix: '`', suffix: '`', placeholder: 'code' } },
+    { key: 'codeblock', labelKey: 'mdCodeBlock', icon: <CodeBlockIcon size={ICON} />, fence: true },
   ];
   // Compact surfaces (board cards) get just the inline-emphasis essentials.
   return compact ? full.filter((a) => ['bold', 'italic', 'link', 'ul', 'code'].includes(a.key)) : full;
@@ -87,12 +90,13 @@ export function MarkdownEditor({
   compact = false,
   ariaLabel,
 }: MarkdownEditorProps): JSX.Element {
+  const { t } = useTranslation('ui');
   const ref = useRef<HTMLTextAreaElement>(null);
   // Guards the draft-recovery check to fire at most once — re-offering on every
   // keystroke (value churn) would be wrong, so we can't key it off `value`.
   const recoveryChecked = useRef(false);
   const [mode, setMode] = useState<'write' | 'preview'>('write');
-  const [draftStatus, setDraftStatus] = useState<string | null>(null);
+  const [draftSaved, setDraftSaved] = useState(false);
   const [recoverable, setRecoverable] = useState<string | null>(null);
   const tabId = useId();
 
@@ -117,10 +121,10 @@ export function MarkdownEditor({
       try {
         if (value.trim()) {
           window.localStorage.setItem(autosaveKey, value);
-          setDraftStatus('Draft saved');
+          setDraftSaved(true);
         } else {
           window.localStorage.removeItem(autosaveKey);
-          setDraftStatus(null);
+          setDraftSaved(false);
         }
       } catch {
         /* ignore quota / private-mode errors */
@@ -193,21 +197,24 @@ export function MarkdownEditor({
       <div
         className="action-bar u-gap-1 u-wrap u-mb-1 u-items-center"
         role="toolbar"
-        aria-label="Formatting"
+        aria-label={t('mdToolbarLabel')}
       >
-        {actions(compact).map((a) => (
+        {actions(compact).map((a) => {
+          const label = t(a.labelKey);
+          return (
           <button
             key={a.key}
             type="button"
             className="secondary btn-sm u-iflex u-items-center u-minw-0 u-pad-2x6"
-            title={a.label}
-            aria-label={a.label}
+            title={label}
+            aria-label={label}
             disabled={mode === 'preview'}
             onClick={() => apply(a)}
           >
             {a.icon}
           </button>
-        ))}
+          );
+        })}
         {!compact ? (
           <div className="u-ml-auto u-iflex u-gap-1">
             <button
@@ -216,7 +223,7 @@ export function MarkdownEditor({
               aria-pressed={mode === 'write'}
               onClick={() => setMode('write')}
             >
-              Write
+              {t('mdWrite')}
             </button>
             <button
               type="button"
@@ -224,7 +231,7 @@ export function MarkdownEditor({
               aria-pressed={mode === 'preview'}
               onClick={() => setMode('preview')}
             >
-              Preview
+              {t('mdPreview')}
             </button>
           </div>
         ) : null}
@@ -232,13 +239,13 @@ export function MarkdownEditor({
 
       {recoverable != null ? (
         <div className="u-flex u-items-center u-gap-2 u-wrap u-fs-12 u-mb-1 u-border u-radius u-pad-4x8 u-bg-surface-2">
-          <span className="muted">An unsaved draft was found.</span>
+          <span className="muted">{t('mdDraftFound')}</span>
           <button
             type="button"
             className="secondary btn-sm"
             onClick={() => { onChange(recoverable); setRecoverable(null); }}
           >
-            Restore draft
+            {t('mdRestoreDraft')}
           </button>
           <button
             type="button"
@@ -248,7 +255,7 @@ export function MarkdownEditor({
               setRecoverable(null);
             }}
           >
-            Discard
+            {t('mdDiscard')}
           </button>
         </div>
       ) : null}
@@ -270,25 +277,25 @@ export function MarkdownEditor({
           className="surface-card mdeditor-preview"
           style={{ minHeight: `${rows * 1.4}em` }}
         >
-          {value.trim() ? <Markdown>{value}</Markdown> : <span className="muted">Nothing to preview yet.</span>}
+          {value.trim() ? <Markdown>{value}</Markdown> : <span className="muted">{t('mdNothingToPreview')}</span>}
         </div>
       )}
 
       <div className="mdeditor-footer">
         <span className="muted u-fs-12">
-          {draftStatus ?? 'Markdown supported'}
+          {draftSaved ? t('mdDraftSaved') : t('mdMarkdownSupported')}
         </span>
         {maxLength != null ? (
           <span className="mdeditor-count" style={{ color: over ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
-            {value.length} / {maxLength}
+            {t('mdCharCountMax', { n: formatNumber(value.length), max: formatNumber(maxLength) })}
           </span>
         ) : (
-          <span className="muted u-fs-12">{value.length} chars</span>
+          <span className="muted u-fs-12">{t('mdCharCount', { count: value.length, formatted: formatNumber(value.length) })}</span>
         )}
       </div>
       {over ? (
         <div className="mdeditor-over-warning">
-          Over the suggested {maxLength} characters — consider trimming.
+          {t('mdOverWarning', { max: formatNumber(maxLength) })}
         </div>
       ) : null}
     </div>

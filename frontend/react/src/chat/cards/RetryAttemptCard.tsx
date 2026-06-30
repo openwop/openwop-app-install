@@ -6,27 +6,29 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { formatNumber } from '../../i18n/format.js';
 import type { EnvelopeRetryAttempt } from '../types.js';
 
 interface Props {
   retry: EnvelopeRetryAttempt;
 }
 
-function reasonLabel(reason: string): string {
-  switch (reason) {
-    case 'schema-violation': return 'schema mismatch';
-    case 'truncation': return 'output cut off';
-    case 'refusal': return 'model refused';
-    default: return reason;
-  }
-}
+const RETRY_REASON_KEY: Record<string, string> = {
+  'schema-violation': 'retryReasonSchema',
+  truncation: 'retryReasonTruncated',
+  refusal: 'retryReasonRefusal',
+};
 
 export function RetryAttemptCard({ retry }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   const [open, setOpen] = useState(false);
+  const reasonKey = RETRY_REASON_KEY[retry.reason];
+  const reasonLabel = reasonKey ? t(reasonKey) : retry.reason;
   return (
-    <div className="env-chip env-chip-info" role="status" aria-label={`Envelope retry attempt ${retry.attempt}`}>
-      <span className="env-chip-tag">RETRY {retry.attempt}</span>
-      <span className="env-chip-text">Re-asked the model — {reasonLabel(retry.reason)}</span>
+    <div className="env-chip env-chip-info" role="status" aria-label={t('retryAttemptTitle', { attempt: formatNumber(retry.attempt) })}>
+      <span className="env-chip-tag">{t('retryBadge', { attempt: formatNumber(retry.attempt) })}</span>
+      <span className="env-chip-text">{t('retryPrefix')}{reasonLabel}</span>
       {retry.previousError ? (
         <button
           type="button"
@@ -34,7 +36,7 @@ export function RetryAttemptCard({ retry }: Props): JSX.Element {
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
         >
-          {open ? 'hide error' : 'show error'}
+          {open ? t('hideError') : t('showError')}
         </button>
       ) : null}
       {open && retry.previousError ? (

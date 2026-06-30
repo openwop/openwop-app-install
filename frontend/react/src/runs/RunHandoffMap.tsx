@@ -18,7 +18,10 @@
  */
 
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
+import i18n from '../i18n/index.js';
+import { formatPercent } from '../i18n/format.js';
 
 interface Props {
   events: readonly RunEventDoc[];
@@ -55,8 +58,8 @@ function buildChips(events: readonly RunEventDoc[]): Chip[] {
     switch (ev.type) {
       case 'runOrchestrator.decided': {
         const d = p.decision;
-        const label = typeof d === 'string' ? d : (asRecord(d).kind as string) ?? 'decided';
-        chips.push({ seq: ev.sequence, kind: 'supervisor', label: `supervisor: ${label}`, sublabel: p.agentId as string, color: 'var(--color-ai-text)' });
+        const label = typeof d === 'string' ? d : (asRecord(d).kind as string) ?? i18n.t('runs:handoffDecidedFallback');
+        chips.push({ seq: ev.sequence, kind: 'supervisor', label: i18n.t('runs:handoffSupervisor', { decision: label }), sublabel: p.agentId as string, color: 'var(--color-ai-text)' });
         break;
       }
       case 'agent.handoff': {
@@ -74,7 +77,7 @@ function buildChips(events: readonly RunEventDoc[]): Chip[] {
       case 'node.dispatched':
         chips.push({
           seq: ev.sequence, kind: 'dispatch',
-          label: `dispatch ${String(p.childWorkflowId ?? '')}`.trim(),
+          label: i18n.t('runs:handoffDispatch', { workflowId: String(p.childWorkflowId ?? '') }).trim(),
           ...(typeof p.childStatus === 'string' ? { sublabel: p.childStatus as string } : {}),
           color: 'var(--clay-text)',
         });
@@ -92,9 +95,12 @@ function buildChips(events: readonly RunEventDoc[]): Chip[] {
       case 'core.workflowChain.confidence-escalated':
         chips.push({
           seq: ev.sequence, kind: 'escalation',
-          label: `escalation: ${String(p.escalationKind ?? '')}`,
+          label: i18n.t('runs:handoffEscalation', { kind: String(p.escalationKind ?? '') }),
           sublabel: typeof p.confidence === 'number'
-            ? `conf ${Math.round((p.confidence as number) * 100)}% < floor ${Math.round(((p.floor as number) ?? 0) * 100)}%`
+            ? i18n.t('runs:handoffConfidenceFloor', {
+                conf: formatPercent(p.confidence as number),
+                floor: formatPercent((p.floor as number) ?? 0),
+              })
             : (p.workerId as string),
           color: 'var(--color-warning-text)',
           emphasize: true,
@@ -108,11 +114,12 @@ function buildChips(events: readonly RunEventDoc[]): Chip[] {
 }
 
 export function RunHandoffMap({ events }: Props) {
+  const { t } = useTranslation('runs');
   const chips = useMemo(() => buildChips(events), [events]);
   if (chips.length === 0) return null;
   return (
     <div className="card">
-      <h2>Multi-agent handoffs</h2>
+      <h2>{t('multiAgentHandoffs')}</h2>
       <div className="handoff-map">
         {chips.map((chip, i) => (
           <div className="handoff-chip-wrap" key={`${chip.seq}-${i}`}>

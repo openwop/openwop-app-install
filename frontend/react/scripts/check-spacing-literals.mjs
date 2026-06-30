@@ -22,7 +22,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CSS = join(__dirname, '..', 'src', 'styles', 'global.css');
 
 /** Lower this whenever a cleanup removes literals; it must never be raised. */
-const BASELINE = Number(process.env.OPENWOP_SPACING_BASELINE ?? '744');
+const BASELINE = Number(process.env.OPENWOP_SPACING_BASELINE ?? '702');
 
 const PROPS = /(?:^|[;{]\s*)(gap|row-gap|column-gap|margin|margin-(?:top|right|bottom|left)|padding|padding-(?:top|right|bottom|left)|border-radius)\s*:\s*([^;}]+)/g;
 // A length literal that is NOT a sanctioned exception.

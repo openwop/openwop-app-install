@@ -10,6 +10,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
@@ -17,8 +18,7 @@ import type { Storage } from '../src/storage/storage.js';
 describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
   let server: http.Server;
   let storage: Storage;
-  const PORT = 18943;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
   const TOKEN = 'dev-token';
   const EXPECTED_ACTOR = `bearer:${TOKEN.slice(0, 8)}`; // auth.ts derives bearer:<8>
   let workflowId: string;
@@ -26,10 +26,10 @@ describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     storage = app.locals.storage;
     await new Promise<void>((res) => {
-      server = app.listen(PORT, res);
+      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
     const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');
     workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';

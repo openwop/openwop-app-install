@@ -21,15 +21,14 @@ import { ensureAssistantAgent } from '../src/features/assistant/capability.js';
 import { upsertAgentProfile, __resetAgentProfileStore } from '../src/host/agentProfileService.js';
 import { __resetConnectionsStore } from '../src/features/connections/connectionsService.js';
 
-const PORT = 18977;
 let server: { close(cb?: () => void): void };
 const TENANT = 'default';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await __clearToggleStore();
-  server = app.listen(PORT);
+  server = app.listen(0);
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));

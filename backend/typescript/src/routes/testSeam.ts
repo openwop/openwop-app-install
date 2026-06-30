@@ -40,6 +40,17 @@ import type { Express, Response } from 'express';
 import { buildHostSurfaceBundle, resolvePresignToken } from '../host/inMemorySurfaces.js';
 import type { HostSurfaceBundle, SurfaceArgs, SurfaceFn } from '../host/inMemorySurfaces.js';
 import { acceptEnvelope, type AcceptOptions } from '../host/envelopeAcceptor.js';
+import { getEventLog } from '../executor/eventLog.js';
+import { randomUUID as a2uiRandomUUID } from 'node:crypto';
+import { cacheableAnthropicSystem, type AnthropicSystemBlock } from '../providers/promptCaching.js';
+
+/** RFC 0116 witness — a content-addressed prompt-prefix cache (the Anthropic
+ *  model: keyed on the literal prefix bytes). Module-scoped to the seam; gated to
+ *  OPENWOP_TEST_SEAM_ENABLED. The (tenant, cachePrefixId) namespacing is REAL
+ *  (cacheableAnthropicSystem); only the Anthropic CALL is mocked (prod has no
+ *  Anthropic key). Tenant B's use of tenant A's cachePrefixId assembles DIFFERENT
+ *  prefix bytes → structural miss → cacheReadTokens==0. */
+const _prefixCacheProbeSeen = new Set<string>();
 import { composePromptTemplate } from '../host/promptCompose.js';
 import { resolvePromptRef, type PromptKind } from '../host/promptResolve.js';
 import type { Storage } from '../storage/storage.js';
@@ -59,7 +70,7 @@ import { computeLLMCacheKey } from '../providers/llmCacheKey.js';
 import { evaluateToolHook, type ToolHookRequest } from '../host/toolHooks.js';
 import { singleTick, missedWindow } from '../host/schedulingService.js';
 import { runAgentLoop, type AgentLoopRequest } from '../host/agentLoop.js';
-import { execInSandboxVm } from '../host/sandbox.js';
+import { execGuardedSandboxVm, type SandboxDispatch } from '../host/sandbox.js';
 import { OpenwopError } from '../types.js';
 import { assertReachableUrl } from './webhooks.js';
 import { createLogger } from '../observability/logger.js';
@@ -75,6 +86,15 @@ interface SeamBody {
 
 const SURFACES = ['kv', 'table', 'cache', 'blob', 'queueBus', 'sql', 'vector', 'search', 'fs'] as const;
 type SurfaceName = (typeof SURFACES)[number];
+
+// In-process correlationId → outcome map for the `envelope/accept` seam, so a
+// re-emission with the SAME correlationId across two sequential calls is deduped
+// (same type → cached outcome) or refused (divergent type → envelope_correlation_
+// conflict) per RFC 0021/0102 §"Replay determinism" WITHOUT the caller threading
+// priorCorrelations/persistedDedup. Cleared by `POST /test/reset`. Test-seam-only.
+// Bounded (evict-oldest) so a long un-reset run can't grow it without limit.
+const SEAM_CORRELATIONS_CAP = 10_000;
+const seamCorrelations = new Map<string, { outcome: EnvelopeOutcome; envelopeType: string }>();
 
 function isSurfaceName(s: string): s is SurfaceName {
   return (SURFACES as readonly string[]).includes(s);
@@ -199,16 +219,107 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   log.warn('test seam ENABLED — /v1/host/openwop-app/test/surface is reachable. NEVER enable in production.');
 
   // Conformance back-compat: the pinned `@openwop/openwop-conformance` suite calls the
-  // legacy `/v1/host/sample/test/*` paths and FAILS on 404 for any seam whose capability
-  // flag is advertised. The product surface is now `/v1/host/openwop-app/test/*`; this
-  // internal rewrite keeps certification green without forking the vendored harness.
-  // Host-private space (`spec/v1/host-extensions.md` §"Canonical prefixes"), non-wire.
-  const LEGACY = '/v1/host/sample/test';
+  // reference host under the legacy `/v1/host/sample/*` vendor alias and FAILS (or
+  // vacuously soft-skips) on 404 for any seam whose capability flag is advertised. The
+  // product surface is `/v1/host/openwop-app/*`; this internal rewrite maps the WHOLE
+  // `sample` namespace onto it (not just `/test/*` — the suite also calls
+  // `/v1/host/sample/envelope/accept`, `/ai/*`, `/agents/*`, etc.) so certification runs
+  // non-vacuously without forking the vendored harness. Gated to OPENWOP_TEST_SEAM_ENABLED
+  // (never production). Host-private space (`spec/v1/host-extensions.md` §"Canonical
+  // prefixes"), non-wire.
+  const LEGACY = '/v1/host/sample';
   app.use((req, _res, next) => {
     if (req.url === LEGACY || req.url.startsWith(LEGACY + '/') || req.url.startsWith(LEGACY + '?')) {
-      req.url = '/v1/host/openwop-app/test' + req.url.slice(LEGACY.length);
+      req.url = '/v1/host/openwop-app' + req.url.slice(LEGACY.length);
     }
     next();
+  });
+
+  // RFC 0114 §15 — A2UI surface emit seam (the non-vacuous delta witness driver).
+  // Emits a `ui.a2ui-surface` as a REAL run event through the REAL closed-catalog
+  // gate (`acceptEnvelope`), so the conformance suite / steward can drive a
+  // two-surface sequence on a real run and observe the `?a2uiDelta=1` transport
+  // (host/streams.ts) produce a delta frame. An out-of-catalog or
+  // contentTrust-dropping surface is rejected here (422) on the SAME gate a full
+  // surface receives — proving the no-code-exec boundary holds at emit. Gated to
+  // OPENWOP_TEST_SEAM_ENABLED (never production).
+  app.post('/v1/host/openwop-app/a2ui/emit-surface', async (req, res) => {
+    const body = (req.body ?? {}) as { runId?: unknown; surface?: unknown; catalogVersion?: unknown; contentTrust?: unknown };
+    if (typeof body.runId !== 'string' || body.runId.length === 0) {
+      res.status(400).json({ error: 'invalid_argument', message: 'runId required' });
+      return;
+    }
+    if (body.surface === undefined || body.surface === null) {
+      res.status(400).json({ error: 'invalid_argument', message: 'surface required' });
+      return;
+    }
+    const catalogVersion = typeof body.catalogVersion === 'string' ? body.catalogVersion : '0.9.1';
+    // Validate the surface through the REAL ui.a2ui-surface envelope gate (closed
+    // catalog + contentTrust). Reject (422) exactly as a full surface would be —
+    // this is the emit-side half of the fail-closed security invariant.
+    const envelope = {
+      type: 'ui.a2ui-surface',
+      schemaVersion: 1,
+      envelopeId: a2uiRandomUUID(),
+      correlationId: a2uiRandomUUID(),
+      payload: { catalogVersion, surface: body.surface },
+      meta: {
+        source: 'ai-generation' as const,
+        ts: new Date().toISOString(),
+        ...(body.contentTrust === 'untrusted' ? { contentTrust: 'untrusted' as const } : {}),
+      },
+    };
+    const outcome = acceptEnvelope(envelope);
+    if (outcome.status !== 'accepted') {
+      res.status(422).json({
+        error: 'a2ui_surface_invalid',
+        reason: outcome.reason,
+        ...(outcome.status === 'invalid' ? { details: outcome.details } : {}),
+      });
+      return;
+    }
+    // Append the FULL surface as a real run event (durable, replay-safe). The
+    // `?a2uiDelta=1` transport diffs consecutive surfaces per subscriber.
+    const rec = await getEventLog().append({
+      runId: body.runId,
+      type: 'ui.a2ui-surface',
+      payload: { catalogVersion, surface: body.surface },
+    });
+    res.status(201).json({ eventId: rec.eventId, sequence: rec.sequence, surfaceRef: rec.eventId, catalogVersion });
+  });
+
+  // RFC 0116 — prompt-prefix cache witness driver. Drives the REAL prefix
+  // assembly + provider.usage-shaped cost-only split through a content-addressed
+  // cache (Anthropic model). The 1.43.0 conformance scenario POSTs tenant A
+  // twice (prime → hit) and tenant B once with the SAME cachePrefixId (structural
+  // miss) and asserts: hit → cacheReadTokens>0; B → cacheReadTokens==0;
+  // inputTokens/outputTokens invariant. Gated to OPENWOP_TEST_SEAM_ENABLED.
+  app.post('/v1/host/openwop-app/aiProviders/prefix-cache-probe', (req, res) => {
+    const body = (req.body ?? {}) as { tenant?: unknown; cachePrefixId?: unknown; system?: unknown };
+    if (typeof body.tenant !== 'string' || typeof body.cachePrefixId !== 'string') {
+      res.status(400).json({ error: 'invalid_argument', message: 'tenant + cachePrefixId required' });
+      return;
+    }
+    const system = typeof body.system === 'string' ? body.system : 'You are a careful assistant. '.repeat(64);
+    // REAL (tenant, cachePrefixId) namespacing → the cache key bytes.
+    const assembled = cacheableAnthropicSystem(system, true, { tenant: body.tenant, cachePrefixId: body.cachePrefixId });
+    const bytes = Array.isArray(assembled)
+      ? (assembled as AnthropicSystemBlock[]).map((b) => b.text).join('')
+      : String(assembled ?? '');
+    const INPUT = 1000;
+    const OUTPUT = 20;
+    const hit = _prefixCacheProbeSeen.has(bytes);
+    if (!hit) _prefixCacheProbeSeen.add(bytes);
+    // Cost-only split (provider.usage shape). inputTokens/outputTokens are
+    // INVARIANT hit-vs-miss (RFC 0116 replay-invariance MUST).
+    res.status(200).json({
+      provider: 'anthropic',
+      inputTokens: INPUT,
+      outputTokens: OUTPUT,
+      cacheReadTokens: hit ? INPUT : 0,
+      cacheWriteTokens: hit ? 0 : INPUT,
+      cacheHit: hit,
+    });
   });
 
   app.post('/v1/host/openwop-app/test/surface', async (req, res) => {
@@ -352,6 +463,12 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
        *  (instead of having to wire a full interrupt + resume flow
        *  through the engine). */
       approvalGateContext?: boolean;
+      /** RFC 0102 §A.5 — the interrupt kind this envelope is presented to
+       *  resolve. `'approval'` makes the call an approval-gate resolution
+       *  (equivalent to `approvalGateContext: true`), so an untrusted
+       *  ui.a2ui-surface bound to an approval interrupt is refused with
+       *  `untrusted_content_blocks_approval`. */
+      boundInterruptKind?: string;
     };
     if (body.envelope === undefined) {
       res.status(400).json({ error: { code: 'invalid_argument', message: 'envelope required' } });
@@ -396,6 +513,9 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     if (body.schemaVersionFloor !== undefined) opts.schemaVersionFloor = body.schemaVersionFloor;
     if (body.envelopeStrictness !== undefined) opts.envelopeStrictness = body.envelopeStrictness;
     if (body.approvalGateContext === true) opts.approvalGateContext = true;
+    // RFC 0102 §A.5 — a surface bound to an approval interrupt is an approval-
+    // gate resolution; route it through the same untrusted-blocks-approval gate.
+    if (body.boundInterruptKind === 'approval') opts.approvalGateContext = true;
     if (Array.isArray(body.byokCanaries) && body.byokCanaries.length > 0) {
       // Drop entries missing either field — keeps the acceptor's
       // [REDACTED:<secretId>] substitution deterministic.
@@ -438,9 +558,36 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
         });
       }
     }
+    // Seed from the in-process correlation map (RFC 0021/0102 §"Replay
+    // determinism") so a re-emission with the same correlationId is deduped/
+    // conflict-detected even without an explicit priorCorrelations/persistedDedup.
+    // Explicit + persisted entries (added above) win on collision.
+    if (inboundCorrelationId && !dedupMap.has(inboundCorrelationId)) {
+      const tracked = seamCorrelations.get(inboundCorrelationId);
+      if (tracked) dedupMap.set(inboundCorrelationId, tracked);
+    }
     if (dedupMap.size > 0) opts.priorCorrelations = dedupMap;
 
     const outcome = acceptEnvelope(body.envelope, opts);
+
+    // Record the FIRST outcome per correlationId in-process (only if not already
+    // tracked, so the original type/outcome is preserved for divergent-type
+    // conflict detection on the next call).
+    if (inboundCorrelationId && !seamCorrelations.has(inboundCorrelationId)) {
+      const envType =
+        body.envelope && typeof body.envelope === 'object' &&
+        typeof (body.envelope as { type?: unknown }).type === 'string'
+          ? (body.envelope as { type: string }).type
+          : 'unknown';
+      // Evict the oldest entry (Map preserves insertion order) before exceeding
+      // the cap — keeps the test-seam map bounded without a wholesale clear that
+      // could drop a correlationId an in-flight test still needs.
+      if (seamCorrelations.size >= SEAM_CORRELATIONS_CAP) {
+        const oldest = seamCorrelations.keys().next().value;
+        if (oldest !== undefined) seamCorrelations.delete(oldest);
+      }
+      seamCorrelations.set(inboundCorrelationId, { outcome, envelopeType: envType });
+    }
 
     // Persist the outcome for future cross-process re-emissions. Only
     // persist when the caller supplied persistedDedup AND the inbound
@@ -588,6 +735,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     resetTestEventLog();
     resetCapabilityOverlay();
     resetTestSpanBuffer();
+    seamCorrelations.clear();
     res.status(200).json({ ok: true });
   });
 
@@ -1566,38 +1714,35 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   // re-parsing the message. Format: `${SENTINEL}${capabilityName}:${humanMessage}`.
   const CAPABILITY_DENIED_SENTINEL = '__OPENWOP_CAP_DENIED__:';
 
-  function makeSandboxContext(allowedHostCalls: string[], args: unknown): Record<string, unknown> {
-    // The host object: only methods listed in allowedHostCalls are
-    // present. Any other method access throws — that's the capability-
-    // gate enforcement contract. The Proxy returns a thrower for unknown
-    // properties (so `host.notInAllowedList()` synchronously raises with
-    // a structured sentinel the classifier parses out into
-    // `sandbox_capability_denied + details.requestedCapability` per
-    // `host-capabilities.md:1680`.
+  // Host-call dispatch for the sandbox seam: only names listed in
+  // allowedHostCalls resolve; any other call throws a structured sentinel the
+  // classifier parses into `sandbox_capability_denied + details.requestedCapability`
+  // per `host-capabilities.md:1680`. Built as a `SandboxDispatch` (not an
+  // outer-realm host object) so the hardened primitive keeps every reference the
+  // sandbox can reach inside the vm realm — closing the prototype-chain escape
+  // (`host.fetch(...).constructor.constructor('return process')()`).
+  function makeSandboxDispatch(allowedHostCalls: string[]): SandboxDispatch {
     const allow = new Set(allowedHostCalls);
-    const host = new Proxy(
-      {
-        fetch: (_url: string) => ({ status: 200, body: 'mocked' }),
-        // Future host calls (kv.get, queue.publish, etc.) extend here.
-      },
-      {
-        get(target, prop) {
-          if (typeof prop !== 'string') return undefined;
-          if (!allow.has(prop)) {
-            return () => {
-              throw new Error(`${CAPABILITY_DENIED_SENTINEL}${prop}:host.${prop} is not in allowedHostCalls`);
-            };
-          }
-          return (target as Record<string, unknown>)[prop];
-        },
-      },
-    );
-
-    return { host, args };
+    const MOCKS: Record<string, (...args: unknown[]) => unknown> = {
+      fetch: (_url) => ({ status: 200, body: 'mocked' }),
+      // Future host calls (kv.get, queue.publish, etc.) extend here.
+    };
+    return (name, args) => {
+      if (!allow.has(name)) {
+        throw new Error(`${CAPABILITY_DENIED_SENTINEL}${name}:host.${name} is not in allowedHostCalls`);
+      }
+      const fn = MOCKS[name];
+      return fn ? fn(...args) : undefined;
+    };
   }
 
   function classifyError(err: unknown, program: SandboxProgram): SandboxResult {
-    const msg = err instanceof Error ? err.message : String(err);
+    // Cross-realm-safe message extraction: the hardened sandbox re-throws host-
+    // call failures as IN-CONTEXT Errors, which are NOT `instanceof` this realm's
+    // Error — so read `.message` directly (the capability-denied sentinel lives
+    // there) and only fall back to String() when there is no message string.
+    const errMessage = (err as { message?: unknown } | null)?.message;
+    const msg = typeof errMessage === 'string' ? errMessage : String(err);
     // Timeouts surface specifically from node:vm — pattern-match here
     // (timeout is independent of the program's declared intent). Canonical
     // code per `host-capabilities.md:1670,1679`.
@@ -1712,16 +1857,17 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       : [];
     const args = body.args ?? {};
 
-    const ctx = makeSandboxContext(allowedHostCalls, args);
+    const dispatch = makeSandboxDispatch(allowedHostCalls);
 
-    // A13(a) — run through the shared `execInSandboxVm` primitive (host/sandbox.ts)
-    // instead of a second inline node:vm path. Same isolation (a fresh frozen
-    // context exposing only `ctx`, no require/process/fs/child_process, 1000ms
-    // wall-clock — RFC 0035 §A). It returns the RAW thrown error so this seam
-    // keeps its richer, program-intent-driven taxonomy (escapeKind /
-    // requestedCapability / memory-exceeded) that `runInSandbox`'s base taxonomy
-    // omits — DRY on the executor, unchanged behavior on the wire.
-    const exec = execInSandboxVm(program.code, { timeoutMs: 1000, globals: ctx });
+    // A13(a) — run through the shared `execGuardedSandboxVm` primitive
+    // (host/sandbox.ts) instead of a second inline node:vm path. Same isolation
+    // (a fresh context exposing only an in-context `host` dispatcher + cloned
+    // `args`, no require/process/fs/child_process, 1000ms wall-clock — RFC 0035
+    // §A) and now hardened against prototype-chain escapes. It returns the RAW
+    // thrown error so this seam keeps its richer, program-intent-driven taxonomy
+    // (escapeKind / requestedCapability / memory-exceeded) that `runInSandbox`'s
+    // base taxonomy omits — DRY on the executor, unchanged behavior on the wire.
+    const exec = execGuardedSandboxVm(program.code, { timeoutMs: 1000, dispatch, args });
     if (!exec.ok) {
       res.status(200).json(classifyError(exec.error, program));
       return;

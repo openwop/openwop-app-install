@@ -5,12 +5,13 @@
  * contract); Cut Over reuses the MG-6 graduated-cutover control.
  */
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Skeleton } from '../ui/Skeleton.js';
 import { Notice } from '../ui/Notice.js';
-import { ArrowLeftIcon, BuildingIcon, CheckIcon, XIcon } from '../ui/icons/index.js';
+import { ArrowLeftIcon, ArrowRightIcon, BuildingIcon, CheckIcon, XIcon } from '../ui/icons/index.js';
 import {
   getMigrationJourney,
   getWorkforce,
@@ -28,21 +29,23 @@ import {
   type WorkforceGovernance,
   type WorkforceStatus,
 } from '../client/workforcesClient.js';
+import { formatPercent } from '../i18n/format.js';
 
-const STAGES: { key: MigrationStageKey; title: string; blurb: string; rfcGated?: boolean }[] = [
-  { key: 'target', title: 'Target', blurb: 'Define the future-state workflow and the outcome it must deliver.' },
-  { key: 'assess', title: 'Assess', blurb: 'Check the workforce is well-formed enough to migrate.' },
-  { key: 'map-data', title: 'Map Data', blurb: 'Declare data sources, sensitivity, and the approval model.' },
-  { key: 'map-boundaries', title: 'Map Boundaries', blurb: 'Confirm which steps are auto-safe vs human-review.' },
-  { key: 'shadow-prove', title: 'Shadow & Prove', blurb: 'Run alongside the legacy process and compare outputs.', rfcGated: true },
-  { key: 'cut-over', title: 'Cut Over', blurb: 'Move production responsibility once the agent has graduated.' },
+const STAGES: { key: MigrationStageKey; titleKey: string; blurbKey: string; rfcGated?: boolean }[] = [
+  { key: 'target', titleKey: 'stageTargetTitle', blurbKey: 'stageTargetBlurb' },
+  { key: 'assess', titleKey: 'stageAssessTitle', blurbKey: 'stageAssessBlurb' },
+  { key: 'map-data', titleKey: 'stageMapDataTitle', blurbKey: 'stageMapDataBlurb' },
+  { key: 'map-boundaries', titleKey: 'stageMapBoundariesTitle', blurbKey: 'stageMapBoundariesBlurb' },
+  { key: 'shadow-prove', titleKey: 'stageShadowProveTitle', blurbKey: 'stageShadowProveBlurb', rfcGated: true },
+  { key: 'cut-over', titleKey: 'stageCutOverTitle', blurbKey: 'stageCutOverBlurb' },
 ];
 
 function pct(n: number): string {
-  return `${(n * 100).toFixed(1)}%`;
+  return formatPercent(n, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
 export function MigrationWizardPage(): JSX.Element {
+  const { t } = useTranslation('workforces');
   const { workforceId = '' } = useParams();
   const [wf, setWf] = useState<Workforce | null>(null);
   const [journey, setJourney] = useState<MigrationJourney | null>(null);
@@ -65,7 +68,7 @@ export function MigrationWizardPage(): JSX.Element {
       if (err instanceof EvalNotEnabledError) setEvalState('unavailable');
       else {
         setEvalState('idle');
-        setStageError(err instanceof Error ? err.message : 'eval failed');
+        setStageError(err instanceof Error ? err.message : t('evalFailed'));
       }
     }
   };
@@ -113,19 +116,19 @@ export function MigrationWizardPage(): JSX.Element {
     }
   }
 
-  const back = <Link to={`/workforces/${encodeURIComponent(workforceId)}`} className="chip"><ArrowLeftIcon size={13} /> Back to workforce</Link>;
+  const back = <Link to={`/workforces/${encodeURIComponent(workforceId)}`} className="chip"><ArrowLeftIcon size={13} /> {t('backToWorkforce')}</Link>;
 
   if (loading) {
-    return <div><PageHeader eyebrow="MIGRATION" title="Loading…" actions={back} /><Skeleton height={140} /></div>;
+    return <div><PageHeader eyebrow={t('migrationEyebrow')} title={t('loadingTitle')} actions={back} /><Skeleton height={140} /></div>;
   }
   if (error || !wf || !journey) {
     return (
       <div>
-        <PageHeader eyebrow="MIGRATION" title="Couldn't load" actions={back} />
+        <PageHeader eyebrow={t('migrationEyebrow')} title={t('couldNotLoad')} actions={back} />
         {!wf && !error ? (
-          <StateCard icon={<BuildingIcon />} title="Workforce not found" body={`No workforce "${workforceId}".`} action={back} />
+          <StateCard icon={<BuildingIcon />} title={t('workforceNotFound')} body={t('noWorkforceNamed', { id: workforceId })} action={back} />
         ) : (
-          <Notice variant="error">{error ?? 'Unknown error'}</Notice>
+          <Notice variant="error">{error ?? t('unknownError')}</Notice>
         )}
       </div>
     );
@@ -138,9 +141,9 @@ export function MigrationWizardPage(): JSX.Element {
   return (
     <div>
       <PageHeader
-        eyebrow="MIGRATION JOURNEY"
-        title={`Migrate: ${wf.name}`}
-        lede="Rebuild one workflow as a governed agent workforce — prove it, then take over production."
+        eyebrow={t('migrationJourneyEyebrow')}
+        title={t('migrateTitle', { name: wf.name })}
+        lede={t('migrationLede')}
         actions={back}
       />
 
@@ -151,28 +154,28 @@ export function MigrationWizardPage(): JSX.Element {
           const cls = i === active ? 'chip chip--accent' : done ? 'chip chip--success' : 'chip chip--muted';
           return (
             <button key={s.key} type="button" className={`${cls} u-border-none u-cursor-pointer`} onClick={() => setActive(i)}>
-              {done ? <CheckIcon size={12} /> : `${i + 1}.`} {s.title}
+              {done ? <CheckIcon size={12} /> : `${i + 1}.`} {t(s.titleKey)}
             </button>
           );
         })}
       </div>
 
       <section className="surface-card">
-        <h3 className="u-mt-0">{active + 1}. {stage.title}</h3>
-        <p className="muted u-mt-0">{stage.blurb}</p>
+        <h3 className="u-mt-0">{t('stageHeading', { n: active + 1, title: t(stage.titleKey) })}</h3>
+        <p className="muted u-mt-0">{t(stage.blurbKey)}</p>
 
         {stage.key === 'target' ? (
           <div className="migwiz-form-grid">
-            <label>Target workflow
+            <label>{t('targetWorkflow')}
               <select value={target.workflowId} onChange={(e) => setTarget({ ...target, workflowId: e.target.value })} className="u-block u-w-full">
                 {wf.workflowCatalog.map((id) => <option key={id} value={id}>{id}</option>)}
               </select>
             </label>
-            <label>Target outcome
+            <label>{t('targetOutcome')}
               <textarea value={target.targetOutcome} onChange={(e) => setTarget({ ...target, targetOutcome: e.target.value })} rows={2} className="u-block u-w-full" />
             </label>
             <div className="action-bar">
-              <button type="button" className="btn" disabled={busy || !target.workflowId} onClick={() => void save({ target, stageStatus: { target: 'done' } })}>Save &amp; continue</button>
+              <button type="button" className="btn" disabled={busy || !target.workflowId} onClick={() => void save({ target, stageStatus: { target: 'done' } })}>{t('saveAndContinue')}</button>
             </div>
           </div>
         ) : null}
@@ -180,68 +183,66 @@ export function MigrationWizardPage(): JSX.Element {
         {stage.key === 'assess' ? (
           <div>
             <ul className="migwiz-assess-list">
-              {[
-                ['Has a supervisor agent', wf.agents.some((a) => a.role === 'supervisor')],
-                ['Has worker agents', wf.agents.some((a) => a.role === 'worker')],
-                ['Has a governance/eval agent', wf.agents.some((a) => a.role === 'governance')],
-                ['Decision boundaries defined', wf.decisionBoundaries.auto.length + wf.decisionBoundaries.review.length > 0],
-                ['Purpose + policy tags defined', Boolean(wf.purpose.statement) && wf.purpose.policyTags.length > 0],
-              ].map(([label, ok]) => (
-                <li key={String(label)}>
-                  <span className={`chip ${ok ? 'chip--success' : 'chip--danger'}`}>{ok ? 'ready' : 'missing'}</span> {label}
+              {([
+                ['assessHasSupervisor', wf.agents.some((a) => a.role === 'supervisor')],
+                ['assessHasWorkers', wf.agents.some((a) => a.role === 'worker')],
+                ['assessHasGovernance', wf.agents.some((a) => a.role === 'governance')],
+                ['assessBoundaries', wf.decisionBoundaries.auto.length + wf.decisionBoundaries.review.length > 0],
+                ['assessPurpose', Boolean(wf.purpose.statement) && wf.purpose.policyTags.length > 0],
+              ] as const).map(([labelKey, ok]) => (
+                <li key={labelKey}>
+                  <span className={`chip ${ok ? 'chip--success' : 'chip--danger'}`}>{ok ? t('assessReady') : t('assessMissing')}</span> {t(labelKey)}
                 </li>
               ))}
             </ul>
-            <button type="button" className="btn" disabled={busy} onClick={() => void markDone('assess')}>Mark assessed &amp; continue</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => void markDone('assess')}>{t('markAssessed')}</button>
           </div>
         ) : null}
 
         {stage.key === 'map-data' ? (
           <div className="migwiz-form-grid">
-            <label>Data sources<input value={dataManifest.dataSources} onChange={(e) => setDataManifest({ ...dataManifest, dataSources: e.target.value })} placeholder="ERP, invoice inbox" className="u-block u-w-full" /></label>
-            <label>Sensitivity<input value={dataManifest.sensitivity} onChange={(e) => setDataManifest({ ...dataManifest, sensitivity: e.target.value })} placeholder="financial PII" className="u-block u-w-full" /></label>
-            <label>Approval model<input value={dataManifest.approvalModel} onChange={(e) => setDataManifest({ ...dataManifest, approvalModel: e.target.value })} placeholder=">$5k → human" className="u-block u-w-full" /></label>
+            <label>{t('dataSources')}<input value={dataManifest.dataSources} onChange={(e) => setDataManifest({ ...dataManifest, dataSources: e.target.value })} placeholder={t('dataSourcesPlaceholder')} className="u-block u-w-full" /></label>
+            <label>{t('sensitivity')}<input value={dataManifest.sensitivity} onChange={(e) => setDataManifest({ ...dataManifest, sensitivity: e.target.value })} placeholder={t('sensitivityPlaceholder')} className="u-block u-w-full" /></label>
+            <label>{t('approvalModel')}<input value={dataManifest.approvalModel} onChange={(e) => setDataManifest({ ...dataManifest, approvalModel: e.target.value })} placeholder={t('approvalModelPlaceholder')} className="u-block u-w-full" /></label>
             <div className="action-bar">
-              <button type="button" className="btn" disabled={busy} onClick={() => void save({ dataManifest, stageStatus: { 'map-data': 'done' } })}>Save &amp; continue</button>
+              <button type="button" className="btn" disabled={busy} onClick={() => void save({ dataManifest, stageStatus: { 'map-data': 'done' } })}>{t('saveAndContinue')}</button>
             </div>
           </div>
         ) : null}
 
         {stage.key === 'map-boundaries' ? (
           <div>
-            <p>These node boundaries determine where approval gates sit:</p>
+            <p>{t('boundariesIntro')}</p>
             <div className="action-bar u-gap-2 u-wrap u-mb-2">
-              {wf.decisionBoundaries.auto.map((n) => <span key={n} className="chip chip--success">auto: {n}</span>)}
-              {wf.decisionBoundaries.review.map((n) => <span key={n} className="chip chip--warning">review: {n}</span>)}
+              {wf.decisionBoundaries.auto.map((n) => <span key={n} className="chip chip--success">{t('boundaryAuto', { node: n })}</span>)}
+              {wf.decisionBoundaries.review.map((n) => <span key={n} className="chip chip--warning">{t('boundaryReview', { node: n })}</span>)}
             </div>
-            <button type="button" className="btn" disabled={busy} onClick={() => void save({ boundaries: wf.decisionBoundaries, stageStatus: { 'map-boundaries': 'done' } })}>Confirm boundaries &amp; continue</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => void save({ boundaries: wf.decisionBoundaries, stageStatus: { 'map-boundaries': 'done' } })}>{t('confirmBoundaries')}</button>
           </div>
         ) : null}
 
         {stage.key === 'shadow-prove' ? (
           <div>
             <p className="muted u-mt-0">
-              A <strong>live-shadow eval</strong> scores the agent's decisions against the baseline (the
-              human/legacy outcome) into an <code>EvalSummary</code>. Content-free — findings carry
-              digests, never raw values.
+              {t('shadowEvalIntroLead')} <strong>{t('shadowEvalLiveShadow')}</strong> {t('shadowEvalIntroMid')} <code>EvalSummary</code>. {t('shadowEvalIntroTail')}
             </p>
 
             {/* Real eval RUN (RFC 0081 §C): dispatches the supervisor over the suite. */}
             <div className="surface-card u-p-3 u-mb-3">
               <div className="action-bar u-justify-between u-gap-3 u-wrap">
-                <strong className="u-fs-14">Run a live-shadow eval</strong>
+                <strong className="u-fs-14">{t('runLiveShadowEval')}</strong>
                 <button type="button" className="btn" disabled={evalState === 'running'} onClick={() => void runEval()}>
-                  {evalState === 'running' ? 'Running…' : evalResult ? 'Re-run eval' : 'Run eval'}
+                  {evalState === 'running' ? t('evalRunning') : evalResult ? t('evalReRun') : t('evalRun')}
                 </button>
               </div>
               {evalState === 'unavailable' ? (
-                <Notice variant="info">This host hasn't enabled live eval runs (<code>agents.evalSuite</code>); showing the runs-derived scorecard below.</Notice>
+                <Notice variant="info">{t('evalUnavailableLead')}<code>agents.evalSuite</code>{t('evalUnavailableTail')}</Notice>
               ) : evalResult ? (
                 <>
                   <div className="action-bar migwiz-eval-summary">
-                    <span className={`chip ${evalResult.passed ? 'chip--success' : 'chip--warning'}`}>{evalResult.passed ? 'passed' : 'below bar'}</span>
-                    <span className="chip">score {pct(evalResult.aggregateScore)}</span>
-                    <span className="chip chip--muted">{evalResult.passedCount}/{evalResult.taskCount} tasks</span>
+                    <span className={`chip ${evalResult.passed ? 'chip--success' : 'chip--warning'}`}>{evalResult.passed ? t('evalPassed') : t('evalBelowBar')}</span>
+                    <span className="chip">{t('evalScore', { score: pct(evalResult.aggregateScore) })}</span>
+                    <span className="chip chip--muted">{t('evalTasks', { passed: evalResult.passedCount, total: evalResult.taskCount })}</span>
                     <span className="chip chip--muted">{evalResult.suiteId}</span>
                   </div>
                   <ul className="u-m-0 u-fs-13">
@@ -255,27 +256,27 @@ export function MigrationWizardPage(): JSX.Element {
                 </>
               ) : (
                 <p className="muted u-fs-14 u-mbox-t1-5">
-                  Dispatches the workforce's supervisor over the <code>invoice-exception</code> suite and scores each task against the human baseline.
+                  {t('evalIdleHelpLead')} <code>invoice-exception</code> {t('evalIdleHelpTail')}
                 </p>
               )}
             </div>
 
             {!shadow || shadow.status === 'pending' ? (
-              <Notice variant="info">No shadow evidence yet — load the example data (or run a live-shadow eval) to populate a scorecard.</Notice>
+              <Notice variant="info">{t('shadowNoEvidence')}</Notice>
             ) : (
               <>
                 <div className="action-bar u-gap-3 u-wrap u-mb-2">
-                  <span className={`chip ${shadow.passed ? 'chip--success' : 'chip--warning'}`}>{shadow.passed ? 'passed' : 'below bar'}</span>
-                  <span className="chip">score {pct(shadow.aggregateScore)}</span>
-                  <span className="chip">override {pct(shadow.overrideRate)}</span>
-                  <span className="chip chip--muted">{shadow.divergenceCount} divergences</span>
+                  <span className={`chip ${shadow.passed ? 'chip--success' : 'chip--warning'}`}>{shadow.passed ? t('evalPassed') : t('evalBelowBar')}</span>
+                  <span className="chip">{t('shadowScore', { score: pct(shadow.aggregateScore) })}</span>
+                  <span className="chip">{t('shadowOverride', { rate: pct(shadow.overrideRate) })}</span>
+                  <span className="chip chip--muted">{t('shadowDivergences', { count: shadow.divergenceCount })}</span>
                 </div>
                 {shadow.findings.length > 0 ? (
                   <details>
-                    <summary className="u-cursor-pointer">Divergence findings ({shadow.findings.length}) — content-free digests</summary>
+                    <summary className="u-cursor-pointer">{t('divergenceFindings', { count: shadow.findings.length })}</summary>
                     <ul className="u-mbox-t2 u-fs-13 u-tabular">
                       {shadow.findings.slice(0, 10).map((d) => (
-                        <li key={d.key}>{d.key.slice(0, 16)}… — agent {d.agentDigest.slice(0, 20)} ≠ baseline {d.baselineDigest.slice(0, 20)}</li>
+                        <li key={d.key}>{t('divergenceFindingRow', { key: d.key.slice(0, 16), agentDigest: d.agentDigest.slice(0, 20), baselineDigest: d.baselineDigest.slice(0, 20) })}</li>
                       ))}
                     </ul>
                   </details>
@@ -289,10 +290,10 @@ export function MigrationWizardPage(): JSX.Element {
                   type="button"
                   className="btn u-mt-2"
                   disabled={busy || !proven}
-                  title={!proven ? 'Run an eval (or load example data) to gather proof first' : undefined}
+                  title={!proven ? t('markProvenGatedTitle') : undefined}
                   onClick={() => void markDone('shadow-prove')}
                 >
-                  Mark proven &amp; continue
+                  {t('markProven')}
                 </button>
               );
             })()}
@@ -302,7 +303,7 @@ export function MigrationWizardPage(): JSX.Element {
         {stage.key === 'cut-over' ? (
           <div>
             <div className="action-bar u-gap-2 u-wrap u-items-center u-mb-2">
-              <span className="chip chip--accent">now: {wf.status}</span>
+              <span className="chip chip--accent">{t('cutOverNow', { status: wf.status })}</span>
               {(['shadow', 'piloting', 'production'] as const).filter((s) => s !== wf.status).map((s) => {
                 const gatedOut = s === 'production' && governance?.autonomy.currentTier !== 'auto';
                 return (
@@ -311,7 +312,7 @@ export function MigrationWizardPage(): JSX.Element {
                     type="button"
                     className="btn"
                     disabled={busy || gatedOut}
-                    title={gatedOut ? 'Promote to production only after graduating to bounded-autonomous' : undefined}
+                    title={gatedOut ? t('cutOverGatedTitle') : undefined}
                     onClick={() => {
                       setBusy(true); setStageError(null);
                       updateWorkforceStatus(workforceId, s as WorkforceStatus)
@@ -319,12 +320,12 @@ export function MigrationWizardPage(): JSX.Element {
                         .catch((e: unknown) => setStageError(e instanceof Error ? e.message : String(e)))
                         .finally(() => setBusy(false));
                     }}
-                  >→ {s}</button>
+                  ><ArrowRightIcon size={13} /> {t('cutOverTo', { status: s })}</button>
                 );
               })}
             </div>
             <div className="muted u-fs-14">
-              Production requires graduation to bounded-autonomous; rollback to shadow is always available (kill-switch).
+              {t('cutOverNote')}
             </div>
           </div>
         ) : null}
@@ -332,8 +333,8 @@ export function MigrationWizardPage(): JSX.Element {
         {stageError ? <Notice variant="error">{stageError}</Notice> : null}
 
         <div className="action-bar u-mt-4 u-justify-between">
-          <button type="button" className="btn" disabled={active === 0} onClick={() => setActive((a) => Math.max(a - 1, 0))}>← Back</button>
-          <button type="button" className="btn" disabled={active === STAGES.length - 1} onClick={() => setActive((a) => Math.min(a + 1, STAGES.length - 1))}>Skip →</button>
+          <button type="button" className="btn" disabled={active === 0} onClick={() => setActive((a) => Math.max(a - 1, 0))}><ArrowLeftIcon size={13} /> {t('stepperBack')}</button>
+          <button type="button" className="btn" disabled={active === STAGES.length - 1} onClick={() => setActive((a) => Math.min(a + 1, STAGES.length - 1))}>{t('stepperSkip')} <ArrowRightIcon size={13} /></button>
         </div>
       </section>
     </div>

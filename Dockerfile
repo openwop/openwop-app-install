@@ -25,7 +25,7 @@
 #   cd apps/workflow-engine/backend/typescript && npm run dev
 
 # ── Builder stage ────────────────────────────────────────────────────────
-FROM node:22-slim AS builder
+FROM node:22-slim@sha256:20b3a9e4bdfe6ee8cc7b14cc360fca2fb6d06f671e06aeb36feaa832364209dd AS builder
 
 WORKDIR /app
 
@@ -46,7 +46,7 @@ COPY backend/typescript/src ./src
 RUN npm run build
 
 # ── Runtime stage ────────────────────────────────────────────────────────
-FROM node:22-slim AS runtime
+FROM node:22-slim@sha256:20b3a9e4bdfe6ee8cc7b14cc360fca2fb6d06f671e06aeb36feaa832364209dd AS runtime
 
 WORKDIR /app
 
@@ -115,9 +115,25 @@ COPY schemas ./schemas
 # as `schemas/` + `conformance-fixtures/` above.
 COPY packs ./packs
 
+# CPython-WASI runtime (ADR 0146 Phase 4a) — OPTIONAL, needed ONLY when an operator sets
+# `OPENWOP_CODE_EXEC_RUNTIME=wasi`. Run `scripts/sync-pythonwasm.sh` before `gcloud run deploy`
+# to populate `backend/typescript/vendor/python-3.12.0.wasm` (SHA-256-pinned, gitignored). The
+# tracked `.gitkeep` keeps this COPY a no-op on builds that don't enable the in-process runtime.
+COPY backend/typescript/vendor ./vendor
+
 ENV NODE_ENV=production
 ENV PORT=8080
 
 EXPOSE 8080
+
+# Run as the unprivileged built-in `node` user (uid 1000) rather than root
+# (CC-1). The boot path writes to the app tree — bootstrap/mountLocalPacks.ts
+# symlinks packs into the runtime pack dir, and the default sqlite DSN creates
+# ./data — so chown the tree to `node` first; otherwise those writes EACCES.
+# (Hardening: the base image is digest-pinned above — FROM node:22-slim@sha256:…
+#  — for reproducible builds. Refresh the digest when bumping the base: pull the
+#  tag and copy the registry's docker-content-digest into both FROM lines.)
+RUN chown -R node:node /app
+USER node
 
 CMD ["node", "lib/index.js"]

@@ -1,0 +1,34 @@
+{
+  "name": "feature.priority-matrix.agents",
+  "version": "1.0.0",
+  "description": "Priority Matrix feature agent pack (ADR 0058 / ADR 0014) — a manifest agent whose tools are feature.priority-matrix.nodes over the ctx.features['priority-matrix'] surface. It captures, scores, ranks ideas, and drafts a planning agenda from the AI chat. Tool-allowlisted to the Priority Matrix feature surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "priority-matrix", "agent", "prioritization", "wsjf", "planning"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.priority-matrix.agents.prioritization-analyst",
+      "persona": "RESEARCH",
+      "label": "Prioritization Analyst",
+      "description": "Captures and scores ideas in a priority list, explains the weighted ranking (Weighted-Scoring / WSJF / RICE), and drafts a planning-session agenda — grounded via feature.priority-matrix.nodes over ctx.features['priority-matrix']. Recommends; the human decides.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/prioritization-analyst.md",
+      "toolAllowlist": [
+        "openwop:feature.priority-matrix.nodes.list-lists",
+        "openwop:feature.priority-matrix.nodes.list-ranked-ideas",
+        "openwop:feature.priority-matrix.nodes.submit-idea",
+        "openwop:feature.priority-matrix.nodes.score-idea",
+        "openwop:feature.priority-matrix.nodes.generate-agenda",
+        "openwop:feature.priority-matrix.nodes.schedule-status"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

@@ -43,6 +43,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
 import { OpenwopError } from '../types.js';
+import { demoMode } from './demoMode.js';
 
 const accessLog = createLogger('host.accessControl');
 
@@ -449,6 +450,16 @@ export async function listMembers(tenantId: string, orgId: string): Promise<OrgM
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/** Every member of a tenant, across ALL its orgs/workspaces. Unlike
+ *  `listMembers` (org-scoped), this spans the whole tenant — used by the
+ *  ADR 0003 Phase 4d subject re-key, which sweeps every legacy-keyed membership
+ *  a tenant holds. */
+export async function listTenantMembers(tenantId: string): Promise<OrgMember[]> {
+  return (await members.list())
+    .filter((m) => m.tenantId === tenantId)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
 export async function getMember(memberId: string): Promise<OrgMember | null> {
   return members.get(memberId);
 }
@@ -809,6 +820,43 @@ export async function deleteGroup(groupId: string): Promise<boolean> {
   return groups.delete(groupId);
 }
 
+// ── Approver-routing resolution helpers (ADR 0075 §D7) ──────────────────────────
+// Point lookups that expand a group/role ref to the authenticated subjects that
+// satisfy it, for HITL approver routing. Tenant/org-scoped (ADR 0075 §D5): a ref
+// resolves only within the caller's (tenantId, orgId); a cross-tenant or
+// cross-org ref resolves to ∅, never a leak. Members with no bound `subject`
+// (descriptive members, no principal yet) contribute nothing — they can't be
+// notified or vote.
+
+/** Subjects of every member in a group. Empty if the group is missing or
+ *  belongs to another tenant/org (fail-closed). */
+export async function getUsersByGroup(tenantId: string, orgId: string, groupId: string): Promise<string[]> {
+  const group = await groups.get(groupId);
+  if (!group || group.tenantId !== tenantId || group.orgId !== orgId) return [];
+  const fetched = await Promise.all(group.memberIds.map((id) => members.get(id)));
+  const subjects = fetched
+    .filter((m): m is OrgMember => m !== null && m.tenantId === tenantId && m.orgId === orgId)
+    .map((m) => m.subject)
+    .filter((s): s is string => typeof s === 'string' && s.length > 0);
+  return [...new Set(subjects)];
+}
+
+/** Subjects of every member who holds `roleId` as an EFFECTIVE role (direct or
+ *  via group membership — mirrors `resolveEffectiveAccess`'s union) within
+ *  (tenantId, orgId). Empty if no holder. */
+export async function getMembersWithRole(tenantId: string, orgId: string, roleId: string): Promise<string[]> {
+  const orgMembers = await listMembers(tenantId, orgId);
+  const orgGroups = (await groups.list()).filter((g) => g.tenantId === tenantId && g.orgId === orgId);
+  const subjects: string[] = [];
+  for (const m of orgMembers) {
+    if (typeof m.subject !== 'string' || m.subject.length === 0) continue;
+    const groupRoles = orgGroups.filter((g) => g.memberIds.includes(m.memberId)).flatMap((g) => g.roles);
+    const effective = new Set([...m.roles, ...groupRoles]);
+    if (effective.has(roleId)) subjects.push(m.subject);
+  }
+  return [...new Set(subjects)];
+}
+
 // ── Custom roles ───────────────────────────────────────────────────────────────
 
 export async function createCustomRole(input: {
@@ -939,7 +987,17 @@ export async function resolveEffectiveAccess(
         (opts.orgId === undefined || m.orgId === opts.orgId) &&
         (opts.memberId !== undefined ? m.memberId === opts.memberId : m.subject === opts.subject),
     );
-    if (!member) return { roles: [], scopes: [], basis: 'none' };
+    if (!member) {
+      // Demo single-tenant exception: in demo mode the tenant is a one-principal
+      // sandbox (tenant == principal — see file header + the tenant-owner branch
+      // below), so a subject with no explicit member record IS the de-facto owner
+      // of its own ephemeral workspace. Mirror the owner branch instead of 403-ing
+      // read surfaces (e.g. /advisors `workspace:read`) for anonymous demo users
+      // who never set up RBAC members. OUTSIDE demo mode this stays FAIL-CLOSED
+      // (RFC 0049): an unknown subject resolves to zero scopes.
+      if (demoMode()) return { roles: ['owner'], scopes: [...OWNER_SCOPES], basis: 'tenant-owner' };
+      return { roles: [], scopes: [], basis: 'none' };
+    }
     // Custom roles defined in this member's org, for scope resolution.
     const orgCustom = (await customRoles.list()).filter((r) => r.tenantId === tenantId && r.orgId === member.orgId);
     const customById = new Map(orgCustom.map((r) => [r.roleId, r]));

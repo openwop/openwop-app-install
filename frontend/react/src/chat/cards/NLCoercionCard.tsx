@@ -8,6 +8,7 @@
  * extra round-trip is visible to anyone counting tokens.
  */
 
+import { useTranslation } from 'react-i18next';
 import type { EnvelopeNLCoercion } from '../types.js';
 
 interface Props {
@@ -15,13 +16,14 @@ interface Props {
 }
 
 export function NLCoercionCard({ coercion }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   return (
-    <div className="env-chip env-chip-info" role="status" aria-label="Natural-language to format coercion engaged">
-      <span className="env-chip-tag">NL → FORMAT</span>
+    <div className="env-chip env-chip-info" role="status" aria-label={t('nlCoercionTitle')}>
+      <span className="env-chip-tag">{t('nlCoercionBadge')}</span>
       <span className="env-chip-text">
-        Coerced prose response into <span className="env-chip-mono">{coercion.originalEnvelopeType}</span>
+        {t('nlCoercionPrefix')}<span className="env-chip-mono">{coercion.originalEnvelopeType}</span>
         {typeof coercion.fallbackCalls === 'number' ? (
-          <> · {coercion.fallbackCalls} fallback call{coercion.fallbackCalls === 1 ? '' : 's'}</>
+          <> · {t('fallbackCalls', { count: coercion.fallbackCalls })}</>
         ) : null}
       </span>
     </div>

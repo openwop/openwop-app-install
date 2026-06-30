@@ -18,15 +18,18 @@ import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
 let server: http.Server;
 let mock: http.Server;
 let mockUrl: string;
-const PORT = 18207;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(PORT, res); });
+  // web-research egress is now SSRF-guarded (denies loopback/private by
+  // default); the mock page server below is on 127.0.0.1, so opt into
+  // private egress for the test — same flag the webhook-egress tests use.
+  process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
+  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   mock = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/html' });
     res.end('<html><head><title>Test Page</title></head><body><script>ignore()</script><p>Hello readable world.</p></body></html>');
@@ -35,6 +38,7 @@ beforeAll(async () => {
   mockUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/`;
 });
 afterAll(async () => {
+  delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
   await new Promise<void>((res) => server.close(() => res()));
   await new Promise<void>((res) => mock.close(() => res()));
 });

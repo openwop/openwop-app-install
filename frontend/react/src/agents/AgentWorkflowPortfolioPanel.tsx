@@ -6,10 +6,12 @@
  * (with a linked run), or unassign. Warns when a workflow is local-only.
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { updateRosterEntry, type RosterEntry } from './rosterClient.js';
 import { createRun } from '../client/runsClient.js';
+import { listWorkflowSummaries } from '../workflows/workflowsClient.js';
 import { ALL_WORKFLOW_OPTIONS, isKnownWorkflow, workflowName, workflowPurpose } from './roleTemplates.js';
 import { Notice } from '../ui/Notice.js';
 import { AlertIcon, PlayIcon } from '../ui/icons/index.js';
@@ -27,10 +29,19 @@ export function AgentWorkflowPortfolioPanel({
   board?: KanbanBoard | null;
   onChanged: () => void;
 }): JSX.Element {
+  const { t } = useTranslation('agents');
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState<string | null>(null);
   const [lastRun, setLastRun] = useState<{ workflowId: string; runId: string } | null>(null);
   const [assignId, setAssignId] = useState('');
+  // ADR 0163 Phase 6 — the caller's REAL backend workflows (incl. ones created
+  // from templates) are assignable, not just the hardcoded role-template options.
+  const [mine, setMine] = useState<{ workflowId: string; name: string }[]>([]);
+  useEffect(() => {
+    void listWorkflowSummaries()
+      .then((rows) => setMine(rows.map((r) => ({ workflowId: r.workflowId, name: r.name }))))
+      .catch(() => setMine([]));
+  }, []);
 
   const scheduledWorkflowIds = new Set(jobs.filter((j) => j.enabled !== false).map((j) => j.workflowId));
   const boardTriggerWorkflowIds = new Set((board?.columns ?? []).map((c) => c.triggerWorkflowId).filter(Boolean) as string[]);
@@ -58,54 +69,60 @@ export function AgentWorkflowPortfolioPanel({
     }
   };
 
-  const assignable = ALL_WORKFLOW_OPTIONS.filter((w) => !entry.workflows.includes(w.workflowId));
+  // Merge role-template options + the caller's real workflows, deduped by id,
+  // excluding already-assigned. (Created ids `wf.*` are disjoint from `tmpl.*`.)
+  const assignable = [...ALL_WORKFLOW_OPTIONS, ...mine]
+    .filter((w, i, arr) => arr.findIndex((x) => x.workflowId === w.workflowId) === i)
+    .filter((w) => !entry.workflows.includes(w.workflowId));
+  // Resolve assigned cards against the caller's real workflows first, so a
+  // backend workflow isn't mislabeled "local/unknown" (ADR 0163 Phase 6).
+  const mineById = new Map(mine.map((m) => [m.workflowId, m.name]));
 
   return (
     <div>
       {error ? <Notice variant="error">{error}</Notice> : null}
       {lastRun ? (
         <Notice variant="success">
-          Started {workflowName(lastRun.workflowId)} ·{' '}
+          {t('portfolioStarted', { workflow: workflowName(lastRun.workflowId) })}
           <Link to={`/runs/${lastRun.runId}`} className="u-iflex u-items-center u-gap-1">
-            <PlayIcon size={12} /> View run
+            <PlayIcon size={12} /> {t('portfolioViewRun')}
           </Link>
         </Notice>
       ) : null}
 
       {entry.workflows.length === 0 ? (
-        <p className="muted">No workflows assigned yet. Assign one from the library below so {entry.persona} has work to do.</p>
+        <p className="muted">{t('portfolioEmpty', { persona: entry.persona })}</p>
       ) : (
         <>
         <p className="muted u-fs-13 u-mt-0">
-          These workflows make up {entry.persona}'s <strong>{entry.label ?? 'role'}</strong> portfolio — the work this
-          role owns. Each card explains what it does and how it's triggered.
+          {t('portfolioIntro', { persona: entry.persona, role: entry.label ?? t('portfolioRoleFallback') })}
         </p>
         <div className="card-grid u-mb-4">
           {entry.workflows.map((wfId) => {
-            const known = isKnownWorkflow(wfId);
-            const triggers: string[] = ['Manual'];
-            if (boardTriggerWorkflowIds.has(wfId)) triggers.unshift('Task board');
-            if (scheduledWorkflowIds.has(wfId)) triggers.unshift('Schedule');
+            const known = mineById.has(wfId) || isKnownWorkflow(wfId);
+            const triggers: Array<{ id: string; label: string }> = [{ id: 'manual', label: t('portfolioTriggerManual') }];
+            if (boardTriggerWorkflowIds.has(wfId)) triggers.unshift({ id: 'board', label: t('portfolioTriggerBoard') });
+            if (scheduledWorkflowIds.has(wfId)) triggers.unshift({ id: 'schedule', label: t('portfolioTriggerSchedule') });
             return (
               <div key={wfId} className="surface-card">
-                <div className="u-fw-600">{workflowName(wfId)}</div>
-                <div className="agentportfolio-purpose">{workflowPurpose(wfId) ?? (known ? '' : 'Local workflow — assigned to this agent.')}</div>
+                <div className="u-fw-600">{mineById.get(wfId) ?? workflowName(wfId)}</div>
+                <div className="agentportfolio-purpose">{workflowPurpose(wfId) ?? (known ? '' : t('portfolioLocalDefault'))}</div>
                 {!known ? (
                   <div className="u-flex u-gap-1 u-items-center u-fs-12 u-text-warning">
-                    <AlertIcon size={13} /> Local-only — register on the host before it can run from a board or schedule.
+                    <AlertIcon size={13} /> {t('portfolioLocalOnly')}
                   </div>
                 ) : null}
                 <div className="u-flex u-gap-1 u-wrap">
-                  {triggers.map((t) => (
-                    <span key={t} className={`chip ${t === 'Schedule' ? 'chip--warning' : t === 'Task board' ? 'chip--accent' : 'chip--muted'}`}>{t}</span>
+                  {triggers.map((trg) => (
+                    <span key={trg.id} className={`chip ${trg.id === 'schedule' ? 'chip--warning' : trg.id === 'board' ? 'chip--accent' : 'chip--muted'}`}>{trg.label}</span>
                   ))}
                 </div>
                 <div className="action-bar">
                   <button type="button" className="primary btn-sm" disabled={!known || running === wfId} onClick={() => void onRunNow(wfId)}>
-                    {running === wfId ? 'Running…' : 'Run now'}
+                    {running === wfId ? t('portfolioRunning') : t('portfolioRunNow')}
                   </button>
                   <button type="button" className="secondary btn-sm" onClick={() => void setWorkflows(entry.workflows.filter((w) => w !== wfId))}>
-                    Unassign
+                    {t('portfolioUnassign')}
                   </button>
                 </div>
               </div>
@@ -116,16 +133,16 @@ export function AgentWorkflowPortfolioPanel({
       )}
 
       <div className="agentportfolio-assign">
-        <strong className="u-fs-14">Assign a workflow</strong>
+        <strong className="u-fs-14">{t('portfolioAssignHeading')}</strong>
         <div className="action-bar u-mt-2">
-          <select className="ui-input u-minw-240" value={assignId} onChange={(e) => setAssignId(e.target.value)} aria-label="Workflow to assign">
-            <option value="">Choose a workflow from the library…</option>
+          <select className="ui-input u-minw-240" value={assignId} onChange={(e) => setAssignId(e.target.value)} aria-label={t('portfolioWorkflowToAssign')}>
+            <option value="">{t('portfolioChooseWorkflow')}</option>
             {assignable.map((w) => <option key={w.workflowId} value={w.workflowId}>{w.name}</option>)}
           </select>
           <button type="button" className="primary" disabled={!assignId} onClick={() => { void setWorkflows([...entry.workflows, assignId]); setAssignId(''); }}>
-            Assign workflow
+            {t('portfolioAssignWorkflow')}
           </button>
-          <Link to="/builder" className="agentportfolio-create-link">Create from template</Link>
+          <Link to="/builder" className="agentportfolio-create-link">{t('portfolioCreateFromTemplate')}</Link>
         </div>
       </div>
     </div>

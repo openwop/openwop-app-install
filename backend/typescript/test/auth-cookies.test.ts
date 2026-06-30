@@ -8,12 +8,12 @@
  */
 
 import { describe, expect, it, beforeAll, afterAll } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 
 let server: http.Server;
-const PORT = 18185;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -21,14 +21,14 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = ''; // dev fallback kicks in
   delete process.env.OPENWOP_SESSION_SECRET;
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test-cookie',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 

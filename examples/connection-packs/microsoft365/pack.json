@@ -2,9 +2,11 @@
   "name": "core.openwop.connections.microsoft365",
   "version": "1.0.0",
   "kind": "connection",
-  "description": "Microsoft 365 connection pack (RFC 0095) — OAuth2 provider for Teams, Outlook (Mail/Calendar), and SharePoint via the Microsoft Graph API. ADR 0033 DEPLOY-GATED. Reach is `openapi` against the Microsoft Graph OpenAPI surface: Microsoft's first-party remote MCP servers are per-tenant/preview (a tenant-templated URL, not a single global https endpoint the manifest can fix), so a stable Graph OpenAPI path is the honest day-1 reach (ADR 0033 §4 capability honesty). Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 §7).",
+  "description": "Microsoft 365 connection pack (RFC 0095) \u2014 OAuth2 provider for Teams, Outlook (Mail/Calendar), and SharePoint via the Microsoft Graph API. ADR 0033 DEPLOY-GATED. Reach is `openapi` against the Microsoft Graph OpenAPI surface: Microsoft's first-party remote MCP servers are per-tenant/preview (a tenant-templated URL, not a single global https endpoint the manifest can fix), so a stable Graph OpenAPI path is the honest day-1 reach (ADR 0033 \u00a74 capability honesty). Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 \u00a77).",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
   "provider": {
     "id": "microsoft365",
     "displayName": "Microsoft 365",
@@ -19,22 +21,89 @@
       },
       "scopes": {
         "read": [
-          { "key": "mail.read", "label": "Outlook mail (read)", "scopes": ["https://graph.microsoft.com/Mail.Read"] },
-          { "key": "calendar.read", "label": "Outlook calendar (read)", "scopes": ["https://graph.microsoft.com/Calendars.Read"] },
-          { "key": "teams.read", "label": "Teams channels + chat (read)", "scopes": ["https://graph.microsoft.com/Channel.ReadBasic.All", "https://graph.microsoft.com/Chat.Read"] },
-          { "key": "sharepoint.read", "label": "SharePoint + OneDrive files (read)", "scopes": ["https://graph.microsoft.com/Sites.Read.All", "https://graph.microsoft.com/Files.Read.All"] },
-          { "key": "offline", "label": "Refresh access", "scopes": ["offline_access"] }
+          {
+            "key": "mail.read",
+            "label": "Outlook mail (read)",
+            "scopes": [
+              "https://graph.microsoft.com/Mail.Read"
+            ]
+          },
+          {
+            "key": "calendar.read",
+            "label": "Outlook calendar (read)",
+            "scopes": [
+              "https://graph.microsoft.com/Calendars.Read"
+            ]
+          },
+          {
+            "key": "teams.read",
+            "label": "Teams channels + chat (read)",
+            "scopes": [
+              "https://graph.microsoft.com/Channel.ReadBasic.All",
+              "https://graph.microsoft.com/Chat.Read"
+            ]
+          },
+          {
+            "key": "sharepoint.read",
+            "label": "SharePoint + OneDrive files (read)",
+            "scopes": [
+              "https://graph.microsoft.com/Sites.Read.All",
+              "https://graph.microsoft.com/Files.Read.All"
+            ]
+          },
+          {
+            "key": "offline",
+            "label": "Refresh access",
+            "scopes": [
+              "offline_access"
+            ]
+          }
         ],
         "write": [
-          { "key": "mail.send", "label": "Outlook mail (send)", "scopes": ["https://graph.microsoft.com/Mail.Send"] },
-          { "key": "calendar.write", "label": "Outlook calendar (write)", "scopes": ["https://graph.microsoft.com/Calendars.ReadWrite"] },
-          { "key": "teams.write", "label": "Teams messages (send)", "scopes": ["https://graph.microsoft.com/ChannelMessage.Send", "https://graph.microsoft.com/ChatMessage.Send"] },
-          { "key": "sharepoint.write", "label": "SharePoint + OneDrive files (write)", "scopes": ["https://graph.microsoft.com/Sites.ReadWrite.All", "https://graph.microsoft.com/Files.ReadWrite.All"] }
+          {
+            "key": "mail.send",
+            "label": "Outlook mail (send)",
+            "scopes": [
+              "https://graph.microsoft.com/Mail.Send"
+            ]
+          },
+          {
+            "key": "calendar.write",
+            "label": "Outlook calendar (write)",
+            "scopes": [
+              "https://graph.microsoft.com/Calendars.ReadWrite"
+            ]
+          },
+          {
+            "key": "teams.write",
+            "label": "Teams messages (send)",
+            "scopes": [
+              "https://graph.microsoft.com/ChannelMessage.Send",
+              "https://graph.microsoft.com/ChatMessage.Send"
+            ]
+          },
+          {
+            "key": "sharepoint.write",
+            "label": "SharePoint + OneDrive files (write)",
+            "scopes": [
+              "https://graph.microsoft.com/Sites.ReadWrite.All",
+              "https://graph.microsoft.com/Files.ReadWrite.All"
+            ]
+          }
         ]
       }
     },
-    "reach": { "openapi": { "ref": "https://graph.microsoft.com/v1.0/$metadata" } },
-    "consumerNodes": ["core.openwop.http"],
-    "docsUrl": "https://learn.microsoft.com/en-us/graph/auth-v2-user"
+    "reach": {
+      "openapi": {
+        "ref": "https://graph.microsoft.com/v1.0/$metadata"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http"
+    ],
+    "docsUrl": "https://learn.microsoft.com/en-us/graph/auth-v2-user",
+    "apiHosts": [
+      "microsoft.com"
+    ]
   }
 }

@@ -11,6 +11,33 @@ Cloud Run) + React SPA (`frontend/react/`, Firebase Hosting). Extracted from the
 - **[`DEPLOY.md`](DEPLOY.md)** + `DEPLOY-SMOKE.md` — the full deploy recipe + the
   live verification sequence.
 
+## AI chat — reuse, never recreate (read before adding any "talk to AI" UI)
+
+There is ONE AI chat in this app (`frontend/react/src/chat/`, the RFC 0005
+conversation primitive). It already does workflow-running, BYOK, persistence,
+conversations, agents, streaming, and HITL interrupt cards. **Do NOT build a new
+chat panel or a bespoke "talk to AI" textarea** — that fragments capabilities and
+drifts (it happened with the workflow-author `AiAuthorPanel` and was removed).
+
+- **Full chat** is a tab in the left-sidebar nav (`/` → `ChatTab`).
+- **To drive AI for a feature:** ship an **agent pack** (persona) + **node pack**
+  (tools) and drive it through the existing chat, scoped to that agent — the
+  ADR 0058 "chat-drivability = agent + nodes" pattern.
+- **To open the chat scoped to an agent/conversation:** deep-link the main chat
+  (`navigate('/?agent=<agentId>')` or `?conversation=<id>`) — the agents page +
+  `ProjectChatTab` precedent ("No second chat system").
+- **To put chat inside another surface:** render the shared
+  **`chat/EmbeddedChatPanel`** (ADR 0073) — the turnkey drop-in that owns the BYOK
+  gate + agent scoping + an empty-state slot. A feature supplies only the overrides
+  (`agentId`, `renderEmptyState?`, `onManageProvider?`, `byokFallback?`) and its own
+  chrome; it inherits the gate, scoping, and ephemeral session. It composes the
+  slimmed **`ConversationView`** (feed + composer + interrupt cards, NO rails) via
+  `EmbeddedConversation`. **Never** reimplement any of this. Import rule: a feature
+  that `chat/` does not import back may static-import `EmbeddedChatPanel`; the
+  **builder must lazy-import** it (chat/→builder/ edge would cycle). The
+  `builder/CreateWithAiPanel` (scoped to the Workflow Architect) is the reference
+  consumer.
+
 ## Working in parallel sessions (read first)
 
 Multiple Claude Code sessions may share this one checkout. Assume another session
@@ -51,6 +78,14 @@ is editing right now. The hard-won git hygiene (same as the upstream spec repo):
 - **Sandbox gotcha:** `npx tsc/vitest/vite` can exit 194 silently — run the entry
   directly instead, e.g. `node node_modules/typescript/bin/tsc --noEmit`,
   `node node_modules/vitest/vitest.mjs run`.
+- **Local CI gate (mirror of `.github/workflows/ci.yml`):** `npm run ci` from the
+  repo root runs backend build + vitest (testcontainers skipped) and frontend lint
+  + build + vitest in one pass. `npm run ci:full` adds the Playwright e2e + live
+  testcontainer adapters (need Chromium/Docker). `npm run hooks:install` wires it as
+  a pre-push hook (bypass once with `git push --no-verify`). This exists because the
+  hosted GitHub Actions jobs currently fail at startup (0 steps run) — an
+  account/billing or org Actions-policy matter on the private repo, NOT a code
+  defect; until that's restored, `npm run ci` green is the trustworthy signal.
 
 ## Tracking architectural changes — ADRs ("ADR 0001" style)
 

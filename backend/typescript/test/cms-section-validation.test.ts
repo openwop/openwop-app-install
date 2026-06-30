@@ -48,6 +48,17 @@ describe('cms section validation — columns layout + titles', () => {
     expect(d.heading).toBe('Y');
     expect((d.columns as { title?: string; text?: string }[])[0]).toEqual({ title: 'T', text: 'B' });
   });
+  it('keeps a safe per-card href + optional flag, and drops an unsafe href', () => {
+    const d = data({ type: 'columns', data: { columns: [
+      { title: 'A', text: 'a', href: '/agents', optional: true },
+      { title: 'B', text: 'b', href: 'javascript:alert(1)' },
+      { title: 'C', text: 'c', href: '//evil.example' },
+    ] } });
+    const c = d.columns as { title?: string; text?: string; href?: string; optional?: boolean }[];
+    expect(c[0]).toEqual({ title: 'A', text: 'a', href: '/agents', optional: true });
+    expect(c[1].href).toBeUndefined();   // javascript: scheme rejected by safeLink
+    expect(c[2].href).toBeUndefined();   // protocol-relative // rejected (open-redirect shape)
+  });
 });
 
 describe('cms section validation — cta band + richText head', () => {

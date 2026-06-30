@@ -22,6 +22,19 @@ export async function listTemplates(ctx) {
   return { status: 'success', outputs: { templates: out.templates ?? [] } };
 }
 
+export async function getTemplate(ctx) {
+  const email = ensureEmail(ctx);
+  const i = ctx.inputs ?? {};
+  const out = await email.getTemplate({
+    orgId: typeof i.orgId === 'string' ? i.orgId : '',
+    templateId: typeof i.templateId === 'string' ? i.templateId : '',
+  });
+  if (!out.template) {
+    throw Object.assign(new Error('email template not found for this tenant'), { code: 'not_found' });
+  }
+  return { status: 'success', outputs: { template: out.template } };
+}
+
 export async function render(ctx) {
   const email = ensureEmail(ctx);
   const i = ctx.inputs ?? {};
@@ -38,6 +51,7 @@ export async function render(ctx) {
 
 export const nodes = {
   'feature.email.nodes.list-templates': listTemplates,
+  'feature.email.nodes.get-template': getTemplate,
   'feature.email.nodes.render': render,
 };
 

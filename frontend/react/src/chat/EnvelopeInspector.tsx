@@ -16,9 +16,11 @@
  */
 
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ChatMessage } from './types.js';
 import { hasEnvelopeEvents } from './EnvelopeEventsTimeline.js';
 import { ChevronRightIcon, ChevronDownIcon } from '../ui/icons/index.js';
+import { formatNumber, formatTime as formatTimeI18n } from '../i18n/format.js';
 
 interface Props {
   message: ChatMessage;
@@ -48,13 +50,14 @@ function hasInspectableEnvelope(m: ChatMessage): boolean {
 function formatTime(iso?: string): string {
   if (!iso) return '—';
   try {
-    return new Date(iso).toLocaleTimeString(undefined, { hour12: false });
+    return formatTimeI18n(new Date(iso), { hour12: false });
   } catch {
     return iso;
   }
 }
 
 export function EnvelopeInspector({ message }: Props): JSX.Element | null {
+  const { t: translate } = useTranslation('chat');
   const [open, setOpen] = useState(false);
   if (!hasInspectableEnvelope(message)) return null;
 
@@ -69,22 +72,22 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
     if (message.meta.provider && message.meta.model) {
       detail.push(`${message.meta.provider}/${message.meta.model}`);
     }
-    if (message.meta.inputTokens != null) detail.push(`in ${message.meta.inputTokens}`);
-    if (message.meta.outputTokens != null) detail.push(`out ${message.meta.outputTokens}`);
-    rows.push({ kind: 'agent.message', detail: detail.join(' · ') || '(no metadata)' });
+    if (message.meta.inputTokens != null) detail.push(translate('inTokens', { count: formatNumber(message.meta.inputTokens) }));
+    if (message.meta.outputTokens != null) detail.push(translate('outTokens', { count: formatNumber(message.meta.outputTokens) }));
+    rows.push({ kind: 'agent.message', detail: detail.join(' · ') || translate('noMetadata') });
   }
 
   if (message.thoughts) {
     rows.push({
       kind: 'agent.reasoned',
       at: message.thoughts.startedAt,
-      detail: `${message.thoughts.content.length} chars from ${message.thoughts.agentId ?? 'agent'}`,
+      detail: translate('thoughtsDetail', { count: formatNumber(message.thoughts.content.length), agentId: message.thoughts.agentId ?? translate('agentFallback') }),
     });
   }
   if (message.reasoning) {
     rows.push({
       kind: 'envelope.reasoning',
-      detail: `${message.reasoning.length} chars (carry-reasoning)`,
+      detail: translate('reasoningDetail', { count: formatNumber(message.reasoning.length) }),
     });
   }
   if (message.meta?.rendering) {
@@ -92,7 +95,7 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
     const extra = [r.lang, r.mimeType, r.title && `“${r.title}”`].filter(Boolean).join(' · ');
     rows.push({
       kind: 'meta.rendering',
-      detail: `${r.display}${extra ? ` · ${extra}` : ''} (rendering hint)`,
+      detail: `${r.display}${extra ? ` · ${extra}` : ''} ${translate('renderingHint')}`,
     });
   }
 
@@ -101,13 +104,13 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
       rows.push({
         kind: 'agent.toolCalled',
         at: tc.startedAt,
-        detail: `${tc.toolName} (callId=${tc.callId.slice(0, 8)}…)`,
+        detail: translate('toolCalledDetail', { tool: tc.toolName, callId: tc.callId.slice(0, 8) }),
       });
       if (tc.finishedAt) {
         rows.push({
           kind: 'agent.toolReturned',
           at: tc.finishedAt,
-          detail: tc.error ? `error: ${tc.error.code}` : 'ok',
+          detail: tc.error ? translate('toolReturnedError', { code: tc.error.code }) : translate('toolReturnedOk'),
         });
       }
     }
@@ -115,14 +118,16 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
       rows.push({
         kind: 'agent.handoff',
         at: h.at,
-        detail: `${h.fromAgentId} → ${h.toAgentId}${h.reason ? ` (${h.reason})` : ''}`,
+        detail: h.reason
+          ? translate('handoffDetailWithReason', { from: h.fromAgentId, to: h.toAgentId, reason: h.reason })
+          : translate('handoffDetail', { from: h.fromAgentId, to: h.toAgentId }),
       });
     }
     for (const d of message.agentEvents.decisions) {
       rows.push({
         kind: 'agent.decided',
         at: d.at,
-        detail: d.confidence != null ? `confidence ${d.confidence.toFixed(2)}` : '(no confidence)',
+        detail: d.confidence != null ? translate('confidenceDetail', { value: formatNumber(d.confidence, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) }) : translate('noConfidence'),
       });
     }
   }
@@ -130,55 +135,65 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
   if (message.envelopeEvents) {
     const e = message.envelopeEvents;
     for (const r of e.retries) {
-      rows.push({ kind: 'envelope.retry', at: r.at, detail: `attempt ${r.attempt}: ${r.reason}` });
+      rows.push({ kind: 'envelope.retry', at: r.at, detail: translate('retryAttemptDetail', { attempt: formatNumber(r.attempt), reason: r.reason }) });
     }
     for (const rx of e.retriesExhausted) {
       rows.push({
         kind: 'envelope.retryExhausted',
         at: rx.at,
-        detail: `${rx.totalAttempts} attempts: ${rx.finalReason}${rx.finalError ? ` (${rx.finalError})` : ''}`,
+        detail: rx.finalError
+          ? translate('retryExhaustedDetailWithError', { count: formatNumber(rx.totalAttempts), reason: rx.finalReason, error: rx.finalError })
+          : translate('retryExhaustedDetail', { count: formatNumber(rx.totalAttempts), reason: rx.finalReason }),
       });
     }
     for (const rf of e.refusals) {
       rows.push({
         kind: 'envelope.refusal',
         at: rf.at,
-        detail: rf.safetyCategory ? `${rf.safetyCategory}: ${rf.refusalText ?? '(no text)'}` : rf.refusalText ?? '(no text)',
+        detail: rf.safetyCategory
+          ? translate('refusalDetailWithCategory', { category: rf.safetyCategory, text: rf.refusalText ?? translate('noText') })
+          : translate('refusalDetail', { text: rf.refusalText ?? translate('noText') }),
       });
     }
     for (const t of e.truncations) {
       rows.push({
         kind: 'envelope.truncation',
         at: t.at,
-        detail: `${t.stopReason}${t.outputTokenCount != null ? ` @ ${t.outputTokenCount} tok` : ''}`,
+        detail: t.outputTokenCount != null
+          ? translate('truncationDetailWithTokens', { reason: t.stopReason, count: formatNumber(t.outputTokenCount) })
+          : translate('truncationDetail', { reason: t.stopReason }),
       });
     }
     for (const nl of e.nlCoercions) {
       rows.push({
         kind: 'envelope.nlCoercion',
         at: nl.at,
-        detail: `${nl.originalEnvelopeType} → prose-coerced${nl.fallbackCalls != null ? ` (${nl.fallbackCalls} fallback call${nl.fallbackCalls === 1 ? '' : 's'})` : ''}`,
+        detail: nl.fallbackCalls != null
+          ? translate('nlCoercionDetailWithFallback', { count: nl.fallbackCalls, type: nl.originalEnvelopeType })
+          : translate('nlCoercionDetail', { type: nl.originalEnvelopeType }),
       });
     }
     for (const rec of e.recoveries) {
       rows.push({
         kind: 'envelope.recovery',
         at: rec.at,
-        detail: `${rec.path}${rec.byteOffset != null ? ` @ byte ${rec.byteOffset}` : ''}`,
+        detail: rec.byteOffset != null
+          ? translate('recoveryDetailWithOffset', { path: rec.path, offset: formatNumber(rec.byteOffset) })
+          : translate('recoveryDetail', { path: rec.path }),
       });
     }
     for (const s of e.capabilitySubstitutions) {
       rows.push({
         kind: 'envelope.capabilitySubstitution',
         at: s.at,
-        detail: `${s.originalProvider}/${s.originalModel} → ${s.fallbackProvider}/${s.fallbackModel} (missing: ${s.missingCapabilities.join(', ')})`,
+        detail: translate('substitutionDetail', { fromProvider: s.originalProvider, fromModel: s.originalModel, toProvider: s.fallbackProvider, toModel: s.fallbackModel, missing: s.missingCapabilities.join(', ') }),
       });
     }
     for (const ci of e.capabilitiesInsufficient) {
       rows.push({
         kind: 'envelope.capabilityInsufficient',
         at: ci.at,
-        detail: `${ci.provider}/${ci.model} missing: ${ci.missingCapabilities.join(', ')}`,
+        detail: translate('insufficientDetail', { provider: ci.provider, model: ci.model, missing: ci.missingCapabilities.join(', ') }),
       });
     }
   }
@@ -194,14 +209,13 @@ export function EnvelopeInspector({ message }: Props): JSX.Element | null {
         <span className="envelope-inspector-toggle-icon u-iflex" aria-hidden="true">
           {open ? <ChevronDownIcon size={14} /> : <ChevronRightIcon size={14} />}
         </span>
-        {open ? 'Hide envelope' : 'Show envelope'}
-        <span className="envelope-inspector-toggle-count">{rows.length}</span>
+        {open ? translate('hideEnvelope') : translate('showEnvelope')}
+        <span className="envelope-inspector-toggle-count">{formatNumber(rows.length)}</span>
       </button>
       {open && (
-        <div className="envelope-inspector-panel" role="region" aria-label="Envelope events">
+        <div className="envelope-inspector-panel" role="region" aria-label={translate('envelopeEventsAria')}>
           <div className="envelope-inspector-help">
-            Wire-shape <code>agent.*</code> + <code>envelope.*</code> events
-            this turn emitted.
+            {translate('envelopeHelpPrefix')}<code>agent.*</code> + <code>envelope.*</code>{translate('envelopeHelpSuffix')}
           </div>
           <ol className="envelope-inspector-rows">
             {rows.map((r, i) => (

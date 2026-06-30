@@ -14,6 +14,7 @@
  */
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
@@ -113,17 +114,16 @@ describe('org-chart service (pure)', () => {
 
 describe('org-chart routes (sqlite memory app)', () => {
   let server: http.Server;
-  const PORT = 18744;
-  const BASE = `http://127.0.0.1:${PORT}`;
+  let BASE: string;
   const TOKEN = 'dev-token';
 
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-    const app = await createApp({ port: PORT, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
+    const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await __resetRosterStore();
     await __resetOrgChartStore();
-    await new Promise<void>((res) => { server = app.listen(PORT, res); });
+    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
 
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

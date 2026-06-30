@@ -9,7 +9,8 @@
  * are fetched best-effort.
  */
 import { useEffect, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '../ui/PageHeader.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Skeleton } from '../ui/Skeleton.js';
@@ -17,7 +18,8 @@ import { Notice } from '../ui/Notice.js';
 import { KeyFigureBand } from '../ui/KeyFigure.js';
 import { BoxesIcon, AlertIcon } from '../ui/icons/index.js';
 import { IllustrativeBadge } from '../ui/IllustrativeBadge.js';
-import { AutonomyTrack } from './AutonomyTrack.js';
+import { ViewToggle, useViewMode } from '../ui/ViewToggle.js';
+import { WorkforceCard, WorkforceRow, type WfSignals } from './WorkforceViews.js';
 import {
   getWorkforceGovernance,
   getWorkforceMetrics,
@@ -25,18 +27,6 @@ import {
   type Workforce,
 } from '../client/workforcesClient.js';
 
-function pct(n: number): string {
-  return `${Math.round(n * 100)}%`;
-}
-
-/** What needs a human + the headline outcome, per workforce. */
-interface WfSignals {
-  openApprovals: number;
-  eligible: boolean;
-  policyViolations: number;
-  /** Share cleared without escalating to a human (1 − escalationRate); null = no runs. */
-  handledShare: number | null;
-}
 interface WfRow {
   wf: Workforce;
   signals: WfSignals | null; // null when metrics + governance both failed
@@ -54,12 +44,14 @@ function rowMatches(row: WfRow, filter: FilterKey): boolean {
 }
 
 export function WorkforcesGalleryPage(): JSX.Element {
+  const { t } = useTranslation('workforces');
   const navigate = useNavigate();
   const [rows, setRows] = useState<WfRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterKey>('all');
   const [showcase, setShowcase] = useState(false);
+  const [viewMode, setViewMode] = useViewMode('workforces', 'grid');
 
   useEffect(() => {
     let cancelled = false;
@@ -102,17 +94,17 @@ export function WorkforcesGalleryPage(): JSX.Element {
   return (
     <div>
       <PageHeader
-        eyebrow="Workforces"
-        title="Your AI workforces"
-        lede="Each workforce is a team of AI agents running a whole business function — and earning the right to run it on its own. See where each one is on that journey, and what still needs you."
+        eyebrow={t('eyebrow')}
+        title={t('galleryTitle')}
+        lede={t('galleryLede')}
       />
 
-      {error ? <Notice variant="error">Couldn't load workforces: {error}</Notice> : null}
+      {error ? <Notice variant="error">{t('loadError', { error })}</Notice> : null}
 
       {showcase ? (
         <Notice variant="info">
-          <IllustrativeBadge detail="Synthetic showcase data — not derived from your runs" /> These are
-          built-in <strong>showcase</strong> workforces so you can explore. Run your own (or load example data) to see your real numbers.
+          <IllustrativeBadge detail={t('showcaseBadgeDetail')} /> {t('galleryShowcaseLead')}{' '}
+          <strong>{t('showcaseWord')}</strong> {t('galleryShowcaseTail')}
         </Notice>
       ) : null}
 
@@ -124,22 +116,22 @@ export function WorkforcesGalleryPage(): JSX.Element {
       ) : !error && rows.length === 0 ? (
         <StateCard
           icon={<BoxesIcon />}
-          title="No workforces yet"
-          body="Load example data to explore the example workforces with weeks of run history."
-          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/example-data')}>Load example data</button>}
+          title={t('noneTitle')}
+          body={t('noneBody')}
+          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/example-data')}>{t('loadExampleData')}</button>}
         />
       ) : (
         <>
           {/* Key figures double as the filter for what needs a human (§4.5 r2). */}
           <KeyFigureBand
-            ariaLabel="What needs you — click to filter"
+            ariaLabel={t('filterAriaLabel')}
             activeKey={filter}
             onToggle={(key) => setFilter(key as FilterKey)}
             figures={([
-              ['all', 'Workforces', figures.all, false],
-              ['approvals', 'Awaiting approval', figures.approvals, true],
-              ['eligible', 'Ready for more autonomy', figures.eligible, false],
-              ['violations', 'Policy issues', figures.violations, true],
+              ['all', t('figureWorkforces'), figures.all, false],
+              ['approvals', t('figureAwaitingApproval'), figures.approvals, true],
+              ['eligible', t('figureReadyForMore'), figures.eligible, false],
+              ['violations', t('figurePolicyIssues'), figures.violations, true],
             ] as const).map(([key, label, n, attn]) => {
               const attentive = attn && n > 0;
               return {
@@ -152,56 +144,34 @@ export function WorkforcesGalleryPage(): JSX.Element {
           />
 
           {filter === 'all' && nothingNeedsYou ? (
-            <Notice variant="success">Every workforce is within policy — nothing needs your attention right now.</Notice>
+            <Notice variant="success">{t('allClear')}</Notice>
           ) : null}
+
+          {/* The collection-view canon (§4.5 r11): the shared toggle lives at
+              the end of the one filterbar row, right-aligned. The key-figure
+              band above is the page's filter (r2); this row just switches the
+              grid/list rendering. */}
+          <div className="filterbar">
+            <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
+          </div>
 
           {visible.length === 0 ? (
             <StateCard
               icon={<BoxesIcon />}
-              title="Nothing here right now"
-              body="No workforce is in that state."
-              action={<button type="button" className="secondary" onClick={() => setFilter('all')}>Show all</button>}
+              title={t('emptyFilterTitle')}
+              body={t('emptyFilterBody')}
+              action={<button type="button" className="secondary" onClick={() => setFilter('all')}>{t('showAll')}</button>}
             />
-          ) : (
+          ) : viewMode === 'grid' ? (
             <div className="card-grid">
               {visible.map(({ wf, signals }) => (
-                <Link
-                  key={wf.workforceId}
-                  to={`/workforces/${encodeURIComponent(wf.workforceId)}`}
-                  className="surface-card wfgallery-card-link"
-                >
-                  <div className="action-bar u-justify-between u-items-baseline">
-                    <h3 className="u-m-0">{wf.name}</h3>
-                    <span className="muted u-fs-13 u-nowrap">{wf.agents.length} agents</span>
-                  </div>
-                  <p className="wfgallery-statement">{wf.purpose.statement}</p>
-
-                  <AutonomyTrack status={wf.status} compact />
-
-                  {signals == null ? null /* couldn't load — don't claim a state */
-                    : signals.handledShare === null ? (
-                      <p className="muted wfgallery-noruns">No runs yet</p>
-                    ) : (
-                      <div>
-                        <span className="wf-outcome-n">{pct(signals.handledShare)}</span>
-                        <span className="wf-outcome-l wfgallery-outcome-inline">cleared without escalation</span>
-                      </div>
-                    )}
-
-                  {signals && (signals.openApprovals > 0 || signals.eligible || signals.policyViolations > 0) ? (
-                    <div className="action-bar u-gap-2 u-wrap u-mt-1-5">
-                      {signals.openApprovals > 0 ? (
-                        <span className="chip chip--warning"><AlertIcon size={12} /> {signals.openApprovals} awaiting approval</span>
-                      ) : null}
-                      {signals.eligible ? (
-                        <span className="chip chip--success">ready for more autonomy</span>
-                      ) : null}
-                      {signals.policyViolations > 0 ? (
-                        <span className="chip chip--danger"><AlertIcon size={12} /> {signals.policyViolations} policy issues</span>
-                      ) : null}
-                    </div>
-                  ) : null}
-                </Link>
+                <WorkforceCard key={wf.workforceId} wf={wf} signals={signals} />
+              ))}
+            </div>
+          ) : (
+            <div className="surface-card list-view">
+              {visible.map(({ wf, signals }) => (
+                <WorkforceRow key={wf.workforceId} wf={wf} signals={signals} />
               ))}
             </div>
           )}

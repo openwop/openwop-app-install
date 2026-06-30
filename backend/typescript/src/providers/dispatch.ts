@@ -8,11 +8,26 @@
  * envelopes, etc.) — see `core.openwop.ai/index.mjs`.
  */
 
+import { fetch as undiciFetch } from 'undici';
 import { parseRefusal, type RefusalSignal } from '@openwop/openwop';
 import { ThinkBlockSplitter } from './thinkBlockSplitter.js';
 import { dispatchMock } from './dispatchMock.js';
+import { uploadAndWaitActive, deleteGeminiFile } from './geminiFileApi.js';
+// RFC 0108 / ADR 0121 — the `compat` provider's base URL is operator/tenant-supplied
+// (untrusted), so it rides the same SSRF egress guard the webhook/connector paths use.
+import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from '../host/webhookEgressGuard.js';
+import { contextEconomy } from '../host/contextEconomy.js';
+import { cacheableAnthropicSystem, extractAnthropicCacheTokens } from './promptCaching.js';
 
-export type ProviderId = 'anthropic' | 'openai' | 'google' | 'minimax' | 'mock';
+/** Decoded audio above this (≈15 MiB) goes through the Gemini File API rather than inline
+ *  (keeps the inline request under Gemini's ~20 MiB limit). ADR 0111. */
+const GEMINI_INLINE_AUDIO_LIMIT = 15 * 1024 * 1024;
+/** Hard ceiling on a single audio part we'll hold in memory to upload (defence before the
+ *  KB-side cap lands in Phase 2). */
+const GEMINI_MAX_AUDIO_BYTES = 200 * 1024 * 1024;
+const decodedBytesOf = (b64: string): number => Math.floor((b64.length * 3) / 4);
+
+export type ProviderId = 'anthropic' | 'openai' | 'google' | 'minimax' | 'compat' | 'mock';
 
 /** A single piece of content within a message. Mirrors the FE shape
  *  in src/chat/types.ts. `image`/`file` parts carry inline `dataBase64`
@@ -38,6 +53,19 @@ export interface DispatchRequest {
   maxTokens?: number;
   /** Enable provider-native web search for this turn. */
   webSearch?: boolean;
+  /** `compat` provider ONLY (RFC 0108 / ADR 0121): the per-connection OpenAI-
+   *  compatible endpoint base URL (e.g. `http://ollama.internal:11434/v1`).
+   *  Operator/tenant configuration resolved from the connection at dispatch
+   *  time — it MUST NOT be serialized into any run event, error envelope, log,
+   *  or discovery output (RFC 0108 §A.3/§D `self-hosted-endpoint-no-disclosure`). */
+  baseUrl?: string;
+  /** RFC 0116 — opaque prompt-prefix cache scope. The HOST assembles this from
+   *  the run's `(tenant, cachePrefixId)`; dispatch stays tenant-agnostic and only
+   *  forwards it to `cacheableAnthropicSystem`, which namespaces the cached
+   *  prefix bytes for cross-tenant isolation. A cost hint only — never affects
+   *  the recorded envelope or inputTokens/outputTokens (replay-invariant), and
+   *  never derived from secret material (BYOK). */
+  cachePrefixScope?: { tenant: string; cachePrefixId: string };
   /** Called for each streaming token chunk (text delta). */
   onDelta?: (delta: string) => void | Promise<void>;
   /** Called for each reasoning-content chunk emitted by reasoning models
@@ -79,6 +107,11 @@ export interface DispatchResult {
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
+    /** ADR 0148 A2 — Anthropic prompt-cache token split for THIS call (0/absent
+     *  when caching is off). Internal observability only — these never reach the
+     *  OpenWOP wire; the only wire touch is `providerUsage.cacheHit`. */
+    cachedReadTokens?: number;
+    cacheWriteTokens?: number;
   };
   /** Provider-reported reason the stream stopped, when known.
    *  Gemini: STOP | MAX_TOKENS | SAFETY | RECITATION | OTHER
@@ -102,7 +135,37 @@ export interface DispatchResult {
   citations?: readonly Citation[];
 }
 
-export async function dispatchChat(req: DispatchRequest): Promise<DispatchResult> {
+/**
+ * Hard ceiling for a single provider call when the caller supplies no signal
+ * of its own. The production path (aiProvidersHost) wraps each call in a 120s
+ * timeout, but a DIRECT `dispatchChat` caller without a signal would otherwise
+ * hang until Node's socket default (INT-4). Overridable via
+ * `OPENWOP_PROVIDER_DISPATCH_TIMEOUT_MS`.
+ */
+const DEFAULT_DISPATCH_TIMEOUT_MS = (() => {
+  const raw = process.env.OPENWOP_PROVIDER_DISPATCH_TIMEOUT_MS;
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 120_000;
+})();
+
+/** Max provider-error body bytes surfaced in a thrown Error (INT-5 — was
+ *  inconsistent: 300 for anthropic/openai/minimax, 500 for google). */
+const ERR_BODY_MAX = 500;
+
+/** Build a consistent provider HTTP error. Drains the body (so the socket can
+ *  be reused) and truncates uniformly. */
+async function providerHttpError(provider: string, res: { status: number; text(): Promise<string> }): Promise<Error> {
+  const body = await res.text().catch(() => '');
+  return new Error(`${provider}_${res.status}: ${body.slice(0, ERR_BODY_MAX)}`);
+}
+
+export async function dispatchChat(reqIn: DispatchRequest): Promise<DispatchResult> {
+  // Apply a default timeout floor so an unguarded caller can't hang forever.
+  // When the caller already passed a signal we leave it untouched (it carries
+  // the caller's own deadline / cancellation).
+  const req: DispatchRequest = reqIn.signal
+    ? reqIn
+    : { ...reqIn, signal: AbortSignal.timeout(DEFAULT_DISPATCH_TIMEOUT_MS) };
   switch (req.provider) {
     case 'anthropic':
       return dispatchAnthropic(req);
@@ -112,6 +175,8 @@ export async function dispatchChat(req: DispatchRequest): Promise<DispatchResult
       return dispatchGoogle(req);
     case 'minimax':
       return dispatchMiniMax(req);
+    case 'compat':
+      return dispatchCompat(req);
     case 'mock':
       // Conformance-only provider — see `dispatchMock.ts`. Production
       // deployments MUST NOT route real tenants here; the mock provider
@@ -226,6 +291,14 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
     (req.reasoningVerbosity ?? 'off') !== 'off' && /^claude-(?:opus|sonnet|haiku)-[4-9]/.test(req.model);
   const thinkingBudget = 4000;
 
+  // ADR 0148 A2 — cache the stable system-prompt prefix (this path carries no
+  // tools, so the breakpoint is the system block). Volatile `messages[]` stay
+  // uncached. Off ⇒ plain string, byte-identical to the prior request.
+  const cachedSystem = cacheableAnthropicSystem(
+    systemMessage ? contentToText(systemMessage.content, 'Anthropic') : undefined,
+    contextEconomy().providerCache,
+  );
+
   const res = await fetchWith429Retry(() => fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -239,21 +312,22 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
       // the floor so visible text still has room when thinking is on.
       max_tokens: req.maxTokens ?? (thinkingEnabled ? 8192 : 4096),
       stream: true,
-      ...(systemMessage ? { system: contentToText(systemMessage.content, 'Anthropic') } : {}),
+      ...(cachedSystem !== undefined ? { system: cachedSystem } : {}),
       messages: conversation.map((m) => ({ role: m.role, content: contentToAnthropicBlocks(m.content) })),
       ...(thinkingEnabled ? { thinking: { type: 'enabled', budget_tokens: thinkingBudget } } : {}),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
   if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`anthropic_${res.status}: ${errBody.slice(0, 300)}`);
+    throw await providerHttpError('anthropic', res);
   }
   if (!res.body) throw new Error('anthropic_no_response_body');
 
   let completion = '';
   let inputTokens: number | undefined;
   let outputTokens: number | undefined;
+  let cachedReadTokens = 0;
+  let cacheWriteTokens = 0;
   let finishReason: string | undefined;
   // Content-block tracker: when thinking is enabled, Anthropic streams
   // a `type: 'thinking'` block (followed by `thinking_delta` events)
@@ -307,8 +381,14 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
       } catch { /* */ }
     } else if (event.event === 'message_start') {
       try {
-        const data = JSON.parse(event.data) as { message?: { usage?: { input_tokens?: number } } };
+        const data = JSON.parse(event.data) as {
+          message?: { usage?: { input_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } };
+        };
         inputTokens = data.message?.usage?.input_tokens;
+        // ADR 0148 A2 — cache token split arrives in the message_start usage block.
+        const ct = extractAnthropicCacheTokens(data.message?.usage);
+        cachedReadTokens = ct.cachedReadTokens;
+        cacheWriteTokens = ct.cacheWriteTokens;
       } catch { /* */ }
     } else if (event.event === 'message_delta') {
       try {
@@ -335,7 +415,12 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
     provider: 'anthropic',
     model: req.model,
     completion,
-    usage: { inputTokens, outputTokens },
+    usage: {
+      inputTokens,
+      outputTokens,
+      ...(cachedReadTokens > 0 ? { cachedReadTokens } : {}),
+      ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+    },
     ...(finishReason ? { finishReason } : {}),
     ...(refusal ? { refusal } : {}),
   };
@@ -361,8 +446,7 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
   if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`openai_${res.status}: ${errBody.slice(0, 300)}`);
+    throw await providerHttpError('openai', res);
   }
   if (!res.body) throw new Error('openai_no_response_body');
 
@@ -465,9 +549,17 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
 
 const MINIMAX_DEFAULT_BASE_URL = 'https://api.minimax.io/v1';
 
-async function dispatchMiniMax(req: DispatchRequest): Promise<DispatchResult> {
-  const baseUrl = (process.env.MINIMAX_API_BASE_URL ?? MINIMAX_DEFAULT_BASE_URL).replace(/\/$/, '');
-  const res = await fetchWith429Retry(() => fetch(`${baseUrl}/chat/completions`, {
+/** Shared OpenAI-compatible chat dispatcher (`POST {baseUrl}/chat/completions`,
+ *  SSE stream, Bearer key). Backs both MiniMax and the `compat` self-hosted
+ *  provider class (RFC 0108 / ADR 0121) — the endpoint base URL is the only
+ *  thing that varies; everything else mirrors dispatchOpenAI. */
+async function dispatchOpenAICompatible(
+  req: DispatchRequest,
+  opts: { baseUrl: string; providerId: ProviderId; label: string; pinEgress?: boolean },
+): Promise<DispatchResult> {
+  const baseUrl = opts.baseUrl.replace(/\/$/, '');
+  const url = `${baseUrl}/chat/completions`;
+  const init = {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
@@ -478,15 +570,27 @@ async function dispatchMiniMax(req: DispatchRequest): Promise<DispatchResult> {
       max_tokens: req.maxTokens ?? 4096,
       stream: true,
       stream_options: { include_usage: true },
-      messages: req.messages.map((m) => ({ role: m.role, content: contentToText(m.content, 'MiniMax') })),
+      messages: req.messages.map((m) => ({ role: m.role, content: contentToText(m.content, opts.label) })),
     }),
     ...(req.signal ? { signal: req.signal } : {}),
-  }), req.signal);
+  };
+  // MKP-1: pin egress ONLY for the untrusted `compat` endpoint (operator/tenant-supplied
+  // base URL) — route through the connect-time-validating dispatcher to close the
+  // DNS-rebind TOCTOU the string host-check can't, and refuse a redirect bypass.
+  // `guardedLookup` itself permits private ranges under webhookPrivateEgressAllowed()
+  // (local-dev Ollama). A trusted managed provider (MiniMax, a fixed public host) keeps
+  // the plain global fetch — narrowest blast radius. `undiciFetch` so the `dispatcher`
+  // option types cleanly against undici's RequestInit (the webhookDeliveryWorker idiom).
+  const res = await fetchWith429Retry(
+    opts.pinEgress
+      ? () => undiciFetch(url, { ...init, redirect: 'error', dispatcher: webhookEgressDispatcher() })
+      : () => fetch(url, init),
+    req.signal,
+  );
   if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`minimax_${res.status}: ${errBody.slice(0, 300)}`);
+    throw await providerHttpError(opts.providerId, res);
   }
-  if (!res.body) throw new Error('minimax_no_response_body');
+  if (!res.body) throw new Error(`${opts.providerId}_no_response_body`);
 
   let completion = '';
   let inputTokens: number | undefined;
@@ -531,10 +635,9 @@ async function dispatchMiniMax(req: DispatchRequest): Promise<DispatchResult> {
     await req.onDelta?.(tail.visible);
   }
 
-  // MiniMax is OpenAI-compatible — same parseRefusal route as dispatchOpenAI.
-  // (MiniMax doesn't surface `message.refusal` today; this catches the
-  // finish_reason: 'content_filter' branch + future-proofs against the
-  // refusal field if they add it.)
+  // OpenAI-compatible — same parseRefusal route as dispatchOpenAI. (MiniMax
+  // doesn't surface `message.refusal` today; this catches the finish_reason:
+  // 'content_filter' branch + future-proofs against the refusal field.)
   const refusal = parseRefusal({
     choices: [{
       message: { content: completion },
@@ -543,7 +646,7 @@ async function dispatchMiniMax(req: DispatchRequest): Promise<DispatchResult> {
   }) ?? undefined;
 
   return {
-    provider: 'minimax',
+    provider: opts.providerId,
     model: req.model,
     completion,
     usage: { inputTokens, outputTokens },
@@ -552,19 +655,113 @@ async function dispatchMiniMax(req: DispatchRequest): Promise<DispatchResult> {
   };
 }
 
+async function dispatchMiniMax(req: DispatchRequest): Promise<DispatchResult> {
+  // Base URL + default model id come from env so operators can swap regional
+  // endpoints (api.minimax.io vs api.minimaxi.com) without a code change.
+  const baseUrl = process.env.MINIMAX_API_BASE_URL ?? MINIMAX_DEFAULT_BASE_URL;
+  return dispatchOpenAICompatible(req, { baseUrl, providerId: 'minimax', label: 'MiniMax' });
+}
+
+/**
+ * `compat` — the RFC 0108 self-hosted / OpenAI-compatible provider class
+ * (ADR 0121). Routes to a PER-CONNECTION base URL (`req.baseUrl`: Ollama /
+ * vLLM / LM Studio / any `/v1/chat/completions` server). The endpoint is
+ * operator/tenant-supplied (untrusted), so it carries two guards the managed
+ * providers don't need:
+ *
+ *   1. **SSRF** — the base-URL host is validated against the egress guard;
+ *      private / denied hosts are refused, and `http` is rejected, unless
+ *      private egress is explicitly enabled (true-local dev). (First-line
+ *      string check; connect-time IP pinning via `webhookEgressDispatcher()`
+ *      is the documented hardening follow-up — see the ADR 0121 prep note.)
+ *   2. **§D non-disclosure** (RFC 0108 §A.3/§D `self-hosted-endpoint-no-
+ *      disclosure`) — the base URL is NEVER surfaced. A transport-level failure
+ *      is mapped to a generic `compat_transport_error` so the endpoint location
+ *      cannot leak via an error message / log / run event. Provider HTTP errors
+ *      carry the remote's response body (not our URL), so they pass through.
+ */
+async function dispatchCompat(req: DispatchRequest): Promise<DispatchResult> {
+  if (!req.baseUrl) throw new Error('compat_no_base_url');
+  let host: string;
+  let protocol: string;
+  try {
+    const u = new URL(req.baseUrl);
+    host = u.hostname;
+    protocol = u.protocol;
+  } catch {
+    throw new Error('compat_invalid_base_url'); // never echo the raw value (§D)
+  }
+  const privateAllowed = webhookPrivateEgressAllowed();
+  if (protocol !== 'https:' && !privateAllowed) {
+    throw new Error('compat_insecure_endpoint'); // https required unless private egress enabled
+  }
+  if (isDeniedWebhookHost(host) && !privateAllowed) {
+    throw new Error('compat_endpoint_blocked'); // SSRF: private/denied host — no URL in the message (§D)
+  }
+  try {
+    return await dispatchOpenAICompatible(req, { baseUrl: req.baseUrl, providerId: 'compat', label: 'compat', pinEgress: true });
+  } catch (e) {
+    // §D: a raw fetch/network rejection can embed the endpoint URL/host — re-throw
+    // a scrubbed, location-free error. `providerHttpError`-shaped errors
+    // (`compat_<status>: <remote body>`) + our own location-free guards carry no
+    // URL, so those pass through unchanged.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/^compat_\d{3}:/.test(msg) || /^compat_(no_response_body|no_base_url|invalid_base_url|insecure_endpoint|endpoint_blocked)$/.test(msg)) {
+      throw e;
+    }
+    throw new Error('compat_transport_error');
+  }
+}
+
 // ── Google Gemini (Generative Language API v1beta) ───────────────────
 // https://ai.google.dev/api/generate-content#method:-models.streamgeneratecontent
+
+/**
+ * ADR 0111: rewrite oversize `audio` parts to File-API references BEFORE the (sync, pure)
+ * `contentToGeminiParts` mapping. Each large audio part is uploaded once and replaced with
+ * `{type:'file', mimeType, url: fileUri}` (→ `fileData`). Small audio passes through inline.
+ * A throw here (upload/poll failure) propagates to the caller's transcription catch → 422.
+ */
+async function resolveLargeAudioForGemini(messages: readonly ChatMessage[], apiKey: string, signal?: AbortSignal): Promise<{ messages: ChatMessage[]; uploadedFileNames: string[] }> {
+  const out: ChatMessage[] = [];
+  const uploadedFileNames: string[] = [];
+  for (const m of messages) {
+    if (typeof m.content === 'string') { out.push(m); continue; }
+    let rewrote = false;
+    const parts: ContentPart[] = [];
+    for (const part of m.content) {
+      if (part.type === 'audio' && decodedBytesOf(part.dataBase64) > GEMINI_INLINE_AUDIO_LIMIT) {
+        if (decodedBytesOf(part.dataBase64) > GEMINI_MAX_AUDIO_BYTES) {
+          throw new Error(`audio exceeds the ${Math.round(GEMINI_MAX_AUDIO_BYTES / (1024 * 1024))} MiB limit`);
+        }
+        const { uri, name } = await uploadAndWaitActive(Buffer.from(part.dataBase64, 'base64'), part.mimeType, apiKey, signal);
+        parts.push({ type: 'file', mimeType: part.mimeType, url: uri });
+        uploadedFileNames.push(name);
+        rewrote = true;
+      } else {
+        parts.push(part);
+      }
+    }
+    out.push(rewrote ? { ...m, content: parts } : m);
+  }
+  return { messages: out, uploadedFileNames };
+}
 
 async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
   // Gemini's wire shape: system prompt is a top-level `systemInstruction`
   // field (not in messages[]), and the assistant role is `model` not
   // `assistant`. Multi-content "parts" array carries the message text.
   const systemMessage = req.messages.find((m) => m.role === 'system');
-  const conversation = req.messages.filter((m) => m.role !== 'system');
+  const conversationRaw = req.messages.filter((m) => m.role !== 'system');
+  // ADR 0111: oversize audio is uploaded to the File API + referenced by URI (long-form
+  // transcription); small audio stays inline. A failure here surfaces as a 422 upstream.
+  const { messages: conversation, uploadedFileNames } = await resolveLargeAudioForGemini(conversationRaw, req.apiKey, req.signal);
 
-  // Use ?key= query param (universal across Gemini surfaces) rather
-  // than the x-goog-api-key header — fewer surfaces ignore it.
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(req.apiKey)}`;
+  // Pass the API key in the `x-goog-api-key` header rather than a `?key=`
+  // query param: query strings are the surface most likely to land in
+  // access/proxy logs, so a credential there is a needless leak vector
+  // (INT-5). The Gemini REST surface accepts the header form.
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(req.model)}:streamGenerateContent?alt=sse`;
 
   // Thinking config only applies to the 2.5 reasoning models
   // (Flash + Pro). Flash-Lite doesn't have thinking.
@@ -575,13 +772,19 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
   // (or 'summary') re-enables thinking. The original empty-completion
   // safety — thinking consuming the entire maxOutputTokens budget — is
   // preserved by the 8192-token floor on opt-in.
+  // 2.5 flash/pro think (flash-LITE does NOT, and rejects thinkingConfig); every
+  // gemini-3.x model thinks AND accepts thinkingConfig — including 3.x flash-lite (unlike
+  // 2.5-flash-lite). Live-verified 2026-06-23: gemini-3-flash-preview returns EMPTY
+  // (finishReason MAX_TOKENS) at a low maxOutputTokens without thinkingBudget:0, and
+  // 3.1-flash-lite accepts thinkingBudget:0 without error. So no `-lite` exclusion for 3.x.
   const isReasoningModel =
-    req.model.includes('2.5-') && !req.model.includes('-lite');
+    (req.model.includes('2.5-') && !req.model.includes('-lite')) ||
+    /gemini-3[.-]/.test(req.model);
   const thinkingEnabled = isReasoningModel && (req.reasoningVerbosity ?? 'off') !== 'off';
 
   const res = await fetchWith429Retry(() => fetch(url, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': req.apiKey },
     body: JSON.stringify({
       contents: conversation.map((m) => ({
         role: m.role === 'assistant' ? 'model' : m.role,
@@ -604,8 +807,7 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
   if (!res.ok) {
-    const errBody = await res.text();
-    throw new Error(`google_${res.status}: ${errBody.slice(0, 500)}`);
+    throw await providerHttpError('google', res);
   }
   if (!res.body) throw new Error('google_no_response_body');
 
@@ -730,6 +932,10 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
   if (thoughtBuf.length > 0) {
     await req.onReasoningBlock?.(thoughtBuf);
   }
+
+  // ADR 0111 follow-on: tidy up any File-API uploads now the transcript is in hand
+  // (best-effort — deleteGeminiFile never throws; files auto-expire after 48 h anyway).
+  for (const name of uploadedFileNames) await deleteGeminiFile(name, req.apiKey);
 
   const citations = Array.from(citationsByUrl.values());
   // Route through parseRefusal() with a synthetic Gemini-shape response.
@@ -870,6 +1076,10 @@ export function contentToGeminiParts(content: string | readonly ContentPart[]): 
       out.push({ text: part.text });
     } else if (part.type === 'audio') {
       out.push({ inlineData: { mimeType: part.mimeType, data: part.dataBase64 } });
+    } else if (part.type === 'file' && part.url) {
+      // A file already uploaded to the Gemini File API (ADR 0111) — reference it by URI
+      // instead of inlining the bytes. `dispatchGoogle` rewrites large audio parts to this.
+      out.push({ fileData: { mimeType: part.mimeType, fileUri: part.url } });
     } else if (part.type === 'image' || (part.type === 'file' && part.mimeType === 'application/pdf')) {
       out.push({ inlineData: { mimeType: part.mimeType, data: requireBytes(part) } });
     } else {

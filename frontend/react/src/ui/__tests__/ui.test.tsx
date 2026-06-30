@@ -43,6 +43,31 @@ describe('Modal', () => {
     fireEvent.click(screen.getByRole('dialog').parentElement as HTMLElement);
     expect(onClose).toHaveBeenCalledTimes(1);
   });
+
+  it('renders a busy loading state instead of children when loading', () => {
+    render(<Modal onClose={() => {}} label="d" loading><p>body content</p></Modal>);
+    const dialog = screen.getByRole('dialog', { name: 'd' });
+    expect(dialog.getAttribute('aria-busy')).toBe('true');
+    // The real body is suppressed while loading.
+    expect(screen.queryByText('body content')).toBeNull();
+    expect(screen.getByText('Loading…')).toBeTruthy();
+  });
+
+  it('is not busy and shows children when loading is unset (backward compatible)', () => {
+    render(<Modal onClose={() => {}} label="d"><p>body content</p></Modal>);
+    const dialog = screen.getByRole('dialog', { name: 'd' });
+    expect(dialog.getAttribute('aria-busy')).toBeNull();
+    expect(screen.getByText('body content')).toBeTruthy();
+  });
+
+  it('renders an inline error region above the body when error is set', () => {
+    render(<Modal onClose={() => {}} label="d" error="Could not save"><p>body content</p></Modal>);
+    const notice = screen.getByText('Could not save');
+    expect(notice).toBeTruthy();
+    // Error coexists with the body (not a replacement like loading).
+    expect(screen.getByText('body content')).toBeTruthy();
+    expect(notice.closest('.alert')?.className).toContain('error');
+  });
 });
 
 describe('ErrorBoundary', () => {
@@ -59,5 +84,14 @@ describe('ErrorBoundary', () => {
   it('renders children when nothing throws', () => {
     render(<ErrorBoundary><p>safe</p></ErrorBoundary>);
     expect(screen.getByText('safe')).toBeTruthy();
+  });
+
+  it('calls a custom onRecover instead of reloading when provided (UI-2)', () => {
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const onRecover = vi.fn();
+    render(<ErrorBoundary label="r" onRecover={onRecover}><Boom /></ErrorBoundary>);
+    fireEvent.click(screen.getByRole('button', { name: /reload/i }));
+    expect(onRecover).toHaveBeenCalledTimes(1);
+    spy.mockRestore();
   });
 });

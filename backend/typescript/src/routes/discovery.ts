@@ -10,25 +10,38 @@ import { createHash } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { DEFAULT_SERVICE_DESCRIPTION, DEFAULT_SERVICE_VENDOR, type AppConfig } from '../index.js';
 import { requestOrigin } from '../host/requestOrigin.js';
+import { SUPPORTED_RUN_ENCODINGS } from '../host/restTransport.js';
+import { a2uiDeltaTransportEnabled } from '../host/a2uiSurfaceDelta.js';
+import { MAX_MULTI_PARTY_PARTICIPANTS } from '../host/multiPartyConversation.js';
+import { channelPresenceEnabled } from '../features/channels/routes.js';
 import { listCapabilities } from '../executor/runtimeCapabilities.js';
 import { demoMode } from '../host/demoMode.js';
+import { hostI18nEnabled, hostDefaultLocale, hostSupportedLocales } from '../host/i18n/index.js';
 import type { Storage } from '../storage/storage.js';
 import { listHostSurfaces } from '../bootstrap/hostSurfaceRegistry.js';
 import { universalEnvelopeKinds } from '../host/envelopeAcceptor.js';
 import { evalSuiteEnabled } from '../host/workforceEval.js';
 import { MAX_INLINE_MEDIA_BYTES } from './mediaAssets.js';
+import { INPUT_MODALITIES } from '../aiProviders/aiProvidersHost.js';
+import { hostAdvertisedSelfHosted } from '../host/compatEndpoints.js';
+import { imageGenerationAdvertised } from '../aiProviders/aiProvidersHost.js';
 import { getFsSandboxRoot } from '../host/inMemorySurfaces.js';
 import { samlConfigured } from '../host/auth/samlSso.js';
 import { listLoadedConformanceFixtures } from '../host/index.js';
+import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { getEnvelopeReasoningConfig } from '../host/envelopeReasoningConfig.js';
 import { getModelCapabilityGateConfig } from '../host/modelCapabilityGateConfig.js';
 import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
 import { authorizationCapability } from '../host/protocolAuthorization.js';
 import { registeredFeatureSurfaceIds } from '../host/featureSurfaces.js';
+import { listArtifactTypes } from '../host/artifactTypes.js';
 import { triggerIngestionEnabled, MAX_INGEST_BODY_BYTES } from '../host/triggerIngestionService.js';
 import { activationMode as proposalsActivationMode } from '../features/proposals/proposalsService.js';
 import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
+import { uiPluginsCapability } from '../host/uiPluginRpc.js';
+import { dispatchCapability } from '../host/dispatchFanOut.js';
+import { presentationEnabled } from '../host/hostProfile.js';
 
 /**
  * Auth profiles this host actually SERVES (review finding #10 / ADR 0002 C1).
@@ -254,7 +267,14 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
     // (routes/mediaAssets.ts). They are NOT universal (not in
     // universalEnvelopeKinds()) — a consumer that doesn't recognize them
     // falls back to raw rendering.
-    supportedEnvelopes: [...universalEnvelopeKinds(), 'media.image', 'media.audio', 'media.file'],
+    // RFC 0102: `ui.a2ui-surface` is advertised because the host ships its
+    // per-kind schema (schemas/envelopes/ui.a2ui-surface.schema.json, byte-
+    // identical to core) AND the chat renderer actually renders the day-1
+    // catalog v0.9.1 (frontend/react/src/chat/a2ui/) — honest-advertisement
+    // per host-capabilities.md §"A2UI surface support" (fails closed under
+    // OPENWOP_REQUIRE_BEHAVIOR=true otherwise). Like media.*, it is NOT
+    // universal — an unrecognizing consumer falls back to store-without-render.
+    supportedEnvelopes: [...universalEnvelopeKinds(), 'media.image', 'media.audio', 'media.file', 'ui.a2ui-surface'],
     schemaVersions: {
       runEvent: 1,
       capabilities: 1,
@@ -269,6 +289,8 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       'media.image': 1,
       'media.audio': 1,
       'media.file': 1,
+      // RFC 0102 A2UI surface kind (v1).
+      'ui.a2ui-surface': 1,
     },
     limits: {
       // Per capabilities.md §3 (CapabilityLimiter shape) — non-negative integers.
@@ -343,6 +365,22 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       supported: true,
       features: ['boards', 'columns', 'cards', 'card-move-trigger'],
     },
+    // RFC 0117 — front-end plugin packs. Advertised at the discovery ROOT (§6).
+    // `isolation` is a schema const: `cross-origin-iframe` (in-process is a
+    // protocol-tier MUST NOT). `supported: true` is HONEST because the host serves
+    // the ui-plugin/1 RPC witness seam (POST /v1/host/openwop-app/ui-plugin/rpc) and
+    // honors the closed allowlist + version-token concurrency. Read from the single
+    // source of truth (host/uiPluginRpc.ts) so advertise/serve can't drift.
+    // ADR 0168 — a CLIENT-PRESENTATION surface; withheld in OPENWOP_PROFILE=headless
+    // (co-gated with the RPC seam mount in registerAllRoutes.ts), so a no-rendering-
+    // client deploy doesn't advertise an iframe-render capability it won't serve.
+    ...(presentationEnabled('uiPlugins') ? { uiPlugins: uiPluginsCapability() } : {}),
+    // RFC 0118 — parallel sub-workflow fan-out + join. Advertised at the discovery ROOT
+    // (§document-root). `fanOutSupported: true` + `"parallel"` in `fanOutPolicies` is HONEST
+    // because the host serves the dispatch/fanout witness seam (POST /v1/host/openwop-app/
+    // dispatch/fanout) running the real RFC 0118 join-fold + bounded-concurrency coordinator.
+    // Read from the single source of truth (host/dispatchFanOut.ts) so advertise/serve can't drift.
+    dispatch: dispatchCapability(),
     // RFC 0083 durable trigger bridge (the deferred reference durable-delivery).
     // The host runs the §B four-state machine + §C delivery model (dedup →
     // retry → dead-letter → causation) for `queue`-source subscriptions — the
@@ -439,8 +477,15 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // Embeddings + image/video generation are NOT implemented — honestly
       // advertised so packs that depend on those sub-caps don't load.
       aiProviders: {
-        supported: ['anthropic', 'openai', 'google'],
+        // RFC 0108 §A.1: `selfHosted` ⊆ `supported`, so the opaque `compat` class
+        // joins `supported` exactly when it is advertised (dark/[] otherwise).
+        supported: ['anthropic', 'openai', 'google', 'minimax', ...hostAdvertisedSelfHosted()],
         byok: ['anthropic', 'openai', 'google'],
+        // RFC 0108 §A — self-hosted / OpenAI-compatible provider class. DARK by
+        // default; lights up (`['compat']`) only when OPENWOP_COMPAT_PROVIDER_ENABLED
+        // + a reachable endpoint backs it (the §A.2 honesty rule). The id is opaque
+        // and non-URL (§A.3); the endpoint location never appears here (§D).
+        selfHosted: hostAdvertisedSelfHosted(),
         policies: {
           modes: ['disabled', 'optional', 'required', 'restricted'],
           scopes: ['workspace', 'project', 'canvas-type'],
@@ -448,9 +493,57 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         },
         toolCalling: { supported: true, providers: ['anthropic', 'openai', 'google'] },
         embeddings: { supported: true },
-        input: { modalities: ['text', 'image', 'document'] },
-        imageGeneration: { supported: false },
+        // RFC 0116 — prompt-prefix cache. PROVIDER-SCOPED + key-gated: the host's
+        // ADR 0148 A2 ephemeral prefix caching is Anthropic-specific, and is only
+        // honestly advertisable where a real Anthropic provider is wired (a
+        // managed ANTHROPIC_API_KEY, or the test-seam witness env). On the
+        // MiniMax managed deployment neither is set ⇒ DARK (advertising Anthropic
+        // prefix-caching on a MiniMax host would be the dishonest claim). The
+        // cache is keyed by (tenant, cachePrefixId) for cross-tenant isolation;
+        // cachePrefixId is a cost hint only (replay-invariant).
+        ...(process.env.ANTHROPIC_API_KEY || process.env.OPENWOP_TEST_SEAM_ENABLED === 'true'
+          ? { promptPrefixCache: { supported: true, providers: ['anthropic'] as const } }
+          : {}),
+        // Derived from the single source of truth `INPUT_MODALITIES`
+        // (aiProvidersHost.ts) so the advertisement can never drift from what
+        // assertModalitiesAdvertised() actually accepts (ADR 0085 Phase 1 —
+        // kills the two-sources-of-truth honesty hazard). `audio` is advertised
+        // here exactly because the host accepts an `{type:'audio'}` ContentPart.
+        input: { modalities: [...INPUT_MODALITIES] },
+        imageGeneration: { supported: imageGenerationAdvertised() }, // ADR 0115 — true only when a provider is configured
         videoGeneration: { supported: false },
+        // RFC 0105 §B — speech synthesis (text-to-speech). The const string
+        // "supported" (the locked shape, parallel to imageGeneration); routable
+        // TTS providers are discovered via aiProviders.supported[] (minimax),
+        // NOT a sub-field. Host routes via the managed MiniMax T2A path.
+        speechSynthesis: 'supported',
+        // RFC 0106 §A — real-time voice. Advertised because the methods/events are
+        // WIRED (advertise+accept-in-lockstep — the ADR 0085 discipline), so the claim
+        // stays honest under OPENWOP_REQUIRE_BEHAVIOR. `transcription: "streaming"`
+        // = `ctx.callTranscriber` (P1/P2). `synthesis: "streaming"` (P3, requires
+        // `speechSynthesis: supported`) = `callSpeechSynthesizer({stream:true})` →
+        // `voice.synthesis_chunk` (§C). `turnDetection: "semantic"` (P1/P2) =
+        // callTranscriber emits `voice.endpoint_candidate` DISTINCT from
+        // `voice.turn_commit`. `bargeIn: "supported"` (P4) = the host emits the
+        // `voice.barge_in` → `voice.cancelled` lifecycle and cancels in-flight
+        // synthesis with NO partial leak (RFC 0106 §F `voice-bargein-no-partial-leak`),
+        // demonstrated by the barge-in seam (a live mic SESSION is host-internal per §E).
+        // HONESTY NOTE (updated ADR 0138): the `voice` feature now provides a PRODUCTION
+        // voice loop (`/v1/host/openwop-app/voice/session/*` → `callTranscriber`/`/speak`/
+        // `/barge-in`), so `bargeIn`/`transcription`/`synthesis` are exercised end-to-end, not
+        // only by the reference seam. `turnDetection: 'semantic'` reflects the emitted
+        // `voice.endpoint_candidate` event-taxonomy (the RFC 0106 §D wire shape) — NOT a
+        // server-side semantic VAD: the current transport commits a turn on the client's
+        // endpoint signal (utterance-buffered). A word-level streaming-ASR provider with real
+        // semantic endpointing (ADR 0138 W7a, e.g. Deepgram Flux) makes the detection real
+        // while keeping the same advertised shape. Survives OPENWOP_REQUIRE_BEHAVIOR — the
+        // gated scenarios drive the taxonomy non-vacuously.
+        // ADR 0168 — a CLIENT-PRESENTATION surface (browser mic capture); withheld in
+        // OPENWOP_PROFILE=headless (co-gated with the voice-feature route mount), so a
+        // no-rendering-client deploy doesn't advertise a mic capability it won't serve.
+        ...(presentationEnabled('realtimeVoice')
+          ? { realtimeVoice: { transcription: 'streaming', synthesis: 'streaming', turnDetection: 'semantic', bargeIn: 'supported' } }
+          : {}),
         // RFC 0055 §C rule 2 — inline-vs-URL cap for media.* envelope payloads.
         // Assets above this size are served by a tenant-scoped URL
         // (GET /v1/host/openwop-app/assets/{token}) rather than inlined.
@@ -460,6 +553,45 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // (open/exchange/close) + honors the `conversation.*` suspend variants.
       // Advertising obligates the full contract (capabilities.md §conversationPrimitive).
       conversationPrimitive: true,
+      // RFC 0101 (ADR 0040 Phase 6) — multi-party group conversation. This host
+      // HONORS the normative shape on the existing RFC 0005 wire: a board-group
+      // conversation carries a participant ROSTER (the `agent:<id>` members of its
+      // `ConversationMeta`, snapshotted at `@@`-summon), every `role:'agent'` turn
+      // carries an explicit `speakerId` (the agent instance id;
+      // host/conversationExchange.ts), and a turn from a non-participant is
+      // rejected fail-closed (host/multiPartyConversation.ts). `supported:true` is
+      // an HONEST claim only because (2)+(3) are enforced — advertising it without
+      // honoring would fail OPENWOP_REQUIRE_BEHAVIOR=true. `maxParticipants` is the
+      // advisory-board cohort cap (ADR 0040 § fan-out caps).
+      multiPartyConversation: { supported: true, maxParticipants: MAX_MULTI_PARTY_PARTICIPANTS },
+      // RFC 0109 (ADR 0124 Phase 2d) — the host stamps `agent.model` ({provider, model})
+      // on the answering agent's conversation turn (conversationExchange `makeTurn`).
+      // `supported:true` is HONEST: the stamp ships (conversation-exchange resolves the
+      // provider/model and writes it non-secret; verbatim on :fork). RFC 0109 is Accepted.
+      conversationTurnModelProvenance: { supported: true },
+      // RFC 0110 (ADR 0126 Phase 4) — channel presence. HONEST gate: advertised ONLY when
+      // the operator opts in (`OPENWOP_CHANNEL_PRESENCE_ENABLED`) on a topology that can
+      // honor it; the host then emits the ephemeral `channel.presence` event over the
+      // membership-gated presence SSE. Default OFF ⇒ no advertisement (the demo's
+      // multi-instance default; per-instance presence would be correct-but-partial).
+      channelPresence: { supported: channelPresenceEnabled() },
+      // RFC 0103 / i18n.md (ADR 0064) — the host negotiates Accept-Language →
+      // Content-Language on its localizable content responses (the CMS read).
+      // OPERATOR-CONFIGURED (OPENWOP_I18N_LOCALES): a host that hasn't enabled
+      // localization advertises NOTHING here (advertise only what is honored).
+      // Per RFC 0103 §A, i18n.defaultLocale == the content baseLocale and the
+      // resolvable content locales are ⊆ i18n.supportedLocales.
+      ...(hostI18nEnabled()
+        ? { i18n: { supported: true, defaultLocale: hostDefaultLocale(), supportedLocales: hostSupportedLocales() } }
+        : {}),
+      // RFC 0103 §A — localized CONTENT delivery (ADR 0064 Phase 3). The host
+      // serves GET /v1/content/pages/{slug} (the system-site projection),
+      // negotiated. content.supported ⇒ i18n.supported; content.baseLocale ==
+      // i18n.defaultLocale; ({base} ∪ content.supportedLocales) ⊆ i18n.supportedLocales;
+      // baseLocale ∉ content.supportedLocales. Same operator gate as i18n.
+      ...(hostI18nEnabled()
+        ? { content: { supported: true, baseLocale: hostDefaultLocale(), supportedLocales: hostSupportedLocales().filter((l) => l !== hostDefaultLocale()) } }
+        : {}),
       interrupts: {
         supported: true,
         kinds: ['approval', 'clarification', 'refinement', 'cancellation', 'external-event', 'conversation.start', 'conversation.exchange', 'conversation.close'],
@@ -478,12 +610,19 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         //     typeId + `interrupts/{token}` correlation matching are
         //     implemented; the `interrupt-external-event-correlation`
         //     scenario passes.
+        //   - `openwop-interrupt-quorum` — multi-approver vote-counting
+        //     to `requiredApprovals` + `rejectionPolicy: 'majority'`,
+        //     backed by the durable `review:decision` ledger (ADR 0070;
+        //     identity from the authenticated user where present, else
+        //     the RFC 0093 capability-token `voter`; per-subject dedup).
+        //     The `interrupt-quorum-resolution` conformance scenario
+        //     passes against this host (3 accepts → completed; 2-of-3
+        //     reject → terminal non-completed), verified under
+        //     `OPENWOP_REQUIRE_BEHAVIOR=true`.
         //
         // Profiles NOT claimed (despite partial implementation):
-        // `openwop-interrupt-quorum` (vote ledger exists but no
-        // multi-tenant identity story), `openwop-interrupt-auth-required`
-        // (auth path bears it via Bearer enforcement but no signed-
-        // callback-token scoping yet).
+        // `openwop-interrupt-auth-required` (auth path bears it via Bearer
+        // enforcement but no signed-callback-token scoping yet).
         //
         // NOTE: the spec profile id for parent-cancel cascade is
         // `openwop-interrupt-cascade-cancel` (per `interrupt-profiles.md
@@ -493,8 +632,16 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         profiles: [
           'openwop-interrupt-cascade-cancel',
           'openwop-interrupt-external-event',
+          'openwop-interrupt-quorum',
         ],
       },
+      // ADR 0075 / RFC 0104 (Active) — portable HITL approver routing. This host
+      // resolves BOTH group and role approver refs (accessControl) against the
+      // run's fail-closed org and targets notifications (`audience` default =
+      // resolved eligibility union), enforced at resolve time exactly as
+      // `approversList` (interrupt.md §"Portable approver routing"). Advertise only
+      // the ref kinds actually honored — both, here.
+      interrupt: { approverRouting: { supported: true, refKinds: ['group', 'role'], audience: true } },
       // `replay` mode (full deterministic re-execution from seq 0) IS
       // supported: the engine re-executes the workflow and the host compares
       // the observable run/node sequence against the source, emitting
@@ -510,6 +657,25 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // `fork: false` is the legacy spelling of that limitation, kept for
       // existing consumers.
       replay: { supported: true, modes: ['replay'], fork: false },
+      // RFC 0115 — Run Transport Economy. The host emits a strong,
+      // sequence-derived ETag and honors If-None-Match/304 on
+      // GET /v1/runs/{runId}, and negotiates Content-Encoding on run reads.
+      // `contentEncodings` is RUNTIME-DETECTED via the SAME constant the
+      // run-read handler uses (host/restTransport.ts), so the advert can never
+      // claim an encoding this Node build cannot serve (honest-witness rule).
+      // On Node < 22.15 (no zstd in node:zlib) this advertises `["gzip"]`.
+      restTransport: {
+        conditionalRunGet: true,
+        contentEncodings: SUPPORTED_RUN_ENCODINGS,
+      },
+      // RFC 0114 — A2UI surface delta transport. The recorded ui.a2ui-surface
+      // envelope stays FULL (unchanged schema); the host delivers RFC 6902 delta
+      // frames over the run-event stream to `?a2uiDelta=1` subscribers, full
+      // materialized otherwise. Advertised iff the host actually serves it —
+      // `a2uiDeltaTransportEnabled()` is the SINGLE gate shared with streams.ts
+      // (no advert/serving drift). Default OFF (dark in prod until an operator
+      // sets OPENWOP_A2UI_DELTA_TRANSPORT, or the test seam drives the witness).
+      ...(a2uiDeltaTransportEnabled() ? { a2uiSurface: { deltaTransport: true } } : {}),
       // RFC 0056 — run feedback / annotations. The sample persists annotations
       // in a per-run side-store and serves POST/GET /v1/runs/{runId}/annotations
       // with secret-pattern + SR-1 redaction of correction/note.
@@ -739,13 +905,23 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         supported: false,
         attribution: { supported: true, emitsWriteEvents: true },
         ...(compactionEnabled ? { compaction: { supported: true, trigger: 'both' } } : {}),
+        // RFC 0113 — the memory read (`GET /v1/host/openwop-app/memory`) honors a
+        // `tokenBudget` that bounds the cumulative SIZE of the returned set
+        // (over-budget entries omitted whole, never truncated; ≥1 kept), reusing
+        // the ADR 0148 A4 `budgetByChars` primitive. The unit is content CHARS,
+        // declared honestly as `tokenCounter: "chars"` (this host counts chars,
+        // not BPE tokens). Ranking is recency-only — `memory.search` semantic
+        // (`modes:["semantic"]`) is NOT advertised, so per RFC 0113 `rank:"relevance"`
+        // is not offered.
+        injectionBudget: { supported: true, tokenCounter: 'chars' as const },
       },
-      // RFC 0023 §B.2 — capabilities.conformance.mockAgent. Reference
-      // host registers core.conformance.mock-agent unconditionally
-      // (see bootstrap/conformanceMockAgent.ts). Production deployments
-      // of this codebase SHOULD remove the registration call AND set
-      // this to false.
-      conformance: { mockAgent: true },
+      // RFC 0023 §B.2 — capabilities.conformance.mockAgent. Advertised
+      // only when the conformance-only nodes are actually registered
+      // (conformanceNodesEnabled() — on for dev/test/conformance, off by
+      // default under NODE_ENV=production unless explicitly enabled). The
+      // registration in bootstrap/nodes.ts reads the SAME switch, so the
+      // advertisement can never claim a typeId the host didn't register.
+      conformance: { mockAgent: conformanceNodesEnabled() },
       // RFC 0025 — test-mode mirror namespace advertisement. The
       // /v1/packs-test/* routes (routes/packs-test.ts) only mount when
       // OPENWOP_PACKS_TEST_NAMESPACE_ENABLED=true; we advertise the
@@ -778,14 +954,21 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // RFC 0100 §1 — the `a2a` capability slot. Advertised ONLY when this host
       // actually exposes itself as an A2A agent (OPENWOP_A2A_SERVER_ENABLED) —
       // otherwise a cross-host caller would feature-detect an A2A surface that
-      // 404s. `durableTasks`/`streaming`/`pushNotifications` are honest only when
+      // 404s. `durableTasks`/`pushNotifications` are honest only when
       // the durable wiring (ADR 0035 / a2aTaskStore) is on
       // (OPENWOP_A2A_DURABLE_TASKS); with it off this is the synchronous
       // round-trip already specified — no regression, the async conformance
-      // subtests soft-skip. `agentCardUrl` points at the JSON-RPC server the
-      // synthesized AgentCard advertises (`url`); the host serves no
-      // `/.well-known/agent-card.json` yet (the card is fetched via
-      // `agent/getCard` over JSON-RPC). The base MUST be a cross-host-reachable
+      // subtests soft-skip. `streaming` is DECOUPLED from `durableTasks` onto its
+      // own `OPENWOP_A2A_STREAMING` flag (default off) so it advertises
+      // `false` here: openwop-conformance 1.34.0 ships no `tasks/resubscribe`
+      // gated subtest ("resubscribe" is comment-only), so `streaming:true` would
+      // be a vacuous claim that also commits us to a resubscribe re-attach we
+      // don't serve. The JSON-RPC server still serves resubscribe; flip the flag
+      // (a clean zero-witness follow-on) once that conformance subtest ships.
+      // `agentCardUrl` points at the GET-able static v0.3 AgentCard at
+      // `/.well-known/agent-card.json` (agents.ts) — a plain GET resolves it
+      // without a credential (public path), the honesty bar a JSON-RPC-only
+      // (POST `agent/getCard`) pointer can't meet. The base MUST be a cross-host-reachable
       // backend origin (else `supported:true` is a dishonest advertisement —
       // capabilities.md advertise-honestly): a dedicated
       // `OPENWOP_A2A_PUBLIC_BASE_URL` override (custom-domain backends), else the
@@ -801,8 +984,8 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
             return {
               a2a: {
                 supported: true,
-                agentCardUrl: `${base}/v1/host/openwop-app/a2a`,
-                streaming: durable,
+                agentCardUrl: `${base}/.well-known/agent-card.json`,
+                streaming: process.env.OPENWOP_A2A_STREAMING === 'true',
                 pushNotifications: durable,
                 durableTasks: durable,
               },
@@ -1012,6 +1195,19 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         presignSupported: true,
         maxObjectBytes: 50 * 1024 * 1024, // 50 MiB
       },
+      // RFC 0071/0075 — host artifact-type registry (ADR 0055). Host-native types
+      // only in v1; schemas served at the schemaEndpoint; per-type export facets.
+      artifactTypes: {
+        supported: true,
+        schemaEndpoint: '/schemas/artifacts',
+        types: listArtifactTypes().map((t) => ({
+          artifactTypeId: t.artifactTypeId,
+          title: t.title,
+          schemaUrl: `/schemas/artifacts/${t.artifactTypeId}.schema.json`,
+          export: t.export,
+          registrationSource: t.registrationSource,
+        })),
+      },
       // RFC 0019 — host.cache.
       cache: {
         supported: true,
@@ -1045,6 +1241,27 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
             serverUrls: [],
             serverMount: { supported: false },
           },
+      // RFC 0078 — the read-only `GET /v1/tools` + `/v1/tools/{toolId}` portable
+      // tool-catalog projection (ADR 0087). Advertised ONLY when the MCP server is
+      // mounted (the catalog projects the `mcp` source — e.g. the notebook tools);
+      // the endpoints 404 + this is absent otherwise (honest, OPENWOP_REQUIRE_BEHAVIOR
+      // clean). `sources: ['mcp']` because that is the only source this host projects.
+      ...(process.env.OPENWOP_MCP_SERVER_ENABLED === 'true'
+        ? {
+            toolCatalog: {
+              supported: true,
+              sources: ['mcp'] as const,
+              // RFC 0112 — compact tool projection (`GET /v1/tools?view=compact`).
+              // The route ships ready, but the capability is advertised ONLY when
+              // OPENWOP_TOOLCATALOG_COMPACTVIEW=true — held dark until RFC 0112 is
+              // Accepted (honest-advert rule; the steward flips it on Accepted +
+              // the published 1.39.0 conformance scenario).
+              ...(process.env.OPENWOP_TOOLCATALOG_COMPACTVIEW === 'true'
+                ? { compactView: true }
+                : {}),
+            },
+          }
+        : {}),
     },
     extensions: {
       // Sample-namespace extensions block. Clients tolerate absence.

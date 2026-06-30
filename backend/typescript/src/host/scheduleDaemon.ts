@@ -33,7 +33,8 @@
 
 import type { StartRunDeps } from './runStarter.js';
 import { startWorkflowRun } from './runStarter.js';
-import { listJobs, markJobFired, recordJobRun, currentTick } from './schedulingService.js';
+import { listJobs, markJobFired, recordJobRun, currentTick, scheduleSubject } from './schedulingService.js';
+import { subjectScope } from './subject.js';
 import { checkAutonomousRunBudget, pruneRunBudget } from './runBudgetService.js';
 import { getInstanceId } from './instanceId.js';
 import { createLogger } from '../observability/logger.js';
@@ -125,6 +126,12 @@ export async function processDueSchedules(
             ...(job.rosterId !== undefined ? { rosterId: job.rosterId } : {}),
             ...(job.ownerUserId !== undefined ? { ownerUserId: job.ownerUserId } : {}),
             ...(job.agentId !== undefined ? { agentId: job.agentId } : {}),
+            // ADR 0046 — the CANONICAL owner (any Subject kind). The legacy
+            // rosterId/ownerUserId above stay for back-compat consumers; this
+            // carries the generic owner (incl. `project:<id>`) so a project-fired
+            // run isn't anonymous. `recordRunAttribution` ignores unknown keys
+            // (it's the agent-only index); a project-runs surface can read this.
+            ...((s) => (s ? { ownerScope: subjectScope(s) } : {}))(scheduleSubject(job)),
           },
         },
       });

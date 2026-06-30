@@ -173,22 +173,28 @@ const SECRET_REQUEST_PATHS: readonly RegExp[] = [
   /^\/(?:api\/)?v1\/host\/(?:openwop-app|sample)\/byok\/secrets(?:$|\/|\?)/,
 ];
 
-/** Conservative field-name denylist applied to any *other* captured request
- *  body — defense in depth if a new secret-bearing route is added without
- *  updating SECRET_REQUEST_PATHS. Request bodies only; response bodies are
- *  BE-shaped and never echo submitted secrets. */
+/** Response paths whose body COULD carry credential material. The host's
+ *  responses are designed never to echo secrets (e.g. `GET /byok/secrets`
+ *  returns credential *refs*, never values), so this is defense in depth: if a
+ *  route ever does, its whole response body is dropped from the buffer +
+ *  sessionStorage mirror. With prod capture enabled (VITE_ENABLE_NETWORK_RECORDER),
+ *  response bodies are mirrored too — so they get the same redaction discipline
+ *  as request bodies, not a trust-the-backend assumption. */
+const SECRET_RESPONSE_PATHS: readonly RegExp[] = [
+  /^\/(?:api\/)?v1\/host\/(?:openwop-app|sample)\/byok\/secrets(?:$|\/|\?)/,
+];
+
+/** Conservative field-name denylist applied to any *other* captured body —
+ *  defense in depth if a new secret-bearing route is added without updating the
+ *  path lists above. Applied to BOTH request and response bodies. */
 const SECRET_FIELD_KEYS = new Set([
   'value', 'apikey', 'api_key', 'secret', 'password', 'privatekey', 'private_key', 'credential', 'token',
 ]);
 
-/** Strip plaintext credential material from a captured request body before it
- *  is buffered/persisted. Route-level redaction is exact; the field-level pass
- *  is best-effort JSON scrubbing. Returns the (possibly redacted) string. */
-export function redactRequestBody(path: string, body: string | undefined): string | undefined {
-  if (body === undefined) return undefined;
-  if (SECRET_REQUEST_PATHS.some((re) => re.test(path))) {
-    return '[redacted: credential request body]';
-  }
+/** Best-effort JSON scrub: replace any secret-named string field (at any depth)
+ *  with `[redacted]`. Returns the input verbatim when it isn't JSON or holds no
+ *  secret-named field, so benign / non-JSON bodies pass through unchanged. */
+function scrubSecretFields(body: string): string {
   try {
     const parsed: unknown = JSON.parse(body);
     if (parsed && typeof parsed === 'object') {
@@ -208,9 +214,31 @@ export function redactRequestBody(path: string, body: string | undefined): strin
       return touched ? JSON.stringify(parsed) : body;
     }
   } catch {
-    /* not JSON — already length-capped in bodyToString(); leave as-is */
+    /* not JSON — already length-capped upstream; leave as-is */
   }
   return body;
+}
+
+/** Strip plaintext credential material from a captured request body before it
+ *  is buffered/persisted. Route-level redaction is exact; the field-level pass
+ *  is best-effort JSON scrubbing. Returns the (possibly redacted) string. */
+export function redactRequestBody(path: string, body: string | undefined): string | undefined {
+  if (body === undefined) return undefined;
+  if (SECRET_REQUEST_PATHS.some((re) => re.test(path))) {
+    return '[redacted: credential request body]';
+  }
+  return scrubSecretFields(body);
+}
+
+/** Strip plaintext credential material from a captured RESPONSE body before it
+ *  is buffered/persisted (relevant once prod capture is enabled — the response
+ *  mirror is no longer dev-only). Same shape as redactRequestBody. */
+export function redactResponseBody(path: string, body: string | undefined): string | undefined {
+  if (body === undefined) return undefined;
+  if (SECRET_RESPONSE_PATHS.some((re) => re.test(path))) {
+    return '[redacted: credential response body]';
+  }
+  return scrubSecretFields(body);
 }
 
 export type RecorderMode = 'off' | 'liveness' | 'full';
@@ -324,8 +352,11 @@ export function installNetworkRecorder(): void {
         try {
           const clone = res.clone();
           const text = await clone.text();
-          responseTruncated = text.length > MAX_RESPONSE_BYTES;
-          responseBody = responseTruncated ? text.slice(0, MAX_RESPONSE_BYTES) : text;
+          // Redact the FULL body before truncation (truncated JSON won't parse,
+          // so a secret near the cut boundary would survive a scrub-after-slice).
+          const redacted = redactResponseBody(path, text) ?? text;
+          responseTruncated = redacted.length > MAX_RESPONSE_BYTES;
+          responseBody = responseTruncated ? redacted.slice(0, MAX_RESPONSE_BYTES) : redacted;
         } catch {
           /* ignore read errors — the original response is unaffected */
         }

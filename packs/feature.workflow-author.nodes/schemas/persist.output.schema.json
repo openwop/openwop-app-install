@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openwop.dev/packs/feature.workflow-author.nodes/persist.output.schema.json",
+  "title": "Workflow Author Persist Output",
+  "type": "object",
+  "required": ["workflowId"],
+  "properties": {
+    "workflowId": { "type": "string", "description": "The registered workflowId, now resolvable by POST /v1/runs and the builder." },
+    "nodeCount": { "type": "integer" },
+    "definition": { "type": "object", "description": "The persisted WorkflowDefinition." }
+  },
+  "additionalProperties": false
+}

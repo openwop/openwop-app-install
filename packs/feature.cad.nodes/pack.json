@@ -1,0 +1,20 @@
+{
+  "name": "feature.cad.nodes",
+  "version": "1.0.0",
+  "description": "CAD canvas producer node pack (ADR 0153 Phase 4). The `render` node emits a typed `canvas.cad` artifact — a constrained parametric model { name?, units?, solids[] } of primitive solids — that flows through the run-output producer (ADR 0083) and renders inline in the chat artifact workbench as an orthographic SVG projection. Constrained typed JSON, never executable code; pure transform; replay-safe.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "cad", "canvas", "3d", "parametric"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.cad.nodes.render",
+      "version": "1.0.0",
+      "label": "Render CAD model",
+      "description": "Emit a `canvas.cad` artifact. Inputs: { model } (or `source` JSON) = { name?, units?, solids: [{ kind, x?, y?, z?, width?, height?, depth?, radius?, length?, color?, label? }] }. kind ∈ box|cylinder|sphere|cone. Output: a typed canvas.cad artifact. Pure transform.",
+      "category": "transform",
+      "role": "action"
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

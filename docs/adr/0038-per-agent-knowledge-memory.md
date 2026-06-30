@@ -2,7 +2,8 @@
 
 **Status:** implemented
 **Date:** 2026-06-13
-**Toggle:** `agent-knowledge` (default OFF, `bucketUnit: tenant`)
+**Toggle:** none — **graduated to always-on 2026-06-16** (§ Correction below). Was
+`agent-knowledge` (default OFF, `bucketUnit: tenant`).
 **Capability:** `knowledge` (a core `AgentCapabilityId`, activated per `agentProfile`)
 **Depends on / composes:** ADR 0011 (Knowledge Base / RAG — `kbService`, `KnowledgeBackend`),
 ADR 0031 (rich `agentProfile` host-ext — extends its shape, additively), ADR 0036
@@ -16,6 +17,29 @@ adjacent ingestion path, distinct concern), ADR 0001 (feature-package architectu
 **NON-NORMATIVE — no OpenWOP RFC.** Rides **already-Accepted** RFC 0004 (Memory Layer),
 RFC 0080 (agent-memory capability dimensions), and RFC 0018 (`host.vectorStore`). It does
 **not** touch any `/v1` wire contract. See § "RFC gate" — there is one hard boundary.
+
+## Correction (2026-06-16) — graduated to always-on (toggle removed)
+
+The `agent-knowledge` toggle (originally default-OFF, `bucketUnit: tenant`) is **removed**;
+per-agent knowledge & memory is now **always-on**, exactly like `profiles` (ADR 0002
+§ Correction) and Personal Memory (ADR 0041 § Correction, 2026-06-15). Rationale: it is core
+agent infrastructure — every work-twin agent should have its own documents + facts without
+an operator first flipping a switch — and the advisory-board feature already depends on it.
+
+Mechanics (mirrors the Personal Memory graduation, commit `57dd7f75`):
+
+- `features/agent-knowledge/feature.ts` — the `toggleDefault` block is dropped.
+- `features/agent-knowledge/routes.ts` — the `requireFeatureEnabled(req, …)` gate is removed
+  from all 13 routes; the remaining gate order is **IDOR → RBAC → ADR 0036 profile policy**,
+  unchanged and still fail-closed. The backend stays the authority.
+- `features/index.ts` — `'agent-knowledge'` is added to `RETIRED_TOGGLE_IDS`, so any lingering
+  per-tenant durable override is deleted at boot (no ghost toggle).
+- Frontend — `AgentWorkspacePage` shows the Knowledge + Memory tabs unconditionally;
+  `AgentKnowledgePanel` no longer calls `useFeatureAccess`.
+
+This does not change the wire, the capability model, or the §9 replay/fork read-only line —
+only the feature-gate axis. References below to "behind the toggle" / "toggle-gated" /
+"OFF by default" predate this correction.
 
 ## Why this exists
 

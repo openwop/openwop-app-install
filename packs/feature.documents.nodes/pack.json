@@ -1,0 +1,78 @@
+{
+  "name": "feature.documents.nodes",
+  "version": "1.1.0",
+  "description": "Documents & Templates feature node pack (ADR 0053) — read + agentic-write nodes over the ctx.features.documents surface. list-documents reads an org's documents; assemble renders a template into an augmentedPrompt; generate-from-template assembles → ctx.callAI → creates a document version (idempotency-keyed, replay-safe). Output is validated against the template-owned outputSchema; NO typed artifact.created is emitted (artifact-types RFC 0071/0075 are not implemented in this host).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "documents", "templates", "sow", "prd", "rfp"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.documents.nodes.list-documents",
+      "version": "1.0.0",
+      "label": "Documents: List Documents",
+      "description": "Lists an org's documents over ctx.features.documents. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.documents.nodes.list-templates",
+      "version": "1.0.0",
+      "label": "Documents: List Templates",
+      "description": "Lists an org's document templates over ctx.features.documents.listTemplates. Inputs: { orgId, kind? }. Output: { templates }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.documents.nodes.get-template",
+      "version": "1.0.0",
+      "label": "Documents: Get Template",
+      "description": "Fetches one document template by id over ctx.features.documents.getTemplate. Inputs: { orgId, templateId }. Output: { template } (null when absent). Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.documents.nodes.get-document",
+      "version": "1.0.0",
+      "label": "Documents: Get Document",
+      "description": "Fetches one document by id over ctx.features.documents.getDocument. Inputs: { orgId, documentId }. Output: { document } (null when absent). Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.documents.nodes.assemble",
+      "version": "1.0.0",
+      "label": "Documents: Assemble Template",
+      "description": "Validates params against a template and renders its body into an augmentedPrompt + outputSchema. No LLM call.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.documents.nodes.generate-from-template",
+      "version": "1.0.0",
+      "label": "Documents: Generate from Template",
+      "description": "Assembles a template, calls ctx.callAI to draft the content, creates a document and an immutable version (idempotency-keyed). Run-scoped generation.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["aiProviders"]
+    },
+    {
+      "typeId": "feature.documents.nodes.render",
+      "version": "1.0.0",
+      "label": "Documents: Render to PDF",
+      "description": "Renders a document's current version to PDF and stores it as a Media token on the version (deterministic — no provider). ADR 0057.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

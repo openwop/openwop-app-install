@@ -101,6 +101,23 @@ export function listManagedProviderIds(): readonly string[] {
 }
 
 /**
+ * Provider ids a user may directly SELECT in the chat model picker — the
+ * server-side single source of truth for "user-facing provider", mirroring the
+ * FE BYOK wizard's `!p.managed && !p.hidden` predicate (ProviderGrid.tsx).
+ *
+ * Excludes `managed: true` tiers (the operator holds the key; reached via the
+ * "Try it free" managed path, not picked by name) and `hidden: true` providers
+ * (e.g. MiniMax, which sits BEHIND the managed `openwop-free` entry — advertising
+ * it as selectable is a capability-honesty defect: a user can't dispatch to it
+ * directly). See ADR 0164.
+ */
+export function listSelectableProviderIds(): readonly string[] {
+  return CATALOG.providers
+    .filter((p) => p.managed !== true && p.hidden !== true)
+    .map((p) => p.id);
+}
+
+/**
  * Return the default model id for a provider — first `recommended: true`,
  * else first model. Used by the chat responder node when inputs.model
  * isn't supplied.

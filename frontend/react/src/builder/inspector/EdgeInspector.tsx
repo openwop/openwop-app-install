@@ -5,12 +5,14 @@
  * edge fires based on the source's output.
  */
 
+import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
 import type { BuilderEdge, EdgeCondition, EdgeTriggerRule } from '../schema/workflow.js';
 import { CONDITION_OPS, TRIGGER_RULE_OPTIONS } from './inspectorHelpers.js';
 import { TextField, SelectField } from '../../ui/Field.js';
 
 export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
+  const { t } = useTranslation('builder');
   const rule = edge.triggerRule ?? 'all_success';
   const cond = edge.condition;
   const updateEdge = useBuilderStore.getState().updateEdge;
@@ -19,28 +21,27 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
   const conditionMeta = CONDITION_OPS.find((o) => o.value === conditionOp)!;
   return (
     <aside className="builder-inspector">
-      <h3 className="builder-inspector-title">Edge</h3>
+      <h3 className="builder-inspector-title">{t('edge')}</h3>
       <p className="muted builder-inspector-desc">
-        Edges connect node outputs to downstream inputs. The trigger rule
-        controls fan-in behavior when a target has multiple incoming edges.
+        {t('edgeInspectorDesc')}
       </p>
 
       <div className="form-row">
-        <span className="builder-inspector-field-label">From → To</span>
+        <span className="builder-inspector-field-label">{t('fromTo')}</span>
         <code className="builder-inspector-typeid">
           {edge.source} → {edge.target}
         </code>
       </div>
 
       <TextField
-        label="Label (optional)"
+        label={t('edgeLabel')}
         value={edge.label ?? ''}
-        placeholder="e.g. 'on success', 'high confidence'"
+        placeholder={t('edgeLabelPlaceholder')}
         onChange={(e) => updateEdge(edge.id, { label: e.target.value || undefined })}
       />
 
       <div className="builder-inspector-divider" />
-      <div className="builder-inspector-section-label">Trigger rule</div>
+      <div className="builder-inspector-section-label">{t('triggerRule')}</div>
 
       <div className="form-row">
         <select
@@ -52,22 +53,23 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
           ))}
         </select>
         <div className="muted builder-inspector-help">
-          {TRIGGER_RULE_OPTIONS.find((o) => o.value === rule)?.help}
+          {(() => {
+            const k = TRIGGER_RULE_OPTIONS.find((o) => o.value === rule)?.helpKey;
+            return k ? t(k) : '';
+          })()}
         </div>
         <div className="muted builder-inspector-help u-mt-1">
-          Applies to target <code>{edge.target}</code>. When multiple edges target
-          the same node, all should declare the same rule (the scheduler picks
-          the rule from the lexicographically-first edge id if they diverge).
+          {t('triggerRuleAppliesTo')} <code>{edge.target}</code>{t('triggerRuleAppliesToAfter')}
         </div>
       </div>
 
       <div className="builder-inspector-divider" />
-      <div className="builder-inspector-section-label">Condition predicate (optional)</div>
+      <div className="builder-inspector-section-label">{t('conditionPredicate')}</div>
 
       <TextField
-        label="Path (into source output)"
+        label={t('conditionPath')}
         value={cond?.path ?? ''}
-        placeholder="e.g. 'completion' or 'data.score'"
+        placeholder={t('conditionPathPlaceholder')}
         onChange={(e) => {
           const path = e.target.value;
           if (!path) {
@@ -77,13 +79,13 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
           const next: EdgeCondition = { path, op: conditionOp, ...(cond?.value !== undefined ? { value: cond.value } : {}) };
           updateEdge(edge.id, { condition: next });
         }}
-        help="When set, this edge fires only when the predicate matches the source's output."
+        help={t('conditionPathHelp')}
       />
 
       {cond?.path ? (
         <>
           <SelectField
-            label="Operator"
+            label={t('conditionOperator')}
             value={conditionOp}
             onChange={(e) =>
               updateEdge(edge.id, {
@@ -92,15 +94,15 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
             }
           >
             {CONDITION_OPS.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
+              <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
             ))}
           </SelectField>
 
           {conditionMeta.needsValue ? (
             <TextField
-              label="Value"
+              label={t('conditionValue')}
               value={typeof cond.value === 'string' ? cond.value : cond.value === undefined ? '' : JSON.stringify(cond.value)}
-              placeholder="literal or JSON"
+              placeholder={t('conditionValuePlaceholder')}
               onChange={(e) => {
                 // Try parsing as JSON for numbers/booleans/objects; fall back to plain string.
                 const raw = e.target.value;
@@ -109,10 +111,10 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
                 updateEdge(edge.id, { condition: { ...cond, value: parsed } });
               }}
               help={<>
-                Plain text stays a string. Values that parse as JSON
-                (<code>5</code>, <code>true</code>, <code>null</code>,
-                <code>{`["a","b"]`}</code>) are stored as the parsed value.
-                Partial JSON (<code>{`{"x": 1`}</code>) silently stays a string.
+                {t('conditionValueHelpPre')}
+                {' '}(<code>5</code>, <code>true</code>, <code>null</code>,
+                <code>{`["a","b"]`}</code>) {t('conditionValueHelpMid')}
+                {' '}(<code>{`{"x": 1`}</code>) {t('conditionValueHelpPost')}
               </>}
             />
           ) : null}
@@ -121,7 +123,7 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
 
       <div className="builder-inspector-divider" />
       <button className="secondary" onClick={() => removeEdge(edge.id)}>
-        Delete edge
+        {t('deleteEdge')}
       </button>
     </aside>
   );

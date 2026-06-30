@@ -7,6 +7,13 @@
 
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
+import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
+
+// ADR 0077 P1 — declare this entity's PII fields once at module load (the
+// `registerSubjectEraser` side-effect pattern). `name` + `email` identify a person;
+// `company` is an org attribute, not personal data.
+declarePiiFields('crm.contact', ['name', 'email']);
 
 export type ContactStage = 'lead' | 'qualified' | 'customer' | 'churned';
 export const CONTACT_STAGES: readonly ContactStage[] = ['lead', 'qualified', 'customer', 'churned'];
@@ -22,7 +29,9 @@ export interface Contact {
   updatedAt: string;
 }
 
-const store = new DurableCollection<Contact>('crm:contact', (c) => c.contactId);
+// GOV-1: `tenantOf` arms the tenant secondary index so the retention purger scans only
+// this tenant's slice (`listForTenantIndexed`) instead of the whole collection.
+const store = new DurableCollection<Contact>('crm:contact', (c) => c.contactId, undefined, (c) => c.tenantId);
 
 /** The caller's contacts, newest first. */
 export async function listContacts(tenantId: string): Promise<Contact[]> {
@@ -80,6 +89,30 @@ export async function updateContact(
 export async function deleteContact(contactId: string): Promise<boolean> {
   return store.delete(contactId);
 }
+
+// DELIBERATELY NOT a `registerSubjectEraser` consumer (crm is retention-only): a CRM
+// contact is a THIRD-PARTY business record the tenant holds ABOUT someone else — it has no
+// app-user/principal key (contactId is a random uuid), so a DSAR keyed on the subject's
+// principal must NOT delete it. The contact's marketing send-history IS reachable (the
+// email feature erases send-logs by contactId). "Erase the third party I hold a record
+// about" is a distinct DSAR-by-email path (its own route/ADR), never this shared
+// principal-keyed seam — overloading it would cross-match other erasers' namespaces.
+// (ADR 0081 P5 correction: profiles+comments IN, crm OUT.)
+
+// ADR 0081 P5 — time-based retention (ADR 0077 seam). A contact carries person PII
+// (name/email, declared above). Delete this tenant's contacts NOT touched within the
+// window — age on `updatedAt` (abandoned records, not merely old ones: a durable entity
+// differs from analytics' event-time `ts`). No-op on a falsy tenant / non-PII
+// classification (fail-closed — never a cross-tenant/global purge).
+registerRetentionPurger({
+  feature: 'crm',
+  async purge(tenantId, classification, cutoffIso) {
+    if (!tenantId || classification !== 'confidential-pii') return 0;
+    return purgeRowsByAge('crm', await store.listForTenantIndexed(tenantId), tenantId, cutoffIso,
+      (c) => ({ tenantId: c.tenantId, updatedAt: c.updatedAt, id: c.contactId }),
+      (id) => store.delete(id));
+  },
+});
 
 /** Test-only: clear all contacts. */
 export async function __resetCrmStore(): Promise<void> {

@@ -29,19 +29,30 @@ function loadAllowedOrigins(): { match: (origin: string) => boolean; explicit: b
   return { match: (origin) => list.includes(origin), explicit: true };
 }
 
+/** PUB-1: the public embeddable-widget endpoints are NON-credentialed (the `wgt_` token is
+ *  the capability; no cookie) and are MEANT to be embedded on any allowlisted customer
+ *  domain. Their real gate is the per-widget server-side Origin allowlist + the token, NOT
+ *  CORS — so they must reflect ANY origin for non-credentialed CORS even when the global
+ *  OPENWOP_CORS_ORIGINS allowlist is set (which exists only to gate the CREDENTIALED cookie/
+ *  SSE path these endpoints never use). Reflect-any WITHOUT `Allow-Credentials` grants a
+ *  browser nothing it couldn't already fetch server-to-server. Scoped tightly to `/public/`. */
+const PUBLIC_EMBED_PREFIX = '/v1/host/openwop-app/public/';
+
 export function corsMiddleware(): RequestHandler {
   return (req, res, next) => {
     const origin = req.header('origin');
     if (origin) {
       const { match, explicit } = loadAllowedOrigins();
-      if (match(origin)) {
+      const isPublicEmbed = req.path.startsWith(PUBLIC_EMBED_PREFIX);
+      // A public-embed path reflects any origin non-credentialed; otherwise the allowlist
+      // (or the reflect-any default) decides, and credentials ride only an explicit allowlist.
+      if (isPublicEmbed || match(origin)) {
         res.set('Access-Control-Allow-Origin', origin);
         res.set('Vary', 'Origin');
-        // Credentials (the session cookie) cross-origin ONLY for an explicit
-        // allowlist — reflect-any + credentials would let any site ride the
-        // user's cookie. The cross-site SSE-with-cookie path therefore needs
-        // OPENWOP_CORS_ORIGINS to name the SPA origin.
-        if (explicit) res.set('Access-Control-Allow-Credentials', 'true');
+        // Credentials (the session cookie) cross-origin ONLY for an explicit allowlist AND
+        // never on a public-embed path — reflect-any + credentials would let any site ride
+        // the user's cookie. The cross-site SSE-with-cookie path needs OPENWOP_CORS_ORIGINS.
+        if (explicit && !isPublicEmbed) res.set('Access-Control-Allow-Credentials', 'true');
         res.set(
           'Access-Control-Allow-Headers',
           'Authorization, Cache-Control, Content-Type, Idempotency-Key, Last-Event-ID, Traceparent, Tracestate',

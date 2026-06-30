@@ -1,7 +1,7 @@
 {
   "name": "feature.assistant.nodes",
-  "version": "1.2.0",
-  "description": "Executive-Assistant graph/logic node pack (ADR 0023 / 0014). THIN by design \u2014 only the memory-graph + prioritization nodes over ctx.features.assistant + ctx.kanban. ALL external I/O (Drive/Gmail/Calendar reads, mail sends) reuses the existing core node packs (core.openwop.{mcp,http,integration}); this pack authors no I/O node.",
+  "version": "1.3.0",
+  "description": "Executive-Assistant graph/logic node pack (ADR 0023 / 0014). THIN by design \u2014 only the memory-graph + prioritization nodes over ctx.features.assistant + ctx.kanban. Full coverage of the assistant surface: commitment / decision / meeting / stakeholder reads + writes (role:action, recorded \u2192 replay-safe) alongside the original perception + prioritization + briefing nodes. ALL external I/O (Drive/Gmail/Calendar reads, mail sends) reuses the existing core node packs (core.openwop.{mcp,http,integration}); this pack authors no I/O node.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": [
@@ -90,6 +90,114 @@
       "description": "Execution verdict for assistant action workflows (ADR 0023 \u00a712 T6): fails the run unless the upstream provider call answered 2xx \u2014 core.openwop.http.fetch deliberately completes on any outcome (side-effect-once), so this gate is what keeps a refused send from being recorded as sent.",
       "category": "transform",
       "role": "pure",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.list-projects",
+      "version": "1.0.0",
+      "label": "Assistant: List Projects",
+      "description": "Lists the principal's projects over ctx.features.assistant.listProjects. Output: { projects }. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.get-project",
+      "version": "1.0.0",
+      "label": "Assistant: Get Project",
+      "description": "Fetches one project by id over ctx.features.assistant.getProject. Inputs: { projectId }. Output: { project } (null when absent).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.list-commitments",
+      "version": "1.0.0",
+      "label": "Assistant: List Commitments",
+      "description": "Lists commitments from the memory graph over ctx.features.assistant.listCommitments. Inputs: { status?, projectId? }. Output: { commitments }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.list-decisions",
+      "version": "1.0.0",
+      "label": "Assistant: List Decisions",
+      "description": "Lists logged decisions over ctx.features.assistant.listDecisions. Inputs: { projectId? }. Output: { decisions }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.get-meeting",
+      "version": "1.0.0",
+      "label": "Assistant: Get Meeting",
+      "description": "Fetches one meeting by id over ctx.features.assistant.getMeeting. Inputs: { meetingId }. Output: { meeting } (null when absent).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.list-meetings",
+      "version": "1.0.0",
+      "label": "Assistant: List Meetings",
+      "description": "Lists recorded meetings over ctx.features.assistant.listMeetings. Output: { meetings }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.list-stakeholders",
+      "version": "1.0.0",
+      "label": "Assistant: List Stakeholders",
+      "description": "Lists relationship stakeholders over ctx.features.assistant.listStakeholders. Output: { stakeholders }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.list-pending-actions",
+      "version": "1.0.0",
+      "label": "Assistant: List Pending Actions",
+      "description": "Lists the approval queue over ctx.features.assistant.listPendingActions. Inputs: { status? }. Output: { pendingActions }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.set-commitment-card",
+      "version": "1.0.0",
+      "label": "Assistant: Set Commitment Card",
+      "description": "Links a commitment to its kanban card (back-ref) over ctx.features.assistant.setCommitmentCard. Inputs: { commitmentId, kanbanCardId }. Output: { commitment }. Idempotent update.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.log-decision",
+      "version": "1.0.0",
+      "label": "Assistant: Log Decision",
+      "description": "Appends a decision to the memory graph over ctx.features.assistant.logDecision. Inputs: { statement, decidedBy?, source?, rationale?, projectId? }. Output: { decision }. Recorded \u2192 replay reads the recorded result.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.record-meeting",
+      "version": "1.0.0",
+      "label": "Assistant: Record Meeting",
+      "description": "Upserts a meeting record (by calendarEventId) over ctx.features.assistant.recordMeeting. Inputs: { calendarEventId, title, startAt, endAt?, prepBriefRef?, transcriptKbDocId? }. Output: { meeting }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.assistant.nodes.upsert-stakeholder",
+      "version": "1.0.0",
+      "label": "Assistant: Upsert Stakeholder",
+      "description": "Upserts a relationship stakeholder (by person) over ctx.features.assistant.upsertStakeholder. Inputs: { person, importance?, intendedCadenceDays?, lastMeaningfulContactAt? }. Output: { stakeholder }.",
+      "category": "integration",
+      "role": "action",
       "capabilities": []
     }
   ],

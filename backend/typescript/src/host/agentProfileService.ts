@@ -57,6 +57,47 @@ export function levelForSpecLevel(specLevel: SpecLevel): RosterLevel {
   }
 }
 
+/**
+ * Inverse of {@link levelForSpecLevel} (ADR 0101). `roster.autonomyLevel` is the
+ * single autonomy source of truth (owned by the Edit-details modal, read by the
+ * heartbeat); the profile's `specLevel` is derived from it so the two can never
+ * disagree. `review` has two spec levels (`draft-only`, `recommend`); we keep an
+ * existing review-class `specLevel` when it already maps to `review`, else default
+ * to `recommend`.
+ */
+export function specLevelForLevel(level: RosterLevel, existing?: SpecLevel): SpecLevel {
+  switch (level) {
+    case 'guided':
+      return 'execute-with-approval';
+    case 'auto':
+      return 'autonomous-within-policy';
+    case 'review':
+      return existing === 'draft-only' ? 'draft-only' : 'recommend';
+  }
+}
+
+/**
+ * Keep a standing agent's profile autonomy in lockstep with `roster.autonomyLevel`
+ * (ADR 0101). Called when the roster level changes (the Edit-details modal) so the
+ * stored `profile.autonomy.{level,specLevel}` — read by the assistant + knowledge
+ * enforcement seams — never goes stale. No-op when no profile exists or the level
+ * already matches. Tenant-guarded (fail-closed cross-tenant).
+ */
+export async function syncAgentProfileAutonomy(
+  tenantId: string,
+  profileId: string,
+  level: RosterLevel,
+): Promise<void> {
+  const existing = await getAgentProfile(tenantId, profileId);
+  if (!existing || existing.autonomy.level === level) return;
+  const specLevel = specLevelForLevel(level, existing.autonomy.specLevel);
+  await profiles.put({
+    ...existing,
+    autonomy: { ...existing.autonomy, level, specLevel },
+    updatedAt: nowIso(),
+  });
+}
+
 /** Input to {@link upsertAgentProfile}. `autonomy.level` is optional — when
  *  omitted it is derived from `autonomy.specLevel` via {@link levelForSpecLevel}. */
 export interface AgentProfileInput {
@@ -91,6 +132,23 @@ export async function getAgentProfile(tenantId: string, profileId: string): Prom
   return profile;
 }
 
+/**
+ * Resolve a standing agent's tool `permissions` for the ADR 0102 per-tool gate.
+ * Only a STANDING (roster) agent carries a profile, and its `rosterId` IS its
+ * dispatchable `agentId` (the `host:<slug>` form) — so a `host:`-prefixed agentId
+ * keys the profile directly. A pack/manifest agent (no `host:` prefix) has no
+ * profile ⇒ `undefined`, leaving the per-tool gate correctly ungated. Tenant-
+ * scoped + fail-closed (a foreign / unknown / deleted agent ⇒ `undefined`).
+ */
+export async function resolveAgentToolPermissions(
+  tenantId: string,
+  agentId: string,
+): Promise<AgentProfile['permissions'] | undefined> {
+  if (!agentId.startsWith('host:')) return undefined;
+  const profile = await getAgentProfile(tenantId, agentId);
+  return profile?.permissions;
+}
+
 /** Create-or-replace a profile for `profileId` under `tenantId`. Preserves the
  *  original `createdAt` on update; always bumps `updatedAt`. The enforced
  *  autonomy `level` is derived from `specLevel` when not explicitly provided. */
@@ -104,11 +162,19 @@ export async function upsertAgentProfile(
   const prior = existing && existing.tenantId === tenantId ? existing : undefined;
   const now = nowIso();
   const level = input.autonomy.level ?? levelForSpecLevel(input.autonomy.specLevel);
+  // `capabilities`, `knowledge`, and `twin` are owned by OTHER subsystems
+  // (capability activation, the ADR 0038 knowledge curator, ADR 0044 twin grants),
+  // not the governance/profile editor. A full-replace PUT from that editor doesn't
+  // resend them — so PRESERVE the prior values when the input omits them, or a
+  // profile edit would silently wipe an agent's activated capabilities / knowledge
+  // bindings / twin link (ADR 0101 data-preservation).
   const profile: AgentProfile = {
     profileId,
     tenantId,
     roleKey: input.roleKey,
-    ...(input.capabilities !== undefined ? { capabilities: input.capabilities } : {}),
+    ...(input.capabilities !== undefined
+      ? { capabilities: input.capabilities }
+      : prior?.capabilities !== undefined ? { capabilities: prior.capabilities } : {}),
     ...(input.department !== undefined ? { department: input.department } : {}),
     ...(input.configParameters !== undefined ? { configParameters: input.configParameters } : {}),
     ...(input.permissions !== undefined ? { permissions: input.permissions } : {}),
@@ -119,7 +185,10 @@ export async function upsertAgentProfile(
     ...(input.riskCompliance !== undefined ? { riskCompliance: input.riskCompliance } : {}),
     ...(input.requiredConnections !== undefined ? { requiredConnections: input.requiredConnections } : {}),
     ...(input.metrics !== undefined ? { metrics: input.metrics } : {}),
-    ...(input.knowledge !== undefined ? { knowledge: input.knowledge } : {}),
+    ...(input.knowledge !== undefined
+      ? { knowledge: input.knowledge }
+      : prior?.knowledge !== undefined ? { knowledge: prior.knowledge } : {}),
+    ...(prior?.twin !== undefined ? { twin: prior.twin } : {}),
     autonomy: {
       level,
       specLevel: input.autonomy.specLevel,
@@ -202,6 +271,24 @@ export async function setAgentKnowledge(
   return updated;
 }
 
+/** Set or clear the digital-twin LINK on an agent's profile (ADR 0044) — `twin`
+ *  set ⇒ this agent is a twin of that user; `null` ⇒ unlinked. Creates a minimal
+ *  profile from `init` if none exists. The link grants NO memory access by itself
+ *  (a user-issued `TwinGrant` is the authorization — `twinService`). Tenant-scoped. */
+export async function setAgentTwin(
+  tenantId: string,
+  profileId: string,
+  twin: AgentProfile['twin'] | null,
+  init: { roleKey: string; autonomy: AgentProfileInput['autonomy'] },
+): Promise<AgentProfile> {
+  let existing = await getAgentProfile(tenantId, profileId);
+  if (!existing) existing = await upsertAgentProfile(tenantId, profileId, init);
+  const updated: AgentProfile = { ...existing, updatedAt: nowIso() };
+  if (twin) updated.twin = twin; else delete updated.twin;
+  await profiles.put(updated);
+  return updated;
+}
+
 /** Delete an agent's profile (incl. its capability activations + ADR 0038
  *  knowledge bindings, which live on the profile). Tenant-guarded (fail-closed:
  *  a cross-tenant profile is not deleted). Used by the roster cascade so a
@@ -210,6 +297,33 @@ export async function deleteAgentProfile(tenantId: string, profileId: string): P
   const existing = await profiles.get(profileId);
   if (!existing || existing.tenantId !== tenantId) return false;
   return profiles.delete(profileId);
+}
+
+/**
+ * One-shot backfill (ADR 0102): ensure every EXISTING profile that already
+ * carries a tool `permissions` allowlist also permits the given read tokens
+ * (the host's builtin tool namespaces), so flipping the per-tool gate on doesn't
+ * block legitimate builtin tool calls. Adds only the MISSING tokens to
+ * `permissions.read` (idempotent set-union — safe under concurrent migration
+ * runners + a no-op on re-run). Profiles with NO `permissions` block stay
+ * ungated (untouched). Returns the number of profiles updated.
+ */
+export async function backfillProfileReadPermissions(readTokens: readonly string[]): Promise<number> {
+  const all = await profiles.list();
+  let updated = 0;
+  for (const p of all) {
+    if (!p.permissions) continue;
+    const read = p.permissions.read ?? [];
+    const missing = readTokens.filter((tok) => !read.includes(tok));
+    if (missing.length === 0) continue;
+    await profiles.put({
+      ...p,
+      permissions: { ...p.permissions, read: [...read, ...missing] },
+      updatedAt: nowIso(),
+    });
+    updated += 1;
+  }
+  return updated;
 }
 
 /** Test-only: drop all profiles. */

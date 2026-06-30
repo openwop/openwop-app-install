@@ -18,6 +18,14 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { scrubSecretShaped } from '../../host/redactSecrets.js';
 import { safeUrl } from '../../host/boundedStrings.js';
+import { declarePiiFields } from '../../host/dataClassification.js';
+import { registerRetentionPurger, purgeRowsByAge } from '../../host/retentionPurger.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+
+// ADR 0081 P5 — a profile is descriptive person data: `bio` + `contact.location` are
+// free-text personal data (declare for log-masking, ADR 0077). `jobTitle`/`department`
+// are org attributes, not personal data.
+declarePiiFields('profiles.profile', ['bio', 'location']);
 
 export type AvailabilityStatus = 'available' | 'busy' | 'away';
 
@@ -69,6 +77,20 @@ export interface Profile {
    *  sub-menu under "Agents"). A pure per-user UI preference — confers no
    *  authority; an unresolvable id is simply skipped when the sidebar renders. */
   pinnedAgentIds: string[];
+  /** Roster member ids the user has PINNED to the AI-chat welcome panel (the
+   *  "hand it to an agent" row). Independent of `pinnedAgentIds` (the two pin
+   *  targets are separate). Optional for back-compat with profiles stored before
+   *  this field; read with `?? []`. Same no-authority / skip-unresolvable rules. */
+  pinnedChatAgentIds?: string[];
+  /** ADR 0042 — the human's knowledge binding (a REFERENCE, never content):
+   *  bound KB `collectionIds` (cited docs live in `kbService`, ADR 0011) +
+   *  optional retrieval tuning. Mirrors `agentProfile.knowledge`. The descriptive
+   *  Profile record holds only the pointers (ADR 0005 descriptive-only boundary);
+   *  the documents + notes themselves live in KB + the `user:<id>` memory scope. */
+  knowledge?: {
+    collectionIds?: string[];
+    retrieval?: { topK?: number; sources?: ('kb' | 'memory')[] };
+  };
   createdAt: string;
   updatedAt: string;
   updatedBy?: string;
@@ -85,7 +107,8 @@ export interface ProfileView extends Profile {
   displayName?: string;
 }
 
-const store = new DurableCollection<Profile>('profiles:profile', (p) => p.userId);
+// GOV-1: `tenantOf` arms the tenant secondary index (bounded retention-purge scan).
+const store = new DurableCollection<Profile>('profiles:profile', (p) => p.userId, undefined, (p) => p.tenantId);
 
 const MAX = { short: 120, bio: 2000, list: 64, item: 120, links: 16, url: 2048 } as const;
 
@@ -110,6 +133,7 @@ function emptyProfile(tenantId: string, userId: string): Profile {
     interests: [],
     workflows: [],
     pinnedAgentIds: [],
+    pinnedChatAgentIds: [],
     createdAt: ts,
     updatedAt: ts,
   };
@@ -140,6 +164,7 @@ export function viewProfile(p: Profile, opts: { emailVerified?: boolean; display
     // Back-compat: rows stored before ADR 0025 lack `workflows` — normalize to [].
     workflows: p.workflows ?? [],
     pinnedAgentIds: p.pinnedAgentIds ?? [],
+    pinnedChatAgentIds: p.pinnedChatAgentIds ?? [],
     completeness: computeCompleteness(p),
     ...(opts.emailVerified !== undefined ? { emailVerified: opts.emailVerified } : {}),
     ...(opts.displayName !== undefined ? { displayName: opts.displayName } : {}),
@@ -167,18 +192,29 @@ export async function getOrCreateProfile(tenantId: string, userId: string): Prom
  *  the caller can only pin agents that exist in their tenant (checked at the
  *  route). Capped to keep the sub-menu sane. */
 const MAX_PINNED = 12;
+/** Where a pin lands: the sidebar sub-menu (`sidebar`) or the AI-chat welcome
+ *  "hand it to an agent" row (`chat`). The two are independent. */
+export type PinTarget = 'sidebar' | 'chat';
+const PIN_FIELD: Record<PinTarget, 'pinnedAgentIds' | 'pinnedChatAgentIds'> = {
+  sidebar: 'pinnedAgentIds',
+  chat: 'pinnedChatAgentIds',
+};
+
 export async function setAgentPinned(
   tenantId: string,
   userId: string,
   rosterId: string,
   pinned: boolean,
+  target: PinTarget = 'sidebar',
 ): Promise<Profile> {
   const current = await getOrCreateProfile(tenantId, userId);
-  const have = new Set(current.pinnedAgentIds ?? []);
+  const field = PIN_FIELD[target];
+  const list = current[field] ?? [];
+  const have = new Set(list);
   if (pinned) {
     if (!have.has(rosterId)) {
-      const next = [...(current.pinnedAgentIds ?? []), rosterId].slice(-MAX_PINNED);
-      const updated: Profile = { ...current, pinnedAgentIds: next, updatedAt: nowIso(), updatedBy: userId };
+      const next = [...list, rosterId].slice(-MAX_PINNED);
+      const updated: Profile = { ...current, [field]: next, updatedAt: nowIso(), updatedBy: userId };
       await store.put(updated);
       return updated;
     }
@@ -187,7 +223,7 @@ export async function setAgentPinned(
   if (have.has(rosterId)) {
     const updated: Profile = {
       ...current,
-      pinnedAgentIds: (current.pinnedAgentIds ?? []).filter((id) => id !== rosterId),
+      [field]: list.filter((id) => id !== rosterId),
       updatedAt: nowIso(),
       updatedBy: userId,
     };
@@ -195,6 +231,23 @@ export async function setAgentPinned(
     return updated;
   }
   return current;
+}
+
+/** Merge a `knowledge` binding patch into the caller's own profile (ADR 0042) —
+ *  the human counterpart of `setAgentKnowledge`. Shallow-merges onto the existing
+ *  `knowledge` block (an explicit field replaces; absent fields are left). The
+ *  binding stores only references (collectionIds); cited docs live in `kbService`.
+ *  Self-owned — the route resolves the caller's own `userId`. Tenant-scoped. */
+export async function setProfileKnowledge(
+  tenantId: string,
+  userId: string,
+  patch: NonNullable<Profile['knowledge']>,
+): Promise<Profile> {
+  const current = await getOrCreateProfile(tenantId, userId);
+  const merged: NonNullable<Profile['knowledge']> = { ...(current.knowledge ?? {}), ...patch };
+  const updated: Profile = { ...current, knowledge: merged, updatedAt: nowIso(), updatedBy: userId };
+  await store.put(updated);
+  return updated;
 }
 
 /** Remove one or more agents from EVERY profile's pinned list in this tenant —
@@ -207,9 +260,11 @@ export async function unpinAgentsForTenant(tenantId: string, rosterIds: string[]
   const drop = new Set(rosterIds);
   for (const p of await listProfiles(tenantId)) {
     const pinned = p.pinnedAgentIds ?? [];
-    const next = pinned.filter((id) => !drop.has(id));
-    if (next.length !== pinned.length) {
-      await store.put({ ...p, pinnedAgentIds: next, updatedAt: nowIso(), updatedBy: 'system' });
+    const chat = p.pinnedChatAgentIds ?? [];
+    const nextPinned = pinned.filter((id) => !drop.has(id));
+    const nextChat = chat.filter((id) => !drop.has(id));
+    if (nextPinned.length !== pinned.length || nextChat.length !== chat.length) {
+      await store.put({ ...p, pinnedAgentIds: nextPinned, pinnedChatAgentIds: nextChat, updatedAt: nowIso(), updatedBy: 'system' });
     }
   }
 }
@@ -440,6 +495,36 @@ export async function setEndorsement(
 }
 
 export const SKILLS_LIMIT = MAX_SKILLS;
+
+// ADR 0081 P5 — time-based retention (ADR 0077 seam). Delete this tenant's profiles NOT
+// touched within the window — age on `updatedAt` (dormant descriptive data; a profile
+// re-materializes empty on the next read, so this drops stale PII without breaking an
+// active user). No-op on a falsy tenant / non-PII classification (fail-closed).
+registerRetentionPurger({
+  feature: 'profiles',
+  async purge(tenantId, classification, cutoffIso) {
+    if (!tenantId || classification !== 'confidential-pii') return 0;
+    return purgeRowsByAge('profiles', await store.listForTenantIndexed(tenantId), tenantId, cutoffIso,
+      (p) => ({ tenantId: p.tenantId, updatedAt: p.updatedAt, id: p.userId }),
+      (id) => store.delete(id));
+  },
+});
+
+// GDPR data-subject erasure (subject-erasure seam, ADR 0077 / ADR 0081 follow-up): a
+// profile IS the descriptive PII of the person identified by `userId`, and a DSAR
+// `subjectKey` is documented as an anon id OR a `User.userId` — so when it is the userId,
+// `subjectKey === profile.userId` is exactly "this subject's own profile". Tenant-guarded
+// (never a foreign-tenant delete), fail-closed on a falsy subject. Returns whether a row
+// was deleted. The complement of the time-based purger above (erase-by-subject, age-blind).
+export async function deleteSubjectProfile(tenantId: string, subjectKey: string): Promise<boolean> {
+  if (!subjectKey) return false;
+  const p = await store.get(subjectKey);
+  if (!p || p.tenantId !== tenantId) return false; // fail-closed, tenant-scoped
+  return store.delete(subjectKey);
+}
+
+const profileEraser = async (tenantId: string, subjectKey: string): Promise<void> => { await deleteSubjectProfile(tenantId, subjectKey); };
+registerSubjectEraser(profileEraser);
 
 // ── Test-only reset ─────────────────────────────────────────────────────────
 export async function __resetProfiles(): Promise<void> {

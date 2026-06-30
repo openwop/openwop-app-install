@@ -13,6 +13,24 @@
 
 terraform {
   required_version = ">= 1.5"
+
+  # CC-5 (CODEBASE-ASSESSMENT.md) — PRODUCTION HARDENING CHECKLIST. This file is
+  # a syntax-reviewed eval scaffold (default VPC, public Fargate task). Before a
+  # real apply, an operator SHOULD:
+  #   1. Configure a REMOTE STATE backend with locking — local terraform.tfstate
+  #      embeds the generated DB password in plaintext. Uncomment + fill:
+  #        backend "s3" {
+  #          bucket         = "<your-tfstate-bucket>"
+  #          key            = "openwop-app/terraform.tfstate"
+  #          region         = "<region>"
+  #          dynamodb_table = "<your-lock-table>"
+  #          encrypt        = true
+  #        }
+  #   2. Put the Fargate task + RDS in PRIVATE subnets behind a NAT gateway and
+  #      set assign_public_ip = false (see the ECS service below).
+  #   3. Require HTTPS: provide acm_certificate_arn so the ALB terminates TLS
+  #      (the HTTP-only listener is dev/eval only).
+  #   4. Set skip_final_snapshot = false for any environment whose data matters.
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -120,7 +138,7 @@ resource "aws_db_instance" "pg" {
   username               = var.db_username
   password               = random_password.db.result
   vpc_security_group_ids = [aws_security_group.db.id]
-  skip_final_snapshot    = true
+  skip_final_snapshot    = true # CC-5: eval convenience — set false where data matters
   publicly_accessible    = false
   tags                   = local.tags
 }
@@ -344,6 +362,8 @@ resource "aws_ecs_service" "app" {
   network_configuration {
     subnets          = data.aws_subnets.default.ids
     security_groups  = [aws_security_group.app.id]
+    # CC-5: public IP is for the default-VPC eval path (no NAT). For production,
+    # use private subnets + a NAT gateway and set this to false.
     assign_public_ip = true
   }
 

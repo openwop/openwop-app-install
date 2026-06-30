@@ -1,0 +1,30 @@
+{
+  "name": "feature.campaign-orchestration.nodes",
+  "version": "1.0.0",
+  "description": "Campaign Studio orchestration node pack (ADR 0158 / ADR 0014) — the post-generation pipeline: `consistency-check` (scores generated channel drafts against the messaging kernel, ≥80 advisory) and `finalize` (creates the MarketingCampaign from a confirmed brief over ctx.features['campaign-orchestration']). Used by the parent orchestration workflow + the Campaign Strategist.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-studio", "orchestration", "consistency", "finalize", "marketing"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-orchestration.nodes.consistency-check",
+      "version": "1.0.0",
+      "label": "Campaign: Consistency Check",
+      "description": "Scores cross-asset messaging consistency — how well each generated channel draft echoes the brief's messaging kernel (≥80 advisory). Inputs: { briefId, drafts? }. Output: { report }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-orchestration.nodes.finalize",
+      "version": "1.0.0",
+      "label": "Campaign: Finalize",
+      "description": "Creates (or updates) the MarketingCampaign from a confirmed brief — one campaign per brief — over ctx.features['campaign-orchestration']. Inputs: { briefId }. Output: { campaign }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

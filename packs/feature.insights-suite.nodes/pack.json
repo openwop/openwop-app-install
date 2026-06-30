@@ -1,0 +1,30 @@
+{
+  "name": "feature.insights-suite.nodes",
+  "version": "1.0.0",
+  "description": "Insights & Drafting Agent Suite node pack (ADR 0078) — pure compute building blocks the suite's meta-workflows use. variance-compute (Actual-vs-Plan for store sales/margin/labor/shrink, flags off-plan metrics) and talent-score (9-box performance×potential readiness). No host surface, no external egress — deterministic math, replay-safe.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "insights-suite", "variance", "talent", "9-box"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.insights-suite.nodes.variance-compute",
+      "version": "1.0.0",
+      "label": "Variance: Actual vs Plan",
+      "description": "Computes Actual-vs-Plan deltas + percentages for a business unit's sales/margin/labor/shrink and flags metrics beyond a threshold. Pure compute.",
+      "category": "data",
+      "role": "pure",
+      "capabilities": ["cacheable"]
+    },
+    {
+      "typeId": "feature.insights-suite.nodes.talent-score",
+      "version": "1.0.0",
+      "label": "Talent: 9-box readiness",
+      "description": "Maps a person's performance (1-3) × potential (1-3) to a 9-box cell + a readiness category. Pure compute.",
+      "category": "data",
+      "role": "pure",
+      "capabilities": ["cacheable"]
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

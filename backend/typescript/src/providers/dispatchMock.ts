@@ -50,6 +50,10 @@ interface ProgramState {
    *  last-dispatch-budget` to verify RFC 0033 §B truncation-budget
    *  multiplication landed. */
   lastReceivedMaxTokens: number | null;
+  /** Records the messages array the most recent call received, so a test can
+   *  assert what reached the prompt (e.g. a board's injected strategy context or
+   *  owner-subject knowledge). In-memory + conformance-gated like the rest. */
+  lastReceivedMessages: ReadonlyArray<{ role: string; content: string }> | null;
 }
 
 const programs = new Map<string, ProgramState>();
@@ -60,7 +64,7 @@ const programs = new Map<string, ProgramState>();
  *  fixture's unique nodeId is sufficient to avoid cross-test
  *  collisions. Each new program seed REPLACES the previous queue. */
 export function programMock(nodeId: string, program: MockProgram): void {
-  programs.set(nodeId, { program, cursor: 0, lastReceivedMaxTokens: null });
+  programs.set(nodeId, { program, cursor: 0, lastReceivedMaxTokens: null, lastReceivedMessages: null });
 }
 
 /** Wipe all programs. Called between conformance scenarios. */
@@ -73,6 +77,12 @@ export function resetMockPrograms(): void {
  *  isn't seeded. */
 export function lastReceivedMaxTokens(nodeId: string): number | null {
   return programs.get(nodeId)?.lastReceivedMaxTokens ?? null;
+}
+
+/** Return the messages the most-recent mock dispatch for `nodeId` received (the
+ *  composed system prompt + prior turns). `null` when no call has fired. */
+export function lastReceivedMessages(nodeId: string): ReadonlyArray<{ role: string; content: string }> | null {
+  return programs.get(nodeId)?.lastReceivedMessages ?? null;
 }
 
 /** Dispatch entry point. Returns a `DispatchResult`-shaped value built
@@ -89,16 +99,27 @@ export async function dispatchMock(req: DispatchRequest & { nodeId?: string }): 
   // Record the maxTokens for the §B truncation-budget assertion.
   if (state) {
     state.lastReceivedMaxTokens = req.maxTokens ?? null;
+    state.lastReceivedMessages = req.messages.map((m) => ({ role: m.role, content: typeof m.content === 'string' ? m.content : JSON.stringify(m.content) }));
   }
   const behavior: MockBehavior =
     state !== undefined && state.cursor < state.program.length
       ? state.program[state.cursor++]!
       : {};
 
+  const completion = behavior.refusalText ?? behavior.content ?? '';
+  // ADR 0079 — stream the canned reply so the mock/test/demo path exercises the
+  // streaming UI. Deterministic word-chunks; best-effort (a callback throw must
+  // not fail the dispatch).
+  if (req.onDelta && completion.length > 0) {
+    for (const chunk of completion.match(/\S+\s*|\s+/g) ?? []) {
+      try { await req.onDelta(chunk); } catch { /* best-effort delta */ }
+    }
+  }
+
   return {
     provider: 'mock',
     model: req.model || 'mock-mini',
-    completion: behavior.refusalText ?? behavior.content ?? '',
+    completion,
     usage: {
       inputTokens: behavior.inputTokens ?? 100,
       outputTokens: behavior.outputTokens ?? 50,

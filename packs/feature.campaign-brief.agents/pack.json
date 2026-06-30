@@ -1,0 +1,30 @@
+{
+  "name": "feature.campaign-brief.agents",
+  "version": "1.0.0",
+  "description": "Personas & Campaign Brief agent pack (ADR 0156 / ADR 0014) — the Campaign Brief Strategist, a manifest agent whose tools are feature.campaign-brief.nodes over ctx.features['campaign-brief']. It validates a brief and generates the grounded messaging kernel from the AI chat. Tool-allowlisted to the Campaign Brief surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-brief", "agent", "strategist", "kernel", "marketing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.campaign-brief.agents.brief-strategist",
+      "persona": "RESEARCH",
+      "label": "Campaign Brief Strategist",
+      "description": "Validates a campaign brief and generates its messaging kernel — the shared strategic foundation every channel echoes — grounded in the knowledge base and brand voice, via feature.campaign-brief.nodes. Recommends; the human approves the kernel.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/brief-strategist.md",
+      "toolAllowlist": [
+        "openwop:feature.campaign-brief.nodes.validate",
+        "openwop:feature.campaign-brief.nodes.generate-kernel"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

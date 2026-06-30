@@ -21,6 +21,7 @@
 
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { Trans, useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
 import { XIcon } from '../ui/icons/index.js';
 import { isRecord } from './lib/typeGuards.js';
@@ -31,9 +32,15 @@ interface Props {
   label: string;
   output: unknown;
   onClose: () => void;
+  /** ADR 0069 — when this node's output is backed by a DURABLE artifact, the
+   *  preview offers to open the full workbench (revisions, diff, provenance)
+   *  instead of being a transient heuristic view. */
+  artifactId?: string;
+  onOpenWorkbench?: (artifactId: string) => void;
 }
 
-export function ArtifactPreviewModal({ open, nodeId, label, output, onClose }: Props): JSX.Element | null {
+export function ArtifactPreviewModal({ open, nodeId, label, output, onClose, artifactId, onOpenWorkbench }: Props): JSX.Element | null {
+  const { t } = useTranslation('chat');
   if (!open) return null;
 
   const { body, format } = pickPrimaryView(output);
@@ -44,13 +51,22 @@ export function ArtifactPreviewModal({ open, nodeId, label, output, onClose }: P
       <header className="artifact-header">
         <h2 className="u-m-0 u-fs-16">{label}</h2>
         <span className="muted u-fs-12">
-          node <code>{nodeId}</code>
+          <Trans i18nKey="nodeLabel" ns="chat" values={{ nodeId }} components={{ 1: <code /> }} />
         </span>
+        {artifactId && onOpenWorkbench ? (
+          <button
+            type="button"
+            onClick={() => onOpenWorkbench(artifactId)}
+            className="btn-accent-solid btn-sm u-ml-auto"
+          >
+            {t('artifactOpenWorkbench')}
+          </button>
+        ) : null}
         <button
           type="button"
           onClick={onClose}
-          aria-label="Close preview"
-          className="secondary u-ml-auto u-iflex u-items-center"
+          aria-label={t('closePreview')}
+          className={`secondary u-iflex u-items-center${artifactId && onOpenWorkbench ? '' : ' u-ml-auto'}`}
         >
           <XIcon size={14} />
         </button>
@@ -68,11 +84,11 @@ export function ArtifactPreviewModal({ open, nodeId, label, output, onClose }: P
         )}
         <details>
           <summary className="muted u-fs-12 u-cursor-pointer u-mb-2">
-            Raw output JSON
+            {t('rawOutputJson')}
           </summary>
           <pre
             tabIndex={0}
-            aria-label="Raw output JSON"
+            aria-label={t('rawOutputJson')}
             className="artifact-json-pre"
           >
             {rawJson}

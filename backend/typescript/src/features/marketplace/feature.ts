@@ -38,7 +38,7 @@ export const marketplaceFeature: BackendFeature = {
     salt: 'marketplace',
   },
   requiredPacks: [
-    { name: 'feature.marketplace.nodes', version: '1.0.0' },
+    { name: 'feature.marketplace.nodes', version: '1.1.0' },
     { name: 'feature.marketplace.agents', version: '1.0.0' },
   ],
 };

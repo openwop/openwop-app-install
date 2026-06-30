@@ -25,7 +25,7 @@ export const analyticsFeature: BackendFeature = {
     salt: 'analytics',
   },
   requiredPacks: [
-    { name: 'feature.analytics.nodes', version: '1.0.0' },
+    { name: 'feature.analytics.nodes', version: '1.1.0' },
     { name: 'feature.analytics.agents', version: '1.0.0' },
   ],
 };

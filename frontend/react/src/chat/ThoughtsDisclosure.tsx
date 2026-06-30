@@ -16,9 +16,12 @@
  * no animation library is needed.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useTranslation } from 'react-i18next';
 import type { ChatMessageThoughts } from './hooks/useChatSession.js';
 import { useElapsedMs } from './hooks/useElapsedMs.js';
+import { useStreamCadence } from './hooks/useStreamCadence.js';
+import { formatDurationMs } from '../i18n/format.js';
 import { ChevronRightIcon, ChevronDownIcon } from '../ui/icons/index.js';
 
 interface Props {
@@ -26,26 +29,20 @@ interface Props {
 }
 
 const ANIM_STYLE_ID = 'openwop-thoughts-anim';
+// The in-flight dots now use the shared `.think-dot` grammar (global.css),
+// cadenced via --think-dur — so reasoning and bare-thinking pulse identically.
+// Only the panel fade-in + chevron rotation remain disclosure-specific.
 const ANIM_STYLE = `
 @media (prefers-reduced-motion: no-preference) {
-  @keyframes openwop-thoughts-dot {
-    0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
-    40%           { opacity: 1;    transform: translateY(-2px); }
-  }
   @keyframes openwop-thoughts-fade-in {
     from { opacity: 0; transform: translateY(-4px); }
     to   { opacity: 1; transform: translateY(0); }
   }
-  .openwop-thoughts-dot { animation: openwop-thoughts-dot 1.2s ease-in-out infinite; display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: currentColor; margin: 0 1px; }
-  .openwop-thoughts-dot:nth-child(1) { animation-delay: 0s; }
-  .openwop-thoughts-dot:nth-child(2) { animation-delay: 0.15s; }
-  .openwop-thoughts-dot:nth-child(3) { animation-delay: 0.3s; }
   .openwop-thoughts-panel { animation: openwop-thoughts-fade-in 0.18s ease-out; }
   .openwop-thoughts-chevron { transition: transform 0.18s ease-out; display: inline-block; }
   .openwop-thoughts-chevron.open { transform: rotate(90deg); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .openwop-thoughts-dot { display: inline-block; width: 4px; height: 4px; border-radius: 50%; background: currentColor; margin: 0 1px; opacity: 0.5; }
   .openwop-thoughts-chevron { display: inline-block; }
   .openwop-thoughts-chevron.open { transform: rotate(90deg); }
 }
@@ -61,20 +58,19 @@ function ensureAnimStyles(): void {
 }
 
 function formatDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
-  const mins = Math.floor(ms / 60_000);
-  const secs = Math.floor((ms % 60_000) / 1000);
-  return `${mins}m ${secs}s`;
+  return formatDurationMs(ms);
 }
 
 export function ThoughtsDisclosure({ thoughts }: Props): JSX.Element {
+  const { t } = useTranslation('chat');
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isInFlight = thoughts.finishedAt == null;
   const elapsedLive = useElapsedMs(thoughts.startedAt, isInFlight);
   const elapsedFinal = thoughts.durationMs ?? 0;
+  // Reasoning dots pulse at the real reasoning-delta cadence.
+  const cadence = useStreamCadence(thoughts.content.length, isInFlight);
 
   useEffect(() => {
     ensureAnimStyles();
@@ -100,20 +96,20 @@ export function ThoughtsDisclosure({ thoughts }: Props): JSX.Element {
 
   const summaryLine = isInFlight ? (
     <span className="u-iflex u-items-center u-gap-1-5">
-      <span>Thinking</span>
-      <span aria-hidden className="u-iflex u-items-baseline">
-        <span className="openwop-thoughts-dot" />
-        <span className="openwop-thoughts-dot" />
-        <span className="openwop-thoughts-dot" />
+      <span>{t('thinkingLabel')}</span>
+      <span aria-hidden className="think-dots u-gap-0-5" style={{ '--think-dur': cadence } as CSSProperties}>
+        <span className="think-dot" />
+        <span className="think-dot" />
+        <span className="think-dot" />
       </span>
       {elapsedLive > 1000 && (
         <span className="u-ml-1 u-tabular">
-          · {formatDuration(elapsedLive)}
+          {t('thoughtForSeparator', { duration: formatDuration(elapsedLive) })}
         </span>
       )}
     </span>
   ) : (
-    <span>Thought for {formatDuration(elapsedFinal)}</span>
+    <span>{t('thoughtFor', { duration: formatDuration(elapsedFinal) })}</span>
   );
 
   // While in-flight with no buffered content, the disclosure is not
@@ -128,7 +124,7 @@ export function ThoughtsDisclosure({ thoughts }: Props): JSX.Element {
         onClick={canToggle ? () => setOpen((v) => !v) : undefined}
         disabled={!canToggle}
         aria-expanded={open}
-        aria-label={open ? 'Hide reasoning' : 'Show reasoning'}
+        aria-label={open ? t('hideReasoning') : t('showReasoning')}
         className="thoughts-toggle-btn"
         style={{ cursor: canToggle ? 'pointer' : 'default' }}
       >
@@ -150,10 +146,10 @@ export function ThoughtsDisclosure({ thoughts }: Props): JSX.Element {
           <button
             type="button"
             onClick={(e) => { void onCopy(e); }}
-            aria-label="Copy reasoning"
+            aria-label={t('copyReasoning')}
             className="thoughts-copy-btn"
           >
-            {copied ? 'Copied' : 'Copy'}
+            {copied ? t('copied') : t('copy')}
           </button>
           <div className="thoughts-content">{thoughts.content}</div>
           {isInFlight && (

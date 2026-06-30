@@ -6,12 +6,12 @@
  * agent, ingest a document (cited RAG), add a private note (recalled memory),
  * toggle curated notes, and a read-only retrieve.
  *
- * Every route is gated, fail-closed, in this order:
- *   1. toggle `agent-knowledge` ON for the caller        (requireFeatureEnabled)
- *   2. `requireOwnedAgent(:id)` — tenant+agent IDOR       (404 cross-tenant)
- *   3. RBAC — workspace:read (view/retrieve) /
+ * ALWAYS-ON (graduated off the `agent-knowledge` toggle 2026-06-16, ADR 0038
+ * § Correction). Every route is gated, fail-closed, in this order:
+ *   1. `requireOwnedAgent(:id)` — tenant+agent IDOR       (404 cross-tenant)
+ *   2. RBAC — workspace:read (view/retrieve) /
  *      workspace:write (bind/ingest/note/delete)          (403 fail-closed)
- *   4. ADR 0036 — `agentProfile` policy on the WRITE
+ *   3. ADR 0036 — `agentProfile` policy on the WRITE
  *      action class (`knowledge.ingest`/`knowledge.note`/
  *      `knowledge.bind`): `permissions.never` ⇒ 403.
  *
@@ -30,7 +30,7 @@ import { getRosterEntry } from '../../host/rosterService.js';
 import { getAgentProfile } from '../../host/agentProfileService.js';
 import { resolveAgentPolicy } from '../../host/agentPolicyResolver.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
-import { requireFeatureEnabled, requireString } from '../featureRoute.js';
+import { requireString } from '../featureRoute.js';
 import {
   getAgentKnowledge,
   createBoundCollection,
@@ -40,20 +40,18 @@ import {
   ingestFromConnection,
   deleteDocFromAgent,
   addNote,
+  listAgentNotes,
+  removeAgentNote,
   setMemoryWritable,
   retrieveForAgent,
 } from './service.js';
-
-const TOGGLE_ID = 'agent-knowledge';
-const LABEL = 'Agent Knowledge';
 
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
 
 /** Resolve the owning agent, fail-closed (mirrors routes/agentProfile.ts:48): a
  *  missing OR cross-tenant agent yields a generic 404 (never leaks existence in
- *  another tenant). The toggle gate runs FIRST so a disabled feature 404s before
- *  any agent is even resolved. */
+ *  another tenant). This is now the FIRST gate (the feature is always-on). */
 async function requireOwnedAgent(req: Request): Promise<string> {
   const id = req.params.id;
   const entry = await getRosterEntry(id);
@@ -113,7 +111,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   // ── view ──
   app.get(BASE, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:read');
       res.json(await getAgentKnowledge(tenantOf(req), id));
@@ -123,7 +120,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   // ── retrieve (read-only) ──
   app.post(`${BASE}/retrieve`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:read');
       const query = requireString((req.body ?? {})?.query, 'query');
@@ -134,7 +130,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   // ── bindings ──
   app.post(`${BASE}/bindings`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:write');
       await enforceAgentPolicy(req, id, 'knowledge.bind');
@@ -146,7 +141,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/bindings/:collectionId`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:write');
       await enforceAgentPolicy(req, id, 'knowledge.bind');
@@ -158,7 +152,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   // ── create a collection for the agent (org-scoped) ──
   app.post(`${BASE}/collections`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       const orgId = orgOf(req);
       await requireOrgScopeFor(req, orgId, 'workspace:write');
@@ -172,7 +165,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   // ── ingest a document into a bound collection (org-scoped) ──
   app.post(`${BASE}/collections/:collectionId/documents`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       const orgId = orgOf(req);
       await requireOrgScopeFor(req, orgId, 'workspace:write');
@@ -189,7 +181,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   // (409 credential_required). Google Drive is the first supported provider.
   app.post(`${BASE}/collections/:collectionId/documents/from-connection`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       const orgId = orgOf(req);
       await requireOrgScopeFor(req, orgId, 'workspace:write');
@@ -206,7 +197,6 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/collections/:collectionId/documents/:documentId`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       const orgId = orgOf(req);
       await requireOrgScopeFor(req, orgId, 'workspace:write');
@@ -217,9 +207,17 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
   });
 
   // ── private notes (recalled memory) ──
+  // List the agent's curated notes for the Memory tab (ADR 0041). Read scope.
+  app.get(`${BASE}/notes`, async (req, res, next) => {
+    try {
+      const id = await requireOwnedAgent(req);
+      await requireTenantScope(req, 'workspace:read');
+      res.json({ notes: await listAgentNotes(tenantOf(req), id) });
+    } catch (err) { next(err); }
+  });
+
   app.post(`${BASE}/notes`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:write');
       await enforceAgentPolicy(req, id, 'knowledge.note');
@@ -229,10 +227,22 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
+  // Delete a curated note by id (ADR 0041). Write scope + policy; only a curated
+  // note is removable (a dispatch turn-summary is not) ⇒ 404 when none matched.
+  app.delete(`${BASE}/notes/:noteId`, async (req, res, next) => {
+    try {
+      const id = await requireOwnedAgent(req);
+      await requireTenantScope(req, 'workspace:write');
+      await enforceAgentPolicy(req, id, 'knowledge.note');
+      const removed = await removeAgentNote(tenantOf(req), id, req.params.noteId);
+      if (!removed) throw new OpenwopError('not_found', 'Note not found.', 404, { noteId: req.params.noteId });
+      res.status(204).end();
+    } catch (err) { next(err); }
+  });
+
   // ── memory-writable knob ──
   app.put(`${BASE}/memory-writable`, async (req, res, next) => {
     try {
-      await requireFeatureEnabled(req, TOGGLE_ID, LABEL);
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:write');
       const writable = (req.body ?? {})?.writable;

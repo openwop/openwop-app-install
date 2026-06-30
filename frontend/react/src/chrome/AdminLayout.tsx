@@ -1,9 +1,12 @@
 import { useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { ADMIN_NAV_GROUPS, chromeFor, navItemIsActive } from './features.js';
-import { ChevronRightIcon } from '../ui/icons/index.js';
+import { chromeFor, navItemIsActive, GROUP_LABEL_KEYS } from './features.js';
+import { ChevronDownIcon, ChevronRightIcon } from '../ui/icons/index.js';
 import { IconButton } from '../ui/IconButton.js';
-import { useFeatureVisible, useFeatureBadge } from '../featureToggles/FeatureAccessContext.js';
+import { useFeatureBadge } from '../featureToggles/FeatureAccessContext.js';
+import { useResolvedNav } from './navConfig/NavConfigProvider.js';
+import { readCollapsedHeaders, toggleCollapsedHeader } from './navConfig/navCollapseCookie.js';
 
 const COLLAPSE_KEY = 'openwop.admin.railCollapsed';
 
@@ -22,6 +25,8 @@ const COLLAPSE_KEY = 'openwop.admin.railCollapsed';
  * persists the choice per browser.
  */
 export function AdminLayout(): JSX.Element {
+  const { t } = useTranslation('chrome');
+  const { t: tn } = useTranslation('nav');
   const location = useLocation();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     try { return localStorage.getItem(COLLAPSE_KEY) === '1'; } catch { return false; }
@@ -33,39 +38,52 @@ export function AdminLayout(): JSX.Element {
       return next;
     });
   };
-  // Feature-gated admin items hide unless enabled (same predicate as the
-  // workspace Sidebar); a `beta` feature renders a Beta badge.
-  const isVisible = useFeatureVisible();
+  // The effective admin rail (ADR 0139): declared nav overlaid with the menu
+  // config + feature-gated by `resolveNav` (a `beta` feature renders a badge).
   const badgeFor = useFeatureBadge();
-  const navGroups = ADMIN_NAV_GROUPS
-    .map((g) => ({ ...g, items: g.items.filter((item) => isVisible(item.featureId)) }))
-    .filter((g) => g.items.length > 0);
+  const { admin: navGroups } = useResolvedNav();
+  // Per-section collapse (ADR 0139), shared cookie with the workspace rail.
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(() => readCollapsedHeaders());
+  const toggleSection = (id: string) => setCollapsedSections(toggleCollapsedHeader(id));
   // Width chrome still derives from the manifest: a `narrow` admin page (CLI,
   // demo-data) keeps its reading width inside the admin content column.
   const narrow = chromeFor(location.pathname) === 'narrow';
   return (
     <div className={`admin-shell${collapsed ? ' is-collapsed' : ''}`}>
-      <aside className="admin-rail" aria-label="Admin sections">
+      <aside className="admin-rail" aria-label={t('adminSections')}>
         <div className="admin-rail-head">
-          {!collapsed && <div className="admin-rail-title">Admin</div>}
+          {!collapsed && <div className="admin-rail-title">{tn('groupAdmin', { defaultValue: 'Admin' })}</div>}
           <IconButton
             className="admin-rail-toggle"
             onClick={toggle}
-            label={collapsed ? 'Expand admin menu' : 'Collapse admin menu'}
-            aria-pressed={!collapsed}
-            title={collapsed ? 'Expand' : 'Collapse'}
+            label={collapsed ? t('expandAdminMenu') : t('collapseAdminMenu')}
+            aria-pressed={collapsed}
+            title={collapsed ? t('expand') : t('collapse')}
             icon={<ChevronRightIcon size={16} />}
           />
         </div>
-        <nav>
-          {navGroups.map((group) => (
-            <div key={group.label} className="admin-nav-group">
-              {/* The root 'Admin' group (Overview) is header-less — the rail
-                  title already names the tier. Headers also hide when the
-                  rail collapses to the icon strip. */}
-              {group.label !== 'Admin' && !collapsed
-                ? <div className="admin-nav-group-label" aria-hidden>{group.label}</div>
-                : null}
+        <nav aria-label={t('sections')}>
+          {navGroups.map((group) => {
+            const isRoot = group.id === 'Admin';
+            const title = group.custom ? group.label : tn(GROUP_LABEL_KEYS[group.id] ?? '', { defaultValue: group.label });
+            // The root 'Admin' group (Overview) is header-less + never collapses
+            // (the rail title already names the tier). Section toggles also hide
+            // when the rail collapses to the icon strip.
+            const sectionCollapsed = !isRoot && !collapsed && collapsedSections.has(group.id);
+            return (
+            <div key={group.id} className="admin-nav-group">
+              {!isRoot && !collapsed && (
+                <button
+                  type="button"
+                  className="admin-nav-group-label admin-nav-group-toggle"
+                  aria-expanded={!sectionCollapsed}
+                  onClick={() => toggleSection(group.id)}
+                >
+                  <span>{title}</span>
+                  <span className={`admin-nav-group-chevron${sectionCollapsed ? ' is-collapsed' : ''}`} aria-hidden><ChevronDownIcon size={11} /></span>
+                </button>
+              )}
+              {!sectionCollapsed && (
               <ul>
                 {group.items.map((item) => {
                   const Icon = item.icon;
@@ -78,18 +96,22 @@ export function AdminLayout(): JSX.Element {
                         {...(item.end !== undefined ? { end: item.end } : {})}
                         className={`admin-nav-link${active ? ' is-active' : ''}`}
                         {...(active ? { 'aria-current': 'page' as const } : {})}
-                        title={collapsed ? item.label : item.hint}
+                        title={collapsed
+                          ? (item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label)
+                          : (item.hintKey ? tn(item.hintKey, { defaultValue: item.hint }) : item.hint)}
                       >
                         <span className="admin-nav-icon" aria-hidden><Icon size={16} /></span>
-                        <span className="admin-nav-label">{item.label}</span>
+                        <span className="admin-nav-label">{item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label}</span>
                         {badge && !collapsed ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
                       </NavLink>
                     </li>
                   );
                 })}
               </ul>
+              )}
             </div>
-          ))}
+            );
+          })}
         </nav>
       </aside>
       <div className={narrow ? 'admin-content admin-content--narrow' : 'admin-content'}>

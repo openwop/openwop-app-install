@@ -16,6 +16,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { openStorage } from '../src/storage/index.js';
@@ -23,22 +24,21 @@ import { loadUserAgentsIntoRegistry } from '../src/routes/userAgents.js';
 import type { UserAgentRecord } from '../src/types.js';
 
 let server: http.Server;
-const PORT = 18601;
-const BASE = `http://127.0.0.1:${PORT}`;
+let BASE: string;
 const TOKEN = 'dev-token';
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({
-    port: PORT,
+    port: 0,
     storageDsn: 'memory://',
     serviceName: 'test',
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(PORT, res);
+    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -280,6 +280,42 @@ describe('user-authored agents — cross-tenant isolation in GET /v1/agents', ()
     const wildcard = await jsonFetch<{ agents: Array<{ persona: string }> }>('/v1/agents?tenantId=*');
     expect(wildcard.status).toBe(200);
     expect(wildcard.body.agents.some((a) => a.persona === 'Tenant Scoped Probe')).toBe(true);
+  });
+});
+
+// AGENTRT-2 (CTI-1): the GET-by-id routes hide cross-tenant user agents, but the
+// DISPATCH route must ALSO refuse to INVOKE another tenant's private agent by id
+// — otherwise its manifest (system prompt, tool allowlist) is reachable cross-
+// tenant. The refusal uses the same 404 as "absent" so existence never leaks.
+describe('user-authored agents — cross-tenant dispatch gate (AGENTRT-2)', () => {
+  it('refuses to dispatch another tenant\'s agent by id (404), but the owner can', async () => {
+    const created = await jsonFetch<AgentEntry>('/v1/host/openwop-app/agents', {
+      method: 'POST',
+      body: JSON.stringify({
+        persona: 'Dispatch Gate Probe',
+        modelClass: 'chat',
+        systemPrompt: 'Private manifest — only my tenant may invoke me.',
+      }),
+    });
+    expect(created.status).toBe(201);
+    const agentId = created.body.agentId;
+    const dispatchBody = JSON.stringify({ task: {}, validateHandoff: false });
+
+    // A different explicit tenant must NOT be able to invoke it — 404, same
+    // message as an absent agent (no cross-tenant existence leak).
+    const crossTenant = await jsonFetch<{ error: string }>(
+      `/v1/host/openwop-app/agents/${agentId}/dispatch?tenantId=someone-else`,
+      { method: 'POST', body: dispatchBody },
+    );
+    expect(crossTenant.status).toBe(404);
+    expect(crossTenant.body.error).toBe('not_found');
+
+    // The owning tenant (bearer-shared default) CAN dispatch it.
+    const owner = await jsonFetch<{ status: string }>(
+      `/v1/host/openwop-app/agents/${agentId}/dispatch`,
+      { method: 'POST', body: dispatchBody },
+    );
+    expect(owner.status).toBe(200);
   });
 });
 

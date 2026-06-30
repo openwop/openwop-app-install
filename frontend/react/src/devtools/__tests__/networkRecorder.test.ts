@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { redactRequestBody, recorderMode } from '../networkRecorder.js';
+import { redactRequestBody, redactResponseBody, recorderMode } from '../networkRecorder.js';
 
 /**
  * Guards the threat-model-secret-leakage invariant for the in-app network
@@ -44,6 +44,29 @@ describe('networkRecorder redaction (threat-model-secret-leakage)', () => {
   it('passes through undefined / non-JSON bodies unchanged', () => {
     expect(redactRequestBody('/v1/runs', undefined)).toBeUndefined();
     expect(redactRequestBody('/v1/runs', 'not json')).toBe('not json');
+  });
+
+  // Response bodies are mirrored to sessionStorage once prod capture is enabled
+  // (VITE_ENABLE_NETWORK_RECORDER), so they get the same redaction discipline.
+  it('drops the BYOK secrets response body entirely (route-level)', () => {
+    const body = JSON.stringify({ credentialRefs: ['openai:default'] });
+    expect(redactResponseBody('/v1/host/openwop-app/byok/secrets', body)).toBe('[redacted: credential response body]');
+    expect(redactResponseBody('/api/v1/host/openwop-app/byok/secrets', body)).not.toContain('openai');
+  });
+
+  it('scrubs secret-named fields in a response body (defense in depth)', () => {
+    const body = JSON.stringify({ ok: true, token: SECRET, nested: { apiKey: SECRET }, harmless: 1 });
+    const out = redactResponseBody('/v1/host/openwop-app/connections/x', body)!;
+    expect(out).not.toContain(SECRET);
+    expect(out).toContain('harmless');
+    expect(out).toContain('[redacted]');
+  });
+
+  it('leaves benign + non-JSON response bodies untouched', () => {
+    const body = JSON.stringify({ runId: 'r-1', status: 'running' });
+    expect(redactResponseBody('/v1/runs/r-1', body)).toBe(body);
+    expect(redactResponseBody('/v1/runs', undefined)).toBeUndefined();
+    expect(redactResponseBody('/v1/runs', 'not json')).toBe('not json');
   });
 });
 

@@ -210,38 +210,15 @@ export function registerMediaAssetRoutes(app: Express): void {
     res.status(201).json({ ...stored, contentType: 'image/png', prompt, stub: true });
   });
 
-  app.post('/v1/host/openwop-app/media/transcribe', (req, res) => {
-    const body = (req.body ?? {}) as { audioBase64?: unknown; language?: unknown };
-    if (typeof body.audioBase64 !== 'string' || body.audioBase64.length === 0) {
-      res.status(400).json({ error: 'invalid_argument', message: 'audioBase64 (non-empty string) required' });
-      return;
-    }
-    if (body.audioBase64.length > MAX_STORE_BASE64_LEN) {
-      res.status(413).json({ error: 'payload_too_large', message: `audioBase64 exceeds ${MAX_STORE_BASE64_LEN} chars` });
-      return;
-    }
-    const language = typeof body.language === 'string' && body.language ? body.language : 'en';
-    // Deterministic stub transcript: pure function of input size + language.
-    const bytes = Buffer.byteLength(body.audioBase64, 'base64');
-    const text = `[stub transcript] Decoded ${bytes} bytes of ${language} audio. The demo backend stubs speech-to-text so replays stay deterministic.`;
-    res.status(200).json({ text, language, bytes, stub: true });
-  });
-
-  app.post('/v1/host/openwop-app/media/synthesize', async (req, res) => {
-    const tenantId = req.tenantId ?? 'default';
-    const body = (req.body ?? {}) as { text?: unknown; voice?: unknown };
-    const text = typeof body.text === 'string' ? body.text : '';
-    if (text.length === 0) {
-      res.status(400).json({ error: 'invalid_argument', message: 'text (non-empty string) required' });
-      return;
-    }
-    const voice = typeof body.voice === 'string' && body.voice ? body.voice : 'default';
-    const stored = await storeMediaAsset(tenantId, { contentBase64: STUB_WAV_BASE64, contentType: 'audio/wav' });
-    res.status(201).json({ ...stored, contentType: 'audio/wav', voice, characters: text.length, stub: true });
-  });
+  // MEDIA-6 (ADR 0085 OQ-5): the legacy `media/transcribe` + `media/synthesize`
+  // demo routes were RETIRED — superseded by the canonical surfaces (audio/video
+  // transcription rides the notebooks `transcribe-source` node via `ctx.callAI`;
+  // text-to-speech rides the RFC 0105 `ai/call-speech-synthesizer` seam +
+  // `ctx.callSpeechSynthesizer`). They were host-extension only (never advertised,
+  // no FE consumer), so removing them touches no wire and no UI.
 
   log.info('media-asset serve + upload routes registered (GET /v1/host/openwop-app/assets/:token, POST /v1/host/openwop-app/media/upload)');
-  log.info('sample media generation routes registered (POST /v1/host/openwop-app/media/{generate-image,transcribe,synthesize})');
+  log.info('sample media generation route registered (POST /v1/host/openwop-app/media/generate-image)');
 }
 
 // A 1×1 transparent PNG — the deterministic stub the generate-image demo
@@ -249,6 +226,3 @@ export function registerMediaAssetRoutes(app: Express): void {
 const STUB_PNG_1x1_BASE64 =
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-// A minimal silent WAV (44-byte header, zero frames) — the deterministic
-// stub the synthesize demo returns when no live TTS provider is wired.
-const STUB_WAV_BASE64 = 'UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=';

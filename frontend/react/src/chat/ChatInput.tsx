@@ -14,11 +14,16 @@
  *   - Esc (while streaming) → cancel
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { useAudioRecorder, blobToBase64, type RecordedAudio } from './hooks/useAudioRecorder.js';
+import { formatDurationSeconds } from '../i18n/format.js';
 import { SlashAutocomplete } from './SlashAutocomplete.js';
+import { refreshWorkflowMentionCache } from './lib/workflowMentions.js';
 import { AgentMentionAutocomplete } from './AgentMentionAutocomplete.js';
-import { MicIcon, SendIcon, StopIcon, PaperclipIcon, PlusIcon, XIcon, AlertIcon } from '../ui/icons/index.js';
+import { BoardMentionAutocomplete } from './BoardMentionAutocomplete.js';
+import { MicIcon, ActivityIcon, SendIcon, StopIcon, PaperclipIcon, PlusIcon, XIcon, AlertIcon } from '../ui/icons/index.js';
+import { Menu } from '../ui/Menu.js';
 import {
   fileToContentPart,
   attachmentRejectionReason,
@@ -27,6 +32,28 @@ import {
   ATTACHMENT_ACCEPT,
 } from '../client/mediaClient.js';
 import type { ContentPart } from './hooks/useChatSession.js';
+
+/** Draft persistence (crash/refresh safety). The composer's in-progress text is
+ *  mirrored to localStorage under a caller-supplied, surface-stable key so a tab
+ *  refresh or a browser crash restores exactly what the user was typing. This is
+ *  DISTINCT from chat history — a draft never creates a conversation; history is
+ *  only written once a prompt is actually sent. */
+function readDraft(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function writeDraft(key: string, value: string): void {
+  try {
+    if (value) localStorage.setItem(key, value);
+    else localStorage.removeItem(key);
+  } catch {
+    /* quota / disabled — drafts are best-effort */
+  }
+}
 
 interface PendingAudio {
   id: string;
@@ -49,16 +76,35 @@ interface Props {
   placeholder?: string;
   /** Reason the send button is disabled, shown in title tooltip. */
   disabledReason?: string | undefined;
-  /** Hint that the active provider supports audio input. When false,
-   *  the mic still records, but on send we'll surface a clear error
-   *  rather than ship audio to an incompatible model. */
+  /** Hint that the active provider supports audio input. When false, the
+   *  "Send audio" option is hidden (a clip can't be read by this model). */
   supportsAudioInput?: boolean;
+  /** Live-conversation mode (ADR 0147), injected by the composer owner so this
+   *  generic input stays voice-feature-agnostic (structural type — no
+   *  `chat/voice/` import). Absent ⇒ no live mode here (e.g. embeds). */
+  liveVoice?: {
+    available: boolean;
+    active: boolean;
+    phase: string;
+    onToggle: () => void;
+  };
   /** Hint that the active model accepts image input (vision). When false,
    *  an attached image is flagged with a "switch models" warning. */
   supportsImageInput?: boolean;
   /** Hint that the active model accepts PDF documents (Anthropic / Gemini).
    *  Text files (.txt/.md/.json/.csv) inline as text and work everywhere. */
   supportsPdfInput?: boolean;
+  /** Next-message modifiers (web search, workflow tools) rendered as a slim chip
+   *  row above the input bar — they change the message you're about to send, so
+   *  they live with the composer, not in the header. Omitted in surfaces (e.g.
+   *  embeds) that expose no modifiers → the row doesn't render. */
+  leadingControls?: ReactNode;
+  /** Optional localStorage key under which the in-progress text is mirrored so a
+   *  refresh / crash restores it (and re-loaded when the key changes, e.g. on a
+   *  conversation switch). Omit it (embeds) for a non-persisted, ephemeral
+   *  composer. A draft is never chat history — it's cleared the moment the
+   *  message is sent. */
+  draftKey?: string;
 }
 
 export function ChatInput({
@@ -70,8 +116,15 @@ export function ChatInput({
   supportsAudioInput,
   supportsImageInput,
   supportsPdfInput,
+  leadingControls,
+  liveVoice,
+  draftKey,
 }: Props): JSX.Element {
-  const [text, setText] = useState('');
+  const { t } = useTranslation('chat');
+  // Seed from the persisted draft on first mount (no flash) so a refresh/crash
+  // restores in-progress text. The effects below keep it in sync as the user
+  // types and re-load it when `draftKey` changes (conversation switch).
+  const [text, setText] = useState(() => (draftKey ? readDraft(draftKey) : ''));
   const [pendingAudio, setPendingAudio] = useState<PendingAudio | null>(null);
   const [pendingFiles, setPendingFiles] = useState<readonly PendingFile[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
@@ -89,6 +142,33 @@ export function ChatInput({
   }
 
   const recorder = useAudioRecorder();
+
+  // Re-load the draft when the key changes (e.g. switching conversations swaps
+  // in that conversation's own in-progress text). Skips the initial mount —
+  // useState already seeded from the same key — so it never clobbers what the
+  // user is actively typing.
+  const lastDraftKey = useRef(draftKey);
+  useEffect(() => {
+    if (lastDraftKey.current === draftKey) return;
+    lastDraftKey.current = draftKey;
+    setText(draftKey ? readDraft(draftKey) : '');
+  }, [draftKey]);
+
+  // Mirror the live text to localStorage (debounced) so a refresh / crash
+  // restores it. No-op when no key is supplied (ephemeral embeds).
+  useEffect(() => {
+    if (!draftKey) return;
+    const id = setTimeout(() => writeDraft(draftKey, text), 250);
+    return () => clearTimeout(id);
+  }, [draftKey, text]);
+
+  // Warm the workflow @-mention cache from the backend ownership index on
+  // mount (ADR 0163 follow-on) so the caller's REAL owned workflows are
+  // available to the `/` picker AND the LLM tool list before the first send.
+  // Best-effort: failure leaves the demo + localStorage sources untouched.
+  useEffect(() => {
+    void refreshWorkflowMentionCache();
+  }, []);
 
   // Auto-resize: clamp scrollHeight to var(--chat-input-height-max) (120px).
   useEffect(() => {
@@ -155,11 +235,14 @@ export function ChatInput({
         attachments.push(await fileToContentPart(pf.file));
       }
     } catch (err) {
-      setAttachError(err instanceof Error ? err.message : 'Attachment failed.');
+      setAttachError(err instanceof Error ? err.message : t('attachmentFailed'));
       return;
     }
     onSend(text.trim(), attachments.length > 0 ? attachments : undefined);
     setText('');
+    // A sent message is no longer a draft — drop it immediately so a refresh
+    // right after sending doesn't resurrect the just-sent text.
+    if (draftKey) writeDraft(draftKey, '');
     setPendingAudio(null);
     clearPendingFiles(pendingFiles);
     setAttachError(null);
@@ -223,14 +306,37 @@ export function ChatInput({
         }}
         onDismiss={() => { /* dismiss is implicit on text/cursor change */ }}
       />
+      {/* `@@` picker — Boards of Advisors. Mutually exclusive with the `@`
+          agent picker above (single `@` vs `@@` triggers never overlap). */}
+      <BoardMentionAutocomplete
+        text={text}
+        cursorPos={cursorPos}
+        onPick={(newText, newCursorPos) => {
+          setText(newText);
+          requestAnimationFrame(() => {
+            const el = taRef.current;
+            if (!el) return;
+            el.focus();
+            el.setSelectionRange(newCursorPos, newCursorPos);
+            setCursorPos(newCursorPos);
+          });
+        }}
+        onDismiss={() => { /* dismiss is implicit on text/cursor change */ }}
+      />
       {pendingAudio && (
         <div className="u-flex u-items-center u-gap-2 u-pad-6x10 u-mb-1-5 u-bg-surface-2 u-border u-radius u-fs-12">
           <MicIcon size={14} />
           <span className="u-flex-1">
-            Voice attachment ({pendingAudio.audio.durationSeconds.toFixed(1)}s, {pendingAudio.audio.mimeType.split(';')[0]})
+            {t('voiceAttachmentLabel', {
+              duration: formatDurationSeconds(pendingAudio.audio.durationSeconds),
+              mimeType: pendingAudio.audio.mimeType.split(';')[0],
+            })}
             {supportsAudioInput === false && (
-              <span className="u-text-warning u-ml-1-5">
-                — current model doesn't accept audio. Switch to a Gemini model or remove the attachment.
+              <span
+                className="u-text-warning u-ml-1-5"
+                title={t('voiceModelUnsupported')}
+              >
+                {t('voiceModelUnsupportedShort')}
               </span>
             )}
           </span>
@@ -238,9 +344,9 @@ export function ChatInput({
             type="button"
             className="secondary u-pad-2x8 u-fs-11 u-minh-0"
             onClick={() => setPendingAudio(null)}
-            aria-label="Remove voice attachment"
+            aria-label={t('removeVoiceAttachment')}
           >
-            Remove
+            {t('common:remove')}
           </button>
         </div>
       )}
@@ -258,7 +364,7 @@ export function ChatInput({
                 style={{
                   border: `1px solid ${cantSend ? 'var(--color-warning)' : 'var(--color-border)'}`,
                 }}
-                title={cantSend ? "The current model can't read this attachment — switch to a vision/PDF-capable model." : pf.file.name}
+                title={cantSend ? t('cantReadAttachment') : pf.file.name}
               >
                 {pf.isImage && pf.previewUrl ? (
                   <img
@@ -273,14 +379,14 @@ export function ChatInput({
                   {pf.file.name}
                 </span>
                 {cantSend && (
-                  <span className="u-text-warning u-iflex" title="Unsupported by the current model">
+                  <span className="u-text-warning u-iflex" title={t('unsupportedByModel')}>
                     <AlertIcon size={12} />
                   </span>
                 )}
                 <button
                   type="button"
                   onClick={() => removeFile(pf.id)}
-                  aria-label={`Remove ${pf.file.name}`}
+                  aria-label={t('removeNamed', { name: pf.file.name })}
                   className="chatinput-file-remove"
                 >
                   <XIcon size={12} />
@@ -303,6 +409,9 @@ export function ChatInput({
         aria-hidden="true"
         tabIndex={-1}
       />
+      {leadingControls && (
+        <div className="chatinput-modifiers">{leadingControls}</div>
+      )}
       <div className="chatinput-bar">
         <textarea
           ref={taRef}
@@ -313,7 +422,7 @@ export function ChatInput({
           onKeyUp={syncCursor}
           onSelect={syncCursor}
           onClick={syncCursor}
-          placeholder={recorder.isRecording ? 'Recording…' : (placeholder ?? 'Ask anything…')}
+          placeholder={liveVoice?.active ? t('voiceLivePlaceholder') : recorder.isRecording ? t('recordingPlaceholder') : (placeholder ?? t('askAnythingPlaceholder'))}
           disabled={disabled}
           spellCheck={false}
           className="chatinput-textarea"
@@ -322,36 +431,88 @@ export function ChatInput({
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={disabled}
-          title="Attach a file (images, PDF, .txt/.md/.json/.csv)"
-          aria-label="Attach a file"
+          title={t('attachFileTitle')}
+          aria-label={t('attachFile')}
           className="chatinput-attach-btn"
         >
           <PlusIcon size={18} />
         </button>
-        {recorder.isSupported && (
-          <button
-            type="button"
-            onClick={() => { void toggleVoice(); }}
-            disabled={disabled && !recorder.isRecording}
-            title={recorder.isRecording ? 'Stop recording' : 'Record voice attachment'}
-            aria-label={recorder.isRecording ? 'Stop voice recording' : 'Start voice recording'}
-            aria-pressed={recorder.isRecording}
-            className="chatinput-mic-btn"
-            style={{
-              background: recorder.isRecording ? 'var(--color-danger)' : 'var(--color-surface-2)',
-              color: recorder.isRecording ? 'white' : 'var(--color-text)',
-              animation: recorder.isRecording ? 'openwop-mic-pulse 1.2s ease-in-out infinite' : 'none',
-            }}
-          >
-            <MicIcon size={18} />
-          </button>
-        )}
+        {(() => {
+          // ADR 0147 — ONE mic. A clip needs a multimodal model; live needs the
+          // voice feature. Active session → a hot stop button (clay=live,
+          // danger=clip). Idle → a menu when both modes apply, else direct, else
+          // nothing (which subsumes "hide the mic when audio is unsupported").
+          const canSendAudio = recorder.isSupported && supportsAudioInput !== false;
+          const canLive = liveVoice?.available === true;
+          if (liveVoice?.active) {
+            return (
+              <button type="button" onClick={() => liveVoice.onToggle()}
+                title={t('voiceLiveStopTitle')} aria-label={t('voiceLiveStopAria')} aria-pressed
+                className="chatinput-mic-btn is-live">
+                <MicIcon size={18} />
+              </button>
+            );
+          }
+          if (recorder.isRecording) {
+            return (
+              <button type="button" onClick={() => { void toggleVoice(); }}
+                title={t('stopRecordingTitle')} aria-label={t('stopVoiceRecording')} aria-pressed
+                className="chatinput-mic-btn is-recording">
+                <MicIcon size={18} />
+              </button>
+            );
+          }
+          const liveItem = {
+            id: 'live',
+            label: (
+              <span className="u-flex u-items-center u-gap-2">
+                <ActivityIcon size={16} />
+                <span className="u-grid"><span>{t('voiceMenuLive')}</span><span className="u-fs-11 u-text-muted">{t('voiceMenuLiveHint')}</span></span>
+              </span>
+            ),
+            onSelect: () => liveVoice?.onToggle(),
+          };
+          const audioItem = {
+            id: 'audio',
+            label: (
+              <span className="u-flex u-items-center u-gap-2">
+                <MicIcon size={16} />
+                <span className="u-grid"><span>{t('voiceMenuAudio')}</span><span className="u-fs-11 u-text-muted">{t('voiceMenuAudioHint')}</span></span>
+              </span>
+            ),
+            onSelect: () => { void toggleVoice(); },
+          };
+          if (canSendAudio && canLive) {
+            return (
+              <Menu label={t('voiceMenuLabel')} triggerTitle={t('voiceMenuLabel')}
+                triggerClassName="chatinput-mic-btn" triggerContent={<MicIcon size={18} />}
+                items={[liveItem, audioItem]} disabled={disabled ?? false} dropUp />
+            );
+          }
+          if (canSendAudio) {
+            return (
+              <button type="button" onClick={() => { void toggleVoice(); }} disabled={disabled}
+                title={t('recordVoiceTitle')} aria-label={t('startVoiceRecording')} className="chatinput-mic-btn">
+                <MicIcon size={18} />
+              </button>
+            );
+          }
+          if (canLive) {
+            return (
+              <button type="button" onClick={() => liveVoice?.onToggle()} disabled={disabled}
+                title={t('voiceLiveStartTitle')} aria-label={t('voiceLiveStartAria')} className="chatinput-mic-btn">
+                <MicIcon size={18} />
+              </button>
+            );
+          }
+          return null;
+        })()}
         {disabled && onCancel ? (
           <button
             type="button"
             onClick={() => { void onCancel(); }}
-            title="Stop generating (Esc)"
-            aria-label="Stop generating"
+            title={t('stopGeneratingTitle')}
+            aria-label={t('stopGenerating')}
             className="chatinput-stop-btn"
           >
             <StopIcon size={12} />
@@ -362,8 +523,8 @@ export function ChatInput({
             className="btn-accent-solid chatinput-send-btn"
             onClick={() => { void submit(); }}
             disabled={!canSend}
-            title={!canSend && disabledReason ? disabledReason : 'Send (Enter)'}
-            aria-label="Send"
+            title={!canSend && disabledReason ? disabledReason : t('sendTitle')}
+            aria-label={t('send')}
           >
             <SendIcon size={16} />
           </button>

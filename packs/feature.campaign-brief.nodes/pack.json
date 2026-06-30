@@ -1,0 +1,30 @@
+{
+  "name": "feature.campaign-brief.nodes",
+  "version": "1.0.0",
+  "description": "Personas & Campaign Brief node pack (ADR 0156 / ADR 0014) — validate a brief (compute the enabled channel set) and generate the messaging kernel (the shared strategic foundation every channel echoes), grounding it in the knowledge base (kb.rag) + brand voice (ctx.features.brand) via the run-scoped provider. Drives the Campaign Studio orchestration (ADR 0158).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-brief", "kernel", "messaging", "marketing", "grounding"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-brief.nodes.validate",
+      "version": "1.0.0",
+      "label": "Brief: Validate",
+      "description": "Validates a campaign brief's completeness and computes the enabled channel set over ctx.features['campaign-brief']. Inputs: { briefId }. Output: { valid, issues, enabledChannels }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.generate-kernel",
+      "version": "1.0.0",
+      "label": "Brief: Generate Messaging Kernel",
+      "description": "Generates the messaging kernel (headline, supporting statement, proof points, CTAs, tone) for a brief — grounded in the KB (kb.rag citations) and the brand voice (ctx.features.brand.resolve-voice), via the run-scoped ctx.callAI — then persists it on the brief. Inputs: { briefId, provider?, model? }. Output: { kernel }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

@@ -1,0 +1,143 @@
+{
+  "name": "core.openwop.workflows.marketing",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Marketing & Advertising cluster: Full Campaign Launch, Ad Performance Optimization Loop, Content Brief Generator, and Content Repurposing. Reasons with core.ai.chatCompletion over real tenant data (feature.crm / feature.kb / feature.cms / feature.email); binds the ad platforms (Google/Meta Ads) via core.openwop.http.openapi-call connectionRef. The optimization loop routes within-guardrail changes to auto-apply and out-of-guardrail changes to a core.chat.approvalGate via a core.flow.if conditional node (ADR 0149 open-question resolution: a flow conditional, not a new primitive). Every launch/publish/apply is approval- or guardrail-gated; all tenant values are run parameters (replay-deterministic). Published under core.openwop.workflows.* (openwop-team key).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "marketing.campaign-launch",
+      "version": "1.0.0",
+      "label": "Full Campaign Launch",
+      "description": "From a brief: select the audience (CRM), draft ad copy and creative, reference the landing page (CMS), consolidate for review, then launch on the ad platform after approval.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["brief"],
+        "properties": {
+          "brief": { "type": "string", "description": "The campaign brief." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "audience", "typeId": "feature.crm.nodes.list-companies", "name": "Audience select", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "copy", "typeId": "core.ai.chatCompletion", "name": "Ad copy", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write ad copy variants for the campaign brief: {{params.brief}}" }, "inputs": {} },
+          { "id": "creative", "typeId": "core.ai.chatCompletion", "name": "Creative variants", "position": { "x": 320, "y": 140 }, "config": { "systemPrompt": "Propose creative concepts/variants for the campaign brief: {{params.brief}}" }, "inputs": {} },
+          { "id": "page", "typeId": "feature.cms.nodes.list-pages", "name": "Landing page (CMS)", "position": { "x": 320, "y": 280 }, "config": {}, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Consolidated review", "position": { "x": 640, "y": 140 }, "config": {}, "inputs": {} },
+          { "id": "launch", "typeId": "core.openwop.http.openapi-call", "name": "Launch campaign (Google Ads)", "position": { "x": 960, "y": 140 }, "config": { "connectionRef": "core.openwop.connections.google-ads", "operationId": "createCampaign" }, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "audience", "to": "copy" },
+          { "from": "audience", "to": "creative" },
+          { "from": "copy", "to": "review" },
+          { "from": "creative", "to": "review" },
+          { "from": "page", "to": "review" },
+          { "from": "review", "to": "launch" }
+        ]
+      },
+      "outputs": { "campaign": { "type": "string", "description": "The launched campaign." } }
+    },
+    {
+      "chainId": "marketing.ad-optimization",
+      "version": "1.0.0",
+      "label": "Ad Performance Optimization Loop",
+      "description": "Fetch ad metrics, diagnose anomalies and recommend a bid/budget shift, then a core.flow.if guardrail routes within-guardrail changes to auto-apply and out-of-guardrail changes to approval before applying — finally log the learnings. Pair with an hourly scheduled trigger.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "guardrail": { "type": "string", "default": "±10% of current budget", "description": "The auto-apply guardrail; changes beyond it require approval." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "fetch", "typeId": "core.openwop.http.openapi-call", "name": "Fetch ad metrics (Google Ads)", "position": { "x": 0, "y": 60 }, "config": { "connectionRef": "core.openwop.connections.google-ads", "operationId": "getCampaignMetrics" }, "inputs": {} },
+          { "id": "diagnose", "typeId": "core.ai.chatCompletion", "name": "Diagnose + recommend", "position": { "x": 280, "y": 60 }, "config": { "systemPrompt": "Detect anomalies vs thresholds and recommend a bid/budget shift. State whether the change is within the guardrail ({{params.guardrail}})." }, "inputs": {} },
+          { "id": "guard", "typeId": "core.flow.if", "name": "Within guardrail?", "position": { "x": 560, "y": 60 }, "config": {}, "inputs": {} },
+          { "id": "autoApply", "typeId": "core.openwop.http.openapi-call", "name": "Auto-apply (within guardrail)", "position": { "x": 840, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.google-ads", "operationId": "updateCampaignBudget" }, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Approve (beyond guardrail)", "position": { "x": 840, "y": 140 }, "config": {}, "inputs": {} },
+          { "id": "applyReviewed", "typeId": "core.openwop.http.openapi-call", "name": "Apply approved change", "position": { "x": 1120, "y": 140 }, "config": { "connectionRef": "core.openwop.connections.google-ads", "operationId": "updateCampaignBudget" }, "inputs": {} },
+          { "id": "log", "typeId": "core.openwop.integration.notification-push", "name": "Log learnings", "position": { "x": 1400, "y": 60 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "fetch", "to": "diagnose" },
+          { "from": "diagnose", "to": "guard" },
+          { "from": "guard", "to": "autoApply" },
+          { "from": "guard", "to": "review" },
+          { "from": "review", "to": "applyReviewed" },
+          { "from": "autoApply", "to": "log" },
+          { "from": "applyReviewed", "to": "log" }
+        ]
+      },
+      "outputs": { "learnings": { "type": "string", "description": "Applied/queued changes + learnings log." } }
+    },
+    {
+      "chainId": "marketing.content-brief",
+      "version": "1.0.0",
+      "label": "Content Brief Generator",
+      "description": "Gather sources from the knowledge base and synthesize a structured SEO content brief for a topic/keyword.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic"],
+        "properties": {
+          "topic": { "type": "string", "description": "Topic or keyword for the brief." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "gather", "typeId": "feature.kb.nodes.rag", "name": "Gather sources", "position": { "x": 0, "y": 0 }, "config": { "query": "{{params.topic}}" }, "inputs": {} },
+          { "id": "brief", "typeId": "core.ai.chatCompletion", "name": "Structured SEO brief", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Produce a structured SEO content brief for \"{{params.topic}}\" grounded in the gathered sources: intent, outline, key questions, and target keywords." }, "inputs": {} },
+          { "id": "deliver", "typeId": "core.openwop.integration.notification-push", "name": "Deliver brief", "position": { "x": 600, "y": 0 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "gather", "to": "brief" },
+          { "from": "brief", "to": "deliver" }
+        ]
+      },
+      "outputs": { "brief": { "type": "string", "description": "The SEO content brief." } }
+    },
+    {
+      "chainId": "marketing.content-repurposing",
+      "version": "1.0.0",
+      "label": "Content Repurposing",
+      "description": "From a published piece, outline then generate a channel-ready set (LinkedIn, X thread, newsletter), gate for approval, then schedule. Pair with a doc-published event trigger.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceText"],
+        "properties": {
+          "sourceText": { "type": "string", "description": "The source content to repurpose." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "outline", "typeId": "core.ai.chatCompletion", "name": "Outline", "position": { "x": 0, "y": 120 }, "config": { "systemPrompt": "Outline the key angles to repurpose this content across channels. Source: {{params.sourceText}}" }, "inputs": {} },
+          { "id": "linkedin", "typeId": "core.ai.chatCompletion", "name": "LinkedIn post", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Write a LinkedIn post from the outline." }, "inputs": {} },
+          { "id": "xthread", "typeId": "core.ai.chatCompletion", "name": "X thread", "position": { "x": 320, "y": 120 }, "config": { "systemPrompt": "Write an X thread from the outline." }, "inputs": {} },
+          { "id": "newsletter", "typeId": "feature.email.nodes.render", "name": "Newsletter render", "position": { "x": 320, "y": 240 }, "config": {}, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Approve before publish", "position": { "x": 640, "y": 120 }, "config": {}, "inputs": {} },
+          { "id": "schedule", "typeId": "core.openwop.integration.notification-push", "name": "Schedule + notify", "position": { "x": 960, "y": 120 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "outline", "to": "linkedin" },
+          { "from": "outline", "to": "xthread" },
+          { "from": "outline", "to": "newsletter" },
+          { "from": "linkedin", "to": "review" },
+          { "from": "xthread", "to": "review" },
+          { "from": "newsletter", "to": "review" },
+          { "from": "review", "to": "schedule" }
+        ]
+      },
+      "outputs": { "contentSet": { "type": "string", "description": "Channel-ready content set." } }
+    }
+  ]
+}

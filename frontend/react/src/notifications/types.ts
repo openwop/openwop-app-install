@@ -13,7 +13,16 @@ export type NotificationType =
   | 'workflow.failed'
   | 'workflow.completed'
   | 'system.alert'
+  // ADR 0074 — a transient review-status cache hint (NOT an inbox row).
+  // Delivered over the same SSE stream via the emitter's non-persisted
+  // `signal()` path; the notification store routes it to the review-status
+  // store instead of the inbox. Excluded from ACTION_NEEDED_TYPES below.
+  | 'review.updated'
   | string;
+
+/** ADR 0074 — the transient signal type the review-status store consumes.
+ *  The notification store MUST NOT ingest this into the inbox/unread count. */
+export const REVIEW_UPDATED_SIGNAL_TYPE = 'review.updated' as const;
 
 export type NotificationPriority = 'low' | 'normal' | 'high' | 'urgent';
 
@@ -64,16 +73,19 @@ export const KNOWN_TYPES: readonly NotificationType[] = [
   'system.alert',
 ] as const;
 
-/** Human label for each well-known type, surfaced in the prefs UI. */
-export const TYPE_LABELS: Record<string, string> = {
-  'workflow.approval_needed': 'Approval needed',
-  'workflow.input_needed':    'Input needed',
-  'workflow.failed':          'Workflow failed',
-  'workflow.completed':       'Workflow completed',
-  'system.alert':             'System alert',
+/** i18n key for each well-known type's human label, surfaced in the prefs UI.
+ *  Components resolve these via `t(TYPE_LABEL_KEYS[type] ?? type)` — an unknown
+ *  (open-wire) type falls through to the raw type string (i18next echoes a
+ *  missing key), preserving forward-compat. */
+export const TYPE_LABEL_KEYS: Record<string, string> = {
+  'workflow.approval_needed': 'notifications:typeApprovalNeeded',
+  'workflow.input_needed':    'notifications:typeInputNeeded',
+  'workflow.failed':          'notifications:typeWorkflowFailed',
+  'workflow.completed':       'notifications:typeWorkflowCompleted',
+  'system.alert':             'notifications:typeSystemAlert',
   // Comments feature (ADR 0021) — additive, fallback-protected; no core-union edit.
-  'comment.added':            'New comment',
-  'comment.reply':            'New reply',
+  'comment.added':            'notifications:typeCommentAdded',
+  'comment.reply':            'notifications:typeCommentReply',
 };
 
 /** Per-type preference row. Each known type carries its own switch

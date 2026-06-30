@@ -32,6 +32,7 @@
 
 import { trace, context as otelContext, SpanStatusCode } from '@opentelemetry/api';
 import { getNodeRegistry } from './nodeRegistry.js';
+import { readCompactionDecision } from './compaction.js';
 import { getEventLog } from './eventLog.js';
 import { getSuspendManager } from './suspendManager.js';
 import { hasCapability } from './runtimeCapabilities.js';
@@ -49,6 +50,7 @@ import {
   nonEnumerableSecretsView,
 } from '../byok/ephemeralRunSecrets.js';
 import { resolveSecret } from '../byok/secretResolver.js';
+import { persistRunArtifact } from '../host/runArtifactStore.js';
 import { sanitizeFreeTextDeep } from '../byok/textRedaction.js';
 import { OpenwopError } from '../types.js';
 import type { Storage } from '../storage/storage.js';
@@ -61,19 +63,23 @@ import type {
 import type { RunRecord } from '../types.js';
 import type { ProviderPolicyResolver } from '../host/index.js';
 import { createAiProvidersAdapter, AiProviderError, type AiProviderErrorCode } from '../aiProviders/aiProvidersHost.js';
+import { createSandboxRunner } from '../host/sandboxAdapter.js';
 import { classifyDispatchError } from '../observability/errorRecovery.js';
+import { createLogger } from '../observability/logger.js';
 import { buildHostSurfaceBundle, writeMemoryEntry, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
 import { getInstanceId } from '../host/instanceId.js';
 import { makeConnectionSafeFetch } from '../host/connectionInjection.js';
 import { makeSlackAdapter } from '../host/slackAdapter.js';
 import { makeEmailAdapter } from '../host/emailAdapter.js';
 import { makeSmsAdapter } from '../host/smsAdapter.js';
+import { makeAdsAdapter } from '../host/adsAdapter.js';
 import { makeNotificationAdapter } from '../host/notificationAdapter.js';
+import { makeConnectorsAdapter } from '../host/connectorsAdapter.js';
 import { makeMcpClient, McpError } from '../host/mcpClient.js';
 import { notifyRunTerminal } from './runLifecycle.js';
 import { emitRunFailureNotification } from '../notifications/notify.js';
-import { snapshotRunVariables, setRunVariable } from '../host/variablesRuntime.js';
-import { setRunAgent } from '../host/runAgentRuntime.js';
+import { snapshotRunVariables, setRunVariable, hydrateRunVariables } from '../host/variablesRuntime.js';
+import { setRunAgent, hydrateRunAgent } from '../host/runAgentRuntime.js';
 import { enforceManifestHandoffContract } from './handoffGate.js';
 import { SuspendSignal, makeSuspendFn } from './suspendSignal.js';
 import {
@@ -90,6 +96,8 @@ import {
   type SchedulerGraph,
   type SchedulerSnapshot,
 } from './scheduler.js';
+
+const log = createLogger('executor');
 
 export interface ExecuteRunResult {
   status: RunRecord['status'];
@@ -357,6 +365,8 @@ async function runOneNode(input: {
         },
       })
     : null;
+  // ADR 0114 Phase 2 — undefined unless OPENWOP_CODE_EXEC_ENDPOINT is configured.
+  const sandboxRunner = createSandboxRunner(run.tenantId); // ADR 0114 Phase 5 — tenant-bound for the exec budget
   const surfaces = buildHostSurfaceBundle({
     tenantId: run.tenantId,
     ...(run.scopeId ? { scopeId: run.scopeId } : {}),
@@ -452,6 +462,9 @@ async function runOneNode(input: {
       run.metadata && (run.metadata as Record<string, unknown>).trustBoundary === 'untrusted'
         ? 'untrusted'
         : 'trusted',
+    // ADR 0099 — the per-run compaction decision frozen at run creation; read
+    // once here (constant across the run, copied verbatim on :fork).
+    compaction: readCompactionDecision(run.metadata),
     secrets: secretsForCtx,
     async emit(type, payload, opts) {
       const record = await eventLog.append({
@@ -467,7 +480,10 @@ async function runOneNode(input: {
       // (RFC 0002 §B). Pre-existing void-returning callers ignore.
       return { eventId: record.eventId, sequence: record.sequence };
     },
-    ...(aiAdapter ? { callAI: aiAdapter.callAI, callAIWithTools: aiAdapter.callAIWithTools } : {}),
+    ...(aiAdapter ? { callAI: aiAdapter.callAI, callAIWithTools: aiAdapter.callAIWithTools, callSpeechSynthesizer: aiAdapter.callSpeechSynthesizer, callTranscriber: aiAdapter.callTranscriber } : {}),
+    // ADR 0114 Phase 2 — `ctx.runSandboxedCode` present ONLY when a sandbox endpoint
+    // is configured (else honest-off `capability_not_provided`, Phase 1 behavior).
+    ...(sandboxRunner ? { runSandboxedCode: sandboxRunner } : {}),
     // interrupt.md — the normative awaitable interrupt primitive (+ the `suspend`
     // alias the packs call). Throws a SuspendSignal on first call (caught below →
     // suspended outcome); on a re-invoke resume the seeded resolution is returned.
@@ -496,28 +512,36 @@ async function runOneNode(input: {
     // broker keys per-user credentials + connections:use on THIS. Absent ⇒
     // system run ⇒ org/user connections fail closed (correct).
     ...(actingUserId ? { actingUserId } : {}),
-    // ADR 0024 §4 / Option C — host-mediated egress + credential injection,
-    // provided ONLY when the run opted into Connections (so other runs keep the
-    // pack's own egress fallback). safeFetch injects the acting user's token for
-    // an allow-listed, host-matched provider, after the pack's header sanitize.
-    ...(connectionProviders.length > 0
-      ? {
-          http: {
-            safeFetch: makeConnectionSafeFetch({
-              storage,
-              tenantId: run.tenantId,
-              runId: run.runId,
-              allowedProviders: connectionProviders,
-              ...(actingUserId ? { actingUserId } : {}),
-              orgId: run.tenantId, // workspace-root org (orgId === tenantId)
-            }),
-          },
-        }
-      : {}),
+    // ADR 0024 §4 / Option C — host-mediated egress + credential injection.
+    // ALWAYS provided (RFC 0076 §B: a host that offers `safeFetch` mediates
+    // egress itself, and the core HTTP pack prefers it over its own fallback).
+    // With an empty `allowedProviders` (a run that did NOT opt into Connections)
+    // it is a pure SSRF-guarded fetch with NO credential injection — the form the
+    // notebooks YouTube-ingest node requires (ADR 0085; it needs guarded egress
+    // to a public host, never a user credential). When the run opted in,
+    // `allowedProviders` is non-empty and the same seam injects the acting user's
+    // token for an allow-listed, host-matched provider after the pack's sanitize.
+    http: {
+      safeFetch: makeConnectionSafeFetch({
+        storage,
+        tenantId: run.tenantId,
+        runId: run.runId,
+        allowedProviders: connectionProviders,
+        ...(actingUserId ? { actingUserId } : {}),
+        orgId: run.tenantId, // workspace-root org (orgId === tenantId)
+      }),
+    },
     // ADR 0024 §4 Phase 3 — integration egress adapters (Slack + email). Always
     // provided (the nodes are explicit); each resolves the acting human's
     // Connection per call and gracefully no-ops when absent.
     slack: makeSlackAdapter({
+      storage,
+      tenantId: run.tenantId,
+      runId: run.runId,
+      ...(actingUserId ? { actingUserId } : {}),
+      orgId: run.tenantId,
+    }),
+    ads: makeAdsAdapter({
       storage,
       tenantId: run.tenantId,
       runId: run.runId,
@@ -539,6 +563,16 @@ async function runOneNode(input: {
       orgId: run.tenantId,
     }),
     notification: makeNotificationAdapter({
+      storage,
+      tenantId: run.tenantId,
+      runId: run.runId,
+      ...(actingUserId ? { actingUserId } : {}),
+      orgId: run.tenantId,
+    }),
+    // ADR 0076 / ADR 0037 — the connector invoker, now exposed to nodes. Always
+    // provided (the node is explicit); resolves the acting human's Connection per
+    // call and fails closed when absent. First consumer: core.bigquery.query.
+    connectors: makeConnectorsAdapter({
       storage,
       tenantId: run.tenantId,
       runId: run.runId,
@@ -874,8 +908,14 @@ export async function executeRun(
   // failure must not abort the run.
   try {
     await storage.setRunDispatchLease(run.runId, getInstanceId(), Date.now() + RUN_DISPATCH_LEASE_MS);
-  } catch {
-    /* lease is an availability optimization, not a correctness gate */
+  } catch (err) {
+    // Lease is an availability optimization, not a correctness gate — never
+    // abort the run. But a write failure here means a degraded storage layer
+    // (the sweeper can't see this run's owner), so surface it for ops (ENG-3).
+    log.warn('dispatch_lease_write_failed', {
+      runId: run.runId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   // Open the run-lifecycle span per `observability.md §"Span naming"`
@@ -915,6 +955,12 @@ interface ExecuteRunBodyInput {
 async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunResult> {
   const { storage, run, definition, options, eventLog, suspend } = input;
   const isResume = options.resumeSnapshot !== undefined || options.resumeFromNodeIndex !== undefined;
+  // ENG-3: load this run's variable bag + agent stamp from durable storage
+  // before executing. No-ops when already cached (the common in-process path);
+  // on a sweeper re-dispatch to another instance they recover the state the
+  // crashed instance wrote, instead of running with empty state.
+  await hydrateRunVariables(run.runId);
+  await hydrateRunAgent(run.runId);
   // Cycle detection + snapshot construction.
   let graph: SchedulerGraph;
   let snapshot: SchedulerSnapshot;
@@ -1145,15 +1191,52 @@ async function executeRunBody(input: ExecuteRunBodyInput): Promise<ExecuteRunRes
       if (out.kind === 'success') {
         markCompleted(nodeId, out.outputs, snapshot);
         releaseDownstream(nodeId, graph, snapshot);
+        // ADR 0083 follow-up — capture a MID-GRAPH deliverable as a durable artifact at
+        // completion. A node that declares an `outputRole` is an explicit deliverable; Seam B
+        // only captures TERMINAL nodes, so an asset produced mid-flow (e.g. a rendered PDF that
+        // then feeds a notify) would be dropped. Scope to mid-graph (has outgoing edges) — a
+        // terminal outputRole node is already captured by Seam B. Best-effort, replay-safe
+        // (deterministic key, no event); skipped on a replay fork. Captured here (not at
+        // finalizeRun) so the deliverable survives even if a LATER node fails.
+        const hasOutgoing = (graph.outgoing.get(nodeId)?.length ?? 0) > 0;
+        if (nodeRef.outputRole && hasOutgoing && run.forkMode !== 'replay') {
+          await persistRunArtifact({
+            tenantId: run.tenantId,
+            runId: run.runId,
+            nodeId,
+            role: 'deliverable',
+            output: unwrapSingleOutput(out.outputs),
+            now: new Date().toISOString(),
+          });
+        }
       } else if (out.kind === 'failure') {
         markFailed(nodeId, out.error, snapshot);
         releaseDownstream(nodeId, graph, snapshot);
       } else {
+        // ADR 0083 — persist the gate's upstream output as a durable run-artifact and bind
+        // its artifactId onto the interrupt so the approval card / Reviews rail can open the
+        // full preview (reviewProjection.artifactBinding reads data.artifactId). Best-effort,
+        // replay-safe (deterministic key, no event emitted); skipped on a replay-mode fork
+        // (the original run's artifacts are canonical, mirroring the memory-write gate).
+        let interruptData: unknown = out.interrupt.data;
+        if (run.forkMode !== 'replay') {
+          const preview = await persistRunArtifact({
+            tenantId: run.tenantId,
+            runId: run.runId,
+            nodeId,
+            role: 'gate-preview',
+            output: inputsByPort,
+            now: new Date().toISOString(),
+          });
+          if (preview && interruptData && typeof interruptData === 'object' && !Array.isArray(interruptData)) {
+            interruptData = { ...(interruptData as Record<string, unknown>), artifactId: preview.artifactId, revisionId: preview.revisionId };
+          }
+        }
         const interrupt = await suspend.createInterrupt({
           runId: run.runId,
           nodeId,
           kind: out.interrupt.kind,
-          data: out.interrupt.data,
+          data: interruptData,
           resumeSchema: out.interrupt.resumeSchema,
         });
         await eventLog.append({
@@ -1264,6 +1347,19 @@ async function finalizeRun(input: {
     // fact. `branch`-mode forks are genuinely new runs and legitimately write
     // (and attribute) their own memory.
     if (run.forkMode !== 'replay') {
+    // ADR 0083 — persist each terminal node's output as a durable run-artifact so the chat
+    // completion card + the Library can preview/open it. Best-effort, replay-safe
+    // (deterministic key, no event), BEFORE the run.completed append (terminal-event order).
+    for (const id of terminals) {
+      await persistRunArtifact({
+        tenantId: run.tenantId,
+        runId: run.runId,
+        nodeId: id,
+        role: 'deliverable',
+        output: unwrapSingleOutput(snapshot.nodeOutputs.get(id)),
+        now: new Date().toISOString(),
+      });
+    }
     try {
       const preview = JSON.stringify(output ?? null);
       const summaryTags = ['run-summary', `run-id:${run.runId}`, `workflow:${run.workflowId}`];

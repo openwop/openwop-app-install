@@ -9,7 +9,6 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 export interface Org { orgId: string; name: string }
 export type ResourceType = 'cms_page' | 'kb_collection';
 export const RESOURCE_TYPES: readonly ResourceType[] = ['cms_page', 'kb_collection'];
-export const RESOURCE_LABEL: Record<ResourceType, string> = { cms_page: 'CMS page', kb_collection: 'KB collection' };
 
 export type CommentStatus = 'open' | 'resolved';
 export interface Comment {

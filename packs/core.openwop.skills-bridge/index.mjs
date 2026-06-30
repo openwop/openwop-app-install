@@ -150,31 +150,46 @@ function validateAgainstManifestSchema(m) {
   return errs;
 }
 
-export const nodeHandlers = {
-  'core.skills-bridge.convert': async (input, _ctx) => {
-    const skillMd = input?.skillMd;
-    const packPrefix = input?.packPrefix;
+// Node handlers follow the openwop pack-node contract (spec/v1/host-capabilities.md):
+// the host loader invokes `fn(ctx)` with a single NodeContext, reads the node's
+// inputs from `ctx.inputs`, and expects a `{ status: 'success', outputs }` envelope.
+// The export MUST be named `nodes` — the loader reads `loaded.nodes`
+// (backend src/packs/tarballLoader.ts) and skips a pack that lacks it.
+export const nodes = {
+  'core.skills-bridge.convert': async (ctx) => {
+    const skillMd = ctx?.inputs?.skillMd;
+    const packPrefix = ctx?.inputs?.packPrefix;
     if (typeof skillMd !== 'string' || skillMd.length === 0) {
-      return { agentManifest: null, warnings: ['input.skillMd is required and must be a non-empty string'] };
+      return {
+        status: 'success',
+        outputs: { agentManifest: null, warnings: ['input.skillMd is required and must be a non-empty string'] },
+      };
     }
     const { manifest, warnings } = convertSkillMd(skillMd, { packPrefix });
     const schemaErrors = validateAgainstManifestSchema(manifest);
     if (schemaErrors.length > 0) {
       return {
-        agentManifest: null,
-        warnings: [
-          ...warnings,
-          ...schemaErrors.map((e) => `agent-manifest.schema.json violation: ${e}`),
-          'converter output suppressed because it failed self-validation against agent-manifest.schema.json',
-        ],
+        status: 'success',
+        outputs: {
+          agentManifest: null,
+          warnings: [
+            ...warnings,
+            ...schemaErrors.map((e) => `agent-manifest.schema.json violation: ${e}`),
+            'converter output suppressed because it failed self-validation against agent-manifest.schema.json',
+          ],
+        },
       };
     }
-    return { agentManifest: manifest, warnings };
+    return { status: 'success', outputs: { agentManifest: manifest, warnings } };
   },
 };
+
+// Back-compat alias for the prior export name (no in-repo consumers; retained
+// so any external importer of `nodeHandlers` keeps working).
+export const nodeHandlers = nodes;
 
 export function getPackTypeIds() {
   return [...PACK_TYPE_IDS];
 }
 
-export default { nodeHandlers, convertSkillMd, getPackTypeIds };
+export default { nodes, nodeHandlers, convertSkillMd, getPackTypeIds };

@@ -1,13 +1,15 @@
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 
 // ── Stepper ────────────────────────────────────────────────────────────
 
 export function BYOKStepper({ current }: { current: 'provider' | 'model' | 'key' }): JSX.Element {
+  const { t } = useTranslation('byok');
   const steps = useMemo(() => [
-    { id: 'provider', label: 'Provider' },
-    { id: 'model', label: 'Model' },
-    { id: 'key', label: 'API key' },
-  ] as const, []);
+    { id: 'provider', label: t('stepProvider') },
+    { id: 'model', label: t('stepModel') },
+    { id: 'key', label: t('stepKey') },
+  ] as const, [t]);
   const currentIdx = steps.findIndex((s) => s.id === current);
   return (
     <ol className="byok-stepper">

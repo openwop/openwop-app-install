@@ -79,9 +79,13 @@ export function registerPushSubscriptionRoutes(app: Express, deps: Deps): void {
       }
 
       const subscriptionId = randomBytes(16).toString('hex');
+      // ADR 0050 — record the owning user so addressed notifications push only
+      // to their devices. May be absent for a tenanted non-user principal.
+      const userId = req.userId ?? req.principal?.principalId;
       const record: PushSubscriptionRecord = {
         subscriptionId,
         tenantId,
+        ...(userId ? { userId } : {}),
         endpoint,
         p256dhKey: p256dh,
         authKey: auth,

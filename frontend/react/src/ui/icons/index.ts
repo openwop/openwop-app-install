@@ -9,15 +9,20 @@
  */
 
 export { AlertIcon } from './AlertIcon.js';
+export { ArrowDownIcon } from './ArrowDownIcon.js';
 export { ArrowLeftIcon } from './ArrowLeftIcon.js';
 export { ArrowRightIcon } from './ArrowRightIcon.js';
+export { ArrowUpIcon } from './ArrowUpIcon.js';
+export { MoreHorizontalIcon } from './MoreHorizontalIcon.js';
 export { BanIcon } from './BanIcon.js';
 export { BoldIcon } from './BoldIcon.js';
+export { BookOpenIcon } from './BookOpenIcon.js';
 export { BotIcon } from './BotIcon.js';
 export { BriefcaseIcon } from './BriefcaseIcon.js';
 export { CheckIcon } from './CheckIcon.js';
 export { CheckSquareIcon } from './CheckSquareIcon.js';
 export { ChevronDownIcon } from './ChevronDownIcon.js';
+export { ChevronLeftIcon } from './ChevronLeftIcon.js';
 export { ChevronRightIcon } from './ChevronRightIcon.js';
 export { CircleIcon } from './CircleIcon.js';
 export { ClipboardIcon } from './ClipboardIcon.js';
@@ -29,6 +34,7 @@ export { FlagIcon } from './FlagIcon.js';
 export { PinIcon } from './PinIcon.js';
 export { GlobeIcon } from './GlobeIcon.js';
 export { GripVerticalIcon } from './GripVerticalIcon.js';
+export { HashIcon } from './HashIcon.js';
 export { HeadingIcon } from './HeadingIcon.js';
 export { ImageIcon } from './ImageIcon.js';
 export { InfoIcon } from './InfoIcon.js';
@@ -77,6 +83,8 @@ export { FileTextIcon } from './FileTextIcon.js';
 export { PackageIcon } from './PackageIcon.js';
 export { BuildingIcon } from './BuildingIcon.js';
 export { BoxesIcon } from './BoxesIcon.js';
+export { LayoutGridIcon } from './LayoutGridIcon.js';
+export { FolderIcon } from './FolderIcon.js';
 export { KeyIcon } from './KeyIcon.js';
 export { TerminalIcon } from './TerminalIcon.js';
 export { SearchIcon } from './SearchIcon.js';

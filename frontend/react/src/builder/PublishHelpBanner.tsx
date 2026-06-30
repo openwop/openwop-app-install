@@ -4,6 +4,9 @@
  * for the PR-based registry submission flow.
  */
 
+import { useTranslation } from 'react-i18next';
+import { formatBytes } from '../i18n/format.js';
+
 interface PublishHelp {
   slug: string;
   size: number;
@@ -16,17 +19,16 @@ interface PublishHelpBannerProps {
 }
 
 export function PublishHelpBanner({ publishHelp, onClose }: PublishHelpBannerProps) {
+  const { t } = useTranslation('builder');
   return (
     <div
       className="alert alert--publish builder-toolbar-error"
       role="status"
       aria-live="polite"
     >
-      <strong>Publish <code>{publishHelp.slug}</code> to packs.openwop.dev</strong>
+      <strong>{t('publishHeading', { slug: publishHelp.slug })}</strong>
       <p className="muted publishhelp-intro">
-        Registry submission is PR-based ({(publishHelp.size / 1024).toFixed(1)} KB manifest).
-        In-browser publishing is intentionally off — Ed25519 signing happens at PR-merge time by the
-        registry maintainers, per <code>PUBLISHING.md</code> + <code>spec/v1/registry-operations.md</code>.
+        {t('publishIntro', { size: formatBytes(publishHelp.size) })}
       </p>
       <ol className="publishhelp-steps">
         <li>
@@ -45,33 +47,31 @@ export function PublishHelpBanner({ publishHelp, onClose }: PublishHelpBannerPro
               URL.revokeObjectURL(url);
             }}
           >
-            Download <code>manifest.json</code>
+            {t('publishStepDownload')}
           </button>{' '}
-          (you may want to rename <code>{publishHelp.slug}</code> + replace fully-bound values with{' '}
-          <code>{'{{params.*}}'}</code> placeholders before submitting).
+          {t('publishStepDownloadNote', { slug: publishHelp.slug, placeholder: '{{params.*}}' })}
         </li>
         <li>
-          Fork{' '}
+          {t('publishStepForkPre')}{' '}
           <a href="https://github.com/openwop/openwop" target="_blank" rel="noreferrer">openwop/openwop</a>{' '}
-          and add the manifest at{' '}
+          {t('publishStepForkMid')}{' '}
           <code>registry/packs/{publishHelp.slug}/manifest.json</code>{' '}
-          — see{' '}
+          {t('publishStepForkSee')}{' '}
           <a href="https://github.com/openwop/openwop/tree/main/registry/packs" target="_blank" rel="noreferrer">
-            existing entries
+            {t('publishStepForkLink')}
           </a>{' '}
-          for the directory shape.
+          {t('publishStepForkPost')}
         </li>
         <li>
-          Run <code>npm run openwop:check</code> locally to validate (the 9-step gate includes pack-manifest +
-          signature checks).
+          {t('publishStepValidatePre')} <code>npm run openwop:check</code> {t('publishStepValidatePost')}
         </li>
         <li>
-          Open a PR; the maintainers run signing + final validation at merge time, then the pack appears at{' '}
+          {t('publishStepPrPre')}{' '}
           <a href="https://packs.openwop.dev" target="_blank" rel="noreferrer">packs.openwop.dev</a>.
         </li>
       </ol>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={onClose}>Close</button>
+        <button type="button" className="secondary" onClick={onClose}>{t('common:close')}</button>
       </div>
     </div>
   );

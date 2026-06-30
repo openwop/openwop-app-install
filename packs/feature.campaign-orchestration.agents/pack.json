@@ -1,0 +1,39 @@
+{
+  "name": "feature.campaign-orchestration.agents",
+  "version": "1.0.0",
+  "description": "Campaign Studio agent pack (ADR 0158 / ADR 0014) — the Campaign Strategist, the chat-driven orchestrator (ADR 0058). It runs a campaign conversationally: validate the brief, generate + approve the messaging kernel, generate each enabled channel, check cross-asset consistency, and finalize the marketing campaign — tool-allowlisted across the campaign-brief, campaign-channels, and campaign-studio node packs.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "campaign-studio", "agent", "strategist", "orchestration", "marketing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.campaign-orchestration.agents.campaign-strategist",
+      "persona": "RESEARCH",
+      "label": "Campaign Strategist",
+      "description": "The chat-driven Campaign Studio orchestrator — validates the brief, generates + approves the messaging kernel, generates each enabled channel, checks cross-asset consistency, and finalizes the marketing campaign. The human approves the kernel and each channel.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/campaign-strategist.md",
+      "toolAllowlist": [
+        "openwop:feature.campaign-brief.nodes.validate",
+        "openwop:feature.campaign-brief.nodes.generate-kernel",
+        "openwop:feature.campaign-channels.nodes.generate",
+        "openwop:feature.campaign-channels.nodes.content-quality-check",
+        "openwop:feature.campaign-channels.nodes.publish-landing-page",
+        "openwop:feature.campaign-channels.nodes.publish-email-sequence",
+        "openwop:feature.campaign-channels.nodes.publish-ad-variants",
+        "openwop:feature.campaign-channels.nodes.publish-creative-briefs",
+        "openwop:feature.campaign-channels.nodes.publish-social-posts",
+        "openwop:feature.campaign-orchestration.nodes.consistency-check",
+        "openwop:feature.campaign-orchestration.nodes.finalize"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

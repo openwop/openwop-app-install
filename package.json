@@ -1,0 +1,15 @@
+{
+  "name": "openwop-app",
+  "private": true,
+  "description": "OpenWOP reference app — monorepo (backend/typescript + frontend/react). This root manifest only exposes the local CI gate; each workspace owns its own deps/build. See CLAUDE.md.",
+  "scripts": {
+    "check:schemas": "node scripts/check-vendored-schemas.mjs",
+    "ci": "bash scripts/ci.sh",
+    "ci:full": "OPENWOP_CI_E2E=1 OPENWOP_CI_LIVE=1 bash scripts/ci.sh",
+    "hooks:install": "git config core.hooksPath scripts/git-hooks && echo 'pre-push gate enabled — runs npm run ci; bypass with git push --no-verify'",
+    "browse": "tools/browser/browse.sh"
+  },
+  "devDependencies": {
+    "playwright": "1.59.1"
+  }
+}
