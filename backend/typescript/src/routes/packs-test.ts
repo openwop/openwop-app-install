@@ -30,12 +30,18 @@
  * @see spec/v1/node-packs.md §"Test-mode registry namespace"
  */
 
+import { V1_PATH_PREFIX } from '../middleware/protocolVersion.js';
+import { requireNonAnonymousPrincipal } from '../middleware/auth.js';
 import { gunzipSync } from 'node:zlib';
 import { createHash } from 'node:crypto';
 import { extract as tarExtract } from 'tar-stream';
 import express, { type Express, type Request, type Response, type NextFunction } from 'express';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
+import { checkPackManifestForMajor } from '../host/packManifestV2Gate.js';
+
+/** The protocol major this host serves; the range must admit it (packs.md §"The engine range"). */
+const HOST_PROTOCOL_MAJOR = 2;
 
 const log = createLogger('routes.packs-test');
 
@@ -373,6 +379,13 @@ export function registerPackTestRoutes(app: Express): void {
   const rawBody = express.raw({ type: '*/*', limit: '60mb' });
 
   // POST /v1/packs-test/reset — RFC 0025 §C point 4. Suite teardown hook.
+  // Every MUTATION of the test namespace needs a non-anonymous principal. The
+  // namespace is in-memory and separate from the real registry, but it can be
+  // enabled on a production-posture deployment (the RFC 0199 witness side
+  // revision), where an anonymous reset/publish/delete must not be reachable.
+  const guard = requireNonAnonymousPrincipal('the packs-test namespace');
+  app.use(`${V1_PATH_PREFIX}/packs-test`, (req, res, next) => (req.method === 'GET' || req.method === 'HEAD' ? next() : guard(req, res, next)));
+
   app.post('/v1/packs-test/reset', (_req, res) => {
     const cleared = testCatalog.size;
     testCatalog.clear();
@@ -402,6 +415,13 @@ export function registerPackTestRoutes(app: Express): void {
         const decompressed = decompressOrThrow(gzipped);
         const entries = await parseTar(decompressed);
         const { manifest: _manifest, signature } = validateManifest(entries, name, version);
+
+        // RFC 0177 §A.1 / §B.1 — packs.md calls this surface "a mirror ingest",
+        // one of the publication paths the engine-range check MUST run on.
+        // Refuse BEFORE anything is stored: a pack that lands and is rejected
+        // later has already become a registry-side artifact.
+        const refusal = checkPackManifestForMajor(_manifest, HOST_PROTOCOL_MAJOR);
+        if (refusal) throw new OpenwopError(refusal.code, refusal.message, 400, { name, version });
 
         const computedSha = computeSha256Base64(gzipped);
         const asserted = normalizeSha256Header(req.header('X-Pack-Sha256'));
@@ -539,9 +559,3 @@ export function registerPackTestRoutes(app: Express): void {
   });
 }
 
-/** Test-only accessor for the in-memory catalog. Exposed so cross-namespace
- *  isolation tests (RFC 0025 §C point 1) can introspect without going
- *  through the HTTP surface. NOT exported on the public route surface. */
-export function _testGetCatalogSize(): number {
-  return testCatalog.size;
-}

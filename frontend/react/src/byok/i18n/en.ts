@@ -1,4 +1,7 @@
 export const messages = {
+  compatOrgsFailed: 'Could not load your organizations, so the endpoint list could not be read. This is a failed read — it does not mean no endpoints are configured.',
+  compatRetry: 'Try again',
+  compatNoOrgs: 'No organization yet — create one to add a self-hosted endpoint.',
   rtGeminiAssurance: 'Gemini Live locks your persona and tools server-side, but tool execution and transcripts are relayed by the browser — lower assurance, not recommended for governance or audit tenants. OpenAI Realtime keeps these host-side.',
   // ADR 0141 real-time voice settings
   rtTitle: "Real-time voice",
@@ -7,7 +10,10 @@ export const messages = {
   rtProviderOff: "Off (recorded voice)",
   rtKey: "API key",
   rtKeySelect: "Select a stored key…",
+  rtKeysUnreadable: "Couldn’t load your stored keys, so this card can’t tell whether the configured key still exists. Nothing here is a verdict on your setup — reload to check.",
   rtNoKeys: "Add a key above first.",
+  rtKeyMissing: "{{ref}} — missing",
+  rtKeyMissingWarning: "This workspace is set to use the key \"{{ref}}\", but that key no longer exists. Real-time voice will fail to start until you pick a key that is still stored.",
   rtSave: "Save",
   rtSaving: "Saving…",
   rtSaved: "Real-time voice settings saved.",
@@ -52,6 +58,9 @@ export const messages = {
   disconnect: 'Disconnect',
   deleteKeyLabel: 'Delete key',
   disconnectAction: 'Disconnect',
+  stopUsingAction: 'Stop using',
+  stopUsingLabel: 'Stop using {{provider}} for this chat',
+  subscriptionModelLabel: '{{model}} · connected through GitHub',
   deleteAction: 'Delete',
 
   // KeyEntry
@@ -68,6 +77,24 @@ export const messages = {
   storing: 'Storing…',
   storeKey: 'Store key',
   back: 'Back',
+  // ADR 0517 open question 1 — duplicate keys per provider are inert but invisible.
+  duplicateKeysWithActive_one: 'Your chat is using {{active}}. The other one stored here is inactive — removing it is safe.',
+  duplicateKeysWithActive_other: 'Your chat is using {{active}}. The other {{count}} stored here are inactive — removing them is safe.',
+  duplicateKeysNoneActive: '{{count}} {{provider}} keys are stored, and your chat is not bound to any of them. Pick one in the chat, or remove the ones you no longer need.',
+  duplicateKeysUnknownActive: '{{count}} {{provider}} keys are stored. We could not read which one your chat is using, so check there before removing any.',
+  // ADR 0517 fix A — reuse an existing stored key instead of asking again.
+  savedKeyFound: 'You already have a {{provider}} key saved',
+  savedKeyExplain: 'It is stored on the server for this workspace. Reconnect it — no need to paste it again.',
+  savedKeyUse: 'Use my saved key',
+  savedKeyUsing: 'Connecting…',
+  savedKeyReplaceHint: 'Only enter a key below if you want to REPLACE the saved one.',
+  replaceKey: 'Replace key',
+  // ADR 0517 fix D — a lapsed session is not a missing key.
+  sessionExpiredTitle: 'Your session ended',
+  sessionExpiredBody: 'Sign back in to reconnect this workspace. Your API key is still saved on the server — you do not need to enter it again.',
+  sessionExpiredSignIn: 'Sign back in',
+  sessionExpiredSigningIn: 'Signing in…',
+  sessionExpiredUseKey: 'Set up a key instead',
 
   // ModelGrid
   modelIdRequired: 'Model id is required.',
@@ -94,12 +121,11 @@ export const messages = {
   byokTitle: 'Bring your own key (BYOK)',
   byokAbbrTitle: 'Bring Your Own Key',
   byokLedeBefore: 'means you supply the API key for the model provider you pick below. The provider bills you directly for your usage; OpenWOP doesn\'t bill you or take a cut. The server forwards each request to the provider using your key, then streams the response back.',
-  byokFineprintBefore: 'Your key is stored on the server (sqlite-backed, AES-256-GCM encrypted at rest) and sent only to the provider you picked. Set',
+  byokFineprintTrust: 'Your key is stored on the server (encrypted at rest with AES-256-GCM) and sent only to the provider you picked.',
+  byokFineprintOperatorEyebrow: 'For operators',
+  byokFineprintBefore: 'Set',
   byokFineprintMid: 'on the server to switch to in-memory-only mode that wipes on restart. Production hosts swap this storage for a managed key-management service (KMS) like AWS KMS, GCP KMS, or HashiCorp Vault — see',
   byokFineprintAfter: 'for the adapter pattern.',
-  getProviderKey: 'Get a {{provider}} API key →',
-
-  // KeysPage
   settingsEyebrow: 'Settings',
   apiKeysTitle: 'API keys',
   apiKeysLede: 'Manage the API keys your workflows use. Each key is stored server-side (encrypted at rest); the chat and workflow-node dispatchers reference a key by its label. Add multiple keys per provider (e.g., separate prod/test keys) and pick which one a specific workflow node uses from the builder.',
@@ -142,22 +168,25 @@ export const messages = {
   labelFieldHint: '(used to identify the key in workflow nodes)',
   labelPlaceholder: 'prod, test, personal, …',
   willBeStoredAs: 'Will be stored as',
-  keyPlaceholderDefault: 'paste your key here',
+  keyPlaceholderDefault: 'API key',
   getKeyFromProvider: 'Get a key from {{provider}}',
   saving: 'Saving…',
   saveKey: 'Save key',
 
   // Web search key (ADR 0101 Phase 3)
+  searchAnswerOnly: 'Search: chat only',
+  searchAnswerOnlyHint: 'This provider’s built-in web search can ground chat answers, but its results can’t be saved as citations — features that store evidence (like the Challenge Factory) need a web-search key below.',
   webSearch: {
     title: 'Web search',
     configured: 'Key configured',
-    body: 'Optional. A search-provider key (Brave, Tavily, …) lets agents search the web on the free tier or with providers that lack native search. Providers that ground natively (e.g. Gemini) use your own model key — no key needed here.',
+    body: "Optional. A search-provider key lets agents search the web, and it is what makes features that SAVE sources as evidence (the Challenge Factory today) work at all. Exa, Brave and Tavily are supported — paste any of their keys and we detect which. Exa's free credit covers about 2,800 searches. Providers that ground natively (e.g. Gemini) use your own model key for chat answers, but their results can't be saved as citations.",
     keyLabel: 'Search-provider API key',
-    placeholder: 'paste your search-provider key',
+    placeholder: 'Search-provider API key',
   },
 
   // Self-hosted / OpenAI-compatible endpoints (RFC 0108 / ADR 0121)
   compatTitle: 'Self-hosted / OpenAI-compatible endpoints',
+  compatLoading: 'Loading endpoints…',
   compatIntro: 'Connect Ollama, LM Studio, vLLM, or any OpenAI-compatible API by base URL (with an optional key). Declare what the endpoint supports — the host can’t probe a private endpoint, so capabilities are taken from what you set here.',
   compatOrg: 'Organization',
   compatHasKey: 'key set',
@@ -178,4 +207,33 @@ export const messages = {
   compatSaved: 'Endpoint added',
   compatError: 'Could not save the endpoint.',
   compatReadOnly: 'You have read-only access to this organization’s endpoints.',
+
+  // RFC 0121 AT-OWN-RISK subscription credential (ADR 0180)
+  sub: {
+    title: 'Personal subscription (at your own risk)',
+    intro: 'Reuse a personal, non-metered consumer subscription (e.g. ChatGPT Plus) as a provider credential instead of a metered API key. Only available because this host has been configured to allow it.',
+    riskDisclosure: 'Reusing your personal subscription may violate the provider’s terms of service and risk account suspension. This is your own risk to accept — the credential is bound only to your user account and never shared with your team.',
+    providerLabel: 'Provider',
+    valueLabel: 'Subscription credential',
+    valuePlaceholder: 'Subscription credential',
+    valueHelp: 'The value stays on the host and is dispatched only to the operator-configured endpoint.',
+    acknowledge: 'I understand reusing my personal subscription may violate the provider’s terms of service and risk account suspension.',
+    save: 'Bind subscription',
+    saved: 'Subscription credential bound to your user account.',
+    boundTitle: 'Bound credential',
+  },
+  copilot: {
+    pickerTitle: 'Your subscriptions',
+    pickerDesc: 'Chat through your connected GitHub Copilot plan.',
+    title: 'GitHub Copilot',
+    intro: 'Use your own GitHub Copilot plan for chat in your personal workspace. Each request counts toward your Copilot allowance.',
+    scopeNote: 'GitHub asks you to authorize this app. It requests no permission scopes, so it cannot read your repositories or private data.',
+    connect: 'Connect GitHub Copilot',
+    disconnect: 'Disconnect',
+    connected: 'GitHub Copilot is connected to your account.',
+    disconnected: 'GitHub Copilot is disconnected.',
+    error: 'GitHub Copilot could not be connected. Try again, and make sure you are signed in to the same account.',
+    personalOnly: 'Available in your personal workspace only.',
+  },
+  getProviderKey: 'Get a {{provider}} API key →',
 } as const;

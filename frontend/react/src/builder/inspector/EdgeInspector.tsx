@@ -5,6 +5,7 @@
  * edge fires based on the source's output.
  */
 
+import { Button } from '../../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
 import type { BuilderEdge, EdgeCondition, EdgeTriggerRule } from '../schema/workflow.js';
@@ -122,9 +123,9 @@ export function EdgeInspector({ edge }: { edge: BuilderEdge }) {
       ) : null}
 
       <div className="builder-inspector-divider" />
-      <button className="secondary" onClick={() => removeEdge(edge.id)}>
+      <Button variant="secondary" onClick={() => removeEdge(edge.id)}>
         {t('deleteEdge')}
-      </button>
+      </Button>
     </aside>
   );
 }

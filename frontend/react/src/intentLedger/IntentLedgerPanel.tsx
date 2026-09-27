@@ -6,6 +6,7 @@
  *
  * @see docs/adr/0136-intent-ledger.md
  */
+import { Button } from '../ui/Button.js';
 import { lazy, Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { FlagIcon } from '../ui/icons/index.js';
@@ -17,9 +18,9 @@ export function IntentLedgerButton({ sessionId, lastUserMessage }: { sessionId: 
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button type="button" className="secondary u-fs-11" onClick={() => setOpen(true)} aria-label={t('button', { defaultValue: 'Mission' })} title={t('title', { defaultValue: 'Mission contract' })}>
+      <Button variant="secondary" className="u-fs-11" onClick={() => setOpen(true)} aria-label={t('button', { defaultValue: 'Mission' })} title={t('title', { defaultValue: 'Mission contract' })}>
         <FlagIcon size={14} /> {t('button', { defaultValue: 'Mission' })}
-      </button>
+      </Button>
       {open && (
         <Suspense fallback={null}>
           <IntentLedgerModal sessionId={sessionId} onClose={() => setOpen(false)} {...(lastUserMessage ? { lastUserMessage } : {})} />

@@ -11,6 +11,10 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { listMcpTools, type McpTool } from './mcpClient.js';
+import { Notice } from '../ui/Notice.js';
+import { Skeleton } from '../ui/Skeleton.js';
+import { StateCard } from '../ui/StateCard.js';
+import { WrenchIcon } from '../ui/icons/index.js';
 
 export function McpToolsPanel() {
   const { t } = useTranslation('mcp');
@@ -30,17 +34,17 @@ export function McpToolsPanel() {
   }, []);
 
   return (
-    <div className="card">
+    <div className="surface-card u-p-4">
       <h2>{t('title')}</h2>
-      {state.status === 'loading' && <div className="muted">{t('probing')}</div>}
+      {state.status === 'loading' && <div role="status" aria-label={t('probing')}><Skeleton width="55%" /><Skeleton width="85%" /></div>}
       {state.status === 'disabled' && (
         <p className="muted u-fs-13">
           {t('disabledPrefix')}<code>OPENWOP_MCP_SERVER_ENABLED</code>{t('disabledSuffix')}
         </p>
       )}
-      {state.status === 'error' && <div className="alert error">{state.message}</div>}
+      {state.status === 'error' && <Notice variant="error">{state.message}</Notice>}
       {state.status === 'ready' && state.tools.length === 0 && (
-        <p className="muted u-fs-13">{t('noToolsAdvertised')}</p>
+        <StateCard icon={<WrenchIcon size={20} />} title={t('noToolsAdvertised')} />
       )}
       {state.status === 'ready' && state.tools.length > 0 && (
         <ul className="mcp-tool-list">

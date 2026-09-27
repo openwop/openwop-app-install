@@ -18,10 +18,20 @@ import { MemoryRouter } from 'react-router-dom';
 
 // ModelsHubPage gates tabs via useFeatureVisible; the mounted owner pages gate via
 // useFeatureAccess. Allow all so both tabs project and both pages render.
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
   useFeatureVisible: () => () => true,
-  useFeatureAccess: () => ({ enabled: true, status: 'on', isBeta: false, variant: null }),
+  useFeatureAccess: () => makeFeatureAccess({ enabled: true, status: 'on', isBeta: false, variant: null }),
 }));
+// The console is admin-tier and in the real app renders only behind <AdminLayout>,
+// which mounts for admins alone. `visibleHubRoutes` now gates admin-tier tabs on the
+// caller's admin authority (AHC-1/MHC-1/CDC-1), so the render test must present an
+// admin caller — otherwise the projection correctly yields zero tabs. Keep the real
+// `isAdminCaller`; only stand in an admin `EffectiveAccess`.
+vi.mock('../../../client/useEffectiveAccess.js', async (importOriginal) => {
+  const real = await importOriginal<typeof import('../../../client/useEffectiveAccess.js')>();
+  return { ...real, useEffectiveAccess: () => ({ roles: ['admin'], scopes: [], basis: 'tenant-owner' as const }) };
+});
 // Inert data layer for the two mounted owner pages.
 vi.mock('../../../client/evalsClient.js', () => ({
   listOrgs: vi.fn().mockResolvedValue([]),

@@ -23,6 +23,8 @@ const markSrc =
   optional(env.VITE_BRAND_MARK_SRC as string | undefined) ??
   optional(env.VITE_BRAND_LOGO_SRC as string | undefined) ??
   BRAND_DEFAULTS.markSrc;
+const markSrcDark =
+  optional(env.VITE_BRAND_MARK_SRC_DARK as string | undefined) ?? BRAND_DEFAULTS.markSrcDark;
 
 function coalesceTheme(value: string | undefined): BrandConfig['defaultTheme'] {
   return value === 'system' || value === 'light' || value === 'dark'
@@ -59,9 +61,14 @@ export const brand: BrandConfig = {
     BRAND_DEFAULTS.assistantName,
   ),
   markSrc,
+  markSrcDark,
   lockupSrc: coalesce(
     env.VITE_BRAND_LOCKUP_SRC as string | undefined,
     BRAND_DEFAULTS.lockupSrc,
+  ),
+  lockupSrcDark: coalesce(
+    env.VITE_BRAND_LOCKUP_SRC_DARK as string | undefined,
+    BRAND_DEFAULTS.lockupSrcDark,
   ),
   logoSrc: markSrc,
   // faviconSrc / documentTitle / fontsHref are stamped into index.html by

@@ -1,6 +1,6 @@
 /**
  * ADR 0132 Phase 5 — client for the per-conversation capability-scope surface
- * (host-extension, /v1/host/openwop-app/conversation-tools/sessions/:id/*). The
+ * (host-extension, /host/openwop-app/conversation-tools/sessions/:id/*). The
  * backend is authority (toggle + owner gating there); a 404 means the feature is
  * off or the conversation is not visible to the caller.
  */
@@ -32,7 +32,7 @@ export interface CapabilityScopeView {
 }
 
 const base = (sessionId: string): string =>
-  `${config.baseUrl}/v1/host/openwop-app/conversation-tools/sessions/${encodeURIComponent(sessionId)}`;
+  `${config.baseUrl}/host/openwop-app/conversation-tools/sessions/${encodeURIComponent(sessionId)}`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

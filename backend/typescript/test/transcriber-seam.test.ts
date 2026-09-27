@@ -19,6 +19,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
@@ -27,12 +28,14 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  process.env.OPENWOP_TEST_SEAM_ENABLED = 'true'; // route to the deterministic mock STT path
+  process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
+  process.env.OPENWOP_VOICE_MOCK = 'true'; // route to the deterministic mock STT path (own flag, not the seam)
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
+  delete process.env.OPENWOP_VOICE_MOCK;
   await new Promise<void>((res) => server.close(() => res()));
 });
 
@@ -56,7 +59,7 @@ describe('RFC 0106 §B — real-time voice transcriber seam (ADR 0109 P1)', () =
   it('400s (invalid_request) when neither audio.streamRef nor audio.url is supplied', async () => {
     const res = await post(APP_PATH, { audio: {} });
     expect(res.status).toBe(400);
-    expect((await res.json() as { error?: { code?: string } }).error?.code).toBe('invalid_request');
+    expect(errorCodeOf(await res.json())).toBe('invalid_request');
   });
 
   it('is wired under BOTH path prefixes (not 404)', async () => {

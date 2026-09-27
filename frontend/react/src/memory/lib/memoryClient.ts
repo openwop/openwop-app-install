@@ -5,8 +5,8 @@
  * wrapper) and adds the single-entry `get` + demo-only `delete` the inspector
  * needs:
  *
- *   GET    /v1/host/openwop-app/memory/:memoryId[?memoryRef=]  → { memoryRef, entry }
- *   DELETE /v1/host/openwop-app/memory/:memoryId[?memoryRef=]  → { memoryRef, memoryId, removed }
+ *   GET    /host/openwop-app/memory/:memoryId[?memoryRef=]  → { memoryRef, entry }
+ *   DELETE /host/openwop-app/memory/:memoryId[?memoryRef=]  → { memoryRef, memoryId, removed }
  *
  * CTI-1: the backend scopes every read/delete to the caller's principal
  * (`req.tenantId`), never a query value. The inspector sends only
@@ -26,7 +26,7 @@ const baseHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'applicat
 export async function getMemoryEntry(memoryId: string, memoryRef?: string): Promise<MemoryEntry> {
   const qs = memoryRef ? `?memoryRef=${encodeURIComponent(memoryRef)}` : '';
   const res = await fetch(
-    `${config.baseUrl}/v1/host/openwop-app/memory/${encodeURIComponent(memoryId)}${qs}`,
+    `${config.baseUrl}/host/openwop-app/memory/${encodeURIComponent(memoryId)}${qs}`,
     fetchOpts({ headers: baseHeaders() }),
   );
   if (!res.ok) throw new Error(i18n.t('memory:getEntryError', { status: res.status }));
@@ -37,7 +37,7 @@ export async function getMemoryEntry(memoryId: string, memoryRef?: string): Prom
 export async function deleteMemoryEntry(memoryId: string, memoryRef?: string): Promise<void> {
   const qs = memoryRef ? `?memoryRef=${encodeURIComponent(memoryRef)}` : '';
   const res = await fetch(
-    `${config.baseUrl}/v1/host/openwop-app/memory/${encodeURIComponent(memoryId)}${qs}`,
+    `${config.baseUrl}/host/openwop-app/memory/${encodeURIComponent(memoryId)}${qs}`,
     fetchOpts({ method: 'DELETE', headers: baseHeaders() }),
   );
   if (!res.ok) throw new Error(i18n.t('memory:deleteEntryRequestError', { status: res.status }));

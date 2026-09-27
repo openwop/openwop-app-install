@@ -22,6 +22,11 @@ import { createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 import { setReadMarker, deleteReadMarkersOf } from './conversationReadState.js';
 import { subjectScope, type Subject } from './subject.js';
+import { registerSubjectEraser } from './subjectErasure.js';
+import { ERASED, ERASED_USER_REF, subjectKeyForms } from './subjectErasureRedaction.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.conversationStore');
 
 /** The four conversation types that share this one model. `project` slots in
  *  later via the same discriminator + a `project:` participant (ADR 0043 §model). */
@@ -75,6 +80,24 @@ export interface ConversationParticipant {
    *  baked into a stored record is a frozen pre-split snapshot kept only as a
    *  transition fallback; do not read it directly. */
   lastReadAt?: string;
+  /** ADR 0192 D1 — the @-mention token that addresses this AGENT member,
+   *  derived via `host/slug.ts` from the resolved manifest at membership time
+   *  and unique within the conversation. FROZEN at add-time (mention tokens in
+   *  history must keep resolving); re-adding the agent re-derives it. Stamped
+   *  only at membership-mutation time — never from a read path (a read-path
+   *  meta rewrite would race concurrent participant mutations, the LWW hazard
+   *  the read-state split exists to avoid). Absent on user members and on
+   *  legacy agent members (which keep matching by agentId). */
+  mentionSlug?: string;
+  /** ADR 0192 D1 — the agent's human label at add-time ("Code Reviewer"),
+   *  shown by roster/message projections without a registry read. */
+  displayLabel?: string;
+  /** ADR 0202 D1 — an AGENT member's reply policy: `'all'` = replies to every
+   *  human post; `'mention'` = only when @mentioned. Stamped at ADD time (never
+   *  a read path — the LWW hazard). ABSENT on legacy agents: the dispatcher
+   *  DERIVES the effective policy (`?? (soleAgent ? 'all' : 'mention')`),
+   *  matching the pre-0200 invisible sole-agent rule with zero writes. */
+  responsePolicy?: 'all' | 'mention';
 }
 
 export interface ConversationMeta {
@@ -256,8 +279,13 @@ export async function ensureConversationMeta(
     createdAt: ts,
     updatedAt: ts,
   };
-  await metas.put(meta);
-  return meta;
+  // GRADE-D6 — atomic insert-if-absent: two concurrent FIRST creators
+  // previously interleaved load(null)/put and the loser's init (participants,
+  // owner) was silently clobbered. CAS(null, meta) keeps create-or-return
+  // semantics exactly; on losing the race, return the winner's row.
+  if (await metas.compareAndSwap(null, meta)) return meta;
+  const winner = await loadMeta(`${tenantId}:${conversationId}`);
+  return winner ?? meta;
 }
 
 /** Promote a conversation to the group chat for an advisory board (ADR 0043
@@ -282,9 +310,72 @@ export async function markAsBoardGroup(
    *  it, RBAC-filtered for the convener). `undefined` leaves an existing snapshot
    *  untouched; `null` clears it. */
   injectedContextBlock?: string | null,
+  /** ADR 0278 GRADE-7 — ASSERT this owner binding on the rebuilt meta (the
+   *  canonical board chat passes its `board:<id>` subject so a racing rewrite
+   *  can never permanently strip the subject-access join gate). `undefined`
+   *  preserves whatever the existing meta carries (the legacy behavior). */
+  assertOwnerSubject?: Subject,
 ): Promise<ConversationMeta> {
+  // GRADE-D6 — bounded CAS: concurrent stamps (two first opens, or an open
+  // racing a summon) were last-writer-wins, silently dropping the loser's
+  // participant merges. Retries rebuild against the fresh row; exhausted →
+  // today's LWW put + warn (converging, slightly lossy — the recorded residual).
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const casBase = attempt === 0 && preloaded !== undefined ? preloaded : await loadMeta(`${tenantId}:${conversationId}`);
+    const casResult = await buildAndSwapBoardGroup(tenantId, conversationId, boardId, participants, ownerUserId, casBase, injectedContextBlock, assertOwnerSubject);
+    if (casResult) return casResult;
+  }
+  log.warn('board_group_stamp_contended', { conversationId, boardId });
+  const finalBase = await loadMeta(`${tenantId}:${conversationId}`);
+  return buildBoardGroupMeta(tenantId, conversationId, boardId, participants, ownerUserId, finalBase, injectedContextBlock, assertOwnerSubject, true);
+}
+
+/** Build the next board-group meta from `existing`; when `forcePut`, write LWW
+ *  and return it; otherwise CAS and return the row on success / null on a lost
+ *  race (the caller retries against a fresh read). */
+async function buildAndSwapBoardGroup(
+  tenantId: string,
+  conversationId: string,
+  boardId: string,
+  participants: SubjectRef[],
+  ownerUserId: string | undefined,
+  existing: ConversationMeta | null,
+  injectedContextBlock: string | null | undefined,
+  assertOwnerSubject: Subject | undefined,
+): Promise<ConversationMeta | null> {
+  const next = composeBoardGroupMeta(tenantId, conversationId, boardId, participants, ownerUserId, existing, injectedContextBlock, assertOwnerSubject);
+  return (await metas.compareAndSwap(existing, next)) ? next : null;
+}
+
+async function buildBoardGroupMeta(
+  tenantId: string,
+  conversationId: string,
+  boardId: string,
+  participants: SubjectRef[],
+  ownerUserId: string | undefined,
+  existing: ConversationMeta | null,
+  injectedContextBlock: string | null | undefined,
+  assertOwnerSubject: Subject | undefined,
+  forcePut: boolean,
+): Promise<ConversationMeta> {
+  const next = composeBoardGroupMeta(tenantId, conversationId, boardId, participants, ownerUserId, existing, injectedContextBlock, assertOwnerSubject);
+  if (forcePut) await metas.put(next);
+  return next;
+}
+
+/** The PURE meta composition markAsBoardGroup has always done — extracted so the
+ *  CAS loop rebuilds against each fresh read. */
+function composeBoardGroupMeta(
+  tenantId: string,
+  conversationId: string,
+  boardId: string,
+  participants: SubjectRef[],
+  ownerUserId: string | undefined,
+  existing: ConversationMeta | null,
+  injectedContextBlock: string | null | undefined,
+  assertOwnerSubject: Subject | undefined,
+): ConversationMeta {
   const ts = now();
-  const existing = preloaded === undefined ? await loadMeta(`${tenantId}:${conversationId}`) : preloaded;
   const merged: ConversationParticipant[] = existing ? [...existing.participants] : [];
   const ownerSubject = ownerUserId ? userRef(ownerUserId) : null;
   if (ownerSubject && !merged.some((p) => p.subjectRef === ownerSubject)) {
@@ -303,24 +394,88 @@ export async function markAsBoardGroup(
     type: 'group',
     ...(ownerUserId ? { ownerUserId } : existing?.ownerUserId ? { ownerUserId: existing.ownerUserId } : {}),
     boardId,
+    // ADR 0278 — PRESERVE the generic owner binding (and GRADE-7: allow the
+    // caller to ASSERT it): the canonical board chat is created with
+    // `ownerSubject: board:<id>` (the subject-access join gate); rebuilding the
+    // meta without it silently erased shared-visibility access on every
+    // re-open/summon, and a summon racing an open could drop it forever.
+    ...((assertOwnerSubject ?? existing?.ownerSubject) ? { ownerSubject: assertOwnerSubject ?? existing?.ownerSubject } : {}),
     ...(nextBlock ? { injectedContextBlock: nextBlock } : {}),
     participants: merged,
     createdAt: existing?.createdAt ?? ts,
     updatedAt: ts,
   };
-  await metas.put(next);
   return next;
+}
+
+/** GRADE-D7 — refresh an ENTITY-bound chat session's title after the entity was
+ *  renamed (boards, projects): the title is set only at session creation, so a
+ *  rename left the rail stale forever. Title-source-guarded — never clobbers a
+ *  user rename (`titleSource !== 'default'`) — and a no-op when unchanged. */
+export async function refreshEntityChatTitle(
+  storage: import('../storage/storage.js').Storage,
+  tenantId: string,
+  sessionId: string,
+  expectedTitle: string,
+): Promise<void> {
+  const session = await storage.getChatSession(tenantId, sessionId);
+  if (!session || session.title === expectedTitle) return;
+  if ((session.titleSource ?? 'default') !== 'default') return;
+  await storage.updateChatSession(tenantId, sessionId, { title: expectedTitle, updatedAt: now() });
+}
+
+/** ADR 0278 GRADE-13 — release a conversation's generic owner binding. Used when
+ *  the OWNING ENTITY is deleted (an advisory board): with the entity gone its
+ *  access resolver returns 'none' for everyone, which would strand the
+ *  transcript as permanently unreadable, undeletable dead data. Stripping
+ *  `ownerSubject` drops the conversation back to the legacy owner/participant
+ *  gate (the creator keeps read/manage; org-wide join ends — correct, since the
+ *  entity that granted the join no longer exists). Idempotent; a no-op when the
+ *  meta is absent or carries no owner binding. */
+export async function releaseConversationOwnerSubject(tenantId: string, conversationId: string): Promise<void> {
+  const existing = await loadMeta(`${tenantId}:${conversationId}`);
+  if (!existing?.ownerSubject) return;
+  const { ownerSubject: _released, ...rest } = existing;
+  await metas.put({ ...rest, updatedAt: now() });
 }
 
 /** Add a participant (idempotent). Returns the updated meta, or null if the
  *  conversation has no meta. */
-export async function addParticipant(tenantId: string, conversationId: string, subjectRef: SubjectRef, preloaded?: ConversationMeta | null): Promise<ConversationMeta | null> {
+export async function addParticipant(
+  tenantId: string,
+  conversationId: string,
+  subjectRef: SubjectRef,
+  preloaded?: ConversationMeta | null,
+  /** ADR 0192 D1 / ADR 0202 D1 — mention identity + response policy stamped
+   *  ONLY here (membership-mutation time), so no read path ever rewrites the meta. */
+  extras?: Pick<ConversationParticipant, 'mentionSlug' | 'displayLabel' | 'responsePolicy'>,
+): Promise<ConversationMeta | null> {
   const meta = preloaded === undefined ? await loadMeta(`${tenantId}:${conversationId}`) : preloaded;
   if (!meta) return null;
   if (meta.participants.some((p) => p.subjectRef === subjectRef)) return meta;
   const next: ConversationMeta = {
     ...meta,
-    participants: [...meta.participants, { subjectRef, role: 'member', addedAt: now() }],
+    participants: [...meta.participants, { subjectRef, role: 'member', addedAt: now(), ...(extras?.mentionSlug ? { mentionSlug: extras.mentionSlug } : {}), ...(extras?.displayLabel ? { displayLabel: extras.displayLabel } : {}), ...(extras?.responsePolicy ? { responsePolicy: extras.responsePolicy } : {}) }],
+    updatedAt: now(),
+  };
+  await metas.put(next);
+  return next;
+}
+
+/** ADR 0202 D1 — set an agent participant's reply policy. A real membership
+ *  mutation (rewrites the participant record) — never a read path. */
+export async function setParticipantResponsePolicy(
+  tenantId: string,
+  conversationId: string,
+  subjectRef: SubjectRef,
+  policy: 'all' | 'mention',
+  preloaded?: ConversationMeta | null,
+): Promise<ConversationMeta | null> {
+  const meta = preloaded === undefined ? await loadMeta(`${tenantId}:${conversationId}`) : preloaded;
+  if (!meta) return null;
+  const next: ConversationMeta = {
+    ...meta,
+    participants: meta.participants.map((p) => (p.subjectRef === subjectRef ? { ...p, responsePolicy: policy } : p)),
     updatedAt: now(),
   };
   await metas.put(next);
@@ -348,7 +503,11 @@ export async function setConversationChannel(
 ): Promise<ConversationMeta | null> {
   const meta = await loadMeta(`${tenantId}:${conversationId}`);
   if (!meta || meta.type !== 'channel' || !meta.channel) return null;
-  const next: ConversationMeta = { ...meta, channel: { ...meta.channel, ...patch }, updatedAt: now() };
+  const channel = { ...meta.channel, ...patch };
+  // An empty-string description means CLEAR — drop the key so consumers never
+  // see (and never have to special-case) `description: ''` (ADR 0192 D4).
+  if (channel.description === '') delete channel.description;
+  const next: ConversationMeta = { ...meta, channel, updatedAt: now() };
   await metas.put(next);
   return next;
 }
@@ -357,8 +516,50 @@ export async function setConversationChannel(
  *  dedicated per-(conversation, subject) read marker rather than rewriting the
  *  whole meta, so it can't race a concurrent participant mutation on the same
  *  record. The route's projection joins the marker back into the response. */
-export async function markRead(tenantId: string, conversationId: string, subjectRef: SubjectRef, at: string): Promise<void> {
-  await setReadMarker(tenantId, conversationId, subjectRef, at);
+export async function markRead(tenantId: string, conversationId: string, subjectRef: SubjectRef, at: string, readMessageCount?: number): Promise<void> {
+  await setReadMarker(tenantId, conversationId, subjectRef, at, readMessageCount);
+}
+
+// ── ADR 0464 P2 — DSAR subject erasure ───────────────────────────────────────
+// A conversation is SHARED history — other participants' transcript. Deleting it
+// on one participant's DSAR would erase everyone's record, so a conversation is
+// NEVER deleted here; instead the erased subject's identifiers are ANONYMIZED in
+// place: `ownerUserId`, a user-kind `ownerSubject`, the matching
+// `participants[].subjectRef` (the participant row is KEPT so the transcript's
+// membership shape survives — the message author simply reads as `user:[erased]`),
+// and the subject's segment of a 1:1 `dmKey`. Channel `name`/`description` are
+// WORKSPACE content (the room's identity, authored as a shared artifact), NOT the
+// subject's personal data, so they are deliberately left intact. The read
+// markers, feedback, and reactions the subject authored are DELETED by their own
+// erasers (separate stores). Idempotent; tenant-scoped; fail-closed on falsy input.
+
+/** DSAR eraser — anonymize the subject's identity across every conversation meta
+ *  in the tenant, without deleting any conversation. */
+export async function eraseSubjectConversations(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return;
+  const { forms } = subjectKeyForms(subjectKey);
+  for (const m of await metas.listByPrefix(`${tenantId}:`)) {
+    const ownerHit = m.ownerUserId !== undefined && forms.has(m.ownerUserId);
+    const partHit = m.participants.some((p) => forms.has(p.subjectRef));
+    const subjHit = m.ownerSubject?.kind === 'user' && forms.has(m.ownerSubject.id);
+    const dmHit = m.dmKey !== undefined && m.dmKey.split('|').some((seg) => forms.has(seg));
+    if (!ownerHit && !partHit && !subjHit && !dmHit) continue;
+    const next: ConversationMeta = {
+      ...m,
+      participants: m.participants.map((p) => (forms.has(p.subjectRef) ? { ...p, subjectRef: ERASED_USER_REF } : p)),
+      updatedAt: now(),
+    };
+    if (ownerHit) next.ownerUserId = ERASED;
+    if (subjHit) next.ownerSubject = { kind: 'user', id: ERASED };
+    if (dmHit) next.dmKey = m.dmKey!.split('|').map((seg) => (forms.has(seg) ? ERASED_USER_REF : seg)).join('|');
+    await metas.put(next);
+  }
+}
+
+/** Register the conversation-store DSAR eraser (idempotent — the seam dedupes by
+ *  reference). Called from the host-erasers boot step (host/hostSubjectErasers.ts). */
+export function registerConversationErasure(): void {
+  registerSubjectEraser(eraseSubjectConversations);
 }
 
 export async function deleteConversationMeta(tenantId: string, conversationId: string): Promise<void> {

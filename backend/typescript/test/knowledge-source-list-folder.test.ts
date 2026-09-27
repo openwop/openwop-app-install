@@ -4,16 +4,27 @@
  * list parsing, pagination, malformed-entry skipping, provider dispatch, and the
  * fail-closed mapping of a missing connection.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../src/host/brokeredEgress.js', () => ({ brokeredFetch: vi.fn() }));
 // The un-credentialed Graph downloadUrl fetch + its SSRF guard (ADR 0107 Phase: Graph binary).
 vi.mock('undici', () => ({ fetch: vi.fn() }));
-vi.mock('../src/host/webhookEgressGuard.js', () => ({
-  isDeniedWebhookHost: vi.fn(() => false),
-  webhookEgressDispatcher: vi.fn(() => ({})),
-  webhookPrivateEgressAllowed: vi.fn(() => false),
-}));
+// ADR 0609 — `fetchGuardedBytes` now delegates its scheme arm to the ADR 0607
+// shared predicate, so this mock must supply it or the module under test imports
+// `undefined` and every download path throws a mock error instead of exercising
+// the guard. `importActual` for the two new symbols keeps the REAL ordered
+// predicate in play (this file's subject is the denied-HOST arm, which it mocks
+// deliberately); hand-rolling a stub here would make these tests assert against
+// a second implementation of the thing ADR 0607 exists to have one of.
+vi.mock('../src/host/webhookEgressGuard.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/host/webhookEgressGuard.js')>();
+  return {
+    ...actual,
+    isDeniedWebhookHost: vi.fn(() => false),
+    webhookEgressDispatcher: vi.fn(() => ({})),
+    webhookPrivateEgressAllowed: vi.fn(() => false),
+  };
+});
 import { brokeredFetch } from '../src/host/brokeredEgress.js';
 import { fetch as undiciFetch } from 'undici';
 import { isDeniedWebhookHost } from '../src/host/webhookEgressGuard.js';
@@ -24,6 +35,17 @@ const mFetch = vi.mocked(brokeredFetch);
 const mUndici = vi.mocked(undiciFetch);
 const mDenied = vi.mocked(isDeniedWebhookHost);
 const deps = { storage: {} as Storage, tenantId: 't1', actingUserId: 'user:a', orgId: 'org1' };
+
+// ADR 0609 — the download leg now applies the ADR 0187 tenant egress policy, the
+// same gate `brokeredFetch` has always applied on the credentialed metadata leg.
+// That policy lives in a DurableCollection, so the host-ext store must be booted.
+// A tenant with no stored rules defaults to `off`, i.e. these tests keep the
+// posture they had; what changed is that the lookup now happens at all.
+beforeAll(async () => {
+  const { initHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
+  const { openStorage } = await import('../src/storage/index.js');
+  initHostExtPersistence(await openStorage('memory://'));
+});
 const sent = (body: unknown) => ({ outcome: 'sent' as const, res: { ok: true, status: 200, text: async () => JSON.stringify(body) } as unknown as Response });
 const sentBytes = (buf: Buffer) => ({ outcome: 'sent' as const, res: { ok: true, status: 200, arrayBuffer: async () => buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) } as unknown as Response });
 const DRIVE_ID = '1AbcDEF_ghiJKL-mnoPQRstuVWxyz0123456789';
@@ -39,10 +61,12 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
       ],
     }) as never);
     const out = await listFolder(deps, 'google', 'FOLDER123');
-    expect(out).toEqual([
+    expect(out.files).toEqual([
       { fileId: 'f1', name: 'Doc A', mimeType: 'application/vnd.google-apps.document', revision: '2026-06-01T00:00:00Z' },
       { fileId: 'f2', name: 'Sheet B', mimeType: 'application/vnd.google-apps.spreadsheet', revision: '2026-06-02T00:00:00Z' },
     ]);
+    // ADR 0605 — a listing the loop DRAINED is complete, so it may be pruned from.
+    expect(out.complete).toBe(true);
     // the query targets the folder + excludes trashed files
     const url = String(mFetch.mock.calls[0]![1].url);
     expect(decodeURIComponent(url)).toContain("'FOLDER123' in parents and trashed = false");
@@ -54,7 +78,8 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
       .mockResolvedValueOnce(sent({ files: [{ id: 'f1', name: 'A', mimeType: 'text/plain', modifiedTime: 'r1' }], nextPageToken: 'PAGE2' }) as never)
       .mockResolvedValueOnce(sent({ files: [{ id: 'f2', name: 'B', mimeType: 'text/plain', modifiedTime: 'r2' }] }) as never);
     const out = await listFolder(deps, 'google', 'F');
-    expect(out.map((f) => f.fileId)).toEqual(['f1', 'f2']);
+    expect(out.files.map((f) => f.fileId)).toEqual(['f1', 'f2']);
+    expect(out.complete).toBe(true);
     expect(mFetch).toHaveBeenCalledTimes(2);
     expect(String(mFetch.mock.calls[1]![1].url)).toContain('pageToken=PAGE2');
   });
@@ -64,7 +89,7 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
       files: [{ name: 'no id' }, { id: 'f3', name: '', mimeType: 'text/plain', modifiedTime: 'r3' }],
     }) as never);
     const out = await listFolder(deps, 'google', 'F');
-    expect(out).toEqual([{ fileId: 'f3', name: 'Untitled', mimeType: 'text/plain', revision: 'r3' }]);
+    expect(out.files).toEqual([{ fileId: 'f3', name: 'Untitled', mimeType: 'text/plain', revision: 'r3' }]);
   });
 
   it('rejects an unsupported provider', async () => {
@@ -98,10 +123,11 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
       ],
     }) as never);
     const out = await listFolder(deps, 'microsoft-graph', 'FOLDER1');
-    expect(out).toEqual([
+    expect(out.files).toEqual([
       { fileId: 'i1', name: 'A.txt', mimeType: 'text/plain', revision: '2026-06-01T00:00:00Z' },
       { fileId: 'i2', name: 'B.md', mimeType: 'text/markdown', revision: '2026-06-02T00:00:00Z' },
     ]);
+    expect(out.complete).toBe(true);
     const url = String(mFetch.mock.calls[0]![1].url);
     expect(url).toContain('graph.microsoft.com/v1.0/me/drive/items/FOLDER1/children');
   });
@@ -111,7 +137,8 @@ describe('listFolder (ADR 0107 Phase 1)', () => {
       .mockResolvedValueOnce(sent({ value: [{ id: 'i1', name: 'A', file: { mimeType: 'text/plain' }, lastModifiedDateTime: 'r1' }], '@odata.nextLink': 'https://graph.microsoft.com/v1.0/next?p=2' }) as never)
       .mockResolvedValueOnce(sent({ value: [{ id: 'i2', name: 'B', file: { mimeType: 'text/plain' }, lastModifiedDateTime: 'r2' }] }) as never);
     const out = await listFolder(deps, 'microsoft-graph', 'root');
-    expect(out.map((f) => f.fileId)).toEqual(['i1', 'i2']);
+    expect(out.files.map((f) => f.fileId)).toEqual(['i1', 'i2']);
+    expect(out.complete).toBe(true);
     expect(String(mFetch.mock.calls[0]![1].url)).toContain('/me/drive/root/children');
     expect(String(mFetch.mock.calls[1]![1].url)).toBe('https://graph.microsoft.com/v1.0/next?p=2');
   });
@@ -217,10 +244,11 @@ describe('Dropbox (ADR 0107 follow-on)', () => {
       has_more: false,
     }) as never);
     const out = await listFolder(deps, 'dropbox', '/Reports');
-    expect(out).toEqual([
+    expect(out.files).toEqual([
       { fileId: 'id:1', name: 'report.pdf', mimeType: 'application/pdf', revision: 'r1' },
       { fileId: 'id:2', name: 'deck.pptx', mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', revision: 'r2' },
     ]);
+    expect(out.complete).toBe(true);
     // the folder ref rides the JSON BODY (no URL-injection surface)
     expect(String(mFetch.mock.calls[0]![1].url)).toContain('api.dropboxapi.com/2/files/list_folder');
     expect(mFetch.mock.calls[0]![1].method).toBe('POST');
@@ -232,7 +260,8 @@ describe('Dropbox (ADR 0107 follow-on)', () => {
       .mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:1', name: 'a.txt', rev: 'r1' }], has_more: true, cursor: 'CUR2' }) as never)
       .mockResolvedValueOnce(sent({ entries: [{ '.tag': 'file', id: 'id:2', name: 'b.txt', rev: 'r2' }], has_more: false }) as never);
     const out = await listFolder(deps, 'dropbox', 'root');
-    expect(out.map((f) => f.fileId)).toEqual(['id:1', 'id:2']);
+    expect(out.files.map((f) => f.fileId)).toEqual(['id:1', 'id:2']);
+    expect(out.complete).toBe(true);
     expect(String(mFetch.mock.calls[1]![1].url)).toContain('/2/files/list_folder/continue');
     expect(JSON.parse(String(mFetch.mock.calls[1]![1].body)).cursor).toBe('CUR2');
   });
@@ -270,10 +299,11 @@ describe('Box (ADR 0107 follow-on)', () => {
       total_count: 3,
     }) as never);
     const out = await listFolder(deps, 'box', 'root');
-    expect(out).toEqual([
+    expect(out.files).toEqual([
       { fileId: '11', name: 'report.pdf', mimeType: 'application/pdf', revision: '3' },
       { fileId: '33', name: 'sheet.xlsx', mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', revision: '7' },
     ]);
+    expect(out.complete).toBe(true);
     expect(String(mFetch.mock.calls[0]![1].url)).toContain('api.box.com/2.0/folders/0/items');
   });
 

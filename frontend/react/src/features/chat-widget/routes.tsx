@@ -9,12 +9,15 @@ const routes: FeatureRoute[] = [
   {
     path: '/widgets',
     element: <WidgetsPage />,
-    tier: 'admin',
+    // ADR 0610 D6 (CDC-2) — backend widget routes are `workspace:write` (chat-widget/routes.ts),
+    // so the FE tier is `workspace`, not `admin`. Now a workspace-rail surface, so the `admin`
+    // archetype + `Platform` (admin-only) group move to the workspace index archetype + group.
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'Platform',
-      label: 'Chat widgets',
+      group: 'Workspace',
+      label: 'Chat widgets', labelKey: 'chatWidgetLabel',
       icon: ActivityIcon,
-      hint: 'Embeddable chat widgets',
+      hint: 'Embeddable chat widgets', hintKey: 'chatWidgetHint',
       // ADR 0145 — subsumed by the Chat deployment console once enabled.
       hiddenWhenFeature: 'chat-deployment',
     },

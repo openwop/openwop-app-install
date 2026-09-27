@@ -10,11 +10,14 @@
  */
 
 import type { BackendFeature } from '../types.js';
+import { registerProposalsAgentTools } from './agentTools.js';
 import { registerProposalsRoutes } from './routes.js';
+import './erasure.js'; // PROPC-ERASURE-DSAR — side-effect: registers the proposals subject eraser + PII declaration at feature load
 
 export const proposalsFeature: BackendFeature = {
   id: 'proposals',
   registerRoutes: (deps) => {
     registerProposalsRoutes(deps);
+    registerProposalsAgentTools(); // XCH-HOLE-3 (Wave 4) — openwop:proposals.list (ADR 0308 seam)
   },
 };

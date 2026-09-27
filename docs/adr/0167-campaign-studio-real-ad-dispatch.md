@@ -2,7 +2,7 @@
 
 | Field | Value |
 |---|---|
-| **Status** | Proposed |
+| **Status** | implemented (Phases 1–3 + dry-run per the phase table, 2026-06-28; header corrected 2026-07-03 — it had lagged at "Proposed" after the phases landed). The payload-seam limitation is **CLOSED by ADR 0223** (2026-07-03): documented-complete payloads, media-upload legs, Customer Match member upload, and a LinkedIn strategy — see the correction notes at "Known limitation" below. |
 | **Date** | 2026-06-28 |
 | **Feature(s)** | a host **ads-dispatch adapter** + `feature.campaign-channels.nodes.publish-ad-variants` (ADR 0166) + RFC 0045 `actions` on the ad connection packs |
 | **Depends on** | The Connections broker + `brokeredPost`/`brokeredFetch` (`host/brokeredEgress.ts`), OAuth flows + refresh daemon (`features/connections/`), `connectorInvoker.ts`, the slack/sms/email adapter precedent; ADR 0024 (Connections), 0159 (ad connection packs), 0166 (publish last-mile + the documents fallback) |
@@ -53,6 +53,8 @@ What's **missing** in openwop-app is small and concrete: the ad connection packs
 - **A new capability flag / event family on the wire** — the intake found `egress.decided` (RFC 0079) + recorded-fact events already cover it; no normative additions.
 
 > **Known limitation (all three phases):** the per-platform request **bodies are minimal — the dispatch SEAM, not production-complete payloads.** Live Meta/Google/TikTok create calls require more fields (e.g. Meta creative+page, Google RSA already padded but needs a real `finalUrls`/landing flow, TikTok adgroup `placements`/`schedule`/`optimization_goal` + ad `identity_id`/media). They will 400 against the live APIs until fleshed out — bounded-safe (a rejection fails closed → no spend; everything is created PAUSED regardless). Completing the payloads (incl. asset/media upload) is the follow-on past the seam.
+>
+> **Correction (2026-07-03, ADR 0223):** this limitation is **closed**. The create bodies are now **documented-complete** (authored to the platforms' current public API doc shapes — Meta v21 real `adcreatives` + required `pageId`, Google v18 mandatory `finalUrls` + network settings, TikTok v1.3 adgroup delivery fields + required `identityId`), the **media-upload legs** ship (Meta `adimages`, TikTok image upload — bytes resolved host-side from the media library), the ADR 0217 Google **Customer Match member upload** is complete, and a **LinkedIn strategy** joins the three. Every invariant in the table above stands; the idem key now also hashes the creative-affecting inputs. What remains honest-incomplete (targeting specs, live-sandbox verification as an operator step) is named in **ADR 0223**.
 
 ## Phased plan
 
@@ -105,6 +107,12 @@ the seam, not production-complete** (they will 400 against the live APIs until f
 fail closed, no spend); **media/asset upload** is not yet wired; and the Meta cascade-delete
 rollback is best-effort PAUSED-safe until **RFC 0120** (connection-pack `apiHosts`) lands and the
 ad packs declare their API hosts (then `brokeredFetch` DELETE works for real).
+
+> **Correction (2026-07-03, ADR 0223):** the first two limitations are closed — payloads are
+> documented-complete and the Meta/TikTok media-upload legs ship (see ADR 0223, which also adds
+> LinkedIn dispatch + `OPENWOP_LINKEDIN_ADS_API_BASE` to the TEST-ONLY override note above).
+> Operator additions per platform: Meta dispatch now also needs the node `pageId`; TikTok needs
+> `identityId`; Google needs `landingUrl`. The RFC 0120 apiHosts point had already landed (#1006).
 
 ## Implementation log
 

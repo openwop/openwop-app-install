@@ -1,0 +1,12 @@
+{
+  "productName": "OpenWOP",
+  "appId": "dev.openwop.desktop",
+  "mode": "demo",
+  "defaultHost": "http://localhost:8000",
+  "demoHost": "https://app.openwop.dev",
+  "lockedHost": null,
+  "helpUrl": "https://app.openwop.dev",
+  "accent": "#b95c3a",
+  "iconSvg": "../../frontend/react/public/OpenWOP.svg",
+  "iconPlate": "#f4f1ea"
+}

@@ -6,7 +6,7 @@
  *     message — replay-safe by construction (the bytes live in `run.inputs`,
  *     copied verbatim on a fork/replay);
  *   - larger files UPLOAD to the host's durable media-asset store
- *     (`POST /v1/host/openwop-app/media/upload`) and the message references them by
+ *     (`POST /host/openwop-app/media/upload`) and the message references them by
  *     `url`. The store is durable + read-through + tenant-scoped, and the
  *     responder node re-inlines the bytes (tenant-checked) before dispatch, so
  *     these are replay-safe too within the asset's retention window.
@@ -16,7 +16,7 @@
  */
 
 import { config, authedHeaders, fetchOpts } from './config.js';
-import { blobToBase64 } from '../chat/hooks/useAudioRecorder.js';
+import { blobToBase64 } from './blobToBase64.js';
 import type { ContentPart } from '../chat/types.js';
 
 /** Files at or below this go inline; larger ones upload. Mirrors the host's
@@ -103,7 +103,7 @@ export async function fileToContentPart(file: File): Promise<ContentPart> {
 
   // Large file → upload to the durable host store, reference by URL.
   const res = await fetch(
-    `${config.baseUrl}/v1/host/openwop-app/media/upload`,
+    `${config.baseUrl}/host/openwop-app/media/upload`,
     fetchOpts({
       method: 'POST',
       headers: { ...authedHeaders(), 'content-type': 'application/json' },

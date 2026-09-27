@@ -16,6 +16,7 @@ import { lazy } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/index.js';
 import { registerArtifactRenderer, type ArtifactRendererProps } from './rendererRegistry.js';
+
 // Canvas renderers are lazy-split off the eager chat/workbench chunk (the entry-budget
 // pattern, like the interactive.* renderers below) — the workbench wraps the chosen
 // renderer in a single <Suspense>, so a lazy canvas renderer loads on first open.
@@ -24,6 +25,7 @@ const AppBuilderPreview = lazy(() => import('./AppBuilderPreview.js').then((m) =
 const CampaignPreview = lazy(() => import('./CampaignPreview.js').then((m) => ({ default: m.CampaignPreview })));
 const DrawingPreview = lazy(() => import('./DrawingPreview.js').then((m) => ({ default: m.DrawingPreview })));
 const CadPreview = lazy(() => import('./CadPreview.js').then((m) => ({ default: m.CadPreview })));
+const BomPreview = lazy(() => import('./BomPreview.js').then((m) => ({ default: m.BomPreview })));
 
 const SandboxedArtifactFrame = lazy(() => import('./SandboxedArtifactFrame.js').then((m) => ({ default: m.SandboxedArtifactFrame })));
 const MermaidDiagram = lazy(() => import('../MermaidDiagram.js').then((m) => ({ default: m.MermaidDiagram })));
@@ -68,11 +70,17 @@ export function registerDefaultArtifactRenderers(): void {
   // ADR 0153 Phase 2 — the app-builder canvas: structured screens/components, rendered
   // read-only inline (drag-and-drop editing is the full-screen editor, Phase 2b).
   registerArtifactRenderer({ artifactTypeId: 'canvas.app-builder', editable: false, Component: AppBuilderPreview });
+  // ADR 0346 4c — the App Builder pipeline's typed deliverables (app.research
+  // now; app.prd/plan/audit with their 4d producers): ONE generic schema-blind
+  // structured view, so a new app.* type never falls to inert Markdown.
+  // Lazy-split (the PR #804 entry-budget pattern; the workbench Suspends).
+  registerArtifactRenderer({ match: (id) => id.startsWith('app.'), editable: false, Component: lazy(() => import('./AppFacetArtifact.js').then((m) => ({ default: m.AppFacetArtifactView }))) });
   // ADR 0153 Phase 3 — campaign-studio canvas (structured marketing campaign).
   registerArtifactRenderer({ artifactTypeId: 'canvas.campaign', editable: false, Component: CampaignPreview });
   // ADR 0153 Phase 4 — drawings canvas (constrained vector scene → safe inline SVG).
   registerArtifactRenderer({ artifactTypeId: 'canvas.drawing', editable: false, Component: DrawingPreview });
   // ADR 0153 Phase 4 — cad canvas (parametric solids → orthographic SVG projection).
   registerArtifactRenderer({ artifactTypeId: 'canvas.cad', editable: false, Component: CadPreview });
+  registerArtifactRenderer({ artifactTypeId: 'canvas.cad.bom', editable: false, Component: BomPreview });
   registered = true;
 }

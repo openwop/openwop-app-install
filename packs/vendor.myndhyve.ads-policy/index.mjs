@@ -292,7 +292,7 @@ export async function policyCheck(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'ads.policy.check': policyCheck,
 };
 

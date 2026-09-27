@@ -8,8 +8,11 @@
  *
  * The metrics (action approval/edit/citation rates, taint share, stale
  * commitments, loop status) are the assistant's domain, so the workspace page
- * gates this on `roleKey === 'chief-of-staff'` — the same gate as Recurring
- * tasks. A generic per-agent telemetry surface would be a separate concept;
+ * gates this on the `assistant` CAPABILITY — the same gate as Recurring tasks.
+ * (Corrected AST-UX-2, 2026-08-19: this line used to name
+ * `roleKey === 'chief-of-staff'`, the role↔capability fusion ADR 0023
+ * §Correction removed; see `AssistantControlPanels` in AgentWorkspacePage.)
+ * A generic per-agent telemetry surface would be a separate concept;
  * this deliberately reuses what already exists.
  *
  * Presentation: a plain-language verdict strip (the one-glance answer AND the
@@ -22,18 +25,19 @@
  * clearly "good") stay neutral.
  */
 import { useEffect, useState, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { getAssistantHealth, type AssistantHealth } from '../features/assistant/assistantClient.js';
 import { relativeTime } from './agentViewModel.js';
 import { formatDateTime } from '../i18n/format.js';
 import {
-  AlertIcon, CheckIcon, ClockIcon, InboxIcon, LinkIcon,
+  AlertIcon, BanIcon, CheckIcon, ClockIcon, InboxIcon, LinkIcon,
   PencilIcon, QuoteIcon, SendIcon, SparklesIcon, ThumbsUpIcon,
 } from '../ui/icons/index.js';
 
 type Tone = 'danger' | 'warn' | 'accent' | 'success' | 'muted';
 
 const pct = (v: number | null): string => (v === null ? '—' : `${Math.round(v * 100)}%`);
-const plural = (n: number, one: string): string => `${n} ${one}${n === 1 ? '' : 's'}`;
 
 const VERDICT_ICON: Record<Tone, (props: { size?: number }) => JSX.Element> = {
   danger: AlertIcon,
@@ -46,30 +50,31 @@ const VERDICT_ICON: Record<Tone, (props: { size?: number }) => JSX.Element> = {
 /** The one-glance answer AND the next step: alarms first (failures, then stale
  *  commitments), then attention (awaiting approval), then a plain healthy/idle
  *  read. `note` tells the admin what to do, not just what the state is. */
-function verdict(h: AssistantHealth, persona: string): { tone: Tone; label: string; note: string } {
+function verdict(h: AssistantHealth, persona: string, t: TFunction<'agents'>): { tone: Tone; label: string; note: string } {
   if (h.actions.failed > 0) {
-    return { tone: 'danger', label: `${plural(h.actions.failed, 'action')} failed`, note: 'Open the Activity tab to see what went wrong.' };
+    return { tone: 'danger', label: t('healthVerdictFailed', { label: t('healthActionPlural', { count: h.actions.failed }) }), note: t('healthVerdictFailedNote') };
   }
   if (h.commitments.stale > 0) {
-    return { tone: 'warn', label: `${plural(h.commitments.stale, 'commitment')} stale`, note: 'These have gone quiet and may need a nudge or to be closed out.' };
+    return { tone: 'warn', label: t('healthVerdictStale', { label: t('healthCommitmentPlural', { count: h.commitments.stale }) }), note: t('healthVerdictStaleNote') };
   }
   if (h.actions.pending > 0) {
-    return { tone: 'accent', label: `${h.actions.pending} awaiting approval`, note: 'Drafted actions are waiting for your review before they go out.' };
+    return { tone: 'accent', label: t('healthVerdictPending', { count: h.actions.pending }), note: t('healthVerdictPendingNote') };
   }
   if (h.actions.sent > 0 || h.commitments.open > 0) {
-    return { tone: 'success', label: 'Healthy', note: 'Running clean — nothing needs your attention right now.' };
+    return { tone: 'success', label: t('healthVerdictHealthy'), note: t('healthVerdictHealthyNote') };
   }
-  return { tone: 'muted', label: 'Idle', note: `No actions drafted yet — metrics fill in as ${persona} starts working.` };
+  return { tone: 'muted', label: t('healthVerdictIdle'), note: t('healthVerdictIdleNote', { persona }) };
 }
 
-function Tile({ icon, label, value, tone }: {
+function Tile({ icon, label, value, tone, help }: {
   icon: ReactNode;
   label: string;
   value: ReactNode;
   tone?: 'danger' | 'warn' | 'accent' | undefined;
+  help?: string;
 }): JSX.Element {
   return (
-    <div className={`agenthealth-tile${tone ? ` agenthealth-tile--${tone}` : ''}`}>
+    <div className={`agenthealth-tile${tone ? ` agenthealth-tile--${tone}` : ''}`} {...(help ? { title: help } : {})}>
       <span className="agenthealth-tile-l">{icon}{label}</span>
       <span className="agenthealth-n">{value}</span>
     </div>
@@ -103,10 +108,11 @@ function Rate({ icon, label, value, help }: {
  *  tsx-color-literal guard forbids inline stroke colours); only the geometric
  *  dash offset is computed inline. */
 function ApprovalGauge({ rate }: { rate: number }): JSX.Element {
+  const { t } = useTranslation('agents');
   const r = 30;
   const circumference = 2 * Math.PI * r;
   return (
-    <div className="agenthealth-gauge" role="img" aria-label={`Approval rate ${Math.round(rate * 100)} percent`}>
+    <div className="agenthealth-gauge" role="img" aria-label={t('healthApprovalRateAria', { percent: Math.round(rate * 100) })}>
       <svg viewBox="0 0 72 72" className="agenthealth-gauge-svg" aria-hidden="true">
         <circle className="agenthealth-gauge-track" cx="36" cy="36" r={r} fill="none" strokeWidth="6" />
         <circle
@@ -117,7 +123,7 @@ function ApprovalGauge({ rate }: { rate: number }): JSX.Element {
       </svg>
       <span className="agenthealth-gauge-c">
         <span className="agenthealth-gauge-n">{Math.round(rate * 100)}%</span>
-        <span className="agenthealth-gauge-l">approved</span>
+        <span className="agenthealth-gauge-l">{t('healthApproved')}</span>
       </span>
     </div>
   );
@@ -139,8 +145,9 @@ export function AgentHealthPanel({ persona = 'this agent' }: { persona?: string 
 /** Presentational view (no fetching). Split out so the dev preview entry can
  *  exercise every verdict/empty state without a backend or admin session. */
 export function AgentHealthView({ health, persona = 'this agent' }: { health: AssistantHealth; persona?: string }): JSX.Element {
+  const { t } = useTranslation('agents');
   const { actions: a, commitments: c } = health;
-  const v = verdict(health, persona);
+  const v = verdict(health, persona, t);
   const VerdictIcon = VERDICT_ICON[v.tone];
   const generated = new Date(health.generatedAt);
   const ratesPending =
@@ -150,9 +157,9 @@ export function AgentHealthView({ health, persona = 'this agent' }: { health: As
     <article className="surface-card agenthealth">
       <header className="agenthealth-head">
         <div className="u-grid u-gap-1">
-          <h2 className="u-m-0">Agent health</h2>
+          <h2 className="u-m-0">{t('healthTitle')}</h2>
           <p className="muted u-m-0 u-fs-12" title={formatDateTime(generated)}>
-            Operating metrics · admin-only · generated {relativeTime(health.generatedAt) ?? formatDateTime(generated)}
+            {t('healthMeta', { when: relativeTime(health.generatedAt) ?? formatDateTime(generated) })}
           </p>
         </div>
       </header>
@@ -166,39 +173,45 @@ export function AgentHealthView({ health, persona = 'this agent' }: { health: As
       </div>
 
       <section className="agenthealth-section">
-        <h3 className="agenthealth-group">Actions</h3>
+        <h3 className="agenthealth-group">{t('healthGroupActions')}</h3>
         <div className="agenthealth-tiles">
-          <Tile icon={<InboxIcon size={13} />} label="Pending" value={a.pending} tone={a.pending > 0 ? 'accent' : undefined} />
-          <Tile icon={<SendIcon size={13} />} label="Sent" value={a.sent} />
-          <Tile icon={<AlertIcon size={13} />} label="Failed" value={a.failed} tone={a.failed > 0 ? 'danger' : undefined} />
+          <Tile icon={<InboxIcon size={13} />} label={t('healthPending')} value={a.pending} tone={a.pending > 0 ? 'accent' : undefined} />
+          <Tile icon={<SendIcon size={13} />} label={t('healthSent')} value={a.sent} />
+          <Tile icon={<AlertIcon size={13} />} label={t('healthFailed')} value={a.failed} tone={a.failed > 0 ? 'danger' : undefined} />
+          {/* COS-8 — shown only when the draft-only policy has actually
+              suppressed an egress; the help text keeps "suppressed" honest
+              (policy blocked the send; it is NOT counted as an approval). */}
+          {a.suppressed > 0 ? (
+            <Tile icon={<BanIcon size={13} />} label={t('healthSuppressed')} value={a.suppressed} help={t('healthSuppressedHelp')} />
+          ) : null}
         </div>
         {ratesPending ? (
           <p className="agenthealth-hint muted">
-            <PencilIcon size={14} /> Quality rates start tracking once {persona} sends its first action.
+            <PencilIcon size={14} /> {t('healthRatesPending', { persona })}
           </p>
         ) : (
           <div className="agenthealth-rates">
-            <Rate icon={<ThumbsUpIcon size={13} />} label="Approval rate" value={a.approvalRate}
-              help="Share of drafted actions you approved." />
-            <Rate icon={<PencilIcon size={13} />} label="Edited before send" value={a.editRate}
-              help="Share of approved actions you edited before they went out." />
-            <Rate icon={<QuoteIcon size={13} />} label="Cited" value={a.citationCoverage}
-              help="Share of actions that carried a source citation." />
-            <Rate icon={<LinkIcon size={13} />} label="From connected content" value={a.taintedShare}
-              help="Share of actions that drew on connected (untrusted) sources." />
+            <Rate icon={<ThumbsUpIcon size={13} />} label={t('healthApprovalRate')} value={a.approvalRate}
+              help={t('healthApprovalRateHelp')} />
+            <Rate icon={<PencilIcon size={13} />} label={t('healthEditRate')} value={a.editRate}
+              help={t('healthEditRateHelp')} />
+            <Rate icon={<QuoteIcon size={13} />} label={t('healthCited')} value={a.citationCoverage}
+              help={t('healthCitedHelp')} />
+            <Rate icon={<LinkIcon size={13} />} label={t('healthFromConnected')} value={a.taintedShare}
+              help={t('healthFromConnectedHelp')} />
           </div>
         )}
       </section>
 
       <section className="agenthealth-section">
-        <h3 className="agenthealth-group">Commitments</h3>
+        <h3 className="agenthealth-group">{t('healthGroupCommitments')}</h3>
         <div className="agenthealth-tiles">
-          <Tile icon={<ClockIcon size={13} />} label="Open" value={c.open} />
-          <Tile icon={<AlertIcon size={13} />} label="Stale" value={c.stale} tone={c.stale > 0 ? 'warn' : undefined} />
+          <Tile icon={<ClockIcon size={13} />} label={t('healthOpen')} value={c.open} />
+          <Tile icon={<AlertIcon size={13} />} label={t('healthStale')} value={c.stale} tone={c.stale > 0 ? 'warn' : undefined} />
         </div>
         <div className="agenthealth-rates">
-          <Rate icon={<QuoteIcon size={13} />} label="Cited" value={c.citationCoverage}
-            help="Share of open commitments backed by a source citation." />
+          <Rate icon={<QuoteIcon size={13} />} label={t('healthCited')} value={c.citationCoverage}
+            help={t('healthCommitmentCitedHelp')} />
         </div>
       </section>
     </article>

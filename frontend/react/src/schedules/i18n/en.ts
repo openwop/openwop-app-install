@@ -46,4 +46,8 @@ export const messages = {
   // Run-now notices
   firedWithRun: 'Fired — ',
   firedNoWorkflow: 'Fired (no workflow bound).',
+
+  // ADR 0313 D3 — silent-schedule chips
+  wontFire: 'Won\u2019t fire — cadence didn\u2019t parse',
+  oneShotDone: 'Completed (one-shot)',
 } as const;

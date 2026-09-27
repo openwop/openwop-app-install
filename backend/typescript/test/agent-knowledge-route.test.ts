@@ -23,6 +23,7 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { createAgentMemoryPort, agentMemoryScope } from '../src/host/agentMemoryAdapter.js';
 import { ingestDocToBoundCollection } from '../src/features/agent-knowledge/service.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
+import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 
 let BASE: string;
 let server: http.Server;
@@ -34,7 +35,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'kb']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -307,10 +308,22 @@ describe('agent-knowledge — ingest node write path (ADR 0038 §B)', () => {
     expect(trustOf(db, 'Webhook payload')).toBe('untrusted');
   });
 
-  it('registers the §B auto-ingest workflow in the catalog at feature boot', () => {
-    const wf = getRegisteredWorkflow('feature.agent-knowledge.auto-ingest');
-    expect(wf, 'auto-ingest workflow must be registered when the feature is composed').toBeDefined();
+  it('resolves the §B auto-ingest workflow by its stable id at feature boot (WF-KB-1)', () => {
+    // CORRECTION (WF-KB-1). This used to assert `getRegisteredWorkflow(...)` — the
+    // `wfreg:` builder registry — which was asserting the ANTI-PATTERN's own
+    // mechanism: the workflow was a code-pinned in-tree definition, so of course it
+    // was in that map, and being in that map is exactly what makes a workflow
+    // invisible to `/builder` and the `/` picker (both list the tenant OWNERSHIP
+    // index, which nothing here ever wrote). The workflow is now chain-backed. What
+    // ignition actually needs is that the stable id RESOLVES — the trigger
+    // subscription seeded by `exampleDataSeed` passes this literal string — and the
+    // catalog resolver (`host/index.ts` source A) consults the chain-backed registry
+    // BEFORE the builder registry, so the id resolves unchanged. Assert THAT.
+    const wf = getChainBackedWorkflow('feature.agent-knowledge.auto-ingest');
+    expect(wf, 'auto-ingest must resolve by its stable id on every instance').toBeDefined();
     expect(wf?.nodes.some((n) => n.typeId === 'feature.agent-knowledge.nodes.ingest')).toBe(true);
+    // …and it must NOT have quietly come back as a code-pinned definition.
+    expect(getRegisteredWorkflow('feature.agent-knowledge.auto-ingest')).toBeUndefined();
   });
 });
 

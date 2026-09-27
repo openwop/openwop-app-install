@@ -7,8 +7,8 @@ You generate tests — unit, integration, or e2e — from source code or specs. 
 - `testType` — `unit` / `integration` / `e2e`.
 - `source` — code or spec to test. May be a single function, a file, a class, an OpenAPI doc, a user flow description.
 - `framework` (optional, inferred when not set) — `jest` / `vitest` / `node-test` / `pytest` / `unittest` / `go-test` / `testify` / `playwright` / `cypress`.
-- `neighborTestPath` (optional) — path to an existing test file. Read it via `openwop:core.files.fs-read` to learn the project's style (assertion library, test helper names, naming conventions).
-- `outputPath` (optional) — write the final test file via `openwop:core.files.fs-write`.
+- `neighborTest` (optional) — the content of an existing test file, supplied inline in the task payload, to learn the project's style (assertion library, test helper names, naming conventions).
+- `outputPath` (optional) — where the enclosing workflow will persist the test file you return.
 - `coverageTargets` (optional) — array of behaviors to specifically cover (e.g., `["error path on null input", "timeout handling"]`).
 
 ## Universal rules
@@ -42,7 +42,7 @@ You generate tests — unit, integration, or e2e — from source code or specs. 
 
 ## Matching house style
 
-If `neighborTestPath` is supplied, read it and match:
+If `neighborTest` is supplied, match:
 
 - Test runner (`describe`/`it` vs `test`; `setUp`/`tearDown` vs `beforeEach`/`afterEach`)
 - Assertion library

@@ -36,6 +36,10 @@
  */
 
 import type { Express, Request, Response } from 'express';
+import { readSecretEnv } from '../host/secretEnv.js';
+import { lastRetentionSweep, listRetentionHolds, setRetentionHold, clearRetentionHold } from '../host/runRetentionSweeper.js';
+import { lastProposalSweep } from '../host/workflowComposeTool.js';
+import { defaultRetentionDays } from '../storage/runRetentionStamp.js';
 import { timingSafeEqual } from 'node:crypto';
 import { createLogger } from '../observability/logger.js';
 import { clearExpiredEphemeralSecrets } from '../byok/secretResolver.js';
@@ -61,7 +65,7 @@ function constantTimeBearerEq(received: string, expected: string): boolean {
 }
 
 function authAdmin(req: Request, res: Response): boolean {
-  const expected = process.env.OPENWOP_ADMIN_TOKEN;
+  const expected = readSecretEnv('OPENWOP_ADMIN_TOKEN');
   if (!expected || expected.length < 16) {
     log.warn('admin route called but OPENWOP_ADMIN_TOKEN unset / too short');
     res.status(503).json({
@@ -122,6 +126,44 @@ export function registerAdminRoutes(app: Express): void {
       wipedSecrets,
       windowMs,
     });
+  });
+
+  // ADR 0371 Phase 3 — run-retention observability + legal holds. The
+  // counters are per-instance (the sweep runs on whichever instance's tick
+  // fires); holds are durable + global.
+  app.get('/v1/host/openwop-app/admin/run-retention', (req, res) => {
+    if (!authAdmin(req, res)) return;
+    void (async () => {
+      res.json({
+        defaultRetentionDays: defaultRetentionDays(),
+        exportEnabled: process.env.OPENWOP_RUN_RETENTION_EXPORT === 'true',
+        window: process.env.OPENWOP_RUN_RETENTION_WINDOW ?? null,
+        lastSweep: lastRetentionSweep(),
+        // ADR 0473 (grade-code C5) — "did the proposal sweep run?" is
+        // distinguishable from "nothing expired" (the daemon-gating symptom).
+        proposalSweep: lastProposalSweep(),
+        holds: await listRetentionHolds(),
+      });
+    })();
+  });
+  app.post('/v1/host/openwop-app/admin/run-retention/hold', (req, res) => {
+    if (!authAdmin(req, res)) return;
+    void (async () => {
+      const body = (req.body ?? {}) as { tenantId?: unknown; reason?: unknown };
+      if (typeof body.tenantId !== 'string' || !body.tenantId || typeof body.reason !== 'string' || !body.reason) {
+        res.status(400).json({ error: 'validation_error', message: 'tenantId and reason are required.' });
+        return;
+      }
+      await setRetentionHold(body.tenantId, body.reason);
+      res.json({ ok: true });
+    })();
+  });
+  app.delete('/v1/host/openwop-app/admin/run-retention/hold/:tenantId', (req, res) => {
+    if (!authAdmin(req, res)) return;
+    void (async () => {
+      const removed = await clearRetentionHold(req.params.tenantId ?? '');
+      res.json({ ok: true, removed });
+    })();
   });
 
   // GET variant for liveness / monitoring — returns current state

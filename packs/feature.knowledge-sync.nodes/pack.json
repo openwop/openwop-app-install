@@ -1,0 +1,28 @@
+{
+  "name": "feature.knowledge-sync.nodes",
+  "version": "1.0.0",
+  "description": "Knowledge-sync feature node pack (WF-KB-3 / KSWF-1). One role:\"action\" node — `run` — that executes one scheduled knowledge-sync pass for a SyncSource through ctx.features['knowledge-sync'].runOnce: list → diff → fetch+ingest → prune, with all the ADR 0605 hardening (pre-run lease, destructive-diff refusal, Tier-2 erasure, subject-scoped prune) behind the WF-KB-4 spend gate. The node reads sourceId from ctx.config (frozen at chain expansion, RFC 0013 Path A). A tenant that disabled the feature makes the surface throw host_capability_disabled, which the node converts to a clean skip (no egress, no failed run). Recorded → replay/fork-safe; a fork never re-issues the egress. This lane replaces the retired knowledgeSyncDaemon, folding the recurring sync onto the ONE host scheduler.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "knowledge-sync", "rag", "sync"],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.knowledge-sync.nodes.run",
+      "version": "1.0.0",
+      "label": "Knowledge Sync: Run",
+      "description": "Run one scheduled knowledge-sync pass for a SyncSource (list → diff → fetch+ingest → prune) via ctx.features['knowledge-sync'].runOnce, behind the WF-KB-4 spend gate. Reads sourceId from ctx.config (frozen at chain expansion). Output: { status:'success', ingested, pruned, unchanged, failed } on a run, or { status:'skipped', reason } when the feature is disabled / not entitled / not due (backoff) / a pass is already in flight — a skip never touches third-party egress or embedding.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
+    }
+  ]
+}

@@ -12,6 +12,9 @@
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
+// ADR 0655 D4 (EMWF-4 — the ANLWF-2 class): a missing `orgId` is a typed refusal, never
+// a coerced `''` that lists nobody's templates as success-with-empty.
+import { requireString } from '../featureRoute.js';
 import { listTemplates, getTemplate, renderTemplate, createTemplate, createCampaign } from './emailService.js';
 import { CONTACT_STAGES, type ContactStage } from '../crm/contactsService.js';
 
@@ -35,10 +38,11 @@ export function buildEmailSurface(scope: BundleScope): FeatureSurface {
     // (the publish node passes runId:nodeId), so a replay/fork reuses the existing
     // entities. Never sends. Returns the created ids for the agent to reference.
     createDraftCampaign: async (args) => {
-      const orgId = str(args.orgId);
+      const orgId = requireString(args.orgId, 'orgId');
       const createdBy = scope.runId ?? 'workflow';
       const base = optStr(args.idemBase) ?? `${scope.runId ?? 'run'}`;
       const name = str(args.name) || 'Campaign email';
+      const sourceBriefId = optStr(args.sourceBriefId); // ADR 0245 — provenance to the source MarketingCampaign brief
       const stageRaw = str(args.stage);
       const stage: ContactStage | undefined = CONTACT_STAGES.includes(stageRaw as ContactStage) ? (stageRaw as ContactStage) : undefined;
       const emails = Array.isArray(args.emails) ? (args.emails as Array<Record<string, unknown>>) : [];
@@ -50,7 +54,7 @@ export function buildEmailSurface(scope: BundleScope): FeatureSurface {
         const subject = firstStr(e.subjectLines) || `${name} ${position}`;
         const body = str(e.body);
         const tpl = await createTemplate({ tenantId, orgId, name: `${name} · Email ${position}`, subject, body, createdBy, templateId: `tpl:${base}:email-${position}` });
-        const cmp = await createCampaign({ tenantId, orgId, templateId: tpl.templateId, createdBy, campaignId: `cmp:${base}:email-${position}`, ...(stage ? { stage } : {}) });
+        const cmp = await createCampaign({ tenantId, orgId, templateId: tpl.templateId, createdBy, campaignId: `cmp:${base}:email-${position}`, ...(stage ? { stage } : {}), ...(sourceBriefId ? { sourceBriefId } : {}) });
         templateIds.push(tpl.templateId);
         campaignIds.push(cmp.campaignId);
       }
@@ -58,15 +62,15 @@ export function buildEmailSurface(scope: BundleScope): FeatureSurface {
     },
 
     listTemplates: async (args) => {
-      const tpls = await listTemplates(tenantId, str(args.orgId));
+      const tpls = await listTemplates(tenantId, requireString(args.orgId, 'orgId'));
       return { templates: tpls.map(project) };
     },
     getTemplate: async (args) => {
-      const t = await getTemplate(tenantId, str(args.orgId), str(args.templateId));
+      const t = await getTemplate(tenantId, requireString(args.orgId, 'orgId'), requireString(args.templateId, 'templateId'));
       return { template: t ? project(t) : null };
     },
     render: async (args) => {
-      const t = await getTemplate(tenantId, str(args.orgId), str(args.templateId));
+      const t = await getTemplate(tenantId, requireString(args.orgId, 'orgId'), requireString(args.templateId, 'templateId'));
       if (!t) return { rendered: null };
       const c = (args.contact ?? {}) as Record<string, unknown>;
       const rendered = renderTemplate(t, {

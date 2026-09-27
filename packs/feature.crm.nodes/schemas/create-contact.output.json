@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/create-contact.output.json",
+  "title": "CrmCreateContactOutput",
+  "description": "The created (or, on an explicit existing id, the ORIGINAL — never overwritten) tenant-scoped contact. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
+  "type": "object",
+  "required": [
+    "success",
+    "contact"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "contact": {
+      "type": "object",
+      "required": [
+        "contactId"
+      ],
+      "properties": {
+        "contactId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "The contact row as the surface projects it (host bookkeeping columns `tenantId`/`orgId`/`createdBy`/`updatedBy` stripped)."
+    }
+  },
+  "additionalProperties": false
+}

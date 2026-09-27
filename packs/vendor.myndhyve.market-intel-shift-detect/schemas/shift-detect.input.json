@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.0.0/shift-detect.input.json",
+  "title": "MarketIntelShiftDetectInput",
+  "type": "object",
+  "required": ["previous", "current"],
+  "properties": {
+    "previous": {
+      "type": "object",
+      "description": "The PRIOR research run's synthesized result.",
+      "properties": {
+        "records": { "type": "array", "items": { "type": "object", "properties": { "quote": { "type": "string" }, "tagType": { "type": "string" }, "confidence": { "type": "number" } } } },
+        "angles": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "score": { "type": "number" } } } }
+      },
+      "additionalProperties": true
+    },
+    "current": {
+      "type": "object",
+      "description": "The CURRENT research run's synthesized result (same shape as previous).",
+      "properties": {
+        "records": { "type": "array", "items": { "type": "object", "properties": { "quote": { "type": "string" }, "tagType": { "type": "string" }, "confidence": { "type": "number" } } } },
+        "angles": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "name": { "type": "string" }, "score": { "type": "number" } } } }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

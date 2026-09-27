@@ -1,83 +1,97 @@
 /**
- * App-builder canvas editor client (ADR 0153 Phase 2b). Wraps the host-ext editor
- * routes (`/v1/host/openwop-app/app-builder/orgs/:orgId/*`): the closed component
- * catalog (palette), opening a run artifact into an editable `host.canvas` working
- * copy, reading it, and saving with optimistic concurrency. The canvas store is
- * tenant-scoped server-side; `orgId` is the auth context (any org the caller belongs to).
+ * App-builder canvas editor client — the framework verbs (catalog, from-artifact,
+ * get/save with optimistic concurrency, versions, delete) delegate to the canvas
+ * framework's `createCanvasClient` (ADR 0310 Phase A; extracted from here, where
+ * it originated as ADR 0153 Phase 2b). Wire paths are byte-identical
+ * (`/host/openwop-app/app-builder/orgs/:orgId/*`). The app-builder-specific
+ * verbs — code export (ADR 0173) and GitHub publish (ADR 0306) — stay here.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { asJson, createCanvasClient } from '../../canvas/canvasClient.js';
+import type { FrameTemplateDto } from '../../canvas/canvasClient.js';
 
-const root = `${config.baseUrl}/v1/host/openwop-app/app-builder`;
+export type {
+  Org,
+  ComponentPropDef,
+  ComponentDef,
+  CatalogResponse,
+  CanvasRecord,
+  CanvasVersionRow,
+  SaveWarning,
+} from '../../canvas/canvasClient.js';
+export { listOrgs } from '../../canvas/canvasClient.js';
+
+/** Screen templates are the app-builder's name for frame templates. */
+export type ScreenTemplateDto = FrameTemplateDto;
+
+const client = createCanvasClient({ basePath: '/host/openwop-app/app-builder' });
+const root = client.root;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
-export interface Org { orgId: string; name: string }
+export const getCatalog = client.getCatalog;
+export const getCanvas = client.getCanvas;
+export const createCanvas = client.createCanvas;
+export const seedFromArtifact = client.seedFromArtifact;
+export const deleteCanvas = client.deleteCanvas;
+export const listVersions = client.listVersions;
+export const getVersion = client.getVersion;
+export const restoreVersion = client.restoreVersion;
+export const saveCanvas = client.saveCanvas;
 
-export interface ComponentPropDef {
-  name: string;
-  type: 'string' | 'number' | 'boolean' | 'enum' | 'color' | 'longtext';
-  label?: string;
-  options?: string[];
-  default?: string | number | boolean;
-  required?: boolean;
-}
-export interface ComponentDef {
-  type: string;
-  label: string;
-  description?: string;
-  category: string;
-  acceptsChildren?: boolean;
-  props?: ComponentPropDef[];
-}
-export interface CatalogResponse { canvasTypeId: string; components: ComponentDef[]; promptSchema: string }
-
-export interface CanvasRecord {
-  canvasId: string;
-  canvasTypeId: string;
-  name?: string;
-  projectId?: string;
-  ownerSubject?: { kind: string; id: string };
-  state: Record<string, unknown>;
-  version: number;
+// ── GitHub publish (ADR 0306) ──
+export interface PublishResult { repoUrl: string; repo: 'created' | 'reused'; filesPushed: number; partial?: boolean; warnings: string[] }
+export async function publishCanvas(orgId: string, canvasId: string, args: { target: ExportTarget; repo: string; private: boolean }): Promise<PublishResult> {
+  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/publish`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(args) }));
+  return asJson<PublishResult>(res, 'publish canvas');
 }
 
-async function asJson<T>(res: Response, ctx: string): Promise<T> {
-  if (!res.ok) {
-    let detail = '';
-    try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    const err = new Error(detail || `${ctx} returned ${res.status}`);
-    (err as { status?: number }).status = res.status;
-    throw err;
-  }
-  return (await res.json()) as T;
+// ── Two-way GitHub sync (ADR 0393 Lane A) ──
+export interface SyncBindingView { canvasId: string; owner: string; repo: string; branch: string; target: ExportTarget; webhookId: string; boundBy: string; boundAt: string }
+export interface SyncPushResult { outcome: 'pushed' | 'noop' | 'ref_conflict'; repoUrl: string; branch: string; commitSha?: string; filesPushed: number; deletedStale: number; modelVersion: number; warnings: string[] }
+
+export async function getSyncBinding(orgId: string, canvasId: string): Promise<SyncBindingView | null> {
+  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/sync-binding`, fetchOpts({ headers: authedHeaders() }));
+  const out = await asJson<{ binding: SyncBindingView | null }>(res, 'read sync binding');
+  return out.binding;
 }
 
-/** List the orgs the caller belongs to (to pick the auth-context org). Tolerates
- *  both the `{ orgs: [...] }` envelope and a bare array. */
-export async function listOrgs(): Promise<Org[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
-  const body = await asJson<{ orgs?: Org[] } | Org[]>(res, 'list orgs');
-  return Array.isArray(body) ? body : (body.orgs ?? []);
+/** Admin-only (`host:code-sync:manage`) — the webhook secret returns exactly once here. */
+export async function bindSyncRepo(orgId: string, canvasId: string, args: { owner: string; repo: string; branch: string; target: ExportTarget }): Promise<{ binding: SyncBindingView; webhookSecret: string }> {
+  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/sync-binding`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(args) }));
+  return asJson<{ binding: SyncBindingView; webhookSecret: string }>(res, 'bind sync repo');
 }
 
-export async function getCatalog(orgId: string): Promise<CatalogResponse> {
-  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/catalog`, fetchOpts({ headers: authedHeaders() }));
-  return asJson<CatalogResponse>(res, 'get catalog');
+export async function unbindSyncRepo(orgId: string, canvasId: string): Promise<void> {
+  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/sync-binding`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok) await asJson(res, 'unbind sync repo');
 }
 
-export async function getCanvas(orgId: string, canvasId: string): Promise<CanvasRecord> {
-  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}`, fetchOpts({ headers: authedHeaders() }));
-  return asJson<CanvasRecord>(res, 'get canvas');
+export async function syncCanvasNow(orgId: string, canvasId: string): Promise<SyncPushResult> {
+  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/sync`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  return asJson<SyncPushResult>(res, 'sync canvas');
 }
 
-/** Open a run's canvas.* artifact into an editable working copy (idempotent). */
-export async function seedFromArtifact(orgId: string, artifactKey: string): Promise<CanvasRecord> {
-  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/from-artifact`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ artifactKey }) }));
-  return asJson<CanvasRecord>(res, 'seed canvas');
+/** ADR 0173 — export code targets. */
+export type ExportTarget = 'react-tailwind' | 'react-styled' | 'vue-tailwind' | 'html-css' | 'react-native' | 'flutter' | 'nextjs';
+export const EXPORT_TARGETS: readonly ExportTarget[] = ['react-tailwind', 'react-styled', 'vue-tailwind', 'html-css', 'react-native', 'flutter', 'nextjs'];
+/** A deterministic warning from the target-capability comparison. The export
+ * is still useful, but this says exactly which authored semantics it omits. */
+export interface ExportPreflightNote { code: string; message: string; count?: number }
+export interface ExportResult {
+  assetToken: string; serveUrl: string; fileName: string; fileCount: number; sizeBytes: number;
+  warnings: string[];
+  /** Additive on older hosts; callers must keep export functional if absent. */
+  preflight?: ExportPreflightNote[];
 }
 
-/** Save the whole canvas state with optimistic concurrency. Throws on a version
- *  conflict (status 409 / code canvas_version_conflict) so the editor can prompt a reload. */
-export async function saveCanvas(orgId: string, canvasId: string, state: Record<string, unknown>, expectedVersion: number): Promise<{ canvasId: string; newVersion: number }> {
-  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ state, expectedVersion }) }));
-  return asJson<{ canvasId: string; newVersion: number }>(res, 'save canvas');
+/** Generate framework-native source; returns a capability-token download (`serveUrl`
+ *  is relative to `config.baseUrl`). Gated by the `code-export` toggle (404 when off). */
+export async function exportCanvasCode(orgId: string, canvasId: string, target: ExportTarget): Promise<ExportResult> {
+  const res = await fetch(`${root}/orgs/${encodeURIComponent(orgId)}/canvases/${encodeURIComponent(canvasId)}/export`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ target }) }));
+  return asJson<ExportResult>(res, 'export canvas');
+}
+
+/** The absolute URL to download a generated asset (same-origin → cookies included). */
+export function exportDownloadUrl(serveUrl: string): string {
+  return `${config.baseUrl}${serveUrl}`;
 }

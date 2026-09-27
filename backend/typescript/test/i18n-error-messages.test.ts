@@ -5,10 +5,14 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import type { ErrorEnvelope } from '@openwop/openwop';
+// The localizer runs BEFORE `v2ErrorCode`, so it takes the host's own
+// pre-translation envelope — `tarball_too_large` below is exactly the kind of
+// host code that is not in the SDK's 97-member spec union and is namespaced at
+// the emitter, not here.
+import type { HostErrorEnvelope } from '../src/types.js';
 import { localizeErrorEnvelope } from '../src/host/i18n/errorMessages.js';
 
-const env = (over: Partial<ErrorEnvelope> = {}): ErrorEnvelope => ({
+const env = (over: Partial<HostErrorEnvelope> = {}): HostErrorEnvelope => ({
   error: 'forbidden',
   message: 'You do not have permission to perform this action.',
   ...over,

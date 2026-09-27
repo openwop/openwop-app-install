@@ -39,7 +39,13 @@ export interface RatingSummary {
 
 const MAX = { body: 4000 } as const;
 
-const store = new DurableCollection<Review>('marketplace:review', (r) => r.reviewId);
+// MPL-7 / MPL-8 — TENANT-INDEXED. Declared without a `tenantOf`, this store was
+// reachable only by a full-collection `list()` (three cross-tenant scans per
+// review POST — `listReviews`, `ratingSummary`, and the duplicate check) and the
+// ADR 0464 subject eraser could not enumerate a tenant's rows at all. The index
+// is self-healing (`ensureTenantIndex` backfills existing rows) and does NOT
+// re-key the primary rows, so there is no migration.
+const store = new DurableCollection<Review>('marketplace:review', (r) => r.reviewId, undefined, (r) => r.tenantId);
 
 /** Coerce + validate a 1..5 integer rating; throws the canonical envelope. */
 function requireRating(value: unknown): number {
@@ -49,11 +55,18 @@ function requireRating(value: unknown): number {
   return value;
 }
 
-/** All reviews for one pack in one (tenant, org), newest first. */
+/** All reviews for one pack in one (tenant, org), newest first.
+ *
+ *  MPL-8 — BOUNDED. This was `store.list()` — a scan of EVERY review on the host,
+ *  filtered in memory — and `ratingSummary` calls it, so a single review POST did
+ *  THREE full-collection scans (list, summary, and the duplicate check below).
+ *  Fine at 100 reviews, an incident at 100 000: the `host_ext_kv` prefix-scan
+ *  class this repo already has an incident for. The tenant index makes it a
+ *  bounded per-tenant read; the org/pack filter stays in memory because a review
+ *  is org-scoped WITHIN a tenant. */
 export async function listReviews(tenantId: string, orgId: string, packName: string): Promise<Review[]> {
-  const all = await store.list();
-  return all
-    .filter((r) => r.tenantId === tenantId && r.orgId === orgId && r.packName === packName)
+  return (await store.listForTenantIndexed(tenantId))
+    .filter((r) => r.orgId === orgId && r.packName === packName)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -83,8 +96,10 @@ export async function upsertReview(input: {
   const body = cleanString(input.body, MAX.body) || undefined;
   const now = new Date().toISOString();
 
-  const existing = (await store.list()).find(
-    (r) => r.tenantId === input.tenantId && r.orgId === input.orgId && r.packName === input.packName && r.authorId === input.authorId,
+  // MPL-8 — bounded (see `listReviews`). The duplicate check was the third
+  // full-collection scan on the review-POST path.
+  const existing = (await store.listForTenantIndexed(input.tenantId)).find(
+    (r) => r.orgId === input.orgId && r.packName === input.packName && r.authorId === input.authorId,
   );
 
   if (existing) {

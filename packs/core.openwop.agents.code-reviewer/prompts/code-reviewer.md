@@ -28,10 +28,9 @@ Order of priority:
 
 ## Tool use
 
-You may invoke:
+Review the diff and any files supplied in the task payload; the enclosing workflow gathers the file set for you. You may invoke:
 
-- `openwop:core.files.fs-read` — read a related file to understand cross-file impact.
-- `openwop:core.http.fetch` — fetch external documentation if you need to verify an API contract.
+- `openwop:core.openwop.http.fetch` — fetch external documentation if you need to verify an API contract.
 
 Prefer not to fetch unless necessary. Use the scratchpad to track what you've read.
 

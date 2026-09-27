@@ -30,7 +30,7 @@ describe('feature-toggle routes (sqlite memory app)', () => {
       enableConsoleTracer: false,
     });
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
 
@@ -93,6 +93,37 @@ describe('feature-toggle routes (sqlite memory app)', () => {
     expect(status).toBe(400);
     expect(body.error).toBe('validation_error');
     expect(body.message ?? '').toMatch(/sum to exactly 100/);
+  });
+
+  // Architect review 2026-07-13 (findings 1-3): provenance, drift, revert.
+  it('GET :id exposes provenance — overridden=false before a row, true after; DELETE reverts to the code default', async () => {
+    registerToggleDefault({ id: 'demo.prov', status: 'off', bucketUnit: 'user', salt: 'p', category: 'Business Tools', label: 'Prov' });
+    const before = await jsonFetch<{ overridden: boolean; defaultDrift: boolean; status: string }>('/v1/host/openwop-app/feature-toggles/admin/configs/demo.prov');
+    expect(before.body.overridden).toBe(false);
+    expect(before.body.defaultDrift).toBe(false);
+    await jsonFetch('/v1/host/openwop-app/feature-toggles/admin/configs/demo.prov', { method: 'PUT', body: JSON.stringify({ status: 'on' }) });
+    const after = await jsonFetch<{ overridden: boolean; status: string }>('/v1/host/openwop-app/feature-toggles/admin/configs/demo.prov');
+    expect(after.body.overridden).toBe(true);
+    expect(after.body.status).toBe('on');
+    const del = await jsonFetch<{ overridden: boolean; status: string }>('/v1/host/openwop-app/feature-toggles/admin/configs/demo.prov', { method: 'DELETE' });
+    expect(del.status).toBe(200);
+    expect(del.body.status).toBe('off'); // the code default governs again
+    expect(del.body.overridden).toBe(false);
+    const gone = await jsonFetch('/v1/host/openwop-app/feature-toggles/admin/configs/demo.prov', { method: 'DELETE' });
+    expect(gone.status).toBe(404); // nothing stored — already code-governed
+  });
+
+  it('defaultDrift flags a compiled-default change under a stored pin (the GA no-op trap made visible)', async () => {
+    registerToggleDefault({ id: 'demo.drift', status: 'off', bucketUnit: 'user', salt: 'd', category: 'Business Tools', label: 'Drift' });
+    await jsonFetch('/v1/host/openwop-app/feature-toggles/admin/configs/demo.drift', { method: 'PUT', body: JSON.stringify({ status: 'on' }) });
+    const pinned = await jsonFetch<{ defaultDrift: boolean }>('/v1/host/openwop-app/feature-toggles/admin/configs/demo.drift');
+    expect(pinned.body.defaultDrift).toBe(false); // default unchanged so far
+    // A later release flips the compiled default — a NO-OP for the effective
+    // status while the row exists; the drift flag must arm.
+    registerToggleDefault({ id: 'demo.drift', status: 'on', bucketUnit: 'user', salt: 'd', category: 'Business Tools', label: 'Drift' });
+    const drifted = await jsonFetch<{ defaultDrift: boolean; overridden: boolean }>('/v1/host/openwop-app/feature-toggles/admin/configs/demo.drift');
+    expect(drifted.body.overridden).toBe(true);
+    expect(drifted.body.defaultDrift).toBe(true);
   });
 
   it('the admin surface is auth-gated (no bearer ⇒ 401)', async () => {

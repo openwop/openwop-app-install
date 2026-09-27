@@ -1,32 +1,37 @@
 /**
  * Media Library (host-extension product feature — ADR 0007). Org-scoped asset
  * store: pick an org, browse/create collections, upload + search assets, delete.
- * Gates on useFeatureAccess('media'); writes require workspace:write in the org
+ * ALWAYS-ON (ADR 0027 — the `media` toggle is retired; no useFeatureAccess gate:
+ * an absent id resolves OFF and bricked fresh installs — /browser 2026-07-03); writes require workspace:write in the org
  * (the backend fail-closes — a viewer sees a 403 surfaced as a toast).
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Button } from '../../ui/Button.js';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../../ui/confirm.js';
 import { PageHeader } from '../../ui/PageHeader.js';
-import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Skeleton } from '../../ui/Skeleton.js';
 import { IconButton } from '../../ui/IconButton.js';
 import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
 import { toast } from '../../ui/toast.js';
-import { useFeatureAccess } from '../../featureToggles/FeatureAccessContext.js';
-import { ImageIcon, LockIcon, PackageIcon, PlusIcon, TrashIcon } from '../../ui/icons/index.js';
+import { ImageIcon, PackageIcon, PlusIcon, TrashIcon } from '../../ui/icons/index.js';
 import { MediaAssetCard, MediaAssetRow } from './MediaViews.js';
+import { AltTextDialog } from './AltTextDialog.js';
+import { Modal } from '../../ui/Modal.js';
 import {
   createCollection,
   deleteAsset,
   deleteCollection,
   listAssets,
+  listAssetUsage,
   listCollections,
   listOrgs,
   uploadAsset,
   type MediaAsset,
   type MediaCollection,
+  type MediaUsageRef,
   type Org,
 } from './mediaClient.js';
 
@@ -35,29 +40,96 @@ const UNCATEGORIZED = 'none'; // matches the backend ?collectionId sentinel (ser
 
 export function MediaLibraryPage(): JSX.Element {
   const { t } = useTranslation('media');
-  const access = useFeatureAccess('media');
+  const [searchParams, setSearchParams] = useSearchParams();
   const [orgs, setOrgs] = useState<Org[] | null>(null);
-  const [orgId, setOrgId] = useState<string>('');
-  const [collections, setCollections] = useState<MediaCollection[]>([]);
-  const [selected, setSelected] = useState<string>(ALL); // ALL | UNCATEGORIZED | collectionId
+  const [orgsFailed, setOrgsFailed] = useState(false);
+  // Deep-link spine (Phase 4): store rides ?org=; the collection filter rides
+  // ?collection= (sentinels round-trip: absent → ALL, 'none' → uncategorized);
+  // an open asset rides ?asset=. The URL owns all three.
+  const [orgId, setOrgId] = useState<string>(() => searchParams.get('org') ?? '');
+  const [collections, setCollections] = useState<MediaCollection[] | null>(null);
+  const [collectionsFailed, setCollectionsFailed] = useState(false);
   const [assets, setAssets] = useState<MediaAsset[] | null>(null);
+  // MED2-M4 (R3) — failure is its own state: the catch used to set `error` and
+  // leave `assets` null, so the grid showed a PERMANENT skeleton under the
+  // banner; and the banner itself outlived the failure (nothing cleared it on a
+  // later successful search).
+  const [assetsFailed, setAssetsFailed] = useState(false);
   const [q, setQ] = useState('');
-  const [error, setError] = useState<string | null>(null);
   const [newCollection, setNewCollection] = useState('');
   const [busy, setBusy] = useState(false);
+  const [usageRefs, setUsageRefs] = useState<MediaUsageRef[] | null>(null);
+  const [usageFailed, setUsageFailed] = useState(false);
+  const [altTextForId, setAltTextForId] = useState<string | null>(null); // ADR 0363 P1
+  const altTextFor = useMemo(() => assets?.find((a) => a.assetId === altTextForId) ?? null, [assets, altTextForId]);
+
+  const selectedParam = searchParams.get('collection');
+  const selected = useMemo(() => {
+    if (!selectedParam) return ALL;
+    if (selectedParam === UNCATEGORIZED) return UNCATEGORIZED;
+    if (collections === null) return selectedParam;
+    return collections.some((c) => c.collectionId === selectedParam) ? selectedParam : ALL; // validity
+  }, [selectedParam, collections]);
+  /** The open REAL collection (ALL / UNCATEGORIZED are views, not entities), so
+   *  its header can carry the name and the delete that used to sit on the rail. */
+  const selectedCollection = useMemo(
+    () => collections?.find((c) => c.collectionId === selected) ?? null,
+    [collections, selected],
+  );
+  const assetParam = searchParams.get('asset');
+  // The "used by" panel (ADR 0206 B4) is now URL-addressable — the open asset
+  // derives from ?asset= (validity: a param naming no loaded asset reads closed).
+  const usageFor = useMemo(() => assets?.find((a) => a.assetId === assetParam) ?? null, [assets, assetParam]);
+
+  const selectOrg = useCallback((id: string) => {
+    setOrgId(id);
+    setSearchParams((p) => { const n = new URLSearchParams(p); n.set('org', id); n.delete('collection'); n.delete('asset'); return n; }, { replace: true });
+  }, [setSearchParams]);
+  const selectCollection = useCallback((sel: string) => {
+    setSearchParams((p) => { const n = new URLSearchParams(p); if (sel && sel !== ALL) n.set('collection', sel); else n.delete('collection'); return n; }, { replace: true });
+  }, [setSearchParams]);
+  /** The rail cell's href — the SAME transition `selectCollection` performs, as
+   *  a URL the browser can open in a new tab or copy (§4.5 rule 12). Derived
+   *  from `searchParams` so the two can't drift apart. */
+  const collectionHref = useCallback((sel: string): string => {
+    const n = new URLSearchParams(searchParams);
+    if (sel && sel !== ALL) n.set('collection', sel); else n.delete('collection');
+    const q = n.toString();
+    return q ? `?${q}` : '';
+  }, [searchParams]);
+  const showUsage = useCallback((id: string | null) => {
+    setSearchParams((p) => { const n = new URLSearchParams(p); if (id) n.set('asset', id); else n.delete('asset'); return n; }, { replace: true });
+  }, [setSearchParams]);
   const [viewMode, setViewMode] = useViewMode('media', 'grid');
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const assetResultsRef = useRef<HTMLDivElement | null>(null);
 
-  // Load orgs once the feature is enabled; default to the first.
-  useEffect(() => {
-    if (!access.enabled) return;
+  // Load orgs once the feature is enabled; default to the first (validated).
+  const loadOrgs = useCallback(() => {
+    setOrgs(null);
+    setOrgsFailed(false);
     void listOrgs()
       .then((o) => {
         setOrgs(o);
-        setOrgId((cur) => cur || (o[0]?.orgId ?? ''));
+        setOrgsFailed(false);
+        setOrgId((cur) => (cur && o.some((x) => x.orgId === cur)) ? cur : (o[0]?.orgId ?? ''));
       })
-      .catch((err) => setError(err instanceof Error ? err.message : t('loadOrgsFailed')));
-  }, [access.enabled, t]);
+      .catch(() => setOrgsFailed(true));
+  }, []);
+  useEffect(() => { loadOrgs(); }, [loadOrgs]);
+  // Fetch the "used by" refs whenever the open asset changes (incl. a ?asset= deep link).
+  useEffect(() => {
+    if (!usageFor) { setUsageRefs(null); return; }
+    setUsageRefs(null);
+    setUsageFailed(false);
+    // "Not used anywhere" is what a person checks BEFORE deleting an asset. A
+    // failed read may not say it. (Delete has its own confirm, so unlike the CMS
+    // shared-section case no guardrail was removed — but the answer was still
+    // fabricated at exactly the moment it is relied on.)
+    listAssetUsage(orgId, usageFor.assetId)
+      .then((u) => { setUsageRefs(u); setUsageFailed(false); })
+      .catch(() => { setUsageRefs(null); setUsageFailed(true); });
+  }, [usageFor, orgId]);
 
   const loadAssets = useCallback(
     (org: string, sel: string, query: string) => {
@@ -65,18 +137,21 @@ export function MediaLibraryPage(): JSX.Element {
       if (sel !== ALL) filter.collectionId = sel; // sel may be UNCATEGORIZED ('none') — the backend filters server-side
       if (query.trim()) filter.q = query.trim();
       void listAssets(org, filter)
-        .then(setAssets)
-        .catch((err) => setError(err instanceof Error ? err.message : t('loadAssetsFailed')));
+        .then((rows) => { setAssets(rows); setAssetsFailed(false); })
+        .catch(() => { setAssetsFailed(true); });
     },
-    [t],
+    [],
   );
 
   // Collections reload only when the ORG changes (selected/q are reset to ALL/''
   // by the org-select onChange, so this effect doesn't also touch them).
   useEffect(() => {
     if (!orgId) return;
-    setError(null);
-    void listCollections(orgId).then(setCollections).catch(() => setCollections([]));
+    setCollections(null);
+    setCollectionsFailed(false);
+    void listCollections(orgId)
+      .then((value) => { setCollections(value); setCollectionsFailed(false); })
+      .catch(() => setCollectionsFailed(true));
   }, [orgId]);
 
   // The SINGLE asset-loading effect — keyed on org + filter + search. On an org
@@ -85,6 +160,7 @@ export function MediaLibraryPage(): JSX.Element {
   useEffect(() => {
     if (!orgId) return;
     setAssets(null);
+    setAssetsFailed(false);
     loadAssets(orgId, selected, q);
   }, [orgId, selected, q, loadAssets]);
 
@@ -93,28 +169,29 @@ export function MediaLibraryPage(): JSX.Element {
     setBusy(true);
     try {
       const c = await createCollection(orgId, newCollection.trim());
-      setCollections((cur) => [...cur, c]);
+      setCollections((cur) => [...(cur ?? []), c]);
       setNewCollection('');
       toast.success(t('collectionCreated'));
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('createFailed'));
+    } catch {
+      toast.error(t('createFailed'));
     } finally {
       setBusy(false);
     }
   }, [newCollection, orgId, t]);
 
   const removeCollection = useCallback(
-    async (collectionId: string) => {
+    async (collectionId: string, name: string) => {
+      if (!(await confirm({ title: t('deleteCollectionConfirm', { name }), danger: true, confirmLabel: t('common:delete') }))) return;
       try {
         await deleteCollection(orgId, collectionId);
-        setCollections((cur) => cur.filter((c) => c.collectionId !== collectionId));
-        if (selected === collectionId) setSelected(ALL);
+        setCollections((cur) => cur?.filter((c) => c.collectionId !== collectionId) ?? cur);
+        if (selected === collectionId) selectCollection(ALL);
         toast.info(t('collectionDeleted'));
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : t('deleteFailed'));
+      } catch {
+        toast.error(t('deleteFailed'));
       }
     },
-    [orgId, selected, t],
+    [orgId, selected, selectCollection, t],
   );
 
   const onUpload = useCallback(
@@ -125,8 +202,8 @@ export function MediaLibraryPage(): JSX.Element {
         await uploadAsset(orgId, file, collectionId);
         loadAssets(orgId, selected, q);
         toast.success(t('uploaded', { name: file.name }));
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : t('uploadFailed'));
+      } catch {
+        toast.error(t('uploadFailed'));
       } finally {
         setBusy(false);
       }
@@ -135,29 +212,26 @@ export function MediaLibraryPage(): JSX.Element {
   );
 
   const removeAsset = useCallback(
-    async (assetId: string) => {
+    async (assetId: string, name: string) => {
       if (!(await confirm({ title: t('deleteAssetConfirm'), danger: true, confirmLabel: t('common:delete') }))) return;
       try {
         await deleteAsset(orgId, assetId);
         setAssets((cur) => (cur ? cur.filter((a) => a.assetId !== assetId) : cur));
-      } catch (err) {
-        toast.error(err instanceof Error ? err.message : t('deleteFailed'));
+        toast.info(t('assetDeleted', { name }));
+        requestAnimationFrame(() => assetResultsRef.current?.focus());
+      } catch {
+        toast.error(t('deleteFailed'));
       }
     },
     [orgId, t],
   );
 
-  if (access.loading) return <Skeleton />;
-  if (!access.enabled) {
-    return <StateCard icon={<LockIcon />} title={t('notEnabledTitle')} body={t('notEnabledBody')} />;
-  }
 
   const orgActions = (
     <select
       value={orgId}
       onChange={(e) => {
-        setOrgId(e.target.value);
-        setSelected(ALL); // reset filter + search in the same batch as the org switch
+        selectOrg(e.target.value); // also clears ?collection= / ?asset= for the new org
         setQ('');
       }}
       className="u-w-auto"
@@ -170,11 +244,13 @@ export function MediaLibraryPage(): JSX.Element {
   );
 
   return (
-    <div>
+    <div data-walkthrough="media.page">
       <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} actions={orgs && orgs.length > 0 ? orgActions : undefined} />
-      {error ? <Notice variant="error">{error}</Notice> : null}
 
-      {!orgs ? (
+      {orgsFailed ? (
+        <StateCard announce icon={<PackageIcon />} title={t('orgsFailedTitle')} body={t('orgsFailedBody')}
+          action={<Button variant="secondary" onClick={loadOrgs}>{t('common:retry')}</Button>} />
+      ) : !orgs ? (
         <Skeleton />
       ) : orgs.length === 0 ? (
         <StateCard icon={<PackageIcon />} title={t('noOrgsTitle')} body={t('noOrgsBody')} />
@@ -187,27 +263,52 @@ export function MediaLibraryPage(): JSX.Element {
               { id: ALL, name: t('allAssets') },
               { id: UNCATEGORIZED, name: t('uncategorized') },
             ].map((c) => (
-              <button key={c.id} type="button" className={`${selected === c.id ? 'btn-accent' : 'btn-ghost'} u-justify-start`} aria-current={selected === c.id ? 'true' : undefined} onClick={() => setSelected(c.id)}>
+              <Link key={c.id} to={collectionHref(c.id)} replace className={`${selected === c.id ? 'btn-accent' : 'btn-ghost'} u-justify-start`} aria-current={selected === c.id ? 'true' : undefined}>
                 {c.name}
-              </button>
+              </Link>
             ))}
             <div className="media-divider" />
-            {collections.map((c) => (
-              <div key={c.collectionId} className="u-flex u-gap-1 u-items-center">
-                <button type="button" className={`${selected === c.collectionId ? 'btn-accent' : 'btn-ghost'} u-justify-start u-flex-1`} aria-current={selected === c.collectionId ? 'true' : undefined} onClick={() => setSelected(c.collectionId)}>
-                  <PackageIcon /> {c.name}
-                </button>
-                <IconButton label={t('deleteCollectionLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={() => void removeCollection(c.collectionId)} />
-              </div>
+            {/* §4.5 rule 12 — rail cells are real `<Link>`s (cmd-click, copy
+                link address), and delete is NOT on the cell: it lives on the
+                open collection's own header to the right, where it can't be hit
+                by a slip aimed at the row you meant to open. */}
+            {collectionsFailed ? (
+              <StateCard announce icon={<PackageIcon />} title={t('collectionsFailedTitle')} body={t('collectionsFailedBody')}
+                action={<Button variant="secondary" onClick={() => {
+                  setCollections(null); setCollectionsFailed(false);
+                  void listCollections(orgId).then((value) => setCollections(value)).catch(() => setCollectionsFailed(true));
+                }}>{t('common:retry')}</Button>} />
+            ) : collections === null ? <Skeleton height={48} /> : collections.map((c) => (
+              <Link
+                key={c.collectionId}
+                to={collectionHref(c.collectionId)}
+                replace
+                className={`${selected === c.collectionId ? 'btn-accent' : 'btn-ghost'} u-justify-start`}
+                aria-current={selected === c.collectionId ? 'true' : undefined}
+              >
+                <PackageIcon /> {c.name}
+              </Link>
             ))}
             <div className="u-flex u-gap-1 u-mt-2">
-              <input value={newCollection} onChange={(e) => setNewCollection(e.target.value)} placeholder={t('newCollectionPlaceholder')} aria-label={t('newCollectionPlaceholder')} onKeyDown={(e) => { if (e.key === 'Enter') void addCollection(); }} />
-              <IconButton label={t('newCollectionPlaceholder')} icon={<PlusIcon />} className="btn-ghost" disabled={busy || !newCollection.trim()} onClick={() => void addCollection()} />
+              <input value={newCollection} onChange={(e) => setNewCollection(e.target.value)} placeholder={t('newCollectionPlaceholder')} aria-label={t('newCollectionPlaceholder')} disabled={collections === null || collectionsFailed} onKeyDown={(e) => { if (e.key === 'Enter') void addCollection(); }} />
+              <IconButton label={t('newCollectionPlaceholder')} icon={<PlusIcon />} className="btn-ghost" disabled={busy || collections === null || collectionsFailed || !newCollection.trim()} onClick={() => void addCollection()} />
             </div>
           </div>
 
           {/* Assets */}
           <div className="u-grid u-gap-3">
+            {/* The open collection's own header. Delete lives HERE (§4.5 rule
+                12) — next to the thing it destroys and the name that says which
+                one. The ALL / Uncategorized views are not entities, so they
+                carry no header and nothing to delete. */}
+            {selectedCollection ? (
+              <div className="u-flex u-items-center u-gap-2 u-wrap">
+                <h2 className="u-fs-16 u-m-0 u-flex-1">{selectedCollection.name}</h2>
+                <Button variant="danger" onClick={() => void removeCollection(selectedCollection.collectionId, selectedCollection.name)}>
+                  <TrashIcon size={14} /> {t('deleteCollectionLabel')}
+                </Button>
+              </div>
+            ) : null}
             {/* Upload control — untouched (collection-management / upload surface). */}
             <div className="action-bar">
               <input
@@ -221,9 +322,9 @@ export function MediaLibraryPage(): JSX.Element {
                   e.target.value = '';
                 }}
               />
-              <button type="button" className="btn-primary" disabled={busy} onClick={() => fileRef.current?.click()}>
+              <Button variant="primary" disabled={busy} onClick={() => fileRef.current?.click()}>
                 <ImageIcon /> {t('upload')}
-              </button>
+              </Button>
             </div>
 
             {/* The ONE asset-list filterbar (search + the shared grid/list toggle). */}
@@ -239,7 +340,16 @@ export function MediaLibraryPage(): JSX.Element {
               <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
             </div>
 
-            {!assets ? (
+            <div ref={assetResultsRef} tabIndex={-1} role="region" aria-label={t('assetResultsLabel')}>
+            {assetsFailed ? (
+              <StateCard
+                announce
+                icon={<ImageIcon />}
+                title={t('assetsFailedTitle')}
+                body={t('assetsFailedBody')}
+                action={<Button variant="secondary" onClick={() => { setAssets(null); setAssetsFailed(false); loadAssets(orgId, selected, q); }}>{t('common:retry')}</Button>}
+              />
+            ) : !assets ? (
               <Skeleton />
             ) : assets.length === 0 ? (
               q.trim() ? (
@@ -247,7 +357,7 @@ export function MediaLibraryPage(): JSX.Element {
                   icon={<ImageIcon />}
                   title={t('noMatchTitle')}
                   body={t('noMatchBody')}
-                  action={<button type="button" className="secondary" onClick={() => setQ('')}>{t('clearSearch')}</button>}
+                  action={<Button variant="secondary" onClick={() => setQ('')}>{t('clearSearch')}</Button>}
                 />
               ) : (
                 <StateCard icon={<ImageIcon />} title={t('noAssetsTitle')} body={t('noAssetsBody')} />
@@ -255,19 +365,56 @@ export function MediaLibraryPage(): JSX.Element {
             ) : viewMode === 'grid' ? (
               <div className="card-grid">
                 {assets.map((a) => (
-                  <MediaAssetCard key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId)} />
+                  <MediaAssetCard key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
                 ))}
               </div>
             ) : (
               <div className="surface-card list-view">
                 {assets.map((a) => (
-                  <MediaAssetRow key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId)} />
+                  <MediaAssetRow key={a.assetId} asset={a} onDelete={() => void removeAsset(a.assetId, a.name)} onShowUsage={() => showUsage(a.assetId)} onEditAltText={() => setAltTextForId(a.assetId)} />
                 ))}
               </div>
             )}
+            </div>
           </div>
         </div>
       )}
+
+      {altTextFor ? (
+        <AltTextDialog
+          orgId={orgId}
+          asset={altTextFor}
+          onClose={() => setAltTextForId(null)}
+          onSaved={(u) => setAssets((prev) => prev?.map((x) => (x.assetId === u.assetId ? u : x)) ?? prev)}
+        />
+      ) : null}
+
+      {usageFor ? (
+        <Modal onClose={() => showUsage(null)} label={t('usedByTitle', { name: usageFor.name })}>
+          {usageFailed ? (
+            <StateCard announce title={t('usedByFailedTitle')} body={t('usedByFailed')}
+              action={<Button variant="secondary" onClick={() => {
+                setUsageFailed(false); setUsageRefs(null);
+                void listAssetUsage(orgId, usageFor.assetId)
+                  .then((value) => setUsageRefs(value))
+                  .catch(() => setUsageFailed(true));
+              }}>{t('common:retry')}</Button>} />
+          ) : !usageRefs ? <Skeleton /> : usageRefs.length === 0 ? (
+            <span className="u-label-sm">{t('usedByEmpty')}</span>
+          ) : (
+            <div className="u-grid u-gap-1">
+              {usageRefs.map((r) => (
+                <div key={`${r.refKind}:${r.refId}`} className="u-flex u-gap-2 u-items-center">
+                  <span className="chip chip--muted">
+                    {t(r.refKind === 'campaign' ? 'usedByKindCampaign' : r.refKind === 'creative-brief' ? 'usedByKindCreativeBrief' : 'usedByKindCmsPage')}
+                  </span>
+                  <span>{r.refLabel}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Modal>
+      ) : null}
     </div>
   );
 }

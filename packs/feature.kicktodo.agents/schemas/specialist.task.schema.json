@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KickTodo specialist handoff task",
+  "description": "The bounded task KickBot hands to a convened specialist skill (ADR 0442 P5). Advisory only: the specialist reasons over the participant's state and PROPOSES; it never commits domain state.",
+  "type": "object",
+  "required": ["goal"],
+  "properties": {
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What KickBot needs the specialist to advise on (e.g. 'draft a 5-day plan', 'flag safety concerns', 'verify claimed progress')."
+    },
+    "context": {
+      "type": "string",
+      "description": "Optional grounding text (e.g. the participant's current Today/Progress summary)."
+    }
+  },
+  "additionalProperties": false
+}

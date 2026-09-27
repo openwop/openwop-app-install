@@ -1,0 +1,32 @@
+{
+  "name": "core.openwop.connections.easypost",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "EasyPost connection pack (RFC 0095) — api_key provider declaring the TARGET shape for the commerce shipping-rate seam (ADR 0250) as an alternative carrier to Shippo: API host, auth kind, consumer nodes. Category is `other` (openai-images precedent): the normative `category` enum has no `shipping` value and the seam would resolve by `id` (`easypost`), not category — no wire/RFC change. The rate mapper is now LIVE (ADR 0250 follow-on): with an easypost connection configured, the seam rate-shops via POST https://api.easypost.com/v2/shipments (Basic auth), converts grams+cm to EasyPost's ounces+inches, and bills the cheapest same-currency rate — as a second carrier in the shippo→easypost cascade. Rate quotes are READ calls (not money movement) — no commerce-spend gate. Carries NO secret (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "easypost",
+    "displayName": "EasyPost",
+    "category": "other",
+    "auth": {
+      "kind": "api_key",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://docs.easypost.com/docs/shipments"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http"
+    ],
+    "docsUrl": "https://docs.easypost.com/docs/shipments/rates",
+    "apiHosts": [
+      "api.easypost.com"
+    ]
+  }
+}

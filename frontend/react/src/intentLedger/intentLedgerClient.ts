@@ -32,7 +32,7 @@ export interface LedgerReckoning {
 }
 
 const base = (conversationId: string): string =>
-  `${config.baseUrl}/v1/host/openwop-app/intent-ledger/conversations/${encodeURIComponent(conversationId)}`;
+  `${config.baseUrl}/host/openwop-app/intent-ledger/conversations/${encodeURIComponent(conversationId)}`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -56,12 +56,11 @@ export async function draftLedger(conversationId: string, input: DraftInput): Pr
   return (await asJson<{ ledger: IntentLedger }>(res, 'draftLedger')).ledger;
 }
 
-/** Auto-draft from the conversation's last user message (the LLM extractor, gated by the
- *  server-side complexity guard — a trivial request 422s). */
-export async function draftLedgerFromConversation(conversationId: string, lastUserMessage: string): Promise<IntentLedger> {
-  const res = await fetch(`${base(conversationId)}/draft`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ lastUserMessage }) }));
-  return (await asJson<{ ledger: IntentLedger }>(res, 'draftLedgerFromConversation')).ledger;
-}
+// CFP A13 — the bespoke `draftLedgerFromConversation` client (a REST call that hid
+// a managed-LLM extractor behind the modal's "Draft from conversation" button) was
+// removed. Model-authored drafting now rides the ONE chat: the modal deep-links the
+// chat scoped to the Chief of Staff, whose `openwop:intent-ledger.draft-contract`
+// tool authors the draft in-conversation for the owner to Approve here.
 
 export async function decideLedger(conversationId: string, decision: 'approve' | 'reject'): Promise<IntentLedger> {
   const res = await fetch(`${base(conversationId)}/${decision}`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));

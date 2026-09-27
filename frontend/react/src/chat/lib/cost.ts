@@ -9,8 +9,11 @@
  */
 
 import { getProvider } from '../../byok/lib/providers.js';
-import { formatCurrency } from '../../i18n/format.js';
 import type { ChatMessage, ChatSession } from '../hooks/useChatSession.js';
+
+// formatUsd moved to the i18n formatting layer (ux-11) so builder + runs +
+// chat render money identically; re-exported here for existing importers.
+export { formatUsd } from '../../i18n/format.js';
 
 export function turnCostUsd(meta: ChatMessage['meta']): number | null {
   if (!meta?.provider || !meta?.model) return null;
@@ -36,10 +39,3 @@ export function sessionCostUsd(session: ChatSession): number {
   return total;
 }
 
-/** Display formatter — small numbers get more decimals, large ones get rounded. */
-export function formatUsd(usd: number): string {
-  if (usd === 0) return formatCurrency(0, 'USD', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
-  if (usd < 0.001) return formatCurrency(usd, 'USD', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
-  if (usd < 1) return formatCurrency(usd, 'USD', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
-  return formatCurrency(usd, 'USD', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}

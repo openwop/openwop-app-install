@@ -23,10 +23,11 @@
  */
 
 import type { Express } from 'express';
+import { v1 } from '../middleware/protocolVersion.js';
 import type { Storage } from '../storage/storage.js';
 import { OpenwopError } from '../types.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
-import { isToolAllowed, listToolsForPrincipal, type ExposedToolManifest } from '../host/mcpServerRegistry.js';
+import { isToolAllowed, listToolsForPrincipal, requiredScopeForTool, type ExposedToolManifest } from '../host/mcpServerRegistry.js';
 import { toCompactDescriptor, type FullToolDescriptor } from '../host/compactToolDescriptor.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -40,15 +41,28 @@ interface Deps {
  *  tools need a brokered credential, do no egress, and are replay-idempotent; the
  *  data-effect tier + approval posture come from the workflow metadata (read tools:
  *  `read`/`never`; the HITL write tools: `write`/`always` + the `workspace:write`
- *  scope). Content-free per SR-1 (no credential material). */
-function toDescriptor(m: ExposedToolManifest): Record<string, unknown> {
+ *  scope). Content-free per SR-1 (no credential material).
+ *
+ *  EXPORTED for tests (ADR 0601 § Corrections / MEDIUM-7). The "advert ≡
+ *  enforcement" parity test used to assert over `requiredScopeForTool` — the
+ *  function BOTH sides call — which restated its first line and could not fail.
+ *  A parity test has to read the ADVERT, and the advert is what this function
+ *  emits; the route body is a `res.json` around it. */
+export function toDescriptor(m: ExposedToolManifest): Record<string, unknown> {
   const safetyTier = m.mcpSafetyTier === 'write' ? 'write' : 'read';
+  // ADR 0601 — the advertised scope comes from the SAME function `isToolAllowed`
+  // enforces (`requiredScopeForTool`), not from a second derivation here. This
+  // line used to compute `workspace:write` independently while the gate checked
+  // no scope at all, so the descriptor made a claim the host did not honour.
+  // `null` (the ungated conformance sample tools) now advertises `[]` — no claim
+  // rather than a false one.
+  const required = requiredScopeForTool(m);
   const d: Record<string, unknown> = {
     toolId: `mcp:${m.name}`,
     source: 'mcp',
     title: m.name,
     safetyTier,
-    auth: { scopes: [safetyTier === 'write' ? 'workspace:write' : 'workspace:read'], credentialRef: true },
+    auth: { scopes: required ? [required] : [], credentialRef: true },
     egress: 'none',
     approval: m.mcpApproval === 'always' ? 'always' : m.mcpApproval === 'conditional' ? 'conditional' : 'never',
     replayPolicy: 'idempotent',
@@ -74,7 +88,7 @@ function wantsCompact(req: { query: Record<string, unknown> }): boolean {
 export function registerToolCatalogRoutes(app: Express, _deps: Deps): void {
   // GET /v1/tools — the catalog the authenticated principal may see (authorization-
   // scoped). Optional ?source=<source> filter.
-  app.get('/v1/tools', async (req, res, next) => {
+  app.get(v1('/tools'), async (req, res, next) => {
     try {
       if (!catalogEnabled()) throw new OpenwopError('not_found', 'Tool catalog not advertised.', 404, {});
       const principal = req.principal;
@@ -103,7 +117,7 @@ export function registerToolCatalogRoutes(app: Express, _deps: Deps): void {
 
   // GET /v1/tools/{toolId} — one descriptor, or 404 for unknown OR unauthorized
   // (non-disclosing). toolId form is `mcp:<tool-name>`.
-  app.get('/v1/tools/:toolId', async (req, res, next) => {
+  app.get(v1('/tools/:toolId'), async (req, res, next) => {
     try {
       if (!catalogEnabled()) throw new OpenwopError('not_found', 'Tool catalog not advertised.', 404, {});
       const principal = req.principal;

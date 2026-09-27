@@ -411,7 +411,11 @@ describe('dispatchManagedChat — system prompt injection', () => {
     const messages = sent!.messages as Array<{ role: string; content: string }>;
     expect(messages).toHaveLength(2);
     expect(messages[0]?.role).toBe('system');
-    expect(messages[0]?.content).toBe('You are a pirate.');
+    // The caller's system prompt is PRESERVED (not overridden) — it is merely
+    // led by the MMXC-1 / ADR 0611 per-tenant cache-scope sentinel (cross-tenant
+    // prefix-cache isolation on the shared managed key).
+    expect(messages[0]?.content).toContain('You are a pirate.');
+    expect(messages[0]?.content).toMatch(/^\[cache-scope [0-9a-f]{16}\] /);
   });
 
   it('honors OPENWOP_MANAGED_SYSTEM_PROMPT env override', async () => {
@@ -429,7 +433,11 @@ describe('dispatchManagedChat — system prompt injection', () => {
     const sent = cap.body();
     const messages = sent!.messages as Array<{ role: string; content: string }>;
     expect(messages[0]?.role).toBe('system');
-    expect(messages[0]?.content).toBe('CUSTOM OPERATOR PROMPT');
+    // The operator override is HONORED — led by the MMXC-1 / ADR 0611 per-tenant
+    // cache-scope sentinel (which is brand-neutral, so the white-label
+    // no-product-name guarantee above still holds).
+    expect(messages[0]?.content).toContain('CUSTOM OPERATOR PROMPT');
+    expect(messages[0]?.content).toMatch(/^\[cache-scope [0-9a-f]{16}\] /);
 
     delete process.env.OPENWOP_MANAGED_SYSTEM_PROMPT;
   });

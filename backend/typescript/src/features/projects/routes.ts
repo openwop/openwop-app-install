@@ -41,9 +41,13 @@ import { subjectBoardId } from '../../host/kanbanService.js';
 import { addSubjectNote, listSubjectNotes, removeSubjectNote } from '../../host/subjectMemory.js';
 import { listAllTenantCollections } from '../kb/kbService.js';
 import {
-  createProject, getProject, listProjects, updateProject, deleteProject, projectSubject,
-  resolveProjectAccess, addProjectMember, removeProjectMember, setProjectVisibility, type Project,
+  createProject, getProject, updateProject, deleteProject, projectSubject,
+  resolveProjectAccess, listVisibleProjects, addProjectMember, removeProjectMember, setProjectVisibility,
+  notebookCorpusToDelete, orderProjectAgentCohort, type Project,
 } from './projectsService.js';
+import { MAX_MULTI_PARTY_PARTICIPANTS } from '../../host/multiPartyConversation.js';
+import { deleteNotebook, getNotebook } from '../notebooks/notebooksService.js';
+import { deleteConversationCompletely } from '../../host/conversationCascade.js';
 import {
   getProjectKnowledge, bindCollection, unbindCollection, createBoundCollection,
   ingestDocToProject, deleteDocFromProject, retrieveForProject,
@@ -54,8 +58,9 @@ import {
   listProjectSchedules, createProjectSchedule, updateProjectSchedule, deleteProjectSchedule,
 } from './projectScheduleService.js';
 import {
-  subjectConversationId, ensureConversationMeta, getConversationMeta, addParticipant, removeParticipant,
+  subjectConversationId, ensureConversationMeta, getConversationMeta, addParticipant, removeParticipant, refreshEntityChatTitle,
 } from '../../host/conversationStore.js';
+import { getRosterEntry } from '../../host/rosterService.js';
 
 const tenantOf = (req: Request): string => req.tenantId ?? 'default';
 const actingUserOf = (req: Request): string | undefined => req.userId ?? req.principal?.principalId;
@@ -98,10 +103,24 @@ async function requireProject(req: Request, scope: Scope): Promise<Project> {
 const view = (tenantId: string) => async (
   id: string,
   callerSubject?: string,
-): Promise<(Project & { boardId: string; canWrite?: boolean }) | null> => {
+): Promise<(Project & { boardId: string; canWrite?: boolean; deletesCorpus: boolean }) | null> => {
   const p = await getProject(tenantId, id);
   if (!p) return null;
   const boardId = subjectBoardId(tenantId, projectSubject(id));
+  // ADR 0601 § Corrections (HIGH-2) — does deleting this project ERASE a source
+  // corpus? The delete confirm needs the answer, and it must be the SAME answer
+  // the eraser acts on, so it comes from `notebookCorpusToDelete` rather than
+  // being re-derived on the client. It was re-derived, as `facet === 'notebook'`,
+  // and `ensureNotebookForProject` never sets `facet` — so every project
+  // provisioned by opening the Sources tab got the generic warning and learned
+  // its corpus was destroyed from the SUCCESS TOAST. Irreversible destruction
+  // disclosed after the fact.
+  //
+  // NO extra read: the predicate is a field on the row `getProject` already
+  // returned. The `projects-list-scan-costs.test.ts` concern about a per-row
+  // computation does not apply — there is no computation, and the list route's
+  // per-row cost is unchanged.
+  const deletesCorpus = notebookCorpusToDelete(p) !== undefined;
   // ADR 0063 — project the caller's effective WRITE access so the FE can pre-gate
   // write affordances (add member / visibility / charter / delete …) instead of
   // showing controls that 403 on use. This is a UX hint ONLY: `requireProject`
@@ -109,8 +128,8 @@ const view = (tenantId: string) => async (
   // D5 — write is `workspace:write` in the project's org, never membership). The
   // same `resolveProjectAccess` the gate uses computes it, so the FE never
   // re-derives the rule. Omitted when no caller is supplied (internal callers).
-  if (callerSubject === undefined) return { ...p, boardId };
-  return { ...p, boardId, canWrite: (await resolveProjectAccess(tenantId, id, callerSubject)) === 'write' };
+  if (callerSubject === undefined) return { ...p, boardId, deletesCorpus };
+  return { ...p, boardId, deletesCorpus, canWrite: (await resolveProjectAccess(tenantId, id, callerSubject)) === 'write' };
 };
 
 export function registerProjectsRoutes(deps: RouteDeps): void {
@@ -121,23 +140,20 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
   app.get(BASE, async (req, res, next) => {
     try {
       // Access-scoped LIST (ADR 0054 D5): only projects the caller can read —
-      // `resolveProjectAccess` composes org `workspace:read` with the project's
-      // visibility/members, so a `private` project the caller isn't a member of is
-      // dropped (can't leak metadata the per-id GET would 404). Bounded by PROJECT_CAP.
+      // the shared `listVisibleProjects` scan (PRJC-3) applies the SAME
+      // visibility rule as `resolveProjectAccess`, with org access resolved
+      // ONCE per (caller, org) and the in-hand row reused (the old loop
+      // re-fetched each row and re-scanned members/customRoles/groups per
+      // project). A `private` project the caller isn't a member of is dropped
+      // (can't leak metadata the per-id GET would 404). Bounded by PROJECT_CAP.
       const tenantId = tenantOf(req);
-      const project = view(tenantId);
-      const caller = actingUserOf(req);
-      const out: unknown[] = [];
-      for (const p of await listProjects(tenantId)) {
-        const level = await resolveProjectAccess(tenantId, p.id, caller);
-        if (level === 'none') continue;
-        // Reuse the level already resolved for the read filter: call view WITHOUT a
-        // caller (so it does NOT resolve access a second time) and stamp canWrite
-        // from `level` (ADR 0063). Avoids doubling the per-project access scan.
-        const base = await project(p.id);
-        if (base) out.push({ ...base, canWrite: level === 'write' });
-      }
-      res.json({ projects: out });
+      res.json({
+        projects: (await listVisibleProjects(tenantId, actingUserOf(req))).map(({ project, level }) => ({
+          ...project,
+          boardId: subjectBoardId(tenantId, projectSubject(project.id)),
+          canWrite: level === 'write', // ADR 0063 — stamped from the level already resolved
+        })),
+      });
     } catch (err) { next(err); }
   });
 
@@ -159,7 +175,8 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
 
   app.patch(`${BASE}/:id`, async (req, res, next) => {
     try {
-      const { id } = await requireProject(req, 'workspace:write');
+      const project = await requireProject(req, 'workspace:write');
+      const { id } = project;
       await updateProject(tenantOf(req), id, (req.body ?? {}) as { name?: unknown; workflows?: unknown; charter?: unknown; moderatorRosterId?: unknown; turnPolicy?: unknown });
       res.json(await view(tenantOf(req))(id, actingUserOf(req)));
     } catch (err) { next(err); }
@@ -167,8 +184,65 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/:id`, async (req, res, next) => {
     try {
-      const { id } = await requireProject(req, 'workspace:write');
-      res.json(await deleteProject(tenantOf(req), id));
+      // `requireProject` already authorized AND returned the row — re-reading it
+      // with `getProject` was a second round-trip for data in hand.
+      const project = await requireProject(req, 'workspace:write');
+      const { id } = project;
+      // R2 PRJ2-B2 — a NOTEBOOK is a project (`facet: 'notebook'`) whose bound collection
+      // is EXCLUSIVE to it. `deleteNotebook` deletes that collection; this route did not,
+      // and the projects list shows notebooks as ordinary tiles with an ordinary Delete
+      // (the client type drops `facet` entirely). So deleting one from /projects left the
+      // whole ingested corpus and its embeddings with no owner, no surface and no eraser
+      // that could reach it — under a confirm that says "cannot be undone".
+      // Delegated at the ROUTE: `notebooksService` imports `projectsService`, so calling
+      // the other way round in the service layer would be a cycle.
+      const tenantId = tenantOf(req);
+      // R2 PRJ2-M1 — the project's group conversation, cascaded HERE because the
+      // full cascade needs `deps.storage` (the session row + its messages), which
+      // the service layer has no handle on. It must run in FULL or not at all:
+      // deleting only the meta — the one piece reachable from the service —
+      // strips the privacy lock off a surviving session, because
+      // `conversationVisibility` treats a conversation with no meta as
+      // tenant-visible. The first version of this fix did exactly that and
+      // published private project chats to the whole workspace.
+      //
+      // ADR 0601 / NBC-1 — this used to branch `if (project?.facet === 'notebook')`
+      // before delegating, and the branch was the bug. The ADR 0084 correction
+      // redefined a notebook as ANY project with a bound KB collection, and
+      // `ensureNotebookForProject` (what opening the Sources tab calls) never
+      // stamps `facet`. So for every ensure-provisioned project the branch was
+      // FALSE, plain `deleteProject` ran, and the exclusive corpus was left with no
+      // owner — the very PRJ2-B2 orphan the branch exists to prevent, still live on
+      // the lane the correction created.
+      //
+      // Note this guard lived at the CALLER, so removing the matching one inside
+      // `deleteNotebook` does nothing for this door. Both had to move together.
+      //
+      // The branch stays; its DISCRIMINATOR is what changes. It now asks
+      // `getNotebook` — the same question the notebooks door asks — instead of
+      // reading a `facet` field that only one of the two provisioning lanes ever
+      // sets. The two doors now agree by construction rather than by coincidence,
+      // and a plain project's delete path is unchanged.
+      //
+      // Cascade order matches the notebooks door: the row delete first, then the
+      // conversation — UNCONDITIONALLY, and reported truthfully.
+      //
+      // CORRECTED (ADR 0601 § Corrections / MEDIUM-6): this used to gate the
+      // cascade on `out.deleted`, which made it unreachable in the concurrent-
+      // delete race (both doors re-read the project between the guard and the
+      // delete) and left the stranded-meta self-heal at
+      // `conversationCascade.ts:34` with no caller. See the notebooks door for
+      // the full reasoning — the two must stay identical, which is why the
+      // sequence is asserted through BOTH in one test.
+      const isNotebook = (await getNotebook(tenantId, id)) !== null;
+      const out = isNotebook
+        ? await deleteNotebook(tenantId, id)
+        : { ...(await deleteProject(tenantId, id)), collectionDeleted: false };
+      const conversationsDeleted = (await deleteConversationCompletely(
+        deps.storage, tenantId, subjectConversationId(tenantId, projectSubject(id)),
+      )) ? 1 : 0;
+      const { collectionDeleted, ...rest } = out;
+      res.json({ ...rest, conversationsDeleted, notebookCorpusDeleted: collectionDeleted });
     } catch (err) { next(err); }
   });
 
@@ -191,7 +265,9 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
   app.delete(`${BASE}/:id/memory/:noteId`, async (req, res, next) => {
     try {
       const { id } = await requireProject(req, 'workspace:write');
-      const removed = await removeSubjectNote(tenantOf(req), projectSubject(id), req.params.noteId);
+      // ADR 0666 D2 follow-up — the project lane keeps its 204 contract; the partial-recall
+      // flag is surfaced on the personal lane only (its own surface, its own copy). `PKWF-15`.
+      const { removed } = await removeSubjectNote(tenantOf(req), projectSubject(id), req.params.noteId);
       if (!removed) throw new OpenwopError('not_found', 'Memory not found.', 404, { noteId: req.params.noteId });
       res.status(204).end();
     } catch (err) { next(err); }
@@ -223,7 +299,11 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
     try {
       const { id } = await requireProject(req, 'workspace:write');
       const collectionId = requireString((req.body ?? {})?.collectionId, 'collectionId');
-      const col = (await listAllTenantCollections(tenantOf(req))).find((c) => c.collectionId === collectionId);
+      // ADR 0643 R3 (Blocker 2) — the project door above resolved this caller's membership
+      // of THIS project, not of the project the collection may be bound to; resolve the
+      // COLLECTION with the binder's own principal (a member of P1 must not bind P2's
+      // private corpus into P1, where P1's agents then read it pre-authorized).
+      const col = (await listAllTenantCollections(tenantOf(req), { subject: actingUserOf(req) })).find((c) => c.collectionId === collectionId); // KBC-1
       if (!col) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
       await requireOrgScope(req, col.orgId, 'workspace:read');
       await bindCollection(tenantOf(req), id, collectionId);
@@ -350,19 +430,70 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
       const p = await requireProject(req, 'workspace:read'); // also loads the project (no re-fetch)
       const tenantId = tenantOf(req);
       const sessionId = subjectConversationId(tenantId, projectSubject(p.id));
-      const agentRefs = (p.members ?? []).filter((m) => m.ref.startsWith('agent:')).map((m) => m.ref);
+      // `COLWF-1` — seat the CHAT-CALLABLE projection, not the roster id.
+      //
+      // A project member ref is `agent:<rosterId>` by contract (`projectsService` validates it
+      // with `getRosterEntry`, and its own error message says so). This seated that ref
+      // VERBATIM — but `participantRosterOf` reads the suffix as an AGENT ID, and the RFC 0101
+      // speaker rule compares it against `answeringId`, which is the registry projection
+      // `agentRef.agentId`. A rosterId is `host:<slug(persona)>`; the projection is the
+      // chat-callable id. They never coincide for a real member, so EVERY agent turn in a
+      // project room 422'd — the chair's opener included, which halted the cadence on its first
+      // edge and meant no project convene ever produced a single agent turn.
+      //
+      // The BOARD lane already does this mapping and states the reason: `boardCohortAgentRefs`
+      // resolves each rosterId and seats `agent:${entry.agentRef.agentId}` "so RFC 0101 roster
+      // enforcement matches dispatched ids". Projects was the only `type:'group'` producer
+      // seating an id from the roster namespace.
+      //
+      // This is the ADR 0608 D6 closure INVERTED: before it the guard was a silent no-op, so
+      // the mismatch was invisible; making the guard fire correctly turned it into an outage
+      // against the one producer that seats the wrong id space.
+      //
+      // A member whose roster entry has vanished is DROPPED rather than seated under an id the
+      // rule cannot match — seating it would re-create the same silent 422, and a seat that can
+      // never speak is worse than an absent one.
+      //
+      // DEDUPED, and the reason is a property worth stating rather than hiding: two roster
+      // members can instantiate the SAME registry agent, and they then collapse to one seat.
+      // That is not something this mapping introduces — `answeringId` IS the registry
+      // projection, so the speaker rule cannot tell those two members apart no matter what is
+      // seated. Seating both rosterIds would only produce a second seat that can never match.
+      // The board lane has the identical property through `boardCohortAgentRefs`.
+      const seen = new Set<string>();
+      const agentRefs: string[] = [];
+      let moderatorSeatRef: string | undefined;
+      for (const m of p.members ?? []) {
+        if (!m.ref.startsWith('agent:')) continue;
+        const entry = await getRosterEntry(tenantId, m.ref.slice('agent:'.length));
+        if (!entry) continue;
+        const seatRef = `agent:${entry.agentRef.agentId}`;
+        if (entry.rosterId === p.moderatorRosterId) moderatorSeatRef = seatRef;
+        if (seen.has(seatRef)) continue;
+        seen.add(seatRef);
+        agentRefs.push(seatRef);
+      }
       const ts = new Date().toISOString();
       try {
         await deps.storage.createChatSession({ sessionId, tenantId, title: `${p.name} · project`, createdAt: ts, updatedAt: ts, messageCount: 0 });
       } catch (err) {
         const code = (err as { code?: string }).code;
         if (code !== 'SQLITE_CONSTRAINT_PRIMARYKEY' && code !== '23505') throw err; // already exists ⇒ reuse
+        // GRADE-D7 — a project rename previously left the rail title stale
+        // forever (the same title-source-guarded refresh the board chat uses).
+        await refreshEntityChatTitle(deps.storage, tenantId, sessionId, `${p.name} · project`);
       }
+      // CPWF-3 — the advertised multi-party ceiling (MAX_MULTI_PARTY_PARTICIPANTS,
+      // the seated-roster cap `multiPartyConversation.maxParticipants`) governs the
+      // SEATED agent roster. Seed a NEW room with the capped, moderator-first cohort
+      // so it never OPENS above the cap; the reconcile below then holds the ceiling on
+      // re-open as project membership changes.
+      const seedCohort = orderProjectAgentCohort(p.moderatorRosterId, agentRefs, MAX_MULTI_PARTY_PARTICIPANTS, moderatorSeatRef);
       await ensureConversationMeta(tenantId, sessionId, {
         type: 'group',
         ...(actingUserOf(req) ? { ownerUserId: actingUserOf(req) } : {}),
         ownerSubject: projectSubject(p.id),
-        participants: agentRefs,
+        participants: seedCohort,
       });
       // Reconcile the lineup to the project's CURRENT agent members — add the
       // newly-added AND prune agents since removed (the meta is create-or-return,
@@ -372,9 +503,33 @@ export function registerProjectsRoutes(deps: RouteDeps): void {
       const meta = await getConversationMeta(tenantId, sessionId);
       const want = new Set(agentRefs);
       const have = (meta?.participants ?? []).map((pp) => pp.subjectRef);
-      for (const ref of agentRefs) {
-        if (!have.includes(ref)) await addParticipant(tenantId, sessionId, ref);
+      // ADD (CPWF-3, skip-with-count + grandfather): seat NEW agents only while the
+      // seated agent roster is under the cap, moderator-first among the not-yet-seated
+      // so which agents fill the remaining slots is deterministic and matches the
+      // client-side convene cohort. An existing room already at/over the cap — one
+      // seeded before this cap, or a >cap room grandfathered in — admits ZERO new
+      // agents: no 4xx, no silent unseat, it simply stops growing.
+      // Count only RETAINED members toward the cap — NOT agents `have` still lists
+      // that the prune arm below is about to unseat (they are no longer members).
+      // The ADD loop runs before the PRUNE loop, so counting a soon-pruned non-member
+      // here would occupy a slot and wrongly block a legitimately-added member from
+      // being seated for the whole session (it would only self-heal on the next
+      // re-open). Filtering by `want` makes a single reconcile converge.
+      let seatedAgents = have.filter((ref) => ref.startsWith('agent:') && want.has(ref)).length;
+      const unseated = orderProjectAgentCohort(
+        p.moderatorRosterId,
+        agentRefs.filter((ref) => !have.includes(ref)),
+        MAX_MULTI_PARTY_PARTICIPANTS,
+      );
+      for (const ref of unseated) {
+        if (seatedAgents >= MAX_MULTI_PARTY_PARTICIPANTS) break;
+        await addParticipant(tenantId, sessionId, ref);
+        seatedAgents += 1;
       }
+      // PRUNE (unchanged — security): a removed MEMBER must be unseated so it stops
+      // responding. This targets NON-members only (`!want.has(ref)`); a member outside
+      // the top-cap cohort is never pruned, so a grandfathered >cap room is not
+      // silently trimmed.
       for (const ref of have) {
         if (ref.startsWith('agent:') && !want.has(ref)) await removeParticipant(tenantId, sessionId, ref);
       }

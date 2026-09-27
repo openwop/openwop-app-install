@@ -9,20 +9,24 @@
 # deployed sample BE can stand in as a black-box conformance target
 # per RFC 0024 etc.).
 #
-# Build context: `apps/workflow-engine/` (the parent of `backend/`) so
-# both the backend source AND the shared `providers.json` are reachable.
+# Build context: the REPO ROOT, so both the backend source AND the shared
+# `providers.json` are reachable. (Corrected 2026-08-10: this header described
+# an `apps/workflow-engine/` context left over from the monorepo this app was
+# extracted from. Every COPY below is repo-root-relative and always has been —
+# the documented command was the stale part, not the paths.)
 # Conformance fixtures are vendored as real files (symlinks would
 # survive `gcloud run deploy --source`'s upload but break Docker COPY's
 # build-context isolation). Run `scripts/sync-fixtures.sh` after any
 # canonical fixture change.
 #
-# Deploy (from repo root):
+# Deploy: use `scripts/deploy.sh` (ADR 0530). By hand, from the repo root:
+#   node scripts/write-build-commit.mjs        # REQUIRED — see build-meta below
 #   gcloud run deploy openwop-app-backend \
-#     --source apps/workflow-engine/ \
-#     --region us-central1 --allow-unauthenticated
+#     --source . \
+#     --region us-central1 --project openwop-dev --quiet
 #
 # Run locally (without docker build):
-#   cd apps/workflow-engine/backend/typescript && npm run dev
+#   cd backend/typescript && npm run dev
 
 # ── Builder stage ────────────────────────────────────────────────────────
 FROM node:22-slim@sha256:20b3a9e4bdfe6ee8cc7b14cc360fca2fb6d06f671e06aeb36feaa832364209dd AS builder
@@ -37,11 +41,36 @@ RUN apt-get update \
 
 # Build context is `apps/workflow-engine/`; pull only the backend
 # subtree for `npm install` + esbuild.
+# `npm ci`, NOT `npm install` (#2680, rationale CORRECTED in #2696 — the original
+# claim that this image shipped a broken Azure backend was WRONG; see below).
+#
+# npm >= 11.5 has a regression that prunes the transitive dependencies of an
+# optionalDependency during `npm install`: `@azure/identity` +
+# `@azure/keyvault-keys` land WITHOUT `@azure/core-rest-pipeline`, so the Azure
+# Key Vault KMS backend becomes present-but-unloadable. A/B inside this very
+# image — same lockfile, same command, only npm differs:
+#
+#     npm 10.9.8 (what node:22-slim pins)  -> 466 pkgs, @azure/identity LOADS
+#     npm 11.6.2 (installed over it)       -> 464 pkgs, ERR_MODULE_NOT_FOUND
+#
+# So the built image was NEVER broken, and `npm install` was not shipping a bug.
+# `npm ci` is here to make that independent of luck: the moment node:22-slim bumps
+# its bundled npm past 11.5, `npm install` would start silently shipping the
+# pruned tree. `npm ci` installs exactly the lockfile and additionally fails loudly
+# when package.json and the lockfile disagree.
+#
+# The lockfile is REQUIRED (npm ci errors without one); that is deliberate. It also
+# makes the churn rule load-bearing: on npm >= 11.5 a local `npm install` rewrites
+# package-lock.json with the PRUNED resolution, and committing that would poison
+# this build for everyone — `npm ci` faithfully installs whatever the lockfile says.
 COPY backend/typescript/package.json backend/typescript/package-lock.json* ./
-RUN npm install --include=dev
+RUN npm ci --include=dev
 
 COPY backend/typescript/tsconfig.json backend/typescript/vitest.config.ts ./
 COPY backend/typescript/src ./src
+# `npm run build` = `node scripts/build.mjs` since ADR 0366 P1b — the builder
+# needs the build script itself (a missing COPY here fails the image build).
+COPY backend/typescript/scripts ./scripts
 
 RUN npm run build
 
@@ -53,7 +82,7 @@ WORKDIR /app
 # Re-install production deps only. better-sqlite3 ships a prebuilt binary
 # for node22 on linux-x64; the postinstall picks it up without rebuild.
 COPY backend/typescript/package.json backend/typescript/package-lock.json* ./
-RUN npm install --omit=dev
+RUN npm ci --omit=dev
 
 # Bundle (./lib/index.js) + shared provider catalog. catalog.ts resolves
 # `../providers.json` relative to `lib/`, so providers.json must land at
@@ -114,6 +143,54 @@ COPY schemas ./schemas
 # before `gcloud run deploy` when pack manifests change. Same pattern
 # as `schemas/` + `conformance-fixtures/` above.
 COPY packs ./packs
+
+# Vendored bundle catalog (ADR 0366 P3): the marketplace's read-only
+# feature-bundles endpoint serves `distributions/bundles.json` at runtime —
+# absence degrades gracefully (the endpoint reports no catalog).
+COPY distributions ./distributions
+
+# In-tree workflow-chain packs (RFC 0013). The app-builder feature registers its
+# design/repair chain at BOOT and hard-requires
+# `examples/workflow-chain-packs/app-builder/pack.json` via
+# `locateRepoDir(__dirname, 'examples', 'workflow-chain-packs/app-builder/pack.json')`
+# (features/app-builder/designWorkflow.ts) — a fatal startup error if absent. The
+# `workflowChainPackLoader` also reads this dir as a default root. Without this
+# COPY the container exits(1) at boot ("design_chain_registration_failed"). Lands
+# them at `/app/examples/workflow-chain-packs/` (sibling of `lib/`) so the upward
+# walk resolves. Same vendoring pattern as `schemas/` + `packs/` above.
+COPY examples/workflow-chain-packs ./examples/workflow-chain-packs
+
+# In-tree connection packs (RFC 0095). `defaultConnectionPackRoots()` reads
+# `<repo>/examples/connection-packs` as a default seam root — without this COPY a
+# deployed container registers only the BUILTIN providers, so pack-only providers
+# (e.g. `cohere-rerank`, the KB external reranker — ADR 0351 KB-8) silently can't
+# be connected in production. Same vendoring pattern as workflow-chain-packs above.
+COPY examples/connection-packs ./examples/connection-packs
+
+# Deploy provenance (ADR 0518 correction). `build-meta/commit.txt` is written by
+# `scripts/write-build-commit.mjs` before the source upload and read at runtime by
+# `host/buildInfo.ts`, which locates this dir by walking up from `lib/` using
+# `.gitkeep` as the sentinel.
+#
+# WHY IT IS IN THE IMAGE RATHER THAN AN ENV VAR: `OPENWOP_BUILD_COMMIT` is set on
+# the SERVICE, so a bare `gcloud run deploy` — correct, since passing no `--set-*`
+# is what preserves the live secret + env binding — PRESERVES the PREVIOUS deploy's
+# value. The new revision then runs new code while reporting the old SHA with
+# `stamped: true` (measured 2026-08-10: rev 00631 ran e65ff6888, reported 43b539ed2).
+# A file in the image cannot drift that way: new code always means a new image.
+#
+# `commit.txt` is gitignored, so a clean clone has only `.gitkeep` here — that is
+# why the COPY targets the DIRECTORY. (It is re-admitted to the Cloud Build upload
+# by a `!build-meta/commit.txt` negation in .gcloudignore, which MUST stay below
+# that file's `#!include:.gitignore` — last match wins, and above it the file
+# silently drops out of the upload.)
+#
+# A FRESH checkout built without the writer reports `unknown`, which
+# `scripts/verify-deploy.sh` hard-fails. A REUSED deploy checkout is the case to
+# watch: the gitignored file persists there, so skipping the writer bakes the
+# previous deploy's SHA instead. `scripts/preflight-deploy.sh` Gate 4 is what
+# catches that; this COPY cannot.
+COPY build-meta ./build-meta
 
 # CPython-WASI runtime (ADR 0146 Phase 4a) — OPTIONAL, needed ONLY when an operator sets
 # `OPENWOP_CODE_EXEC_RUNTIME=wasi`. Run `scripts/sync-pythonwasm.sh` before `gcloud run deploy`

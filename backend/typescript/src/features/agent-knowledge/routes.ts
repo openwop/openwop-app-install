@@ -30,7 +30,7 @@ import { getRosterEntry } from '../../host/rosterService.js';
 import { getAgentProfile } from '../../host/agentProfileService.js';
 import { resolveAgentPolicy } from '../../host/agentPolicyResolver.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
-import { requireString } from '../featureRoute.js';
+import { requireString, requireTenantScope as requireTenantScopeUnion } from '../featureRoute.js';
 import {
   getAgentKnowledge,
   createBoundCollection,
@@ -41,6 +41,7 @@ import {
   deleteDocFromAgent,
   addNote,
   listAgentNotes,
+  countAgentRecallOnly,
   removeAgentNote,
   setMemoryWritable,
   retrieveForAgent,
@@ -54,8 +55,8 @@ const actingUserOf = (req: Request): string | undefined => req.userId ?? req.pri
  *  another tenant). This is now the FIRST gate (the feature is always-on). */
 async function requireOwnedAgent(req: Request): Promise<string> {
   const id = req.params.id;
-  const entry = await getRosterEntry(id);
-  if (!entry || entry.tenantId !== tenantOf(req)) {
+  const entry = await getRosterEntry(tenantOf(req), id);
+  if (!entry) {
     throw new OpenwopError('not_found', 'Agent not found.', 404, { id });
   }
   return id;
@@ -64,12 +65,19 @@ async function requireOwnedAgent(req: Request): Promise<string> {
 /** Tenant-wide scope gate (these routes are agent-scoped, not org-scoped): the
  *  caller's UNION of scopes across their org memberships in the tenant. The
  *  tenant owner implicitly has every scope. Fail-closed: a subject with no
- *  membership resolves to no scopes ⇒ 403. */
+ *  membership resolves to no scopes ⇒ 403.
+ *
+ *  ADR 0643 R4 review (Blocker 2, found by its witness) — this used to call
+ *  `resolveEffectiveAccess(tenantId, { subject })` with NO `orgId`, which that
+ *  function documents as "first match in the tenant", not a union: for a member of
+ *  two orgs the gate answered with whichever membership row the scan hit first, so
+ *  the same caller was admitted or refused NON-DETERMINISTICALLY (measured: ~50%
+ *  403 for an org-A editor / org-B viewer). The docblock above was a claim the code
+ *  did not implement. `featureRoute.requireTenantScope` IS the union
+ *  (`resolveSubjectScopesUnion`), plus the personal-workspace and wildcard-operator
+ *  rules every other tenant-level route already gets. */
 async function requireTenantScope(req: Request, scope: Scope): Promise<void> {
-  const access = await resolveEffectiveAccess(tenantOf(req), { subject: actingUserOf(req) });
-  if (!access.scopes.includes(scope)) {
-    throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
-  }
+  await requireTenantScopeUnion(req, scope);
 }
 
 /** Per-org scope gate (org-scoped writes — create collection, ingest, delete
@@ -113,7 +121,7 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
     try {
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:read');
-      res.json(await getAgentKnowledge(tenantOf(req), id));
+      res.json(await getAgentKnowledge(tenantOf(req), id, { subject: actingUserOf(req) })); // R3 Blocker 2 — the READER's principal
     } catch (err) { next(err); }
   });
 
@@ -123,7 +131,7 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:read');
       const query = requireString((req.body ?? {})?.query, 'query');
-      res.json(await retrieveForAgent(tenantOf(req), id, query));
+      res.json(await retrieveForAgent(tenantOf(req), id, query, { subject: actingUserOf(req) })); // R3 Blocker 2 — the READER's principal
     } catch (err) { next(err); }
   });
 
@@ -134,8 +142,10 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
       await requireTenantScope(req, 'workspace:write');
       await enforceAgentPolicy(req, id, 'knowledge.bind');
       const collectionId = requireString((req.body ?? {})?.collectionId, 'collectionId');
-      await bindCollection(tenantOf(req), id, collectionId);
-      res.status(201).json(await getAgentKnowledge(tenantOf(req), id));
+      // ADR 0643 R3 (Blocker 2) — the BIND door resolves the binder against the
+      // collection's subject; a non-member cannot launder a bound corpus into a grant.
+      await bindCollection(tenantOf(req), id, collectionId, { subject: actingUserOf(req) });
+      res.status(201).json(await getAgentKnowledge(tenantOf(req), id, { subject: actingUserOf(req) }));
     } catch (err) { next(err); }
   });
 
@@ -212,7 +222,8 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
     try {
       const id = await requireOwnedAgent(req);
       await requireTenantScope(req, 'workspace:read');
-      res.json({ notes: await listAgentNotes(tenantOf(req), id) });
+      const [notes, recallOnlyCount] = await Promise.all([listAgentNotes(tenantOf(req), id), countAgentRecallOnly(tenantOf(req), id)]);
+      res.json({ notes, recallOnlyCount });
     } catch (err) { next(err); }
   });
 
@@ -223,7 +234,7 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
       await enforceAgentPolicy(req, id, 'knowledge.note');
       const content = requireString((req.body ?? {})?.content, 'content');
       await addNote(tenantOf(req), id, content);
-      res.status(201).json(await getAgentKnowledge(tenantOf(req), id));
+      res.status(201).json(await getAgentKnowledge(tenantOf(req), id, { subject: actingUserOf(req) })); // R4 Blocker 2 — the READER's principal (tenant `workspace:write` is org-agnostic)
     } catch (err) { next(err); }
   });
 
@@ -250,7 +261,7 @@ export function registerAgentKnowledgeRoutes(deps: RouteDeps): void {
         throw new OpenwopError('validation_error', 'Field `writable` is required and MUST be a boolean.', 400, { field: 'writable' });
       }
       await setMemoryWritable(tenantOf(req), id, writable);
-      res.json(await getAgentKnowledge(tenantOf(req), id));
+      res.json(await getAgentKnowledge(tenantOf(req), id, { subject: actingUserOf(req) })); // R4 Blocker 2 — the READER's principal
     } catch (err) { next(err); }
   });
 }

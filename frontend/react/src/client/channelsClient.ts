@@ -22,17 +22,53 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
 export interface ChannelDescriptor { name: string; description?: string; visibility: 'public' | 'private'; archived?: boolean }
 export interface ChannelSummary { conversationId: string; channel?: ChannelDescriptor }
 export interface ChannelMember { subjectRef: string; role: 'owner' | 'member'; addedAt?: string }
+/** ADR 0192 D2 — a roster row with the display identity RESOLVED server-side
+ *  (raw subjectRefs never render as UI). The owner row is synthesized by the
+ *  backend when the owner isn't a stored participant. */
+export interface ChannelRosterEntry {
+  subjectRef: string;
+  role: 'owner' | 'member';
+  addedAt?: string;
+  kind: 'user' | 'agent' | 'other';
+  displayName: string;
+  /** Agent members only — the token the composer `@` inserts. */
+  mentionSlug?: string;
+  /** ADR 0202 D1 — an agent member's effective reply policy. */
+  responsePolicy?: 'all' | 'mention';
+}
 /** The full channel meta (GET /:id) — carries visibility + the membership roster,
  *  which the rail's conversation-list projection omits. `viewerIsOwner` is
  *  server-computed (ADR 0154 Phase 2) so the FE never reconstructs the backend
- *  identity to gate management. */
-export interface ChannelDetail { conversationId: string; ownerUserId?: string; viewerIsOwner?: boolean; channel?: ChannelDescriptor; participants?: ChannelMember[] }
-export interface ChannelMessage { messageId: string; role: string; content: string; createdAt: string }
+ *  identity to gate management; `viewerSubjectRef` (ADR 0192) is the caller's
+ *  own ref, for own-message alignment in the feed. */
+export interface ChannelDetail {
+  conversationId: string;
+  ownerUserId?: string;
+  viewerIsOwner?: boolean;
+  viewerSubjectRef?: string;
+  channel?: ChannelDescriptor;
+  participants?: ChannelMember[];
+  roster?: ChannelRosterEntry[];
+}
+export interface ChannelMessage { messageId: string; role: string; content: string; createdAt: string; authorSubject?: string | null; authorDisplayName?: string; authorKind?: 'user' | 'agent' | 'other' }
 /** A discovery row (ADR 0154 FU-4): a public channel or the caller's own private
- *  membership, with whether the caller is already in it. */
-export interface ChannelListEntry { conversationId: string; channel?: ChannelDescriptor; joined: boolean }
+ *  membership, with whether the caller is already in it. ADR 0192 D8 adds the
+ *  aggregate counts + message-activity timestamp (reasons to join; no roster leak). */
+export interface ChannelListEntry {
+  conversationId: string;
+  channel?: ChannelDescriptor;
+  joined: boolean;
+  memberCount?: number;
+  agentCount?: number;
+  lastActivityAt?: string;
+  /** Mentions-inbox rollup (2026-07-17) — the CALLER's counts, present only on
+   *  joined rows for a signed-in caller (unread = messageCount − readMessageCount;
+   *  mentions per ADR 0192 D6, zeroed on read). */
+  unreadCount?: number;
+  mentionCount?: number;
+}
 
-const BASE = '/v1/host/openwop-app/channels';
+const BASE = '/host/openwop-app/channels';
 
 /** Discover joinable channels (public + the caller's private memberships). */
 export async function listJoinableChannels(): Promise<ChannelListEntry[]> {
@@ -44,7 +80,14 @@ export async function joinChannel(channelId: string): Promise<ChannelSummary> {
   return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}/join`, { method: 'POST' })).channel;
 }
 
-export async function createChannel(input: { name: string; visibility?: 'public' | 'private'; description?: string }): Promise<ChannelSummary> {
+export async function createChannel(input: {
+  name: string;
+  visibility?: 'public' | 'private';
+  description?: string;
+  /** ADR 0192 D4 — one-flow create: initial human + agent members. */
+  memberUserIds?: string[];
+  agentIds?: string[];
+}): Promise<ChannelSummary> {
   return (await http<{ channel: ChannelSummary }>(BASE, { method: 'POST', body: JSON.stringify(input) })).channel;
 }
 
@@ -60,9 +103,67 @@ export async function renameChannel(channelId: string, name: string): Promise<Ch
   return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}`, { method: 'PATCH', body: JSON.stringify({ name }) })).channel;
 }
 
+/** Set/clear a channel's description (owner-only; empty string clears) — ADR 0192 D4. */
+export async function updateChannelDescription(channelId: string, description: string): Promise<ChannelSummary> {
+  return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}`, { method: 'PATCH', body: JSON.stringify({ description }) })).channel;
+}
+
 /** Archive a channel (owner-only). Backend returns 204; `http` tolerates the empty body. */
 export async function archiveChannel(channelId: string): Promise<void> {
   await http<unknown>(`${BASE}/${encodeURIComponent(channelId)}/archive`, { method: 'POST' });
+}
+
+/** ADR 0192 D3 — self-serve leave (any non-owner member; the owner gets 409). */
+export async function leaveChannel(channelId: string): Promise<void> {
+  await http<unknown>(`${BASE}/${encodeURIComponent(channelId)}/members/me`, { method: 'DELETE' });
+}
+
+/** ADR 0202 D1 — set an agent member's reply policy (owner-only). */
+export async function setChannelAgentPolicy(channelId: string, agentId: string, policy: 'all' | 'mention'): Promise<ChannelSummary> {
+  return (await http<{ channel: ChannelSummary }>(`${BASE}/${encodeURIComponent(channelId)}/agents/${encodeURIComponent(agentId)}/policy`, { method: 'PUT', body: JSON.stringify({ policy }) })).channel;
+}
+
+/** ADR 0202 D2 — request an AI catch-up summary. Returns the run to read the
+ *  summary from (via the run-event subscription; the summary is NOT posted
+ *  in-channel). */
+export async function requestChannelCatchup(channelId: string): Promise<{ runId: string; unreadCount: number }> {
+  return http<{ runId: string; unreadCount: number }>(`${BASE}/${encodeURIComponent(channelId)}/catchup`, { method: 'POST' });
+}
+
+/** ADR 0202 D3 — a recurring agent post bound to this channel. `conversationId` is
+ *  the channel (server-forced). `cronExpr` is the cadence; `nextRunAt` is the
+ *  scheduler's next fire time (joined server-side). */
+export interface ChannelScheduledPost {
+  chatId: string;
+  agentId: string;
+  prompt: string;
+  cronExpr: string;
+  conversationId: string;
+  enabled: boolean;
+  nextRunAt?: string;
+  lastRunAt?: string;
+}
+
+const schedBase = (channelId: string): string => `/host/openwop-app/scheduled-chats/channels/${encodeURIComponent(channelId)}/chats`;
+
+/** List the channel's scheduled posts (member-gated). */
+export async function listChannelScheduledPosts(channelId: string): Promise<ChannelScheduledPost[]> {
+  return (await http<{ chats: ChannelScheduledPost[] }>(schedBase(channelId))).chats ?? [];
+}
+
+/** Schedule a recurring agent post (owner-only). The agent MUST be a channel member. */
+export async function createChannelScheduledPost(channelId: string, input: { agentId: string; prompt: string; cronExpr: string; timezone?: string }): Promise<ChannelScheduledPost> {
+  return (await http<{ chat: ChannelScheduledPost }>(schedBase(channelId), { method: 'POST', body: JSON.stringify(input) })).chat;
+}
+
+/** Pause / resume a scheduled post (owner-only). */
+export async function setChannelScheduledPostEnabled(channelId: string, chatId: string, enabled: boolean): Promise<ChannelScheduledPost> {
+  return (await http<{ chat: ChannelScheduledPost }>(`${schedBase(channelId)}/${encodeURIComponent(chatId)}/pause`, { method: 'POST', body: JSON.stringify({ enabled }) })).chat;
+}
+
+/** Delete a scheduled post (owner-only). */
+export async function deleteChannelScheduledPost(channelId: string, chatId: string): Promise<void> {
+  await http(`${schedBase(channelId)}/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
 }
 
 /** Add a member by user id (owner-only). Returns the updated channel meta. */
@@ -90,6 +191,11 @@ export async function listChannelMessages(channelId: string): Promise<ChannelMes
   return (await http<{ messages: ChannelMessage[] }>(`${BASE}/${encodeURIComponent(channelId)}/messages`)).messages ?? [];
 }
 
+// (The paged channel-messages FE helper was removed by architect ruling:
+// the FE has exactly ONE thread loader — the chat-sessions paged route via
+// useChatSession — and channel threads ride it. The channels ROUTE keeps
+// ?limit/&before paging for display-enriched API consumers.)
+
 export async function postChannelMessage(channelId: string, content: string): Promise<{ messageId: string }> {
   return http<{ messageId: string }>(`${BASE}/${encodeURIComponent(channelId)}/messages`, { method: 'POST', body: JSON.stringify({ content }) });
 }
@@ -113,7 +219,7 @@ export function subscribeChannelPresence(channelId: string, onSnapshot: (s: Pres
   // One signal for the whole subscription (reusable across reconnects until aborted); the
   // returned unsubscribe aborts it, ending the loop + any in-flight fetch/backoff.
   const sub = new AbortController();
-  const url = `${config.sseBaseUrl}/v1/host/openwop-app/channels/${encodeURIComponent(channelId)}/presence`;
+  const url = `${config.sseBaseUrl}/host/openwop-app/channels/${encodeURIComponent(channelId)}/presence`;
   let attempt = 0;
   // Last server-sent presence, retained across reconnects so the connected/disconnected
   // toggle keeps the last-known present/typing rather than flashing empty.
@@ -130,8 +236,12 @@ export function subscribeChannelPresence(channelId: string, onSnapshot: (s: Pres
     // TERMINAL (presence disabled — not transient, don't hammer the host).
     while (!sub.signal.aborted) {
       try {
-        const res = await fetch(url, { method: 'GET', headers: authedHeaders(), credentials: 'include', signal: sub.signal });
-        if (res.status === 404 || res.status === 405) return; // presence not enabled — terminal
+        // CS-CH-1 — declare the stream intent so the per-IP rate limiter's SSE
+        // exemption matches (path ∧ Accept); without it every reconnect burned
+        // request budget. CS-CH-2 — a 403 (not a member / removed mid-stream)
+        // is TERMINAL like 404/405: reconnecting can't fix membership.
+        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
+        if (res.status === 403 || res.status === 404 || res.status === 405) return; // presence denied/not enabled — terminal
         if (res.ok && res.body) {
           attempt = 0; // a successful connect resets the backoff
           for await (const frame of readSseFrames(res.body, sub.signal)) {
@@ -163,9 +273,9 @@ export function subscribeChannelPresence(channelId: string, onSnapshot: (s: Pres
  *  caller reloads the thread (the frame carries only the messageId). Reconnects with
  *  backoff + jitter; a 404/405 is TERMINAL (not a member). Returns an unsubscribe.
  *  Unlike presence, this rides the cross-instance host-ext bus — always-on. */
-export function subscribeChannelMessages(channelId: string, onMessage: () => void): () => void {
+export function subscribeChannelMessages(channelId: string, onMessage: (messageId?: string) => void, onTerminal?: (status: number) => void): () => void {
   const sub = new AbortController();
-  const url = `${config.sseBaseUrl}/v1/host/openwop-app/channels/${encodeURIComponent(channelId)}/stream`;
+  const url = `${config.sseBaseUrl}/host/openwop-app/channels/${encodeURIComponent(channelId)}/stream`;
   let attempt = 0;
   const sleep = (ms: number): Promise<void> => new Promise<void>((resolve) => {
     const t = setTimeout(resolve, ms);
@@ -174,12 +284,25 @@ export function subscribeChannelMessages(channelId: string, onMessage: () => voi
   void (async () => {
     while (!sub.signal.aborted) {
       try {
-        const res = await fetch(url, { method: 'GET', headers: authedHeaders(), credentials: 'include', signal: sub.signal });
-        if (res.status === 404 || res.status === 405) return; // not a member / unavailable — terminal
+        // CS-CH-1/2 — same stream-intent header + terminal-403 semantics as the
+        // presence subscription above (membership loss must not reconnect forever).
+        // CHV-UX-6 — the terminal exit is REPORTED (not silent): a user removed
+        // mid-session gets a designed notice instead of a feed that goes quiet.
+        const res = await fetch(url, { method: 'GET', headers: { ...authedHeaders(), accept: 'text/event-stream' }, credentials: 'include', signal: sub.signal });
+        if (res.status === 403 || res.status === 404 || res.status === 405) { onTerminal?.(res.status); return; } // not a member / unavailable — terminal
         if (res.ok && res.body) {
           attempt = 0; // a successful connect resets the backoff
           for await (const frame of readSseFrames(res.body, sub.signal)) {
-            if (frame.event === 'channel.message') onMessage();
+            if (frame.event === 'channel.message') {
+              // GC-CHAT-2 — surface the frame's messageId (edit/delete/reaction
+              // frames target a specific row; the refresh can cursor-walk to it).
+              let messageId: string | undefined;
+              try {
+                const p = JSON.parse(frame.data) as { messageId?: unknown };
+                if (typeof p.messageId === 'string') messageId = p.messageId;
+              } catch { /* frame without a parseable body — plain refresh */ }
+              onMessage(messageId);
+            }
           }
         }
       } catch { /* aborted / network — fall through to backoff */ }
@@ -196,7 +319,7 @@ export function subscribeChannelMessages(channelId: string, onMessage: () => voi
 export async function setChannelTyping(channelId: string, typing: boolean): Promise<void> {
   try {
     await fetch(
-      `${config.baseUrl}/v1/host/openwop-app/channels/${encodeURIComponent(channelId)}/presence/typing`,
+      `${config.baseUrl}/host/openwop-app/channels/${encodeURIComponent(channelId)}/presence/typing`,
       fetchOpts({ method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ typing }) }),
     );
   } catch { /* best-effort */ }

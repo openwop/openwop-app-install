@@ -59,6 +59,21 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
       );
       CREATE INDEX IF NOT EXISTS idx_runs_tenant_status
         ON runs (tenant_id, status, created_at DESC);
+      -- The tenant-recency read (listRuns: WHERE tenant_id ORDER BY created_at
+      -- DESC LIMIT n) canNOT use idx_runs_tenant_status for its ordering —
+      -- status sits between tenant_id and created_at — so at ~4k runs/tenant
+      -- it degraded to a 35s bitmap+sort on Cloud SQL and blew the 30s
+      -- statement timeout (the 2026-07-14 silent-board incident: every
+      -- GET /v1/runs/:id 500ed inside its child-run scan). The ordered index
+      -- turns it into an early-terminating LIMIT walk. (Applied to prod live
+      -- via CREATE INDEX CONCURRENTLY the same day; IF NOT EXISTS makes this
+      -- a no-op there.)
+      CREATE INDEX IF NOT EXISTS idx_runs_tenant_created
+        ON runs (tenant_id, created_at DESC);
+      -- Child-run lookup (snapshot childRuns + the cancel cascade) by parent —
+      -- replaces the O(tenant) listRuns+filter scan.
+      CREATE INDEX IF NOT EXISTS idx_runs_parent
+        ON runs (parent_run_id) WHERE parent_run_id IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS events (
         event_id TEXT PRIMARY KEY,
@@ -109,6 +124,10 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
         response_status INTEGER NOT NULL,
         created_at TIMESTAMPTZ NOT NULL
       );
+
+      -- ADR 0618's invocation_claim: created in migration v44 (NOT here) — the
+      -- same trap as annotations above, a third time. The v1 block is FROZEN;
+      -- test/postgres-v1-migration-frozen.test.ts pins its table set.
 
       CREATE TABLE IF NOT EXISTS invocation_log (
         run_id TEXT NOT NULL,
@@ -703,6 +722,300 @@ export const MIGRATIONS: Record<number, (client: Queryable) => Promise<void>> = 
     // (never overwrite). Mirrors sqlite mig 32.
     await client.query(`
       ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS title_source TEXT;
+    `);
+  },
+  30: async (client) => {
+    // ADR 0178 — per-org daily BYOK LLM chat token usage (input + output tokens),
+    // keyed by provider, for the BYOK chat spend-governance budget. Mirrors
+    // managed_provider_usage / media_provider_usage + sqlite mig 33. `date_utc` is
+    // the UTC calendar day in YYYY-MM-DD form (TEXT to match the sqlite shape, so
+    // the Storage interface stays backend-agnostic).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS byok_chat_usage (
+        tenant_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        date_utc TEXT NOT NULL,
+        input_tokens BIGINT NOT NULL DEFAULT 0,
+        output_tokens BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (tenant_id, provider_id, date_utc)
+      );
+    `);
+  },
+  31: async (client) => {
+    // PERF (incident 2026-07-13): host_ext_kv is read almost entirely via
+    // `k LIKE 'hostext:<name>:%'` prefix scans (DurableCollection.list /
+    // listByPrefix / listForTenantIndexed). The PRIMARY-KEY btree on `k` CANNOT
+    // serve `LIKE 'prefix%'` under the db's en_US.UTF8 collation, so every such
+    // read was a FULL SEQ SCAN of the table — at ~87k rows that measured ~1–3.7s
+    // EACH, and a screen firing several of them loaded in 10–15s. A
+    // `text_pattern_ops` index makes prefix LIKE an index range scan (~5ms).
+    // (Prod was hotfixed via CREATE INDEX CONCURRENTLY; this migration is the
+    // durable/replayable form — IF NOT EXISTS ⇒ no-op there. Non-concurrent here
+    // because migrations may run in a txn; only a pre-existing LARGE db without
+    // the index would block on boot, and the sole such db already has it.)
+    // Postgres-only: SQLite (dev/test) DBs are tiny and never hit this.
+    try {
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS host_ext_kv_k_pattern ON host_ext_kv (k text_pattern_ops);
+      `);
+    } catch (err) {
+      // pg-mem (the vitest harness) cannot parse index OPERATOR CLASSES — it
+      // broke every pg-mem suite at boot the day this migration landed. A
+      // plain same-named index is a functional no-op there (tests never
+      // measure LIKE plans); REAL Postgres always succeeds on the first
+      // statement and never reaches this branch. Anything other than the
+      // opclass parse failure still throws — never swallow a prod error.
+      if (!(err instanceof Error) || !err.message.includes('text_pattern_ops')) throw err;
+      // Grade-pass: NEVER degrade silently — if this ever fires on real
+      // Postgres (a stripped build missing the opclass), the LIKE-plan fix
+      // is absent and the operator must know.
+      console.warn('[storage] host_ext_kv_k_pattern: opclass index failed; created a PLAIN (k) index instead:', err.message);
+      await client.query(`
+        CREATE INDEX IF NOT EXISTS host_ext_kv_k_pattern ON host_ext_kv (k);
+      `);
+    }
+  },
+  32: async (client) => {
+    // ADR 0369 — the runs-reference probe (`hasRunForWorkflow`) serves the
+    // workflow DELETE guard + the promote gate. Runs are looked up by
+    // workflow_id, which only had per-tenant/status indexes; without this,
+    // the probe would seq-scan runs. Mirrors sqlite mig 34.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs (workflow_id);
+    `);
+  },
+  33: async (client) => {
+    // ADR 0371 — run retention. removal_at is precomputed at terminal
+    // transition (storage-layer stamp); the sweeper range-scans the index.
+    // Backfill: pre-policy terminal runs get a GRACE floor of now + 7 days
+    // (repair-before-constrain — the first sweep must never be a mass
+    // extinction of history nobody chose to expire). Mirrors sqlite mig 35.
+    await client.query(`ALTER TABLE runs ADD COLUMN IF NOT EXISTS removal_at TIMESTAMPTZ;`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_runs_removal ON runs (removal_at) WHERE removal_at IS NOT NULL;`);
+    await client.query(`
+      UPDATE runs SET removal_at = NOW() + INTERVAL '7 days'
+      WHERE removal_at IS NULL AND status IN ('completed', 'failed', 'cancelled');
+    `);
+  },
+  34: async (client) => {
+    // ADR 0379 P2 (PR-A) — user_agents PK becomes COMPOSITE (tenant_id,
+    // agent_id): the prerequisite for persona-scoped ids (`user.<slug>`), and
+    // the structural fold-collision mechanism (two tenants' same-persona rows
+    // share a per-tenant key, so the adopt fold's tenant move collides instead
+    // of duplicating). Mirrors sqlite mig 36 (which rebuilds the table —
+    // sqlite can't ALTER a PK).
+    await client.query(`
+      ALTER TABLE user_agents DROP CONSTRAINT user_agents_pkey;
+      ALTER TABLE user_agents ADD PRIMARY KEY (tenant_id, agent_id);
+    `);
+  },
+  35: async (client) => {
+    // ADR 0549 P0 — the HTTP idempotency ledger, keyed (tenant_id,
+    // endpoint_id, idempotency_key). Mirrors sqlite mig 37.
+    //
+    // A NEW table, not an ALTER of `idempotency`: the old table keeps serving
+    // the daemons' fire-once mutex and is deliberately NOT dropped (ADR 0549
+    // CORRECTION 4). Separating the lanes is what makes a caller-supplied key
+    // structurally unable to collide with a host-generated one.
+    //
+    // No backfill — a raw legacy key cannot be attributed to a tenant after
+    // the fact, and guessing an owner is the defect being fixed.
+    //
+    // Every primary-key column is NOT NULL. That is not decoration: Postgres
+    // implies NOT NULL on a PK, but SQLITE DOES NOT — it permits NULLs in a
+    // PK and treats multiple NULL rows as non-conflicting, which would make
+    // the atomic claim silently non-atomic on one adapter and hard-fail on the
+    // other. Writing it explicitly keeps the two schemas honestly identical.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS idempotent_response (
+        tenant_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (state IN ('pending', 'completed', 'released')),
+        claim_token TEXT,
+        claim_expires_at TIMESTAMPTZ,
+        response_status INTEGER,
+        response_body TEXT,
+        run_id TEXT,
+        created_at TIMESTAMPTZ NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tenant_id, endpoint_id, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_idempotent_response_age
+        ON idempotent_response (created_at);
+    `);
+  },
+  36: async (client) => {
+    // ADR 0551 P0 — durable RFC 0059 agent workspace. Mirrors sqlite mig 38.
+    // See that migration for why every key column is explicitly NOT NULL.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS workspace_files (
+        tenant_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        content TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        etag TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        updated_at TIMESTAMPTZ NOT NULL,
+        PRIMARY KEY (tenant_id, workspace_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workspace_files_owner
+        ON workspace_files (tenant_id, workspace_id, path);
+    `);
+  },
+  37: async (client) => {
+    // ADR 0549 P3 — RFC 0150 §B logical effect identity. Mirrors sqlite mig 39;
+    // see that migration for why this is a RENAME and why `attempt` stays.
+    //
+    // `IF EXISTS` because a database whose `invocation_log` was created after
+    // this migration landed already carries the new name; Postgres has no
+    // `RENAME COLUMN IF EXISTS`, so the guard is the information_schema probe.
+    const { rows } = await client.query<{ present: number }>(
+      `SELECT 1 AS present FROM information_schema.columns
+       WHERE table_name = 'invocation_log' AND column_name = 'provider_key'`,
+    );
+    if (rows.length > 0) {
+      await client.query(`ALTER TABLE invocation_log RENAME COLUMN provider_key TO invocation_id`);
+    }
+  },
+  38: async (client) => {
+    // ADR 0551 P1 — the durable dispatch outbox. Mirrors sqlite mig 40; see
+    // that migration for why `run_id` is the primary key, why there is no
+    // backfill, and why a discharged intent is deleted rather than marked.
+    //
+    // Epoch-ms columns are BIGINT, matching `webhook_deliveries` (mig 16) — the
+    // other leased queue in this schema — so the two claim paths compare
+    // timestamps the same way on both adapters.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS dispatch_outbox (
+        run_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'dead')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at BIGINT NOT NULL,
+        claimed_by TEXT,
+        claim_expires_at BIGINT,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_outbox_due
+        ON dispatch_outbox (status, next_attempt_at);
+    `);
+  },
+  39: async (client) => {
+    // PR #3409 review fold-in — the `listAudit` exact-match `resource`
+    // pushdown. Mirrors sqlite mig 41; see that migration for the two
+    // window-scan consumers this replaces. Partial index: most audit rows
+    // carry no resource, and NULL never matches the exact-match pushdown.
+    await client.query(`
+      CREATE INDEX IF NOT EXISTS idx_audit_resource_ts
+        ON audit_log (resource, timestamp DESC)
+        WHERE resource IS NOT NULL;
+    `);
+  },
+  40: async (client) => {
+    // ADR 0591 P1 — the durable effect ESCAPE ledger. Mirrors sqlite mig 42;
+    // see that migration for why this is a SECOND table rather than a count
+    // over `invocation_log` (whose REPLACE-over-constant-`attempt` collapses
+    // two escapes into one row — measured, not assumed).
+    //
+    // The row id is GENERATED, not caller-supplied — see mig 42 for the
+    // measurement that forced this: a caller-supplied sequence is process-local,
+    // restarts at 0 in the process that resumes after the kill, and so collides
+    // with the pre-kill row for the same identity. Under this schema an append
+    // cannot address an existing row at all, on either backend.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS effect_escape_ledger (
+        escape_id BIGSERIAL PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        invocation_id TEXT NOT NULL,
+        effect_kind TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_effect_escape_run
+        ON effect_escape_ledger (run_id, invocation_id);
+    `);
+  },
+  41: async (client) => {
+    // v2 charter Phase 4 (P4-C) — THE ERA KEY. Mirrors sqlite mig 44; see that
+    // migration for why the column is nullable and why there is no backfill
+    // (`spec/v2/core/persistence.md` §"The era key": absent stays era `2`
+    // forever, a host MUST NOT rewrite historical rows to add an explicit `2`,
+    // and the snapshot field is synthesized at read time instead).
+    //
+    // `ADD COLUMN` with no DEFAULT takes no table rewrite on any supported
+    // Postgres, so this is safe on a large `runs` table.
+    await client.query(`
+      ALTER TABLE runs ADD COLUMN IF NOT EXISTS event_log_schema_version INTEGER;
+    `);
+  },
+  42: async (client) => {
+    // v2 charter Phase 4 (P4-D) — THE SUBSCRIBER'S CONTRACT MAJOR. Mirrors
+    // sqlite mig 45; see that migration for why a delivery cannot negotiate a
+    // contract (it is an emission, not a response) and why NULL MUST read as
+    // major 1 rather than being backfilled to 2.
+    await client.query(`
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS protocol_major INTEGER;
+    `);
+  },
+  43: async (client) => {
+    // RFC 0187 §A.1 — the delivery header carries the same tenant-bound
+    // subscription id minted by POST /webhooks. Persist the exact wire value
+    // on the durable row so crash recovery/retry cannot revert to the raw
+    // storage id. NULL preserves every historical and major-1 row.
+    await client.query(`
+      ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS wire_subscription_id TEXT;
+    `);
+  },
+  44: async (client) => {
+    // FORWARD-FIX for ADR 0618's invocation_claim (the Layer-2 atomic claim —
+    // idempotency.md, "Concurrent duplicates (Layer 2)"). It was added to the
+    // v1 block on 2026-09-01, which no existing DB re-runs, so production never
+    // had it: MEASURED 2026-09-21, every run-retention tick since at least
+    // 2026-09-14 failed on `relation "invocation_claim" does not exist` (99
+    // logged in a week — runs were never purged), and the notification emitter
+    // ran with duplicate suppression OFF. Idempotent. Mirrors sqlite, which
+    // created it in its own forward migration from the start.
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS invocation_claim (
+        run_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        invocation_id TEXT NOT NULL,
+        claimed_at BIGINT NOT NULL,
+        PRIMARY KEY (run_id, node_id, invocation_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_invocation_claim_run ON invocation_claim(run_id);
+    `);
+  },
+  45: async (client) => {
+    // RFC 0201 / ADR 0747 — the Standard Webhooks companion scheme. Mirrors
+    // sqlite mig 47; see it for why every column is NULLABLE WITH NO BACKFILL
+    // (NULL `signature_algorithms` = `["v1"]`, today's behaviour byte for byte)
+    // and why `previous_secret` carries the sealed at-rest form. `ADD COLUMN`
+    // with no DEFAULT takes no table rewrite.
+    await client.query(`
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS signature_algorithms JSONB;
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS previous_secret TEXT;
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS previous_secret_expires_at BIGINT;
+      ALTER TABLE webhooks ADD COLUMN IF NOT EXISTS rotated_at BIGINT;
+    `);
+  },
+  46: async (client) => {
+    // RFC 0215 §A.3 / ADR 0752 P2 — the owning tenant on each delivery row, so
+    // one tenant's unanswered attempts cannot take capacity another tenant
+    // needs. Mirrors sqlite mig 48. NULLABLE WITH NO BACKFILL: only rows queued
+    // before this deploy are NULL, they drain within minutes, and a NULL row is
+    // simply not tenant-capped (never excluded) — the pre-P2 behaviour.
+    await client.query(`
+      ALTER TABLE webhook_deliveries ADD COLUMN IF NOT EXISTS tenant_id TEXT;
     `);
   },
 };

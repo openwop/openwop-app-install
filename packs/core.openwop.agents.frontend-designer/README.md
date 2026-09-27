@@ -17,7 +17,7 @@ Given a UI brief + optional design-system source, produces:
 - **Layout JSON** — declarative layout (grid / stack / flow) with spacing tokens, breakpoint behavior.
 - **Skeleton code** — React (TSX) or HTML scaffold matching the contracts.
 
-When `task.designSystemPath` is supplied, reads it via `openwop:core.files.fs-read` and references its tokens. When `task.knowledgeSourceIds` is supplied, retrieves design-system docs via `openwop:core.rag.retrieve`.
+When `task.designSystemPath` is supplied, reads it via `openwop:core.files.read` and references its tokens. When `task.knowledgeSourceIds` is supplied, retrieves design-system docs via `openwop:core.rag.retriever-basic`.
 
 ## Why "designer", not just "frontend"
 

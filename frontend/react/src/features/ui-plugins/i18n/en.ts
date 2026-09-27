@@ -1,0 +1,51 @@
+/**
+ * `ui-plugins` namespace — user-facing copy for the UI Plugins feature (ADR 0300,
+ * RFC 0117/0119). Feature-self-contained: every string lives here.
+ */
+export const messages = {
+  eyebrow: 'Developer',
+  title: 'UI Plugins',
+  lede: 'Load signed, sandboxed front-end plugin packs (RFC 0117/0119).',
+
+  notEnabledTitle: 'UI Plugins is not enabled',
+  notEnabledBody: 'Ask an administrator to enable UI Plugins for this tenant.',
+
+  isolationLabel: 'Isolation',
+  boundaryExplainer: 'A downloaded plugin runs in a cross-origin sandboxed iframe and talks to the host only over ui-plugin/1. Four guarantees:',
+  legIsolation: 'Isolated — an opaque origin (no allow-same-origin).',
+  legEgress: 'Egress-denied — default-src \'none\', no network requests.',
+  legAllowlist: 'Allowlist-bound — an undeclared method → method_not_allowed.',
+  legNoByok: 'No BYOK — no credential-bearing method exists.',
+
+  selfTestTitle: 'Boundary self-test',
+  selfTestBlurb: 'The four guarantees above are claims. This checks the three that are mechanically checkable, using the same sandbox and CSP settings a real plugin is mounted under.',
+  selfTestRun: 'Run the self-test',
+  selfTestRerun: 'Run again',
+  selfTestFrameTitle: 'Isolation probe (hidden)',
+  selfTestNoByokNote: 'No-BYOK is ASSERTED, not probed: it is the absence of a credential-bearing method from a closed allowlist, which a probe cannot demonstrate. It is shown without a pass mark rather than given one it has not earned.',
+  outcome_pass: 'PASS',
+  outcome_fail: 'FAIL',
+  outcome_running: 'checking…',
+  outcome_asserted: 'asserted',
+  outcome_inconclusive: 'no answer',
+  legForwarded: 'forwarded to the host — NOT refused',
+  legNoResponse: 'no response',
+  installedLabel: 'Installed plugins',
+  noneTitle: 'No plugins installed',
+  noneBody: 'This host serves no frontend-plugin packs.',
+
+  liveLabel: 'Live plugin',
+  liveExplainer: 'The reference viewer reads a demo artifact over ui-plugin/1 and self-witnesses the four guarantees.',
+  pluginLoading: 'Loading plugin…',
+  pluginLoadFailed: 'Plugin failed to load',
+  listFailedLead: 'Could not load the plugin list:',
+  listFailedTitle: 'Could not load the plugin list',
+  isolationUnknown: 'Unknown — not reported',
+  witnessUnavailableTitle: 'The live witness is not showing',
+  witnessListFailedBody: 'The plugin list did not load, so there is nothing to mount here. This is NOT evidence that isolation failed — and not evidence that it held either.',
+  witnessNoViewerBody: 'This host serves no artifact-viewer plugin, so there is nothing to mount. The four guarantees above are unwitnessed on this page.',
+  witnessArtifactFailedBody: 'The demo artifact the reference viewer reads could not be prepared, so the viewer was not mounted:',
+  tierTrusted: 'Trusted (signed)',
+  tierCommunity: 'Community (sandboxed)',
+  trustedLiveExplainer: 'This plugin is signed by an operator-pinned key and runs in the main frame with full UI integration. Signature and revocation are re-verified on every load.',
+} as const;

@@ -1,7 +1,7 @@
 {
   "name": "feature.consent.nodes",
-  "version": "1.0.0",
-  "description": "Consent feature node pack (ADR 0014) — gate/record nodes over the ctx.features.consent surface. check evaluates a subject's consent for a category (fail-closed in regulated regions); record upserts consent from a run. The SAME enforcement helper Analytics/Email consume — one consent rule.",
+  "version": "1.2.0",
+  "description": "Consent feature node pack — gate/record nodes over the ctx.features.consent surface. check evaluates a subject's consent for a category; record MERGES a partial consent update from a run. The SAME enforcement helper Analytics/Email consume — one consent rule.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "consent", "compliance", "gdpr", "gate"],
@@ -9,21 +9,21 @@
   "nodes": [
     {
       "typeId": "feature.consent.nodes.check",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Consent: Check",
-      "description": "Evaluates whether a subject has consented to a category (necessary/analytics/marketing) over ctx.features.consent. Fail-closed in regulated regions.",
+      "description": "Evaluates whether a subject has consented to a category (necessary/analytics/marketing, plus the marketing.email|sms|push|whatsapp specifics) over ctx.features.consent. A missing/blank subjectKey or an unrecognized category is a typed validation_error, never a fabricated verdict. Fail-closed when the tenant policy is opt-in; permissive when the consent feature is off. A READ: it re-executes on replay/fork — a gate verdict is live by design, never served from a historical run.",
       "category": "integration",
-      "role": "action",
+      "role": "read",
       "capabilities": []
     },
     {
       "typeId": "feature.consent.nodes.record",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Consent: Record",
-      "description": "Upserts a subject's consent choices over ctx.features.consent (latest-wins).",
+      "description": "Merges a subject's consent choices over ctx.features.consent (per-category, latest-wins). A missing/blank subjectKey, or a categories block with no recordable boolean, is a typed validation_error. A SIDE EFFECT: served from the recorded outcome on replay/fork so a historical run never re-merges its consent over current state (ADR 0657 D3).",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

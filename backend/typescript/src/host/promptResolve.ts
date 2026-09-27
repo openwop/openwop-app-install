@@ -10,7 +10,13 @@
  * the `agent.promptResolved` `RunEventDoc` payload carries.
  *
  * Layer order (per RFC 0029 §A):
- *   1. node           — WorkflowNode.config.{kind}PromptRef (highest)
+ *   0. run-configurable — RunOptions.configurable.promptOverrides[kind]
+ *                       (optional, NON-NORMATIVE extension; highest when
+ *                       present). Opt-in: only consulted when the caller
+ *                       supplies `req.runConfigurable`; a run that carries
+ *                       no override map produces no chain entry, so the
+ *                       normative trace is byte-identical to before.
+ *   1. node           — WorkflowNode.config.{kind}PromptRef
  *   2. agent-*        — AgentManifest fields (intrinsic / overrides /
  *                       library-default). Gated on
  *                       capabilities.prompts.agentBindings: true; skipped
@@ -19,11 +25,11 @@
  *   3. workflow-defaults — WorkflowDefinition.defaults.promptRefs[kind]
  *   4. host-defaults  — capabilities.prompts.defaults[kind] (lowest)
  *
- * The `run-configurable` extension layer (optional, non-normative per
- * RFC 0029 §A) is NOT implemented here; hosts that honor
- * `RunOptions.configurable.promptOverrides` can opt in by prepending a
- * chain entry with layer: "run-configurable" before passing the
- * remaining context to this resolver.
+ * The `run-configurable` extension layer is optional + non-normative per
+ * RFC 0029 §A. This host honors it as an opt-in: a caller that reads
+ * `RunOptions.configurable.promptOverrides` passes it as
+ * `req.runConfigurable`, and it takes precedence over every normative
+ * layer. Absent → the layer is skipped with no trace entry (back-compat).
  */
 
 // Mirror of the PromptKind enum from schemas/prompt-kind.schema.json.
@@ -81,6 +87,12 @@ export interface WorkflowDefaultsInputs {
 export interface ResolveRequest {
   kind: PromptKind;
   node: NodeConfigInputs;
+  /** OPTIONAL run-configurable override map (layer 0) — the non-normative
+   *  RFC 0029 §A extension, sourced from `RunOptions.configurable.promptOverrides`.
+   *  When present, `[kind]` takes precedence over every normative layer. When
+   *  absent (the default), the layer is skipped entirely and emits no chain
+   *  entry — so runs that don't use it keep an unchanged resolution trace. */
+  runConfigurable?: Partial<Record<PromptKind, unknown>>;
   agentManifest?: AgentManifestInputs;
   workflowDefaults?: WorkflowDefaultsInputs;
   hostDefaults?: Partial<Record<PromptKind, unknown>>;
@@ -163,6 +175,21 @@ function agentIntrinsicRef(am: AgentManifestInputs): string | null {
   return null;
 }
 
+/** Surface `RunOptions.configurable.promptOverrides` as the resolver's
+ *  layer-0 map (RFC 0029 §A run-configurable extension) — but ONLY when it
+ *  is a plain object. Anything else (absent / array / scalar) yields
+ *  `undefined`, so `resolvePromptRef` skips the layer entirely and the
+ *  resolution trace is unchanged. Callers pass the result as
+ *  `ResolveRequest.runConfigurable`. */
+export function promptOverridesFromConfigurable(
+  configurable: Record<string, unknown> | undefined,
+): Partial<Record<PromptKind, unknown>> | undefined {
+  const raw = configurable?.promptOverrides;
+  return raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as Partial<Record<PromptKind, unknown>>)
+    : undefined;
+}
+
 /**
  * Resolve a `(node, kind)` pair through the four-layer chain.
  * Returns the winning stringy ref + the full chain[] trace.
@@ -183,16 +210,34 @@ export function resolvePromptRef(req: ResolveRequest): ResolveResult {
     chain.push(entry);
   };
 
+  // ── Layer 0: run-configurable (optional, non-normative RFC 0029 §A) ──
+  // Only consulted when the caller opts in by supplying `runConfigurable`
+  // (from RunOptions.configurable.promptOverrides). Highest precedence.
+  // When the field is absent, emit NO entry — the normative chain trace is
+  // byte-identical to a host that doesn't honor the extension.
+  if (req.runConfigurable !== undefined) {
+    const runCfgRef = toStringyRef(req.runConfigurable[kind]);
+    if (runCfgRef !== null) {
+      recordApplied('run-configurable', runCfgRef);
+    } else {
+      recordSkipped('run-configurable', undefined, 'no run-configurable override for this kind');
+    }
+  }
+
   // ── Layer 1: node config ────────────────────────────────────────
   const fewShotIndex = typeof req.fewShotIndex === 'number' && req.fewShotIndex >= 0
     ? req.fewShotIndex
     : 0;
-  const nodeRefRaw = nodeConfigRef(node.config, kind, fewShotIndex);
-  const nodeRef = toStringyRef(nodeRefRaw);
-  if (nodeRef !== null) {
-    recordApplied('node', nodeRef);
+  if (resolved === null) {
+    const nodeRefRaw = nodeConfigRef(node.config, kind, fewShotIndex);
+    const nodeRef = toStringyRef(nodeRefRaw);
+    if (nodeRef !== null) {
+      recordApplied('node', nodeRef);
+    } else {
+      recordSkipped('node', undefined, 'no candidate at this layer');
+    }
   } else {
-    recordSkipped('node', undefined, 'no candidate at this layer');
+    recordSkipped('node', undefined, 'superseded by higher-precedence layer');
   }
 
   // ── Layer 2: agent binding ──────────────────────────────────────

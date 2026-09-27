@@ -1,0 +1,28 @@
+{
+  "name": "feature.whatsapp.agents",
+  "version": "1.0.0",
+  "description": "The WhatsApp-facing customer-service agent (ADR 0394) — a PURPOSE-SPECIFIC persona scoped to defined functions, the structural answer to Meta's primary-functionality ban on general-purpose assistants. Minimal tool allowlist (workspace FAQ/knowledge lookup only); no web, exec, authoring, or open-ended tools. Composes the ONE chat (ADR 0058); no new chat surface. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "agents", "whatsapp", "customer-service", "scoped"],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.whatsapp.agents.customer-service",
+      "persona": "WhatsApp Customer Service",
+      "label": "WhatsApp Customer Service",
+      "description": "Answers customer questions over the workspace knowledge base — order/FAQ lookups within defined functions only. Deliberately NOT a general assistant (Meta's Business Solution Terms bar general-purpose AI as primary functionality on WhatsApp); requests outside its defined functions are redirected to a human.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/customer-service.md",
+      "toolAllowlist": [
+        "openwop:knowledge.search"
+      ]
+    }
+  ]
+}

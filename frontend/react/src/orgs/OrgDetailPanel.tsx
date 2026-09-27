@@ -216,6 +216,7 @@ export function OrgDetailPanel(props: OrgDetailPanelProps): JSX.Element {
 
           {/* Members (extracted — GAP-ANALYSIS E11) */}
           <MembersPanel
+            orgId={selectedOrg.orgId}
             members={members}
             memberName={memberName}
             setMemberName={setMemberName}

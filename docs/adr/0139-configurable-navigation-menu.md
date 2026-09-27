@@ -92,6 +92,35 @@ a *projection re-sort* over the existing declared nav.
 `WORKSPACE_NAV` / `ADMIN_NAV_GROUPS` exactly (zero behavior change until configured).
 A regression test pins this.
 
+> **CORRECTED 2026-09-20 — route tier is immutable.** ADR 0203 later made the
+> `admin` tier a role-gated route shell, but this ADR's overlay continued to let
+> an operator move a link between `workspace` and `admin`. That changed only
+> where the link was advertised; `App.tsx` still mounted the route under its
+> declared shell. The result was a visible destination that could not render in
+> the advertised authority context. `FeatureRoute.tier` is now immutable in menu
+> resolution. The editor can regroup, order, and hide items inside their declared
+> tier; legacy persisted `items[*].tier` values remain schema-compatible but are
+> ignored. This is a compatibility correction to the projection, not a new menu
+> store or migration.
+
+> **Architecture review, Phase 0 (2026-09-20).** The existing seams remain the
+> correct owners: `FEATURES` declares routes, `resolveNav` produces one effective
+> projection, `/access/effective` supplies presentation authority, and backend
+> route handlers enforce it. The review rejected a second permission registry in
+> the overview/palette and a second canonical-route registry for hubs. Instead,
+> `FeatureNav` carries optional `superadminOnly`, `requiredScope`, and
+> `activeFor` projection metadata; the rail, overview, and command palette all
+> consume the same resolved result.
+
+> **Phase 3 UX correction (2026-09-20).** The editor's draft is now guarded
+> before browser exits, same-origin application-link exits, and scope changes;
+> a rejected scope change preserves both the active scope and draft. Its live
+> preview calls the same pure `resolveNav` projection as the rails. “My layout”
+> previews tenant + draft user layers; “Workspace default” previews the draft
+> tenant layer with an empty user layer, so the editor does not mistake the
+> current operator's personal overrides for the default everyone will inherit.
+> This adds no router, permission registry, persistence owner, or menu model.
+
 ### Persistence (host-extension — no RFC)
 - `GET /v1/host/openwop-app/menu-config` → `{ tenant, user }` in **one** read (the
   rate-limit fan-out gotcha — never N requests on load).
@@ -198,3 +227,11 @@ fixes (header id≠label split; subsume `navGroups`; reduced-motion chevron fall
 `aria-pressed` toggle over a misused `role="tablist"`). Backend tsc + the menu-config
 route test green; the FE build gate (tsc + token/CSS integrity + bundle budget) green;
 resolver + cookie unit tests green.
+
+> **Adaptive-navigation correction (2026-09-20).** On viewports at or below
+> 860px, the effective headerless **Pinned** group now projects its first four
+> destinations into a persistent bottom quick-access bar. This is not a second
+> registry: tenant/user ordering, feature gates, labels, and visibility still
+> come from `resolveNav`. A stable **More** action opens the existing complete,
+> focus-trapped drawer. Desktop keeps the rail, and the route/wire contract is
+> unchanged.

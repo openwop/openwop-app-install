@@ -1,7 +1,7 @@
 /**
  * Conversation auto-titling (ADR 0151) — on the first exchange of a new chat, a cheap
  * LLM names the conversation by its topic (LibreChat `immediate`+`completion`), writing
- * the existing chat-session title and emitting a `conversation.titled` host event the FE
+ * the existing chat-session title and emitting a `openwop-app.conversation.titled` host event the FE
  * consumes live. A BACKEND side-effect feature: no routes, no store of its own (it writes
  * through the existing `chatSessions` title) — this entry DECLARES the toggle default and
  * the binding is *called from* `conversationExchange` (the established core→feature seam,

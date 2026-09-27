@@ -1,7 +1,7 @@
 {
   "name": "feature.forms.nodes",
-  "version": "1.0.0",
-  "description": "Forms feature node pack (ADR 0014) — read nodes over the ctx.features.forms surface shipped by the Forms feature package. list-forms reads an org's forms; list-submissions reads a form's captured submissions.",
+  "version": "1.2.0",
+  "description": "Forms feature node pack — read nodes over the ctx.features.forms surface shipped by the Forms feature package. list-forms reads an org's forms; list-submissions reads a form's captured submissions; get-submission reads one submission's values + intake binding (the forms→priority-matrix bridge).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "forms", "submissions", "lead-capture"],
@@ -21,6 +21,15 @@
       "version": "1.0.0",
       "label": "Forms: List Submissions",
       "description": "Lists a form's captured submissions over ctx.features.forms. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.forms.nodes.get-submission",
+      "version": "1.1.0",
+      "label": "Forms: Get Submission",
+      "description": "Reads one submission's values + the form's intake binding over ctx.features.forms. Tenant+org+form-guarded. The forms→priority-matrix bridge (ADR 0247). ADR 0584: emits `flagged` and answers `willFile:'no'` for a QUARANTINED submission, so a held row is never filed as intake.",
       "category": "integration",
       "role": "action",
       "capabilities": []

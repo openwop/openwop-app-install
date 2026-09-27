@@ -1,0 +1,32 @@
+{
+  "name": "core.openwop.connections.shippo",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Shippo connection pack (RFC 0095) — api_key provider for the commerce shipping-rate seam (ADR 0250). Category is `other` (openai-images precedent): the normative `category` enum has no `shipping` value and the seam resolves by `id` (`shippo`), not category — no wire/RFC change. When configured AND the org sets `commerce.shipFrom` AND the cart's physical lines all carry a weight, `features/commerce/taxShipping.ts` calls Shippo's rate API (POST https://api.goshippo.com/v1/shipments) at checkout and bills the CHEAPEST rate; ANY missing input/error/timeout falls back to the flat/manual rate — a carrier hiccup never blocks a sale. Rate quotes are READ calls (not money movement) — no commerce-spend gate. Credentials stay host-side via the Connections broker; the request carries only the from/to postal + parcel weight, never customer contact details. Carries NO secret (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "shippo",
+    "displayName": "Shippo",
+    "category": "other",
+    "auth": {
+      "kind": "api_key",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://docs.goshippo.com/shippoapi/public-api/"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http"
+    ],
+    "docsUrl": "https://docs.goshippo.com/docs/rates/shipping_rates/",
+    "apiHosts": [
+      "api.goshippo.com"
+    ]
+  }
+}

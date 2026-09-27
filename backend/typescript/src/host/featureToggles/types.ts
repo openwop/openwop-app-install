@@ -66,6 +66,12 @@ export interface ToggleConfig {
   tenantOverrides?: Record<string, ToggleOverride>;
   updatedAt?: string;
   updatedBy?: string;
+  /** The COMPILED default status the admin was overriding when this row was
+   *  saved (architect review 2026-07-13, finding 1): if the current compiled
+   *  default differs, the admin surface flags `defaultDrift` — a later
+   *  "GA by flipping the compiled default" is a NO-OP while a row exists,
+   *  and this makes that pin visible the moment it arms. */
+  overriddenDefaultStatus?: FeatureToggleStatus;
 }
 
 /** The subject a toggle is resolved against — the authenticated caller. */

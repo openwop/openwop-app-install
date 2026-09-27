@@ -1,11 +1,19 @@
 {
   "name": "feature.campaign-connectors.nodes",
-  "version": "1.0.0",
-  "description": "Campaign Connectors node pack (ADR 0159 / ADR 0014) — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (pull a platform's performance through the Connections broker; honest-off with `connector_not_configured` until the broker reach is wired — ADR 0037 day-1 matrix). Over ctx.features['campaign-connectors'].",
+  "version": "1.2.0",
+  "description": "Campaign Connectors node pack (sync honest-ON per the campaign gap plan C2) — `import-csv` (parse a platform CSV export onto the unified metric schema with dedup + computed fields) and `sync` (pull yesterday's metrics for every dispatched campaign through the Connections broker via ctx.ads — meta/google live; other platforms stay CSV-first with `connector_not_configured`). Over ctx.features['campaign-connectors'] + ctx.ads.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "campaign-connectors", "performance", "csv", "marketing"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "campaign-connectors",
+    "performance",
+    "csv",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.campaign-connectors.nodes.import-csv",
@@ -20,11 +28,23 @@
       "typeId": "feature.campaign-connectors.nodes.sync",
       "version": "1.0.0",
       "label": "Connectors: Sync (live)",
-      "description": "Pulls a platform's performance through the Connections broker. Honest-off: returns `connector_not_configured` until the broker reach is wired (ADR 0037). Inputs: { orgId, platform }. Output: { synced } or a structured not-configured failure.",
+      "description": "Pulls yesterday's metrics for every dispatched campaign of the platform through the acting user's connection (ctx.ads.getMetrics window 'yesterday'; 15-min cooldown; per-campaign best-effort). meta/google live; other platforms return `connector_not_configured` (CSV import is the path). Inputs: { orgId, platform }. Output: { outcome: 'synced'|'cooldown'|'no_dispatches', campaigns, imported, deduped, failures[] }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-connectors.nodes.audience-sync",
+      "version": "1.0.0",
+      "role": "action",
+      "label": "Sync Segment → Ad Audience",
+      "description": "Uploads a CRM saved segment as a hashed platform custom audience (ADR 0217): consent-checked, suppression-subtracted, SHA-256-hashed members via ctx.ads.syncAudience — behind the ads-audience approval gate (default require-approval; PII-adjacent). Inputs: { segmentId, platform: meta|google, adAccountId, audienceName? }. Output: { platformAudienceId, uploaded, excluded }."
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

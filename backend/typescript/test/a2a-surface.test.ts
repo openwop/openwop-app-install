@@ -94,11 +94,15 @@ beforeAll(async () => {
     }
     res.writeHead(404).end();
   });
-  await new Promise<void>((resolve) => server.listen(0, resolve));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  // The A2A client egress is now SSRF-guarded (2026-07 vuln-scan M1); permit the
+  // loopback test server via the documented dev/test escape.
+  process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
 });
 
 afterAll(async () => {
+  delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
   await new Promise<void>((resolve) => server.close(() => resolve()));
 });
 

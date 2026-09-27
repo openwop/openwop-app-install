@@ -10,6 +10,7 @@ export const messages = {
 
   // Tablist
   tablistLabel: 'Model sections',
+  panelRegion: '{{panel}} model panel',
 
   // Tab labels (keyed by the route id = path last segment)
   'tab_model-router': 'Routing',

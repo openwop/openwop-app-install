@@ -1,0 +1,67 @@
+{
+  "name": "core.openwop.workflows.kicktodo-plan-generation",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "KickTodo plan generation as an RFC 0013 / RFC 0133 chain pack (migrated from the deprecated ADR 0072 builtin `openwop-app.kicktodo.plan-generation`). Generate a validated challenge plan with the run-scoped provider (closed-world validatePlan + one bounded repair inside the node; fails closed on stub providers), then decompose it into a draft. Demonstrates RFC 0133 produced variables: `generate` writes the validated `plan` to the run bag and `decompose` reads it by name — no typed output port, so an explicit edge is not the right shape.",
+  "keywords": ["KickTodo", "Challenges"],
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "kicktodo.plan-generation",
+      "version": "1.0.0",
+      "label": "Generate a challenge plan",
+      "description": "Generate a validated plan from research, then decompose it into a challenge draft.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["candidateId", "topic", "audience", "authorSubject"],
+        "properties": {
+          "candidateId": { "type": "string", "description": "The challenge candidate this plan binds to." },
+          "topic": { "type": "string", "description": "The challenge topic." },
+          "audience": { "type": "string", "description": "The target audience." },
+          "evidenceSummary": { "type": "string", "description": "Optional research evidence summary to ground the plan." },
+          "authorSubject": { "type": "string", "description": "The authoring subject the draft binds to." }
+        }
+      },
+      "capabilities": [],
+      "producedVariables": [
+        {
+          "name": "plan",
+          "producedBy": "generate",
+          "type": "object",
+          "description": "The validated challenge plan the generate node writes to the run bag; decompose reads it by name (RFC 0133 §2)."
+        }
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "generate",
+            "typeId": "feature.kicktodo.nodes.plan-generate",
+            "name": "Generate plan",
+            "position": { "x": 0, "y": 0 },
+            "inputs": {
+              "candidateId": "{{params.candidateId}}",
+              "topic": "{{params.topic}}",
+              "audience": "{{params.audience}}",
+              "evidenceSummary": "{{params.evidenceSummary}}"
+            }
+          },
+          {
+            "id": "decompose",
+            "typeId": "feature.kicktodo.nodes.decompose",
+            "name": "Decompose into a draft",
+            "position": { "x": 200, "y": 0 },
+            "inputs": {
+              "plan": { "type": "variable", "variableName": "plan" },
+              "authorSubject": "{{params.authorSubject}}",
+              "candidateId": "{{params.candidateId}}"
+            }
+          }
+        ],
+        "edges": [
+          { "from": "generate", "to": "decompose", "triggerRule": "all_success" }
+        ]
+      }
+    }
+  ]
+}

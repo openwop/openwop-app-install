@@ -1,7 +1,7 @@
 {
   "name": "feature.drawings.agents",
-  "version": "1.0.0",
-  "description": "Illustrator agent (ADR 0153 Phase 4). Turns a request into a vector illustration or diagram rendered in the EXISTING chat artifact workbench as safe SVG — composes the AI chat + the feature.drawings.nodes pack; no new chat surface. Pure-agent pack.",
+  "version": "1.0.1",
+  "description": "Illustrator agent. Turns a request into a vector illustration or diagram rendered in the EXISTING chat artifact workbench as safe SVG — composes the AI chat + the feature.drawings.nodes pack; no new chat surface. Pure-agent pack.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/feature.drawings.agents",
@@ -19,11 +19,12 @@
       "agentId": "feature.drawings.agents.default",
       "persona": "Illustrator",
       "label": "Illustrator",
-      "description": "Turns a request into a vector illustration or diagram rendered live in the artifact workbench. Uses openwop:feature.drawings.nodes.render.",
+      "description": "Turns a request into a vector illustration or diagram rendered live in the artifact workbench. Uses openwop:drawings.render (and openwop:drawings.get-design to read before revising).",
       "modelClass": "general",
       "systemPromptRef": "prompts/illustrator.md",
       "toolAllowlist": [
-        "openwop:feature.drawings.nodes.render"
+        "openwop:drawings.get-design",
+        "openwop:drawings.render"
       ],
       "memoryShape": {
         "scratchpad": true,

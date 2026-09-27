@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { setNodePackResolver } from '../executor/nodeRegistry.js';
 import { loadPackFromManifest } from '../packs/tarballLoader.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
+import { isParkedPackDirName } from './mountLocalPacks.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 
@@ -56,18 +57,28 @@ function buildTypeIndex(entries: readonly string[]): Map<string, string> {
   return idx;
 }
 
+/** The installed-pack entry that declares `typeId`, refreshing the cached
+ *  index when the set of pack directories changed. Shared by the async resolver
+ *  and its sync probe so the two cannot disagree about what is installed. */
+function packEntryFor(typeId: string): string | null {
+  if (!existsSync(PACK_DIR)) return null;
+  // readdirSync is cheap; the JSON.parse-per-manifest is what we cache.
+  const entries = readdirSync(PACK_DIR).filter((e) => !isParkedPackDirName(e)).sort();
+  const dirKey = entries.join('\n');
+  if (dirKey !== cachedDirKey) {
+    typeIndex = buildTypeIndex(entries);
+    cachedDirKey = dirKey;
+  }
+  return typeIndex.get(typeId) ?? null;
+}
+
 export function ensureNodePackResolverInstalled(_storage: Storage): void {
-  setNodePackResolver(async (typeId) => {
-    if (!existsSync(PACK_DIR)) return null;
-    // readdirSync is cheap; the JSON.parse-per-manifest is what we cache.
-    const entries = readdirSync(PACK_DIR).sort();
-    const dirKey = entries.join('\n');
-    if (dirKey !== cachedDirKey) {
-      typeIndex = buildTypeIndex(entries);
-      cachedDirKey = dirKey;
-    }
-    const entry = typeIndex.get(typeId);
-    if (!entry) return null;
-    return await loadPackFromManifest(join(PACK_DIR, entry));
-  });
+  setNodePackResolver(
+    async (typeId) => {
+      const entry = packEntryFor(typeId);
+      if (!entry) return null;
+      return await loadPackFromManifest(join(PACK_DIR, entry));
+    },
+    (typeId) => packEntryFor(typeId) !== null,
+  );
 }

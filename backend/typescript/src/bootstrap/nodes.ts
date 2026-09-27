@@ -9,20 +9,30 @@
  * `core.openwop.http` from the published packs.
  */
 
+import { declaredRunCredentialRefs } from '../host/runCredentials.js';
 import { createHash } from 'node:crypto';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
-import type { NodeContext, NodeModule } from '../executor/types.js';
+import { agentVisibleToTenant } from '../host/agentVisibility.js';
+import type { NodeContext, NodeModule, NodeOutcome } from '../executor/types.js';
 import { emitCost } from '../observability/costEmitter.js';
+import { createLogger } from '../observability/logger.js';
+import { DurableCollection } from '../host/hostExtPersistence.js';
+import { invokeWithConnectionPrompt, resolveCapabilityWithPrompt } from '../host/connectionInterrupt.js';
+import { priorSend, recordSend } from '../host/emailSentLedger.js';
+import { refuseUnknownRejectionPolicy } from '../host/reviewDecisionLedger.js';
+
+const hostLog = createLogger('bootstrap.nodes');
 import { composeAgentSystemPrompt } from '../host/agentPromptScaffold.js';
 import { applyToolResultTransform } from '../host/toolResultTransform.js';
 import { resolveAgentKnowledgeRetrieve, composeAgentKnowledgeContext } from '../host/agentKnowledgeComposition.js';
-import { createAgentMemoryPort, agentMemoryScope } from '../host/agentMemoryAdapter.js';
+import { resolveAgentIdentity } from '../host/agentIdentity.js';
+import { createAgentMemoryPort } from '../host/agentMemoryAdapter.js';
 import { conversationIdFor, makeTurn } from '../host/conversation.js';
 import { appendChannelMessage } from '../host/channelsRuntime.js';
 import { getUser } from '../features/users/usersService.js';
 import { composePromptTemplate } from '../host/promptCompose.js';
-import { resolvePromptRef, type PromptKind } from '../host/promptResolve.js';
+import { resolvePromptRef, promptOverridesFromConfigurable, type PromptKind } from '../host/promptResolve.js';
 import { getTemplate } from '../host/promptStore.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
 import { dispatchChat, type ChatMessage, type ContentPart, type DispatchResult, type ProviderId } from '../providers/dispatch.js';
@@ -42,10 +52,28 @@ import {
   buildTruncatedPayload,
 } from '../host/envelopeReliabilityEmit.js';
 import { dispatchSubRun, type SubRunResult } from '../subruns/subRunDispatcher.js';
+
 import { registerMockAgentNode, conformanceNodesEnabled } from './conformanceMockAgent.js';
+import { hasMemoryAction, runMemoryProbe } from './conformanceMemoryProbe.js';
+import { registerConformanceSideEffectNode } from './conformanceSideEffectNode.js';
+import { registerConformanceHttpEffectNode } from './conformanceHttpEffectNode.js';
+import { registerConformanceA2aInvokeNode } from './conformanceA2aInvokeNode.js';
+import { registerConformanceMcpInvokeNode } from './conformanceMcpInvokeNode.js';
+import { enterprisePosture } from '../host/deployPosture.js';
 import { diagnoseEmptyCompletion } from './emptyCompletionDiagnostic.js';
-import { storeMediaAsset, resolveMediaAsset, writeMemoryEntry, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
+import { storeMediaAsset, resolveMediaAsset, writeMemoryEntryRedacted, MEMORY_DEMO_REF } from '../host/inMemorySurfaces.js';
 import agentRunnerNode from '../host/agentRunnerNode.js';
+import { DurableSearchUnavailableError } from '../host/webResearchSurface.js';
+
+/** ADR 0706 — the parent run's registered BYOK refs, handed to every child the
+ *  parent spawns so `prepareRunSecrets` resolves the SAME secrets for the child.
+ *  Read from the run-level `configurable` (names only), never widened. */
+function inheritedCredentialRefs(ctx: NodeContext): { parentCredentialRefs?: readonly string[] } {
+  // ADR 0712 — the same reader `prepareRunSecrets` uses, so a child inherits the
+  // parent's wire `ai.credentialRef` too, not only the host-set list.
+  const refs = declaredRunCredentialRefs(ctx.configurable as Record<string, unknown> | undefined);
+  return refs.length > 0 ? { parentCredentialRefs: refs } : {};
+}
 
 const noopNode: NodeModule = {
   typeId: 'core.noop',
@@ -69,6 +97,22 @@ const identityNode: NodeModule = {
   version: '1.0.0',
   async execute(ctx) {
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object') ? (ctx.inputs as Record<string, unknown>) : {};
+    // H49 — RFC 0004 / RFC 0113 memory probes. The corpus drives its memory
+    // scenarios through `core.identity` + `config.memoryAction` (the typeId is
+    // PINNED by the vendored fixtures, so this cannot be a typeId of our own);
+    // the host recognises the action, drives its real MemoryAdapter, and
+    // surfaces the results as run variables. Same shape as the
+    // `emitDuplicateMessageId` branch below.
+    //
+    // Gated on the SAME switch the fixture advert reads
+    // (`implementedMemoryActions()` in conformanceMemoryProbe.ts, consumed by
+    // `host/index.ts`), so "advertised ⟺ executable" cannot drift. With the
+    // conformance nodes off, a `memoryAction` config is inert and the node
+    // stays the plain identity pass-through — and the matching fixture is not
+    // advertised, so nothing can dispatch expecting otherwise.
+    if (hasMemoryAction(ctx.config) && conformanceNodesEnabled()) {
+      return runMemoryProbe(ctx);
+    }
     // `channels-and-reducers.md §message` idempotency probe (the
     // `conformance-message-reducer` fixture): emit a small conversation
     // into the workflow-declared `messages` channel, intentionally
@@ -126,6 +170,16 @@ const orchestratorSupervisorNode: NodeModule = {
     // explicitly in their config.
     const plan = Array.isArray(cfg.mockDispatchPlan) && cfg.mockDispatchPlan.length > 0
       ? cfg.mockDispatchPlan
+      // ADR 0725 — REVERTED, and the reason is a corpus mismatch worth keeping
+      // written down. `orchestrator-decision.schema.json` requires
+      // `nextWorkerIds` to carry ≥1 entry, so this `next-worker` step records a
+      // schema-invalid payload; collapsing the plan to a single `terminate`
+      // fixes that and BREAKS a normative MUST — RFC 0007 §D: "host MUST emit
+      // next-worker then terminate in a loop topology"
+      // (`conformance-dispatch-loop`, whose fixture supplies NO child workflow,
+      // so there is no id that would both satisfy `minItems: 1` and dispatch).
+      // The MUST wins; `runOrchestrator.decided` stays admitted in
+      // `scripts/event-payload-violations-baseline.json` with this reason.
       : [
           { kind: 'next-worker', nextWorkerIds: [] },
           { kind: 'terminate', reason: 'goal-reached' },
@@ -331,6 +385,25 @@ const dispatchNode: NodeModule = {
       if (kind !== 'next-worker') continue; // ignore unknown kinds for forward-compat
       const nextWorkerIds = Array.isArray(decision.nextWorkerIds) ? (decision.nextWorkerIds as string[]) : [];
 
+      // RFC 0126 — per-item input for a data-parallel fan-out (`nextWorkerInputs[i]`
+      // → child i's inputs). FAIL-CLOSED: a host that doesn't advertise
+      // `dispatch.perItemInput` MUST reject a non-empty `nextWorkerInputs` (never
+      // silently drop → N identical children); when honored, length MUST equal
+      // `nextWorkerIds`. The array is frozen in the recorded `runOrchestrator.decided`
+      // decision, so replay re-reads it verbatim (never recomputed).
+      const nextWorkerInputs = Array.isArray((decision as { nextWorkerInputs?: unknown }).nextWorkerInputs)
+        ? ((decision as { nextWorkerInputs?: unknown }).nextWorkerInputs as Array<Record<string, unknown>>)
+        : undefined;
+      if (nextWorkerInputs !== undefined) {
+        const { perItemInputSupported } = await import('../host/dispatchFanOut.js');
+        if (!perItemInputSupported()) {
+          return { status: 'failure', error: { code: 'validation_error', message: 'core.dispatch received nextWorkerInputs but this host does not advertise capabilities.dispatch.perItemInput (RFC 0126) — fail-closed, no child dispatched.' } };
+        }
+        if (nextWorkerInputs.length !== nextWorkerIds.length) {
+          return { status: 'failure', error: { code: 'validation_error', message: `core.dispatch nextWorkerInputs.length (${nextWorkerInputs.length}) MUST equal nextWorkerIds.length (${nextWorkerIds.length}) (RFC 0126) — no child dispatched.` } };
+        }
+      }
+
       // RFC 0118 — parallel fan-out wave. When fanOutPolicy:'parallel' and >1 worker, dispatch
       // all children concurrently (bounded by maxConcurrency) and join per joinPolicy, instead of
       // the serial loop below. The host advertises only joinMode 'wait-all' (dispatchCapability),
@@ -363,14 +436,18 @@ const dispatchNode: NodeModule = {
           // outputMapping is applied post-join in mergeOrder below.
           dispatchChild: async (childWorkflowId, idx) => {
             const inputMapping = perWorkerInputMappings?.[childWorkflowId] ?? defaultInputMapping;
+            // RFC 0126 — project this slot's per-item literal inputs (over the mapping).
+            const perItem = nextWorkerInputs?.[idx];
             try {
               const result = await dispatchSubWorkflow({
                 parentRunId: ctx.runId,
                 parentTenantId: ctx.tenantId,
                 ...(ctx.scopeId ? { parentScopeId: ctx.scopeId } : {}),
                 parentNodeId: ctx.nodeId,
+                ...inheritedCredentialRefs(ctx),
                 childWorkflowId,
                 ...(inputMapping ? { inputMapping } : {}),
+                ...(perItem && typeof perItem === 'object' && !Array.isArray(perItem) ? { perItemInputs: perItem } : {}),
                 onChildFailure: 'continue',
               });
               await eventLog.append({
@@ -440,10 +517,11 @@ const dispatchNode: NodeModule = {
         continue; // wave handled; proceed to the next decision
       }
 
-      for (const childWorkflowId of nextWorkerIds) {
+      for (const [seqIdx, childWorkflowId] of nextWorkerIds.entries()) {
         if (typeof childWorkflowId !== 'string' || childWorkflowId.length === 0) continue;
         const inputMapping = perWorkerInputMappings?.[childWorkflowId] ?? defaultInputMapping;
         const outputMapping = perWorkerOutputMappings?.[childWorkflowId] ?? defaultOutputMapping;
+        const seqPerItem = nextWorkerInputs?.[seqIdx]; // RFC 0126 per-item input (sequential path)
 
         // RFC 0037 §"Handoff state machine" — transition 1/7: pending → dispatching.
         // Chains causationId back to the runOrchestrator.decided that named this worker.
@@ -465,9 +543,11 @@ const dispatchNode: NodeModule = {
             parentTenantId: ctx.tenantId,
             ...(ctx.scopeId ? { parentScopeId: ctx.scopeId } : {}),
             parentNodeId: ctx.nodeId,
+            ...inheritedCredentialRefs(ctx),
             childWorkflowId,
             ...(inputMapping ? { inputMapping } : {}),
             ...(outputMapping ? { outputMapping } : {}),
+            ...(seqPerItem && typeof seqPerItem === 'object' && !Array.isArray(seqPerItem) ? { perItemInputs: seqPerItem } : {}),
             onChildFailure: 'continue', // dispatch loop doesn't fail-parent on a single worker miss
           });
           // RFC 0007 §D — emit `node.dispatched` for each spawned child
@@ -626,6 +706,23 @@ const subWorkflowNode: NodeModule = {
     if (!childWorkflowId) {
       return { status: 'failure', error: { code: 'invalid_request', message: 'core.subWorkflow requires config.workflowId' } };
     }
+    // node-packs.md §core.subWorkflow: `waitForCompletion: false` is "reserved
+    // for a future asynchronous variant; v1 hosts MAY refuse `false` with
+    // `validation_error`." This host exercises that MAY — refusing LOUDLY is
+    // more honest than the prior silent accept-and-await (a caller asking for
+    // fire-and-forget got a long-blocking parent with no signal). Detached
+    // dispatch lands when the spec defines the async variant's semantics
+    // (output mapping / failure propagation are await-only today) — inventing
+    // them host-side for a reserved field would be an unspecified wire claim.
+    if (cfg.waitForCompletion === false) {
+      return {
+        status: 'failure',
+        error: {
+          code: 'validation_error',
+          message: 'core.subWorkflow waitForCompletion:false is reserved for a future asynchronous variant (node-packs.md §core.subWorkflow); this host awaits the child — omit the flag or set true.',
+        },
+      };
+    }
     const inputMapping = (cfg.inputMapping && typeof cfg.inputMapping === 'object' && !Array.isArray(cfg.inputMapping))
       ? (cfg.inputMapping as Record<string, string>)
       : undefined;
@@ -641,6 +738,7 @@ const subWorkflowNode: NodeModule = {
         parentTenantId: ctx.tenantId,
         ...(ctx.scopeId ? { parentScopeId: ctx.scopeId } : {}),
         parentNodeId: ctx.nodeId,
+        ...inheritedCredentialRefs(ctx),
         childWorkflowId,
         ...(inputMapping ? { inputMapping } : {}),
         ...(outputMapping ? { outputMapping } : {}),
@@ -752,7 +850,22 @@ const delayNode: NodeModule = {
       : (Number.isFinite(fromConfig) ? fromConfig
       : (Number.isFinite(fromConfigShort) ? fromConfigShort : 0));
     const ms = Math.max(0, Math.min(60_000, raw));
-    await new Promise((r) => setTimeout(r, ms));
+    // ADR 0632 — honour the run's abort signal so an `immediate` pause (or a
+    // cancel) stops the sleep instead of waiting it out; without a signal the
+    // behaviour is unchanged.
+    const maybe = (ctx as { signal?: unknown }).signal;
+    const signal = maybe && typeof (maybe as AbortSignal).addEventListener === 'function' ? (maybe as AbortSignal) : undefined;
+    if (!signal) {
+      await new Promise((r) => setTimeout(r, ms));
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        const fail = (): void => reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'));
+        if (signal.aborted) { fail(); return; }
+        const onAbort = (): void => { clearTimeout(t); fail(); };
+        const t = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve(); }, ms);
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
     return { status: 'success', outputs: { waitedMs: ms } };
   },
 };
@@ -807,6 +920,23 @@ const approvalGateNode: NodeModule = {
     // no further plumbing. Both sides MUST move together when the
     // shape changes — there's no spec/v1 schema for `data.options`
     // yet (sample-app contract; spec promotion is a follow-up).
+    // ── ADR 0600 §6 (`ISU-11` / `ISC-13` / `ISWF-13`) — CLOSED-WORLD `rejectionPolicy` ──
+    // This is the WRITER side, and the single choke BOTH authoring lanes pass
+    // through: a chain pack and a Builder-edited workflow both reach the gate
+    // here. (A pack-load-only check would gate the creation lane and leave the
+    // use lane open — the shape ADR 0582 is about.) An unrecognized token used
+    // to be forwarded verbatim and then silently coerced to the default by both
+    // readers, so `rejectionPolicy:"block"` read as a deliberate safety choice,
+    // enforced nothing, and would have behaved identically as any other invented
+    // word. Refuse it where a human can still fix it.
+    //
+    // ADR 0600 §Correction 9 (`LOW-1`) — the refusal moved into ONE shared
+    // helper, because this node is NOT the only writer of the field: the
+    // `core.interrupt` node forwards `config.data` verbatim, and both readers
+    // pull `data.rejectionPolicy` off any approval interrupt. Two nodes, one
+    // rule; hand-copying it is how the two readers drifted in the first place.
+    const badPolicy = refuseUnknownRejectionPolicy('core.approvalGate', cfg.rejectionPolicy);
+    if (badPolicy) return badPolicy;
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object' && !Array.isArray(ctx.inputs))
       ? (ctx.inputs as Record<string, unknown>)
       : {};
@@ -886,6 +1016,22 @@ const interruptNode: NodeModule = {
   typeId: 'core.interrupt',
   version: '1.0.0',
   async execute(ctx) {
+    const data = (ctx.config?.data && typeof ctx.config.data === 'object' && !Array.isArray(ctx.config.data))
+      ? (ctx.config.data as Record<string, unknown>)
+      : undefined;
+    // ADR 0600 §Correction 9 (`LOW-1`) — this node forwards `config.data`
+    // VERBATIM, so it is a second writer of `rejectionPolicy` and §6's refusal
+    // on `core.approvalGate` did not cover it: the very defect §6 closed stayed
+    // authorable through the PACK lane, which is how `rejectionPolicy:"block"`
+    // shipped. Same helper, so there is one rule rather than two copies.
+    //
+    // NOT gated on `kind === 'approval'` deliberately: `host/reviewProjection`
+    // reads `data.rejectionPolicy` off an interrupt without consulting its kind,
+    // and the field means nothing on the other kinds anyway — so refusing an
+    // unrecognized token there costs a pack author nothing and closes the lane
+    // completely rather than for one value of a discriminator.
+    const badPolicy = refuseUnknownRejectionPolicy('core.interrupt', data?.rejectionPolicy);
+    if (badPolicy) return badPolicy;
     return {
       status: 'suspended',
       interrupt: { kind: coerceKind(ctx.config?.kind), data: ctx.config?.data ?? {} },
@@ -937,7 +1083,10 @@ export const conversationGateNode: NodeModule = {
       const detTs = (i: number): string => new Date(i * 1000).toISOString(); // fork-stable
       const detId = (i: number, role: string): string => `${ctx.nodeId}:${i}:${role}`;
       const writeTurn = async (idx: number, role: 'system' | 'user' | 'agent', from: string, content: string): Promise<void> => {
-        const turn = makeTurn({ conversationId, turnIndex: idx, role, from, content, ts: idx, groupId: conversationId });
+        // ADR 0746 — an agent turn names its speaker: the closed v2 turn def
+        // REQUIRES `speakerId` on `role:'agent'` (RFC 0101), so without it every
+        // agent turn this fixture emits was v2-invalid, `parts` or not.
+        const turn = makeTurn({ conversationId, turnIndex: idx, role, from, content, ts: idx, groupId: conversationId, ...(role === 'agent' ? { speakerId: from } : {}) });
         const evt = idx === 0 ? 'conversation.opened' : 'conversation.exchanged';
         await ctx.emit(evt, idx === 0 ? { conversationId, initialTurn: turn, capabilities: ['multi-turn'] } : { conversationId, turnIndex: idx, turn });
         appendChannelMessage(ctx.runId, CH, { messageId: detId(idx, role), role: role === 'agent' ? 'assistant' : role, content, timestamp: detTs(idx) });
@@ -1054,6 +1203,7 @@ const mockAiNode: NodeModule = {
       const resolution = resolvePromptRef({
         kind,
         node: { nodeId: ctx.nodeId, config: cfg },
+        runConfigurable: promptOverridesFromConfigurable(ctx.configurable),
         agentBindingsSupported: promptsConfig.agentBindings,
         fewShotIndex: slotIndex,
       });
@@ -1080,14 +1230,23 @@ const mockAiNode: NodeModule = {
       // template (secret-source → BYOK lookup, etc.) and emits the
       // composed body with redaction + trust-marker preservation.
       // observability is read from the shared host config so the
-      // emitted payload matches what the host advertised — a
-      // deployer who tightens to "hashed" or "off" gets the strict
-      // emission without further dispatch-path changes.
+      // emitted payload matches what the host advertised.
+      //
+      // RFC 0124 — a MINTED template (deferred-mode inline-prompt-body lift) is not
+      // a fixture, so compose it inline; resolve its materialized `source:"variable"`
+      // slots from the per-run variable bag, marked untrusted (R1 fence + SR-1
+      // redaction for sensitive vars, both in composePromptTemplate).
+      const { bindings, bindingTrust } = await bagBindingsForTemplate(ctx, found.template, inputs);
       const composed = await composePromptTemplate({
         templateId,
-        bindings: inputs,
+        template: found.template as unknown as Parameters<typeof composePromptTemplate>[0]['template'],
+        bindings,
+        bindingTrust,
         observability: promptsConfig.observability,
         nodeId: ctx.nodeId,
+        // RFC 0124 Security — resolve a lifted source:secret variable (a sensitive
+        // param) against the run owner's BYOK secret store; redacted, never bagged.
+        secretScope: { tenantId: ctx.tenantId },
       });
       await ctx.emit('prompt.composed', composed);
       return composed.composed ?? null;
@@ -1157,7 +1316,7 @@ const mockAiNode: NodeModule = {
 
 // Chat responder — dispatches to a real AI provider via raw fetch.
 // Reads BYOK credentialRef from ctx.secrets, model/provider from inputs,
-// and streams tokens via ai.message.chunk events (ADR 0079).
+// and streams tokens via output.chunk events (ADR 0079).
 //
 // Tool calling: when inputs.tools is a non-empty array of
 // {workflowId, name, description}, the node routes anthropic dispatch
@@ -1309,6 +1468,27 @@ async function emitChatEnvelopeSignals(
  *  an ambiguous/missing template, or the composer emits an empty body.
  *  Emits `agent.promptResolved` + `prompt.composed` events identically
  *  to the mock-ai path so observability is uniform across executors. */
+/** RFC 0124 G3 run-path — for a template with materialized (`source:"variable"`)
+ *  variables (produced by the deferred-mode inline-prompt-body lift), resolve their
+ *  values from the per-run variable bag and mark each `untrusted`: a deferred per-run
+ *  value interpolated into a prompt is untrusted content (R1 fence) and, if the
+ *  variable is `sensitive`, redacts in observability (SR-1) — both handled in
+ *  `composePromptTemplate`. Returns the bag merged under the node's port `inputs`
+ *  (a colliding explicit input still wins) + the per-variable trust map. */
+async function bagBindingsForTemplate(
+  ctx: NodeContext,
+  template: { variables?: Array<{ name: string; source?: string }> },
+  inputs: Record<string, unknown>,
+): Promise<{ bindings: Record<string, unknown>; bindingTrust: Record<string, 'trusted' | 'untrusted'> }> {
+  const { snapshotRunVariables } = await import('../host/variablesRuntime.js');
+  const bag = snapshotRunVariables(ctx.runId) ?? {};
+  const bindingTrust: Record<string, 'trusted' | 'untrusted'> = {};
+  for (const v of template.variables ?? []) {
+    if (v.source === 'variable') bindingTrust[v.name] = 'untrusted';
+  }
+  return { bindings: { ...bag, ...inputs }, bindingTrust };
+}
+
 async function resolveAndComposePromptRef(
   ctx: NodeContext,
   kind: PromptKind,
@@ -1321,6 +1501,7 @@ async function resolveAndComposePromptRef(
   const resolution = resolvePromptRef({
     kind,
     node: { nodeId: ctx.nodeId, config: cfg },
+    runConfigurable: promptOverridesFromConfigurable(ctx.configurable),
     agentBindingsSupported: promptsConfig.agentBindings,
   });
   await ctx.emit('agent.promptResolved', resolution);
@@ -1331,11 +1512,19 @@ async function resolveAndComposePromptRef(
   const version = refMatch[2];
   const found = getTemplate(templateId, version !== undefined ? { version } : {});
   if (!found || found === 'ambiguous') return null;
+  // RFC 0124 — a MINTED template is not a fixture, so compose it inline; resolve its
+  // materialized `source:"variable"` slots from the per-run variable bag (untrusted).
+  const { bindings, bindingTrust } = await bagBindingsForTemplate(ctx, found.template, inputs);
   const composed = await composePromptTemplate({
     templateId,
-    bindings: inputs,
+    template: found.template as unknown as Parameters<typeof composePromptTemplate>[0]['template'],
+    bindings,
+    bindingTrust,
     observability: promptsConfig.observability,
     nodeId: ctx.nodeId,
+    // RFC 0124 Security — resolve a lifted source:secret variable (a sensitive param)
+    // against the run owner's BYOK secret store; redacted, never bagged.
+    secretScope: { tenantId: ctx.tenantId },
   });
   await ctx.emit('prompt.composed', composed);
   return composed.composed ?? null;
@@ -1543,7 +1732,7 @@ export const chatResponderNode: NodeModule = {
       // instance's boot-hydrated registry is read through from durable storage
       // (agentPackResolver miss-path) rather than silently falling through to
       // the default prompt — the chat turn routes correctly on any instance.
-      const agent = await getAgentRegistry().resolve(agentIdInput);
+      const agent = await getAgentRegistry().resolve(agentIdInput, ctx.tenantId);
       // Cross-tenant isolation (CTI-1, agent-memory.md). User-authored
       // agents carry `ownerTenant`; pack-installed agents don't. The
       // request that triggered this node carries `ctx.tenantId` (the
@@ -1551,7 +1740,7 @@ export const chatResponderNode: NodeModule = {
       // silently falling through to the default system-prompt path —
       // surfacing a 403 here would leak which agent ids exist in
       // another tenant.
-      const tenantOk = !agent || !agent.ownerTenant || agent.ownerTenant === ctx.tenantId;
+      const tenantOk = !agent || agentVisibleToTenant(agent, ctx.tenantId); // ADR 0379 P1 — the ONE rule
       if (agent && agent.systemPrompt && tenantOk) {
         // Wrap the persona prompt with the multi-agent persona-preservation
         // scaffold (user identity + narrative-casting framing + recency
@@ -1619,14 +1808,30 @@ export const chatResponderNode: NodeModule = {
           try {
             // A per-agent profile read on the hot path — a cheap point lookup
             // that returns undefined fast for agents with no `knowledge` binding.
+            // ADR 0277 P2 — identity-normalized: the binding + memory live on the
+            // PROFILE id (the rosterId for standing agents), not the dispatched
+            // registry id (TTL-cached resolve, so this stays cheap per turn).
             const memory = createAgentMemoryPort(ctx.tenantId);
-            const retrieve = await resolveAgentKnowledgeRetrieve(ctx.tenantId, agent.agentId, memory, agentMemoryScope(agent.agentId));
+            const nodeAgentIdentity = await resolveAgentIdentity(ctx.tenantId, agent.agentId, { allowReverseScan: true });
+            // ADR 0442 P3 — no acting participant on the workflow-node path; a
+            // default-scope agent reads `agent:<profileId>` exactly as before
+            // (`resolveAgentKnowledgeRetrieve` derives the scope from the profile).
+            const retrieve = await resolveAgentKnowledgeRetrieve(ctx.tenantId, nodeAgentIdentity.profileId, memory);
             if (retrieve) {
               const knowledgeBlock = await composeAgentKnowledgeContext(retrieve, knowledgeQuery);
               if (knowledgeBlock) systemBody = `${systemBody}\n\n${knowledgeBlock}`;
             }
-          } catch {
-            /* best-effort — knowledge never fails the turn */
+          } catch (err) {
+            // WF-AKM-6 (ADR 0587 §4) — the THIRD silent catch on this lane, and
+            // the outermost one: `composeAgentKnowledgeContext` now reports its own
+            // per-source faults, but a throw HERE still swallowed the whole
+            // composition. Best-effort is right (knowledge must never fail the
+            // turn); SILENT is not — a faulted backend was byte-identical to an
+            // agent with nothing bound, with nothing in the logs either way.
+            hostLog.warn('agent_knowledge_node_compose_failed', {
+              agentId: agent.agentId,
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
         }
       }
@@ -1693,8 +1898,8 @@ export const chatResponderNode: NodeModule = {
       try {
         const onDelta = async (delta: string) => {
           // ADR 0079 — the spec-canonical streaming delta the FE consumes. The
-          // transitional `node.message` dual-emit was retired in Phase 5.
-          await ctx.emit('ai.message.chunk', { chunk: delta, isLast: false });
+          // transitional `openwop-app.node.message` dual-emit was retired in Phase 5.
+          await ctx.emit('output.chunk', { chunk: delta, isLast: false });
         };
         // Bound the upstream LLM call. Without this, an unresponsive
         // managed-provider request (slow network, stuck connection,
@@ -1711,6 +1916,10 @@ export const chatResponderNode: NodeModule = {
           managed = await dispatchManagedChat({
             userFacingProvider,
             tenantId: ctx.tenantId,
+            // ADR 0721 — without this the bucket is the pooled tenant (see
+            // `managedUsageScope.ts`'s `!subject` branch). `ctx.actingUserId` is the
+            // DURABLE human the run was created for, absent for genuine system runs.
+            ...(ctx.actingUserId ? { actingSubject: ctx.actingUserId } : {}),
             messages: messages as ChatMessage[],
             maxTokens,
             onDelta,
@@ -1804,9 +2013,9 @@ export const chatResponderNode: NodeModule = {
 
     try {
       const onDelta = async (delta: string) => {
-        // ADR 0079 — canonical `ai.message.chunk` (see above); `node.message`
+        // ADR 0079 — canonical `output.chunk` (see above); `openwop-app.node.message`
         // retired in Phase 5.
-        await ctx.emit('ai.message.chunk', { chunk: delta, isLast: false });
+        await ctx.emit('output.chunk', { chunk: delta, isLast: false });
       };
       let result: DispatchResult;
       if (useTools) {
@@ -2063,7 +2272,10 @@ const memoryWriteNode: NodeModule = {
       ? inputs.note
       : `Demo memory entry written by node ${ctx.nodeId}`;
     const tags = ['demo-write', `node:${ctx.nodeId}`, `run-id:${ctx.runId}`];
-    const row = writeMemoryEntry(ctx.tenantId, MEMORY_DEMO_REF, { content: note, tags });
+    // SR-1 — `note` is caller-supplied input that may carry a value the run's
+    // BYOK vault resolved, so this in-run write goes through the redacting
+    // chokepoint (`agent-memory.md` §SR-1), not the bare write.
+    const row = await writeMemoryEntryRedacted(ctx.tenantId, MEMORY_DEMO_REF, { content: note, tags }, ctx.runId);
     // RFC 0057 §B — attribute the write on the event log, content-free
     // (identifiers + non-secret tags; never the entry content). `nodeId` is
     // included in the payload per the SHOULD; `ctx.emit` also stamps it on
@@ -2082,31 +2294,158 @@ const memoryWriteNode: NodeModule = {
  * Gap D-4 — `core.web.search` (core.openwop.web-search pack).
  *
  * Protocol-layer, capability-advertised search node — NOT a host-side
- * `exec` tool. The canonical pack implementation
- * (`packs/core.openwop.web-search/index.mjs`) delegates to the host's
- * `ctx.webSearch(...)` surface. This reference host does NOT advertise
- * `host.webSearch` (see routes/discovery.ts), so this in-process
- * registration mirrors the pack's stub branch: it returns a DETERMINISTIC
- * fixture result derived purely from the query, tagged `stub: true`, so
- * `openwop-app.web.research` runs end-to-end and replays deterministically
- * without provisioning a real search provider. A production deployer wires
- * a real `host.webSearch` and ships the published pack instead.
+ * `exec` tool. ADR 0101 unified web search on ONE owner — the
+ * `host.webResearch` surface (`host/webResearchSurface.ts`: SSRF-guarded,
+ * BYOK `web-search` secret → `OPENWOP_WEBSEARCH_API_KEY`, honest
+ * `engine:'demo'` fallback that returns a real search-engine query URL,
+ * never fabricated content) — and this node is its workflow leg
+ * (ADR 0190 Phase 5). Every real run has the surface
+ * (`inMemorySurfaces.ts` bundles it), so results are live when a search
+ * key is configured and honestly-demo when not. Only when the surface is
+ * ABSENT (conformance/test harnesses that build a bare node ctx) does the
+ * node fall back to the original deterministic fixture, tagged
+ * `stub: true`, so fixture runs replay byte-stable. Replay of real runs
+ * reads the run-cached node output (same nondeterminism class as
+ * `core.openwop.http.fetch`).
  */
+/**
+ * `core.web.fetch` — the READ half of `host.webResearch`.
+ *
+ * ADR 0101 made `host.webResearch` the ONE owner of web access, and the surface
+ * has always exposed `fetchBatch` (SSRF-guarded, redirect-following, readable-text
+ * extraction, bounded body + timeout). Only `search` was ever projected as a node,
+ * so a chain could find pages but never READ one.
+ *
+ * That gap had a live consequence: the KickTodo Challenge Factory's research spine
+ * was `search → normalize → evidence-graph`, which records source URLs and titles
+ * and NOTHING ELSE — so the dossier carried zero claims, `unsupportedClaimIds` was
+ * always empty, and `plan-generate` was told to "ground every claim ONLY in the
+ * provided evidence" while its evidence summary literally read "no source-supported
+ * claims recorded". Grounding cannot be verified against content nobody fetched.
+ *
+ * Deliberately a SEPARATE node rather than folding fetch into search (the surface's
+ * `research()` op already composes both): chains are user-editable and reviewed by
+ * humans, so `search → fetch → …` stays legible and each step independently
+ * re-runnable. Same nondeterminism class as `core.web.search` — replay reads the
+ * run-cached node output.
+ */
+const webFetchNode: NodeModule = {
+  typeId: 'core.web.fetch',
+  version: '1.0.0',
+  async execute(ctx) {
+    const inputs = (ctx.inputs && typeof ctx.inputs === 'object') ? (ctx.inputs as Record<string, unknown>) : {};
+    const config = (ctx.config ?? {}) as { maxPages?: unknown; maxBodyBytes?: unknown; extractReadable?: unknown };
+
+    // Accept either an explicit `urls` array or the `results` shape `core.web.search`
+    // emits, so the two nodes wire together with no mapping step in between.
+    const fromUrls = Array.isArray(inputs.urls) ? inputs.urls : [];
+    const fromResults = Array.isArray(inputs.results) ? inputs.results : [];
+    const urls = [
+      ...fromUrls,
+      ...fromResults.map((r) => (r && typeof r === 'object' ? (r as { url?: unknown }).url : undefined)),
+    ].filter((u): u is string => typeof u === 'string' && u.length > 0);
+
+    if (urls.length === 0) {
+      return { status: 'failure', error: { code: 'invalid_request', message: 'core.web.fetch requires a non-empty `urls` array or a `results` array carrying urls' } };
+    }
+    if (!ctx.webResearch) {
+      // No honest degrade exists here: unlike search there is no "demo page" that
+      // isn't a fabrication. Fail typed so a caller cannot mistake absence for
+      // empty content.
+      return { status: 'failure', error: { code: 'host_capability_missing', message: 'host does not expose ctx.webResearch' } };
+    }
+
+    const maxPages = typeof config.maxPages === 'number' && config.maxPages > 0
+      ? Math.min(25, Math.floor(config.maxPages))
+      : 8;
+    try {
+      const { pages } = await ctx.webResearch.fetchBatch({
+        urls: urls.slice(0, maxPages),
+        extractReadable: config.extractReadable !== false,
+        ...(typeof config.maxBodyBytes === 'number' ? { maxBodyBytes: config.maxBodyBytes } : {}),
+      });
+      // A page that failed to fetch is REPORTED, not dropped: a caller building
+      // evidence must be able to tell "this source was unreadable" from "this
+      // source said nothing".
+      const ok = pages.filter((p) => p.status >= 200 && p.status < 300 && !p.error);
+      return {
+        status: 'success',
+        outputs: { pages, fetched: ok.length, requested: urls.length, failed: pages.length - ok.length },
+      };
+    } catch (err) {
+      return { status: 'failure', error: { code: 'internal_error', message: `web fetch failed: ${err instanceof Error ? err.message : String(err)}` } };
+    }
+  },
+};
+
 const webSearchNode: NodeModule = {
   typeId: 'core.web.search',
   version: '1.0.0',
   async execute(ctx) {
     const inputs = (ctx.inputs && typeof ctx.inputs === 'object') ? (ctx.inputs as Record<string, unknown>) : {};
-    const config = (ctx.config ?? {}) as { maxResults?: unknown };
+    const config = (ctx.config ?? {}) as { maxResults?: unknown; suitability?: unknown };
     const query = typeof inputs.query === 'string' && inputs.query.length > 0
       ? inputs.query
       : findFirstStringValue(inputs);
     if (!query) {
       return { status: 'failure', error: { code: 'invalid_request', message: 'core.web.search requires a non-empty `query` input' } };
     }
-    const n = typeof config.maxResults === 'number' && config.maxResults > 0
-      ? Math.min(50, Math.floor(config.maxResults))
-      : 5;
+    // ADR 0502 §Correction (ADR 0525) — read from `inputs` TOO, exactly as
+    // `suitability` does thirteen lines below. `maxResults` was left config-only
+    // when that correction landed, and chain packs overwhelmingly author node
+    // parameters under `inputs`: `kicktodo.research` and
+    // `openwop-app.kicktodo.challenge-factory` both ask for 8 via `inputs` and
+    // silently ran at the default 5. Honouring it rather than deleting the key
+    // is the choice that does not quietly ratify a value loss the author
+    // intended — and it matches the precedent already set for its sibling.
+    // Prefer the first VALID number, not the first non-nullish value. `??` alone
+    // was wrong: an unfilled `{{params.n}}` freezes to a STRING (ADR 0507), which
+    // is not nullish, so a broken `config.maxResults` would shadow a perfectly
+    // good `inputs.maxResults` and silently fall back to the default — a new
+    // path to the very defect this fix exists to close. Caught by the behaviour
+    // test, not by review.
+    // Accept a NUMERIC STRING as well as a number. `chainPackManifest` declares
+    // every exported param `type: 'string'`, and an embedded `{{params.n}}`
+    // coerces to string by design — so a chain author who correctly fills in 8
+    // delivers `'8'`, which a number-only guard silently discards back to the
+    // default. That is the very silent loss this fix exists to close, surviving
+    // one layer along; found by the grade pass, not by the first test.
+    const usable = (v: unknown): number | undefined => {
+      const n = typeof v === 'number' ? v : (typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN);
+      return Number.isFinite(n) && n > 0 ? n : undefined;
+    };
+    const declaredMax = usable(config.maxResults) ?? usable((inputs as Record<string, unknown>).maxResults);
+    const n = declaredMax === undefined ? 5 : Math.min(50, Math.floor(declaredMax));
+    if (ctx.webResearch) {
+      try {
+        // ADR 0101 Phase 4 — a chain whose results will be STORED as evidence sets
+        // `config.suitability: 'durable'`, so a provider licensed only for
+        // answer-display never backs it. Default stays 'answer-only': an ordinary
+        // lookup should work on any capable provider.
+        // ADR 0502 — read from `inputs` TOO. Chain packs overwhelmingly author
+        // node parameters under `inputs` (the Factory's search node had only
+        // `inputs`), so a config-only read meant a chain could not actually ask
+        // for the durable gate the comment above describes.
+        const declared = config.suitability ?? (inputs as Record<string, unknown>).suitability;
+        const suitability = declared === 'durable' ? 'durable' as const : 'answer-only' as const;
+        const { results, engine, totalResults } = await ctx.webResearch.search({ query, maxResults: n, suitability });
+        return {
+          status: 'success',
+          outputs: { results, engine, query, totalResults: totalResults ?? results.length },
+        };
+      } catch (err) {
+        // A durable caller's refusal is a CONFIGURATION fact, not an internal
+        // fault: it must name the fix, and it must not read as a transient
+        // error the operator might retry their way out of.
+        if (err instanceof DurableSearchUnavailableError) {
+          return { status: 'failure', error: { code: err.code, message: err.message } };
+        }
+        return {
+          status: 'failure',
+          error: { code: 'internal_error', message: `web search failed: ${err instanceof Error ? err.message : String(err)}` },
+        };
+      }
+    }
     const slug = query.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64) || 'query';
     const results = Array.from({ length: n }, (_unused, i) => ({
       url: `https://example.com/${slug}/result-${i + 1}`,
@@ -2244,13 +2583,17 @@ const bigqueryQueryNode: NodeModule = {
     if (!sql) return { status: 'failure', error: { code: 'invalid_config', message: 'core.bigquery.query requires config.sql (or inputs.sql).' } };
     if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
 
-    const r = await ctx.connectors.invoke(connectorId, {
-      url: `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries`,
-      method: 'POST',
-      body: JSON.stringify({ query: sql, useLegacySql: false, maxResults: maxRows }),
-      contentType: 'application/json',
-      authScheme: 'bearer',
-    });
+    // ADR 0189 P1 — connect-to-continue: an interactive run prompts instead of
+    // silently no-opping when the connection is missing; headless unchanged.
+    const connectors = ctx.connectors;
+    const r = await invokeWithConnectionPrompt(ctx, { ref: connectorId, providerId: connectorId, label: 'BigQuery' }, () =>
+      connectors.invoke(connectorId, {
+        url: `https://bigquery.googleapis.com/bigquery/v2/projects/${encodeURIComponent(projectId)}/queries`,
+        method: 'POST',
+        body: JSON.stringify({ query: sql, useLegacySql: false, maxResults: maxRows }),
+        contentType: 'application/json',
+        authScheme: 'bearer',
+      }));
 
     if (!r.ok) {
       return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `BigQuery query failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
@@ -2280,9 +2623,12 @@ const bigqueryQueryNode: NodeModule = {
  * human, RFC 0079 provenance stamped, `connections:use` enforced, READ-ONLY provider). The
  * real source node for the talent + recognition-drafting workflows (replaces the prior
  * mock-ai placeholders). The tenant-specific REST base
- * (`https://{instance}.workday.com/ccx/api/v1/{tenant}`) is supplied via `config.baseUrl`
- * (resolved from the connection's `instanceUrlTemplate`); the apiHosts pin guarantees egress
- * can only reach *.workday.com regardless of the configured base.
+ * (`https://{instance}.workday.com/ccx/api/v1/{tenant}`) is supplied via `config.baseUrl` /
+ * `inputs.baseUrl` — AUTHORED on the node or bound from a chain parameter. It is NOT
+ * resolved from the connection's `instanceUrlTemplate`: that field is declared in the
+ * connection-pack manifest and typed in the loader, and read by NO code path (ADR 0599 §5
+ * retires the claim rather than leaving a documented mechanism with no implementation).
+ * The apiHosts pin guarantees egress can only reach *.workday.com regardless of the base.
  *
  * Output carries `{ rows, rowCount, resource, baseUrl }` — deterministic "Verify Source"
  * provenance, mirroring core.bigquery.query.
@@ -2305,7 +2651,13 @@ const workdayQueryNode: NodeModule = {
     const connectorId = String(cfg.connectorId ?? 'workday');
     const maxRows = Number.isFinite(Number(cfg.maxRows)) ? Math.max(1, Math.min(10_000, Number(cfg.maxRows))) : 1000;
 
-    if (!baseUrl) return { status: 'failure', error: { code: 'invalid_config', message: 'core.workday.query requires config.baseUrl (the tenant REST base, from the connection instanceUrlTemplate).' } };
+    // ADR 0599 §5 — this message used to say "from the connection
+    // instanceUrlTemplate". That field is declared in the connection-pack manifest
+    // and typed in `connectionPackLoader`, and it is READ BY NOTHING: no code path
+    // substitutes `{instance}`/`{tenant}` from a stored connection and hands the
+    // result to this node. Naming a mechanism that does not exist sent the last
+    // three readers hunting for a resolver instead of authoring the value.
+    if (!baseUrl) return { status: 'failure', error: { code: 'invalid_config', message: 'core.workday.query requires config.baseUrl (or inputs.baseUrl) — your tenant REST base, e.g. https://{instance}.workday.com/ccx/api/v1/{tenant}. Author it on the node or bind it from a chain parameter.' } };
     if (!(WORKDAY_RESOURCES as readonly string[]).includes(resource)) {
       return { status: 'failure', error: { code: 'invalid_config', message: `core.workday.query requires config.resource ∈ {${WORKDAY_RESOURCES.join(', ')}}.` } };
     }
@@ -2321,7 +2673,10 @@ const workdayQueryNode: NodeModule = {
     }
     // Read-only GET to the tenant REST base; the broker pins the host to *.workday.com.
     const url = `${baseUrl}/${encodeURIComponent(resource)}?${qs.toString()}`;
-    const r = await ctx.connectors.invoke(connectorId, { url, method: 'GET', authScheme: 'bearer' });
+    // ADR 0189 P1 — connect-to-continue (interactive runs prompt; headless unchanged).
+    const connectors = ctx.connectors;
+    const r = await invokeWithConnectionPrompt(ctx, { ref: connectorId, providerId: connectorId, label: 'Workday' }, () =>
+      connectors.invoke(connectorId, { url, method: 'GET', authScheme: 'bearer' }));
 
     if (!r.ok) {
       return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `Workday query failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
@@ -2394,52 +2749,112 @@ function buildRfc822(recipients: string[], subject: string, body: string, html: 
   ].join('\r\n');
 }
 
+// ADR 0193 Phase 2 — provider-native SEND endpoints (siblings of the draft
+// URLs). Fixed literals, never caller-supplied.
+const GMAIL_SEND_URL = 'https://gmail.googleapis.com/gmail/v1/users/me/messages/send';
+const GRAPH_SEND_URL = 'https://graph.microsoft.com/v1.0/me/sendMail';
+
+interface EmailFields { recipients: string[]; subject: string; body: string; html: boolean; }
+
+/**
+ * The ONE render seam for both `core.email.draft` and `core.email.send` — the
+ * CR/LF header-injection guard, the Gmail-vs-Graph body shape, and the
+ * draft-vs-send endpoint live here so the security-critical guard can never
+ * drift across the two nodes (ADR 0193 Phase 2, architect ruling). PURE over
+ * its inputs (no clock/random): so the SEND path's re-render on an approval
+ * resume is byte-identical to the preview the human approved
+ * (approved-bytes-verbatim), given inputs are replay-stable.
+ */
+function renderEmailRequest(
+  connectorId: string,
+  f: EmailFields,
+  kind: 'draft' | 'send',
+): { ok: true; url: string; body: string } | { ok: false; error: string } {
+  if (/[\r\n]/.test(f.subject) || f.recipients.some((a) => /[\r\n]/.test(a))) {
+    return { ok: false, error: 'recipients/subject must not contain line breaks.' };
+  }
+  if (connectorId === 'gmail') {
+    const raw = gmailB64Url(buildRfc822(f.recipients, f.subject, f.body, f.html));
+    return kind === 'draft'
+      ? { ok: true, url: GMAIL_CREATE_DRAFT_URL, body: JSON.stringify({ message: { raw } }) }
+      : { ok: true, url: GMAIL_SEND_URL, body: JSON.stringify({ raw }) };
+  }
+  // Microsoft Graph.
+  const contentType = f.html ? 'HTML' : 'Text';
+  const message = {
+    subject: f.subject,
+    body: { contentType, content: f.body },
+    toRecipients: f.recipients.map((address) => ({ emailAddress: { address } })),
+  };
+  return kind === 'draft'
+    ? { ok: true, url: GRAPH_CREATE_DRAFT_URL, body: JSON.stringify(message) }
+    : { ok: true, url: GRAPH_SEND_URL, body: JSON.stringify({ message, saveToSentItems: true }) };
+}
+
+/** Shared config parse for the two email nodes. */
+function parseEmailConfig(ctx: NodeContext): { recipients: string[]; subject: string; body: string; html: boolean; connectorId: string } {
+  const cfg = (ctx.config ?? {}) as { to?: unknown; subject?: unknown; body?: unknown; bodyFormat?: unknown; connectorId?: unknown };
+  const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+  const toRaw = cfg.to ?? inputs.to;
+  return {
+    recipients: (Array.isArray(toRaw) ? toRaw : toRaw ? [toRaw] : []).map((a) => String(a).trim()).filter(Boolean),
+    subject: String(cfg.subject ?? inputs.subject ?? '').trim(),
+    body: String(cfg.body ?? inputs.body ?? ''),
+    html: String(cfg.bodyFormat ?? 'Text') === 'HTML',
+    connectorId: String(cfg.connectorId ?? 'microsoft-graph'),
+  };
+}
+
 const emailDraftNode: NodeModule = {
   typeId: 'core.email.draft',
   version: '1.0.0',
+  // ADR 0677 D2 — this node creates a DURABLE draft in a live mailbox via `ctx.connectors`
+  // (`:2792-2796`), so a replay must serve the recorded outcome rather than re-issue it.
+  //
+  // It is invisible to BOTH manifest-derived sets: `MANIFEST_SIDE_EFFECT_FLOOR` and
+  // `MANIFEST_FAST_PATH_SERVED` are generated from pack manifests, and `core.email.draft`
+  // has NO manifest anywhere (`grep -rn 'core\.email' packs/` → zero). No
+  // `SIDE_EFFECTING_TYPE_PATTERNS` arm covers `core.email.*` either. `sideEffecting` is the
+  // third arm and the ONLY one available here — `sideEffects.ts:97` reserves it for exactly
+  // this case: "a pack `.mjs` node cannot self-declare (`NodeModule.sideEffecting` is
+  // reachable only by programmatic registration)". Verified live: the registry stores the
+  // module by reference (`executor/nodeRegistry.ts:16-41`) and `executor.ts:1007` passes it
+  // verbatim to `isSideEffectingNode(typeId, module)`.
+  //
+  // WHAT THIS DOES AND DOES NOT FIX (corrected pre-merge; the first framing was false).
+  // A `mode:'replay'` fork does NOT duplicate today — it THROWS, because `brokeredFetch`
+  // opens with `assertEffectAllowed('network-egress', …)` (`host/brokeredEgress.ts:186`),
+  // which raises `ReplayEffectError` while `ctx.replaying`. This flag converts that backstop
+  // throw into a served recorded outcome, which is the correct steady state (ADR 0563: a
+  // backstop firing is a bug report, not a design). A `mode:'branch'` fork re-executes live
+  // BY DESIGN and is unaffected — `sourceOutcomes` is populated only for `mode:'replay'`
+  // (`executor.ts:1565-1573`), and the classification is consulted only under it (`:1007`).
+  //
+  // Deliberately NOT extended to the sibling `core.email.send` (`:2863`), which carries a
+  // written rationale for staying unclassified: a fork mints a new runId, so its ledger does
+  // not suppress the send, and the forked run correctly re-hits its mandatory approval
+  // interrupt. `draft` has no such interrupt in front of it; `send` does. The asymmetry is
+  // adopted, not overlooked.
+  sideEffecting: true,
   async execute(ctx) {
-    const cfg = (ctx.config ?? {}) as { to?: unknown; subject?: unknown; body?: unknown; bodyFormat?: unknown; connectorId?: unknown };
-    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
-    const toRaw = cfg.to ?? inputs.to;
-    const subject = String(cfg.subject ?? inputs.subject ?? '').trim();
-    const body = String(cfg.body ?? inputs.body ?? '');
-    const bodyFormat = String(cfg.bodyFormat ?? 'Text') === 'HTML' ? 'HTML' : 'Text';
-    const connectorId = String(cfg.connectorId ?? 'microsoft-graph');
-    const recipients = (Array.isArray(toRaw) ? toRaw : toRaw ? [toRaw] : [])
-      .map((a) => String(a).trim())
-      .filter(Boolean);
+    const { recipients, subject, body, html, connectorId } = parseEmailConfig(ctx);
 
     if (recipients.length === 0) return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.draft requires config.to (one or more recipients).' } };
     if (!subject) return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.draft requires config.subject.' } };
-    // Email headers are single-line — a CR/LF in a recipient/subject is a MIME
-    // header-injection vector on the Gmail raw-RFC822 path (Graph's structured JSON is
-    // safe, but reject for both: a line break in a header value is never legitimate and
-    // could smuggle a hidden Bcc/Cc onto the draft). Fail closed (ADR 0081 P6).
-    if (/[\r\n]/.test(subject) || recipients.some((a) => /[\r\n]/.test(a))) {
-      return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.draft recipients/subject must not contain line breaks.' } };
-    }
     if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
 
-    // Provider strategy by connectorId (ADR 0081 P6): `gmail` → Gmail drafts.create
-    // (base64url RFC822); anything else → the Graph create-message shape. Both URLs are
-    // fixed literals — never caller-supplied, never a send endpoint.
+    // Shared render (fixed draft URLs, CR/LF header-injection guard — ADR 0081 P6).
+    const rendered = renderEmailRequest(connectorId, { recipients, subject, body, html }, 'draft');
+    if (!rendered.ok) return { status: 'failure', error: { code: 'invalid_config', message: `core.email.draft ${rendered.error}` } };
     const isGmail = connectorId === 'gmail';
-    const url = isGmail ? GMAIL_CREATE_DRAFT_URL : GRAPH_CREATE_DRAFT_URL;
-    const requestBody = isGmail
-      ? JSON.stringify({ message: { raw: gmailB64Url(buildRfc822(recipients, subject, body, bodyFormat === 'HTML')) } })
-      : JSON.stringify({
-          subject,
-          body: { contentType: bodyFormat, content: body },
-          toRecipients: recipients.map((address) => ({ emailAddress: { address } })),
-        });
 
-    const r = await ctx.connectors.invoke(connectorId, {
-      url,
-      method: 'POST',
-      body: requestBody,
-      contentType: 'application/json',
-      authScheme: 'bearer',
-    });
+    // ADR 0189 P1 — connect-to-continue (interactive runs prompt; headless unchanged).
+    const connectors = ctx.connectors;
+    const r = await invokeWithConnectionPrompt(
+      ctx,
+      { ref: connectorId, providerId: connectorId, label: isGmail ? 'Gmail' : 'Microsoft Outlook' },
+      () => connectors.invoke(connectorId, { url: rendered.url, method: 'POST', body: rendered.body, contentType: 'application/json', authScheme: 'bearer' }),
+    );
 
     if (!r.ok) {
       const which = isGmail ? 'Gmail' : 'Outlook';
@@ -2465,6 +2880,590 @@ const emailDraftNode: NodeModule = {
         recipientCount: recipients.length,
       },
     };
+  },
+};
+
+/**
+ * core.email.send (ADR 0193 Phase 2) — provider-native email SEND, i.e. sends
+ * AS the connected human via Gmail (`messages/send`) or Microsoft Graph
+ * (`sendMail`). This deliberately reverses the ADR 0081 P6 draft-only posture.
+ *
+ * Consent + the ALWAYS-mandatory gate (NOTE the Gmail/Graph asymmetry, honestly):
+ *   - **Graph** is dual-gated: `Mail.Send` is a SEPARATE write-scope group kept
+ *     OUT of `defaultScopes` (a real re-consent — `Mail.ReadWrite` genuinely
+ *     cannot send, ADR 0024 §3), AND the approval interrupt below.
+ *   - **Gmail** cannot be dual-gated at the scope level: the draft connector's
+ *     `gmail.compose` scope (granted at draft-connect) ALREADY permits send —
+ *     Google offers no draft-only-without-send scope. So for the `gmail`
+ *     connector the mandatory approval interrupt is the SOLE per-send gate; there
+ *     is no extra scope re-consent to add that would actually restrict anything.
+ *   - Either way the load-bearing guarantee is the same: a MANDATORY approval
+ *     interrupt (`kind:'approval'`, profile `openwop-send-approval`) carrying the
+ *     rendered preview — no bypass flag. A run cannot send provider-native
+ *     without a human approving THAT message.
+ *
+ * Fail-closed, never a silent send (every non-approve path leaves the message unsent):
+ *   - headless (no interactive channel / no `ctx.suspend`) ⇒ `{ sent:false,
+ *     reason:'send_requires_approval' }`, run continues (ADR 0033 — drafts
+ *     never auto-send);
+ *   - explicit reject ⇒ the node resumes with `{action:'reject'}` ⇒ `{ sent:false,
+ *     reason:'send_not_approved' }`;
+ *   - gate expiry ⇒ ONLY when the operator sets a gate deadline
+ *     (`OPENWOP_APPROVAL_GATE_DEFAULT_TIMEOUT_SEC`; this node passes no `timeoutMs`
+ *     — a send-as-you gate waits for the human by default). On expiry the gate
+ *     auto-rejects and the RUN fails closed (`approval_rejected`, reason `timeout`,
+ *     approvalGateTimeout.ts) — the node does not resume, and nothing is sent.
+ *
+ * Replay/idempotency: `ctx.connectors.invoke` does not dedup, and the node
+ * re-invokes on the approval resume, so a replay/:fork would re-send. Guarded
+ * by the shared `email:sent` ledger keyed `<tenant>:send:<run>:<node>`
+ * (get-before-send, put-on-accept). Approved-bytes-verbatim: `renderEmailRequest`
+ * is PURE over replay-stable inputs, so the post-approval send is byte-identical
+ * to the approved preview — no re-render from a mutable source.
+ */
+const emailSendNode: NodeModule = {
+  typeId: 'core.email.send',
+  version: '1.0.0',
+  async execute(ctx) {
+    const { recipients, subject, body, html, connectorId } = parseEmailConfig(ctx);
+    if (recipients.length === 0) return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.send requires config.to (one or more recipients).' } };
+    if (!subject) return { status: 'failure', error: { code: 'invalid_config', message: 'core.email.send requires config.subject.' } };
+    if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
+
+    const rendered = renderEmailRequest(connectorId, { recipients, subject, body, html }, 'send');
+    if (!rendered.ok) return { status: 'failure', error: { code: 'invalid_config', message: `core.email.send ${rendered.error}` } };
+    const isGmail = connectorId === 'gmail';
+    const providerLabel = isGmail ? 'Gmail' : 'Microsoft Outlook';
+
+    // Idempotency FIRST: a REPLAY or a post-approval re-invoke of the SAME run
+    // returns the recorded send, never a second email (ctx.connectors.invoke has
+    // no dedup). Node+run-anchored, tenant-prefixed; namespaced `:send:` so it
+    // never collides with the transactional adapter's key. Sequential per run, so
+    // no CAS needed (the `ads:dispatch` posture). NOTE `:fork` mints a NEW runId →
+    // a fresh key → this ledger does NOT (and should not) suppress it; a forked
+    // run correctly re-hits the mandatory approval interrupt (a human re-approves
+    // the send), which is the fork backstop — not a double-send hole.
+    const key = `${ctx.tenantId}:send:${ctx.runId}:${ctx.nodeId}`;
+    const prior = await priorSend(key);
+    if (prior) return { status: 'success', outputs: { sent: true, deduped: true, provider: connectorId, ...(prior.messageId ? { messageId: prior.messageId } : {}) } };
+
+    // MANDATORY approval — no config bypass. Headless (no interactive channel)
+    // fails closed to not-sent (drafts never auto-send).
+    if (!ctx.interactiveSession || !ctx.suspend) {
+      return { status: 'success', outputs: { sent: false, reason: 'send_requires_approval', provider: connectorId, to: recipients, subject } };
+    }
+    // kind:'approval' inherits the fail-closed gate timeout (expiry → reject →
+    // not-sent) + the exactly-once approval claim. The `openwop-send-approval`
+    // profile + `message` preview let the approval card show what will be sent.
+    const decision = await ctx.suspend({
+      kind: 'approval',
+      key: `send:${ctx.nodeId}`,
+      profile: 'openwop-send-approval',
+      actions: ['approve', 'reject'],
+      prompt: `Send this email as you via ${providerLabel}?`,
+      // `provider` here is the DISPLAY label (the card renders it as a chip);
+      // the machine `connectorId` rides `outputs.provider` for downstream nodes.
+      message: { to: recipients, subject, bodyPreview: body.slice(0, 4000), html, provider: providerLabel },
+    });
+    if ((decision as { action?: unknown } | null)?.action !== 'approve') {
+      return { status: 'success', outputs: { sent: false, reason: 'send_not_approved', provider: connectorId, to: recipients, subject } };
+    }
+
+    // Approved → send the SAME bytes the preview rendered (renderEmailRequest is
+    // pure over replay-stable inputs). No re-render from a mutable source.
+    const r = await ctx.connectors.invoke(connectorId, { url: rendered.url, method: 'POST', body: rendered.body, contentType: 'application/json', authScheme: 'bearer' });
+    if (!r.ok) return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `${providerLabel} send failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+
+    // Gmail messages.send → { id }; Graph sendMail → 202, empty body (no id).
+    const messageId = isGmail ? String((r.data as { id?: unknown } | undefined)?.id ?? '') : '';
+    await recordSend({ key, tenantId: ctx.tenantId, provider: connectorId, messageId, createdAt: new Date().toISOString() });
+    return { status: 'success', outputs: { sent: true, provider: connectorId, to: recipients, subject, ...(messageId ? { messageId } : {}) } };
+  },
+};
+
+/**
+ * core.openwop.connectors.calendar-list-events (ADR 0186 — capability dispatch) — a
+ * PROVIDER-AGNOSTIC, READ-ONLY upcoming-events node. Instead of hard-coding one vendor
+ * (the pack chains' `openapi-call` → `microsoft365`/`listCalendarEvents`), it resolves the
+ * acting human's connected `email-calendar` provider via `ctx.connectors.resolveForCapability`,
+ * maps it to that vendor's calendar-events REST endpoint, and reads through the SAME broker
+ * as every connector (`apiHosts`-pinned, credential = acting human, RFC 0079 provenance,
+ * `connections:use` enforced). It is the reference capability node for the Phase 2b program.
+ *
+ * Fails SAFE, never throws: no connected provider ⇒ `{ connected:false, events:[] }`; a
+ * connected provider with no calendar API (the `email-calendar` category also covers
+ * email-only providers like gmail/sendgrid) ⇒ `{ connected:false, reason:'provider_no_calendar' }`.
+ * A workflow then degrades to "no calendar wired" rather than erroring or leaking a vendor.
+ */
+// `timeMin`/`timeMax` are OPTIONAL ISO-8601 bounds supplied via config/inputs (e.g. a
+// scheduled trigger's fire time) — NEVER a wall clock read in the node, which would break
+// replay/fork determinism (the core.bigquery.query rule). Absent ⇒ the vendor default
+// ordering (events by start), which is why the node does not claim "upcoming" unless a
+// caller anchors the window.
+type CalendarWindow = { timeMin?: string; timeMax?: string };
+type CalendarEndpoint = { url: (max: number, w: CalendarWindow) => string; map: (data: unknown) => Array<Record<string, unknown>> };
+const CALENDAR_ENDPOINTS: Record<string, CalendarEndpoint> = {
+  // Google Calendar API — primary calendar, single events ordered by start; `timeMin`
+  // makes it a genuine "upcoming" read.
+  google: {
+    url: (max, w) => `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=${max}`
+      + (w.timeMin ? `&timeMin=${encodeURIComponent(w.timeMin)}` : '')
+      + (w.timeMax ? `&timeMax=${encodeURIComponent(w.timeMax)}` : ''),
+    map: (data) => {
+      const items = Array.isArray((data as { items?: unknown[] })?.items) ? (data as { items: Array<Record<string, unknown>> }).items : [];
+      return items.map((e) => ({
+        title: typeof e.summary === 'string' ? e.summary : '',
+        start: (e.start as { dateTime?: string; date?: string })?.dateTime ?? (e.start as { date?: string })?.date ?? '',
+        end: (e.end as { dateTime?: string; date?: string })?.dateTime ?? (e.end as { date?: string })?.date ?? '',
+        location: typeof e.location === 'string' ? e.location : '',
+        attendees: Array.isArray(e.attendees) ? (e.attendees as Array<{ email?: string }>).map((a) => a.email).filter(Boolean) : [],
+      }));
+    },
+  },
+};
+// Microsoft Graph — the signed-in user's events. Both the built-in `microsoft-graph`
+// provider and the installable `microsoft365` connection pack resolve to Graph.
+const graphCalendar: CalendarEndpoint = {
+  url: (max, w) => {
+    // Graph allows $filter + $orderby on the same property (start/dateTime).
+    const clauses = [
+      ...(w.timeMin ? [`start/dateTime ge '${w.timeMin}'`] : []),
+      ...(w.timeMax ? [`start/dateTime le '${w.timeMax}'`] : []),
+    ];
+    return `https://graph.microsoft.com/v1.0/me/events?$top=${max}&$orderby=start/dateTime&$select=subject,start,end,location,attendees`
+      + (clauses.length ? `&$filter=${encodeURIComponent(clauses.join(' and '))}` : '');
+  },
+  map: (data) => {
+    const items = Array.isArray((data as { value?: unknown[] })?.value) ? (data as { value: Array<Record<string, unknown>> }).value : [];
+    return items.map((e) => ({
+      title: typeof e.subject === 'string' ? e.subject : '',
+      start: (e.start as { dateTime?: string })?.dateTime ?? '',
+      end: (e.end as { dateTime?: string })?.dateTime ?? '',
+      location: (e.location as { displayName?: string })?.displayName ?? '',
+      attendees: Array.isArray(e.attendees) ? (e.attendees as Array<{ emailAddress?: { address?: string } }>).map((a) => a.emailAddress?.address).filter(Boolean) : [],
+    }));
+  },
+};
+CALENDAR_ENDPOINTS['microsoft-graph'] = graphCalendar;
+CALENDAR_ENDPOINTS['microsoft365'] = graphCalendar;
+
+const calendarListEventsNode: NodeModule = {
+  typeId: 'core.openwop.connectors.calendar-list-events',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as { capability?: unknown; maxResults?: unknown; timeMin?: unknown; timeMax?: unknown };
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const capability = String(cfg.capability ?? 'email-calendar');
+    const maxResults = Number.isFinite(Number(cfg.maxResults)) ? Math.max(1, Math.min(50, Number(cfg.maxResults))) : 10;
+    // Replay-safe time window: config/inputs only (a scheduled trigger's fire time), never a clock.
+    const nonEmpty = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+    const window: CalendarWindow = {
+      ...(nonEmpty(cfg.timeMin ?? inputs.timeMin) ? { timeMin: nonEmpty(cfg.timeMin ?? inputs.timeMin)! } : {}),
+      ...(nonEmpty(cfg.timeMax ?? inputs.timeMax) ? { timeMax: nonEmpty(cfg.timeMax ?? inputs.timeMax)! } : {}),
+    };
+    const conn = ctx.connectors;
+    const resolveOne = conn?.resolveForCapability;
+    if (!conn || !resolveOne) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors capability-resolution surface is not available.' } };
+
+    // Prefer ALL candidates for the category so an email-only connection (gmail/sendgrid)
+    // sorting ahead of a calendar-capable one (google/microsoft-graph) doesn't shadow it;
+    // pick the first candidate this node actually supports. Fall back to the single
+    // resolver on an older host that lacks the plural surface.
+    // ADR 0189 P1 — the capability no-connection case is an EMPTY resolution:
+    // interactive runs get the connect-to-continue prompt + ONE re-resolve
+    // through the same choke point; headless (and still-empty) keep the
+    // graceful "not wired" success below unchanged.
+    const candidates = await resolveCapabilityWithPrompt(ctx, capability, async () =>
+      conn.resolveAllForCapability
+        ? conn.resolveAllForCapability(capability)
+        : [await resolveOne(capability)].filter((p): p is string => !!p));
+    // No connected calendar ⇒ graceful "not wired" success (never a throw).
+    if (candidates.length === 0) return { status: 'success', outputs: { connected: false, events: [], eventCount: 0 } };
+    const provider = candidates.find((p) => CALENDAR_ENDPOINTS[p]);
+    // Connected in this category, but none of the providers exposes a calendar API (email-only).
+    if (!provider) return { status: 'success', outputs: { connected: false, events: [], eventCount: 0, reason: 'provider_no_calendar', provider: candidates[0] } };
+    const endpoint = CALENDAR_ENDPOINTS[provider]!;
+
+    const r = await conn.invoke(provider, { url: endpoint.url(maxResults, window), method: 'GET', authScheme: 'bearer' });
+    if (!r.ok) return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `Calendar read failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+
+    const events = endpoint.map(r.data);
+    return { status: 'success', outputs: { connected: true, provider, events, eventCount: events.length } };
+  },
+};
+
+const AD_PLATFORMS = new Set(['meta', 'google', 'tiktok']);
+function adPlatformOf(v: unknown): 'meta' | 'google' | 'tiktok' {
+  const p = String(v ?? '').toLowerCase();
+  return AD_PLATFORMS.has(p) ? (p as 'meta' | 'google' | 'tiktok') : 'meta';
+}
+
+/**
+ * core.openwop.connectors.ad-metrics (ADR 0186 slice 4a) — a PROVIDER-AGNOSTIC,
+ * READ-ONLY campaign-performance read via ctx.ads.getMetrics. Replaces the marketing
+ * optimization loop's hard-coded google-ads `getCampaignMetrics` openapi-call so the
+ * chain reads whichever ad platform the tenant connected. Fails SAFE: no ctx.ads
+ * surface / no adAccountId+campaignId / no connection ⇒ { connected:false } success
+ * (the diagnose step degrades to "no data"), never a throw.
+ */
+const adMetricsNode: NodeModule = {
+  typeId: 'core.openwop.connectors.ad-metrics',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as Record<string, unknown>;
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const platform = adPlatformOf(cfg.platform ?? inputs.platform);
+    const adAccountId = String(cfg.adAccountId ?? inputs.adAccountId ?? '').trim();
+    const campaignId = String(cfg.campaignId ?? inputs.campaignId ?? '').trim();
+    if (!ctx.ads?.getMetrics || !adAccountId || !campaignId) {
+      return { status: 'success', outputs: { connected: false, metrics: null } };
+    }
+    const r = await ctx.ads.getMetrics({ platform, adAccountId, campaignId });
+    if (r.outcome === 'ok') return { status: 'success', outputs: { connected: true, platform: r.platform, metrics: r.metrics } };
+    if (r.outcome === 'failed') return { status: 'failure', error: { code: 'ad_metrics_failed', message: `Ad metrics read failed (${r.error}).` } };
+    // no_connection / unsupported ⇒ graceful "no data".
+    return { status: 'success', outputs: { connected: false, metrics: null, ...(r.outcome === 'unsupported' ? { reason: 'platform_unsupported', platform } : {}) } };
+  },
+};
+
+/**
+ * core.openwop.connectors.ad-budget-update (ADR 0186 slice 4b) — a PROVIDER-AGNOSTIC
+ * campaign budget step. SAFE BY DEFAULT: `dryRun` is ON unless config sets it to the
+ * literal `false`, so out of the box (and in the vendored template) it RECOMMENDS a
+ * change — `{applied:false, planned:{…}}` for the approval card / learnings log — and
+ * calls no platform API. A deliberate `dryRun:false` (plus a real `adAccountId`, behind
+ * the chain's guardrail + approval gate) applies the change via ctx.ads.updateBudget
+ * (the one live-spend mutation; idempotent, never unpauses). Fails SAFE: no surface /
+ * budget / campaign / connection ⇒ `{applied:false}` success, never a throw.
+ */
+const adBudgetUpdateNode: NodeModule = {
+  typeId: 'core.openwop.connectors.ad-budget-update',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as Record<string, unknown>;
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const platform = adPlatformOf(cfg.platform ?? inputs.platform);
+    const campaignId = String(cfg.campaignId ?? inputs.campaignId ?? '').trim();
+    const adAccountId = String(cfg.adAccountId ?? inputs.adAccountId ?? '').trim();
+    const raw = cfg.dailyBudgetMinor ?? inputs.dailyBudgetMinor;
+    const dailyBudgetMinor = Number.isFinite(Number(raw)) ? Math.max(0, Math.round(Number(raw))) : undefined;
+    // dryRun DEFAULTS on — only an explicit `false` opts into a real mutation.
+    const apply = (cfg.dryRun ?? inputs.dryRun) === false;
+    const planned = dailyBudgetMinor !== undefined && campaignId ? { platform, campaignId, dailyBudgetMinor } : null;
+
+    // Recommend (default), or a real apply is impossible without an account/budget/surface.
+    if (!apply || !planned || !adAccountId || !ctx.ads?.updateBudget) {
+      return { status: 'success', outputs: { applied: false, planned } };
+    }
+    const r = await ctx.ads.updateBudget({ platform, adAccountId, campaignId, dailyBudgetMinor: planned.dailyBudgetMinor, dryRun: false });
+    if (r.outcome === 'updated') return { status: 'success', outputs: { applied: true, planned, target: r.target } };
+    // Spend governance (campaign gap plan B3): threshold met → human sign-off in
+    // the Approvals inbox, then re-run applies under the same fork-stable key.
+    if (r.outcome === 'requires_approval') {
+      return { status: 'success', outputs: { applied: false, planned, requiresApproval: true, approvalId: r.approvalId } };
+    }
+    if (r.outcome === 'failed') return { status: 'failure', error: { code: 'ad_budget_update_failed', message: `Budget update failed (${r.error}).` } };
+    // no_connection / unsupported / preview ⇒ graceful "not applied".
+    return { status: 'success', outputs: { applied: false, planned, ...(r.outcome === 'unsupported' ? { reason: 'platform_unsupported' } : {}) } };
+  },
+};
+
+/**
+ * Ticketing capability nodes (ADR 0186 slice 2) — PROVIDER-AGNOSTIC create/transition
+ * over `ctx.connectors` (brokered egress, RFC 0079 provenance), replacing the pack
+ * chains' hard-coded `jira` openapi-call nodes. `resolveForCapability('ticketing')`
+ * picks the tenant's connected provider (ServiceNow built-in; Jira when its pack is
+ * installed); a per-provider request builder + a `baseUrl` config (the tenant instance,
+ * like core.workday.query) shape the REST call. Real writes when connected+configured;
+ * fail-SAFE otherwise — no ticketing connection / no baseUrl ⇒ `{connected:false}` (no
+ * side effect, never a throw), so a preloaded chain degrades instead of erroring.
+ */
+type TicketReq = { url: string; method: string; body: string };
+type TicketBuilder = {
+  create: (baseUrl: string, i: Record<string, string>) => TicketReq;
+  createResult: (data: unknown) => { id: string; key: string };
+  transition: (baseUrl: string, i: Record<string, string>) => TicketReq;
+};
+const s = (v: unknown): string => (typeof v === 'string' ? v.trim() : '');
+const TICKET_BUILDERS: Record<string, TicketBuilder> = {
+  jira: {
+    create: (baseUrl, i) => ({ url: `${baseUrl}/rest/api/3/issue`, method: 'POST', body: JSON.stringify({ fields: { project: { key: i.project }, summary: i.summary, issuetype: { name: i.issueType || 'Task' }, ...(i.description ? { description: i.description } : {}) } }) }),
+    createResult: (data) => { const d = (data ?? {}) as { id?: string; key?: string }; return { id: s(d.id), key: s(d.key) }; },
+    transition: (baseUrl, i) => ({ url: `${baseUrl}/rest/api/3/issue/${encodeURIComponent(i.issueKey)}/transitions`, method: 'POST', body: JSON.stringify({ transition: { id: i.transitionId } }) }),
+  },
+  servicenow: {
+    create: (baseUrl, i) => ({ url: `${baseUrl}/api/now/table/${encodeURIComponent(i.table || 'incident')}`, method: 'POST', body: JSON.stringify({ short_description: i.summary, ...(i.description ? { description: i.description } : {}) }) }),
+    createResult: (data) => { const r = ((data ?? {}) as { result?: { sys_id?: string; number?: string } }).result ?? {}; return { id: s(r.sys_id), key: s(r.number) }; },
+    transition: (baseUrl, i) => ({ url: `${baseUrl}/api/now/table/${encodeURIComponent(i.table || 'incident')}/${encodeURIComponent(i.sysId)}`, method: 'PATCH', body: JSON.stringify({ state: i.state }) }),
+  },
+};
+
+/** Shared setup: resolve the ticketing provider + its builder + the tenant baseUrl. */
+async function ticketingContext(ctx: NodeContext): Promise<{ provider: string; builder: TicketBuilder; baseUrl: string; authScheme: 'bearer' | 'basic'; fields: Record<string, string> } | null> {
+  const cfg = (ctx.config ?? {}) as Record<string, unknown>;
+  const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+  if (!ctx.connectors?.resolveForCapability) return null;
+  const candidates = ctx.connectors.resolveAllForCapability
+    ? await ctx.connectors.resolveAllForCapability('ticketing')
+    : [await ctx.connectors.resolveForCapability('ticketing')].filter((p): p is string => !!p);
+  const provider = candidates.find((p) => TICKET_BUILDERS[p]);
+  const baseUrl = s(cfg.baseUrl ?? inputs.baseUrl).replace(/\/+$/, '');
+  if (!provider || !baseUrl) return null;
+  // Per-provider auth default (API-token/basic for both); overridable via config.
+  const authScheme: 'bearer' | 'basic' = (cfg.authScheme ?? inputs.authScheme) === 'bearer' ? 'bearer' : 'basic';
+  // Merge config + inputs into a flat string map for the request builder.
+  const fields: Record<string, string> = {};
+  for (const src of [cfg, inputs]) for (const [k, v] of Object.entries(src)) if (typeof v === 'string') fields[k] = v.trim();
+  return { provider, builder: TICKET_BUILDERS[provider]!, baseUrl, authScheme, fields };
+}
+
+// Fork-stable idempotency for ticket CREATE (mirrors ctx.ads dispatch): a create is
+// NOT idempotent (running twice = two tickets), so a :fork/retry must not duplicate.
+// Keyed on tenant + provider + baseUrl + summary + description; a prior record for the
+// tenant short-circuits with the recorded id/key. (Transition is a PATCH — idempotent —
+// so it needs no record.)
+interface TicketRecord { idemKey: string; tenantId: string; provider: string; id: string; key: string }
+const ticketsCreated = new DurableCollection<TicketRecord>('tickets:created', (r) => r.idemKey);
+function ticketIdemKey(tenantId: string, provider: string, baseUrl: string, summary: string, description: string): string {
+  return `ticket:${createHash('sha256').update(JSON.stringify([tenantId, provider, baseUrl, summary, description])).digest('hex')}`;
+}
+
+const ticketCreateNode: NodeModule = {
+  typeId: 'core.openwop.connectors.ticket-create',
+  version: '1.0.0',
+  async execute(ctx) {
+    if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
+    const t = await ticketingContext(ctx);
+    if (!t || !t.fields.summary) return { status: 'success', outputs: { connected: false, created: false } };
+    // Idempotency: a prior create for this key (same tenant) is reused, never re-created.
+    const idemKey = ticketIdemKey(ctx.tenantId, t.provider, t.baseUrl, t.fields.summary, t.fields.description ?? '');
+    const prior = await ticketsCreated.get(idemKey).catch(() => undefined);
+    if (prior && prior.tenantId === ctx.tenantId) {
+      return { status: 'success', outputs: { connected: true, created: true, reused: true, provider: prior.provider, id: prior.id, key: prior.key } };
+    }
+    const req = t.builder.create(t.baseUrl, t.fields);
+    const r = await ctx.connectors.invoke(t.provider, { url: req.url, method: req.method, body: req.body, contentType: 'application/json', authScheme: t.authScheme });
+    if (!r.ok) return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `Ticket create failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+    const created = t.builder.createResult(r.data);
+    // Persist the fork-stable record so a retry/fork short-circuits (best-effort; the
+    // ticket already exists, so a storage hiccup must not fail the node — log instead).
+    try { await ticketsCreated.put({ idemKey, tenantId: ctx.tenantId, provider: t.provider, id: created.id, key: created.key }); }
+    catch (e) { hostLog.warn('ticket idempotency record write failed — a retry/fork may duplicate this ticket', { idemKey, error: e instanceof Error ? e.message : String(e) }); }
+    return { status: 'success', outputs: { connected: true, created: true, reused: false, provider: t.provider, ...created } };
+  },
+};
+
+const ticketTransitionNode: NodeModule = {
+  typeId: 'core.openwop.connectors.ticket-transition',
+  version: '1.0.0',
+  async execute(ctx) {
+    if (!ctx.connectors) return { status: 'failure', error: { code: 'host_capability_missing', message: 'host.connectors surface is not available.' } };
+    const t = await ticketingContext(ctx);
+    const key = t?.fields.issueKey || t?.fields.sysId;
+    if (!t || !key) return { status: 'success', outputs: { connected: false, transitioned: false } };
+    const req = t.builder.transition(t.baseUrl, t.fields);
+    const r = await ctx.connectors.invoke(t.provider, { url: req.url, method: req.method, body: req.body, contentType: 'application/json', authScheme: t.authScheme });
+    if (!r.ok) return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `Ticket transition failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+    return { status: 'success', outputs: { connected: true, transitioned: true, provider: t.provider } };
+  },
+};
+
+/**
+ * core.openwop.connectors.hris-action (ADR 0186 slice 3 + 3b) — a PROVIDER-AGNOSTIC HRIS
+ * step. SAFE BY DEFAULT: `dryRun` is on unless config sets it to the literal `false`, so
+ * out of the box (and in the vendored templates) it RECOMMENDS a worker action —
+ * `{applied:false, planned:{…}}` — and mutates nothing.
+ *
+ * A deliberate `dryRun:false` executes ONLY `submit-time-off` — the one REST-implementable,
+ * reversible, lowest-stakes HRIS write — via the connected provider's API (Workday Absence
+ * Management v1: POST /workers/{id}/requestTimeOff). `create-worker` / `terminate-worker`
+ * are Workday STAFFING business processes (SOAP `Human_Resources` WWS, not a REST call), so
+ * they REMAIN recommend-only even with `dryRun:false` (reported honestly). Fails SAFE.
+ */
+const HRIS_ACTIONS = new Set(['create-worker', 'terminate-worker', 'submit-time-off']);
+interface TimeOffRecord { idemKey: string; tenantId: string }
+const timeOffSubmitted = new DurableCollection<TimeOffRecord>('hris:timeoff', (r) => r.idemKey);
+
+const hrisActionNode: NodeModule = {
+  typeId: 'core.openwop.connectors.hris-action',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as Record<string, unknown>;
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const action = s(cfg.action ?? inputs.action);
+    if (!HRIS_ACTIONS.has(action)) {
+      return { status: 'failure', error: { code: 'invalid_config', message: 'hris-action requires config.action ∈ {create-worker, terminate-worker, submit-time-off}.' } };
+    }
+    const fields: Record<string, string> = {};
+    for (const src of [cfg, inputs]) for (const [k, v] of Object.entries(src)) if (typeof v === 'string' && k !== 'action') fields[k] = v.trim();
+    const provider = ctx.connectors?.resolveForCapability ? await ctx.connectors.resolveForCapability('hr') : null;
+    const apply = (cfg.dryRun ?? inputs.dryRun) === false;
+    const recommend = (extra?: Record<string, unknown>): NodeOutcome => ({
+      status: 'success',
+      outputs: {
+        connected: !!provider, applied: false, provider: provider ?? null,
+        planned: { action, ...(Object.keys(fields).length ? { fields } : {}) },
+        note: 'HRIS action recommended, not applied.', ...extra,
+      },
+    });
+
+    // Real execution is limited to submit-time-off on Workday (the REST-implementable,
+    // reversible write); everything else stays a recommendation.
+    const baseUrl = s(fields.baseUrl).replace(/\/+$/, '');
+    const workerId = s(fields.workerId);
+    const executable = action === 'submit-time-off' && provider === 'workday';
+    if (!apply || !executable || !ctx.connectors?.invoke || !baseUrl || !workerId || !fields.date) {
+      // Be honest when a real apply was asked for a staffing action we don't execute.
+      if (apply && (action === 'create-worker' || action === 'terminate-worker')) {
+        return recommend({ reason: 'staffing_soap_only', note: 'Workday hire/terminate is a Staffing SOAP business process, not a REST write — recommended, not applied.' });
+      }
+      return recommend();
+    }
+
+    // Idempotent submit (a time-off request is not idempotent — a fork/retry must not
+    // double-submit). Keyed on tenant + worker + baseUrl + date + type.
+    const idemKey = `hris:timeoff:${createHash('sha256').update(JSON.stringify([ctx.tenantId, workerId, baseUrl, fields.date, fields.timeOffType ?? ''])).digest('hex')}`;
+    const prior = await timeOffSubmitted.get(idemKey).catch(() => undefined);
+    if (prior && prior.tenantId === ctx.tenantId) {
+      return { status: 'success', outputs: { connected: true, applied: true, reused: true, provider, planned: { action, fields } } };
+    }
+    // Workday Absence Management v1 — POST /workers/{id}/requestTimeOff.
+    const body = JSON.stringify({ days: [{ date: fields.date, dailyQuantity: fields.dailyQuantity || '8', ...(fields.timeOffType ? { timeOffType: { id: fields.timeOffType } } : {}), ...(fields.reason ? { reason: fields.reason } : {}) }] });
+    const r = await ctx.connectors.invoke(provider, { url: `${baseUrl}/workers/${encodeURIComponent(workerId)}/requestTimeOff`, method: 'POST', body, contentType: 'application/json', authScheme: 'bearer' });
+    if (!r.ok) return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `Time-off submit failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+    try { await timeOffSubmitted.put({ idemKey, tenantId: ctx.tenantId }); }
+    catch (e) { hostLog.warn('hris time-off idempotency record write failed — a retry/fork may double-submit', { idemKey, error: e instanceof Error ? e.message : String(e) }); }
+    return { status: 'success', outputs: { connected: true, applied: true, reused: false, provider, planned: { action, fields } } };
+  },
+};
+
+/**
+ * core.openwop.connectors.erp-action (ADR 0186 slice 5 + 5b) — a PROVIDER-AGNOSTIC ERP
+ * step. SAFE BY DEFAULT: `dryRun` is on unless config sets it to the literal `false`, so
+ * out of the box (and in the vendored templates) it RECOMMENDS a finance action and posts
+ * nothing.
+ *
+ * A deliberate `dryRun:false` executes against the connected provider (NetSuite):
+ *  - money-posting WRITES (`post-bill`, `create-expense-report`) → SuiteTalk REST
+ *    POST /services/rest/record/v1/{vendorBill|expensereport}, idempotent;
+ *  - READS (`get-financial-summary`, `match-po`) → SuiteQL (ADR 0186 slice-B) POST
+ *    /services/rest/query/v1/suiteql with the required `Prefer: transient` header;
+ *    side-effect-free (`applied:false, dispatched:true, result:[…]`).
+ * Fails SAFE: no `finance` provider / no builder / no baseUrl / dry-run ⇒ recommend,
+ * dispatching nothing (a preloaded template makes no external call until opted in).
+ */
+const ERP_ACTIONS = new Set(['get-financial-summary', 'match-po', 'post-bill', 'create-expense-report']);
+// Per-provider request builders for the money-posting WRITES only (reads recommend).
+const ERP_WRITE_BUILDERS: Record<string, Record<string, (baseUrl: string, f: Record<string, string>) => { url: string; body: string }>> = {
+  netsuite: {
+    'post-bill': (baseUrl, f) => ({ url: `${baseUrl}/services/rest/record/v1/vendorBill`, body: JSON.stringify({ ...(f.vendorId ? { entity: { id: f.vendorId } } : {}), ...(f.amount ? { item: { items: [{ rate: Number(f.amount) || 0 }] } } : {}) }) }),
+    'create-expense-report': (baseUrl, f) => ({ url: `${baseUrl}/services/rest/record/v1/expensereport`, body: JSON.stringify({ ...(f.employeeId ? { entity: { id: f.employeeId } } : {}), ...(f.amount ? { expense: { items: [{ amount: Number(f.amount) || 0 }] } } : {}) }) }),
+  },
+};
+// Injection-safe SuiteQL scalar helpers. SuiteQL `q` is a raw SQL string (no bind
+// params over the REST body), and `fields` come from config/inputs — so every
+// interpolated value MUST be validated/escaped. Numeric ids: digits only, else
+// dropped. String literals: single-quote-escaped + length-capped. SuiteQL is
+// SELECT-only (no DML), so the worst an injection could do is widen a read — the
+// escaping closes even that.
+const sqlNumEq = (col: string, v: string | undefined): string | null => (/^\d{1,20}$/.test(v ?? '') ? `${col} = ${v}` : null);
+const sqlStrEq = (col: string, v: string | undefined): string | null => {
+  const t = (v ?? '').slice(0, 128);
+  return t ? `${col} = '${t.replace(/'/g, "''")}'` : null;
+};
+// Per-provider SuiteQL READ builders (ADR 0186 slice-B). NetSuite reads go through
+// the SuiteQL REST endpoint (POST /services/rest/query/v1/suiteql, which REQUIRES a
+// `Prefer: transient` header). Query shapes are a documented best-effort — reads are
+// side-effect-free, so shipping them resolve-gated (NetSuite isn't a built-in
+// provider) is honest per ADR 0186; they carry no live-tenant validation. Returns
+// `null` when a required identifier is absent (⇒ recommend, not a broken query).
+const ERP_READ_BUILDERS: Record<string, Record<string, (f: Record<string, string>) => { q: string } | null>> = {
+  netsuite: {
+    'get-financial-summary': (f) => {
+      const where = [sqlNumEq('t.postingperiod', f.postingPeriod), sqlNumEq('tl.subsidiary', f.subsidiaryId)].filter((c): c is string => c !== null);
+      return {
+        q:
+          'SELECT t.type AS type, COUNT(*) AS txns, SUM(tl.foreignamount) AS total ' +
+          'FROM transaction t JOIN transactionline tl ON tl.transaction = t.id' +
+          (where.length ? ` WHERE ${where.join(' AND ')}` : '') +
+          ' GROUP BY t.type',
+      };
+    },
+    'match-po': (f) => {
+      const where = [sqlStrEq('tranid', f.poNumber ?? f.tranId), sqlNumEq('id', f.poId)].filter((c): c is string => c !== null);
+      if (!where.length) return null; // need at least one PO identifier to match
+      return { q: `SELECT id, tranid, entity, foreigntotal, status FROM transaction WHERE type = 'PurchOrd' AND (${where.join(' OR ')})` };
+    },
+  },
+};
+interface ErpPostRecord { idemKey: string; tenantId: string; recordId: string }
+const erpPosted = new DurableCollection<ErpPostRecord>('erp:posted', (r) => r.idemKey);
+
+const erpActionNode: NodeModule = {
+  typeId: 'core.openwop.connectors.erp-action',
+  version: '1.0.0',
+  async execute(ctx) {
+    const cfg = (ctx.config ?? {}) as Record<string, unknown>;
+    const inputs = (ctx.inputs ?? {}) as Record<string, unknown>;
+    const action = s(cfg.action ?? inputs.action);
+    if (!ERP_ACTIONS.has(action)) {
+      return { status: 'failure', error: { code: 'invalid_config', message: 'erp-action requires config.action ∈ {get-financial-summary, match-po, post-bill, create-expense-report}.' } };
+    }
+    const fields: Record<string, string> = {};
+    for (const src of [cfg, inputs]) for (const [k, v] of Object.entries(src)) if (typeof v === 'string' && k !== 'action') fields[k] = v.trim();
+    const provider = ctx.connectors?.resolveForCapability ? await ctx.connectors.resolveForCapability('finance') : null;
+    const apply = (cfg.dryRun ?? inputs.dryRun) === false;
+    const recommend = (extra?: Record<string, unknown>): NodeOutcome => ({
+      status: 'success',
+      outputs: { connected: !!provider, applied: false, provider: provider ?? null, planned: { action, ...(Object.keys(fields).length ? { fields } : {}) }, note: 'ERP action recommended, not applied.', ...extra },
+    });
+
+    const baseUrl = s(fields.baseUrl).replace(/\/+$/, '');
+    const writeBuild = provider ? ERP_WRITE_BUILDERS[provider]?.[action] : undefined;
+    const readBuild = provider ? ERP_READ_BUILDERS[provider]?.[action] : undefined;
+    // Dry-run / no provider / no builder / no baseUrl ⇒ recommend, dispatch nothing
+    // (keeps a preloaded template external-call-free until an operator opts in).
+    if (!apply || !ctx.connectors?.invoke || !baseUrl || (!writeBuild && !readBuild)) {
+      return recommend();
+    }
+
+    // READ dispatch (ADR 0186 slice-B) — a SuiteQL query. Side-effect-free, so no
+    // idempotency record; `applied` stays false (nothing was mutated) with
+    // `dispatched:true` + the result rows. `Prefer: transient` is NetSuite-required.
+    if (readBuild) {
+      const built = readBuild(fields);
+      if (!built) return recommend({ reason: 'read_missing_filter' });
+      const r = await ctx.connectors.invoke(provider!, {
+        url: `${baseUrl}/services/rest/query/v1/suiteql`,
+        method: 'POST',
+        body: JSON.stringify({ q: built.q }),
+        contentType: 'application/json',
+        authScheme: 'bearer',
+        extraHeaders: { Prefer: 'transient' },
+      });
+      if (!r.ok) return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `ERP ${action} query failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+      const items = (r.data as { items?: unknown[] })?.items;
+      const result = Array.isArray(items) ? items : [];
+      return { status: 'success', outputs: { connected: true, applied: false, dispatched: true, provider, action, result } };
+    }
+
+    // WRITE dispatch (money-posting). Idempotent (a vendor bill / expense report is not
+    // idempotent — a fork/retry must not double-post). Keyed on tenant + provider +
+    // baseUrl + action + the money fields.
+    const build = writeBuild;
+    if (!build) return recommend(); // unreachable (guard above ensures a builder), narrows the type
+    const idemKey = `erp:${createHash('sha256').update(JSON.stringify([ctx.tenantId, provider, baseUrl, action, fields.vendorId ?? fields.employeeId ?? '', fields.amount ?? ''])).digest('hex')}`;
+    const prior = await erpPosted.get(idemKey).catch(() => undefined);
+    if (prior && prior.tenantId === ctx.tenantId) {
+      return { status: 'success', outputs: { connected: true, applied: true, reused: true, provider, recordId: prior.recordId, planned: { action, fields } } };
+    }
+    const req = build(baseUrl, fields);
+    const r = await ctx.connectors.invoke(provider!, { url: req.url, method: 'POST', body: req.body, contentType: 'application/json', authScheme: 'bearer' });
+    if (!r.ok) return { status: 'failure', error: { code: r.error ?? 'connector_request_failed', message: `ERP ${action} failed (${r.error ?? `HTTP ${r.status ?? '?'}`}).` } };
+    const recordId = s((r.data as { id?: string })?.id);
+    try { await erpPosted.put({ idemKey, tenantId: ctx.tenantId, recordId }); }
+    catch (e) { hostLog.warn('erp idempotency record write failed — a retry/fork may double-post', { idemKey, error: e instanceof Error ? e.message : String(e) }); }
+    return { status: 'success', outputs: { connected: true, applied: true, reused: false, provider, recordId, planned: { action, fields } } };
   },
 };
 
@@ -2498,15 +3497,29 @@ export function ensureNodesRegistered(): void {
   registry.register(interruptNode);
   registry.register(conversationGateNode);
   registry.register(webSearchNode);
+  registry.register(webFetchNode);
   registry.register(uppercaseNode);
   registry.register(a2uiClarifyNode);
   registry.register(imageEmitNode);
   registry.register(memoryWriteNode);
-  registry.register(mockAiNode);
+  // LEAK-3: `local.sample.demo.mock-ai` fabricates LLM output ("Mock response
+  // to: …"). Keep it for demo/dev/conformance, but do NOT register it in the
+  // enterprise (auth) posture — a real tenant must never reach a fake-LLM node.
+  if (!enterprisePosture()) {
+    registry.register(mockAiNode);
+  }
   registry.register(chatResponderNode);
   registry.register(bigqueryQueryNode);
   registry.register(workdayQueryNode);
+  registry.register(calendarListEventsNode);
+  registry.register(adMetricsNode);
+  registry.register(adBudgetUpdateNode);
+  registry.register(ticketCreateNode);
+  registry.register(ticketTransitionNode);
+  registry.register(hrisActionNode);
+  registry.register(erpActionNode);
   registry.register(emailDraftNode);
+  registry.register(emailSendNode);
   // ADR 0089 Phase 4 (Option B) — the agent-runner node behind the synthetic
   // `openwop-app.agent-mention` workflow (runs a tool-bearing @mentioned agent's
   // gated tool loop as a persisted run / chat `workflow_run` bubble).
@@ -2531,6 +3544,54 @@ function registerConformanceNodes(registry: ReturnType<typeof getNodeRegistry>):
     async execute() {
       // Unreachable: the host's capability check fails before this runs.
       return { status: 'success', outputs: {} };
+    },
+  });
+  // RFC 0199 §C (ADR 0753 D12) — `conformance-credential`'s one node. It does
+  // nothing itself: its `config.auth { type: oauth2, provider, scopes }` is what
+  // the executor's credential gate (`host/credentialGate.ts`) acts on BEFORE any
+  // node runs — suspend on a `credential` interrupt, fail on a decline. Reaching
+  // execute() means a credential resolved, and succeeding is then the witness.
+  registry.register({
+    typeId: 'conformance.oauth.use',
+    version: '1.0.0',
+    async execute() {
+      return { status: 'success', outputs: { used: true } };
+    },
+  });
+  // RFC 0205 (ADR 0746) — `conformance-artifact-emit`'s one node
+  // (conformance/fixtures.md §"conformance-artifact-emit"). Persists
+  // `config.data` as an ANNOUNCED run artifact under the deterministic
+  // `run-event:<runId>:<nodeId>` id and emits `artifact.created` naming it, so
+  // `getArtifact` has something real to read back. Registering it is what makes
+  // the fixture advertisable (host/index.ts only lists fixtures whose
+  // conformance nodes are registered).
+  registry.register({
+    typeId: 'conformance.artifact.emit',
+    version: '1.0.0',
+    async execute(ctx) {
+      const cfg = (ctx.config ?? {}) as { artifactType?: unknown; data?: unknown; name?: unknown; summary?: unknown };
+      if (typeof cfg.artifactType !== 'string' || cfg.artifactType.length === 0 || !('data' in cfg)) {
+        return { status: 'failure', error: { code: 'invalid_request', message: 'conformance.artifact.emit requires config.artifactType (string) and config.data' } };
+      }
+      const { persistAnnouncedArtifact } = await import('../host/runArtifactStore.js');
+      const { isRegisteredArtifactType } = await import('../host/artifactTypes.js');
+      const { artifactId } = await persistAnnouncedArtifact({
+        tenantId: ctx.tenantId,
+        runId: ctx.runId,
+        nodeId: ctx.nodeId,
+        artifactType: cfg.artifactType,
+        payload: cfg.data,
+        ...(typeof cfg.name === 'string' ? { title: cfg.name } : {}),
+        now: new Date().toISOString(),
+      });
+      await ctx.emit('artifact.created', {
+        artifactId,
+        artifactType: cfg.artifactType,
+        nodeId: ctx.nodeId,
+        ...(typeof cfg.summary === 'string' ? { summary: cfg.summary } : {}),
+        registered: isRegisteredArtifactType(cfg.artifactType),
+      });
+      return { status: 'success', outputs: { artifactId } };
     },
   });
   // Conformance-only typeId for BYOK end-to-end. Resolves the
@@ -2609,6 +3670,54 @@ function registerConformanceNodes(registry: ReturnType<typeof getNodeRegistry>):
       return { status: 'success', outputs: {} };
     },
   });
+  // RFC 0140 — conformance-only typeId whose ONLY job is to perform exactly one
+  // host-observable external effect, so the replay-suppression scenario has
+  // something real to count.
+  //
+  // The effect is a durable notification, chosen deliberately over a stub: it
+  // routes through `notifications/emitter.ts`, one of the guarded chokepoints
+  // that calls `assertEffectAllowed()`, so it is COUNTED by the ADR 0533
+  // counter and PROTECTED by the ADR 0531 guard. A node returning `{ ok: true }`
+  // would satisfy the fixture's shape while proving nothing — the whole
+  // scenario asks whether the host refuses to do this during a replay, and that
+  // question is only meaningful if doing it would actually change the world.
+  //
+  // It is ALSO classified side-effecting (`executor/sideEffects.ts`), which is
+  // rule 5(a): during a replay the executor short-circuits it and serves the
+  // source run's recorded outcome, so the replay stays CORRECT rather than
+  // merely safe. `sideEffecting: true` here is the belt to that file's braces —
+  // a programmatically registered node can self-declare, so the classification
+  // survives an edit to the regex list.
+  registry.register({
+    typeId: 'conformance.effect.emit',
+    version: '1.0.0',
+    sideEffecting: true,
+    async execute(ctx) {
+      const { getNotificationEmitter } = await import('../notifications/emitter.js');
+      const record = await getNotificationEmitter().emit({
+        tenantId: ctx.tenantId,
+        type: 'conformance.replay-effect',
+        priority: 'normal',
+        title: 'Conformance replay effect',
+        message: `RFC 0140 host-observable effect from run ${ctx.runId} node ${ctx.nodeId}`,
+        runId: ctx.runId,
+        nodeId: ctx.nodeId,
+      });
+      return { status: 'success', outputs: { notificationId: record.notificationId } };
+    },
+  });
   // RFC 0023 — conformance-only typeId for agent-event emission hooks.
   registerMockAgentNode();
+  // RFC 0140 — the reserved side-effecting node the replay-suppression fixture
+  // uses. Self-gates on `conformanceNodesEnabled()`.
+  registerConformanceSideEffectNode();
+  registerConformanceHttpEffectNode();
+  // RFC 0152 / openwop#1028 — the reserved A2A invoke bridge the
+  // `conformance-a2a-task-roundtrip` fixture declares (both the 1.122.0
+  // spelling and the pinned 1.106.0 one). Self-gates the same way.
+  registerConformanceA2aInvokeNode();
+  // H21 / RFC 0153 — the reserved MCP invoke bridge the
+  // `conformance-mcp-tool-roundtrip` fixture is rewritten onto at load
+  // (`host/index.ts`). Self-gates the same way.
+  registerConformanceMcpInvokeNode();
 }

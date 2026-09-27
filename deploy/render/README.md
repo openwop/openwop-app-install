@@ -49,6 +49,14 @@ single-tenant install, or point `OPENWOP_BYOK_KMS_KEY` at AWS KMS / Azure Key
 Vault cross-cloud (`aws-kms:…` / `azure-keyvault:…`). Wire `OPENWOP_OIDC_*` to
 any OIDC issuer.
 
+Host surfaces in the `auth` posture (ADR 0636): keep `OPENWOP_SURFACE_BACKEND=durable`,
+add `OPENWOP_SURFACE_OBSERVABILITY=memory` (it has no durable adapter) and either
+`OPENWOP_SURFACE_BLOB=s3` with the `OPENWOP_BLOB_S3_*` settings or
+`OPENWOP_SURFACE_BLOB=memory` plus `OPENWOP_ALLOW_INMEMORY_SURFACES=blob` to
+acknowledge ephemeral uploads by name. The boot error prints these lines if you
+miss one; `OPENWOP_ALLOW_INMEMORY_SURFACES=true` also boots but makes EVERY
+surface ephemeral.
+
 ## Host contract
 
 | Capability | Provided by |

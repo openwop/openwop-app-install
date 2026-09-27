@@ -91,7 +91,7 @@ const MAX_CAS_RETRIES = 256;
 // correctness still comes from kvCompareAndSwap below. Keyed by full storage
 // key, shared across scopes.
 const keyLocks = new Map<string, Promise<unknown>>();
-async function withKeyLock<T>(lockKey: string, fn: () => Promise<T>): Promise<T> {
+export async function withKeyLock<T>(lockKey: string, fn: () => Promise<T>): Promise<T> {
   const prev = keyLocks.get(lockKey) ?? Promise.resolve();
   let release!: () => void;
   const gate = new Promise<void>((r) => { release = r; });

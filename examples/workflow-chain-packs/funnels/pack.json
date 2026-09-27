@@ -1,0 +1,70 @@
+{
+  "name": "core.openwop.workflows.funnels",
+  "version": "1.0.1",
+  "kind": "workflow-chain",
+  "description": "Funnel optimization chains (ADR 0294 / Funnel A, Phase 6) — read-only analysis over the funnels feature nodes: per-step stats in, a grounded optimization proposal out. Proposals only: publishing, step edits, and experiment starts remain human actions in the Funnels page.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "keywords": ["funnels", "optimization", "conversion", "marketing"],
+  "chains": [
+    {
+      "chainId": "funnels.optimize-step",
+      "version": "1.0.0",
+      "label": "Funnel Step Optimization Proposal",
+      "description": "Reads a funnel's definition and per-step stats, identifies the weakest step (honest about small samples), and produces a grounded optimization proposal: what to change on that step's page, and the 50/50 challenger experiment a human should start in the Funnels page. Read-only — no drafts are written, nothing is published.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId", "funnelId"],
+        "properties": {
+          "orgId": { "type": "string", "description": "The workspace org id." },
+          "funnelId": { "type": "string", "description": "The funnel to analyze." },
+          "goal": { "type": "string", "default": "maximize completed checkouts", "description": "What the funnel should optimize for." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "funnel",
+            "typeId": "feature.funnels.nodes.get",
+            "name": "Read the funnel",
+            "position": { "x": 0, "y": 0 },
+            "config": {},
+            "inputs": { "orgId": "{{params.orgId}}", "funnelId": "{{params.funnelId}}" }
+          },
+          {
+            "id": "stats",
+            "typeId": "feature.funnels.nodes.step-stats",
+            "name": "Read per-step stats",
+            "position": { "x": 0, "y": 160 },
+            "config": {},
+            "inputs": { "orgId": "{{params.orgId}}", "funnelId": "{{params.funnelId}}" }
+          },
+          {
+            "id": "propose",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Draft the optimization proposal",
+            "position": { "x": 320, "y": 80 },
+            "config": {
+              "systemPrompt": "You are a conversion-rate specialist. Given a funnel definition and its per-step totals (views, completions, revenue, orders), identify the weakest step for the goal: {{params.goal}}. Ground every claim in the provided numbers; if a step's sample is small, say the data is insufficient rather than over-reading it. Output: (1) the weakest step and why, (2) concrete page changes to test, (3) the 50/50 challenger experiment to start in the Funnels page (a human starts it), (4) what result would confirm or refute the hypothesis. Never invent traffic, revenue, or pages.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          { "from": "funnel", "to": "propose" },
+          { "from": "stats", "to": "propose" }
+        ]
+      },
+      "outputs": {
+        "proposal": { "type": "string", "description": "The grounded optimization proposal (weakest step, page changes, the experiment a human should start)." }
+      }
+    }
+  ]
+}

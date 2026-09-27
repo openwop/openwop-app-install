@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/revoke-invitation.config.json",
+  "title": "OrgsRevokeInvitationConfig",
+  "description": "Authoring-time configuration. `inviteId` is the fallback target (runtime `inputs.inviteId` wins); `orgId` optional. Authorization is never configured here: it is the run's acting user holding host:members:manage in the target org (the SAME predicate the /orgs/:orgId/invites routes use), checked in the host surface.",
+  "type": "object",
+  "properties": {
+    "inviteId": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "orgId": {
+      "type": "string",
+      "maxLength": 200
+    }
+  },
+  "additionalProperties": false
+}

@@ -4,6 +4,12 @@
   "properties": {
     "title": { "type": "string" },
     "artifactType": { "type": "string" },
+    "actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 },
+      "description": "WF-EM-5 — the verb allowlist for THIS gate. Forwarded into the suspend payload, so it becomes `interrupt.data.actions`: `validateResumeValue` refuses any other verb with a 400 (the run stays interrupted rather than recording a decision the approver did not make) and both approval cards render only these buttons. Omit to keep the full default set (approve | reject | request-changes | defer | escalate). Declare it whenever the gate's `falsy approved` branch leads to a TERMINAL node, or `defer`/`escalate` — which have no member in the decision union — fall through to `refine` and are written down as a decline."
+    },
     "maxRequestChangesIterations": { "type": "integer", "minimum": 0, "default": 0 },
     "timeoutMs": { "type": "integer", "minimum": 0 }
   },

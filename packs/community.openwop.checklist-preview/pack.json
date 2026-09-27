@@ -1,0 +1,16 @@
+{
+  "name": "community.openwop.checklist-preview",
+  "version": "1.0.0",
+  "kind": "frontend-plugin",
+  "description": "RFC 0130 / ADR 0310 Phase E witness: a sandboxed canvas-preview plugin for the Tier-1 pack canvas type `canvas.checklist` (community.openwop.canvas-checklist). Falsifiability: with ui-plugins + canvas-packs on, the checklist editor's center panel is THIS plugin's rendering (an opaque-origin iframe under a deny-egress CSP) — it follows live edits via host.documentChanged, highlights the selected item via host.selectionChanged, and feeds the editor's live region via host.announce; remove the pack and the editor falls back to the generic data view.",
+  "engines": { "openwop": ">=1.2.0" },
+  "uiPlugins": [
+    {
+      "pluginId": "checklist-preview",
+      "surface": "canvas-preview",
+      "canvasTypes": ["canvas.checklist"],
+      "entry": "ui/preview.html",
+      "hostApi": ["artifact.read", "host.announce"]
+    }
+  ]
+}

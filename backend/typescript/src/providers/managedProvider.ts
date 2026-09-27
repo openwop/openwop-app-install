@@ -46,10 +46,14 @@ import {
   type EncryptedRecord,
 } from '../byok/encryption.js';
 import { createLogger } from '../observability/logger.js';
+import { managedUsageBucket, isReservedUsageBucket, usageBucketMatchersForTenant } from './managedUsageScope.js';
+import { registerSubjectEraser } from '../host/subjectErasure.js';
 import type { Storage } from '../storage/storage.js';
 import { managedAnonSignInRequired } from '../host/deployPosture.js';
+import { managedBalanceAvailable, managedBalanceDraw } from '../host/managedBalanceHook.js';
+import { createHash } from 'node:crypto';
 import { listManagedProviderIds } from './catalog.js';
-import { dispatchChat, type ChatMessage, type ProviderId } from './dispatch.js';
+import { dispatchChat, type ChatMessage, type ContentPart, type ProviderId } from './dispatch.js';
 import { dispatchMiniMaxToolsRound } from './dispatchProviderTools.js';
 import type { ToolDef, ToolUseBlock } from './dispatchAnthropicTools.js';
 
@@ -182,7 +186,136 @@ export function configureManagedProvider(input: { storage: Storage; dataDir: str
  * + skips when the env var is unset (provider becomes unavailable
  * until the operator sets it).
  */
+/**
+ * ADR 0693 §4 — DSAR eraser for the per-subject free-tier buckets.
+ *
+ * WHY THIS EXISTS AT ALL. Before ADR 0693 a managed-usage row keyed a TENANT and
+ * was operator accounting, not personal data — which is why no eraser was ever
+ * registered for this store. A per-subject bucket is a fact about a PERSON ("how
+ * many tokens did they use on this day"), so the moment §2 ships, this store
+ * falls under ADR 0464 and a DSAR must be able to empty it.
+ *
+ * It removes ONLY the reserved per-subject bucket. The tenant-level row and the
+ * `managed:global` ceiling are the operator's own accounting and survive an
+ * erasure — deleting them would let a DSAR silently reset a spend cap.
+ *
+ * The bucket is RE-DERIVED from `(tenantId, subjectKey)` rather than found by
+ * scanning: the hash is one-way, and a scan of this table on a DSAR-triggered
+ * path is the unbounded read ADR 0684 §6 forbids.
+ */
+export async function eraseSubjectManagedUsage(tenantId: string, subjectKey: string): Promise<void> {
+  if (!storageRef || !tenantId || !subjectKey) return;
+  const bucket = managedUsageBucket(tenantId, subjectKey);
+  // A single-principal tenant returns ITSELF here, which is the operator's row
+  // for that tenant — never delete it on a subject erasure.
+  if (!isReservedUsageBucket(bucket)) return;
+  await storageRef.deleteManagedUsageForTenant(bucket);
+  // ADR 0693 phase 3 — the media bucket uses the SAME composer, so one derived
+  // key clears both stores. Erasing tokens but not TTS/STT would leave a DSAR
+  // half-done and the gap would be invisible: both are keyed by a hash nobody
+  // can enumerate.
+  await storageRef.deleteMediaUsageForTenant(bucket);
+}
+
+/** What a caller can be told about their OWN managed free-tier usage today.
+ *  Deliberately carries NO bucket key — see `describeOwnManagedUsage`. */
+export interface OwnManagedUsage {
+  providerId: string;
+  /** UTC day these figures cover. Resets at 00:00 UTC. */
+  day: string;
+  tokens: number;
+  dailyTokenCap: number;
+  /** `cap - tokens`, floored at 0. */
+  remaining: number;
+  /** Whether this allowance is the caller's ALONE (`subject`) or shared with
+   *  everyone in the tenant (`tenant`). The honest answer to "is this mine?",
+   *  and the only way a participant can tell which regime they are under. */
+  scope: 'subject' | 'tenant';
+}
+
+/**
+ * ADR 0693 phase 5 — the caller's OWN managed free-tier usage for today.
+ *
+ * WHY THIS IS A SELF-READ AND NOT AN OPERATOR VIEW, which is open question 2 of
+ * that ADR and is hereby ANSWERED rather than left hanging. An operator view
+ * over OTHER subjects would need a reverse map from bucket back to person: the
+ * bucket is `sha256(tenantId + subject)` precisely so these rows are not a log
+ * of who asked what, when (§4), and a reverse map would rebuild exactly that —
+ * a SECOND personal-data surface, created to display a number, on rows a DSAR
+ * must be able to empty.
+ *
+ * A self-read needs no map at all. The caller's subject arrives with the
+ * request, so the bucket composes directly, and the person whose fairness the
+ * whole ADR is about is the person who gets to see it. That is not a reduced
+ * version of the operator view — it is the read that was actually missing.
+ * "Per-subject usage is not observable today" was a complaint on behalf of
+ * participants, and phases 0-4 gave every participant a private allowance they
+ * had no way to see.
+ *
+ * It reads through the SAME composer as the charge and the cap check. A second
+ * path to "which bucket is this" is the one thing §2 says to refuse in review,
+ * and a read that disagreed with the charge would be worse than no read.
+ */
+export async function describeOwnManagedUsage(
+  tenantId: string,
+  actingSubject?: string,
+  providerId = 'openwop-free',
+): Promise<OwnManagedUsage | null> {
+  const target = getTargets()[providerId];
+  if (!target || !storageRef) return null;
+  const day = todayUtc();
+  const bucket = managedUsageBucket(tenantId, actingSubject);
+  const usage = await storageRef.getManagedUsage(bucket, providerId, day);
+  const tokens = usage.inputTokens + usage.outputTokens;
+  return {
+    providerId,
+    day,
+    tokens,
+    dailyTokenCap: target.dailyTokenCap,
+    remaining: Math.max(0, target.dailyTokenCap - tokens),
+    // Derived from the composer's own answer, never re-decided here. If the
+    // bucket is reserved it is this subject's; otherwise the charge landed on
+    // the tenant and the allowance really is shared.
+    scope: isReservedUsageBucket(bucket) ? 'subject' : 'tenant',
+  };
+}
+
+/**
+ * ADR 0697 follow-up — remove every usage row a TENANT owns, including its
+ * participants' per-subject buckets, on tenant teardown.
+ *
+ * WHY THIS EXISTS AT ALL. `deleteAllTenantData` (ADR 0284) introspects every
+ * table with a `tenant_id` column and deletes by EXACT match. ADR 0693 phases
+ * 1–3 put `managed:sub:<tenant>:<hash>` in that column, so an exact match on the
+ * tenant reaches its OWN rows and leaves every participant's behind — orphaned
+ * under a one-way hash, in a store §4 calls subject-linked personal data. The
+ * §4 eraser is no help: it re-derives a bucket from a SUBJECT, and teardown has
+ * a tenant.
+ *
+ * ONE function rather than three lines at three call sites. The teardown callers
+ * are `retentionSweepDaemon` (twice) and `routes/account.ts`; a copy at each is
+ * an invariant that drifts the first time a fourth appears, and this particular
+ * invariant fails SILENTLY — orphaned rows have no symptom.
+ *
+ * Best-effort by design: a usage-row sweep must never be the reason an account
+ * deletion fails. The rows it misses are unreadable counters, and a thrown error
+ * here would strand a teardown that had already removed the readable data.
+ */
+export async function eraseTenantOwnedUsage(
+  storage: Pick<Storage, 'deleteManagedUsageForTenant' | 'deleteMediaUsageForTenant'>,
+  tenantId: string,
+): Promise<{ managed: number; media: number }> {
+  const { exact, likePattern, likeEscape } = usageBucketMatchersForTenant(tenantId);
+  const alsoLike = { pattern: likePattern, escape: likeEscape };
+  let managed = 0;
+  let media = 0;
+  try { managed = await storage.deleteManagedUsageForTenant(exact, alsoLike); } catch { /* see above */ }
+  try { media = await storage.deleteMediaUsageForTenant(exact, alsoLike); } catch { /* see above */ }
+  return { managed, media };
+}
+
 export async function bootstrapManagedProvider(): Promise<void> {
+  registerSubjectEraser(eraseSubjectManagedUsage);
   if (!storageRef || !masterKeyPathRef) {
     throw new Error('managedProvider not configured — call configureManagedProvider() first.');
   }
@@ -248,6 +381,8 @@ function todayUtc(): string {
  *  tenant: real ids are `anon:<sid>` / `user:<hash>` / `default`, so this
  *  namespaced value can't collide. */
 export const GLOBAL_USAGE_TENANT = 'managed:global';
+// ADR 0693 — the ONE composer for usage buckets. Do not inline a second one.
+
 
 /** Operator spend backstop across ALL tenants per (day, provider).
  *  `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP` unset/0/non-numeric = disabled.
@@ -263,6 +398,8 @@ export interface ManagedDispatchRequest {
   userFacingProvider: string;
   /** Caller tenant; demo postures may be anon, auth posture requires user. */
   tenantId: string;
+  /** ADR 0693 — the ACTING subject, when one exists. See ManagedToolsRoundRequest. */
+  actingSubject?: string;
   messages: readonly ChatMessage[];
   maxTokens?: number;
   onDelta?: (delta: string) => void | Promise<void>;
@@ -294,6 +431,7 @@ async function prepareManagedDispatch(
   userFacingProvider: string,
   tenantId: string,
   reqMessages: readonly ChatMessage[],
+  actingSubject?: string,
 ): Promise<{ target: ManagedTarget; apiKey: string; messages: readonly ChatMessage[]; date: string }> {
   const target = getTargets()[userFacingProvider];
   if (!target) throw new ManagedProviderError('managed_unknown', `No managed target configured for provider "${userFacingProvider}".`);
@@ -301,8 +439,16 @@ async function prepareManagedDispatch(
   if (!storageRef) throw new ManagedProviderError('managed_unavailable', 'Free tier not configured on this server.');
 
   const date = todayUtc();
-  const usage = await storageRef.getManagedUsage(tenantId, userFacingProvider, date);
-  if (usage.inputTokens + usage.outputTokens >= target.dailyTokenCap) {
+  // ADR 0693 — cap on the BUCKET, not the raw tenant. For a personal tenant the
+  // bucket IS the tenant, so this is byte-identical to the previous behaviour;
+  // for a shared workspace it is the acting participant's own allowance.
+  const bucket = managedUsageBucket(tenantId, actingSubject);
+  const usage = await storageRef.getManagedUsage(bucket, userFacingProvider, date);
+  // ADR 0176 Phase 2 — balance BEFORE cap: a tenant with purchased prepaid credit is not
+  // blocked by the free-tier daily cap (their balance covers usage). Checked via the
+  // dependency-inversion hook so core never imports the billing feature.
+  const prepaid = await managedBalanceAvailable(tenantId);
+  if (prepaid <= 0 && usage.inputTokens + usage.outputTokens >= target.dailyTokenCap) {
     throw new ManagedProviderError('daily_limit_reached', `Daily limit reached (${target.dailyTokenCap} tokens). Resets at 00:00 UTC.`);
   }
   // Global ceiling — the operator's spend backstop across ALL tenants (checked
@@ -320,17 +466,64 @@ async function prepareManagedDispatch(
   // Inject the default system prompt when the caller didn't supply one (grounds
   // the model in OpenWOP context). Callers who DO supply one keep full control.
   const hasSystem = reqMessages.some((m) => m.role === 'system');
-  const messages = hasSystem ? reqMessages : [{ role: 'system' as const, content: target.defaultSystemPrompt }, ...reqMessages];
+  const base = hasSystem ? reqMessages : [{ role: 'system' as const, content: target.defaultSystemPrompt }, ...reqMessages];
+  // MMXC-1 / ADR 0611 — per-tenant cache-scope sentinel. The managed tier shares
+  // ONE server key across ALL tenants, and MiniMax's AUTOMATIC prompt-prefix cache
+  // keys by prompt content on that shared key — so two tenants sending the same
+  // ≥512-token prefix would share a provider cache entry (the
+  // `prompt-prefix-cache-cross-tenant-isolation` hazard RFC 0116 §43 elevates to a
+  // protocol-tier invariant). A per-tenant, opaque, STABLE hash prepended to the
+  // LEADING system content makes the cached-prefix bytes differ per tenant → the
+  // provider cache structurally MISSES across tenants, while each tenant's OWN
+  // prefix reuse (same hash) still HITS (within-tenant economy preserved). The
+  // sentinel is secret-free (a hash, never the raw id), wire-invisible (never on
+  // the OpenWOP wire/an event/an advert), and replay-invariant (present on every
+  // call, so hit-vs-miss is unchanged). Defense-in-depth: MiniMax is not an
+  // advertised `promptPrefixCache` provider, so this is the invariant's SPIRIT, not
+  // its cachePrefixId letter — hence no RFC and no capability advert.
+  //
+  // Stamp the FIRST system message's content, NOT a second system message: the
+  // Anthropic path keeps only the first system turn and the chat-responder
+  // de-dupes back-to-back systems, so a separate sentinel message could be dropped
+  // — a leading sentinel INSIDE the one system message survives every path. `base`
+  // always carries a system message (the default is injected above when absent).
+  const scope = `[cache-scope ${cacheScopeHash(tenantId)}] `;
+  let stamped = false;
+  const messages = base.map((m) => {
+    if (stamped || m.role !== 'system') return m;
+    stamped = true;
+    return { ...m, content: prependCacheScope(scope, m.content) };
+  });
   return { target, apiKey, messages, date };
+}
+
+/** MMXC-1 / ADR 0611 — an opaque, stable, secret-free per-tenant cache-scope
+ *  discriminator: a SHA-256 slice of the tenant id. Stable per tenant (so a
+ *  tenant's own prefix reuse still hits the provider cache) and opaque (the raw
+ *  tenant id is never sent to the provider or written to a log via this path). */
+function cacheScopeHash(tenantId: string): string {
+  return createHash('sha256').update(tenantId).digest('hex').slice(0, 16);
+}
+
+/** Prepend the cache-scope sentinel to a system message's content, preserving a
+ *  structured (`ContentPart[]`) body by leading it with a text part. */
+function prependCacheScope(scope: string, content: string | readonly ContentPart[]): string | readonly ContentPart[] {
+  if (typeof content === 'string') return scope + content;
+  return [{ type: 'text', text: scope }, ...content];
 }
 
 /** Best-effort managed usage increment (per-tenant + reserved global bucket) —
  *  never fails the call on a write error (the safer skew is a free turn). */
-async function recordManagedUsage(tenantId: string, userFacingProvider: string, date: string, inTok: number, outTok: number): Promise<void> {
+async function recordManagedUsage(tenantId: string, userFacingProvider: string, date: string, inTok: number, outTok: number, actingSubject?: string): Promise<void> {
   if (!storageRef || (inTok <= 0 && outTok <= 0)) return;
   try {
-    await storageRef.incrementManagedUsage(tenantId, userFacingProvider, date, inTok, outTok);
+    // ADR 0693 — charge the same bucket the cap was read from, or the two
+    // disagree and a participant is capped on a total they never accrued.
+    await storageRef.incrementManagedUsage(managedUsageBucket(tenantId, actingSubject), userFacingProvider, date, inTok, outTok);
     await storageRef.incrementManagedUsage(GLOBAL_USAGE_TENANT, userFacingProvider, date, inTok, outTok);
+    // ADR 0176 Phase 2 — draw the consumed tokens from the tenant's prepaid balance
+    // first (best-effort; no-op when billing/balance is unwired).
+    await managedBalanceDraw(tenantId, inTok + outTok);
   } catch (err) {
     log.warn('failed to increment managed usage', { tenantId, provider: userFacingProvider, error: err instanceof Error ? err.message : String(err) });
   }
@@ -339,6 +532,10 @@ async function recordManagedUsage(tenantId: string, userFacingProvider: string, 
 export interface ManagedToolsRoundRequest {
   userFacingProvider: string;
   tenantId: string;
+  /** ADR 0693 — the ACTING subject, when one exists. Optional on purpose: the
+   *  public chat widget is anonymous by design, so an absent subject is a
+   *  permanent legal state that charges the tenant (today's behaviour). */
+  actingSubject?: string;
   messages: readonly ChatMessage[];
   tools: readonly ToolDef[];
   maxTokens?: number;
@@ -349,14 +546,36 @@ export interface ManagedToolsRoundResult {
   toolUses: ToolUseBlock[];
   inputTokens?: number;
   outputTokens?: number;
+  /** ADR 0148 A2 (OQ#3) — tokens served from MiniMax's AUTOMATIC prefix cache
+   *  this round (0/absent when the prefix was below the ≥512-token floor or the
+   *  first, cache-writing round). MANAGED-path only, which never emits
+   *  `provider.usage` — so on this path it is genuinely internal (the `managed_
+   *  prompt_cache` log). The BYOK path surfaces its equivalent on the wire; see
+   *  `DispatchResult.usage.cachedReadTokens`. */
+  cachedReadTokens?: number;
 }
 
 /** ONE managed (free-tier) tool-calling round — the same caps + server key +
  *  provider hiding as `dispatchManagedChat`, but a single tool round (the
  *  observe→act loop is the caller's). The underlying provider is never exposed.
  *  Only the MiniMax-backed managed tier supports tools here. */
+/** ADR 0148 A2 (OQ#3) — emit the prefix-cache split for a managed MiniMax call so
+ *  the free-tier caching win is observable in prod (grep `managed_prompt_cache`).
+ *  Only when the provider reported a cache read (rounds 2..N of a tool turn, and
+ *  cross-turn chat reuse). Best-effort; never affects the call. */
+function logManagedCache(kind: 'tools-round' | 'chat', tenantId: string, provider: string, promptTokens?: number, cachedReadTokens?: number): void {
+  if (!cachedReadTokens || cachedReadTokens <= 0) return;
+  const prompt = promptTokens ?? 0;
+  log.info('managed_prompt_cache', {
+    kind, tenantId, provider,
+    promptTokens: prompt,
+    cachedReadTokens,
+    cacheHitRatio: prompt > 0 ? Math.round((cachedReadTokens / prompt) * 100) / 100 : 0,
+  });
+}
+
 export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): Promise<ManagedToolsRoundResult> {
-  const { target, apiKey, messages, date } = await prepareManagedDispatch(req.userFacingProvider, req.tenantId, req.messages);
+  const { target, apiKey, messages, date } = await prepareManagedDispatch(req.userFacingProvider, req.tenantId, req.messages, req.actingSubject);
   if (target.provider !== 'minimax') {
     throw new ManagedProviderError('managed_unavailable', 'Tool calling is not available on this managed tier.');
   }
@@ -368,12 +587,14 @@ export async function dispatchManagedToolsRound(req: ManagedToolsRoundRequest): 
     ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
     ...(req.signal ? { signal: req.signal } : {}),
   });
-  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, round.inputTokens ?? 0, round.outputTokens ?? 0);
+  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, round.inputTokens ?? 0, round.outputTokens ?? 0, req.actingSubject);
+  logManagedCache('tools-round', req.tenantId, req.userFacingProvider, round.inputTokens, round.cachedReadTokens);
   return {
     text: round.text,
     toolUses: round.toolUses,
     ...(round.inputTokens != null ? { inputTokens: round.inputTokens } : {}),
     ...(round.outputTokens != null ? { outputTokens: round.outputTokens } : {}),
+    ...(round.cachedReadTokens != null ? { cachedReadTokens: round.cachedReadTokens } : {}),
   };
 }
 
@@ -381,7 +602,7 @@ export async function dispatchManagedChat(
   req: ManagedDispatchRequest,
 ): Promise<ManagedDispatchResult> {
   const { target, apiKey, messages, date } = await prepareManagedDispatch(
-    req.userFacingProvider, req.tenantId, req.messages,
+    req.userFacingProvider, req.tenantId, req.messages, req.actingSubject,
   );
 
   const result = await dispatchChat({
@@ -396,7 +617,8 @@ export async function dispatchManagedChat(
     ...(req.signal ? { signal: req.signal } : {}),
   });
 
-  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0);
+  await recordManagedUsage(req.tenantId, req.userFacingProvider, date, result.usage?.inputTokens ?? 0, result.usage?.outputTokens ?? 0, req.actingSubject);
+  logManagedCache('chat', req.tenantId, req.userFacingProvider, result.usage?.inputTokens, result.usage?.cachedReadTokens);
 
   return {
     provider: req.userFacingProvider,

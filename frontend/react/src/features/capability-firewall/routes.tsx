@@ -13,7 +13,7 @@ const routes: FeatureRoute[] = [
   {
     path: '/capability-firewall',
     element: <FirewallRulesPage />,
-    tier: 'admin',
+    tier: 'admin', archetype: 'admin',
     // ADR 0144 §Correction (2026-06-26) — reached only via the always-on Access
     // Hub; no standalone nav. Route + hubTab stay (the hub renders the element).
     hubTab: { group: 'identity', order: 2 },

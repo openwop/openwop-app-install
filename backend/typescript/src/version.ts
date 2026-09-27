@@ -7,4 +7,4 @@
  * release so the bundle, the `/readiness` version, the recorded `__app_meta`
  * `app_version`, and the published `vX.Y.Z` artifact all agree.
  */
-export const APP_VERSION = '0.1.0';
+export const APP_VERSION = '0.2.0';

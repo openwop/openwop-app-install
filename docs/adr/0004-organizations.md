@@ -165,3 +165,46 @@ gives it the `orgId` and the membership edges to build on.
 - [ ] **Invite to a not-yet-registered email:** v1 stores the invite by email;
   acceptance binds it to whichever durable user claims that email. Revisit when
   ADR 0005 (Profiles) firms up email ownership.
+
+---
+
+## Correction note — invitation accept required consent (2026-07-24, `docs/steward/UX_UPGRADE-invitations.md`)
+
+A benchmark of the accept page against workspace-invite flows (Slack, Notion,
+Linear, GitHub) graded it **clarity F / consent D**, against a security model
+that was otherwise sound (server-side email-ownership gate, single-use
+hash-indexed token, expiry + age-out).
+
+**The defect: the page redeemed the token on LOAD.** A signed-in recipient joined
+an org merely by *opening* the link, so anything that follows a link on their
+behalf — a mail-client link scanner, a chat unfurler, a browser prefetch —
+accepted the invitation for them. Joining an organisation is a consequential act
+and now takes a deliberate click.
+
+**The enabling change: `previewInvitation(token)`**, a strictly NON-MUTATING read
+that returns the org name, the role, the invited address and the expiry. It never
+creates a member, never deletes the invite, and never consumes the single use —
+there is a test asserting repeated previews leave the invitation redeemable,
+because a link scanner hitting the URL must not break the real invite.
+
+**Preview informs; accept authorizes.** `previewInvitation` performs no email
+check by design: the email-ownership gate stays entirely in `acceptInvitation`.
+A test asserts a third party holding the token can preview it but cannot redeem
+it. Nothing is weakened — preview exposes only facts the token-holder already
+has, since the token arrived in that mailbox.
+
+The route is unauthenticated for the same reason: a recipient should be able to
+see what they're being invited to *before* deciding whether creating an account
+is worth it. A signed-out visitor now gets the same context as a signed-in one;
+only the next step differs.
+
+Also: the page is now `noindex,nofollow` (a capability-token URL, reusing the
+`applyUnlistedHead` helper introduced for share links — this closes the `SH-G6`
+follow-on recorded in `docs/steward/UX_UPGRADE-sharing.md`), and the failure state no longer
+prints the raw API error. It names the one failure a person can act on — the
+invitation was sent to a different address — and leaves the action available to
+retry.
+
+Deferred: an explicit decline (IN-G5). Ignoring an unwanted invite is already the
+correct and safe default (it expires), and a real decline verb needs server-side
+state the model doesn't have; a button that only navigated away would be theatre.

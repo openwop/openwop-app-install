@@ -60,7 +60,7 @@ beforeAll(async () => {
   app.use(authMiddleware()); // reads ENFORCE_BEARER at construction → set above first
   registerScimAuthRoutes(app);
   app.use(errorEnvelopeMiddleware());
-  server = await new Promise<http.Server>((r) => { const s = app.listen(0, () => r(s)); });
+  server = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   port = (server.address() as { port: number }).port;
 });
 
@@ -121,7 +121,7 @@ describe('SCIM /scim/v2 routes — 404 when OPENWOP_SCIM_BEARER is unset', () =>
     app.use(authMiddleware());
     registerScimAuthRoutes(app);
     app.use(errorEnvelopeMiddleware());
-    s2 = await new Promise<http.Server>((r) => { const s = app.listen(0, () => r(s)); });
+    s2 = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
     p2 = (s2.address() as { port: number }).port;
   });
   afterAll(async () => {

@@ -40,7 +40,21 @@ function envBool(name: string): boolean | undefined {
 }
 
 export interface ContextEconomyConfig {
-  /** Master switch — OR of "any lever on". */
+  /** The MASTER switch's own state — i.e. whether `OPENWOP_CONTEXT_ECONOMY` is set.
+   *
+   *  ADR 0720 — this docstring used to read "Master switch — OR of 'any lever on'",
+   *  which the code has never implemented (`enabled: master`). The CODE is right and
+   *  the sentence was wrong, and the evidence is the consumer's shape: the
+   *  env-governed projection (`routes/featureToggles.ts`) emits this capability with
+   *  `envVar: 'OPENWOP_CONTEXT_ECONOMY'` alongside `enabled`, and reports EVERY lever
+   *  separately with its own `envVar`/`enabled`. So `enabled` describes the env var
+   *  named beside it, and an operator reading that payload sees "master off, transcript
+   *  on" accurately — nothing is concealed.
+   *
+   *  It is therefore NOT the answer to "is context economy doing anything to my
+   *  prompts?" — for that, read the levers. A lever can be ON with the master OFF
+   *  (`lever = envBool(name) ?? master`), which `test/context-economy-caching.test.ts`
+   *  pins deliberately on adjacent lines. */
   readonly enabled: boolean;
   /** A2 (Phase 1) — Anthropic prompt caching on the stable system+tools prefix. */
   readonly providerCache: boolean;

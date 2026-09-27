@@ -31,7 +31,7 @@ import { CodeBlock } from './CodeBlock.js';
 const MermaidDiagram = lazy(() => import('./MermaidDiagram.js').then((m) => ({ default: m.MermaidDiagram })));
 import 'katex/dist/katex.min.css';
 import type { ContentPart } from './hooks/useChatSession.js';
-import { config } from '../client/config.js';
+import { mediaSrc } from './mediaSrc.js';
 import { formatDurationSeconds } from '../i18n/format.js';
 import { MicIcon } from '../ui/icons/MicIcon.js';
 import { PaperclipIcon } from '../ui/icons/index.js';
@@ -176,8 +176,8 @@ function TextWithCodeBlocks({ content, markdown }: { content: string; markdown: 
 
 /** Render a plain-text segment as GFM markdown using openwop's theme
  *  tokens. Headings / lists / emphasis / links / tables / blockquotes /
- *  inline-code all wired to `var(--ink)` / `var(--color-accent)` /
- *  `var(--color-border)` / `var(--mono)` so dark-mode + reduced-motion
+ *  inline-code all wired to `var(--ink)` / `var(--clay-text)` /
+ *  `var(--rule)` / `var(--mono)` so dark-mode + reduced-motion
  *  pick up the same overrides as the rest of the chat. Block-level
  *  triple-backtick fences never reach this component (handled by the
  *  fence parser above as `CodeBlock`); inline-code (`single backticks`)
@@ -250,32 +250,6 @@ function AudioAttachment({ mimeType, dataBase64, durationSeconds }: AudioProps):
       />
     </div>
   );
-}
-
-/** Resolve a media part to a renderable src: host-served URL (RFC 0055 §C
- *  preferred) or an inline data URI. Returns null when neither is present.
- *
- *  The untrusted `url` field is restricted to http(s)/blob OR the host's own
- *  media-asset serve path — media content is LLM-influenced, and an
- *  unsanitized `javascript:` URL in the file-chip anchor would be a DOM-XSS
- *  vector (the app's other links are sanitized by react-markdown; this raw
- *  element is not). The relative host path (`/v1/host/openwop-app/assets/<token>`,
- *  where the unguessable token IS the capability) is resolved against the API
- *  base so an `<img>`/`<a>` can fetch it cross-origin in the public deploy;
- *  any other relative or non-allowlisted scheme is rejected. Inline `data:`
- *  is only ever produced from our own base64 below, never accepted from `url`. */
-function mediaSrc(mimeType: string, url?: string, dataBase64?: string): string | null {
-  if (url) {
-    const u = url.trim();
-    if (/^(https?|blob):/i.test(u)) return u;
-    // Same-origin host media-asset path. Match the exact token shape (32 random
-    // bytes, base64url — no `/` or `.`) so a crafted LLM-emitted `url` can't
-    // smuggle a traversal segment past the prefix check.
-    if (/^\/v1\/host\/openwop-app\/assets\/[A-Za-z0-9_-]+$/.test(u)) return `${config.baseUrl}${u}`;
-    return null;
-  }
-  if (dataBase64) return `data:${mimeType};base64,${dataBase64}`;
-  return null;
 }
 
 /** RFC 0055 media.image — inline image with `alt` wired for screen readers. */

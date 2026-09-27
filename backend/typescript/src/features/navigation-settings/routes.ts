@@ -18,8 +18,7 @@ import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { tenantOf } from '../featureRoute.js';
-import { isSuperadmin, requireSuperadmin } from '../../host/superadmin.js';
-import { OpenwopError } from '../../types.js';
+import { requireSuperadmin } from '../../host/superadmin.js';
 import type { User } from '../users/usersService.js';
 import { getBundle, getTenantBundle, putTenantConfig, putUserConfig, tenantConfigVersion, validateMenuConfig } from './service.js';
 
@@ -40,9 +39,6 @@ export function registerNavigationSettingsRoutes(deps: RouteDeps): void {
   app.get(BASE, async (req, res, next) => {
     try {
       const user = await tryResolveUser(req);
-      if (!user && !isSuperadmin(req)) {
-        throw new OpenwopError('sign_in_required', 'Sign in to read the menu configuration.', 401, {});
-      }
       const layerTenant = user?.tenantId ?? tenantOf(req);
       // CHN-6: expose the tenant-layer version as an ETag so an editor can round-trip
       // it via If-Match on the next PUT (optimistic concurrency).
@@ -50,7 +46,11 @@ export function registerNavigationSettingsRoutes(deps: RouteDeps): void {
       if (user) {
         res.json(await getBundle(user.tenantId, user.userId));
       } else {
-        // Superadmin bearer with no user identity — the tenant layer only.
+        // No durable user — an anonymous session, or a superadmin bearer with
+        // no user identity: the caller's OWN tenant layer only. Menu config is
+        // presentation preference, not a secret; the nav rail reads it on every
+        // paint, so anonymous sessions get their (empty) own layer instead of a
+        // 401 per page (day-1 UX P2 — anon console noise). Writes stay gated.
         res.json(await getTenantBundle(tenantOf(req)));
       }
     } catch (err) { next(err); }

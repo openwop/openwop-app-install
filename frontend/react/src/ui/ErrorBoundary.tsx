@@ -11,6 +11,7 @@
  * route recovers without a full reload.
  */
 
+import { Button } from '../ui/Button.js';
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { StateCard } from './StateCard.js';
 import { AlertIcon, RotateCwIcon } from './icons/index.js';
@@ -65,6 +66,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
     if (this.props.fallback) return this.props.fallback(error, this.reset);
     return (
       <StateCard
+        announce
         icon={<AlertIcon size={26} />}
         title={i18n.t('ui:errorTitle')}
         body={
@@ -77,13 +79,12 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
           </>
         }
         action={
-          <button
-            type="button"
-            className="btn-accent-solid btn-sm"
+          <Button
+            variant="accent-solid" size="sm"
             onClick={this.props.onRecover ?? (() => window.location.reload())}
           >
             <RotateCwIcon size={14} aria-hidden /> {i18n.t('ui:errorReload')}
-          </button>
+          </Button>
         }
       />
     );

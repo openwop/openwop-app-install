@@ -78,7 +78,7 @@ async function boot(env: Record<string, string | undefined>): Promise<{ base: st
   // the default-off toggle 404s the handler and HTTP can't tell mounted-but-off from
   // unmounted. With the toggle ON, headless's 404 is unambiguously the route gate.
   await saveConfig({ ...voiceFeature.toggleDefault!, status: 'on' }, 'test');
-  const server = await new Promise<http.Server>((res) => { const s = app.listen(0, () => res(s)); });
+  const server = await new Promise<http.Server>((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
   return { base: `http://127.0.0.1:${(server.address() as AddressInfo).port}`, server };
 }
 const close = (s: http.Server) => new Promise<void>((res) => s.close(() => res()));

@@ -1,0 +1,160 @@
+{
+  "name": "feature.commerce.nodes",
+  "version": "1.3.1",
+  "description": "E-Commerce node pack (+ gap plan \u00a75B B5) \u2014 catalog, orders, order-ops (fulfill/refund), inventory, and coupons over ctx.features.commerce. Money-adjacent verbs ride the tenant's commerce-spend approval thresholds inside the service (B3).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "commerce",
+    "order",
+    "catalog",
+    "store"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.commerce.nodes.create-order",
+      "version": "1.0.0",
+      "label": "Commerce: Create order",
+      "description": "Create an order from product lines over ctx.features.commerce. Inputs: { orgId, lines:[{productId,quantity}], contactId?, couponCode? }. Output: { order }. role:action (recorded \u2192 replay-safe).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.list-products",
+      "version": "1.0.0",
+      "label": "Commerce: List products",
+      "description": "List the org's products over ctx.features.commerce. Inputs: { orgId, q? }. Output: { products }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.get-product",
+      "version": "1.0.0",
+      "label": "Commerce: Get Product",
+      "description": "Fetches one catalog product by id over ctx.features.commerce (org-scoped read). Inputs: { orgId, productId }. Output: the product read model.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.get-order",
+      "version": "1.0.0",
+      "label": "Commerce: Get order",
+      "description": "Fetch one order over ctx.features.commerce. Inputs: { orgId, orderId }. Output: { order }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.list-orders",
+      "version": "1.0.0",
+      "label": "Commerce: List orders",
+      "description": "List the org's orders over ctx.features.commerce. Inputs: { orgId }. Output: { orders }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.fulfill-order",
+      "version": "1.0.0",
+      "label": "Commerce: Update fulfillment",
+      "description": "Advance a paid order's fulfillment (processing/shipped/delivered \u2014 delivered flips the order to fulfilled). Inputs: { orgId, orderId, fulfillmentStatus }. Output: { order }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.refund-order",
+      "version": "1.0.0",
+      "label": "Commerce: Refund order",
+      "description": "Refund a paid/fulfilled order IN FULL. When the tenant has a Stripe key configured this issues a REAL Stripe refund (money leaves); with no key it flips state only. The output order's `refundProvider` says which ran: 'stripe' = money returned, 'none' = recorded only. Inventory restores either way. At/over the tenant's refund threshold this parks a commerce-spend approval and fails with approval_required until a human signs off (B3). Inputs: { orgId, orderId }. Output: { order }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.adjust-inventory",
+      "version": "1.0.0",
+      "label": "Commerce: Adjust inventory",
+      "description": "Set a physical product's inventory count. Inputs: { orgId, productId, inventory }. Output: { product }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.list-coupons",
+      "version": "1.0.0",
+      "label": "Commerce: List coupons",
+      "description": "List the org's coupons. Inputs: { orgId }. Output: { coupons }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.create-coupon",
+      "version": "1.0.0",
+      "label": "Commerce: Create coupon",
+      "description": "Create a coupon (percentage/fixed/free_shipping). Inputs: { orgId, code, type, value, currency? }. `currency` is REQUIRED-in-effect for type `fixed` — a fixed amount is only meaningful in a stated currency, and a fixed coupon whose currency differs from the order's does not apply. Output: { coupon }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.create-quote",
+      "version": "1.0.0",
+      "label": "Commerce: Create quote",
+      "description": "Draft a quote with C4-resolved (overridable) line prices. Inputs: { orgId, lines:[{productId,quantity,unitPrice?}], contactId?, companyId?, note? }. Output: { quote }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.get-quote",
+      "version": "1.0.0",
+      "label": "Commerce: Get quote",
+      "description": "Fetch one quote. Inputs: { orgId, quoteId }. Output: { quote }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.list-quotes",
+      "version": "1.0.0",
+      "label": "Commerce: List quotes",
+      "description": "List the org's quotes. Inputs: { orgId }. Output: { quotes }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.send-quote",
+      "version": "1.0.0",
+      "label": "Commerce: Send quote",
+      "description": "Mark a draft quote sent \u2014 at/over the tenant's order threshold this parks a commerce-spend approval (approval_required) until a human signs off. Inputs: { orgId, quoteId }. Output: { quote }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.commerce.nodes.resolve-price",
+      "version": "1.0.0",
+      "label": "Commerce: Resolve price",
+      "description": "The explainable price answer for one product + buyer context (contract entry > variant > list). Inputs: { orgId, productId, variantId?, contactId?, companyId? }. Output: { price, currency, source, priceListName? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

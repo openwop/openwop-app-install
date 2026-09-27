@@ -29,7 +29,7 @@ describe('run acting-user provenance (ADR 0024 §4 / D2)', () => {
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     storage = app.locals.storage;
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
     const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');
     workflowId = disco.body.fixtures?.[0] ?? 'openwop-app.uppercase';

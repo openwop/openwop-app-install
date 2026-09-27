@@ -14,10 +14,11 @@ const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..',
 const AGENT_PACK = join(REPO_ROOT, 'packs', 'feature.brand.agents');
 
 describe('feature.brand.nodes — node pack', () => {
-  it('exports the four brand node fns', () => {
+  it('exports the five brand node fns', () => {
     expect(Object.keys(nodePack).sort()).toEqual([
       'feature.brand.nodes.compliance-check',
       'feature.brand.nodes.get-app-identity',
+      'feature.brand.nodes.get-brand',
       'feature.brand.nodes.list-brands',
       'feature.brand.nodes.resolve-voice',
     ]);
@@ -93,10 +94,13 @@ describe('feature.brand.agents — agent pack', () => {
     expect(loaded.length).toBe(1);
     const steward = loaded[0];
     expect(steward.agentId).toBe('feature.brand.agents.brand-steward');
+    // CFP-1: the allowlist now names the REAL registered agent tools
+    // (`openwop:brand.<verb>`, resolvable in `builtinAgentToolIds()`), not the
+    // dead `feature.brand.nodes.*` node typeIds that no provider projected.
     expect(steward.toolAllowlist).toEqual([
-      'openwop:feature.brand.nodes.list-brands',
-      'openwop:feature.brand.nodes.resolve-voice',
-      'openwop:feature.brand.nodes.compliance-check',
+      'openwop:brand.list-brands',
+      'openwop:brand.resolve-voice',
+      'openwop:brand.compliance-check',
     ]);
   });
 });

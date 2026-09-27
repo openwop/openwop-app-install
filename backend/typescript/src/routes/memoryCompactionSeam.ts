@@ -24,8 +24,10 @@
  */
 
 import type { Express } from 'express';
+import { v1 } from '../middleware/protocolVersion.js';
 import { seedMemoryEntry, compactMemory } from '../host/inMemorySurfaces.js';
 import { createLogger } from '../observability/logger.js';
+import { sendError } from '../middleware/errorEnvelope.js';
 
 const log = createLogger('routes.memoryCompactionSeam');
 
@@ -40,14 +42,14 @@ export function registerMemoryCompactionSeamRoutes(app: Express): void {
   }
   log.warn('memory-compaction seam ENABLED — /v1/test/memory/{seed,compact} reachable. NEVER enable in production.');
 
-  app.post('/v1/test/memory/seed', (req, res) => {
+  app.post(v1('/test/memory/seed'), async (req, res) => {
     const body = (req.body ?? {}) as { memoryRef?: unknown; entries?: unknown };
     if (typeof body.memoryRef !== 'string' || body.memoryRef.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'memoryRef required' } });
+      sendError(res, 400, 'invalid_argument', 'memoryRef required');
       return;
     }
     if (!Array.isArray(body.entries) || body.entries.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'entries[] required' } });
+      sendError(res, 400, 'invalid_argument', 'entries[] required');
       return;
     }
     let seeded = 0;
@@ -58,7 +60,7 @@ export function registerMemoryCompactionSeamRoutes(app: Express): void {
         typeof (e as { content?: unknown }).content === 'string'
       ) {
         const entry = e as { id: string; content: string; tags?: unknown };
-        seedMemoryEntry(SEAM_TENANT, body.memoryRef, {
+        await seedMemoryEntry(SEAM_TENANT, body.memoryRef, {
           id: entry.id,
           content: entry.content,
           ...(Array.isArray(entry.tags)
@@ -71,15 +73,15 @@ export function registerMemoryCompactionSeamRoutes(app: Express): void {
     res.status(201).json({ seeded });
   });
 
-  app.post('/v1/test/memory/compact', (req, res) => {
+  app.post(v1('/test/memory/compact'), async (req, res) => {
     const body = (req.body ?? {}) as { memoryRef?: unknown };
     if (typeof body.memoryRef !== 'string' || body.memoryRef.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'memoryRef required' } });
+      sendError(res, 400, 'invalid_argument', 'memoryRef required');
       return;
     }
-    const result = compactMemory(SEAM_TENANT, body.memoryRef);
+    const result = await compactMemory(SEAM_TENANT, body.memoryRef);
     if (!result) {
-      res.status(400).json({ error: { code: 'nothing_to_compact', message: 'no live entries under memoryRef' } });
+      sendError(res, 400, 'nothing_to_compact', 'no live entries under memoryRef');
       return;
     }
     res.status(200).json({

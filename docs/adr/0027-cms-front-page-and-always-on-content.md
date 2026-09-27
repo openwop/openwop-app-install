@@ -263,3 +263,61 @@ id (per the `no-parallel-architecture` rule). The only new thing is the AUTHORIT
 Net: out of the box `/` serves a seeded, **super-admin-editable** homepage
 (Admin → Content → "Front page", reusing the shared `SectionsEditor`), regardless
 of any tenant. No env, no per-tenant pointer.
+
+## Amendment (2026-07-05): collapse "Front page" into the CMS Page Builder
+
+The 2026-06-12 Option A above gave the homepage its own admin surface —
+`Admin → Content → "Front page"` (`FrontPageSettingsPanel`), a bespoke
+`requireSuperadmin`-gated `GET/PUT /v1/host/openwop-app/site-page` route, and a
+124-line editor. That surface reused the CMS **components** (`SectionsEditor` /
+`SectionRenderer`) but NOT the CMS **editing model**: the homepage — arguably the
+most important page in the app — silently lost the editorial workflow, version
+history/restore, page experiments (ADR 0236), tags, and locale governance
+(ADR 0205) that every org page has. Two editors over one page store is the
+duplication this amendment removes.
+
+**Decision:** the public homepage is edited as a **scope inside the CMS Page
+Builder** (`/cms`), not a separate surface.
+
+1. **Reserved-org CMS authority (`requireCmsScope`).** A new guard localizes the
+   host-authority exception to the CMS route family: when the path org is the
+   reserved `host-site`, authorize on `requireSuperadmin` (host authority);
+   otherwise delegate to the untouched shared `requireOrgScope`. This is strictly
+   narrower than the "relax `requireOrgScope` everywhere" alternative the Option-A
+   note rejected — it is one reserved org, and the shared cross-tenant guard stays
+   byte-for-byte pristine. A non-superadmin gets the **same 404** any foreign org
+   yields, so the reserved org's editability stays invisible in the authenticated
+   CMS namespace. A real tenant can never collide with `host-site` (the create-org
+   route only accepts `name`/`description`; ids are server-minted `org-<uuid>`).
+   The net effect: a super admin drives the WHOLE CMS route family (pages,
+   versions, experiments, i18n, workflow) on the homepage through
+   `/cms/orgs/host-site/*` — **zero new route surface**.
+
+2. **"Front page" as a picker scope.** `CmsPage` surfaces the reserved site as a
+   "Front page (public site)" scope (a `<optgroup>` "System" in the workspace
+   picker), gated by a successful superadmin `site-config` probe (a non-superadmin
+   never sees it). The **"show the front page at /"** on/off switch moves into that
+   scope. Media is skipped for the system scope (no org media library — the front
+   page uses pasted tokens, parity with the old panel).
+
+3. **Retire the duplication.** Deleted: the `/front-page` nav + route, the
+   `FrontPageSettingsPanel`, the bespoke `/site-page` route + `editSystemHomePage`,
+   and the now-dead `getSitePage`/`putSitePage` client + panel-only i18n.
+   `getSystemHomePage` is retained (the example-data seeders read it); the boot
+   seed + the public Publishing render (`/public/host-site/pages/home`) are
+   unchanged.
+
+**Accepted coupling.** `CmsPage` (feature `cms`) now imports `siteConfigClient`
+(feature `site`) for the on/off switch — a thin, cycle-free cross-feature client
+edge (`siteConfigClient` depends only on `client/config`, never on `cms`).
+Justified: the front page's visibility is now a CMS concern, and `site` is already
+the public face of `cms` (`site/FrontPage` imports `cms/SectionRenderer`). Not a
+parallel system, not a namespace collision.
+
+- Reject — expand `/site-page` to mirror the CMS route family: trades editor
+  duplication for route-surface duplication; the same "two of everything" smell.
+- Reject — leave the standalone panel: perpetuates the capability gap (homepage
+  frozen out of workflow/versions/experiments) and two editors that drift.
+
+No RFC needed — all surfaces are non-normative `/v1/host/openwop-app/*` host
+extensions; the wire is untouched.

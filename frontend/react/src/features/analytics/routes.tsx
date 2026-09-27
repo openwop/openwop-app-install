@@ -9,12 +9,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/analytics',
     element: <AnalyticsPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'Workspace',
-      label: 'Analytics',
+      group: 'CRM',
+      label: 'Analytics', labelKey: 'analyticsLabel',
       icon: ActivityIcon,
-      hint: 'Traffic + conversions on the public surface',
+      hint: 'Traffic + conversions on the public surface', hintKey: 'analyticsHint',
       featureId: 'analytics',
     },
   },

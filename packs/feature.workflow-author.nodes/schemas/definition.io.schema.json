@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://openwop.dev/packs/feature.workflow-author.nodes/definition.io.schema.json",
+  "$id": "https://packs.openwop.dev/feature.workflow-author.nodes/1.0.4/definition.io.schema.json",
   "title": "Workflow Author Definition Port",
   "type": "object",
   "required": ["definition"],

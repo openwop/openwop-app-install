@@ -9,13 +9,15 @@
  * host, including hosts that haven't deployed CLI-specific endpoints yet.
  */
 
+import { Button } from './ui/Button.js';
 import type { ReactNode } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
+import { brand } from './brand/brand.js';
 import i18n from './i18n/index.js';
 import { PageHeader } from './ui/PageHeader.js';
 import { DataTable, type DataColumn } from './ui/DataTable.js';
 import { IconButton } from './ui/IconButton.js';
-import { toast } from './ui/toast.js';
+import { copyToClipboard } from './ui/copyToClipboard.js';
 import {
   ClipboardIcon,
   LinkIcon,
@@ -29,13 +31,7 @@ const INSTALL_CMD = 'npm install -g @openwop/cli';
 const CLI_REPO = 'https://github.com/openwop/openwop-cli';
 
 function copy(text: string, label?: string): void {
-  const message = label ?? i18n.t('chrome:cliCommandCopied');
-  void navigator.clipboard
-    ?.writeText(text)
-    .then(() => toast.success(message))
-    .catch(() => {
-      /* clipboard blocked */
-    });
+  void copyToClipboard(text, label ?? i18n.t('chrome:cliCommandCopied'));
 }
 
 function Cmd({ children }: { children?: ReactNode }) {
@@ -54,7 +50,9 @@ function CommandBlock({ children, copyLabel }: { children: string; copyLabel?: s
           onClick={() => copy(children, copyLabel)}
         />
       </div>
-      <pre>{children}</pre>
+      {/* tabIndex=0 keeps the horizontally-scrollable snippet reachable by
+          keyboard (WCAG 2.1.1 / axe scrollable-region-focusable). */}
+      <pre tabIndex={0}>{children}</pre>
     </div>
   );
 }
@@ -214,7 +212,7 @@ const CATALOG_COLUMNS: DataColumn<CatalogEntry>[] = [
     key: 'group',
     header: i18n.t('chrome:cliColGroup'),
     width: '160px',
-    render: (row) => <span className="chip chip--accent">{row.group}</span>,
+    render: (row) => <span className="chip chip--muted">{row.group}</span>,
   },
   {
     key: 'commands',
@@ -276,20 +274,19 @@ const ADAPTERS: Adapter[] = [
 export function CliPage() {
   const { t } = useTranslation('chrome');
   return (
-    <section className="cli-page page-stack">
+    <section data-walkthrough="cli.page" className="cli-page page-stack">
       <PageHeader
         eyebrow={t('cliEyebrow')}
         title={t('cliTitle')}
         lede={<Trans t={t} i18nKey="cliLede" components={{ 0: <Cmd />, 1: <strong />, 2: <Cmd /> }} />}
         actions={
           <>
-            <button
-              type="button"
-              className="btn-primary u-iflex u-gap-1"
+            <Button
+              variant="primary" className="u-iflex u-gap-1"
               onClick={() => copy(INSTALL_CMD, t('cliInstallCommandCopied'))}
             >
               <ClipboardIcon size={15} /> {t('cliCopyInstall')}
-            </button>
+            </Button>
             <a className="btn-ghost u-iflex u-gap-1" href={CLI_REPO}>
               <LinkIcon size={15} /> {t('cliSourceAndIssues')}
             </a>
@@ -314,7 +311,7 @@ openwop --version`}</CommandBlock>
         <p>
           <Trans t={t} i18nKey="cliPointBody" components={{ 0: <Cmd />, 1: <Cmd />, 2: <Cmd /> }} />
         </p>
-        <CommandBlock>{`export OPENWOP_BASE_URL=https://app.openwop.dev/api
+        <CommandBlock>{`export OPENWOP_BASE_URL=https://${brand.primaryDomain}/api
 openwop onboard           # interactive auth + key issuance
 openwop doctor            # check connectivity + capability surface
 openwop capabilities      # read /.well-known/openwop`}</CommandBlock>
@@ -389,7 +386,6 @@ openwop a2a task <taskId>`}</CommandBlock>
           columns={CATALOG_COLUMNS}
           rows={CATALOG}
           rowKey={(row) => row.group}
-          density="comfortable"
           caption={t('cliCatalogCaption')}
         />
       </section>

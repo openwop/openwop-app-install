@@ -11,6 +11,7 @@
  * @see agents/AgentWorkflowPortfolioPanel.tsx, features/projects/ProjectWorkflowsTab.tsx
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
@@ -123,12 +124,12 @@ export function AssignWorkflowModal({ workflow, onClose }: Props): JSX.Element {
             )}
           </SelectField>
           <div className="u-flex u-gap-2 u-justify-end u-mt-2">
-            <button type="button" className="btn-secondary" onClick={onClose} disabled={submitting}>
+            <Button variant="secondary" onClick={onClose} disabled={submitting}>
               {t('common:cancel')}
-            </button>
-            <button type="submit" className="btn-accent-solid" disabled={submitting || !selected}>
+            </Button>
+            <Button type="submit" variant="accent-solid" disabled={submitting || !selected}>
               {t('assignButton')}
-            </button>
+            </Button>
           </div>
         </form>
       )}

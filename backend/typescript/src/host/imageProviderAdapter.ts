@@ -12,8 +12,46 @@
  */
 import { fetch as undiciFetch } from 'undici';
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
+// ADR 0244 — broker-resolve the api_key (a host→features/connections edge, the
+// `host/smtpSend.ts` precedent). Endpoint stays env; the CREDENTIAL comes from a
+// per-tenant KMS-enveloped Connection when installed.
+import { resolveConnectionCredential } from '../features/connections/connectionsService.js';
+// ADR 0253 — RFC 0079 connection-use provenance: when a broker-resolved Connection
+// (not the env key) actually served the image call, stamp it onto the run so the
+// use surfaces in run.metadata.connectionUse (parity with ads/email/sms). Storage
+// comes from the public host-ext accessor (the image seam isn't handed deps.storage
+// — the ADR 0244 deferral blocker), NOT AdapterScope surgery.
+import { stampConnectionUse } from './connectionInjection.js';
+import { hostExtStorage } from './hostExtPersistence.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.imageProviderAdapter');
+type Provenance = Parameters<typeof stampConnectionUse>[2];
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+
+/** ADR 0244 — the RFC 0095 connection-pack provider id backing each image-seam
+ *  provider (explicit map; an unknown provider skips the broker → env fallback). */
+function connectionProviderIdFor(provider?: string): string | undefined {
+  if (provider === 'openai') return 'openai-images';
+  if (provider === 'google') return 'google-imagen';
+  return undefined;
+}
+
+/** ADR 0244 — resolve the image api_key: a workspace-scoped Connection (KMS,
+ *  per-tenant, rotatable) WINS over the host-wide env key; env is the fallback.
+ *  Tenant-scoped resolution — only a workspace Connection self-authorizes (no
+ *  acting user on the image scope); org/user connections are withheld. */
+async function resolveImageKey(provider: string | undefined, tenantId: string | undefined): Promise<{ secret?: string; provenance?: Provenance }> {
+  const connProvider = tenantId ? connectionProviderIdFor(provider) : undefined;
+  if (connProvider) {
+    const resolved = await resolveConnectionCredential({ tenantId: tenantId!, provider: connProvider }).catch(() => null);
+    // Broker Connection wins — carry its provenance so a successful call can be
+    // stamped (ADR 0253). The env key (below) has no Connection to stamp.
+    if (resolved?.secret) return { secret: resolved.secret, provenance: resolved.provenance };
+  }
+  return { secret: imageApiKey(provider) };
+}
 
 /** ADR 0115 Phase 6 — per-PROVIDER endpoint resolution. A provider-specific
  *  `OPENWOP_IMAGE_PROVIDER_ENDPOINT_<PROVIDER>` (e.g. `_OPENAI`, `_GOOGLE` for Imagen)
@@ -43,10 +81,11 @@ export function imageProviderConfigured(provider?: string): boolean {
 
 export interface RawImage { base64: string; mimeType: string }
 
-export async function dispatchImageGeneration(req: { prompt: string; model?: string; size?: string; n: number; provider?: string }): Promise<RawImage[]> {
+export async function dispatchImageGeneration(req: { prompt: string; model?: string; size?: string; n: number; provider?: string; tenantId?: string; runId?: string }): Promise<RawImage[]> {
   const endpoint = imageEndpoint(req.provider);
   if (!endpoint) throw new Error('image_provider_not_configured');
-  const apiKey = imageApiKey(req.provider);
+  // ADR 0244 — broker key (per-tenant Connection) wins over the env key.
+  const { secret: apiKey, provenance } = await resolveImageKey(req.provider, req.tenantId);
   let url: URL;
   try { url = new URL(endpoint); } catch { throw new Error('image_provider_misconfigured'); }
   // SSRF guard (the ADR 0108 compat pattern) — never echo the endpoint (§D).
@@ -75,6 +114,20 @@ export async function dispatchImageGeneration(req: { prompt: string; model?: str
     clearTimeout(timer);
   }
   if (!res.ok) throw new Error('image_provider_error'); // §D — no status/endpoint echo
+  // ADR 0253 — the call SUCCEEDED; if a broker Connection (not the env key) served
+  // it, stamp the use (RFC 0079) onto the run. Best-effort + dedup-by-connectionId
+  // (a provider-rejected call above never reaches here, so a use isn't recorded for
+  // a failed send — the ads/sms/smtp discipline). Env-key path: no provenance, no stamp.
+  if (provenance && req.runId) {
+    // Fully isolated — `hostExtStorage()` throws synchronously if boot hasn't wired
+    // persistence, which the promise `.catch` would NOT catch; a best-effort audit
+    // stamp must never break the (already-succeeded) image generation.
+    try {
+      await stampConnectionUse(hostExtStorage(), req.runId, provenance);
+    } catch (e) {
+      log.warn('image connectionUse stamp failed', { error: e instanceof Error ? e.message : String(e) });
+    }
+  }
   const body = (await res.json()) as { images?: Array<{ base64?: unknown; b64_json?: unknown; mimeType?: unknown }> };
   const out: RawImage[] = [];
   for (const img of body.images ?? []) {

@@ -6,6 +6,15 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
+import * as undici from 'undici';
+
+// oauthFlow's token POST goes through the SSRF-guarded egress (undici fetch), whose
+// export can't be spied (non-configurable) — mock the module with a passthrough
+// default so only the token-refresh test overrides it (Agent etc. stay real).
+vi.mock('undici', async (orig) => {
+  const actual = await orig<typeof import('undici')>();
+  return { ...actual, fetch: vi.fn(actual.fetch) };
+});
 import { createApp } from '../src/index.js';
 import { BACKEND_FEATURES } from '../src/features/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
@@ -46,7 +55,7 @@ describe('Connections feature (sqlite memory app)', () => {
     await __clearToggleStore();
     await __resetConnectionsStore();
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
   afterAll(async () => {
@@ -127,14 +136,29 @@ describe('Connections feature (sqlite memory app)', () => {
     expect(url.searchParams.get('redirect_uri')).toContain('/v1/host/openwop-app/connections/google/callback');
   });
 
-  it('callback with a bad state bounces the browser back with connectError (never a JSON 4xx)', async () => {
+  it('callback with a bad state is REFUSED (4xx) yet still returns the browser with connectError (ADR 0753 D1)', async () => {
     const res = await fetch(`${BASE}/v1/host/openwop-app/connections/google/callback?state=nope&code=abc`, {
       headers: { authorization: `Bearer ${TOKEN}` },
       redirect: 'manual',
     });
+    // A host refusal is observable as a refusal (RFC 0199 §A.2) …
+    expect(res.status).toBe(400);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('content-security-policy')).toBe("default-src 'none'");
+    // … and the page still sends the browser to the SPA with the same params.
+    const html = await res.text();
+    const target = /http-equiv="refresh" content="0;url=([^"]+)"/.exec(html)?.[1]?.replace(/&amp;/g, '&') ?? '';
+    expect(target).toContain('connectError=google');
+    expect(target).toContain('reason=invalid_state');
+  });
+
+  it('a provider-reported error (the user declined at the provider) is still a plain 302', async () => {
+    const res = await fetch(`${BASE}/v1/host/openwop-app/connections/google/callback?error=access_denied`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+      redirect: 'manual',
+    });
     expect([302, 303]).toContain(res.status);
-    expect(res.headers.get('location')).toContain('connectError=google');
-    expect(res.headers.get('location')).toContain('reason=invalid_state');
+    expect(res.headers.get('location')).toContain('reason=consent_denied');
   });
 
   it('authorize with write:true requests the provider write scopes (Phase C re-consent)', async () => {
@@ -206,8 +230,10 @@ describe('OAuth2 token material — store, resolve, refresh-on-expiry (ADR 0024 
 
   /** Stub global fetch with one canned token-endpoint JSON response. */
   function stubTokenEndpoint(body: Record<string, unknown>, ok = true): void {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify(body), { status: ok ? 200 : 400, headers: { 'content-type': 'application/json' } }),
+    // The token endpoint (https://oauth2.googleapis.com) passes the SSRF guard's
+    // public-host precheck; this stub answers the undici egress instead of the network.
+    vi.mocked(undici.fetch).mockResolvedValue(
+      new undici.Response(JSON.stringify(body), { status: ok ? 200 : 400, headers: { 'content-type': 'application/json' } }),
     );
   }
 

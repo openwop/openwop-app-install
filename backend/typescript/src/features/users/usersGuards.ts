@@ -89,7 +89,14 @@ export async function resolveCallerUser(req: Request): Promise<User> {
       principalId.startsWith('oidc:') || principalId.startsWith('user:')
         ? 'oidc'
         : reconcilableSource(principalId) ?? 'oidc';
-    return resolveCanonicalUserForTenant({ homeTenant, principalId, source });
+    // ADR 0622 D7 / USERS-20 — the bearer's IdP-VERIFIED email (the middleware
+    // surfaces it ONLY under `email_verified: true`) rides into the canonical
+    // fold, so an OIDC user's row carries an `'idp'` address without a bind
+    // call. Cookie-only requests carry none and leave the row as it is.
+    return resolveCanonicalUserForTenant({
+      homeTenant, principalId, source,
+      ...(req.oidcEmail ? { email: req.oidcEmail } : {}),
+    });
   }
   if (req.userId) {
     const user = await getUser(req.userId);

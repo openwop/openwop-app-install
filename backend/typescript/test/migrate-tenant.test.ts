@@ -21,6 +21,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { authMiddleware, _resetOidcVerifier } from '../src/middleware/auth.js';
+import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { usersSessionAuthority } from '../src/features/users/feature.js';
 import { registerMigrateRoute } from '../src/routes/migrate.js';
 import { openStorage } from '../src/storage/index.js';
 import {
@@ -55,7 +57,7 @@ async function startSyntheticIssuer(audience: string): Promise<SyntheticIssuer> 
   const jwks = { keys: [{ ...pubJwk, kid, alg: 'RS256', use: 'sig' }] };
   const app = express();
   app.get('/.well-known/jwks.json', (_req, res) => res.json(jwks));
-  const server = await new Promise<http.Server>((r) => { const s = app.listen(0, () => r(s)); });
+  const server = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   const port = (server.address() as { port: number }).port;
   const issuer = `http://127.0.0.1:${port}`;
   return {
@@ -105,6 +107,13 @@ beforeAll(async () => {
   process.env.OPENWOP_OIDC_JWKS_URL = issuer.jwksUrl;
   process.env.OPENWOP_SESSION_SECRET = SESSION_SECRET;
   process.env.OPENWOP_BYOK_EPHEMERAL = 'true';
+  // ADR 0621 rev. 2 — the unbound OIDC lane now consults the session authority
+  // (no permissive default on the seam). This harness mounts the bare
+  // middleware with NO host-ext persistence and no users store, so the honest
+  // unbound-lane answer is "no durable row was ever bound" (`null`); the
+  // `userId` read is the feature's real one (never reached — no bound cookie).
+  registerSessionAuthority(usersSessionAuthority);
+  registerPersonalTenantSessionAuthority(async () => null);
   _resetOidcVerifier();
 
   storage = await openStorage('memory://');
@@ -125,7 +134,7 @@ beforeAll(async () => {
       message: e.message ?? 'internal error',
     });
   });
-  appServer = await new Promise<http.Server>((r) => { const s = app.listen(0, () => r(s)); });
+  appServer = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   appPort = (appServer.address() as { port: number }).port;
 });
 
@@ -229,14 +238,42 @@ describe('P3.5 anon → user migration', () => {
     expect(await listSecretRefs({ tenantId: anonTenantId })).toEqual([]);
   });
 
-  it('expires the anon cookie via Set-Cookie max-age=0', async () => {
+  // ADR 0434 Phase 2 — DELIBERATELY OVERTURNED. This asserted that a successful
+  // adoption EXPIRED the session cookie ("so the next request carries only the
+  // bearer"). But the auth middleware appends its own Set-Cookie on this same
+  // response, PROMOTING that cookie to user-tier. Two Set-Cookie headers with
+  // the same name and path — the later one wins, so this route silently threw
+  // away the promotion and the browser finished sign-in with NO cookie.
+  //
+  // That is what left devices bearer-only, and a bearer-only device that hits a
+  // token-rotation race had nothing to fall back to — the fresh-anon-tenant bug
+  // (see auth-bearer-cookie-fallthrough.test.ts). The promoted user-tier cookie
+  // must SURVIVE. The anon session is not stranded by keeping it: it was
+  // promoted in place, and its data was just folded into the user tenant.
+  it('PRESERVES the promoted user-tier cookie — never expires it', async () => {
     const sid = 'sid-cookie-clear';
     const token = issuer.mint({ sub: 'firebase-uid-cookie-clear' });
     const res = await callMigrate(token, mintAnonCookie(sid));
     expect(res.status).toBe(200);
     const setCookie = res.headers.get('set-cookie');
-    expect(setCookie).toBeTruthy();
-    expect(setCookie!).toContain(`${COOKIE_NAME}=`);
-    expect(setCookie!).toContain('Max-Age=0');
+
+    // §Correction — this was `if (setCookie) { expect(...) }`, which PASSES when
+    // the response carries no cookie at all. "Ending sign-in cookie-less" is
+    // precisely the defect the docblock above describes, so the guard admitted
+    // the thing it was written to catch. It also never checked the TIER, while
+    // the whole point is that the PROMOTED user-tier cookie survives.
+    expect(setCookie, 'sign-in must not end cookie-less — that is the defect').toBeTruthy();
+    expect(setCookie, 'the cookie must not be a deletion').not.toContain('Max-Age=0');
+
+    // Decode the payload and assert the promotion actually happened: a
+    // surviving ANON cookie would satisfy "not a deletion" while leaving the
+    // device exactly as un-promoted as no cookie at all.
+    const raw = /(?:^|[;,\s])__session=([^;]+)/.exec(setCookie!)?.[1];
+    expect(raw, 'no __session cookie in the Set-Cookie header').toBeTruthy();
+    const payload = JSON.parse(
+      Buffer.from(raw!.split('.')[0]!.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+    ) as { tier?: string; tenantId?: string };
+    expect(payload.tier, 'the surviving cookie must be USER-tier — an anon one is not a promotion').toBe('user');
+    expect(payload.tenantId, 'and it must name the user tenant').toMatch(/^user:/);
   });
 });

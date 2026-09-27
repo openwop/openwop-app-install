@@ -2,7 +2,7 @@
  * check-theme-stock (ADR 0171 Phase B) — token-tier drift guard.
  *
  * The brand theme generator's STOCK constants (src/brand/theme/generate.ts) and the
- * stock token literals in src/styles/global.css are mirrors across the JS↔CSS
+ * stock token literals in src/styles/foundations/tokens.css are mirrors across the JS↔CSS
  * boundary (CSS can't import the TS constants). This gate fails if they drift, so
  * changing a stock token in one file forces the matching change in the other — the
  * "default seed-set reproduces the current literals" invariant, enforced at the
@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const css = readFileSync(join(root, 'src/styles/global.css'), 'utf8');
+const css = readFileSync(join(root, 'src/styles/foundations/tokens.css'), 'utf8');
 const gen = readFileSync(join(root, 'src/brand/theme/generate.ts'), 'utf8');
 
 // Tokens the generator OWNS (alpha-derived accent variants stay CSS relative-color).

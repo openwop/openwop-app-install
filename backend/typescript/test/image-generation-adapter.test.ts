@@ -16,7 +16,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, res); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
   const hostSuite = app.locals.hostSuite as HostAdapterSuite;
   adapter = createAiProvidersAdapter({
     runId: 'img-run', nodeId: 'image.generate', tenantId: 'default', attempt: 1,

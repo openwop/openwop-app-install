@@ -27,9 +27,11 @@
  */
 
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, renameSync, rmSync, statSync, symlinkSync, mkdirSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createLogger } from '../observability/logger.js';
+import { isTombstoned } from '../host/packTombstones.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 
 const log = createLogger('bootstrap.mountLocalPacks');
@@ -57,6 +59,18 @@ export function localPackPrefixes(): string[] {
   return [...DEFAULT_LOCAL_PACK_PREFIXES];
 }
 
+/**
+ * A directory PARKED by the shadow pass below (`<name>.registry-<version>`) —
+ * preserved so the superseded registry install is recoverable, but it must
+ * NEVER be loaded: its pack.json still declares the ORIGINAL pack name, so a
+ * scanner that iterates it loads a stale manifest that (iterating after the
+ * live dir alphabetically) overwrites the fresh registration. Every
+ * `readdirSync(<pack dir>)` scanner must skip entries matching this.
+ */
+export function isParkedPackDirName(name: string): boolean {
+  return /\.registry-[0-9]/.test(name);
+}
+
 export interface MountResult {
   /** Directories mounted on this run (excludes pre-existing). */
   mounted: string[];
@@ -66,6 +80,15 @@ export interface MountResult {
    *  (when not in OPENWOP_STRICT_REGISTRY=true mode). The old dir is
    *  renamed to `<name>.registry-<version>` so it's recoverable. */
   shadowed: string[];
+  /** WF-CMNT-10 — packs whose local copy DIFFERS from the registry install at the
+   *  SAME declared version: somebody edited a pack and forgot the bump.
+   *
+   *  DETECTED, not acted on. This is deliberately NOT a subset of `shadowed`: the
+   *  registry install keeps serving and this list is the diagnostic. See the long
+   *  note at the detection site for why reporting is the whole remedy here. */
+  driftDetected?: string[];
+  /** Symlinks removed because their source checkout no longer exists. */
+  pruned?: string[];
   /** Whether mounting was disabled via env. */
   disabled: boolean;
 }
@@ -84,7 +107,7 @@ export function ensureLocalPacksMounted(): MountResult {
   const localDir = resolveLocalPacksDir();
   if (!localDir || !existsSync(localDir)) {
     log.info('no local packs dir to mount', { searched: localDir ?? '<not-found>' });
-    return { mounted: [], skipped: [], shadowed: [], disabled: false };
+    return { mounted: [], skipped: [], shadowed: [], pruned: [], disabled: false };
   }
 
   const destDir = resolveDefaultPackDir();
@@ -95,9 +118,13 @@ export function ensureLocalPacksMounted(): MountResult {
   const mounted: string[] = [];
   const skipped: string[] = [];
   const shadowed: string[] = [];
+  /** WF-CMNT-10 — same-version content drift, DETECTED (never acted on). */
+  const driftDetected: string[] = [];
 
   for (const entry of readdirSync(localDir)) {
     if (!shouldMount(entry)) continue;
+    // ADR 0194 P4: a tombstoned (removed-from-host) pack is never re-mounted.
+    if (isTombstoned(entry)) { skipped.push(entry); continue; }
     const src = join(localDir, entry);
     if (!statSync(src).isDirectory()) continue;
     if (!existsSync(join(src, 'pack.json'))) continue;
@@ -135,6 +162,123 @@ export function ensureLocalPacksMounted(): MountResult {
       if (isSymlinkToRepo(dest, src)) {
         skipped.push(entry);
         continue;
+      }
+      // A destination with NO READABLE MANIFEST is rubble, not an install.
+      //
+      // `shouldShadow()` returns false when either side's version is
+      // unreadable, so a registry dir whose `pack.json` is missing or corrupt
+      // could never be shadowed — and the `existsSync(dest)` branch below then
+      // skips it. Net effect: the broken directory permanently blocks the
+      // vendored copy, with no repair path short of deleting it by hand.
+      //
+      // MEASURED 2026-08-13: `~/.openwop-packs/core.openwop.ai` held ONLY
+      // `.openwop-installed.json` — no `pack.json`, no `index.mjs`. That pack
+      // provides `core.ai.structuredOutput`, so eight conformance scenarios
+      // failed for want of a node type and were quarantined as undiagnosed host
+      // failures. The host was fine; the directory was rubble that nothing could
+      // clear.
+      //
+      // "Don't clobber registry installs" is the right instinct and still holds
+      // for every dir that HAS a manifest — shadowing there stays version-gated.
+      // This branch only fires when there is nothing to protect. It is also
+      // deliberately NOT gated on `preferLocal`: `OPENWOP_STRICT_REGISTRY=true`
+      // means "prefer the signed registry copy", not "keep an unloadable one".
+      // Under ADR 0555 P0 the replacement is still trust-classified like any
+      // other mount, so this cannot launder untrusted code into a trusted slot.
+      if (readManifestVersion(dest) === null) {
+        try {
+          rmSync(dest, { recursive: true, force: true });
+          symlinkSync(src, dest, 'dir');
+          mounted.push(entry);
+          log.warn('replaced an unloadable pack dir (no readable pack.json) with the vendored copy', {
+            pack: entry,
+            destDir: dest,
+            localVersion: readManifestVersion(src),
+          });
+        } catch (err) {
+          log.warn('failed to replace unloadable pack dir', {
+            pack: entry,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          skipped.push(entry);
+        }
+        continue;
+      }
+      // WF-CMNT-10 — same-version content drift is REPORTED, never acted on.
+      //
+      // THE OBSERVATION. The node lane's only precedence rule is `shouldShadow`,
+      // a STRICT `>`, so an EQUAL version leaves the registry-installed copy in
+      // place and records the miss in `skipped` with no WARN and no content
+      // compare. Every pack is born at 1.0.0, so a pack FIX that forgot a version
+      // bump is inert on a registry-installing host — and that host looks
+      // identical to one that never received it.
+      //
+      // ── WHY THIS IS A LOG LINE AND NOT A SHADOW (corrected before merge) ──
+      //
+      // The first version of this code ALSO shadowed on drift: it renamed the
+      // registry install aside and symlinked the repo copy over it. That was
+      // wrong in three independent ways, and it is worth recording all three so
+      // the idea is not re-proposed.
+      //
+      //  1. It DOWNGRADES TRUST, and under ADR 0555 P0 that means it can kill a
+      //     working pack. The parked dir is `operator-trusted` — Ed25519 + SRI
+      //     verified at install and RE-verified on every load
+      //     (`registryInstaller.verifyInstalledPack`). The symlink replacing it is
+      //     only `steward` if `packs/.steward-manifest.json` carries a MATCHING
+      //     digest (`host/packTrust.classifyPackDir`); otherwise it is
+      //     `no_attestation` → `untrusted` → `dispatchable: false`. The manifest
+      //     is a SEPARATE CI-gated artifact (`scripts/ci.sh` → `gen-steward-
+      //     manifest.mjs --check`), so a developer who edited a pack and forgot
+      //     the version bump has, with the same keystroke, almost certainly not
+      //     regenerated it. The pack would go from STALE to DEAD — and the parked
+      //     `<name>.registry-<version>` dir is skipped by every scanner
+      //     (`isParkedPackDirName`), so the working copy is present-but-unloadable
+      //     by design and the operator sees a pack that vanished.
+      //
+      //  2. It is a THIRD opinion on a question two seams already own, and the
+      //     only one that mutates state to express it. `check-pack-version-bump.mjs`
+      //     (run from `scripts/ci.sh`) refuses the MERGE on exactly this mistake —
+      //     fail-closed, repo-wide, and explicitly de-vacuumed for node packs.
+      //     `check-pack-pin-drift.mjs` covers repo-vs-production. A boot-time WARN
+      //     cannot refuse anything, so it must not pretend to be the enforcement.
+      //
+      //  3. It was not needed by its own motivating change: the pack that prompted
+      //     this (`feature.comments.nodes`) bumped 1.0.0 → 1.1.0, which the
+      //     pre-existing `shouldShadow` already handles. And `feature.*` packs are
+      //     never registry-installed at all (`check-pack-pin-drift.mjs`'s MANAGED =
+      //     `/^(core\.openwop\.|vendor\.)/`), so for that pack there is never a
+      //     marker-carrying dir here to shadow.
+      //
+      // ── REACHABILITY, STATED PLAINLY (do not overclaim this) ──
+      //
+      // This branch needs `dest` to already EXIST. Mount runs BEFORE the registry
+      // installer (`index.ts`), so on a fresh Cloud Run container the pack dir is
+      // empty and this cannot fire — `OPENWOP_STRICT_REGISTRY` is irrelevant to
+      // that. It is NOT production coverage. Its real population is hosts with a
+      // PERSISTENT pack dir: dev boxes, and self-hosted white-label operators
+      // running a volume. For production the cure is unchanged and lives
+      // elsewhere: republish to the registry and advance the pin (DEPLOY.md,
+      // "Vendoring a pack is NOT shipping it").
+      //
+      // NOT gated on `preferLocal`. It is a pure log line with no blast radius,
+      // and under `OPENWOP_STRICT_REGISTRY=true` the state it names — the repo
+      // vendors one thing, the host runs another — is precisely the pin-drift
+      // class that is worth the most. Gating the diagnostic on the flag would
+      // silence it exactly where it is most informative.
+      //
+      // Identical content is silent: there is nothing to say and nothing to fix.
+      const drift = sameVersionContentDrift(src, dest);
+      if (drift) {
+        // The message states the FACT and the remedy. It deliberately does not
+        // say "shadowing it" — nothing is shadowed here, and a log line that
+        // asserts an action it did not take is worse than no log line.
+        log.warn('local pack DIFFERS from the registry install at the SAME version — the REGISTRY copy is being served; bump the pack version, republish, and advance the pin', {
+          pack: entry,
+          version: readManifestVersion(src) ?? 'unknown',
+          localDir: src,
+          registryDir: dest,
+        });
+        driftDetected.push(entry);
       }
       if (preferLocal && shouldShadow(src, dest)) {
         const installedVer = readManifestVersion(dest) ?? 'unknown';
@@ -183,15 +327,57 @@ export function ensureLocalPacksMounted(): MountResult {
     }
   }
 
+  // ── PRUNE DANGLING MOUNTS (worktree-teardown hygiene) ────────────────────
+  //
+  // The re-point branch above only heals packs THIS repo also has. A pack that
+  // exists solely in some other checkout leaves a symlink here that outlives
+  // that checkout: `git worktree remove` deletes the target and nothing ever
+  // revisits the link.
+  //
+  // OBSERVED, not hypothetical (2026-08-06): all 180 symlinks in a developer's
+  // `~/.openwop-packs` were dangling at once — 174 of them from a single
+  // worktree removed minutes earlier. Every non-vitest boot reading those packs
+  // fails, and the failure points at a path that no longer exists, which reads
+  // as a corrupt install rather than a stale link. (Vitest is unaffected:
+  // `test/setup/isolatePackDir.ts` gives each worker its own dir.)
+  //
+  // A dangling symlink is useless BY DEFINITION — it resolves to nothing — so
+  // removing it cannot lose data. It also restores the honest signal: an absent
+  // pack is reported as not installed, rather than as an install that explodes
+  // on read.
+  const pruned: string[] = [];
+  for (const entry of readdirSync(destDir)) {
+    const dest = join(destDir, entry);
+    if (symlinkTarget(dest) !== null && !existsSync(dest)) {
+      try {
+        rmSync(dest, { force: true });
+        pruned.push(entry);
+      } catch (err) {
+        log.warn('failed to prune dangling local-pack symlink', {
+          pack: entry, error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+  if (pruned.length > 0) {
+    log.warn('pruned dangling local-pack symlinks (their source checkout is gone)', {
+      count: pruned.length, packs: pruned.slice(0, 10),
+    });
+  }
+
   log.info('local packs mounted', {
     mounted: mounted.length,
     skipped: skipped.length,
     shadowed: shadowed.length,
+    // WF-CMNT-10 — non-zero means at least one pack was edited without a
+    // version bump. Surfaced in the summary so it is visible without grepping.
+    sameVersionDrift: driftDetected.length,
+    pruned: pruned.length,
     preferLocal,
     sourceDir: localDir,
     destDir,
   });
-  return { mounted, skipped, shadowed, disabled: false };
+  return { mounted, skipped, shadowed, driftDetected, pruned, disabled: false };
 }
 
 /** The link target if `p` is a symlink (dangling or not), else null. Unlike
@@ -220,6 +406,84 @@ function shouldShadow(srcDir: string, destDir: string): boolean {
   const installed = readManifestVersion(destDir);
   if (!local || !installed) return false;
   return compareSemver(local, installed) > 0;
+}
+
+/**
+ * WF-CMNT-10 — true when the two copies declare the SAME version and their
+ * CONTENT differs: the state that means somebody edited a pack and forgot the
+ * bump. The chain lane's `workflow_chain_pack_duplicate_content_drift` answers
+ * the same question by canonicalising the parsed chain; there is no equivalent
+ * parsed form for a node pack, so this digests the directory.
+ *
+ * Bounded on purpose: it is reached ONLY when both versions are readable and
+ * EQUAL (so a real upgrade never pays for it), it walks the pack dir once, and
+ * it SKIPS registry bookkeeping (`.openwop-installed.json`, `.openwop-*`) which
+ * exists on one side only and would make every comparison report drift.
+ *
+ * Unreadable ⇒ FALSE. An IO failure must not be reported as drift: that would
+ * shadow a signed registry install on the strength of a failed read, which is a
+ * worse outcome than the miss this exists to surface.
+ */
+function sameVersionContentDrift(srcDir: string, destDir: string): boolean {
+  const local = readManifestVersion(srcDir);
+  const installed = readManifestVersion(destDir);
+  if (!local || !installed || compareSemver(local, installed) !== 0) return false;
+  const a = digestPackDir(srcDir);
+  const b = digestPackDir(destDir);
+  return a !== null && b !== null && a !== b;
+}
+
+/** A stable digest of a pack directory's content (sorted relative paths + bytes),
+ *  ignoring registry bookkeeping files. `null` on any read failure — see above. */
+function digestPackDir(dir: string): string | null {
+  try {
+    const h = createHash('sha256');
+    for (const rel of walkPackFiles(dir, '').sort()) {
+      h.update(rel);
+      h.update('\0');
+      h.update(readFileSync(join(dir, rel)));
+      h.update('\0');
+    }
+    return h.digest('hex');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Files that are NOT pack content and must never read as drift.
+ *
+ * The first version of this excluded only `.openwop*` (registry bookkeeping,
+ * which exists on the installed side only). That is too narrow by a wide margin:
+ * the two sides are a REPO WORKING TREE and an UNPACKED TARBALL, and the working
+ * tree accumulates files the tarball never carries. A `.DS_Store` from opening
+ * the folder in Finder, a `.pack.json.swp` from an editor session, an `index.mjs~`
+ * backup, a stray `node_modules/` — each of those would have been reported as
+ * "somebody edited this pack and forgot the version bump."
+ *
+ * A false WARN is cheap; a false WARN that fires on most developers' machines is
+ * not, because it trains everyone to ignore the real one. Anything dot-prefixed
+ * is excluded (it covers `.openwop*`, `.DS_Store`, `.git`, `.#emacs-lock`),
+ * plus editor swap/backup suffixes and dependency dirs.
+ */
+function isIncidentalPackFile(name: string): boolean {
+  return (
+    name.startsWith('.')
+    || name === 'node_modules'
+    || name.endsWith('~')
+    || /\.(swp|swo|swn|tmp|orig|rej|bak|log)$/i.test(name)
+  );
+}
+
+function walkPackFiles(root: string, rel: string): string[] {
+  const out: string[] = [];
+  for (const name of readdirSync(join(root, rel))) {
+    if (isIncidentalPackFile(name)) continue;
+    const next = rel ? join(rel, name) : name;
+    if (statSync(join(root, next)).isDirectory()) out.push(...walkPackFiles(root, next));
+    else out.push(next);
+  }
+  return out;
 }
 
 function readManifestVersion(packDir: string): string | null {

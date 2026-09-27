@@ -15,8 +15,8 @@ import { CheckIcon, ChevronDownIcon, ChevronRightIcon, CircleIcon, PauseIcon, XI
 import type { ChatMessage, WorkflowRunState } from '../hooks/useChatSession.js';
 
 export const STATUS_COLORS: Record<WorkflowRunState['status'], string> = {
-  pending: 'var(--color-text-muted)',
-  running: 'var(--color-accent)',
+  pending: 'var(--ink-3)',
+  running: 'var(--clay-text)',
   completed: 'var(--color-success)',
   failed: 'var(--color-danger)',
   cancelled: 'var(--color-warning)',

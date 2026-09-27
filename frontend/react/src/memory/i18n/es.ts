@@ -21,6 +21,11 @@ export const messages = {
   emptyBodyDefault: 'Añada aquí hechos y preferencias; se recuperan cuando son relevantes.',
   externalUnverified: 'Externa · sin verificar',
   externalUnverifiedTitle: 'Importada de una fuente externa: se trata como no fiable (ADR 0038 §C).',
+  autoLearned: 'Aprendida automáticamente',
+  autoLearnedTitle: 'Tu asistente la dedujo de una conversación: no la escribiste tú, así que se trata como no verificada.',
+  learnedOn: 'Aprendida el {{date}}',
+  recallOnlyDisclosure_one: '{{n}} elemento más se recordó de una conversación y no aparece aquí. Tu asistente aún puede recordarlo; no se puede editar desde esta lista.',
+  recallOnlyDisclosure_other: '{{n}} elementos más se recordaron de conversaciones y no aparecen aquí. Tu asistente aún puede recordarlos; no se pueden editar desde esta lista.',
   removeMemory: 'Eliminar memoria',
   // MemoryInspectorPage — header
   eyebrow: 'Memoria',
@@ -66,8 +71,14 @@ export const messages = {
   emptyNoMatchTitle: 'No hay entradas de memoria coincidentes',
   emptyNoEntriesTitle: 'Aún no hay entradas de memoria',
   emptyNoMatchBody: 'Ninguna entrada coincide con la búsqueda o el filtro de etiquetas actual. Borre los filtros para ver el registro completo.',
+  clearFilters: 'Limpiar filtros',
   emptyNoEntriesBody: 'Las entradas se escriben de forma interna en el host: el ejecutor escribe un resumen de la ejecución al completarse. Ejecute un flujo de trabajo para poblar el registro.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry ha devuelto {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry ha devuelto {{status}}',
+  removeMemoryConfirmBody: '¿Eliminar esta memoria? El agente ya no la recordará.',
+  storedUnknown: "Memorias guardadas: desconocido",
+  loadFailedTitle: "No se pudieron cargar estas memorias",
+  loadFailedBody: "Es una lectura fallida, no una memoria vacía: lo que esté guardado sigue ahí.",
+  retry: "Reintentar",
 } as const;

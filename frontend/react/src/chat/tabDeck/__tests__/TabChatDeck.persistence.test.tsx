@@ -59,7 +59,7 @@ describe('TabChatDeck P6 — dead-tab prune', () => {
 
     await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
     // 'b' pruned (absent from the loaded list); 'a' survives.
-    expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid'))).toEqual(['a']);
+    expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid')).filter(Boolean)).toEqual(['a']);
   });
 
   it('does NOT prune while the sessions list is still loading (offline safety)', async () => {
@@ -68,7 +68,7 @@ describe('TabChatDeck P6 — dead-tab prune', () => {
 
     await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
     // Both restored tabs survive — pruning waits for a successful load.
-    expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid')).sort()).toEqual(['a', 'b']);
+    expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid')).filter(Boolean).sort()).toEqual(['a', 'b']);
   });
 });
 
@@ -84,7 +84,7 @@ describe('TabChatDeck P6 — restore mount-gate (no doomed messages fetch)', () 
     await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
 
     expect(mountedSids()).not.toContain('dead'); // the doomed tab never mounted → never fetched
-    expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid'))).toEqual(['a']); // pruned
+    expect(screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid')).filter(Boolean)).toEqual(['a']); // pruned
     expect(mountedSids()).toEqual(['a']); // active falls to the live tab, which mounts
   });
 

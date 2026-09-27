@@ -1,0 +1,35 @@
+{
+  "name": "feature.webinars.nodes",
+  "version": "1.0.1",
+  "description": "Webinar connector node pack (ADR 0404) — `register` (push a registrant to the provider via the Connections broker + record the CRM registration) and `sync` (backfill-reconcile an event's attendance + no-shows). Over ctx.features.webinars; adapterOnly consumer of the zoom-webinar provider (the governed registrant write can never ride ctx.http.fetch).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "webinars", "zoom", "marketing"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.webinars.nodes.register",
+      "version": "1.0.0",
+      "label": "Webinar: Register Attendee",
+      "description": "Pushes a registrant to the webinar provider through the acting user's Connection (adapterOnly zoom-webinar) and records the CRM `registered` activity. Inputs: { orgId, webinarId, email, name? }. Output: { success, registrantId?, joinUrl?, error? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.webinars.nodes.sync",
+      "version": "1.0.0",
+      "label": "Webinar: Sync Attendance",
+      "description": "Backfill-reconciles a webinar event's attendance + no-shows over ctx.features.webinars.syncEvent (15-min cooldown; best-effort; idempotent deterministic-id activities). Inputs: { orgId, eventId }. Output: { success, outcome: 'synced'|'cooldown'|'error', attendees?, noShows?, retryAtIso?, reason? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

@@ -40,8 +40,54 @@ export function registerArtifactType(t: ArtifactType): void {
   log.debug('artifact_type_registered', { artifactTypeId: t.artifactTypeId, source: t.registrationSource });
 }
 
+/**
+ * READ-SIDE artifact-type id aliases (PMC-4, host-internal).
+ *
+ * This host's native ids predate the canonical namespace pattern
+ * `^(core|vendor|community|private)\.` that
+ * `artifact-type-pack-manifest.schema.json` requires, so `canvas.checklist`,
+ * `doc.one-pager` and `brand.kit` are not wire-conformant names.
+ *
+ * They CANNOT simply be renamed. `detectTypedArtifact`
+ * (`runArtifactStore.ts:141`) reads `artifactTypeId` out of a NODE OUTPUT
+ * ENVELOPE, so these ids live in the run-event log — immutable, and replayed.
+ * Rewriting them would either break `:fork` determinism or leave a replayed run
+ * emitting an id the registry no longer knows, whereupon
+ * `isRegisteredArtifactType` returns false and the artifact SILENTLY stops being
+ * typed. That is a worse outcome than the non-conformant name.
+ *
+ * So resolution is READ-ONLY and PERMANENT, not transitional: an alias is
+ * consulted when looking a type UP, and no stored or emitted id is ever
+ * rewritten. Because historical events are immutable, the reader must accept the
+ * legacy spelling forever.
+ *
+ * Direction: canonical → native. A caller using the conformant name resolves to
+ * the registration that already exists, so a spec-conformant consumer works today
+ * without touching the 19 files that reference the native ids as literals. If the
+ * packs are ever re-minted under canonical ids, this map inverts rather than
+ * disappears — the legacy arm is what old events need.
+ *
+ * NOT a conformance claim. Until the corpus states plainly that these ids were
+ * never wire-conformant (logged upstream as G5), this is a host compatibility
+ * shim and must not be advertised as anything else.
+ */
+const ID_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['community.openwop.canvas.checklist', 'canvas.checklist'],
+  ['core.openwop.doc.one-pager', 'doc.one-pager'],
+  ['core.openwop.brand.kit', 'brand.kit'],
+]);
+
+/** Resolve an id through the alias table. Returns the input when unaliased. */
+export function resolveArtifactTypeId(id: string): string {
+  const target = ID_ALIASES.get(id);
+  // An alias only resolves when its TARGET is actually registered. A dangling
+  // alias must not shadow a real miss, or a typo'd canonical id would look
+  // "registered" while resolving to nothing.
+  return target !== undefined && registry.has(target) ? target : id;
+}
+
 export function getArtifactType(id: string): ArtifactType | undefined {
-  return registry.get(id);
+  return registry.get(resolveArtifactTypeId(id));
 }
 
 export function listArtifactTypes(): ArtifactType[] {
@@ -49,7 +95,7 @@ export function listArtifactTypes(): ArtifactType[] {
 }
 
 export function isRegisteredArtifactType(id: string): boolean {
-  return registry.has(id);
+  return registry.has(resolveArtifactTypeId(id));
 }
 
 export interface ArtifactValidation {
@@ -62,10 +108,17 @@ export interface ArtifactValidation {
 /** Validate `payload` against a registered type's schema. An unregistered type is
  *  `{registered:false, valid:true}` (RFC 0071 escape hatch). */
 export function validateArtifact(artifactTypeId: string, payload: unknown): ArtifactValidation {
-  const t = registry.get(artifactTypeId);
+  // Alias-resolve here too. `validateArtifact` is the path a RUN takes
+  // (`detectTypedArtifact` -> validate -> persist), so a canonical id that
+  // resolved for `isRegisteredArtifactType` but not here would pass the gate and
+  // then validate against nothing — registered:false, valid:true, silently
+  // untyped. Resolve once and key the validator cache off the resolved id so the
+  // two spellings share one compiled schema.
+  const resolvedId = resolveArtifactTypeId(artifactTypeId);
+  const t = registry.get(resolvedId);
   if (!t) return { registered: false, valid: true };
-  let v = validators.get(artifactTypeId);
-  if (!v) { v = ajv.compile(t.schema); validators.set(artifactTypeId, v); }
+  let v = validators.get(resolvedId);
+  if (!v) { v = ajv.compile(t.schema); validators.set(resolvedId, v); }
   const valid = v(payload) === true;
   return {
     registered: true,

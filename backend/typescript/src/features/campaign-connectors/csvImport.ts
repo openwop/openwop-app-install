@@ -21,6 +21,8 @@ export interface ColumnMapping {
   clicks?: string;
   conversions?: string;
   revenue?: string;
+  /** R2 CC-SP-7 — the export's account-currency column (ISO-4217). */
+  currency?: string;
 }
 
 /** Generic header aliases (used when a template doesn't pin a column). */
@@ -33,7 +35,41 @@ const ALIASES: Record<keyof Omit<ColumnMapping, 'platform'>, string[]> = {
   clicks: ['clicks', 'link clicks'],
   conversions: ['conversions', 'results', 'conv.', 'conv'],
   revenue: ['revenue', 'conversion value', 'total conv. value', 'sales'],
+  // R2 CC-SP-7 — the account currency, straight from the export (Meta/Google
+  // both include it). Unbackfillable if not captured at intake.
+  currency: ['currency', 'currency code', 'account currency', 'account_currency'],
 };
+
+/** ADR 0357 P5 — per-platform export column PRESETS (the spec's nine),
+ *  layered over the generic alias autodetect: a preset pins the platform's
+ *  exact export headers; anything it doesn't pin falls back to ALIASES. */
+export const PLATFORM_CSV_PRESETS: Record<string, Partial<Record<keyof Omit<ColumnMapping, 'platform'>, string>>> = {
+  google: { campaignName: 'campaign', adSet: 'ad group', date: 'day', spend: 'cost', impressions: 'impr.', clicks: 'clicks', conversions: 'conversions', revenue: 'total conv. value' },
+  meta: { campaignName: 'campaign name', adSet: 'ad set name', date: 'day', spend: 'amount spent', impressions: 'impressions', clicks: 'link clicks', conversions: 'results', revenue: 'conversion value' },
+  linkedin: { campaignName: 'campaign name', adSet: 'campaign group', date: 'date', spend: 'total spent', impressions: 'impressions', clicks: 'clicks', conversions: 'conversions', revenue: 'conversion value' },
+  tiktok: { campaignName: 'campaign name', adSet: 'ad group name', date: 'date', spend: 'cost', impressions: 'impression', clicks: 'click', conversions: 'conversion', revenue: 'total purchase value' },
+  x: { campaignName: 'campaign name', adSet: 'ad group', date: 'time period', spend: 'spend', impressions: 'impressions', clicks: 'link clicks', conversions: 'conversions', revenue: 'purchase value' },
+  pinterest: { campaignName: 'campaign name', adSet: 'ad group name', date: 'date', spend: 'spend', impressions: 'impressions', clicks: 'pin clicks', conversions: 'checkouts', revenue: 'checkout value' },
+  snapchat: { campaignName: 'campaign name', adSet: 'ad set name', date: 'day', spend: 'spend', impressions: 'impressions', clicks: 'swipe ups', conversions: 'conversions', revenue: 'purchase value' },
+  reddit: { campaignName: 'campaign name', adSet: 'ad group', date: 'date', spend: 'spend', impressions: 'impressions', clicks: 'clicks', conversions: 'conversions', revenue: 'conversion value' },
+  youtube: { campaignName: 'campaign', adSet: 'ad group', date: 'day', spend: 'cost', impressions: 'impr.', clicks: 'clicks', conversions: 'conversions', revenue: 'total conv. value' },
+};
+
+/** Resolve a preset-pinned mapping over the generic autodetect. Unknown preset
+ *  names fall through to pure autodetect (never an error — the wizard offers
+ *  the preset list from PLATFORM_CSV_PRESETS keys). */
+export function mappingWithPreset(headers: string[], preset?: string): ColumnMapping {
+  const base = autodetectMapping(headers);
+  const pins = preset ? PLATFORM_CSV_PRESETS[preset.toLowerCase()] : undefined;
+  if (!pins) return base;
+  const lower = headers.map((h) => h.trim().toLowerCase());
+  const out = { ...base };
+  for (const [field, header] of Object.entries(pins)) {
+    const idx = lower.indexOf(String(header).toLowerCase());
+    if (idx >= 0) (out as Record<string, unknown>)[field] = headers[idx]; // header NAME (the mapping vocabulary)
+  }
+  return out;
+}
 
 /** Parsed CSV: header row + data rows (RFC 4180-ish — quoted fields, commas in quotes). */
 export function parseCsv(text: string): { headers: string[]; rows: string[][] } {
@@ -72,22 +108,67 @@ export function autodetectMapping(headers: string[]): ColumnMapping {
   return mapping;
 }
 
-const num = (raw: string | undefined): number => {
+/** R2 CC-SP-8 — a metric parse has three honest outcomes: a number, an ABSENT
+ *  cell (0 — an empty export cell means no activity), or GARBAGE (null → an
+ *  issue row). The old `num()` silently zeroed garbage AND corrupted
+ *  decimal-comma locales: "1.234,56" had its comma stripped after the dot
+ *  survived → 1.234 → a ~1000× silent understatement. Separator rule: when both
+ *  appear, the LAST one is the decimal separator; a lone comma is decimal only
+ *  when not followed by exactly three digits (else it groups thousands). */
+const num = (raw: string | undefined): number | null => {
   if (raw == null) return 0;
-  const n = Number(String(raw).replace(/[$€£¥,%x\s]/g, ''));
-  return Number.isFinite(n) ? n : 0;
+  const trimmed = String(raw).trim();
+  // Common export null markers mean ABSENT (0), not garbage — Google Ads emits
+  // " --" for empty cells; skipping the whole row for them would shed real
+  // exports wholesale (review m5).
+  if (/^(-{1,2}|—|n\/a)$/i.test(trimmed)) return 0;
+  let s = trimmed.replace(/[$€£¥%x\s]/g, '');
+  if (s === '') return 0;
+  const lastDot = s.lastIndexOf('.');
+  const lastComma = s.lastIndexOf(',');
+  if (lastComma >= 0 && lastDot >= 0) {
+    if (lastComma > lastDot) s = s.replace(/\./g, '').replace(',', '.'); // 1.234,56 → 1234.56
+    else s = s.replace(/,/g, ''); // 1,234.56 → 1234.56
+  } else if (lastComma >= 0) {
+    // A lone comma is the DECIMAL separator iff followed by 1–2 trailing
+    // digits ("12,5"); otherwise it groups thousands ("1,234").
+    s = /,\d{1,2}$/.test(s) ? s.replace(/,/g, '.') : s.replace(/,/g, '');
+  } else if ((s.match(/\./g) ?? []).length > 1) {
+    // 2+ dots with no comma is unambiguous EU grouping ("12.345.678").
+    s = s.replace(/\./g, '');
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
 };
 
-function parseDate(raw: string | undefined): string | null {
+/** R2 CC-SP-9 — MM/DD is the default, but a swapped export must not silently
+ *  land on the wrong day: a first component >12 is unambiguously DD/MM (parsed
+ *  as such, flagged) — the old code built an invalid month and mislabelled the
+ *  row "Date is in the future". `ambiguous` marks rows where both readings are
+ *  valid dates, so the import can disclose the assumption ONCE. */
+function parseDate(raw: string | undefined): { iso: string; ambiguous: boolean; swapped: boolean } | null {
   const s = String(raw ?? '').trim();
-  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return { iso: s.slice(0, 10), ambiguous: false, swapped: false };
   const m = /^(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})$/.exec(s); // MM/DD/YYYY (US default)
   if (m) {
     const yyyy = m[3].length === 2 ? `20${m[3]}` : m[3];
-    return `${yyyy}-${m[1].padStart(2, '0')}-${m[2].padStart(2, '0')}`;
+    let mm = Number(m[1]);
+    let dd = Number(m[2]);
+    let swapped = false;
+    if (mm > 12 && dd <= 12) { [mm, dd] = [dd, mm]; swapped = true; }
+    if (mm < 1 || mm > 12 || dd < 1 || dd > 31) return null;
+    const ambiguous = !swapped && mm <= 12 && dd <= 12 && mm !== dd;
+    return { iso: `${yyyy}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`, ambiguous, swapped };
   }
   return null;
 }
+
+/** R2 CC-SP-7 — an ISO-4217-shaped currency from the export's own column;
+ *  anything else is dropped (never guessed). */
+const parseCurrency = (raw: string | undefined): string | undefined => {
+  const s = String(raw ?? '').trim().toUpperCase();
+  return /^[A-Z]{3}$/.test(s) ? s : undefined;
+};
 
 const asPlatform = (raw: string | undefined, fallback: AdPlatform): AdPlatform => {
   const s = String(raw ?? '').trim().toLowerCase().replace(/\s*ads?$/, '');
@@ -110,6 +191,8 @@ export interface ParsedRow {
   platform: AdPlatform; campaignName: string; adSet: string; date: string;
   spend: number; impressions: number; clicks: number; conversions: number; revenue: number;
   ctr: number; cpc: number; cvr: number; cpa: number; roas: number;
+  /** R2 CC-SP-7 — the account currency, when the export carried one. */
+  currency?: string;
 }
 
 /**
@@ -124,22 +207,34 @@ export function mapAndValidate(
   const records: ParsedRow[] = [];
   const issues: ImportValidationIssue[] = [];
 
+  let ambiguousDates = 0;
+  let swappedDates = 0;
   rows.forEach((row, i) => {
     const rowNum = i + 2; // 1-based + header
-    const date = parseDate(cells(row, mapping.date));
-    const spend = num(cells(row, mapping.spend));
-    const impressions = num(cells(row, mapping.impressions));
-    const clicks = num(cells(row, mapping.clicks));
-    const conversions = num(cells(row, mapping.conversions));
-    const revenue = num(cells(row, mapping.revenue));
+    const parsed = parseDate(cells(row, mapping.date));
+    // R2 CC-SP-8 — a garbage metric is an ISSUE row, never a silent zero.
+    const metrics: Array<[string, number | null]> = [
+      ['spend', num(cells(row, mapping.spend))],
+      ['impressions', num(cells(row, mapping.impressions))],
+      ['clicks', num(cells(row, mapping.clicks))],
+      ['conversions', num(cells(row, mapping.conversions))],
+      ['revenue', num(cells(row, mapping.revenue))],
+    ];
+    const garbage = metrics.find(([, v]) => v === null);
+    if (garbage) { issues.push({ row: rowNum, severity: 'error', message: `Unparseable ${garbage[0]} value.` }); return; }
+    const [spend, impressions, clicks, conversions, revenue] = metrics.map(([, v]) => v as number);
 
-    if (!date) { issues.push({ row: rowNum, severity: 'error', message: 'Missing or unparseable date.' }); return; }
+    if (!parsed) { issues.push({ row: rowNum, severity: 'error', message: 'Missing or unparseable date.' }); return; }
+    const { iso: date } = parsed;
+    if (parsed.ambiguous) ambiguousDates += 1;
+    if (parsed.swapped) swappedDates += 1;
     if (date > todayIso) { issues.push({ row: rowNum, severity: 'error', message: 'Date is in the future.' }); return; }
     if (spend < 0 || impressions < 0 || clicks < 0 || conversions < 0 || revenue < 0) { issues.push({ row: rowNum, severity: 'error', message: 'Negative metric value.' }); return; }
     if (clicks > impressions && impressions > 0) issues.push({ row: rowNum, severity: 'warning', message: 'Clicks exceed impressions.' });
     if (conversions > clicks && clicks > 0) issues.push({ row: rowNum, severity: 'warning', message: 'Conversions exceed clicks.' });
 
     const base = { spend, impressions, clicks, conversions, revenue };
+    const currency = parseCurrency(cells(row, mapping.currency));
     records.push({
       platform: asPlatform(cells(row, mapping.platform), defaultPlatform),
       campaignName: String(cells(row, mapping.campaignName) ?? '').trim() || 'Unknown',
@@ -147,7 +242,11 @@ export function mapAndValidate(
       date,
       ...base,
       ...computeDerived(base),
+      ...(currency ? { currency } : {}),
     });
   });
+  // R2 CC-SP-9 — disclose the format assumption ONCE, not per row.
+  if (ambiguousDates > 0) issues.push({ row: 0, severity: 'warning', message: `${ambiguousDates} date(s) were read as MM/DD (US format). If this export uses DD/MM, those rows landed on the wrong day.` });
+  if (swappedDates > 0) issues.push({ row: 0, severity: 'warning', message: `${swappedDates} date(s) had a first component over 12 and were read as DD/MM.` });
   return { records, issues };
 }

@@ -41,7 +41,7 @@ beforeEach(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_RATELIMIT_DISABLED = 'true';
   app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'smoke', serviceVersion: '0', enableConsoleTracer: false });
-  await new Promise<void>((r) => { server = app.listen(0, () => { base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
+  await new Promise<void>((r) => { server = app.listen(0, '127.0.0.1', () => { base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; r(); }); });
 });
 afterEach(async () => { await new Promise<void>((r) => server.close(() => r())); });
 
@@ -73,7 +73,7 @@ describe('agent autonomy — end-to-end smoke', () => {
     //    so the daemon starts a real heartbeat-sourced run. (ADR 0032's canonical
     //    set has no default-`auto` twin; guided-routine is the autonomous path.)
     const agent = roster.find((r) => r.roleKey === 'it-service-desk')!;
-    await updateRosterEntry(agent.rosterId, { heartbeatIntervalMs: 60_000 });
+    await updateRosterEntry(agent.tenantId, agent.rosterId, { heartbeatIntervalMs: 60_000 });
     const now = Date.now();
     const ran = await processDueHeartbeats(deps(), listRosterTenants, now);
     expect(ran).toBeGreaterThanOrEqual(1); // picked a To Do card → started a real run

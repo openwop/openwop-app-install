@@ -68,6 +68,13 @@ credentialRef }`. Stored host-side; the BYOK key is added on the Keys page and r
 - **Tool auth on voice:** voice-initiated tool calls run through the SAME RBAC + capability firewall
   (ADR 0135) + HITL as typed turns — a spoken "send the email" is gated identically. The realtime model
   cannot bypass host policy because execution is host-side.
+  **Correction (ADR 0324, 2026-07-09):** "the SAME as typed turns" held for
+  allowlist/firewall/executor but NOT for the execution *scope*: the bridge
+  omitted `actingUserId`/`conversationId` (which ADR 0308/0309 later threaded
+  into the chat loop only), so the deliverable tools failed closed over voice.
+  The scope is now composed by the one shared composer
+  (`createScopedAgentToolProvider`), with the acting user host-bound at session
+  open — see ADR 0324.
 - **Untrusted transcript:** the user's speech transcript carries `contentTrust:'untrusted'` (RFC 0106 §F)
   before it can drive a side effect.
 - **Tenant binding / budget:** the session is tenant+agent bound; per-session duration/cost budget
@@ -144,3 +151,145 @@ unit-tested; the live token mint is verify-with-key. Provider-specific-vs-unifie
 remains the open strategic call (RT-4 note).
 
 **RT-5a — Gemini audio correction (functional).** The first Gemini client streamed `audio/webm` and never played the model audio — non-functional. Corrected to Gemini Live's actual wire: capture raw **PCM16** via Web Audio and send `realtimeInput.audio` (`audio/pcm;rate=<ctx>`); decode + schedule the model's **PCM16** from `serverContent.modelTurn.parts[].inlineData` for gapless playback; barge-in via `serverContent.interrupted`; transcription enabled in `setup`. Verify-in-browser. (OpenAI's WebRTC path needs no such fix — the codec is negotiated natively.)
+
+**RT-6 — production correction (2026-07-02): voice mocks decoupled from the conformance seam
+flag.** Every voice mock (Gemini ephemeral-token stub, OpenAI Realtime session/SDP stubs, the
+`useMock` TTS path, and the deterministic `live transcript (N bytes)` STT stub in
+`aiProvidersHost.transcribeStreamRef`) keyed on `OPENWOP_TEST_SEAM_ENABLED` — but production
+keeps that flag **on** for the `/v1/host/sample/*` conformance seam ROUTES, so every real user
+got mocked voice: the browser received the fake `auth_tokens/test_gemini` token (then failed),
+and spoken audio would transcribe to the stub string. Corrected: voice mocks now key on their
+own **`OPENWOP_VOICE_MOCK`** flag (tests set it; prod leaves it unset ⇒ real provider calls),
+while `provider:'mock'`-guarded paths keep the seam flag as defense-in-depth (an explicit mock
+provider request is never sent by the real UI). Companion frontend fix: `connect-src` in
+`firebase.json` now allows `wss://generativelanguage.googleapis.com` — the Gemini Live
+BidiGenerateContent WebSocket (by design browser-direct with the constrained single-use token,
+RT-5) was CSP-blocked, so the arm could never connect even with a real token.
+
+**RT-7 — Gemini token-mint wire correction (2026-07-03).** RT-6's un-mocking exposed the
+verify-with-key drift on the first real mint: prod returned 502 `realtime_provider_error`. Probed
+against the live API (a bad-key POST validates the payload *shape* before the key, so the request
+shape is fully verifiable key-free) + the v1alpha discovery document:
+- The REST path is **`POST /v1alpha/auth_tokens`** (snake_case) — the camelCase `/v1alpha/authTokens`
+  404s outright.
+- The body is an **`AuthToken`** resource — `{uses, expireTime?, newSessionExpireTime?, fieldMask?,
+  bidiGenerateContentSetup?}`. The SDK docs' `liveConnectConstraints` is a **client-SDK abstraction**,
+  not a wire field (`400 Unknown name "liveConnectConstraints" at 'auth_token'`).
+- The RT-5 lock maps to **`bidiGenerateContentSetup` + empty `fieldMask`**: setup present + empty mask
+  ⇒ the effective setup comes ENTIRELY from the token and the client's `setup` message is IGNORED —
+  a *stronger* lock than intended, with the corollary that the token setup must carry everything the
+  client sent, including `inputAudioTranscription`/`outputAudioTranscription` (RT-5a), or they are
+  silently dropped. The corrected `buildGeminiConstraint` mirrors the full client setup.
+- The minted token is the response's `name` (adapter already read `token ?? name` — unchanged); the
+  WS connect passes it as `access_token=` (unchanged).
+- `DEFAULT_MODEL` updated to the docs' current Live example (`gemini-3.1-flash-live-preview`);
+  admins override per-tenant via `config.model`. Model existence remains the one verify-with-key
+  residue (validated at mint/connect time by Google, surfaced through the honest 502 envelope).
+
+**RT-7 follow-up (SHIPPED):** agent-scoped voice sessions pinned RAW tool ids
+(`openwop:knowledge.search`) into the provider payloads — provider function names reject `:`/`.`
+(the #578 class), so the first agent-with-tools mint/session would 400. Fixed with the #578
+sanitize+reverse-map pattern at the realtime seams: `resolveAgentToolDecls` now emits
+`sanitizeToolName`-ed decl names (the decls are consumed ONLY at provider egress — the Gemini token
+setup + both OpenAI payloads), `buildGeminiConstraint` additionally projects each decl's parameter
+schema through `toGeminiSchema` (Gemini rejects `additionalProperties`/`minLength`/… wholesale), and
+the single ingress chokepoint `executeRealtimeToolCall` resolves the provider's wire name back to
+the canonical allowlisted id via the pure `resolveWireToolName` (exact match wins; else
+sanitized-form match; neither ⇒ default-deny) — so the allowlist, the capability firewall + its
+composition seen-set, and the executor all keep operating on the SAME canonical ids typed-chat
+uses. Both callback paths (the Gemini `…/tool-call` relay route and the OpenAI server-side
+sideband) funnel through that chokepoint, so one mapping covers both providers.
+
+**RT-8 — AudioWorklet capture + the live-voice waveform (2026-07-03).**
+*Capture:* the Gemini mic path moved off the deprecated `ScriptProcessorNode` onto an
+`AudioWorkletNode` (`pcmCaptureWorklet.js`, same 4096-sample cadence, off the main thread).
+The worklet MUST ship as a real same-origin asset — Vite's small-asset inlining would emit a
+`data:` URL, which `audioWorklet.addModule` loads as a script and CSP `script-src 'self'`
+blocks in production; a per-file `assetsInlineLimit` exemption pins it. ScriptProcessor
+survives only as the no-audioWorklet fallback (older Safari).
+*Waveform:* the live conversation now renders a real-audio animation — `VoiceWaveform.tsx`, a
+scrolling mirrored bar strip in the composer's live pill. Driven by analysis-only
+`AnalyserNode` taps (`VoiceAudioGraph {input, output}`) surfaced through
+`RealtimeCallbacks.onAudioGraph` on BOTH providers: Gemini taps the mic source + the
+`GeminiPcmPlayer` playback chain (sources now route src → analyser → destination, so the tap
+observes exactly what is audible); OpenAI taps mic + the remote WebRTC track on a dedicated
+analysis context (playback stays on the `<audio>` element). Mic level paints `--clay` bars,
+model speech `--color-info`, idle `--color-border` — whoever is louder wins the time-slot, with
+a fast-attack/slow-release envelope (pure, unit-tested `audioLevels.ts`). Token colors resolve
+at draw time (theme flips apply live); `prefers-reduced-motion` degrades to a non-scrolling
+8 fps meter; the canvas is `aria-hidden` (the stop button carries state). Lazy-loaded from
+`ChatInput` — the entry chunk stays inside the bundle budget. The walkie fallback has no live
+audio graph and keeps the plain hot button (honest: no fake animation without real levels).
+
+**RT-8a — the waveform extends to clip recording (2026-07-03).** `useAudioRecorder` now opens an
+analysis-only `AudioContext` + `AnalyserNode` tap on the mic stream for the life of a recording
+(guarded: where `AudioContext` is unavailable there is simply no waveform — recording itself is
+unaffected; the tap closes on stop/cancel/unmount). `ChatInput`'s recording state renders the same
+`VoiceWaveform` in a `.is-rec` pill with `tone="recording"` — an input-only graph, mic bars in
+`--color-danger` and danger-derived pill chrome (`--danger-rule`/`--danger-wash`, the clay recipe
+applied to danger) — preserving the color language: red = recording a clip, clay = in a live
+conversation. No analyser ⇒ the plain hot button (no fake bars, no empty pill chrome).
+
+**RT-9 — the Gemini Live conversation loop (2026-07-03).** The first real end-to-end session
+(post RT-6/RT-7) "listened but never answered": no model speech, no transcripts, no turn
+detection. Four defects, all client-side:
+1. **Input rate.** Capture ran at the device rate (44.1/48 kHz) with an honest `rate=` tag —
+   but the Live API requires **16 kHz** PCM16 input, so speech detection never triggered.
+   The capture context now opens at 16 kHz (browsers resample internally; fallback to the
+   default context if construction throws, still honestly tagged).
+2. **Handshake.** Audio streamed the moment the socket opened and "live" was client-derived.
+   Capture now starts on the server's **`setupComplete`** — "live" means the server said so.
+   (With the RT-7 token-locked setup the client's `setup` message content is ignored, but
+   sending it still drives the handshake.)
+3. **Silent death.** A refused/dropped session (e.g. an invalid model in the token) just kept
+   "listening". Abnormal close — or close before `setupComplete` — now surfaces the server's
+   code/reason as an honest error.
+4. **Transcripts had no consumer.** `onTranscript` was emitted per-fragment and dropped.
+   A `TranscriptAccumulator` (pure, unit-tested) folds Gemini's incremental fragments into
+   whole turns — the user's utterance flushes when the model starts answering (thread reads
+   user → assistant), the model's on `turnComplete`/barge-in/teardown — and the turns surface
+   as chat bubbles via `onTranscript → useRealtimeVoice → LiveVoiceController.onLiveTranscript
+   → ConversationView → ChatSidebar → useChatSession.appendTranscriptTurn` (display-only
+   appends riding the normal persist path — NOT sends; the realtime model already answered by
+   voice, so dispatching would double-respond). Embeds omit the prop ⇒ no transcript bubbles.
+Companion CSP fix: `media-src 'self' data: blob:` — the multimodal voice-clip bubble (ADR 0067
+correction) renders its audio via a `data:` URL, which fell back to `default-src 'self'` and
+was blocked (player showed 0:00).
+
+**RT-9a — capture at the native rate, resample in the worklet (2026-07-03).** RT-9's forced
+16 kHz `AudioContext` trips Chrome's `MediaStreamSource` rate limitation — the live session
+died "as soon as I start talking". Corrected: the capture context runs at the mic's NATIVE
+rate and the worklet downsamples to 16 kHz via linear interpolation (2048-sample output
+chunks, 128 ms; the ScriptProcessor fallback resamples through the pure, unit-tested
+`audioLevels.resamplePcm` — same algorithm, kept in step with the worklet's inline copy).
+The `rate=16000` tag is now always the TRUE payload rate. Companion fix: `useRealtimeVoice`
+captured session errors but `RealtimeController` never consumed them, so a server-side close
+looked like a silent stop — errors now surface as a toast, so the NEXT failure names itself
+(model, quota, rejected audio) instead of dying quietly.
+
+**RT-9b — the constrained bidi endpoint (2026-07-03).** RT-9a's error surfacing immediately paid
+off: the live session died with "Gemini Live closed (1000) before setup completed" — the server
+accepted the socket (token valid), then closed cleanly without `setupComplete`. Web research
+(the Live WebSockets API reference + the ephemeral-tokens guide + AI-dev-forum reports) pinned
+it: **an ephemeral token authenticates only `v1alpha.GenerativeService.BidiGenerateContentConstrained`**;
+connecting it to the plain `BidiGenerateContent` method yields exactly this silent-close
+signature. One-line host fix: the `/session` seam's `connect.url` now points at the Constrained
+method. Confirmed against the docs while there: the client still SENDS its `setup` message on
+the constrained endpoint (the token's `bidiGenerateContentSetup` governs — the RT-7 lock; a
+client-sent `systemInstruction` is ignored there, which is why ours rides in the token), and
+`gemini-3.1-flash-live-preview` is a currently-listed Live model (default unchanged;
+`gemini-2.5-flash-native-audio-preview-12-2025` is the documented flagship alternative if the
+tenant config ever needs it).
+
+**RT-9c — LIVE transcript rendering (2026-07-03).** With two-way voice working (RT-9b), the
+transcripts only appeared as WHOLE turns after each side finished. Now they stream live:
+`TranscriptAccumulator` emits an interim update on every fragment (`final:false`, growing text)
+under a STABLE per-turn id, then a settling `final:true` on flush. The consumer
+(`useChatSession.upsertTranscriptTurn`) UPSERTS one bubble per turn — interim updates patch the
+same message (`isStreaming:true` ⇒ the live-reveal cadence), `final` settles it — instead of the
+prior append-only whole-turn behavior. Turn ids are prefixed with the realtime session id so a
+stop→start never collides bubbles. So your spoken words paint as you talk, and the model's reply
+streams in as it speaks — the "print it live" ask. Persists via the existing session→
+persistSession effect, so completed voice turns survive reload. Chain unchanged end-to-end
+(`onTranscript → useRealtimeVoice → LiveVoiceController.onLiveTranscript → ConversationView →
+ChatSidebar → upsertTranscriptTurn`); only the signature widened to `(text, role, turnId, final)`.

@@ -1,17 +1,18 @@
 /**
  * ADR 0139 — frontend client for the menu-config host-extension (Phase 2).
  *
- * `getMenuConfig` swallows errors into the empty bundle so a 401 (anonymous
- * first paint) or a transient network failure never breaks the nav rails — the
- * resolver just falls back to the declared menu. The PUT helpers throw so the
- * editor can surface a save failure.
+ * Reads and writes throw on transport/server failure. The provider owns the
+ * safe declared-menu fallback because it can preserve that fallback while also
+ * exposing a distinct degraded state; coercing failure to an empty bundle here
+ * would erase the difference between "no overrides" and "unknown".
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
-import { EMPTY_MENU_CONFIG_BUNDLE, type MenuConfig, type MenuConfigBundle } from './types.js';
+import type { MenuConfig, MenuConfigBundle } from './types.js';
 
-const BASE = '/v1/host/openwop-app/menu-config';
+const BASE = '/host/openwop-app/menu-config';
+let tenantVersion: string | null = null;
 
-async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function httpResponse<T>(path: string, init: RequestInit = {}): Promise<{ body: T; response: Response }> {
   const res = await fetch(`${config.baseUrl}${path}`, {
     ...fetchOpts(init),
     headers: { ...(init.headers ?? {}), ...authedHeaders({ 'content-type': 'application/json' }) },
@@ -21,21 +22,32 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
     const err = body as { error?: string; message?: string };
     throw new Error(`${err.error ?? 'http_error'}: ${err.message ?? `HTTP ${res.status}`}`);
   }
-  return body as T;
+  return { body: body as T, response: res };
 }
 
-/** The combined { tenant, user } layers (one round-trip). Never throws. */
+async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
+  return (await httpResponse<T>(path, init)).body;
+}
+
+/** The combined { tenant, user } layers (one round-trip). */
 export async function getMenuConfig(): Promise<MenuConfigBundle> {
-  try {
-    return await http<MenuConfigBundle>(BASE);
-  } catch {
-    return EMPTY_MENU_CONFIG_BUNDLE;
-  }
+  // A failed reload may follow an identity/tenant change. Never retain a
+  // validator from the previous successful context in that unknown state.
+  tenantVersion = null;
+  const result = await httpResponse<MenuConfigBundle>(BASE);
+  tenantVersion = result.response.headers.get('etag');
+  return result.body;
 }
 
 /** Save the shared workspace default (superadmin). Throws on failure. */
 export async function putTenantMenuConfig(cfg: MenuConfig): Promise<MenuConfig> {
-  return (await http<{ config: MenuConfig }>(`${BASE}/tenant`, { method: 'PUT', body: JSON.stringify({ config: cfg }) })).config;
+  const result = await httpResponse<{ config: MenuConfig }>(`${BASE}/tenant`, {
+    method: 'PUT',
+    body: JSON.stringify({ config: cfg }),
+    ...(tenantVersion ? { headers: { 'if-match': tenantVersion } } : {}),
+  });
+  tenantVersion = result.response.headers.get('etag');
+  return result.body.config;
 }
 
 /** Save the caller's personalization. Throws on failure. */

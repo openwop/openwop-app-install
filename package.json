@@ -4,10 +4,21 @@
   "description": "OpenWOP reference app — monorepo (backend/typescript + frontend/react). This root manifest only exposes the local CI gate; each workspace owns its own deps/build. See CLAUDE.md.",
   "scripts": {
     "check:schemas": "node scripts/check-vendored-schemas.mjs",
+    "check:feature-deps": "node scripts/gen-feature-deps.mjs --check",
+    "check:skill-mirror": "node scripts/check-agent-skill-mirror.mjs",
+    "check:root-docs": "node scripts/check-root-docs.mjs",
+    "gen:feature-deps": "node scripts/gen-feature-deps.mjs",
     "ci": "bash scripts/ci.sh",
-    "ci:full": "OPENWOP_CI_E2E=1 OPENWOP_CI_LIVE=1 bash scripts/ci.sh",
+    "ci:e2e-report": "node scripts/e2e-ledger-report.mjs",
+    "sync": "bash scripts/git-sync.sh",
+    "ci:full": "OPENWOP_CI_E2E=1 OPENWOP_CI_E2E_ROUTES=1 OPENWOP_CI_LIVE=1 bash scripts/ci.sh",
     "hooks:install": "git config core.hooksPath scripts/git-hooks && echo 'pre-push gate enabled — runs npm run ci; bypass with git push --no-verify'",
-    "browse": "tools/browser/browse.sh"
+    "browse": "tools/browser/browse.sh",
+    "diagrams": "node tools/mermaid/render.mjs",
+    "test:e2e:full": "bash scripts/e2e-routes.sh",
+    "build:distribution": "node scripts/gen-distribution.mjs && npm --prefix backend/typescript run build && npm --prefix frontend/react run build",
+    "ci:distribution": "node scripts/gen-distribution.mjs --check && OPENWOP_DISTRIBUTION=slim-proof npm --prefix backend/typescript run build && OPENWOP_DISTRIBUTION=slim-proof npm --prefix frontend/react run build",
+    "packs:prune": "node scripts/prune-dangling-packs.mjs"
   },
   "devDependencies": {
     "playwright": "1.59.1"

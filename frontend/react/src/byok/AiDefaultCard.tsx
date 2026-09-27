@@ -4,6 +4,7 @@
  * managed provider doesn't offer. Composes the shared form primitives + the already-loaded
  * BYOK `refs`; the key value never touches the FE, only the ref.
  */
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { SelectField, TextField } from '../ui/Field.js';
@@ -75,12 +76,19 @@ export function AiDefaultCard({ refs }: { refs: readonly string[] }): JSX.Elemen
           </SelectField>
 
           <div className="u-flex u-gap-2 u-mt-2">
-            <button type="button" className="btn-primary" disabled={!canSave} onClick={() => void save()}>{t('aiDefaultSave')}</button>
-            {existing ? <button type="button" className="btn-ghost" disabled={busy} onClick={() => void clear()}>{t('aiDefaultClear')}</button> : null}
+            <Button variant="primary" disabled={!canSave} onClick={() => void save()}>{t('aiDefaultSave')}</Button>
+            {existing ? <Button variant="quiet" disabled={busy} onClick={() => void clear()}>{t('aiDefaultClear')}</Button> : null}
           </div>
         </>
       )}
-      {notice ? <div className="u-mt-2"><Notice variant={notice.variant}>{notice.msg}</Notice></div> : null}
+      {/* The ACTION RESULT of Save/Clear, and the asymmetry is the point: `notice.variant`
+          is 'success' | 'error', so a FAILURE already spoke (role="alert" fires on
+          insertion) while a SUCCESS did not (role="status" does not). A screen-reader
+          user heard every failure and was never told the save landed. `announce` replaces
+          this instance's own region, so passing it unconditionally does not double-speak
+          the error case. The two Notices above are ambient state, not action results —
+          deliberately left silent so this one keeps the single polite slot. */}
+      {notice ? <div className="u-mt-2"><Notice variant={notice.variant} announce={notice.msg}>{notice.msg}</Notice></div> : null}
     </section>
   );
 }

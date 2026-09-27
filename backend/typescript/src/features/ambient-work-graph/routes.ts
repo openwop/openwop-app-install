@@ -19,6 +19,10 @@ import { OpenwopError } from '../../types.js';
 import { requireOrgScope } from '../featureRoute.js';
 import { listSuggestions, getSuggestion, setSuggestionStatus } from './suggestionStore.js';
 import { sweepTenant } from './workGraphSweep.js';
+import { createProposalFromAcceptedPattern } from '../proposals/proposalsService.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('ambient-work-graph');
 
 // Always-on (toggle removed, 2026-06-24) — RBAC-gated only.
 const BASE = '/v1/host/openwop-app/work-graph/orgs/:orgId/suggestions';
@@ -29,8 +33,8 @@ export function registerAmbientWorkGraphRoutes(deps: RouteDeps): void {
   // READ — non-dismissed suggestions (suggested + accepted). No sweep on the hot path.
   app.get(BASE, async (req, res, next) => {
     try {
-      const { user } = await requireOrgScope(req, 'workspace:read');
-      const suggestions = (await listSuggestions(user.tenantId)).filter((s) => s.status !== 'dismissed');
+      const { tenantId } = await requireOrgScope(req, 'workspace:read');
+      const suggestions = (await listSuggestions(tenantId)).filter((s) => s.status !== 'dismissed');
       res.json({ suggestions });
     } catch (err) { next(err); }
   });
@@ -38,17 +42,17 @@ export function registerAmbientWorkGraphRoutes(deps: RouteDeps): void {
   // Explicit on-demand refresh (bounded sweep) — kept off GET to protect the read path.
   app.post(`${BASE}/refresh`, async (req, res, next) => {
     try {
-      const { user } = await requireOrgScope(req, 'workspace:write');
-      await sweepTenant({ storage }, user.tenantId);
-      const suggestions = (await listSuggestions(user.tenantId)).filter((s) => s.status !== 'dismissed');
+      const { tenantId } = await requireOrgScope(req, 'workspace:write');
+      await sweepTenant({ storage }, tenantId);
+      const suggestions = (await listSuggestions(tenantId)).filter((s) => s.status !== 'dismissed');
       res.json({ suggestions });
     } catch (err) { next(err); }
   });
 
   app.post(`${BASE}/:id/dismiss`, async (req, res, next) => {
     try {
-      const { user } = await requireOrgScope(req, 'workspace:write');
-      await requireOwned(req.params.id, user.tenantId);
+      const { tenantId } = await requireOrgScope(req, 'workspace:write');
+      await requireOwned(req.params.id, tenantId);
       res.json({ suggestion: await setSuggestionStatus(req.params.id, 'dismissed') });
     } catch (err) { next(err); }
   });
@@ -57,11 +61,34 @@ export function registerAmbientWorkGraphRoutes(deps: RouteDeps): void {
   // workflow-author (the Workflow Architect agent); no second author, no schema coupling.
   app.post(`${BASE}/:id/accept`, async (req, res, next) => {
     try {
-      const { user } = await requireOrgScope(req, 'workspace:write');
-      const existing = await requireOwned(req.params.id, user.tenantId);
+      const { user, tenantId } = await requireOrgScope(req, 'workspace:write');
+      const existing = await requireOwned(req.params.id, tenantId);
       const suggestion = await setSuggestionStatus(req.params.id, 'accepted');
+      // RFC 0096 — record the human-vetted accept as a durable reviewable-learning
+      // proposal (the ONE real producer). Idempotent (deterministic id from the
+      // suggestionId), tenant-scoped; best-effort so a proposals hiccup never
+      // fails the accept + draftSeed the FE needs.
+      let proposalId: string | undefined;
+      try {
+        const proposal = await createProposalFromAcceptedPattern(
+          tenantId,
+          {
+            suggestionId: existing.suggestionId,
+            toolSequence: existing.toolSequence,
+            count: existing.count,
+            exampleRunIds: existing.exampleRunIds,
+            ...(existing.sampleGoal ? { sampleGoal: existing.sampleGoal } : {}),
+          },
+          user.userId,
+        );
+        proposalId = proposal.id;
+      } catch (err) {
+        // Best-effort: a proposals hiccup must not fail the accept + draftSeed.
+        log.warn('work_graph_proposal_create_failed', { suggestionId: existing.suggestionId, error: err instanceof Error ? err.message : String(err) });
+      }
       res.json({
         suggestion,
+        ...(proposalId ? { proposalId } : {}),
         draftSeed: {
           name: existing.sampleGoal ?? `Workflow from ${existing.toolSequence.join(' → ')}`,
           toolSequence: existing.toolSequence,

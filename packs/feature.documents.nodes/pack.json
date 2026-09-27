@@ -1,11 +1,20 @@
 {
   "name": "feature.documents.nodes",
-  "version": "1.1.0",
-  "description": "Documents & Templates feature node pack (ADR 0053) — read + agentic-write nodes over the ctx.features.documents surface. list-documents reads an org's documents; assemble renders a template into an augmentedPrompt; generate-from-template assembles → ctx.callAI → creates a document version (idempotency-keyed, replay-safe). Output is validated against the template-owned outputSchema; NO typed artifact.created is emitted (artifact-types RFC 0071/0075 are not implemented in this host).",
+  "version": "1.3.1",
+  "description": "Documents & Templates feature node pack — read + agentic-write nodes over the ctx.features.documents surface. list-documents reads an org's documents; assemble renders a template into an augmentedPrompt; generate-from-template assembles → ctx.callAI → creates a document + immutable version with a deterministic run/node-derived document id and idempotency key (a resume/crash-replay of the same run converges on the same rows; a :fork mints a fresh runId and deliberately creates its own document — the fork-backstop posture). Output is validated against the template-owned outputSchema; when the template binds a registered host artifact type, a typed artifact.created run event is emitted (RFC 0071 / ADR 0055). generate-from-template and render are role:side-effect durable writers.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "documents", "templates", "sow", "prd", "rfp"],
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "documents",
+    "templates",
+    "sow",
+    "prd",
+    "rfp"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
   "peerDependencies": {
     "aiProviders": "supported"
   },
@@ -57,22 +66,29 @@
     },
     {
       "typeId": "feature.documents.nodes.generate-from-template",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Documents: Generate from Template",
-      "description": "Assembles a template, calls ctx.callAI to draft the content, creates a document and an immutable version (idempotency-keyed). Run-scoped generation.",
+      "description": "Assembles a template, calls ctx.callAI to draft the content, creates a document and an immutable version with a deterministic run/node-derived document id + idempotency key (a replay/fork converges on the same rows). Run-scoped generation; durable writer.",
       "category": "integration",
-      "role": "action",
-      "capabilities": ["aiProviders"]
+      "role": "side-effect",
+      "capabilities": [
+        "aiProviders"
+      ]
     },
     {
       "typeId": "feature.documents.nodes.render",
-      "version": "1.0.0",
-      "label": "Documents: Render to PDF",
-      "description": "Renders a document's current version to PDF and stores it as a Media token on the version (deterministic — no provider). ADR 0057.",
+      "version": "1.2.0",
+      "label": "Documents: Render / Export",
+      "description": "Renders a document's current version to one of seven formats (deterministic — no provider). Inputs: { orgId, documentId, format? } — format is one of: pdf (default), slides, sheet, docx, epub, odt, latex (ADR 0057 + ADR 0400). pdf/slides/sheet store durable Media library assets, idempotent per version+format — a re-render or replay converges on the SAME stored asset and token instead of minting duplicates or rewriting the immutable version's renderedMediaToken; docx/epub/odt/latex are REGENERABLE editable exports (latex = source-only .tex, no compile; math is faithful) stored as ~1-hour scratch Media (download-and-go — re-render to get a fresh link). Output: { versionId, format, renderedMediaToken, url, sizeBytes }. Fails typed: not_found (document), validation_error (unknown format, no content, >25 MiB export). Durable writer.",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

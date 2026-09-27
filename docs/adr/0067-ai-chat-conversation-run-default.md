@@ -125,3 +125,54 @@ Phases 1–5 landed together; Phase 6 (fallback retirement) landed 2026-06-21 on
 
 Tests: `backend/test/conversation-exchange.test.ts` (idempotent-retry no-duplicate; BYOK `credential_unavailable` fail-closed), `frontend conversationTransport.test.ts` (turn→bubble mapping + streaming guards), `useChatSession.integration.test.tsx` (Phase 6: pins the conversation send path — lazy-open + run reuse, wire-turn rebuild, error-bubble-preserves-user-turn; the @mention `workflow_run` block still pins the createRun + SSE lifecycle).
 
+
+## Correction — multimodal attachments were dropped by the conversation transport (2026-07-03)
+
+Phase 6 made the RFC 0005 conversation primitive the SOLE chat transport, but the
+attachment path was never ported from the retired per-turn `chat.turn` workflow: the
+frontend's `sendViaConversation` ignored `opts.attachments` (the exchange body carried
+`content: text` only), and the backend's `conversationExchange` treated turn content as
+text (`asText`/`sanitizeFreeText` + text-only `turnsToMessages`). Net effect: every
+attachment in main chat was silently dropped, and an attachment-only send (a voice clip
+with no typed text) 422'd — "Conversation exchange requires a non-empty turn.content."
+
+Fixed end-to-end. Turn content is OPAQUE on the RFC 0005 wire, so this is host behavior,
+not a wire change:
+- **Frontend** composes `content: ContentPart[]` when attachments are present (text part
+  first when non-blank); the transport type widened accordingly.
+- **Backend** `isContentParts` VALIDATES the dispatch `ContentPart` shape (field-typed per
+  variant; malformed arrays fall through to the JSON text projection). Validation accepts
+  a turn with ≥1 payload-bearing part (`partHasPayload`) — audio-only is valid; a blank
+  parts array or blank string still 422s. The STORED turn keeps the real parts
+  (`sanitizeFreeTextDeep` redacts pasted keys inside text parts), and `turnsToMessages`
+  hands the model the actual parts — the existing dispatchers already convert
+  per-provider (audio→inlineData / Gemini File API, image→image_url, ADR 0111).
+- **`asText` is parts-aware**: text parts join; media parts become `[audio attachment]`
+  markers — so transcripts / scaffolds / memory extraction / knowledge queries never
+  stringify base64 into a prompt. `userText` (routing, channel mirror, agent-loop task)
+  stays this text projection.
+
+**Honest residue:** the `@agent` loop path consumes `userText` (the text projection), so
+an attachment addressed *to a named agent* reaches it as an `[audio attachment]` marker,
+not bytes — multimodal agent-loop dispatch is a follow-up seam. Default (agentless) chat
+gets the real bytes via `turnsToMessages`.
+
+## RT-10 — voice-clip turns: transcript-on-the-user-turn + parts-aware bubbles (2026-07-03)
+
+Two defects surfaced by the first real voice-clip send after the multimodal correction:
+1. **The "wall of base64".** The reconciled user bubble rendered the raw parts JSON: the
+   frontend fold (`turnsToBubbles`) projected ALL turn content through `asText`
+   (JSON.stringify for non-strings). Fixed: a validated `ContentPart[]` passes through
+   VERBATIM (MessageRenderer already renders text/audio/image/file parts — the optimistic
+   bubble always did); malformed arrays still fall back to the text projection. The
+   persisted round-trip (whole-envelope JSON) already preserved arrays.
+2. **The model parroted the clip.** An audio-only turn gave the model nothing but audio and
+   no task, so it replied with the transcription itself. Fixed host-side: an audio-parts
+   turn with no typed text is TRANSCRIBED first (`transcribeTurnAudio` — the shared
+   `mediaTranscriptionPrompts` constants through the SAME `dispatchReply`
+   provider/key/budget path as the reply), and the transcript becomes a leading text part
+   of the USER's turn. The bubble shows the spoken words (+ the audio player), `userText`
+   (routing / knowledge / channel mirror) gets real text, and the model ANSWERS the words.
+   Fail-soft: transcription failure (no audio-capable provider, missing key, mock) leaves
+   the turn audio-only — the model still hears the raw audio (prior behavior). Cost: one
+   extra model call per voice-clip turn, on the same budget accounting as the reply.

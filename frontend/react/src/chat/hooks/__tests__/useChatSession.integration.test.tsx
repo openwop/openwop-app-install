@@ -17,7 +17,7 @@ import type { RunEventDoc } from '@openwop/openwop';
 interface SubOpts {
   onEvent: (ev: RunEventDoc) => void | Promise<void>;
   onTimeout?: (kind: 'idle' | 'absolute') => void;
-  onError?: (err: unknown) => void;
+  onError?: (err: Event) => void;
 }
 interface Captured extends SubOpts { runId: string; sub: { close: () => void } }
 let captured: Captured | null = null;
@@ -39,9 +39,20 @@ vi.mock('../../../client/runsClient.js', () => ({
   cancelRun: vi.fn(() => Promise.resolve()),
   getRun: vi.fn(() => Promise.resolve({ status: 'running' })),
   // The reconcile backfill (workflowRunSubscription) re-polls the log on
-  // node.interrupt.resolved / run.completed. Empty log → a no-op union.
-  pollEvents: vi.fn(() => Promise.resolve({ events: [], isComplete: true })),
+  // interrupt.resolved / run.completed. Empty log → a no-op union.
+  pollEvents: vi.fn(() => Promise.resolve({ events: [], runId: 'run-1', lastSequence: seq, status: 'running', isTerminal: true })),
   getSdkClient: vi.fn(),
+}));
+// ADR 0712 — the mention lane reads the declared run inputs and, for a declared
+// credentialRef, the chat's durable BYOK binding. Default: the contract read FAILS
+// (the degrade path every other test here has always exercised).
+vi.mock('../../../workflows/workflowsClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../../workflows/workflowsClient.js')>()),
+  getWorkflowRunInputs: vi.fn(() => Promise.reject(new Error('no stored definition'))),
+}));
+vi.mock('../../../byok/lib/byokClient.js', async (orig) => ({
+  ...(await orig<typeof import('../../../byok/lib/byokClient.js')>()),
+  getActiveConfig: vi.fn(),
 }));
 vi.mock('../../../client/interruptsClient.js', () => ({
   listOpenInterrupts: vi.fn(() => Promise.resolve([])),
@@ -80,16 +91,17 @@ vi.mock('../../conversationTransport.js', async (importOriginal) => {
 
 import { useChatSession } from '../useChatSession.js';
 import { createRun, cancelRun, pollEvents } from '../../../client/runsClient.js';
+import { getWorkflowRunInputs } from '../../../workflows/workflowsClient.js';
+import { getActiveConfig } from '../../../byok/lib/byokClient.js';
 import { listOpenInterrupts } from '../../../client/interruptsClient.js';
 import { createChatSession, appendChatMessage, listChatSessionMessagesPage, updateChatMessage, getSessionFeedback } from '../../../client/chatSessionsClient.js';
-import { openConversationSession, sendConversationTurn } from '../../conversationTransport.js';
 
 const CONFIG = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' };
 
 let seq = 0;
 function evt(type: string, payload: unknown): RunEventDoc {
   seq += 1;
-  return { eventId: `e${seq}`, runId: 'run-1', type, payload, timestamp: '2026-01-01T00:00:00Z', sequence: seq };
+  return { eventId: `e${seq}`, runId: 'run-1', type, payload, timestamp: '2026-01-01T00:00:00Z', sequence: seq, schemaVersion: 3 };
 }
 
 beforeEach(() => {
@@ -99,7 +111,7 @@ beforeEach(() => {
   seq = 0;
   closeSpy.mockClear();
   vi.mocked(pollEvents).mockClear();
-  vi.mocked(pollEvents).mockResolvedValue({ events: [], isComplete: true });
+  vi.mocked(pollEvents).mockResolvedValue({ events: [], runId: 'run-1', lastSequence: seq, status: 'running', isTerminal: true });
   vi.mocked(createRun).mockClear();
   vi.mocked(cancelRun).mockClear();
   openConversationSessionMock.mockClear();
@@ -201,6 +213,129 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
     // ids as the persisted rows — not the wire `c:1:user` form — so feedback /
     // regenerate / reopen all key on one value (no per-path id duality, no flip).
     expect(result.current.session.messages.map((m) => m.id)).toEqual(['c_1_user', 'c_2_agent']);
+  });
+
+  it('refreshNewestMessages MERGES without teardown: streaming rows untouched, order preserved, new rows appended (GRADE-D1)', async () => {
+    const { result } = renderHook(() => useChatSession());
+    // Seed a live thread: one settled + one STREAMING bubble (a typed turn in flight).
+    await act(async () => {
+      result.current.upsertTranscriptTurn('settled turn', 'user', 's1:u0', true);
+      result.current.upsertTranscriptTurn('still streaming', 'assistant', 's1:a0', false);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const sessionId = result.current.session.id;
+    const before = result.current.session.messages.map((m) => m.id);
+    // The store returns the settled row + a NEW server-persisted voice turn.
+    vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
+      messages: [
+        { messageId: 'voice-tx_s1_u0', role: 'user', content: JSON.stringify({ role: 'user', content: 'settled turn' }), createdAt: '2026-01-01T00:00:01Z' },
+        { messageId: 'srv-new-1', role: 'assistant', content: JSON.stringify({ role: 'assistant', content: 'server-side voice reply' }), createdAt: '2026-01-01T00:00:02Z' },
+      ],
+      nextCursor: null,
+    } as never);
+    await act(async () => { await result.current.refreshNewestMessages(sessionId); });
+    const after = result.current.session.messages;
+    // Existing order preserved; the new row APPENDED (never re-sorted/removed).
+    expect(after.map((m) => m.id).slice(0, before.length)).toEqual(before);
+    expect(after.map((m) => m.id)).toContain('srv-new-1');
+    // The streaming bubble is untouched (still streaming, content intact).
+    const streaming = after.find((m) => m.id.includes('s1_a0'));
+    expect(streaming?.isStreaming).toBe(true);
+    expect(streaming?.content).toBe('still streaming');
+  });
+
+  it('refreshNewestMessages adopts LIVE lifecycle + reactions (ADR 0327 P2 slice — channel frames ride the merge, not a reload)', async () => {
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => {
+      result.current.upsertTranscriptTurn('will be tombstoned', 'user', 'ch1:u0', true);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const sessionId = result.current.session.id;
+    const rowId = result.current.session.messages[0]!.id;
+    // The server row comes back tombstoned + reacted (an edit/delete/reaction
+    // frame triggered this refresh) — the merge must adopt both facets.
+    vi.mocked(listChatSessionMessagesPage).mockResolvedValueOnce({
+      messages: [
+        {
+          messageId: rowId, role: 'user',
+          content: JSON.stringify({ role: 'user', content: 'will be tombstoned' }),
+          createdAt: '2026-01-01T00:00:01Z',
+          meta: JSON.stringify({ deletedAt: '2026-01-01T00:00:05Z', deletedBy: 'user:mod' }),
+          reactions: [{ emoji: '👍', count: 2, mine: false }],
+        },
+      ],
+      nextCursor: null,
+    } as never);
+    await act(async () => { await result.current.refreshNewestMessages(sessionId); });
+    const row = result.current.session.messages.find((m) => m.id === rowId);
+    expect(row?.meta?.deletedAt).toBe('2026-01-01T00:00:05Z');
+    expect(row?.reactions?.[0]?.count).toBe(2);
+  });
+
+  it('refreshNewestMessages cursor-walks to a lifecycle target OLDER than the newest page; walked rows never append (GC-CHAT-2)', async () => {
+    const { result } = renderHook(() => useChatSession());
+    // Seed an on-screen thread containing the OLD row the lifecycle frame targets.
+    await act(async () => {
+      result.current.upsertTranscriptTurn('ancient message', 'user', 'old1:u0', true);
+      result.current.upsertTranscriptTurn('recent message', 'user', 'new1:u0', true);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const sessionId = result.current.session.id;
+    const oldId = result.current.session.messages[0]!.id;
+    const newId = result.current.session.messages[1]!.id;
+    // Page 1 (newest) does NOT contain the target — it offers a cursor.
+    vi.mocked(listChatSessionMessagesPage)
+      .mockResolvedValueOnce({
+        messages: [
+          { messageId: newId, role: 'user', content: JSON.stringify({ role: 'user', content: 'recent message' }), createdAt: '2026-01-01T00:01:00Z' },
+        ],
+        nextCursor: '2026-01-01T00:00:01Z~cursor-1',
+      } as never)
+      // Page 2 (walked) carries the tombstoned target + an off-screen row that
+      // must NOT be appended (it belongs to pagination, not the feed tail).
+      .mockResolvedValueOnce({
+        messages: [
+          { messageId: 'offscreen-old', role: 'user', content: JSON.stringify({ role: 'user', content: 'never loaded' }), createdAt: '2026-01-01T00:00:00Z' },
+          { messageId: oldId, role: 'user', content: JSON.stringify({ role: 'user', content: 'ancient message' }), createdAt: '2026-01-01T00:00:01Z', meta: JSON.stringify({ deletedAt: '2026-01-01T00:02:00Z' }) },
+        ],
+        nextCursor: null,
+      } as never);
+    await act(async () => { await result.current.refreshNewestMessages(sessionId, [oldId]); });
+    const msgs = result.current.session.messages;
+    // The old on-screen row adopted the tombstone from the WALKED page…
+    expect(msgs.find((m) => m.id === oldId)?.meta?.deletedAt).toBe('2026-01-01T00:02:00Z');
+    // …the second page WAS requested with the cursor…
+    expect(vi.mocked(listChatSessionMessagesPage).mock.calls.some(([, o]) => (o as { before?: string }).before === '2026-01-01T00:00:01Z~cursor-1')).toBe(true);
+    // …and the off-screen walked row did NOT append to the feed.
+    expect(msgs.some((m) => m.id === 'offscreen-old')).toBe(false);
+  });
+
+  it('upsertTranscriptTurn: streams interim in-memory, persists only the SETTLED turn (survives reload)', async () => {
+    const { result } = renderHook(() => useChatSession());
+
+    // Interim fragments (final=false) stream into ONE in-memory bubble, no BE write.
+    await act(async () => {
+      result.current.upsertTranscriptTurn('hel', 'user', 'sess-1:u0', false);
+      result.current.upsertTranscriptTurn('hello', 'user', 'sess-1:u0', false);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    const live = result.current.session.messages.filter((m) => m.id.startsWith('voice-tx'));
+    expect(live).toHaveLength(1);
+    expect(live[0]).toMatchObject({ id: 'voice-tx_sess-1_u0', role: 'user', content: 'hello', isStreaming: true });
+    expect(vi.mocked(appendChatMessage)).not.toHaveBeenCalled();
+
+    // The final turn settles the bubble AND writes through to the durable store, using
+    // the SAME canonical (colon-sanitized) id so a reload lines up on one row.
+    await act(async () => {
+      result.current.upsertTranscriptTurn('hello there', 'user', 'sess-1:u0', true);
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(result.current.session.messages.find((m) => m.id === 'voice-tx_sess-1_u0'))
+      .toMatchObject({ content: 'hello there', isStreaming: false });
+    const voiceAppends = vi.mocked(appendChatMessage).mock.calls.filter((c) => c[1].messageId === 'voice-tx_sess-1_u0');
+    expect(voiceAppends).toHaveLength(1);
+    expect(voiceAppends[0]?.[1].role).toBe('user');
+    expect(JSON.parse(voiceAppends[0]?.[1].meta ?? '{}')).toMatchObject({ source: 'voice-realtime' });
   });
 
   it('switching conversations resets the run + accumulator (no cross-chat contamination)', async () => {
@@ -342,7 +477,7 @@ describe('useChatSession conversation send lifecycle (integration)', () => {
   it('async exchange whose chunks ALREADY advanced the seq is not mis-read as a dropped sync turn (board-cadence regression)', async () => {
     // Regression for the board-of-advisors persistence bug: under the async
     // exchange path the POST acks before the reply, but transient
-    // `ai.message.chunk` deltas have already bumped lastSeq PAST the cursor. The
+    // `output.chunk` deltas have already bumped lastSeq PAST the cursor. The
     // old `lastSeq > cursor` heuristic mis-read that as a completed sync turn,
     // merged an EMPTY turn set, and advanced the cursor past the chunks — silently
     // dropping the advisor's reply. The fix keys on a real new agent turn, so this
@@ -400,6 +535,40 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     expect(run?.workflowRun?.runId).toBe('run-1');
     expect(vi.mocked(createRun)).toHaveBeenCalledOnce();
     expect(captured?.runId).toBe('run-1');
+  });
+
+  it('ADR 0712 — a declared credentialRef left unset runs on the chat\'s valid BYOK key, via configurable only', async () => {
+    vi.mocked(getWorkflowRunInputs).mockResolvedValueOnce([
+      { name: 'topic', type: 'string', required: true },
+      { name: 'kicktodo_challenge_factory_a2ec352bceed_credentialRef', type: 'string', required: false },
+    ]);
+    vi.mocked(getActiveConfig).mockResolvedValueOnce({
+      config: { provider: 'google', model: 'gemini-3.5-flash-lite', credentialRef: 'byok:google' }, valid: true, anonymous: false,
+    });
+    const { result } = renderHook(() => useChatSession());
+    await act(async () => { await result.current.runWorkflowMention(MENTION, 'watercolor'); });
+    const req = vi.mocked(createRun).mock.calls[0]![0];
+    expect(req.configurable).toEqual({ version: 1, ai: { credentialRef: 'byok:google' } });
+    // Never as the node input: the explicit rung does not check the provider.
+    expect(req.inputs).toMatchObject({ topic: 'watercolor' });
+    expect(Object.keys(req.inputs ?? {}).filter((k) => k.endsWith('credentialRef'))).toEqual([]);
+  });
+
+  it('ADR 0712 — an invalid or managed chat binding sends no run credential', async () => {
+    for (const env of [
+      { config: { provider: 'google', model: 'm', credentialRef: 'byok:google' }, valid: false, anonymous: false },
+      { config: { provider: 'openwop', model: 'm', credentialRef: 'managed:openwop-free' }, valid: true, anonymous: false },
+    ]) {
+      vi.mocked(createRun).mockClear();
+      vi.mocked(getWorkflowRunInputs).mockResolvedValueOnce([
+        { name: 'topic', type: 'string', required: true },
+        { name: 'credentialRef', type: 'string', required: false },
+      ]);
+      vi.mocked(getActiveConfig).mockResolvedValueOnce(env);
+      const { result } = renderHook(() => useChatSession());
+      await act(async () => { await result.current.runWorkflowMention(MENTION, 'x'); });
+      expect(vi.mocked(createRun).mock.calls[0]![0].configurable).toBeUndefined();
+    }
   });
 
   it('node.started/completed update the workflow_run progress', async () => {
@@ -500,7 +669,7 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
 
     // Authoritative log carries BOTH nodes.
     vi.mocked(pollEvents).mockResolvedValueOnce({
-      isComplete: true,
+      runId: 'run-1', lastSequence: seq, status: 'running', isTerminal: true,
       events: [
         evt('node.completed', { nodeId: 'upper_0', outputs: { text: 'HI' } }),
         evt('node.completed', { nodeId: 'gate_1', outputs: { action: 'approve' } }),
@@ -530,7 +699,7 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     // The stream idled out during a HITL suspend; meanwhile a node completed.
     // The log is the only place that knows (no SSE event will arrive).
     vi.mocked(pollEvents).mockResolvedValueOnce({
-      isComplete: false,
+      runId: 'run-1', lastSequence: seq, status: 'running', isTerminal: false,
       events: [evt('node.completed', { nodeId: 'gate_1', outputs: { action: 'approve' } })],
     });
 
@@ -550,7 +719,7 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
 
     // Stream died during a suspend; the run actually completed while it was gone.
     vi.mocked(pollEvents).mockResolvedValueOnce({
-      isComplete: true,
+      runId: 'run-1', lastSequence: seq, status: 'running', isTerminal: true,
       events: [
         evt('node.completed', { nodeId: 'gate_1', outputs: {} }),
         evt('run.completed', { output: {} }),
@@ -595,7 +764,7 @@ describe('useChatSession workflow_run lifecycle (integration)', () => {
     // A timeout that fires on the now-orphaned sub must NOT re-subscribe — the
     // identity guard sees its registry entry was cleared on reset.
     vi.mocked(pollEvents).mockResolvedValueOnce({
-      isComplete: false,
+      runId: 'run-1', lastSequence: seq, status: 'running', isTerminal: false,
       events: [evt('node.completed', { nodeId: 'late_1', outputs: {} })],
     });
     await act(async () => { orphan.onTimeout?.('idle'); await flush(); });

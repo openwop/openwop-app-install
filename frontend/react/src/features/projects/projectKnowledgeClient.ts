@@ -1,7 +1,7 @@
 /**
  * Project knowledge client (ADR 0046 follow-on) — the project counterpart of the
  * profile knowledge client, over the GENERIC subject binding. Drives
- * /v1/host/openwop-app/projects/:id/knowledge: view, create / unbind a KB
+ * /host/openwop-app/projects/:id/knowledge: view, create / unbind a KB
  * collection, ingest a text document, delete a document, and a read-only retrieve
  * over the project's corpus (bound docs + project notes).
  */
@@ -11,10 +11,15 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 export interface KnowledgeDoc { documentId: string; title: string; chunkCount: number; createdAt: string; contentTrust?: 'trusted' | 'untrusted' }
 export interface KnowledgeCollection { collectionId: string; orgId: string; name: string; documentCount: number; chunkCount: number; documents: KnowledgeDoc[] }
 export interface ProjectKnowledgeView { projectId: string; collections: KnowledgeCollection[]; noteCount: number }
-export interface RetrieveResult { chunks: Array<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust?: 'trusted' | 'untrusted' }>; hasResults: boolean }
+/** `failedSources` (ADR 0583 / KB-UX-3) — the server-side composition swallows a
+ *  per-source fault so a live agent turn survives it, which made `hasResults:false`
+ *  the SAME value an empty corpus produces: the panel rendered an internal error
+ *  as the confident "No matches". Non-empty ⇒ the answer is PARTIAL, and the UI
+ *  must say which source could not be searched rather than claiming absence. */
+export interface RetrieveResult { chunks: Array<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust?: 'trusted' | 'untrusted' }>; hasResults: boolean; failedSources?: Array<'kb' | 'memory'> }
 export interface Org { orgId: string; name: string }
 
-const baseFor = (projectId: string): string => `${config.baseUrl}/v1/host/openwop-app/projects/${encodeURIComponent(projectId)}/knowledge`;
+const baseFor = (projectId: string): string => `${config.baseUrl}/host/openwop-app/projects/${encodeURIComponent(projectId)}/knowledge`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -27,7 +32,7 @@ export async function getProjectKnowledge(projectId: string): Promise<ProjectKno
 }
 
 export async function listOrgs(): Promise<Org[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ orgs: Org[] }>(res, 'listOrgs')).orgs;
 }
 

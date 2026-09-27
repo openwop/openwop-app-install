@@ -7,16 +7,20 @@
  *   - Then:       API key input (masked + eye toggle + trust alert)
  *   - On success: parent re-renders to the chat / configured view
  *
- * The credentialRef is auto-derived: `byok:{provider}:{timestamp}`.
- * Adopters who want stable refs (e.g., named per-tenant keys) swap
- * `useAutoRef()` for their own naming policy.
+ * The credentialRef is DETERMINISTIC — `byok:{provider}` (ADR 0517 fix B), or the
+ * provider's existing ref when the workspace already has one. It used to carry a
+ * `${Date.now()}` suffix, which meant every pass through this wizard minted a new
+ * secret row rather than replacing the old one; combined with a browser-local
+ * pointer that could go missing, one workspace ended up with seven Google keys.
+ * When a stored key exists for the picked provider the key step OFFERS it instead
+ * of asking (fix A).
  */
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { PROVIDERS, type ProviderConfig, type ProviderModel } from './lib/providers.js';
+import { PROVIDERS, COPILOT_CREDENTIAL_REF, COPILOT_DEFAULT_MODEL, type ProviderConfig, type ProviderModel } from './lib/providers.js';
 import { useAuth } from '../auth/useAuth.js';
-import type { BYOKActiveConfig } from './lib/useBYOKConfig.js';
+import { preferredRefForProvider, type BYOKActiveConfig } from './lib/useBYOKConfig.js';
 import { BYOKStepper } from './BYOKStepper.js';
 import { TryItFreeCard, ProviderGrid } from './ProviderGrid.js';
 import { ModelGrid } from './ModelGrid.js';
@@ -26,6 +30,13 @@ interface Props {
   onComplete: (cfg: BYOKActiveConfig) => void | Promise<void>;
   /** Optional cancel — present when the wizard is opened from a settings drawer. */
   onCancel?: (() => void) | undefined;
+  /**
+   * The workspace's already-stored credentialRefs (ADR 0517 fix A). Supplied by
+   * the caller, which has already fetched them, so the wizard adds no round trip.
+   * When the picked provider has one, the key step offers it instead of asking
+   * for a key the user has given us before.
+   */
+  storedRefs?: readonly string[];
 }
 
 const MANAGED_PENDING_KEY = 'openwop-app.byok.pendingManaged';
@@ -39,7 +50,7 @@ function managedCredentialRef(providerId: string): string {
   return `managed:${providerId}`;
 }
 
-export function BYOKWizard({ onComplete, onCancel }: Props): JSX.Element {
+export function BYOKWizard({ onComplete, onCancel, storedRefs = [] }: Props): JSX.Element {
   const { t } = useTranslation('byok');
   const { user, signIn } = useAuth();
   const [step, setStep] = useState<'provider' | 'model' | 'key'>('provider');
@@ -106,9 +117,17 @@ export function BYOKWizard({ onComplete, onCancel }: Props): JSX.Element {
       {step === 'provider' && (
         <ProviderGrid
           isAuthed={user !== null}
+          storedRefs={storedRefs}
           onPick={(p) => {
             if (p.managed) {
               void activateManaged(p);
+              return;
+            }
+            // ADR 0757 follow-up — a connected subscription provider (GitHub
+            // Copilot) needs no model or key step: its credential is the user's
+            // OAuth connection, and `default` lets Copilot pick the plan's model.
+            if (p.subscription) {
+              void onComplete({ provider: p.id, model: COPILOT_DEFAULT_MODEL, credentialRef: COPILOT_CREDENTIAL_REF });
               return;
             }
             setProvider(p);
@@ -136,6 +155,10 @@ export function BYOKWizard({ onComplete, onCancel }: Props): JSX.Element {
         <KeyEntry
           provider={provider}
           model={model}
+          // Store INTO the provider's existing ref when it has one, so a
+          // deliberate replacement overwrites rather than orphaning (ADR 0517 fix B).
+          targetRef={preferredRefForProvider(storedRefs, provider.id) ?? `byok:${provider.id}`}
+          existingRef={preferredRefForProvider(storedRefs, provider.id)}
           onBack={() => setStep('model')}
           onStored={async (credentialRef) => {
             await onComplete({ provider: provider.id, model: model.id, credentialRef });

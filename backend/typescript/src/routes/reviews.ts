@@ -22,6 +22,8 @@ import { OpenwopError } from '../types.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import { requireProtocolScope } from '../host/protocolAuthorization.js';
+import { isSuperadmin } from '../host/superadmin.js';
+import { isOwnPersonalWorkspace } from '../host/requestSubject.js';
 import { listReviews, getReview, type ReviewStatus, type ReviewAuthCtx } from '../host/reviewProjection.js';
 import { claimApproval, rejectApproval } from '../host/approvalDecision.js';
 import { resolveAndResume, validateResumeValue } from './interrupts.js';
@@ -55,7 +57,9 @@ export function registerReviewRoutes(app: Express, deps: Deps): void {
       await requireProtocolScope(req, 'runs:read');
       const raw = String(req.query.status ?? '');
       const status = (REVIEW_STATUSES as readonly string[]).includes(raw) ? (raw as ReviewStatus) : undefined;
-      const items = await listReviews(storage, authCtx(req), status ? { status } : {});
+      const conversationId = typeof req.query.conversationId === 'string' && req.query.conversationId ? req.query.conversationId : undefined;
+      const boardId = typeof req.query.boardId === 'string' && req.query.boardId ? req.query.boardId : undefined;
+      const items = await listReviews(storage, authCtx(req), { ...(status ? { status } : {}), ...(conversationId ? { conversationId } : {}), ...(boardId ? { boardId } : {}) });
       res.status(200).json({ items });
     } catch (err) {
       next(err);
@@ -94,7 +98,10 @@ export function registerReviewRoutes(app: Express, deps: Deps): void {
         // The mapper always sets approvalId for an approval-source review; guard
         // explicitly rather than assert, so a future mapper change fails loud.
         if (!review.approvalId) throw new OpenwopError('internal_error', 'review missing approvalId', 500, {});
-        const decideCtx = { tenantId: ctx.tenantId, ...(ctx.subjectRef ? { decidedBy: ctx.subjectRef } : {}), ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}) };
+        // ADR 0473 — `expectedDefinitionHash` is the approve-what-you-see pin a
+        // composed-workflow card sends; other kinds ignore it.
+        const bodyHash = (req.body as { expectedDefinitionHash?: unknown } | undefined)?.expectedDefinitionHash;
+        const decideCtx = { tenantId: ctx.tenantId, ...(ctx.subjectRef ? { decidedBy: ctx.subjectRef } : {}), ...(noteOf(req) !== undefined ? { note: noteOf(req) } : {}), ...(typeof bodyHash === 'string' && bodyHash.trim().length > 0 ? { expectedDefinitionHash: bodyHash.trim() } : {}), ...(isSuperadmin(req) ? { decidedBySuperadmin: true } : {}), ...(req.principal?.tenants?.includes('*') ? { decidedByWildcardOperator: true } : {}), ...(isOwnPersonalWorkspace(req) ? { decidedByPersonalOwner: true } : {}) };
         const result = action === 'approve'
           ? await claimApproval(deps, decideCtx, review.approvalId)
           : await rejectApproval(deps, decideCtx, review.approvalId);

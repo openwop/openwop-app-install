@@ -149,6 +149,8 @@ A `feature.podcasts` workflow, run on the executor:
 
 Long-running → executor run + optional HITL approval + **failed-episode retry** (re-run from the failed node). **Schedulable** via ADR 0025 — a "weekly digest podcast" is a near-free win (a scheduled run over a notebook).
 
+> **Correction (2026-07-22, chat-first-port C6):** the "weekly digest podcast" was NOT the near-free win this line assumed, and it is **not wired** — recording the reason rather than a phantom feature. The `podcasts.generate` workflow is **episode-first**: its ONLY input is `episodeId`, and every node resolves the cast/notebook/models from that pre-created `PodcastEpisode` record (minted by `POST /episodes`). The generic RFC 0052 scheduler fires a `workflowId` with only **server-stamped static `inputs`** — it cannot create a fresh episode row per tick, so binding `podcasts.generate` to a schedule would fire every run against the SAME episode (or an undefined id), not a recurring digest. A real weekly digest needs a podcasts-owned "digest schedule" that mints a new episode from a stored `{notebookId, episodeProfileId}` each period (a small daemon or a wrapper workflow whose first node creates the episode) — **deferred**, tracked as future host work. The catalog copy is corrected to stop implying it ships (FEATURES.md).
+
 ### RBAC & isolation
 
 Org-scoped (ADR 0006): every route + the `ctx.podcasts` surface gates on the caller's RBAC scope **in the workspace's org** — `workspace:read` to view profiles/episodes, `workspace:write` to mutate/generate — uniform 404 on insufficient scope (no existence leak). Profiles + episodes never become authenticated principals. Delete cascades the `PodcastEpisode` → releases the Media asset + the Documents (per their owners' cascade rules).

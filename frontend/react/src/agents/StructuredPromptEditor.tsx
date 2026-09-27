@@ -12,6 +12,7 @@
  * convention — those open in raw mode so nothing is silently restructured).
  */
 
+import { Button } from '../ui/Button.js';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { MarkdownEditor } from '../ui/MarkdownEditor.js';
@@ -125,22 +126,20 @@ export function StructuredPromptEditor({
             : t('promptRawHint')}
         </span>
         <div className="u-iflex u-gap-1">
-          <button
-            type="button"
-            className={mode === 'guided' ? 'primary btn-sm' : 'secondary btn-sm'}
+          <Button
+            variant={mode === 'guided' ? 'primary' : 'secondary'} size="sm"
             aria-pressed={mode === 'guided'}
             onClick={switchToGuided}
           >
             {t('promptGuidedSections')}
-          </button>
-          <button
-            type="button"
-            className={mode === 'raw' ? 'primary btn-sm' : 'secondary btn-sm'}
+          </Button>
+          <Button
+            variant={mode === 'raw' ? 'primary' : 'secondary'} size="sm"
             aria-pressed={mode === 'raw'}
             onClick={() => setMode('raw')}
           >
             {t('promptRawMarkdown')}
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -158,14 +157,14 @@ export function StructuredPromptEditor({
         <div className="u-flex u-flex-col u-gap-3">
           {preamble.trim() ? (
             <div>
-              <div className="u-fs-13 u-fw-600">{t('promptIntro')}</div>
+              <h3 className="u-fs-13 u-fw-600 u-m-0">{t('promptIntro')}</h3>
               <p className="structprompt-hint">{t('promptIntroHint')}</p>
               <MarkdownEditor value={preamble} onChange={setPreambleBody} rows={3} compact ariaLabel={t('promptIntro')} />
             </div>
           ) : null}
           {SECTIONS.map((s) => (
             <div key={s.heading}>
-              <div className="u-fs-13 u-fw-600">{t(s.headingKey)}</div>
+              <h3 className="u-fs-13 u-fw-600 u-m-0">{t(s.headingKey)}</h3>
               <p className="structprompt-hint">{t(s.hintKey)}</p>
               <MarkdownEditor
                 value={bodies[s.heading] ?? ''}

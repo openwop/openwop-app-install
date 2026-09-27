@@ -16,7 +16,7 @@ export const messages = {
   pageEyebrow: 'Construire',
   pageTitle: 'Bibliothèque de prompts',
   pageLede:
-    'Des prompts réutilisables que les nœuds IA de votre workflow peuvent choisir. Modifiez-en un à un seul endroit et chaque nœud qui l\'utilise se met à jour à sa prochaine exécution — sans copier-coller, sans dérive. Les prompts système définissent le rôle et le ton de l\'IA ; les prompts utilisateur façonnent ce que vous lui demandez.',
+    'Des prompts réutilisables que les nœuds IA de votre workflow peuvent choisir. Modifiez-en un à un seul endroit et chaque nœud qui l’utilise se met à jour à sa prochaine exécution — sans copier-coller, sans dérive. Les prompts système définissent le rôle et le ton de l’IA ; les prompts utilisateur façonnent ce que vous lui demandez.',
   newPrompt: '+ Nouveau prompt',
 
   // Tier-1 subset banner (segments — markup stays in the component)
@@ -42,7 +42,7 @@ export const messages = {
   // Loading / empty states
   loadingPromptsAria: 'Chargement des prompts',
   noMatchTitle: 'Aucun prompt correspondant',
-  noMatchBody: 'Essayez d\'effacer la recherche ou le filtre par type.',
+  noMatchBody: 'Essayez d’effacer la recherche ou le filtre par type.',
   clearFilters: 'Effacer les filtres',
   emptyTitle: 'Aucun prompt pour le moment',
   emptyBody: 'Rédigez un prompt réutilisable que les nœuds IA de votre workflow peuvent choisir.',
@@ -72,10 +72,10 @@ export const messages = {
   namePlaceholder: 'ex. Éditeur de ton de voix',
   fieldKind: 'Type',
   fieldDescription: 'Description',
-  descriptionPlaceholder: 'Ce que fait ce prompt et quand l\'utiliser.',
+  descriptionPlaceholder: 'Ce que fait ce prompt et quand l’utiliser.',
   fieldPromptText: 'Texte du prompt',
   promptTextPlaceholderUser: 'Modèle de style Mustache. Utilisez {{token}} pour les entrées.',
-  promptTextPlaceholderSystem: 'L\'instruction système. Définissez le rôle, le ton, la forme de sortie.',
+  promptTextPlaceholderSystem: 'L’instruction système. Définissez le rôle, le ton, la forme de sortie.',
   fieldTags: 'Tags',
   tagsHint: '(séparés par des virgules)',
   tagsPlaceholder: 'éditorial, rédaction',
@@ -96,20 +96,22 @@ export const messages = {
   variableDefault: 'par défaut : {{value}}',
   previewLabel: 'Aperçu (rendu local)',
   missingRequired: 'Champs requis manquants : {{vars}}',
-  localRenderNotePrefix: 'Ceci est un rendu local de style Mustache. Une fois que l\'hôte annonce',
-  localRenderNoteMiddle: ', l\'aperçu passera par',
-  localRenderNoteSuffix: 'pour l\'invariant de hachage déterministe.',
+  localRenderNotePrefix: 'Ceci est un rendu local de style Mustache. Une fois que l’hôte annonce',
+  localRenderNoteMiddle: ', l’aperçu passera par',
+  localRenderNoteSuffix: 'pour l’invariant de hachage déterministe.',
 
   // Prompt picker input
   pickerFailedToLoad: 'Échec du chargement des prompts : {{error}}',
-  pickerLoading: 'Chargement des prompts…',
   pickerNone: '— aucun —',
   pickerOptionWithName: '{{name}} ({{ref}})',
   pickerShowBody: 'Afficher le corps du modèle',
   pickerVariables: 'Variables : {{vars}}',
 
   // Tier-1 lint findings (rendered as chips)
-  lintNoOneOf: '`oneOf` — Gemini l\'ignore silencieusement ; préférez `anyOf` ou une union avec discriminateur',
+  lintNoOneOf: '`oneOf` — Gemini l’ignore silencieusement ; préférez `anyOf` ou une union avec discriminateur',
   lintObjectNeedsAdditionalPropertiesFalse:
-    'schéma d\'objet sans `additionalProperties: false` — requis pour le mode strict d\'OpenAI',
+    'schéma d’objet sans `additionalProperties: false` — requis pour le mode strict d’OpenAI',
+  loadFailedTitle: "Impossible de charger la bibliothèque de prompts",
+  loadFailedBody: "C’est une lecture en échec, pas une bibliothèque vide : vos prompts sont toujours là.",
+  retry: "Réessayer",
 } as const;

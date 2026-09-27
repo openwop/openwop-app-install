@@ -5,6 +5,9 @@
  * org-scoped on the backend (a user with no org sees an empty list).
  */
 import { lazy } from 'react';
+
+// P4 continuation — this page's walkthrough spotlight (lazy chunk, boot-eager trigger).
+void import('../../walkthroughs/pageSpotlight.js').then((m) => m.registerPageSpotlight('projects.page.view', '/projects', 'projects.page'));
 import { FolderIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
@@ -16,16 +19,16 @@ const routes: FeatureRoute[] = [
   {
     path: '/projects',
     element: <ProjectsPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'Workspace',
-      label: 'Projects',
+      group: 'Planning',
+      label: 'Projects', labelKey: 'projectsLabel',
       icon: FolderIcon,
-      hint: 'Work containers — board, memory, workflows',
-      order: 34,
+      order: 38,
+      hint: 'Work containers — board, memory, workflows', hintKey: 'projectsHint',
     },
   },
-  { path: '/projects/:projectId', element: <ProjectDetailPage />, tier: 'workspace' },
+  { path: '/projects/:projectId', element: <ProjectDetailPage />, tier: 'workspace' , archetype: 'detail',},
 ];
 
 export const projectsFeature: FrontendFeature = { id: 'projects', routes };

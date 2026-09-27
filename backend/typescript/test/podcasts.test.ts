@@ -19,6 +19,7 @@ import { BACKEND_FEATURES } from '../src/features/index.js';
 import { projectStatus, PODCAST_LIMITS } from '../src/features/podcasts/podcastsService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -30,7 +31,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['podcasts', 'notebooks', 'kb', 'users']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -39,7 +40,7 @@ beforeAll(async () => {
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
+interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
 function client(): Client {
   let cookie = '';
   const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
@@ -48,7 +49,7 @@ function client(): Client {
     const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
     return { status: res.status, body: out };
   };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), del: (p) => call('DELETE', p) };
+  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 
 const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
@@ -137,6 +138,85 @@ describe('podcasts — profiles + generation', () => {
     // b generates in b.org but points at a's notebook → uniform 404 (no existence leak).
     const ep = await b.c.post(`${P}/episodes`, { orgId: b.orgId, notebookId: nb.body.notebook.id, episodeProfileId: fmt.body.profile.id });
     expect(ep.status).toBe(404);
+  });
+});
+
+describe('podcasts — episode reads gate on notebook access (CPU-2)', () => {
+  const PROJ = '/v1/host/openwop-app/projects';
+
+  // An owner + org pinned to an EXPLICIT tenant so co-org readers can share it
+  // (org membership is tenant-scoped — the default per-session tenant would isolate
+  // them and the outer org-read gate would 404 before the notebook gate is reached).
+  async function ownerInTenant(who: string): Promise<{ c: Client; orgId: string; tenantId: string }> {
+    const tenantId = `org:cpu2-${Date.now()}-${n++}`;
+    const c = client();
+    const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who), tenantId });
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+    const orgId = (await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' })).body.orgId as string;
+    return { c, orgId, tenantId };
+  }
+
+  // A co-org VIEWER (workspace:read) in the SAME tenant, NOT a notebook member.
+  async function coOrgReader(orgId: string, tenantId: string, who: string): Promise<{ c: Client; id: string }> {
+    const c = client();
+    const id = (await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail(who), tenantId })).body.user.userId as string;
+    await createMember({ tenantId, orgId, subject: id, displayName: who, roles: ['viewer'] });
+    return { c, id };
+  }
+
+  async function anEpisodeOverANotebook(owner: Client, orgId: string): Promise<{ notebookId: string; episodeId: string }> {
+    const cast = await owner.post(`${P}/speaker-profiles`, { orgId, name: 'Cast', speakers: oneSpeaker });
+    const fmt = await owner.post(`${P}/episode-profiles`, { orgId, name: 'Fmt', speakerProfileId: cast.body.profile.id });
+    const nb = await owner.post('/v1/host/openwop-app/notebooks', { orgId, name: 'Private research' });
+    expect(nb.status).toBe(201);
+    const ep = await owner.post(`${P}/episodes`, { orgId, notebookId: nb.body.notebook.id, episodeProfileId: fmt.body.profile.id });
+    expect(ep.status, JSON.stringify(ep.body)).toBe(202);
+    return { notebookId: nb.body.notebook.id, episodeId: ep.body.episode.id };
+  }
+
+  const inList = (r: Res, id: string): boolean => (r.body.episodes ?? []).some((e: { id: string }) => e.id === id);
+
+  it('a private-notebook episode is hidden from a co-org reader who is not a member; restored on membership', async () => {
+    const { c: owner, orgId, tenantId } = await ownerInTenant('cpu2-owner');
+    const { notebookId, episodeId } = await anEpisodeOverANotebook(owner, orgId);
+    const reader = await coOrgReader(orgId, tenantId, 'cpu2-reader');
+
+    // CONTROL — while the notebook is org-visible, the org reader sees the episode
+    // through BOTH read paths. This is what the private flip must take away.
+    expect((await reader.c.get(`${P}/episodes/${episodeId}`)).status).toBe(200);
+    expect(inList(await reader.c.get(`${P}/episodes?orgId=${orgId}`), episodeId)).toBe(true);
+
+    // Make the notebook private → the reader is an org member but NOT a notebook
+    // member. Born red before CPU-2: org read alone passed, so both still returned it.
+    expect((await owner.patch(`${PROJ}/${notebookId}/visibility`, { visibility: 'private' })).status).toBe(200);
+    expect((await reader.c.get(`${P}/episodes/${episodeId}`)).status).toBe(404); // uniform, no existence leak
+    expect(inList(await reader.c.get(`${P}/episodes?orgId=${orgId}`), episodeId)).toBe(false);
+
+    // The owner (org writer + notebook member) is unaffected.
+    expect((await owner.get(`${P}/episodes/${episodeId}`)).status).toBe(200);
+    expect(inList(await owner.get(`${P}/episodes?orgId=${orgId}`), episodeId)).toBe(true);
+
+    // Add the reader as a notebook member → read is restored on both paths.
+    expect((await owner.post(`${PROJ}/${notebookId}/members`, { ref: `user:${reader.id}`, role: 'observer' })).status).toBe(201);
+    expect((await reader.c.get(`${P}/episodes/${episodeId}`)).status).toBe(200);
+    expect(inList(await reader.c.get(`${P}/episodes?orgId=${orgId}`), episodeId)).toBe(true);
+  });
+
+  it('an ORPHANED episode (notebook deleted) stays readable by an org reader — no read-lockout (Option B discriminator)', async () => {
+    const { c: owner, orgId, tenantId } = await ownerInTenant('cpu2-orphan-owner');
+    const { notebookId, episodeId } = await anEpisodeOverANotebook(owner, orgId);
+    await owner.patch(`${PROJ}/${notebookId}/visibility`, { visibility: 'private' });
+    const reader = await coOrgReader(orgId, tenantId, 'cpu2-orphan-reader');
+
+    // CONTROL — a private-notebook non-member is denied (as above).
+    expect((await reader.c.get(`${P}/episodes/${episodeId}`)).status).toBe(404);
+
+    // Delete the notebook. Project delete does NOT cascade episodes, so the episode is
+    // now orphaned. Under the LITERAL !== 'none' gate it would 404 + vanish while DELETE
+    // stayed org-scoped — unreachable. Option B falls through to the org-read scope.
+    expect((await owner.del(`${PROJ}/${notebookId}`)).status).toBe(200);
+    expect((await reader.c.get(`${P}/episodes/${episodeId}`)).status).toBe(200);
+    expect(inList(await reader.c.get(`${P}/episodes?orgId=${orgId}`), episodeId)).toBe(true);
   });
 });
 

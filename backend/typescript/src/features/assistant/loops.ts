@@ -20,10 +20,16 @@
  * off the scheduler job row — no parallel bookkeeping store.
  */
 
-import type { WorkflowDefinition } from '../../executor/types.js';
-import { registerWorkflow } from '../../host/workflowsRegistry.js';
+import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
+import { stripAutoTerminalOutputRole } from './chainBackedShape.js';
 import { getJob, registerJob, setJobEnabled, type ScheduledJob } from '../../host/schedulingService.js';
 import { ensureAssistantAgent } from './capability.js';
+import { parseCron } from '../../host/cronSchedule.js';
+import { OpenwopError } from '../../types.js';
+import { createLogger } from '../../observability/logger.js';
+import { hostExtStorage } from '../../host/hostExtPersistence.js';
+
+const log = createLogger('features.assistant.loops');
 
 export interface AssistantLoopDef {
   loopId: string;
@@ -35,7 +41,12 @@ export interface AssistantLoopDef {
   defaultCron: string;
 }
 
-const MAX_ITEMS_PER_TICK = 25;
+/** The per-tick volume cap. EXPORTED and otherwise unused on purpose (WF-COS-1):
+ *  the live value now lives in the chain pack's `maxItemsPerTick` node config and
+ *  in the fetch URL's page size, and `test/assistant-chain-backed-workflows.test.ts`
+ *  asserts all three agree — so this constant cannot quietly drift into a lie
+ *  about what the loops actually do. */
+export const MAX_ITEMS_PER_TICK = 25;
 
 export const ASSISTANT_LOOPS: readonly AssistantLoopDef[] = [
   {
@@ -67,52 +78,42 @@ export const ASSISTANT_LOOPS: readonly AssistantLoopDef[] = [
   },
 ];
 
-function loopDefinition(loop: AssistantLoopDef): WorkflowDefinition {
-  if (loop.loopId === 'morning-briefing') {
-    // Loop 5 — a single graph-read node; `notify:true` makes the host-side
-    // surface drop the inbox notification (ADR 0010). No external I/O at all.
-    return {
-      workflowId: loop.workflowId,
-      nodes: [
-        { nodeId: 'brief', typeId: 'feature.assistant.nodes.compose-briefing', config: { notify: true } },
-      ],
-      edges: [],
-    };
-  }
-  // ADR 0024 §4 / Option C: the credential opt-in is RUN-LEVEL
-  // (`configurable.connections`, set on the scheduler job in enableLoop) —
-  // node config stays exactly the pack's published schema; the host injects
-  // the acting user's token when the URL matches the provider's curated
-  // apiHosts. No connection material or annotation lives in the definition.
-  const fetchConfig =
-    loop.loopId === 'calendar-ingest'
-      ? { url: `https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=${MAX_ITEMS_PER_TICK}` }
-      : { url: `https://www.googleapis.com/drive/v3/files?orderBy=modifiedTime%20desc&pageSize=${MAX_ITEMS_PER_TICK}&fields=files(id,name,modifiedTime,webViewLink)` };
-  return {
-    workflowId: loop.workflowId,
-    nodes: [
-      { nodeId: 'fetch', typeId: 'core.openwop.http.fetch', config: fetchConfig },
-      {
-        nodeId: 'ingest',
-        typeId: 'feature.assistant.nodes.ingest-commitments',
-        config: {
-          sourceKind: loop.loopId === 'calendar-ingest' ? 'calendar' : 'drive',
-          maxItemsPerTick: MAX_ITEMS_PER_TICK,
-        },
-      },
-    ],
-    edges: [{ edgeId: 'fetch→ingest', sourceNodeId: 'fetch', targetNodeId: 'ingest' }],
-  };
-}
-
-/** Register the loop workflow definitions in the host catalog. Boot-time,
- *  idempotent — definitions are tenant-agnostic; per-tenant state lives on
- *  the scheduler job + the credential the resolver picks at run time. */
+/**
+ * Register the three loop workflows CHAIN-BACKED (WF-COS-1). Boot-time,
+ * idempotent — definitions are tenant-agnostic; per-tenant state lives on the
+ * scheduler job + the credential the resolver picks at run time.
+ *
+ * WHAT CHANGED AND WHY. This used to build an in-tree `WorkflowDefinition`
+ * literal per loop and hand it to `registerWorkflow()` — one of the two pin
+ * sites this feature held in `PIN_SITE_QUARANTINE`, and the pattern
+ * `CLAUDE.md` § "Workflows — never hard-code" forbids: a code-pinned workflow
+ * is invisible to `/builder` and the `/` picker (both list only the tenant
+ * ownership index) and is not tenant-editable. The graphs now ship as
+ * `core.openwop.workflows.assistant` (`examples/workflow-chain-packs/assistant`)
+ * and are registered under the SAME workflowIds, so every existing per-tenant
+ * scheduler job row (`assistant:<loopId>:<tenantId>`) and every existing run
+ * stamp keeps resolving.
+ *
+ * REPLAY NOTE, stated rather than assumed. The chain expansion rewrites node ids
+ * from the bare `fetch`/`ingest`/`brief` to `<chain>_<expansionId>_<id>`, so a
+ * run created against the OLD definition does not replay def-identically. The
+ * expansion is deterministic (same chainId + version ⇒ same expansionId), so the
+ * NEW shape is stable from here on; the discontinuity is one-time and applies to
+ * the pre-existing run population, which the deploy should state rather than
+ * assume is zero (the `WFC-DATA-1` precedent).
+ *
+ * `postProcess` strips the auto-assigned terminal `outputRole: 'primary'` that
+ * `expandChain` adds and the retired literals never had — a difference the
+ * builder would render and `/reviews` would read, so it is removed rather than
+ * silently accepted (the `registerLegacyDefsChainBacked` precedent).
+ */
 export function registerAssistantLoopWorkflows(): void {
-  for (const loop of ASSISTANT_LOOPS) registerWorkflow(loopDefinition(loop));
+  for (const loop of ASSISTANT_LOOPS) {
+    registerChainBackedWorkflow(loop.workflowId, { postProcess: stripAutoTerminalOutputRole });
+  }
 }
 
-export function getLoopDef(loopId: string): AssistantLoopDef | null {
+function getLoopDef(loopId: string): AssistantLoopDef | null {
   return ASSISTANT_LOOPS.find((l) => l.loopId === loopId) ?? null;
 }
 
@@ -124,6 +125,30 @@ export interface AssistantLoopStatus extends AssistantLoopDef {
   lastRunAt?: string;
   lastRunId?: string;
   nextFireAt?: number;
+  /** WF-COS-4 — the last fire that consumed its slot and produced NO run, with
+   *  the reason. Rendered ALONGSIDE `lastRunAt`: without it the panel said
+   *  "last run: just now" over a `/runs/<id>` link to a run from hours before. */
+  lastSkippedAt?: string;
+  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled';
+  /** ADR 0662 D3 — the OUTCOME of `lastRunId`, not merely that a run happened.
+   *
+   *  Without it the panel renders "last run: <time>" over a run that FAILED, which is the
+   *  same lie `lastSkippedAt` was added to stop one level up: fixing the run half alone
+   *  (an ingest that now fails honestly) would still leave this surface green. */
+  lastRunStatus?: string;
+}
+
+/** ADR 0662 D3 — read the run's own status. The scheduled-job row records THAT a run was
+ *  dispatched, never how it ended, so the outcome has to come from the run. A run that can
+ *  no longer be read yields nothing rather than a fabricated verdict. */
+async function lastRunStatusOf(runId: string | undefined): Promise<{ lastRunStatus?: string }> {
+  if (!runId) return {};
+  try {
+    const run = await hostExtStorage().getRun(runId);
+    return run?.status ? { lastRunStatus: run.status } : {};
+  } catch {
+    return {};
+  }
 }
 
 export async function listLoopStatuses(tenantId: string): Promise<AssistantLoopStatus[]> {
@@ -136,7 +161,10 @@ export async function listLoopStatuses(tenantId: string): Promise<AssistantLoopS
         ...(job?.cronExpr !== undefined ? { cronExpr: job.cronExpr } : {}),
         ...(job?.lastRunAt !== undefined ? { lastRunAt: job.lastRunAt } : {}),
         ...(job?.lastRunId !== undefined ? { lastRunId: job.lastRunId } : {}),
+        ...(await lastRunStatusOf(job?.lastRunId)),
         ...(job?.nextFireAt !== undefined ? { nextFireAt: job.nextFireAt } : {}),
+        ...(job?.lastSkippedAt !== undefined ? { lastSkippedAt: job.lastSkippedAt } : {}),
+        ...(job?.lastSkipReason !== undefined ? { lastSkipReason: job.lastSkipReason } : {}),
       };
     }),
   );
@@ -149,10 +177,22 @@ export async function enableLoop(
 ): Promise<ScheduledJob | null> {
   const loop = getLoopDef(loopId);
   if (!loop) return null;
+  // COS-5 — validate a caller-supplied cron HERE, the ONE composition owner
+  // (not only the route): `registerJob` stores an unparseable expr `enabled:true`
+  // with no `nextFireAt`, so the panel reads "On" over a job that never fires.
+  // Guard ONLY the cronExpr-provided branch — the re-enable-in-place path below
+  // touches no cadence and must stay unaffected. `parseCron` (not
+  // `computeNextFire`) is the right instrument: a syntactically-valid-but-never-
+  // fires expr like `0 0 30 2 *` parses fine and MUST be accepted.
+  if (opts.cronExpr !== undefined && !parseCron(opts.cronExpr)) {
+    throw new OpenwopError('validation_error', `Invalid cron expression: \`${opts.cronExpr}\`.`, 400, { loopId, cronExpr: opts.cronExpr });
+  }
   const existing = await getJob(jobIdOf(tenantId, loopId));
   if (existing && !opts.cronExpr) {
     // Re-enable in place, preserving cadence + attribution.
-    return setJobEnabled(existing.jobId, true);
+    const job = await setJobEnabled(existing.jobId, true);
+    log.info('assistant_loop_enabled', { tenantId, loopId, jobId: existing.jobId, reenabled: true });
+    return job;
   }
   // A loop is the assistant-capability agent's recurring task, so the
   // ScheduledJob carries its REAL rosterId/agentId — it shows in that agent's
@@ -179,10 +219,16 @@ export async function enableLoop(
       ...(opts.actingUserId !== undefined ? { actingUserId: opts.actingUserId } : {}),
     },
   });
-  return result.ok ? result.job : null;
+  if (result.ok) {
+    log.info('assistant_loop_enabled', { tenantId, loopId, jobId: result.job.jobId, cronExpr: result.job.cronExpr });
+    return result.job;
+  }
+  return null;
 }
 
 export async function disableLoop(tenantId: string, loopId: string): Promise<ScheduledJob | null> {
   if (!getLoopDef(loopId)) return null;
-  return setJobEnabled(jobIdOf(tenantId, loopId), false);
+  const job = await setJobEnabled(jobIdOf(tenantId, loopId), false);
+  if (job) log.info('assistant_loop_disabled', { tenantId, loopId, jobId: job.jobId });
+  return job;
 }

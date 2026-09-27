@@ -19,6 +19,7 @@
  * For now "Open run" remains a sibling link on the completion card.
  */
 
+import { Button } from '../ui/Button.js';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Trans, useTranslation } from 'react-i18next';
@@ -54,22 +55,20 @@ export function ArtifactPreviewModal({ open, nodeId, label, output, onClose, art
           <Trans i18nKey="nodeLabel" ns="chat" values={{ nodeId }} components={{ 1: <code /> }} />
         </span>
         {artifactId && onOpenWorkbench ? (
-          <button
-            type="button"
+          <Button
             onClick={() => onOpenWorkbench(artifactId)}
-            className="btn-accent-solid btn-sm u-ml-auto"
+            variant="accent-solid" size="sm" className="u-ml-auto"
           >
             {t('artifactOpenWorkbench')}
-          </button>
+          </Button>
         ) : null}
-        <button
-          type="button"
+        <Button
           onClick={onClose}
           aria-label={t('closePreview')}
-          className={`secondary u-iflex u-items-center${artifactId && onOpenWorkbench ? '' : ' u-ml-auto'}`}
+          variant="secondary" className={`u-iflex u-items-center${artifactId && onOpenWorkbench ? '' : ' u-ml-auto'}`}
         >
           <XIcon size={14} />
-        </button>
+        </Button>
       </header>
       <div className="artifact-body">
         {body && format === 'markdown' && (

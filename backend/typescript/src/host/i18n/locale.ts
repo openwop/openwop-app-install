@@ -12,12 +12,29 @@
  * @see ../../../../openwop/spec/v1/i18n.md
  */
 
-/** BCP-47 subset accepted as a content locale tag (`en`, `pt-BR`). */
-export const LOCALE_RE = /^[a-z]{2}(-[A-Z]{2})?$/;
+/**
+ * The case-canonical BCP 47 subset accepted as a content locale tag (RFC 0206
+ * §A, `localized-content.md` §B): a lowercase 2–3 letter language, an optional
+ * titlecase script, an optional uppercase or 3-digit region — `en`, `pt-BR`,
+ * `fil`, `zh-Hant`, `zh-Hant-TW`, `es-419`.
+ *
+ * CORRECTED 2026-09-24 — this was RFC 0103's `^[a-z]{2}(-[A-Z]{2})?$`, while the
+ * vendored `schemas/localized-content-*.schema.json` already carried the RFC 0206
+ * pattern below: the host rejected with 400 a section the schema it ships
+ * declares valid. Byte-identical to that schema pattern; a test pins the two.
+ */
+export const LOCALE_RE = /^[a-z]{2,3}(-[A-Z][a-z]{3})?(-([A-Z]{2}|[0-9]{3}))?$/;
 
 /** The primary language subtag (`pt-BR` → `pt`), lower-cased. */
 function primarySubtag(tag: string): string {
   return tag.toLowerCase().split('-')[0] ?? tag.toLowerCase();
+}
+
+/** `ll-Ssss` (lower-cased) when `tag` carries a script subtag past it
+ *  (`zh-Hant-TW` → `zh-hant`), else null. */
+export function scriptPrefix(tag: string): string | null {
+  const parts = tag.toLowerCase().split('-');
+  return parts.length >= 3 && /^[a-z]{4}$/.test(parts[1] ?? '') ? `${parts[0]}-${parts[1]}` : null;
 }
 
 interface RankedTag {
@@ -54,8 +71,8 @@ function parseAcceptLanguage(header: string | undefined | null): RankedTag[] {
 
 /**
  * Pick the locale to serve. Walks the client's q-ranked preferences: for each,
- * try an exact (case-insensitive) match in `supported`, then a language-family
- * match. Falls back to `defaultLocale` when nothing matches. Returns the
+ * try an exact (case-insensitive) match in `supported`, then a script-family
+ * match (RFC 0206), then a language-family match. Falls back to `defaultLocale` when nothing matches. Returns the
  * canonical tag FROM `supported` (so `Content-Language` is the host's casing).
  */
 export function negotiateLocale(
@@ -66,13 +83,22 @@ export function negotiateLocale(
   const set = supported.length > 0 ? supported : [defaultLocale];
   const exactByLower = new Map(set.map((l) => [l.toLowerCase(), l]));
   const byFamily = new Map<string, string>();
+  const byScriptFamily = new Map<string, string>();
   for (const l of set) {
     const fam = primarySubtag(l);
     if (!byFamily.has(fam)) byFamily.set(fam, l); // first declared wins the family
+    const sf = scriptPrefix(l);
+    if (sf && !byScriptFamily.has(sf)) byScriptFamily.set(sf, l);
   }
   for (const { tag } of parseAcceptLanguage(acceptLanguage)) {
     const exact = exactByLower.get(tag.toLowerCase());
     if (exact) return exact;
+    // Script family (RFC 0206, the same step `resolveSection` takes): a
+    // `zh-Hant-TW` reader gets an advertised `zh-Hant` before any `zh-*`, so a
+    // Traditional-Chinese reader is never handed a Simplified locale.
+    const script = scriptPrefix(tag);
+    const byScript = script ? (exactByLower.get(script) ?? byScriptFamily.get(script)) : undefined;
+    if (byScript) return byScript;
     const fam = byFamily.get(primarySubtag(tag));
     if (fam) return fam;
   }
@@ -96,9 +122,40 @@ export function hostDefaultLocale(): string {
 export function hostSupportedLocales(): string[] {
   const raw = (process.env.OPENWOP_I18N_LOCALES ?? '').trim();
   if (!raw) return [];
-  const tags = raw.split(',').map((s) => s.trim()).filter((s) => LOCALE_RE.test(s));
+  // A tag outside the grammar is DROPPED — it cannot be served, so it must not be
+  // advertised — but never silently: an operator who configured it needs to know
+  // discovery does not carry it (`OPENWOP_I18N_LOCALES=es-419` used to vanish
+  // without a trace under the pre-RFC-0206 grammar).
+  const all = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  const tags = all.filter((s) => LOCALE_RE.test(s));
+  const rejected = all.filter((s) => !LOCALE_RE.test(s));
+  if (rejected.length > 0) warnRejectedLocales(rejected);
   const set = new Set<string>([hostDefaultLocale(), ...tags]);
   return [...set];
+}
+
+const warnedRejected = new Set<string>();
+/** Once per distinct value per process — `hostSupportedLocales` runs per request. */
+function warnRejectedLocales(rejected: readonly string[]): void {
+  const key = rejected.join(',');
+  if (warnedRejected.has(key)) return;
+  warnedRejected.add(key);
+  // eslint-disable-next-line no-console -- core-shared i18n infra has no logger dependency
+  console.warn(
+    `[i18n] OPENWOP_I18N_LOCALES: dropping ${rejected.map((t) => `"${t}"`).join(', ')} — not a case-canonical ` +
+      'BCP 47 tag (RFC 0206: ll[l][-Ssss][-RR|-NNN]); these are NOT advertised in discovery.',
+  );
+}
+
+/**
+ * The advertised CONTENT locales (`capabilities.content.supportedLocales`, RFC
+ * 0103 §A): the host locales minus the base, which section `data` carries. ONE
+ * derivation for v1 discovery, the v2 `content` record, delivery negotiation and
+ * `GET /content/settings` (ADR 0748), so none of them can disagree.
+ */
+export function hostContentLocales(): string[] {
+  const base = hostDefaultLocale();
+  return hostSupportedLocales().filter((l) => l !== base);
 }
 
 /** True when the operator has configured host content localization. */

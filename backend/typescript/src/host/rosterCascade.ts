@@ -25,8 +25,10 @@ import { unpinAgentsForTenant } from '../features/profiles/profilesService.js';
 import { deleteAgentProfile } from './agentProfileService.js';
 import { clearMemoryScope } from './inMemorySurfaces.js';
 import { agentMemoryScope } from './agentMemoryAdapter.js';
+import { purgeNamespaceVectors } from './vector/vectorTenantPurge.js';
 import { clearSubjectNotes } from './subjectMemory.js';
 import { clearTwinGrantsForAgent } from './twinService.js';
+import { fireRosterMemberDeleted } from './rosterLifecycle.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 
@@ -55,7 +57,7 @@ export async function deleteRosterMemberCascade(
   storage: Storage,
   rosterId: string,
 ): Promise<RosterCascadeResult> {
-  const entry = await getRosterEntry(rosterId);
+  const entry = await getRosterEntry(tenantId, rosterId);
 
   // Boards (and their cards, via deleteBoard's own cascade) bound to this member.
   const boards = await listBoardsForSubject(tenantId, { kind: 'agent', id: rosterId });
@@ -74,12 +76,17 @@ export async function deleteRosterMemberCascade(
   // agent definition out from under another reference.
   let chatAgentDeleted = false;
   const chatAgentId = entry?.agentRef.agentId;
-  if (chatAgentId && chatAgentId.startsWith(`user.${tenantId}.`)) {
-    chatAgentDeleted = await storage.deleteUserAgent(chatAgentId);
+  if (chatAgentId && chatAgentId.startsWith('user.')) {
+    // ADR 0379 P2 — the guard only needs to exclude PACK ids now (`user.` vs
+    // `<packId>.`): the tenant check moved INTO the delete predicate (P1), and
+    // new-scheme persona-scoped ids (`user.<slug>`) no longer embed the tenant,
+    // so the old `user.${tenantId}.` prefix would silently skip them (the
+    // architect-caught shape-parse break).
+    chatAgentDeleted = await storage.deleteUserAgent(tenantId, chatAgentId);
   }
 
   // The roster row itself.
-  await deleteRosterEntry(rosterId);
+  await deleteRosterEntry(tenantId, rosterId);
 
   // Drop just this member from the org chart (and any now-empty department),
   // rather than nuking the whole chart — other members may remain. Clear any
@@ -115,12 +122,40 @@ export async function deleteRosterMemberCascade(
   // Clear BOTH the durable curated notes (ADR 0041 source of truth) and the
   // in-memory recall scope (turn summaries + the notes' recall mirror).
   const durableNotesCleared = await clearSubjectNotes(tenantId, { kind: 'agent', id: rosterId });
-  const memoryEntriesCleared = clearMemoryScope(tenantId, agentMemoryScope(rosterId)) + durableNotesCleared;
+  const memoryEntriesCleared = (await clearMemoryScope(tenantId, agentMemoryScope(rosterId))) + durableNotesCleared;
+  // ADR 0664 D1 — and the VECTOR namespace, which the two clears above do not touch.
+  //
+  // Without this, deletion was incomplete in a way that RE-SURFACED: `rosterId` is
+  // `host:${slugify(persona)}` (`rosterService.ts:145`), so re-creating an agent under the
+  // same persona name reuses the same namespace, and `subjectMemory`'s recall returns
+  // `md.content` from the vector path IN PREFERENCE to recency — so the new agent's first
+  // recall served the deleted agent's private notes.
+  //
+  // Namespace-scoped, not id-scoped: the id-collecting shape the sibling eraser uses
+  // (`subjectMemory.ts:410-416`) cannot work here (the clears above return counts, not ids)
+  // and would be incomplete anyway — dispatch turn-summaries are indexed with no durable
+  // note row, and a pgvector deployment holds rows this process never saw.
+  //
+  // Best-effort, like the sibling: a vector backend that is down must not block the durable
+  // delete. But the failure is LOGGED with its backend named, never folded into a success.
+  const vectorPurge = await purgeNamespaceVectors(tenantId, agentMemoryScope(rosterId));
+  if (vectorPurge.failed.length > 0) {
+    log.error('roster_cascade_vector_purge_partial', {
+      tenantId, rosterId, failed: vectorPurge.failed, purged: vectorPurge.purged,
+    });
+  }
   // ADR 0044 — the twin link dies with the profile; clear its consent grants too.
   await clearTwinGrantsForAgent(tenantId, rosterId);
 
+  // ADR 0288 — fire the roster-lifecycle seam LAST so feature-owned refs the
+  // host cascade cannot reach (scheduled chats, public widgets, advisory
+  // membership) disable/prune themselves. Best-effort; never blocks the delete.
+  const lifecycleConsumersRan = await fireRosterMemberDeleted({
+    tenantId, rosterId, ...(chatAgentId ? { agentId: chatAgentId } : {}),
+  });
+
   log.info('roster_member_cascade_deleted', {
-    tenantId, rosterId, boards: boards.length, schedules: jobs.length, approvals, chatAgentDeleted, orgChartUpdated, profileDeleted, memoryEntriesCleared,
+    tenantId, rosterId, boards: boards.length, schedules: jobs.length, approvals, chatAgentDeleted, orgChartUpdated, profileDeleted, memoryEntriesCleared, lifecycleConsumersRan,
   });
   return { rosterId, boards: boards.length, schedules: jobs.length, approvals, chatAgentDeleted, orgChartUpdated, profileDeleted, memoryEntriesCleared };
 }

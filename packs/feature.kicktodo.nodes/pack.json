@@ -1,0 +1,747 @@
+{
+  "name": "feature.kicktodo.nodes",
+  "version": "1.30.0",
+  "description": "KickTodo node pack (ADR 0414 P4) — thin adapters over ctx.features.kicktodo-core for the participant loop: enroll, materialize today's actions, check in, freeze progress evidence, and evaluate judged completion through the standing-goals owner. Authorization, validation, CAS, and storage remain in the host services; nodes are role:action so replay reads recorded outputs. v1.1.0 adds the Challenge Factory research spine (ADR 0415 P1): research-frame, source-normalize, evidence-graph. v1.14.0 adds the ADR 0451 P4 referral-code node (resolve-or-mint the referrer's affiliate code for a paid challenge) v1.15.0 adds the ADR 0456 P4 lifecycle-status read node (enrolled + progress + completed, no freeze/judge). v1.16.0 adds the factory's terminal submit-publication step (ADR 0458 P1): raises the separation-of-duties publish approval — it never completes publication. v1.17.0 adds the factory's per-lesson media leg (ADR 0458 P2): lesson-media-persist promotes a generated image/video (host serve URL) to a durable Media asset, then binds it to the candidate's lesson day via the creator surface. v1.18.0 completes the P2 factory spine: checkpoint-plan (partition the validated plan into ≤4 batches via the deterministic checkpointPlan host policy; writes batch0..batch3 + planBrief to the bag, outputs slot0Live..slot3Live + noLiveSlots), lesson-batch-build (iterate one batch's day payloads, enrich each via ctx.callAI with closed-world validation + one bounded repair, optional per-day media), and sim-collect (forward the three sim personas' typed verdicts to recordSimulationVerdicts). v1.19.0 adds the ADR 0459 participant-replan lane: apply-revision-commands (thin adapter over ctx.features['kicktodo-core'].applyRevisionCommands that applies the validated ADR 0429-lane revision through the governed surface; typed failure carries the failing command index) and session-reminder (thin adapter over the accountability session-notify surface op that delivers a scheduled cohort session's T-minus reminder into the circle conversation, mute-respecting; typed failures). v1.20.0 adds enrich-plan-revision (ADR 0459 grade-fix): the compose→approve humanizer that wraps the composed revision as a typed kicktodo.plan-revision artifact envelope carrying a server-resolved display (activity/alternative titles, never opaque ids) so the approval card renders humanized text, not raw JSON; best-effort (a missing/failing enrich surface degrades to the un-humanized typed payload) and never touches the commands the apply path reads. v1.21.0 adds replan-clarify (ADR 0463): the one-round A2UI clarification leg that sits BETWEEN the composer and enrich — when the composer's revision carries an OPTIONAL `clarification` (ASK XOR ACT, under-specified intent within the ADR 0429 lanes) and a real executor `ctx.suspend` is present, it raises a day-1-catalog clarification surface (RFC 0102 / ADR 0051 bridge) and folds the participant's answer into the pending command's single unfilled slot; with no clarification or no suspend it passes the revision through unchanged, bounded to one round. v1.22.0 closes the NODE-PACK-AUDIT NP-KT-1 surface-parity sweep: 17 thin wrappers over the family surfaces no node reached — core reads (list-challenges, get-enrollment, today, progress) + set-schedule-preference, creator reads (get-candidate, get-candidate-plan, lesson-media) + create-candidate, accountability (list-circles, coach-caseload, propose-plan-change), community (creator-profile, creator-analytics), integrations (list-consents), metrics (verifier-quality), organizations (org-catalog). Also declares the missing role:action on remind-today (NP-KT-2). v1.23.0 (XCH-KT-1): plan-generate now fetches the authoritative plan JSON schema from the creator surface (planSchema) at call time and hands it to the model as responseSchema + prompt grounding — the hand-authored shape prose survives only as the older-host fallback. v1.28.0 (ADR 0689, KickBot speaks first): kickbot-coach-turn — the reminder-loop's second node; after the consent-gated reminder it enqueues ONE proactive turn of the participant's named guide into their own 1:1 with KickBot via ctx.features.kicktodo-core.kickbotCoachTurn (gated: active enrollment, something pending, not muted; idempotent per enrollment per local day). Skips honestly on an older host without the op.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "kicktodo",
+    "challenges",
+    "goals",
+    "participant-loop"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.kicktodo.nodes.enroll",
+      "version": "1.0.0",
+      "label": "KickTodo: Enroll",
+      "description": "Idempotently enroll a participant in a published challenge version via ctx.features.kicktodo-core.enroll (the deterministic saga: enrollment + board + one standing goal + day-1 actions). Inputs: { ownerSubject, challengeId, challengeVersion, timezone? }. Output: { enrollment }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.materialize-today",
+      "version": "1.0.0",
+      "label": "KickTodo: Materialize Today",
+      "description": "Idempotently materialize today's due action occurrences/cards for one enrollment (the scheduled daily trigger / repair pass). Inputs: { enrollmentId }. Output: { occurrences, count }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.check-in",
+      "version": "1.0.0",
+      "label": "KickTodo: Check In",
+      "description": "Record the participant's check-in for one action card (idempotent — recorded evidence wins) and complete the card. Inputs: { ownerSubject, cardId, note? }. Output: { checkIn }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.freeze-evidence",
+      "version": "1.0.0",
+      "label": "KickTodo: Freeze Progress Evidence",
+      "description": "Freeze the enrollment's current progress into an immutable content-hashed kicktodo.progress-evidence snapshot (the judge never reads live collections). Inputs: { enrollmentId }. Output: { snapshotId, snapshotHash }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.evaluate-progress",
+      "version": "1.0.0",
+      "label": "KickTodo: Evaluate Progress",
+      "description": "Freeze evidence and judge completion through the standing-goals owner (deterministic verifier; replay returns the recorded verdict). Inputs: { enrollmentId, ownerSubject }. Output: { satisfied, replayed, enrollmentState }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.research-frame",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Frame Research",
+      "description": "Deterministic research-question families for a challenge topic via ctx.features.kicktodo-creator.frameResearch (host policy — a model never chooses what due diligence looks like). Inputs: { topic, audience? }. Output: { questions }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.source-normalize",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Normalize Sources",
+      "description": "Canonicalize search results into dedupable source records (url, domain, title, hash, engine) via ctx.features.kicktodo-creator.normalizeSource. Carries the ENGINE honestly — stub/demo retrieval is refused downstream at record time. Inputs: { results: [{url,title,rank?}], engine }. Output: { sources }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.claim-extract",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Extract Cited Claims",
+      "description": "Extract factual claims from FETCHED source content, each cited by source hash, via ctx.callAI with the creator surface's live claim schema (responseSchema) and one bounded error-fed repair. FAILS CLOSED when no source content is readable or no claim is supported — an ungrounded plan is worse than no plan. Inputs: { sources, pages, questions?, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Output: { claims, claimCount, sourcesRead }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.claim-verify",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Verify Claim Entailment",
+      "description": "Judge whether each CITED source actually supports its claim (supports/contradicts/unrelated/unverifiable with the deciding passage), via ctx.callAI and the creator surface's live verdict schema. Judges only pairs a claim cites, and requests a second SKEPTICAL opinion only where the first said `supports` — a false support is what carries a bad claim through a gate. Disagreement is RECORDED, not resolved: it stops counting as support and surfaces on the informational `disputed` gate for the human approver. FAILS CLOSED when no claim survives. Inputs: { claims, sources, pages, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Config: { maxVerifications? }. Output: { claims, verifiedPairs, secondOpinions, disputedClaimIds, skippedPairs }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.evidence-graph",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Evidence Graph",
+      "description": "Structure-check claims against normalized sources and record the dossier on a candidate via ctx.features.kicktodo-creator.recordResearch (unsupported claims are RECORDED as unsupported; stub/demo engines fail closed). Writes bag vars evidenceSummary (prose) and evidenceClaims (the STRUCTURED claim ids + sources every text-producing step is grounded on — ADR 0458 §2.2 correction). Inputs: { candidateId, questions?, sources, claims?, readSourceHashes? }. Output: { candidate, unsupportedClaimIds, evidenceClaims }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.plan-validate",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Validate Plan",
+      "description": "Run the deterministic Challenge Plan gates (measurable outcomes, orphan achievements, traceability, workload, recovery presence) via ctx.features.kicktodo-creator.validatePlan. Output: { defects, valid } — a failing plan lists EVERY defect for the one bounded error-fed repair.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.remind-today",
+      "title": "Send today's reminder",
+      "description": "Sends the participant's daypart reminder for today's pending headline action via the consent-gated integrations reminder path (ADR 0443 R1). Skips silently when the enrollment is missing, snoozed, or has nothing pending.",
+      "role": "action",
+      "capabilities": [],
+      "inputs": {
+        "enrollmentId": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "sent": {
+          "type": "boolean"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.kickbot-coach-turn",
+      "title": "KickBot speaks first",
+      "description": "Enqueues ONE proactive turn of the participant's named guide (KickBot) into their own 1:1 conversation, about today's pending action or an earned award (ADR 0689). A fire-now job on the coach turn-workflow; gated on an active enrollment, something pending, and the participant's mute / quiet hours; idempotent per enrollment per local day (reminder) or per award. Skips honestly when nothing applies — a snoozed participant hears nothing.",
+      "role": "action",
+      "capabilities": [],
+      "inputs": {
+        "enrollmentId": {
+          "type": "string",
+          "required": true
+        },
+        "ownerSubject": {
+          "type": "string",
+          "required": true
+        },
+        "occasion": {
+          "type": "string",
+          "required": false
+        },
+        "awardKind": {
+          "type": "string",
+          "required": false
+        }
+      },
+      "outputs": {
+        "queued": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "conversationId": {
+          "type": "string"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.decompose",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Decompose Plan to Draft",
+      "description": "Deterministically transform a VALIDATED Challenge Plan into a kicktodo-core ChallengeDefinition draft (the single challenge owner) via ctx.features.kicktodo-creator.draftFromPlan. Fails typed (defect list) on any gate failure — never a partial draft.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.submit-publication",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Submit for Publication",
+      "description": "The factory's TERMINAL step (ADR 0458 P1): raise the separation-of-duties challenge-publish approval for a candidate's validated draft via ctx.features.kicktodo-creator.submitPublication. It ONLY submits — no in-run step can complete publication; a DIFFERENT identity decides the approval in the reviews inbox (exchange law: model output reaches durable state only through a human gate). Refusals (separation-of-duties, not-validated, not-found) surface as a typed failure. Inputs: { candidateId }. Output: { approvalId?, state }.",
+      "category": "action",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.lesson-media-persist",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Persist Lesson Media",
+      "description": "The factory's per-lesson media leg (ADR 0458 P2): promote a generated image/video (a host serve URL) to a durable Media asset via ctx.features.media.createAssetFromServeUrl (SSRF-safe, hash-deduped, capacity-gated), THEN bind it to the candidate's lesson day via ctx.features['kicktodo-creator'].setLessonMedia. Two governed writes in order; a missing surface fails typed (host_capability_missing), never a silent no-op that would strand the image. orgId defaults to the workspace-root org (orgId === tenantId); an explicit `orgId` overrides. Inputs: { candidateId, day, url, kind ('image'|'video') }. Output: { assetId, day, kind, candidate? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.checkpoint-plan",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Checkpoint Plan",
+      "description": "Partition a VALIDATED Challenge Plan into ≤4 contiguous checkpoint batches via the deterministic ctx.features['kicktodo-creator'].checkpointPlan host policy (a model never chooses the cadence). Writes bag vars batch0..batch3 (the plan's day OBJECTS per batch — the subWorkflow `days` source), planBrief (the newcomer/time-poor sims' task text) and planEvidenceBrief (the skeptic's task: the brief PLUS the cited evidence and each day's claimRefs — ADR 0458 §2.2 correction), and OUTPUTS slot0Live..slot3Live + noLiveSlots (the parent factory edges condition on these exact names). Inputs: { plan, checkpointEvery ('batched'|'outline-only'), evidenceClaims? }. Output: { slot0Live..slot3Live, noLiveSlots }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.lesson-batch-build",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Build Lesson Batch",
+      "description": "Iterate ONE checkpoint batch's day payloads (the acyclic executor can't express per-day nodes for a variable-length batch) and, per day, enrich the plan day into a participant-facing lesson via ctx.callAI against the creator surface's live lessonSchema, under a closed-world validator + ONE bounded error-fed repair (the plan-generate pattern — fails typed, never success-with-empty). Every lesson is grounded on the STRUCTURED evidence and must cite it: claimRefs may name only ids the evidence lists (ADR 0458 §2.2 correction). When generateMedia, generates a visual via ctx.callImageGenerator and persists it through the shared media leg (createAssetFromServeUrl → setLessonMedia). No ctx.callAI ⇒ fail closed. Inputs: { candidateId, authorSubject?, days (day-payload array), evidenceClaims?, generateMedia?, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Output: { lessons (each with claimRefs), count, mediaCount }.",
+      "category": "generation",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.sim-collect",
+      "version": "1.0.0",
+      "label": "KickTodo Factory: Collect Sim Verdicts",
+      "description": "Collect the three read-only sim personas' typed verdicts (each the sim-verdict schema {verdict, findings, personaSummary} arriving on its own input port — newcomer/timePoor/skeptic) and record them via ctx.features['kicktodo-creator'].recordSimulationVerdicts (the closed-world normalize the publication `simulation` gate reads). Forwards the sim-verdict shape VERBATIM keyed by persona — never renames fields into a {summary,flags} shape. Inputs: { candidateId, newcomer?, timePoor?, skeptic? }. Output: { recorded, state?, verdicts? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.accountability-summary",
+      "version": "1.0.0",
+      "label": "KickTodo: Accountability Summary",
+      "description": "Project a circle's grant-scoped progress feed via ctx.features.kicktodo-accountability.feed (the pure allowlist — a workflow never sees more than the grant allows). Inputs: { circleId, callerSubject }. Output: { feed }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.entitlement-check",
+      "version": "1.0.0",
+      "label": "KickTodo: Entitlement Check",
+      "description": "Read-only paid-state + per-buyer entitlement lookup via ctx.features.kicktodo-commerce (isPaid/entitlement). Inputs: { challengeId, challengeVersion?, buyerSubject? }. Output: { paid, entitlementState }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.calendar-sync",
+      "version": "1.0.0",
+      "label": "KickTodo: Calendar Sync",
+      "description": "Replay-safe calendar sync for one enrollment via ctx.features.kicktodo-integrations.calendarSync (deterministic external ids — upsert, never duplicate; supersession deletes; consent + transport fail closed). Inputs: { ownerSubject, enrollmentId }. Output: { upserted, removed }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.engagement-summary",
+      "version": "1.0.0",
+      "label": "KickTodo: Engagement Summary",
+      "description": "Read the caller's leaderboard view + awards via ctx.features.kicktodo-engagement (opt-in gated; closed projection). Inputs: { ownerSubject }. Output: { belowFloor, entries, awards }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.challenge-reviews",
+      "version": "1.0.0",
+      "label": "KickTodo: Challenge Reviews",
+      "description": "Read a challenge's visible reviews + k-floor aggregate via ctx.features.kicktodo-community (PII-free projections). Inputs: { challengeId }. Output: { reviews, aggregate }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.plan-generate",
+      "version": "1.0.0",
+      "label": "KickTodo: Plan Generate",
+      "description": "Generate a ChallengePlan draft with the run-scoped provider (ctx.callAI) against the creator surface's live plan schema, judged AUTHORITATIVELY by validatePlan with ONE bounded error-fed repair (typed plan_invalid after; capability_missing without a provider). Receives the STRUCTURED evidence (evidenceClaims) and must cite it: every day's claimRefs is validated closed-world against the candidate's dossier (ADR 0458 §2.2 correction). Inputs: { candidateId, topic, audience?, evidenceSummary?, evidenceClaims?, provider?, model?, credentialRef? } (credentialRef: ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI; absent ⇒ the dispatcher’s provider ladder). Output: { plan }; writes bag var plan.",
+      "category": "generation",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.substitute",
+      "version": "1.0.0",
+      "label": "KickTodo: Substitute Action",
+      "description": "Swap today's action for a PUBLISHER-DECLARED alternative via ctx.features.kicktodo-core.substitute (closed set; evidence-policy parity enforced by the host; owner-scoped). Inputs: { ownerSubject, cardId, alternativeId }. Output: { occurrence }.",
+      "category": "action",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.apply-missed-window",
+      "version": "1.0.0",
+      "label": "KickTodo: Apply Missed-Window Policy",
+      "description": "Apply the challenge's missed-window policy for one enrollment (skip / collapse-recovery / ask) via ctx.features.kicktodo-core.applyMissedWindow. Idempotent: the recovery occurrence is deterministic and the ask prompts once per window. Inputs: { enrollmentId }. Output: { policy, missed, recoveryCardId?, asked? }.",
+      "category": "action",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.catalog-for-locale",
+      "version": "1.0.0",
+      "label": "KickTodo: Catalog For Locale",
+      "description": "Read the published catalog negotiated for a CONTENT locale (exact → same-language → source) via ctx.features.kicktodo-core.catalogForLocale; one row per lineage with the served locale disclosed. Inputs: { contentLocale }. Output: { challenges }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.seat-availability",
+      "version": "1.0.0",
+      "label": "KickTodo: Seat Availability",
+      "description": "Read a cohort seat product's capacity/seatsTaken and whether the buyer holds a live reservation, via ctx.features.kicktodo-commerce.seatAvailability (counts only). Inputs: { buyerSubject, productId }. Output: { availability }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.outcome-metrics",
+      "version": "1.0.0",
+      "label": "KickTodo: Outcome Metrics",
+      "description": "Read the tenant's PRD §15 outcome metrics (north star, activation, retention, recovery, factory quality) via ctx.features.kicktodo-metrics — counts only, k>=5 cells withheld. Inputs: {}. Output: { activation, engagement, factory }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.referral-code",
+      "version": "1.0.0",
+      "label": "KickTodo: Referral Code",
+      "description": "Resolve (or lazily mint) the referrer's affiliate code for a PAID challenge via ctx.features.kicktodo-commerce.referralCode, so a workflow can build the ?ref= invite link that accrues them commission on a referred purchase (ADR 0451). Idempotent (resolve-or-mint). Inputs: { ownerSubject, challengeId, challengeVersion? }. Output: { code } (null for a free challenge).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.lifecycle-status",
+      "version": "1.0.0",
+      "label": "KickTodo: Lifecycle Status",
+      "description": "A lightweight lifecycle read for automation authors: is the participant enrolled in a challenge and how far along (enrolled/state/completedActivities/totalActivities/completed), WITHOUT the heavyweight freeze+judge of evaluate-progress (ADR 0456). Finds the enrollment by (ownerSubject, challengeId) so a workflow needn't know the enrollmentId. Inputs: { ownerSubject, challengeId, challengeVersion? }. Output: { lifecycle }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.apply-revision-commands",
+      "version": "1.0.0",
+      "label": "KickTodo: Apply Revision Commands",
+      "description": "The participant-replan applier (ADR 0459 P1): a thin adapter over ctx.features['kicktodo-core'].applyRevisionCommands that applies a VALIDATED, participant-approved plan revision (the ADR 0429 lanes — schedule preference / publisher-declared substitution / missed-window recovery) through the governed surface. Authorization, closed-world validation against the challenge version, and per-lane apply stay in the host; this node just forwards { enrollmentId, subject, commands } and surfaces the result. A refusal is a TYPED failure carrying the surface's failing command index (`failedIndex`) so the caller can point the participant at the exact command; host_capability_missing without the surface. Inputs: { enrollmentId, subject, commands }. Output: { applied, results? }.",
+      "category": "action",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.enrich-plan-revision",
+      "version": "1.0.0",
+      "label": "KickTodo: Enrich Plan Revision",
+      "description": "The compose→approve HUMANIZER (ADR 0459 grade-fix): wraps the Replan Composer's raw revision ({ commands, rationale }) as a typed kicktodo.plan-revision artifact envelope ({ artifactTypeId, payload }) carrying an additive `display` (server-resolved activity/alternative titles via ctx.features['kicktodo-core'].enrichPlanRevision — never an opaque id), so the approval card dispatches the plan-revision renderer instead of showing raw JSON. The apply path reads the raw revision off the separate compose→apply edge, so `commands` is untouched. Best-effort: a missing/failing enrich surface degrades to the un-humanized typed payload rather than failing the run. Inputs: { enrollmentId, revision }. Output: { result: { artifactTypeId, payload } }.",
+      "category": "action",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.replan-clarify",
+      "version": "1.0.0",
+      "label": "KickTodo: Replan Clarify",
+      "description": "The one-round A2UI clarification leg on the replan builtin (ADR 0463). Sits BETWEEN the composer and enrich. When the composer's plan-revision carries an OPTIONAL `clarification` (ASK XOR ACT — present only when `commands` is empty) because the intent falls in the ADR 0429 lanes but is under-specified, and a real executor `ctx.suspend` is present, it builds a day-1-catalog surface from the signalled field (a `select` or a `date`) and raises a `clarification` interrupt (the SAME interrupt→a2uiInterruptCard bridge the chat renders — RFC 0102 / ADR 0051); the collected value fills the pending command's single unfilled slot (keyed at `field.id`) and the completed command becomes the sole revision command. With NO clarification (the composer acted) — or no `ctx.suspend` (non-executor context) — it passes the revision through unchanged. Bounded to ONE round; never re-clarifies. Inputs: { revision }. Output: { result: { commands, rationale } }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.session-reminder",
+      "version": "1.0.0",
+      "label": "KickTodo: Session Reminder",
+      "description": "The cohort-session T-minus reminder delivery node (ADR 0459 P3): a thin adapter over the accountability session-notify surface op (ctx.features['kicktodo-accountability'].sendSessionReminder) that the one-shot scheduler job fires ~1h before a scheduled session, delivering the reminder into the circle's OWN conversation via the notification owner (mute-respecting per ADR 0457). Delivery, membership fan-out, and mute-respect stay in the host; this node forwards the context the armed job already carries. Typed failures; host_capability_missing without the surface. Inputs: { circleId, atIso, conversationId }. Output: { notified, reason? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.list-challenges",
+      "version": "1.0.0",
+      "label": "KickTodo: List Challenges",
+      "description": "List the tenant's published challenges via ctx.features['kicktodo-core'].listChallenges. Inputs: {}. Output: { challenges }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {},
+      "outputs": {
+        "challenges": {
+          "type": "array"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.get-enrollment",
+      "version": "1.0.0",
+      "label": "KickTodo: Get Enrollment",
+      "description": "Read one enrollment by id via ctx.features['kicktodo-core'].getEnrollment (tenant-guarded; null when not found). Inputs: { enrollmentId }. Output: { enrollment | null }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "enrollmentId": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "enrollment": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.set-schedule-preference",
+      "version": "1.0.0",
+      "label": "KickTodo: Set Schedule Preference",
+      "description": "Set (or clear) the participant's reminder daypart via ctx.features['kicktodo-core'].setSchedulePreference (ADR 0443 R1 — owner-checked in the service; an absent/invalid daypart clears the preference and disables the job). Inputs: { enrollmentId, ownerSubject, daypart? (morning|afternoon|evening) }. Output: { enrollment | null }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [],
+      "inputs": {
+        "enrollmentId": {
+          "type": "string",
+          "required": true
+        },
+        "ownerSubject": {
+          "type": "string",
+          "required": true
+        },
+        "daypart": {
+          "type": "string"
+        }
+      },
+      "outputs": {
+        "enrollment": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.today",
+      "version": "1.0.0",
+      "label": "KickTodo: Today",
+      "description": "Read the participant's today view (pending/completed occurrences across active enrollments) via ctx.features['kicktodo-core'].today. Inputs: { ownerSubject }. Output: { today }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "ownerSubject": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "today": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.progress",
+      "version": "1.0.0",
+      "label": "KickTodo: Progress",
+      "description": "Read an enrollment's progress projection via ctx.features['kicktodo-core'].progress (no freeze/judge — see evaluate-progress for the judged path). Inputs: { enrollmentId }. Output: { progress }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "enrollmentId": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "progress": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.create-candidate",
+      "version": "1.0.0",
+      "label": "KickTodo: Create Candidate",
+      "description": "Create a challenge candidate (the factory's opening write) via ctx.features['kicktodo-creator'].createCandidate — the surface defaults createdBy to 'workflow'; authoring stays draft-side (publication remains gated by the separation-of-duties approval, see submit-publication). Inputs: { createdBy?, topic, audience, transformation, durationDaysTarget?, dailyMinutesTarget? }. Output: { candidate }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [],
+      "inputs": {
+        "createdBy": {
+          "type": "string"
+        },
+        "topic": {
+          "type": "string",
+          "required": true
+        },
+        "audience": {
+          "type": "string",
+          "required": true
+        },
+        "transformation": {
+          "type": "string",
+          "required": true
+        },
+        "durationDaysTarget": {
+          "type": "number"
+        },
+        "dailyMinutesTarget": {
+          "type": "number"
+        }
+      },
+      "outputs": {
+        "candidate": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.get-candidate",
+      "version": "1.0.0",
+      "label": "KickTodo: Get Candidate",
+      "description": "Read one challenge candidate by id via ctx.features['kicktodo-creator'].getCandidate (tenant-guarded; null when not found). Inputs: { candidateId }. Output: { candidate | null }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "candidateId": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "candidate": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.lesson-media",
+      "version": "1.0.0",
+      "label": "KickTodo: Lesson Media",
+      "description": "List a candidate's lesson-media pointers via ctx.features['kicktodo-creator'].lessonMedia (the ADR 0458 (candidate, day) pointer set; write path is lesson-media-persist). Inputs: { candidateId }. Output: { pointers }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "candidateId": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "pointers": {
+          "type": "array"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.get-candidate-plan",
+      "version": "1.0.0",
+      "label": "KickTodo: Get Candidate Plan",
+      "description": "Read the candidate's current validated plan revision (the ADR 0458 SSoT read; null until first decompose) via ctx.features['kicktodo-creator'].getCandidatePlan. Inputs: { candidateId }. Output: { planRevision | null }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "candidateId": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "planRevision": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.list-circles",
+      "version": "1.0.0",
+      "label": "KickTodo: List Circles",
+      "description": "List the accountability circles a subject owns via ctx.features['kicktodo-accountability'].listCircles. Inputs: { ownerSubject }. Output: { circles }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "ownerSubject": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "circles": {
+          "type": "array"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.coach-caseload",
+      "version": "1.0.0",
+      "label": "KickTodo: Coach Caseload",
+      "description": "Read a coach's caseload across circles via ctx.features['kicktodo-accountability'].caseload. Inputs: { coachSubject }. Output: { caseload }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "coachSubject": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "caseload": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.propose-plan-change",
+      "version": "1.0.0",
+      "label": "KickTodo: Propose Plan Change",
+      "description": "Record a coach's plan-change PROPOSAL via ctx.features['kicktodo-accountability'].propose (ADR 0419: the surface is read+propose only — grant writes stay route-level with the acting participant; a proposal never applies itself). Inputs: { circleId, coachSubject, note }. Output: { proposal }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [],
+      "inputs": {
+        "circleId": {
+          "type": "string",
+          "required": true
+        },
+        "coachSubject": {
+          "type": "string",
+          "required": true
+        },
+        "note": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "proposal": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.creator-profile",
+      "version": "1.0.0",
+      "label": "KickTodo: Creator Profile",
+      "description": "Read a creator's public profile by handle via ctx.features['kicktodo-community'].profile (public projection only). Inputs: { handle }. Output: { profile | null }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "handle": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "profile": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.creator-analytics",
+      "version": "1.0.0",
+      "label": "KickTodo: Creator Analytics",
+      "description": "Read a creator's per-challenge analytics (incl. revenue projection) via ctx.features['kicktodo-community'].analytics. Inputs: { creatorSubject }. Output: { challenges }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "creatorSubject": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "challenges": {
+          "type": "array"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.list-consents",
+      "version": "1.0.0",
+      "label": "KickTodo: List Consents",
+      "description": "List a participant's integration consents via ctx.features['kicktodo-integrations'].consents (reads only — granting/revoking consent stays route-level with the acting participant, ADR 0421). Inputs: { ownerSubject }. Output: { consents }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "ownerSubject": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "consents": {
+          "type": "array"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.verifier-quality",
+      "version": "1.0.0",
+      "label": "KickTodo: Verifier Quality",
+      "description": "Read the tenant's verifier-quality metrics via ctx.features['kicktodo-metrics'].verifierQuality (computed-on-read projection, ADR 0432 — nothing here is model-writable). Inputs: {}. Output: { quality }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {},
+      "outputs": {
+        "quality": {
+          "type": "object"
+        }
+      }
+    },
+    {
+      "typeId": "feature.kicktodo.nodes.org-catalog",
+      "version": "1.0.0",
+      "label": "KickTodo: Org Catalog",
+      "description": "Read an org's challenge-library catalog via ctx.features['kicktodo-organizations'].catalog (ADR 0428). Inputs: { orgId }. Output: { catalog }.",
+      "category": "read",
+      "role": "read",
+      "capabilities": [],
+      "inputs": {
+        "orgId": {
+          "type": "string",
+          "required": true
+        }
+      },
+      "outputs": {
+        "catalog": {
+          "type": "object"
+        }
+      }
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

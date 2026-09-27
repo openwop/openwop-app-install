@@ -1,0 +1,74 @@
+{
+  "name": "core.openwop.workflows.csm-ops",
+  "version": "1.2.0",
+  "kind": "workflow-chain",
+  "description": "CSM↔CRM linkage workflows (ADR 0212, RFC 0013). Where feature.csm.agents.health-insights is read-only, these two chains carry the CSM write surface: computing an Account's healthScore/healthFactors from its linked CRM company's deals/tasks (the scoring recipe as visible, editable workflow configuration rather than buried code — ADR 0212 §3), and a human-gated renewal-risk follow-up over the deal-hygiene shape (ADR 0212 §4 — renewals are deals, not a new entity). All tenant/org-specific values are run parameters (replay-deterministic). Resolves on hosts that ship the feature.crm + feature.csm features + node packs (the OpenWOP reference app).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "keywords": ["Customer Success"],
+  "chains": [
+    {
+      "chainId": "csm-ops.health-from-crm",
+      "version": "1.0.0",
+      "label": "Compute Health From CRM",
+      "description": "ADR 0212 §3 — reads the linked CRM company's open deals (feature.crm.nodes.list-deals, company-scoped) and the org's open tasks (feature.crm.nodes.list-tasks — CRM has no company filter for tasks server-side, so the health-write node re-filters locally by companyId), then hands both lists to feature.csm.nodes.health-set, which applies its documented default formula (100, minus a configurable number of points per open deal and per open task, clamped to [0,100]) to produce healthScore + an inspectable healthFactors breakdown. Bind to a schedule or run on demand per account; tune the formula by editing the health-write node's `weights` config directly — no code change needed. Requires the target Account's crmRef to already point at orgId/companyId (set via the CSM UI or POST/PATCH /csm/accounts).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId", "companyId", "accountId"],
+        "properties": {
+          "orgId": { "type": "string", "description": "The org the linked CRM company belongs to." },
+          "companyId": { "type": "string", "description": "The linked CRM company (Account.crmRef.companyId) whose deals/tasks feed the score." },
+          "accountId": { "type": "string", "description": "The csm Account to update. Its crmRef MUST already reference orgId/companyId." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "deals", "typeId": "feature.crm.nodes.list-deals", "name": "Company deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "companyId": "{{params.companyId}}" }, "inputs": {} },
+          { "id": "tasks", "typeId": "feature.crm.nodes.list-tasks", "name": "Org open tasks", "position": { "x": 0, "y": 140 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "health-write", "typeId": "feature.csm.nodes.health-set", "name": "Compute + write health", "position": { "x": 320, "y": 70 }, "config": { "accountId": "{{params.accountId}}", "companyId": "{{params.companyId}}" }, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "deals.deals", "to": "health-write.deals" },
+          { "from": "tasks.tasks", "to": "health-write.tasks" }
+        ]
+      },
+      "outputs": {
+        "account": { "type": "object", "description": "The csm Account after the write — healthScore, healthFactors, and healthComputedAt." }
+      }
+    },
+    {
+      "chainId": "csm-ops.renewal-risk",
+      "version": "1.2.0",
+      "label": "Renewal Risk Review",
+      "description": "ADR 0212 §4 — renewals are deals, not a new entity: reads an org's open deals, then pauses at a human review gate (the deal-hygiene shape) for the CSM/account team to flag which are at renewal risk — this chain does not attempt to infer risk itself. The reviewer SEES the open-deal list (the `open-deals.deals → review.artifact` port-qualified edge). ON APPROVAL, and only then, one follow-up task is created; ON REJECTION the run COMPLETES down the `gate-reject` branch and NO task is created (ADR 0582 §1 — `core.chat.approvalGate` returns status:'success' on reject too, so the effect MUST hang off a `truthy approved` edge condition or the gate does not gate). A rejection is a business OUTCOME, not a run failure: it terminates the run `completed` (ADR 0582 §10) so a reviewer's legitimate \"no\" does not degrade this workflow's fleet success rate; the reject is auditable from the gate's own `decision:'reject'` output in the run feed. Pair with a weekly or monthly scheduled trigger per account book; the run feed is the audit trail.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId"],
+        "properties": {
+          "orgId": { "type": "string", "description": "The org whose open deals (the renewal book) to review." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "open-deals", "typeId": "feature.crm.nodes.list-deals", "name": "Open deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "review", "typeId": "core.chat.approvalGate", "name": "Review for renewal risk", "position": { "x": 320, "y": 0 }, "config": { "title": "Review open deals — flag any at renewal risk for follow-up", "artifactType": "crm.deals", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — no follow-up task created", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "follow-up", "typeId": "feature.crm.nodes.create-task", "name": "Create renewal follow-up task", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "Follow up on at-risk renewal" }, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "open-deals.deals", "to": "review.artifact" },
+          { "from": "review", "to": "follow-up", "condition": { "type": "truthy", "left": "approved" } },
+          { "from": "review", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } }
+        ]
+      },
+      "outputs": {
+        "task": { "type": "object", "description": "The follow-up task created after the reviewer confirms a renewal is at risk." }
+      }
+    }
+  ]
+}

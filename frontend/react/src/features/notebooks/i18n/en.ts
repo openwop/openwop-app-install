@@ -4,31 +4,16 @@
  * actions (delete) are reused from the `common` namespace via `t('common:…')`.
  */
 export const messages = {
-  // Page chrome
-  eyebrow: 'Research',
-  title: 'Notebooks',
-  lede: 'Grounded research notebooks — collect sources, take notes, and ask questions grounded in them.',
-  workspaceLede: 'Sources, notes, and a grounded ask over this notebook.',
-
-  // Gating
-  notEnabledTitle: 'Notebooks is not enabled',
-  notEnabledBody: 'Ask an administrator to turn on the Research Notebooks feature in Admin → Feature toggles.',
-
-  // Chooser
-  nameLabel: 'Notebook name',
-  namePlaceholder: 'Market research',
-  orgLabel: 'Organization',
-  createNotebook: 'Create notebook',
-  created: 'Notebook created.',
-  createFailed: 'Failed to create the notebook.',
+  // Failure copy — shared across the panels below.
   loadFailed: 'Failed to load.',
-  deleteFailed: 'Delete failed.',
-  open: 'Open',
-  deleteNotebookLabel: 'Delete {{name}}',
-  deleteNotebookConfirm: 'Delete “{{name}}”? This can\'t be undone.',
-  emptyTitle: 'No notebooks yet',
-  emptyBody: 'Create your first research notebook with the form above — then add sources and ask questions grounded in them.',
-  backToList: 'Back to notebooks',
+  // NBU-2 / NBU-5 (ADR 0601) — failed READS state themselves in the panel that
+  // failed, each with its own retry. A failed read used to render a permanent
+  // loading skeleton under a shared banner an unrelated success could clear.
+  retry: 'Try again',
+  sourcesFailedTitle: "Couldn't load your sources",
+  notesFailedTitle: "Couldn't load your notes",
+  transformationsFailedTitle: "Couldn't load your transformations",
+  askFailedTitle: "Couldn't run that search",
 
   // Sources panel
   sourcesTitle: 'Sources',
@@ -46,7 +31,6 @@ export const messages = {
   uploading: 'Uploading…',
   addFileHint: 'Upload a document — its text is extracted and added as a source.',
   addAudioHint: 'Upload a recording — it’s transcribed and added as a source.',
-  addAudioBtn: 'Transcribe & add',
   audioEnqueued: 'Transcribing your recording — the source will appear shortly.',
   audioFailed: 'Failed to start transcription.',
   addYoutubeLabel: 'YouTube URL',
@@ -82,12 +66,30 @@ export const messages = {
   transforming: 'Transforming…',
   transformLabel: 'Apply a transformation to {{title}}',
   transformHint: 'Apply a transformation template — the result is written as a Document.',
+  transformUnavailable: 'Transform unavailable',
+  transformUnavailableHint: 'The transformation catalog could not be loaded — this notebook may still have templates.',
   transformStarted: 'Applying the transformation… the result will appear under Transformations.',
   transformFailed: 'Failed to start the transformation.',
   transformationsTitle: 'Transformations',
   transformationsNote: 'Applied-transformation results are saved as Documents owned by this notebook.',
   noTransformationsTitle: 'No transformations yet',
   noTransformationsBody: 'Use the Transform menu on a source to generate a Summary, Key Concepts, and more.',
+
+  // NBU-6 (ADR 0602) — a poll that gives up SAYS SO. The register is deliberate:
+  // "we stopped checking", never "there is nothing". The run may still be working,
+  // and a timeout that reads as an empty result is worse than silence.
+  stalledIngestTitle: 'Still waiting for that source',
+  stalledIngestBody: 'We stopped checking after about 30 seconds. The source may still be processing — this is not a report that it failed.',
+  stalledSummarizeTitle: 'Still waiting for that summary',
+  stalledSummarizeBody: 'We stopped checking after about 20 seconds. The summary may still be generating — this is not a report that it failed.',
+  stalledTransformTitle: 'Still waiting for that transformation',
+  stalledTransformBody: 'We stopped checking after about 20 seconds. The transformation may still be running — this is not a report that it failed.',
+  checkAgain: 'Check again',
+  stalledRecheckedNothing_one: 'Checked {{count}} more time — still nothing new.',
+  stalledRecheckedNothing_other: 'Checked {{count}} more times — still nothing new.',
+  stalledRecheckFailed: "We couldn't check just now — the connection failed. Still not a report that it failed.",
+  stalledRecheckLanded: 'It landed — the list is up to date.',
+  stalledViewRun: 'View the run',
   openInDocuments: 'Open in Documents',
 
   // Notes panel

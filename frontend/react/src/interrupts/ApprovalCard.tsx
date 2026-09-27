@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../client/interruptsClient.js';
@@ -5,6 +6,8 @@ import { TextField } from '../ui/Field.js';
 import { Notice } from '../ui/index.js';
 import { useFocusTrap } from '../ui/useFocusTrap.js';
 import { useReviewStatusByRunNode } from '../chat/reviews/reviewStatusStore.js';
+import { confirm } from '../ui/confirm.js';
+import { GateEvidence } from '../chat/reviews/GateEvidence.js';
 
 interface Props {
   runId: string;
@@ -55,6 +58,21 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
 
   async function send(action: ApprovalAction) {
     if (inFlight.current) return;
+    // ADR 0600 §7 (`ISU-12`) — REJECT is the irreversible verb and it was one
+    // unconfirmed click straight to the network. It fails the run (a rejected
+    // `core.approvalGate` appends `run.failed` with `approval_rejected` and
+    // never resolves the suspend), discarding whatever the run already spent —
+    // a warehouse query, an LLM call, and this person's attention. Run DELETION
+    // on the very next surface over already confirms; this did not. Approve is
+    // deliberately NOT gated: it continues a run the user asked for, and a
+    // confirm on the common path is the kind of friction people learn to click
+    // through, which would weaken this one.
+    if (action === 'reject' && !(await confirm({
+      title: t('rejectConfirmTitle'),
+      body: t('rejectConfirmBody'),
+      danger: true,
+      confirmLabel: t('actionReject'),
+    }))) return;
     inFlight.current = true;
     setSubmitting(true);
     setError(null);
@@ -75,19 +93,28 @@ export function ApprovalCard({ runId, nodeId, data, onResolved }: Props) {
     <div className="card" role="group" aria-labelledby={headingId} ref={trapRef}>
       <h2 id={headingId}>{t('approvalRequired')}</h2>
       <p>{prompt}</p>
+      {/* ADR 0600 §2 (`ISU-10`) — THE evidence. This card is where the interrupt
+          notification's `actionUrl: '/inbox'` actually lands, and it used to read
+          exactly two keys (`prompt`, `actions`): "Confirm the variance figures"
+          with no figures, "Review the recognition draft" with no draft. The
+          artifact was on the wire the whole time — `executor.ts` binds
+          `artifactId`/`revisionId` onto the interrupt and `listOpenInterrupts`
+          returns them verbatim. Shared with the chat card so the two surfaces
+          cannot drift apart again. */}
+      <GateEvidence data={data} title={prompt} />
       <TextField label={t('commentLabel')} ref={commentRef} value={comment} onChange={(e) => setComment(e.target.value)} placeholder={t('commentPlaceholder')} />
       {resolvedElsewhere && <Notice variant="info">{t('resolvedElsewhere')}</Notice>}
-      {error && <div className="alert error">{error}</div>}
+      {error && <div role="alert" className="alert error">{error}</div>}
       <div className="button-row">
         {allowedActions.map((action) => (
-          <button
+          <Button
             key={action}
             disabled={disabled}
-            className={action === 'approve' ? 'btn-accent-solid' : 'secondary'}
+            variant={action === 'approve' ? 'accent-solid' : 'secondary'}
             onClick={() => send(action)}
           >
             {t(ACTION_LABEL_KEYS[action])}
-          </button>
+          </Button>
         ))}
       </div>
     </div>

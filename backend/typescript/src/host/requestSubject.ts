@@ -35,11 +35,39 @@ export function personalTenantOf(req: Request): string | undefined {
   return (req as { personalTenant?: string }).personalTenant;
 }
 
+/**
+ * True iff `tenantId` has the SHAPE of a personal workspace — a tenant that is
+ * single-principal BY CONSTRUCTION, so "the caller's personal tenant is the
+ * active tenant" really does mean "there is nobody else here to isolate from":
+ *   - `user:<hash>` — one signed-in human's own workspace (ADR 0015; derived 1:1
+ *     from the OIDC subject, `middleware/auth.ts` `tenantIdFromOidc`, and the
+ *     `usersGuards.ts` canonical-user model relies on the same 1:1 fact)
+ *   - `anon:<sid>`  — one ephemeral anonymous session's sandbox
+ *
+ * FALSE for everything else — a shared `ws:` workspace, `default`, and any
+ * deployment-named tenant. USERS-19 (ADR 0617 D2 / ADR 0621): the SAML ACS mints
+ * `personalTenant: OPENWOP_SAML_TENANT` (`routes/authSamlSso.ts`) — ONE
+ * host-global tenant shared by EVERY SAML user — so "personal === active" was
+ * TRUE for every plain SAML member and every implicit-owner short-circuit below
+ * granted them owner authority (create/PATCH/disable/delete any user, …).
+ * `personalTenant` is a claim the MINT SITE makes; this allowlist is what stops
+ * a multi-human tenant from inheriting the single-principal assumption. An
+ * unrecognised shape fails CLOSED (the `isSinglePrincipalTenant` discipline —
+ * NOT reused here because that predicate also admits `default`, which is exactly
+ * the shape a SAML deployment can mint).
+ */
+export function isPersonalTenantId(tenantId: string | undefined): tenantId is string {
+  return tenantId !== undefined && (tenantId.startsWith('user:') || tenantId.startsWith('anon:'));
+}
+
 /** True iff the active tenant IS the caller's own personal workspace — the
- *  implicit-owner condition. Never true for a shared `ws:` workspace. */
+ *  implicit-owner condition. Never true for a shared `ws:` workspace, and (USERS-19)
+ *  never true unless the personal tenant has a personal SHAPE — see
+ *  {@link isPersonalTenantId}: a session whose `personalTenant` is a multi-human
+ *  tenant (the SAML host-global tenant, `default`) is NOT its implicit owner. */
 export function isOwnPersonalWorkspace(req: Request): boolean {
   const personal = personalTenantOf(req);
-  return personal !== undefined && tenantOf(req) === personal;
+  return isPersonalTenantId(personal) && tenantOf(req) === personal;
 }
 
 /** True iff the caller is a DURABLE signed-in account (a `user:`-prefixed

@@ -352,3 +352,15 @@ answers "I have no idea what these are for." Examples (final copy in i18n):
 5. **Work-patterns home.** Operations (run-derived read-model) vs an Author-adjacent
    placement (it feeds the builder). Chose Operations per the "surface via run
    surfaces" rule; revisit if operators look for it next to Workflows.
+
+## Amendment (2026-07-05) — Mission Control folded into Runs as the "Active runs" tab
+
+Mission Control (`/mission`, `CommandCenterPage`) was a dedicated Operations nav item
+sitting beside Runs — two adjacent run surfaces where one showed live in-flight runs and
+the other showed history. Per the same declutter rationale (don't give a sibling view its
+own top-level rail entry), the live view is now the **"Active runs" tab of the Runs page**
+(`/runs?tab=active`, deep-linkable via `useUrlTab`). The panel moved verbatim into
+`runs/ActiveRunsTab.tsx` (state/poll/SSE `RunWatch` intact, only the `PageHeader` dropped);
+`CommandCenterPage.tsx` was deleted and `/mission` is now a query-preserving `<Navigate>`
+redirect (off the rail, bookmarks preserved). Runs gains a `Tabs` strip: **All runs** (the
+existing history + summary + create form) and **Active runs**. No backend change.

@@ -9,7 +9,7 @@
  *   - persist registers a valid candidate through the shared registry
  */
 
-import { beforeAll, afterEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, afterEach, describe, expect, it } from 'vitest';
 import { ensureNodesRegistered } from '../src/bootstrap/nodes.js';
 import {
   validateAuthoredWorkflow,
@@ -19,11 +19,18 @@ import {
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
 import { OpenwopError } from '../src/types.js';
 import { setCapabilityOverlay, resetCapabilityOverlay } from '../src/host/capabilityOverlay.js';
+import { openStorage } from '../src/storage/index.js';
+import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 
-beforeAll(() => {
+const TENANT = 'ws-svc';
+
+beforeAll(async () => {
   // Populate the in-process node registry so `core.noop` is a legal catalog typeId.
   ensureNodesRegistered();
+  // persist now records tenant ownership (ADR 0163) → needs a wired kv store.
+  initHostExtPersistence(await openStorage('memory://'));
 });
+afterAll(() => __resetHostExtPersistence());
 afterEach(() => resetCapabilityOverlay());
 
 const noopWorkflow = (id: string) => ({
@@ -52,17 +59,28 @@ describe('workflow-author service — closed-world typeIds', () => {
     expect(cat.nodes.some((n) => n.typeId === 'core.noop')).toBe(true);
   });
 
-  it('rejects a node this host cannot run (missing host surface) — closed-world honesty', () => {
+  it('rejects a node this host cannot run (missing host surface) — closed-world honesty', (ctx) => {
     // A node withheld from the authoring menu *only* for a missing host surface
     // is NOT a legal typeId (it would register a workflow that fails at run).
     const cat = buildAuthoringCatalog();
     const offMenu = cat.excluded.find((e) => /missing host surface/.test(e.reason));
-    if (!offMenu) return; // no surface-gated node present in this environment
+    // ADR 0673 D4 (`WFAWF-13`) — this used to `return` when no surface-gated node was
+    // present, so a probe that ran NOTHING reported PASSED. Two changes make it honest:
+    //
+    //   1. a non-vacuity FLOOR — the catalog must have loaded nodes at all, so an empty
+    //      catalog (a broken fixture) can never be mistaken for "nothing to check";
+    //   2. an explicit SKIP rather than a silent return, so the absence is visible in the
+    //      report instead of counted as a pass.
+    //
+    // MEASURED at HEAD: this bare unit environment registers no surface-gated node, so the
+    // leg has genuinely had nothing to assert — which is exactly what the silent return hid.
+    expect(cat.nodes.length, 'the catalog must load SOMETHING — an empty one is a broken fixture, not an empty case').toBeGreaterThan(0);
+    if (!offMenu) ctx.skip();
     const v = validateAuthoredWorkflow({
       workflowId: 'authored.unrunnable',
-      nodes: [{ nodeId: 'n1', typeId: offMenu.typeId }],
+      nodes: [{ nodeId: 'n1', typeId: offMenu!.typeId }],
     });
-    expect(v.ok, `${offMenu.typeId} should be rejected as not runnable here`).toBe(false);
+    expect(v.ok, `${offMenu!.typeId} should be rejected as not runnable here`).toBe(false);
     expect(v.errors.join(' ')).toMatch(/Unknown node typeId/);
   });
 });
@@ -93,18 +111,33 @@ describe('workflow-author service — RFC 0022 §C capability gate', () => {
 });
 
 describe('workflow-author service — persist', () => {
-  it('registers a valid candidate through the shared registry', () => {
+  it('registers a valid candidate through the shared registry', async () => {
     const id = 'authored.persist-1';
-    const out = persistAuthoredWorkflow(noopWorkflow(id));
+    const out = await persistAuthoredWorkflow(noopWorkflow(id), { tenantId: TENANT });
     expect(out.workflowId).toBe(id);
     expect(out.nodeCount).toBe(1);
     expect(getRegisteredWorkflow(id)?.workflowId).toBe(id);
   });
 
-  it('throws on an out-of-catalog typeId (never registers an unrunnable graph)', () => {
-    expect(() =>
-      persistAuthoredWorkflow({ workflowId: 'authored.persist-bad', nodes: [{ nodeId: 'n1', typeId: 'made.up' }] }),
-    ).toThrow(OpenwopError);
+  it('throws on an out-of-catalog typeId (never registers an unrunnable graph)', async () => {
+    await expect(
+      persistAuthoredWorkflow({ workflowId: 'authored.persist-bad', nodes: [{ nodeId: 'n1', typeId: 'made.up' }] }, { tenantId: TENANT }),
+    ).rejects.toThrow(OpenwopError);
     expect(getRegisteredWorkflow('authored.persist-bad')).toBeUndefined();
+  });
+
+  it('the same tenant may overwrite its OWN workflow (autosave)', async () => {
+    const id = 'authored.persist-self';
+    await persistAuthoredWorkflow(noopWorkflow(id), { tenantId: TENANT });
+    const out = await persistAuthoredWorkflow(noopWorkflow(id), { tenantId: TENANT });
+    expect(out.workflowId).toBe(id);
+  });
+
+  it('another tenant CANNOT overwrite a workflow this tenant authored (typed conflict)', async () => {
+    const id = 'authored.persist-foreign';
+    await persistAuthoredWorkflow(noopWorkflow(id), { tenantId: TENANT });
+    await expect(
+      persistAuthoredWorkflow(noopWorkflow(id), { tenantId: 'ws-other' }),
+    ).rejects.toMatchObject({ code: 'conflict', details: { reason: 'owned_by_other_tenant' } });
   });
 });

@@ -32,7 +32,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -114,7 +114,13 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
     expect(res.body.error).toBe('validation_error');
   });
 
-  it('records lastRunAt when a job is triggered', async () => {
+  // WF-COS-4 — the two shapes this route can fire, and they are NOT the same
+  // claim. A job bound to NO workflow has no run to name, so the fire IS the
+  // event and `lastRunAt` is honest. A job bound to a workflow that does not
+  // resolve produced nothing, so stamping `lastRunAt` beside a stale
+  // `lastRunId` is the "last run: just now, linking to a run that never
+  // happened" defect — reachable from SubjectSchedulesPanel's "Run now".
+  it('records lastRunAt when a job with NO bound workflow is triggered (the fire IS the event)', async () => {
     await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
       method: 'POST',
       body: JSON.stringify({ jobId: 'job-lr', cronExpr: '* * * * *' }),
@@ -124,6 +130,32 @@ describe('scheduler CRUD route (C-6 / RFC 0052)', () => {
     const job = list.body.jobs.find((j) => j.jobId === 'job-lr')!;
     expect(typeof job.lastRunAt).toBe('string');
     expect(Number.isNaN(Date.parse(job.lastRunAt!))).toBe(false);
+  });
+
+  it('a BOUND workflow that does not resolve records a SKIP, never a lastRunAt', async () => {
+    type HonestJob = Job & { lastRunAt?: string; lastRunId?: string; lastSkippedAt?: string; lastSkipReason?: string; lastFiredTick?: number };
+    await jsonFetch('/v1/host/openwop-app/scheduler/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ jobId: 'job-unresolved', cronExpr: '* * * * *', workflowId: 'wf-does-not-exist' }),
+    });
+    const fired = await jsonFetch<{ runsFired: number; runId?: string; lastFiredTick: number }>(
+      '/v1/host/openwop-app/scheduler/jobs/job-unresolved/trigger',
+      { method: 'POST', body: '{}' },
+    );
+    // The premise: the slot really WAS consumed and no run came back. Without
+    // this the assertions below would also pass on a route that never fired.
+    expect(fired.status).toBe(200);
+    expect(fired.body.runsFired, 'the fire must actually happen, or this test is inert').toBeGreaterThan(0);
+    expect(fired.body.runId, 'an unresolvable workflow yields no run id').toBeUndefined();
+
+    const list = await jsonFetch<{ jobs: HonestJob[] }>('/v1/host/openwop-app/scheduler/jobs');
+    const job = list.body.jobs.find((j) => j.jobId === 'job-unresolved')!;
+    expect(job.lastRunAt, 'no run happened — claiming one is the whole defect').toBeUndefined();
+    expect(job.lastRunId).toBeUndefined();
+    expect(job.lastSkippedAt).toBeTruthy();
+    expect(job.lastSkipReason).toBe('workflow-unresolved');
+    // …and the slot still advanced, which is the property the split must keep.
+    expect(job.lastFiredTick).toBe(fired.body.lastFiredTick);
   });
 
   it('assigns a jobId when none is supplied', async () => {

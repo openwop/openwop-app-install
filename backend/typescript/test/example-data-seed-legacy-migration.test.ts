@@ -19,6 +19,8 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { createRosterEntry, listRoster } from '../src/host/rosterService.js';
+import { saveConfig } from '../src/host/featureToggles/service.js';
+import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let server: http.Server;
 let BASE: string;
@@ -31,7 +33,13 @@ beforeAll(async () => {
   const app = await createApp({
     port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  // ADR 0229 flipped `advisory-board` ON by default, which makes the advisors
+  // seeder run inside the example-data seed (+8 roster personas). This test
+  // isolates the TEN-TWIN legacy migration, so pin the toggle off here — the
+  // exact-count assertions below are about the twins, not the advisors.
+  const advisors = getToggleDefault('advisory-board');
+  if (advisors) await saveConfig({ ...advisors, status: 'off' }, 'test');
 });
 
 afterAll(async () => {

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.0/timeline.plan.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.1/timeline.plan.config.json",
   "title": "TimelinePlanConfig",
   "type": "object",
   "properties": {

@@ -1,6 +1,6 @@
 /**
  * Chat message-feedback client (ADR 0071) — durable per-(user, message)
- * thumbs-up/down over `/v1/host/openwop-app/chat/messages/:messageId/feedback`.
+ * thumbs-up/down over `/host/openwop-app/chat/messages/:messageId/feedback`.
  *
  * DISTINCT from `src/client/feedbackClient.ts` (RFC 0056 run annotations, per-RUN,
  * capability-gated). This is a host-ext chat quality signal, per-user and
@@ -24,7 +24,7 @@ export interface MessageFeedback {
   updatedAt: string;
 }
 
-const base = (messageId: string): string => `/v1/host/openwop-app/chat/messages/${encodeURIComponent(messageId)}/feedback`;
+const base = (messageId: string): string => `/host/openwop-app/chat/messages/${encodeURIComponent(messageId)}/feedback`;
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${config.baseUrl}${path}`, {

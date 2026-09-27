@@ -1,4 +1,7 @@
 import { lazy } from 'react';
+
+// P4 continuation — this page's walkthrough spotlight (lazy chunk, boot-eager trigger).
+void import('../../walkthroughs/pageSpotlight.js').then((m) => m.registerPageSpotlight('media.page.view', '/media', 'media.page'));
 import { ImageIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
@@ -11,12 +14,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/media',
     element: <MediaLibraryPage />,
-    tier: 'admin',
+    tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Content',
-      label: 'Media',
+      label: 'Media', labelKey: 'mediaLabel',
       icon: ImageIcon,
-      hint: 'Org asset library',
+      hint: 'Org asset library', hintKey: 'mediaHint',
       order: 10,
     },
   },

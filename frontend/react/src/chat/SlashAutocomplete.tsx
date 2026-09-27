@@ -236,7 +236,7 @@ function CommandRow({
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="slashac-row"
-      style={{ background: selected ? 'var(--color-surface-2)' : 'transparent' }}
+      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
       <div className="u-flex u-items-center u-gap-2">
         <code className="u-fw-600 u-fs-12">{cmd.name}</code>
@@ -258,6 +258,7 @@ function WorkflowRow({
   onClick: () => void;
   onHover: () => void;
 }): JSX.Element {
+  const { t } = useTranslation('chat');
   return (
     <div
       role="option"
@@ -266,11 +267,12 @@ function WorkflowRow({
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="slashac-row"
-      style={{ background: selected ? 'var(--color-surface-2)' : 'transparent' }}
+      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
-      <div className="u-flex u-items-center u-gap-2">
+      <div className="u-flex u-items-center u-gap-2 u-wrap">
         <code className="u-fw-600 u-fs-12">/{wf.slug}</code>
-        <span className="muted u-fs-11">{wf.displayName}</span>
+        <span className="muted u-fs-11 u-truncate">{wf.displayName}</span>
+        {wf.draft ? <span className="chip chip--muted u-fs-10">{t('workflowDraftChip')}</span> : null}
       </div>
       <div className="muted u-fs-11">{wf.description}</div>
     </div>

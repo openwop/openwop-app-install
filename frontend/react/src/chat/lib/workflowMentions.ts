@@ -5,7 +5,7 @@
  *   - Hardcoded sample workflows (demo mode only — so mentions work
  *     without any builder-saved entries).
  *   - The caller's REAL backend-owned workflows (the ADR 0163 per-tenant
- *     ownership index, `GET /v1/host/openwop-app/workflows`). These are the
+ *     ownership index, `GET /host/openwop-app/workflows`). These are the
  *     source of truth — durable, multi-device, assignable. The index is
  *     async, so it's fetched into a module-level cache by
  *     {@link refreshWorkflowMentionCache} (warmed on composer mount + on
@@ -45,6 +45,9 @@ export interface WorkflowMentionEntry {
   toolName: string;
   /** OpenWOP workflow id the backend dispatches when the LLM calls the tool. */
   workflowId: string;
+  /** ADR 0474 P1b F6 (landed with ADR 0475 P2b) — unpromoted builder draft:
+   *  the picker badges it so a user knows they're launching a draft. */
+  draft?: boolean;
 }
 
 interface ExampleSource {
@@ -70,7 +73,7 @@ function exampleSources(): ExampleSource[] {
  *  Populated by {@link refreshWorkflowMentionCache}; empty until the first
  *  successful fetch (so the picker degrades to demo + localStorage exactly
  *  as before — fail-safe). */
-let backendWorkflowCache: { id: string; name: string; nodeCount: number }[] = [];
+let backendWorkflowCache: { id: string; name: string; nodeCount: number; transient?: boolean }[] = [];
 
 /** Fetch the caller's tenant-scoped owned workflows into the module cache so
  *  the sync {@link listWorkflowMentions} can include them. Best-effort: on any
@@ -79,7 +82,7 @@ let backendWorkflowCache: { id: string; name: string; nodeCount: number }[] = []
 export async function refreshWorkflowMentionCache(): Promise<void> {
   try {
     const rows = await listWorkflowSummaries();
-    backendWorkflowCache = rows.map((r) => ({ id: r.workflowId, name: r.name, nodeCount: r.nodeCount }));
+    backendWorkflowCache = rows.map((r) => ({ id: r.workflowId, name: r.name, nodeCount: r.nodeCount, ...(r.transient ? { transient: true } : {}) }));
   } catch {
     /* leave the cache untouched — backend down ⇒ demo + localStorage only */
   }
@@ -90,7 +93,7 @@ export function listWorkflowMentions(): WorkflowMentionEntry[] {
   const usedSlugs = new Set<string>();
   const seenIds = new Set<string>();
 
-  function push(displayName: string, description: string, workflowId: string): void {
+  function push(displayName: string, description: string, workflowId: string, draft?: boolean): void {
     // Cloned templates carry " (from template)" — strip from the slug so
     // the `@mention` token stays short. Keep displayName so users can tell
     // which workflow originated from a template.
@@ -109,6 +112,7 @@ export function listWorkflowMentions(): WorkflowMentionEntry[] {
       description,
       toolName: sanitizeToolName(workflowId),
       workflowId,
+      ...(draft ? { draft: true } : {}),
     });
   }
 
@@ -123,7 +127,7 @@ export function listWorkflowMentions(): WorkflowMentionEntry[] {
   // listed ahead of local drafts so the durable copy wins on a collision.
   for (const wf of backendWorkflowCache) {
     if (seenIds.has(wf.id)) continue;
-    push(wf.name, i18n.t('chat:workflowNodeCount', { count: wf.nodeCount }), wf.id);
+    push(wf.name, i18n.t('chat:workflowNodeCount', { count: wf.nodeCount }), wf.id, wf.transient);
   }
   // localStorage drafts NOT already covered by the backend index (offline /
   // pre-migration legacy). Skip any id the backend index already surfaced.

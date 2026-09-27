@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/create-deal.output.json",
+  "title": "CrmCreateDealOutput",
+  "description": "The created (or original, on an explicit existing id) org-scoped deal. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
+  "type": "object",
+  "required": [
+    "success",
+    "deal"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "deal": {
+      "type": "object",
+      "required": [
+        "dealId"
+      ],
+      "properties": {
+        "dealId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "The deal row as the surface projects it (host bookkeeping columns `tenantId`/`orgId`/`createdBy`/`updatedBy` stripped)."
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.mcp",
-  "version": "1.1.1",
+  "version": "1.1.3",
   "description": "Spec-canonical MCP (Model Context Protocol) pack. v1.0 four-node client baseline (list-tools, invoke-tool, read-resource, server-status) plus the v1.1 additions: full client-side surface (resources, prompts, completion, logging, ping) AND server-side (workflow IS an MCP server — server-trigger + expose-tool/resource/prompt + handle-sampling/elicitation + provide-roots). Tracks modelcontextprotocol.io 2025-06-18 spec via spec/v1/mcp-integration.md.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -8,7 +8,7 @@
   "repository": "https://github.com/openwop/openwop",
   "keywords": ["core", "mcp", "tools", "resources", "prompts", "elicitation", "sampling", "integration"],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
     "mcp": "supported"
@@ -170,5 +170,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

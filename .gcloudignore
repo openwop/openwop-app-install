@@ -1,2 +1,61 @@
 #!include:.gitignore
+
+# The repository's own history is not build input. `.gitignore` does not list
+# `.git` (nothing else needs it to), and `#!include:.gitignore` is the ONLY
+# source of exclusions here, so without this line every deploy from a normal
+# checkout uploads the whole object store to Cloud Build.
+#
+# MEASURED 2026-08-15 in the shared checkout: 5,479 of 14,529 uploaded files —
+# 38% — were `.git/` internals, ~172 MB. Found because a parallel session's
+# deploy produced a 187.6 MB source zip and said so.
+#
+# Invisible from a git WORKTREE, which is the recommended way to deploy: there
+# `.git` is a ~69-byte text pointer, so the upload looks clean and the problem
+# only appears from the shared checkout. Two deploy paths, one of which cannot
+# observe the defect.
+#
+# The Dockerfile never invokes git, and `scripts/write-build-commit.mjs` reads
+# HEAD LOCALLY before the upload and ships the answer in `build-meta/`, so
+# nothing downstream of this point needs the repository at all.
+#
+# VERIFIED both directions on a scratch tree with a real `.git/` directory:
+#   without this line -> `.git/config`, `.git/refs/heads/main` in the upload set
+#   with it           -> both gone, `src/` and the ignore files retained
+.git
+
 !backend/typescript/vendor/python-3.12.0.wasm
+# Deploy provenance (ADR 0518 correction). `build-meta/commit.txt` is gitignored
+# — deliberately, so `scripts/preflight-deploy.sh` (which refuses a dirty tree via
+# `git status --porcelain`) does not trip on a file every deploy regenerates.
+#
+# But `#!include:.gitignore` above means gitignored ⇒ NOT UPLOADED, and this file
+# has to reach Cloud Build or the Dockerfile's `COPY build-meta` lands an empty
+# directory and every image reports `commit: unknown`. Caught pre-merge on
+# 2026-08-10 by diffing `gcloud meta list-files-for-upload`: `.gitkeep` was in the
+# upload set and `commit.txt` was not, while the file sat on disk.
+#
+# The failure would have been SILENT and test-invisible — the unit tests point at
+# a temp dir via `OPENWOP_BUILD_META_DIR`, so they pass whether or not the real
+# file ever ships. Same negation pattern as the python-wasm line above.
+#
+# THE NEGATION IS DIRECTORY-WIDE, and that is the correction (2026-08-15). It
+# read `!build-meta/commit.txt` — one file — so when RFC 0146's
+# `build-meta/corpus-suite.txt` was added it inherited the gitignore and was
+# silently dropped from the upload. `contractProvenance` then deployed, again,
+# ABSENT: the image had no stamp to read, the commit stamp matched HEAD, and
+# `verify-deploy.sh` passed. The same defect, on the same day, caused by the
+# same mechanism as the fix it was carrying.
+#
+# The per-file form encoded the INSTANCE. `build-meta/` is a purpose-built
+# directory written only by `scripts/write-build-commit.mjs`, so every file in
+# it is by definition a stamp that must ship — which makes the directory the
+# correct unit and makes the next stamp file safe by construction rather than
+# by remembering this line exists.
+#
+# MEASURED with `gcloud meta list-files-for-upload`, both directions, because
+# the `**` form is not obviously valid under gitignore semantics (a negation
+# cannot re-include inside an EXCLUDED directory — it works here only because
+# `build-meta/` itself is never excluded, just files within it):
+#   with    `!build-meta/**` → commit.txt, .gitkeep, corpus-suite.txt
+#   without                  → commit.txt, .gitkeep        (corpus-suite drops)
+!build-meta/**

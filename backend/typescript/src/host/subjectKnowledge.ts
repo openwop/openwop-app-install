@@ -17,8 +17,10 @@
  */
 
 import { DurableCollection } from './hostExtPersistence.js';
-import { subjectScope, type Subject } from './subject.js';
+import { subjectScope, personSubject, type Subject } from './subject.js';
 import type { SubjectKnowledgeBinding } from './agentKnowledgeComposition.js';
+import { registerSubjectEraser } from './subjectErasure.js';
+import { subjectKeyForms } from './subjectErasureRedaction.js';
 
 interface StoredBinding {
   /** Collection key `${tenantId}:${kind}:${id}` — bounds reads to one subject. */
@@ -58,4 +60,26 @@ export async function setSubjectKnowledge(tenantId: string, subject: Subject, pa
  *  removed). The referenced KB collections are NOT deleted (shareable). */
 export async function clearSubjectKnowledge(tenantId: string, subject: Subject): Promise<void> {
   await store.delete(keyOf(tenantId, subject));
+}
+
+// ── ADR 0464 P2 — DSAR subject erasure ───────────────────────────────────────
+// A subject's knowledge binding is THEIR OWN reference data (which KB
+// collections + retrieval tuning they bound), so a DSAR DELETES it — the same
+// taxonomy the subject-memory notes follow (own data → delete). The referenced
+// KB collections are shareable and NOT touched (clearSubjectKnowledge's rule).
+// The binding key embeds the subject SCOPE (`${tenantId}:user:<id>`), so the
+// erasure targets the `user:` scope directly; idempotent (a second run finds no
+// row). Fail-closed on a falsy tenant/subject.
+
+/** DSAR eraser — drop the subject's knowledge binding under their `user:` scope. */
+export async function eraseSubjectKnowledge(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return;
+  const { raw } = subjectKeyForms(subjectKey);
+  await store.delete(keyOf(tenantId, personSubject(raw)));
+}
+
+/** Register the subject-knowledge DSAR eraser (idempotent — the seam dedupes by
+ *  reference). Called from the host-erasers boot step (host/hostSubjectErasers.ts). */
+export function registerSubjectKnowledgeErasure(): void {
+  registerSubjectEraser(eraseSubjectKnowledge);
 }

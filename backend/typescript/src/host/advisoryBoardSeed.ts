@@ -30,7 +30,7 @@ import { ensureUserAgentRegistered } from '../routes/userAgents.js';
 import { createRosterEntry, listRoster } from './rosterService.js';
 import { upsertAgentProfile } from './agentProfileService.js';
 import { createAgentMemoryPort, agentMemoryScope, countAgentMemoryByTag } from './agentMemoryAdapter.js';
-import { createBoard, listBoards, clearSeededAdvisoryBoards } from '../features/advisory-board/service.js';
+import { createBoard, listBoards, clearSeededAdvisoryBoards, clearFabricatedLivingAcks } from '../features/advisory-board/service.js';
 import { deleteRosterMemberCascade } from './rosterCascade.js';
 import { listOrgs } from './accessControlService.js';
 
@@ -52,7 +52,6 @@ interface BoardSpec {
   handle: string;
   name: string;
   personaKind: string;
-  livingPersonaAck?: boolean;
   visibility: string;
   advisors: string[];
 }
@@ -65,9 +64,12 @@ interface AdvisorSeedFile {
 const SEED = advisorSeed as AdvisorSeedFile;
 
 /** The deterministic user-agent id for an advisor — stable across re-seeds so
- *  `ensureUserAgentRegistered` + the roster match are idempotent. */
-function advisorAgentId(tenantId: string, slug: string): string {
-  return `user.${tenantId}.advisor-${slug}`;
+ *  `ensureUserAgentRegistered` + the roster match are idempotent. ADR 0379 P2:
+ *  persona-scoped (no tenant in the id — the tenant lives on the ROW), so a
+ *  fold collides instead of duplicating. `tenantId` kept in the signature for
+ *  call-site clarity only. */
+function advisorAgentId(_tenantId: string, slug: string): string {
+  return `user.advisor-${slug}`;
 }
 
 export interface AdvisorySeedResult {
@@ -115,7 +117,12 @@ export async function seedAdvisoryBoards(
       createdAt: new Date().toISOString(),
     });
 
-    const found = existingRoster.find((e) => e.agentRef.agentId === agentId);
+    // Grade-pass fix: ALSO match the grandfathered pre-ADR-0379 id form
+    // (`user.<tenant>.advisor-<slug>`) — matching only the new form made a
+    // reseed on an old tenant mint a duplicate advisor (roster + user-agent)
+    // beside the legacy one: the exact bug class ADR 0379 exists to kill.
+    const legacyAgentId = `user.${tenantId}.advisor-${spec.slug}`;
+    const found = existingRoster.find((e) => e.agentRef.agentId === agentId || e.agentRef.agentId === legacyAgentId);
     const entry = found ?? (await createRosterEntry({
       tenantId,
       persona: spec.persona,
@@ -144,7 +151,7 @@ export async function seedAdvisoryBoards(
     // Preseed the persona's principles into its RFC-0004 memory namespace once
     // (idempotent via the seed tag — a re-seed never duplicates).
     const scope = agentMemoryScope(entry.rosterId);
-    if (countAgentMemoryByTag(tenantId, scope, SEED_TAG) === 0) {
+    if ((await countAgentMemoryByTag(tenantId, scope, SEED_TAG)) === 0) {
       const memory = createAgentMemoryPort(tenantId);
       for (const principle of spec.memory) {
         await memory.write(scope, { content: principle, tags: [SEED_TAG, entry.rosterId] });
@@ -163,16 +170,34 @@ export async function seedAdvisoryBoards(
       .map((slug) => slugToRoster.get(slug))
       .filter((id): id is string => typeof id === 'string');
     if (advisorIds.length === 0) continue;
+    // ADVB-4 / ADR 0588 D5 — the seed does NOT acknowledge on a human's behalf.
+    // It used to ship `livingPersonaAck: true` on the ONE `living` board
+    // (`titans`) over its FOUR advisors — pastiche names (Elon Trask, Geoff
+    // Bezor, Steve Jobes, Sam Oltman) modeled on named real individuals — and
+    // adoption then transferred that fabricated record to the first user who
+    // renamed the board. (CORRECTED 2026-08-20: this said "eight named real
+    // individuals". `seed-data/advisorAgents.json` ships eight ADVISORS across
+    // TWO boards; the other four are `timeless`, `personaKind:'historical'`,
+    // with no ack. Overstating the blast radius of a defect is the same failure
+    // as understating it — it stops the number being checkable.) A `living` seeded board is now created UNACKNOWLEDGED
+    // and is unconvenable until its owner acknowledges — which is the governance
+    // gate demonstrating itself rather than being bypassed by the one cohort in
+    // the product that triggers it.
     await createBoard(tenantId, orgId, 'demo:advisory-seed', {
       name: board.name,
       handle: board.handle,
       advisors: advisorIds,
       visibility: board.visibility,
       personaKind: board.personaKind,
-      ...(board.livingPersonaAck ? { livingPersonaAck: true } : {}),
-    });
+    }, { allowUnacknowledgedLiving: true });
     boardsCreated += 1;
   }
+
+  // ADVB-4 / ADR 0588 D5 — the seeder is idempotent by HANDLE, so a tenant
+  // seeded before this change keeps the fabricated acknowledgement forever
+  // unless it is actively removed. Narrow + idempotent; see the service.
+  const acksCleared = await clearFabricatedLivingAcks(tenantId);
+  if (acksCleared > 0) log.info('advisory_seed_ack_unfabricated', { tenantId, acksCleared });
 
   if (advisorsCreated > 0 || boardsCreated > 0) {
     log.info('advisory_seed_done', { tenantId, advisorsCreated, boardsCreated });

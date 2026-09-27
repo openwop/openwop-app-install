@@ -12,14 +12,19 @@
  * Secrets are NEVER returned on any response — only connection metadata + status.
  */
 
+import { timingSafeEqual } from 'node:crypto';
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
+import { resolveAndResume } from '../../routes/interrupts.js';
+import { vendorTwin } from '../../middleware/protocolVersion.js';
 import { createLogger } from '../../observability/logger.js';
 import { resolveEffectiveAccess } from '../../host/accessControlService.js';
 import { isProviderAllowed } from '../../host/governanceService.js';
 import { requireSuperadmin } from '../../host/superadmin.js';
+import { publicBaseUrl } from '../featureRoute.js';
 import { listProviders, getProvider, type CredentialKind } from './providerRegistry.js';
+import { sendError } from '../../middleware/errorEnvelope.js';
 import {
   setHostOAuthClient,
   listHostOAuthClients,
@@ -40,15 +45,21 @@ import {
   exchangeCodeForTokens,
   isOAuthConfigured,
   appReturnUrl,
+  authorizationResponseIssuerOk,
+  callbackRefusalPage,
   writeScopesOf,
   inboundIngestUrl,
 } from './oauthFlow.js';
 import {
   setInboundConfig,
   getInboundConfig,
+  getInboundConfigForWebhook,
+  resolveInboundSigningSecret,
   removeInboundConfig,
   handleInboundEvent,
-  inboundSupported,
+  inboundConfigurable,
+  inboundObserverOnly,
+  isStreamInbound,
 } from './inboundWebhooks.js';
 
 const log = createLogger('connections.routes');
@@ -253,14 +264,62 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     res.json({ authorizeUrl });
   }));
 
-  // callback: the provider's browser redirect. Identity comes from the single-use
-  // server-stored `state` (NOT the session) — so we drive it ourselves and bounce
-  // the browser back to the SPA on both success and failure, never a JSON 4xx.
+  // connect: a `credential` interrupt's connectUrl (RFC 0199 §C.3, ADR 0753 D9).
+  // NOT pre-authenticated: it requires a signed-in user who IS the run's recorded
+  // owner (read verbatim from the run, never re-resolved — fork-safe), and an OPEN
+  // credential interrupt at that node. Only then does it start §A's grant for that
+  // Subject, through the production authorization-URL builder, carrying the
+  // interrupt on the single-use state. Anyone else gets no authorization URL.
+  // Registered on the version-agnostic vendor root's `/v1` twin (ADR 0652): the
+  // canonical `/host/openwop-app/…` address — the one `connectUrl` names — reaches it too.
+  app.get(vendorTwin('/connections/connect/:runId/:nodeId'), wrap(async (req, res) => {
+    const subject = actingUserOf(req);
+    if (!subject) throw new OpenwopError('unauthenticated', 'Sign in to authorize this connection.', 401);
+    const run = await deps.storage.getRun(req.params.runId);
+    const owner = typeof (run?.metadata as Record<string, unknown> | undefined)?.actingUserId === 'string'
+      ? ((run!.metadata as Record<string, unknown>).actingUserId as string)
+      : undefined;
+    // One refusal for "not your run" and "no such run": existence is not leaked.
+    if (!run || run.tenantId !== tenantOf(req) || owner !== subject) {
+      throw new OpenwopError('forbidden', 'Only the user who started this run can authorize it.', 403);
+    }
+    const interrupt = await deps.storage.getInterruptByNode(run.runId, req.params.nodeId);
+    if (!interrupt || interrupt.kind !== 'credential' || interrupt.resolvedAt) {
+      throw new OpenwopError('not_found', 'No open authorization request for this step.', 404);
+    }
+    const data = (interrupt.data ?? {}) as { provider?: unknown; scopes?: unknown };
+    if (typeof data.provider !== 'string') throw new OpenwopError('not_found', 'No open authorization request for this step.', 404);
+    const { authorizeUrl } = await beginAuthorization({
+      provider: data.provider,
+      tenantId: run.tenantId,
+      userId: subject,
+      reqOrigin: reqOriginOf(req),
+      ...(Array.isArray(data.scopes) && data.scopes.length > 0 ? { scopes: data.scopes.filter((x): x is string => typeof x === 'string') } : {}),
+      returnTo: `/runs/${encodeURIComponent(run.runId)}`,
+      interruptId: interrupt.interruptId,
+    });
+    res.set('Cache-Control', 'no-store').redirect(authorizeUrl);
+  }));
+
+  // callback: the provider's browser redirect. The grant is bound by the single-use
+  // server-stored `state`; the browser is always sent back to the SPA. A HOST
+  // refusal (bad/replayed state, wrong Subject, wrong `iss`, failed exchange) is a
+  // 4xx page that meta-refreshes there (ADR 0753 D1) — observable as a refusal,
+  // same UX. A PROVIDER-reported error (the user declined at the provider) and a
+  // success stay plain 302s.
   app.get('/v1/host/openwop-app/connections/:provider/callback', async (req: Request, res: import('express').Response) => {
     const provider = req.params.provider;
     const origin = reqOriginOf(req);
-    const fail = (returnTo: string, reason: string): void => {
+    const bounce = (returnTo: string, reason: string): void => {
       res.redirect(appReturnUrl(origin, returnTo, { connectError: provider, reason }));
+    };
+    const fail = (returnTo: string, reason: string, status = 400): void => {
+      res
+        .status(status)
+        .set('Cache-Control', 'no-store')
+        .set('Content-Security-Policy', "default-src 'none'")
+        .type('html')
+        .send(callbackRefusalPage(appReturnUrl(origin, returnTo, { connectError: provider, reason })));
     };
     const state = typeof req.query.state === 'string' ? req.query.state : '';
     let returnTo = '/connections';
@@ -268,14 +327,35 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
       // Provider-side consent error (user declined / invalid scope, etc.).
       if (typeof req.query.error === 'string' && req.query.error) {
         const pendingErr = state ? await consumePendingAuth(state) : null;
-        return fail(pendingErr?.returnTo ?? returnTo, 'consent_denied');
+        return bounce(pendingErr?.returnTo ?? returnTo, 'consent_denied');
       }
       const code = typeof req.query.code === 'string' ? req.query.code : '';
       if (!state || !code) return fail(returnTo, 'missing_params');
 
-      const pending = await consumePendingAuth(state); // single-use
+      const pending = await consumePendingAuth(state); // single-use (an atomic claim)
       if (!pending || pending.provider !== provider) return fail(returnTo, 'invalid_state');
       returnTo = pending.returnTo;
+      // SAME-USER BINDING (RFC 0199 §A.3, invariant `oauth-same-user-binding`): if
+      // the callback request is authenticated and its Subject DIFFERS from the one
+      // that started the grant, refuse and store nothing. This used to take the
+      // identity from `state` alone and never look at the session, so a victim's
+      // browser completing an attacker-initiated consent (or vice versa) bound the
+      // provider account to the wrong user — a login-CSRF / account-binding hole.
+      // An UNAUTHENTICATED callback may still complete under the state's Subject
+      // (the RFC refuses only on a mismatch); the `state` was already claimed above,
+      // so a refused callback cannot be replayed either.
+      const callbackSubject = actingUserOf(req);
+      if (callbackSubject && callbackSubject !== pending.userId) {
+        log.warn('oauth callback subject mismatch — refused', { provider });
+        return fail(returnTo, 'subject_mismatch', 403);
+      }
+      // MIX-UP DEFENSE (RFC 0199 §A.4 / RFC 9207): the response must name the
+      // provider's issuer before any code is exchanged. Checked against the provider
+      // bound to `state`, never one named by the request.
+      if (!authorizationResponseIssuerOk(pending.provider, req.query.iss)) {
+        log.warn('oauth callback issuer mismatch — refused', { provider });
+        return fail(returnTo, 'iss_mismatch');
+      }
 
       const tokens = await exchangeCodeForTokens({
         provider,
@@ -291,10 +371,22 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
         ...(pending.userId ? { userId: pending.userId } : {}),
       });
       log.info('oauth connection established', { provider, connectionId: connection.connectionId });
+      // RFC 0199 §C.4 — a grant started from a `credential` interrupt's
+      // connectUrl resolves that interrupt itself, through the ordinary resolve
+      // choke point (which re-checks that the credential now resolves). Losing a
+      // race to a concurrent resolve (the user declined meanwhile) is not a
+      // failure of THIS grant: the credential is stored either way.
+      if (pending.interruptId) {
+        try {
+          await resolveAndResume(deps.storage, deps.hostSuite, pending.interruptId, { outcome: 'authorized' });
+        } catch (err) {
+          log.warn('credential interrupt auto-resolve did not apply', { provider, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
       return res.redirect(appReturnUrl(origin, returnTo, { connected: provider }));
     } catch (err) {
       log.warn('oauth callback failed', { provider, error: err instanceof Error ? err.message : String(err) });
-      return fail(returnTo, 'exchange_failed');
+      return fail(returnTo, 'exchange_failed', 502);
     }
   });
 
@@ -334,16 +426,23 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
     const existing = await getConnection(tenantOf(req), req.params.id);
     if (!existing) throw new OpenwopError('not_found', 'Connection not found.', 404, { connectionId: req.params.id });
     await authorizeManage(req, existing);
-    if (!inboundSupported(existing.provider)) {
+    if (!inboundConfigurable(existing.provider)) {
       throw new OpenwopError('validation_error', `Inbound webhooks are not supported for '${existing.provider}'.`, 400, { provider: existing.provider });
     }
     const body = (req.body ?? {}) as Record<string, unknown>;
+    // RFC 0127 — a streaming/CDC ingress connection declares which broker source it
+    // delivers (`stream` | `change`, default `stream`); ignored for the messaging trio.
+    const streamSource = body.source === 'change' || body.source === 'stream' ? body.source : undefined;
+    // OBSERVER-ONLY providers (ADR 0404 zoom-webinar) fire no workflow — a
+    // workflowId is meaningless for them, so it is not required (and ignored).
+    const observerOnly = inboundObserverOnly(existing.provider);
     const config = await setInboundConfig({
       tenantId: tenantOf(req),
       connectionId: req.params.id,
       provider: existing.provider,
-      workflowId: requireString(body.workflowId, 'workflowId'),
+      ...(observerOnly ? {} : { workflowId: requireString(body.workflowId, 'workflowId') }),
       signingSecret: requireString(body.signingSecret, 'signingSecret'),
+      ...(isStreamInbound(existing.provider) && streamSource ? { streamSource } : {}),
     });
     res.status(201).json({ config, ingestUrl: inboundIngestUrl(req.params.id, reqOriginOf(req)) });
   }));
@@ -361,6 +460,31 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
   // verified against the stored signing secret IS the credential. Distinct
   // prefix `connections-inbound` (allow-listed in auth.ts), keyed by connectionId.
   const startDeps = { storage: deps.storage, hostSuite: deps.hostSuite };
+  // ADR 0394 Phase 4 — Meta Cloud API webhook SUBSCRIPTION verification: Meta
+  // GETs the callback with hub.mode=subscribe&hub.verify_token&hub.challenge
+  // and expects the raw challenge echoed when the token matches. The verify
+  // token is the connection's inbound signing config's companion (we accept the
+  // stored Meta app secret as the verify token — one secret to provision).
+  // Only whatsapp-cloud connections answer; everything else 404s uniformly.
+  app.get('/v1/host/openwop-app/connections-inbound/:connectionId', async (req: Request, res: import('express').Response) => {
+    const config = await getInboundConfigForWebhook(req.params.connectionId);
+    if (!config || !config.enabled || config.provider !== 'whatsapp-cloud') { sendError(res, 404, 'not_found', 'No such inbound webhook.'); return; }
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    const secret = await resolveInboundSigningSecret(req.params.connectionId, config.tenantId);
+    // Constant-time token compare — the verify token IS the stored app secret.
+    const tokenMatches = typeof token === 'string' && secret !== null
+      && token.length === secret.length
+      && timingSafeEqual(Buffer.from(token), Buffer.from(secret));
+    if (mode === 'subscribe' && tokenMatches && typeof challenge === 'string') {
+      res.status(200).type('text/plain').send(challenge);
+      return;
+    }
+    // Deliberately unspecific: a message distinguishing "wrong token" from
+    // "wrong mode" would be a probe oracle on the stored app secret.
+    sendError(res, 403, 'verification_failed', 'Webhook verification failed.');
+  });
   app.post('/v1/host/openwop-app/connections-inbound/:connectionId', async (req: Request, res: import('express').Response) => {
     try {
       // The scoped `express.json({ verify })` parser populates rawBody for every
@@ -368,11 +492,22 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
       // verified over the exact bytes the provider signed — reject rather than
       // re-serialize (which could never match) and pretend to have a body.
       if (!req.rawBody) {
-        res.status(401).json({ error: 'unauthorized' });
+        sendError(res, 401, 'unauthorized', 'The raw request body is required to verify the webhook signature.');
         return;
       }
+      // Pass every provider's signature/secret headers (ADR 0175); the handler picks
+      // the ones its configured provider needs.
       const tsHeader = req.get('x-slack-request-timestamp');
       const sigHeader = req.get('x-slack-signature');
+      const discordSig = req.get('x-signature-ed25519');
+      const discordTs = req.get('x-signature-timestamp');
+      const telegramToken = req.get('x-telegram-bot-api-secret-token');
+      const twilioSig = req.get('x-twilio-signature'); // adr 0394 whatsapp-twilio
+      const hubSig256 = req.get('x-hub-signature-256'); // adr 0394 whatsapp-cloud (meta)
+      const streamSig = req.get('x-openwop-stream-signature'); // rfc0127 broker/CDC push
+      const streamTs = req.get('x-openwop-stream-timestamp');
+      const zoomSig = req.get('x-zm-signature'); // adr 0404 zoom-webinar
+      const zoomTs = req.get('x-zm-request-timestamp');
       const outcome = await handleInboundEvent(startDeps, {
         connectionId: req.params.connectionId,
         rawBody: req.rawBody.toString('utf8'),
@@ -380,12 +515,29 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
         headers: {
           ...(tsHeader ? { timestamp: tsHeader } : {}),
           ...(sigHeader ? { signature: sigHeader } : {}),
+          ...(discordSig ? { discordSignature: discordSig } : {}),
+          ...(discordTs ? { discordTimestamp: discordTs } : {}),
+          ...(telegramToken ? { telegramToken } : {}),
+          ...(streamSig ? { streamSignature: streamSig } : {}),
+          ...(streamTs ? { streamTimestamp: streamTs } : {}),
+          ...(twilioSig ? { twilioSignature: twilioSig } : {}),
+          ...(hubSig256 ? { signature256: hubSig256 } : {}),
+          ...(zoomSig ? { zoomSignature: zoomSig } : {}),
+          ...(zoomTs ? { zoomTimestamp: zoomTs } : {}),
         },
         now: Date.now(),
+        // ADR 0394 — Twilio signs the full public delivery URL + params (not the
+        // raw body); reconstructed from the sanitized public base (never the
+        // client-influenceable Host header alone).
+        requestUrl: `${publicBaseUrl(req)}${req.originalUrl}`,
       });
       switch (outcome.status) {
         case 'challenge':
           res.json({ challenge: outcome.challenge });
+          return;
+        case 'respond':
+          // Provider handshake needing a JSON body (e.g. Discord PING → PONG).
+          res.json(outcome.json);
           return;
         case 'accepted':
           res.status(202).json({ accepted: true, deduped: outcome.deduped });
@@ -393,17 +545,31 @@ export function registerConnectionsRoutes(deps: RouteDeps): void {
         case 'ignored':
           res.status(202).json({ accepted: true });
           return;
+        case 'rejected':
+          // RFC 0127 — a verified push whose body failed normalization (e.g. an invalid
+          // CDC `op`, over-cap body) — verified sender, unprocessable payload.
+          // H27-b — `reason` was a NEW TOP-LEVEL key, which
+          // `error-envelope.schema.json` forbids (`additionalProperties: false`).
+          // It is contextual data, so it belongs under `details`.
+          sendError(
+            res,
+            422,
+            'rejected',
+            'The push was verified but its payload could not be processed.',
+            outcome.reason ? { reason: outcome.reason } : undefined,
+          );
+          return;
         case 'unauthorized':
-          res.status(401).json({ error: 'unauthorized' });
+          sendError(res, 401, 'unauthorized', 'Webhook signature verification failed.');
           return;
         case 'not_found':
         default:
-          res.status(404).json({ error: 'not_found' });
+          sendError(res, 404, 'not_found', 'No such inbound webhook.');
           return;
       }
     } catch (err) {
       log.error('inbound webhook handler error', { error: err instanceof Error ? err.message : String(err) });
-      res.status(500).json({ error: 'internal_error' });
+      sendError(res, 500, 'internal_error', 'An unexpected error occurred.');
     }
   });
 }

@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.frontend-designer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Frontend / UI design agent. Produces design-system-aware component specs, page layouts, and Storybook-style mocks from briefs. Mirrors Anthropic's `frontend-design` skill (top-installed in marketplace).",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -26,12 +26,10 @@
       "agentId": "core.openwop.agents.frontend-designer.default",
       "persona": "Frontend Designer",
       "label": "Frontend Designer Agent",
-      "description": "Produces design-system-aware component specs, page layouts, and mocks. Reads a brief + optional design-system source files; emits component contracts (props + variants + states), layout JSON, and React/HTML skeleton code. Mirrors Anthropic's `frontend-design` skill.",
+      "description": "Produces design-system-aware component specs, page layouts, and mocks. Takes a brief + optional design-system source (supplied inline or retrieved via openwop:core.rag.retriever-basic); emits component contracts (props + variants + states), layout JSON, and React/HTML skeleton code. Mirrors Anthropic's `frontend-design` skill.",
       "modelClass": "writing",
       "systemPromptRef": "prompts/frontend-designer.md",
       "toolAllowlist": [
-        "openwop:core.files.write",
-        "openwop:core.files.read",
         "openwop:core.rag.retriever-basic"
       ],
       "memoryShape": {

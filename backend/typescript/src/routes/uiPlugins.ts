@@ -95,6 +95,13 @@ function handlersForTenant(tenantId: string): Record<string, UiPluginHandler> {
     // Client-only UI ops — accepted no-ops on the server witness.
     'host.toast': async () => ({ ok: true }),
     'host.navigate': async () => ({ ok: true }),
+    // RFC 0130: the live-region relay is FE-local (PluginFrame); the witness
+    // accepts + length-caps like the FE does so advertise/serve can't drift.
+    'host.announce': async (params) => {
+      const p = (params ?? {}) as Record<string, unknown>;
+      if (typeof p.message !== 'string') throw new OpenwopError('invalid_request', "'message' must be a string", 400);
+      return {};
+    },
   };
 }
 

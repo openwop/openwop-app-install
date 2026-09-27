@@ -9,7 +9,8 @@
  *
  * @see docs/adr/0137-ambient-work-graph.md
  */
-import { useCallback, useEffect, useState } from 'react';
+import { Button } from '../../ui/Button.js';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
@@ -19,6 +20,14 @@ import { toast } from '../../ui/toast.js';
 import { SparklesIcon } from '../../ui/icons/index.js';
 import { listOrgs, listSuggestions, refreshSuggestions, dismissSuggestion, acceptSuggestion, type Org, type WorkflowSuggestion } from './workGraphClient.js';
 
+// §4.5 collection kit — the status facet covers the statuses a suggestion can
+// surface with (dismissed ones are removed from the list, never shown). Labels
+// reuse the existing status copy so they can't drift from the row chips.
+const STATUS_FACETS = [
+  { value: 'suggested', labelKey: 'statusSuggested' },
+  { value: 'accepted', labelKey: 'statusAccepted' },
+] as const;
+
 export function WorkGraphPage(): JSX.Element {
   const { t } = useTranslation('ambient-work-graph');
   const navigate = useNavigate();
@@ -27,6 +36,13 @@ export function WorkGraphPage(): JSX.Element {
   const [suggestions, setSuggestions] = useState<WorkflowSuggestion[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // §4.5 collection kit — status facet feeding a separate memo over the
+  // unfiltered suggestions.
+  const [statusFilter, setStatusFilter] = useState<'' | 'suggested' | 'accepted'>('');
+  const visibleSuggestions = useMemo(
+    () => (suggestions ?? []).filter((s) => !statusFilter || s.status === statusFilter),
+    [suggestions, statusFilter],
+  );
 
   useEffect(() => {
     void listOrgs().then((o) => { setOrgs(o); setOrgId((cur) => cur || (o[0]?.orgId ?? '')); })
@@ -34,7 +50,7 @@ export function WorkGraphPage(): JSX.Element {
   }, [t]);
 
   const load = useCallback((org: string) => {
-    void listSuggestions(org).then(setSuggestions)
+    void listSuggestions(org).then((rows) => { setSuggestions(rows); setError(null); })
       .catch((e) => setError(e instanceof Error ? e.message : t('loadFailed', { defaultValue: 'Failed to load suggestions.' })));
   }, [t]);
   useEffect(() => { if (orgId) load(orgId); }, [orgId, load]);
@@ -63,10 +79,27 @@ export function WorkGraphPage(): JSX.Element {
     return <StateCard icon={<SparklesIcon size={28} />} title={t('noOrgsTitle', { defaultValue: 'No organizations' })} body={t('noOrgsBody', { defaultValue: 'Create an organization to see work-pattern suggestions.' })} />;
   }
 
-  if (suggestions === null) return <StateCard loading title={t('loading', { defaultValue: 'Loading…' })} />;
+  // AWG-R2-1 — a failed FIRST read used to leave this early-return showing the
+  // loading card forever (the error was set but never reachable below it):
+  // failure-as-LOADING. Two prior passes graded this page "clean" by checking
+  // the error was SET — neither checked it could RENDER.
+  if (suggestions === null) {
+    if (error) {
+      return (
+        <StateCard
+          icon={<SparklesIcon size={28} />}
+          title={t('loadFailedTitle', { defaultValue: 'Couldn’t load work patterns' })}
+          body={error}
+          announce
+          action={<Button variant="secondary" onClick={() => { setError(null); if (orgId) load(orgId); }}>{t('retry', { defaultValue: 'Retry' })}</Button>}
+        />
+      );
+    }
+    return <StateCard loading title={t('loading', { defaultValue: 'Loading…' })} />;
+  }
 
   return (
-    <div className="u-flex u-flex-col u-gap-3">
+    <div data-walkthrough="work-patterns.page" className="u-flex u-flex-col u-gap-3">
       <PageHeader eyebrow={t('eyebrow', { defaultValue: 'Automation' })} title={t('title', { defaultValue: 'Work patterns' })} lede={t('lede', { defaultValue: 'Recurring work across your recent runs — turn a repeated pattern into a reusable workflow. Tool-shape only; nothing is shared across organizations.' })} />
       {error && <Notice variant="error">{error}</Notice>}
 
@@ -77,15 +110,30 @@ export function WorkGraphPage(): JSX.Element {
             {(orgs ?? []).map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
           </select>
         </label>
-        <button type="button" className="secondary u-fs-11" disabled={busy || !orgId} onClick={refresh}>{t('refresh', { defaultValue: 'Scan now' })}</button>
+        <Button variant="secondary" className="u-fs-11" disabled={busy || !orgId} onClick={refresh}>{t('refresh', { defaultValue: 'Scan now' })}</Button>
       </div>
 
-      {suggestions !== null && suggestions.length === 0 && (
-        <StateCard icon={<SparklesIcon size={28} />} title={t('emptyTitle', { defaultValue: 'No patterns yet' })} body={t('emptyBody', { defaultValue: 'Once you repeat a multi-step task a few times, it’ll show up here as a workflow suggestion.' })} />
-      )}
+      {suggestions.length > 3 ? (
+        <div className="filterbar" role="group" aria-label={t('filterGroup', { defaultValue: 'Filters' })}>
+          <select
+            className="ui-input filterbar-select"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as '' | 'suggested' | 'accepted')}
+            aria-label={t('filterStatusLabel', { defaultValue: 'Filter by status' })}
+          >
+            <option value="">{t('allStatuses', { defaultValue: 'All statuses' })}</option>
+            {STATUS_FACETS.map((s) => <option key={s.value} value={s.value}>{t(s.labelKey, { defaultValue: s.value })}</option>)}
+          </select>
+        </div>
+      ) : null}
 
+      {suggestions.length === 0 ? (
+        <StateCard icon={<SparklesIcon size={28} />} title={t('emptyTitle', { defaultValue: 'No patterns yet' })} body={t('emptyBody', { defaultValue: 'Once you repeat a multi-step task a few times, it’ll show up here as a workflow suggestion.' })} />
+      ) : visibleSuggestions.length === 0 ? (
+        <StateCard icon={<SparklesIcon size={28} />} title={t('noMatchTitle', { defaultValue: 'No matches' })} body={t('noMatchBody', { defaultValue: 'Nothing matches the current filter.' })} action={<Button variant="secondary" onClick={() => setStatusFilter('')}>{t('clearFilters', { defaultValue: 'Clear filters' })}</Button>} />
+      ) : (
       <ul className="u-list-none u-p-0 u-flex u-flex-col u-gap-2">
-        {(suggestions ?? []).map((s) => (
+        {visibleSuggestions.map((s) => (
           <li key={s.suggestionId} className="surface-card u-pad-2 u-flex u-flex-col u-gap-1">
             <div className="u-flex u-items-center u-justify-between u-gap-2">
               <span className="u-fs-12 u-fw-600">{s.sampleGoal ?? t('aPattern', { defaultValue: 'A repeated pattern' })}</span>
@@ -109,13 +157,14 @@ export function WorkGraphPage(): JSX.Element {
               <span className="chip chip--accent u-fs-11 u-self-start">{t('statusAccepted', { defaultValue: 'accepted' })}</span>
             ) : (
               <div className="u-flex u-gap-2">
-                <button type="button" className="u-fs-11" disabled={busy} onClick={() => void accept(s)}>{t('makeWorkflow', { defaultValue: 'Make a workflow' })}</button>
-                <button type="button" className="secondary u-fs-11" disabled={busy} onClick={() => void dismiss(s.suggestionId)} aria-label={t('dismiss', { defaultValue: 'Dismiss' })}>{t('dismiss', { defaultValue: 'Dismiss' })}</button>
+                <Button variant="primary" className="u-fs-11" disabled={busy} onClick={() => void accept(s)}>{t('makeWorkflow', { defaultValue: 'Make a workflow' })}</Button>
+                <Button variant="secondary" className="u-fs-11" disabled={busy} onClick={() => void dismiss(s.suggestionId)} aria-label={t('dismiss', { defaultValue: 'Dismiss' })}>{t('dismiss', { defaultValue: 'Dismiss' })}</Button>
               </div>
             )}
           </li>
         ))}
       </ul>
+      )}
     </div>
   );
 }

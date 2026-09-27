@@ -1,5 +1,5 @@
 /**
- * INT-1 (CODEBASE-ASSESSMENT.md): web-research egress is run-controllable, so
+ * INT-1 (docs/steward/CODEBASE-ASSESSMENT.md): web-research egress is run-controllable, so
  * fetchOne / searchLive MUST refuse loopback / link-local / cloud-metadata
  * targets (SSRF) when private egress is not explicitly allowed — closing the
  * one path that previously bypassed the host's pinned-resolution egress guard.

@@ -89,18 +89,19 @@ describe('brand identity facet (ADR 0170) — sanitization', () => {
           accentSeed: 'oklch(58% 0.13 40)',
           override: {
             light: {
-              '--clay': 'oklch(60% 0.12 30)', // allowlisted + safe → kept
-              '--color-danger': '#cc2222', // allowlisted + safe → kept
+              '--clay': 'oklch(60% 0.12 30)', // contrast-critical → generator-owned, dropped
+              '--color-danger': '#cc2222', // contrast-critical → generator-owned, dropped
+              '--cat-ai': '#cc2222', // non-contrast category token → kept
               '--evil-prop': 'oklch(50% 0 0)', // NOT allowlisted → dropped
               '--paper': 'red;}x{y:1', // allowlisted but injection → dropped
             },
-            dark: { '--clay': '#0a84ff' },
+            dark: { '--clay': '#0a84ff', '--cat-data': '#0a84ff' },
           },
         },
       },
     });
-    expect(b.identity?.theme?.override?.light).toEqual({ '--clay': 'oklch(60% 0.12 30)', '--color-danger': '#cc2222' });
-    expect(b.identity?.theme?.override?.dark).toEqual({ '--clay': '#0a84ff' });
+    expect(b.identity?.theme?.override?.light).toEqual({ '--cat-ai': '#cc2222' });
+    expect(b.identity?.theme?.override?.dark).toEqual({ '--cat-data': '#0a84ff' });
   });
 
   it('rejects CSS-injection in color and font values (drops them)', async () => {
@@ -168,5 +169,28 @@ describe('brand identity facet (ADR 0170) — sanitization', () => {
     const v4 = await updateBrand(TENANT, b.id, { identity: { colors: { accent: 'bad;' } } });
     expect(v4?.identity).toBeUndefined();
     expect((await getBrand(TENANT, b.id))?.identity).toBeUndefined();
+  });
+});
+
+describe('per-mode brand marks (ADR 0510 §6 — additive)', () => {
+  it('accepts markSrcDark/lockupSrcDark, sanitized like the base fields', async () => {
+    const b = await createBrand(TENANT, ORG, 'u1', {
+      name: 'DarkMark',
+      identity: {
+        logo: {
+          markSrc: 'https://cdn.example.com/logo.svg',
+          markSrcDark: 'https://cdn.example.com/logo-dark.svg',
+          lockupSrcDark: 'javascript:alert(1)', // dangerous scheme → dropped
+        },
+      },
+    });
+    expect(b.identity?.logo?.markSrcDark).toBe('https://cdn.example.com/logo-dark.svg');
+    expect(b.identity?.logo?.lockupSrcDark).toBeUndefined();
+  });
+
+  it('a legacy brand carrying only markSrc keeps working (compatibility window)', async () => {
+    const b = await createBrand(TENANT, ORG, 'u1', { name: 'LegacyMark', identity: { logo: { markSrc: '/legacy.svg' } } });
+    expect(b.identity?.logo?.markSrc).toBe('/legacy.svg');
+    expect(b.identity?.logo?.markSrcDark).toBeUndefined();
   });
 });

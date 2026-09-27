@@ -32,16 +32,28 @@ export function scopesOf(route: HubRoute): HubScope[] {
 
 /**
  * Every tab for ONE console the caller may see — filtered by the `hub`
- * discriminator, gated by `isVisible` (the toggle gate the rail uses), ordered by
- * `groupOrder` then `hubTab.order`. Scope is applied separately by the caller so
+ * discriminator, gated by `isVisible` (the toggle gate the rail uses) AND by the
+ * route's `tier` (an `admin`-tier tab is dropped for a non-admin caller), ordered
+ * by `groupOrder` then `hubTab.order`. Scope is applied separately by the caller so
  * a page can also ask "is there any Personal surface?".
  *
+ * The TIER filter is the defense-in-depth the coarse `<AdminLayout>` shell gate
+ * cannot provide once a console MIXES admin + non-admin tabs (the ADR 0145/0200
+ * generalization): without it the projection is tier-blind, so the only thing
+ * keeping a non-admin from seeing an admin destination is the all-tabs-admin
+ * invariant + the page-level gate. Filtering here makes the projection itself
+ * honest (closes access-hub `AHC-1` / models `MHC-1` / chat-deployment `CDC-1` /
+ * campaign-console `CSCC-1` — one shared fix). `workspace`/`public` tiers are
+ * visible to everyone; only `admin` is gated.
+ *
+ * @param isAdmin whether the caller holds admin authority (`isAdminCaller`).
  * @param groupOrder display order of `hubTab.group` values; tabs without a group
  *   (flat consoles) sort purely by `order`.
  */
 export function visibleHubRoutes(
   features: readonly FeatureRoute[],
   isVisible: (featureId?: string) => boolean,
+  isAdmin: boolean,
   hub: HubId,
   groupOrder: readonly string[] = [],
 ): HubRoute[] {
@@ -53,6 +65,7 @@ export function visibleHubRoutes(
     .filter((r): r is HubRoute => Boolean(r.hubTab))
     .filter((r) => inHub(r, hub))
     .filter((r) => isVisible(r.hubTab.featureId))
+    .filter((r) => r.tier !== 'admin' || isAdmin)
     .sort((a, b) => {
       const g = groupRank(a.hubTab.group) - groupRank(b.hubTab.group);
       if (g !== 0) return g;

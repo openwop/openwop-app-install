@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import { expiredExceptions, isExcepted } from './support/axeExceptions.js';
 
 /**
  * Live accessibility audit (GAP-ANALYSIS — live-app pass). Runs axe-core
@@ -11,7 +12,10 @@ import AxeBuilder from '@axe-core/playwright';
 
 const ROUTES = [
   '/', '/chat', '/runs', '/boards', '/agents', '/orgs', '/keys', '/prompts',
-  '/builder', '/inbox', '/mission', '/memory', '/roster', '/capabilities', '/cli', '/demo-data',
+  '/builder', '/inbox', '/runs?tab=active', '/memory', '/roster', '/capabilities', '/cli', '/demo-data',
+  // ADR 0510 Phase 2 — the design-system gallery: axe over the full primitive
+  // matrix catches a defect in a shared component once, at its source.
+  '/design-system',
 ];
 
 async function setTheme(page: import('@playwright/test').Page, theme: 'light' | 'dark') {
@@ -30,7 +34,15 @@ for (const theme of ['light', 'dark'] as const) {
       // so reduced-motion disables the animation and axe sees true colors.
       await page.emulateMedia({ reducedMotion: 'reduce' });
       await page.goto(route);
-      await page.waitForSelector('main#main-content');
+      // EITHER main, because the app has two shells. `/` is the PUBLIC root
+      // (ADR 0487 split public root from `/dashboard`), so it renders
+      // `PublicShell`'s `main#public-main`, not the app shell's
+      // `main#main-content`. Waiting only for the app shell meant `/` timed out
+      // at 30s in BOTH themes and was never audited at all — the route most
+      // likely to be a stranger's first impression was the one route with no
+      // a11y coverage, and the timeout read as "flaky lane" rather than "this
+      // assertion is stale".
+      await page.waitForSelector('main#main-content, main#public-main');
       await setTheme(page, theme);
       // Let data fetches + AutoSeedDemoData re-renders settle before axe —
       // capturing mid-fetch/mid-seed measures a transient render and reports
@@ -48,12 +60,18 @@ for (const theme of ['light', 'dark'] as const) {
         const d = n.any?.[0]?.data as { fgColor?: string; bgColor?: string } | undefined;
         return !d || (d.fgColor === undefined && d.bgColor === undefined);
       };
+      // ADR 0510 Phase 2 (DSA-021): EVERY in-scope WCAG A/AA violation fails,
+      // not just serious/critical — moderate hits are real A/AA failures. The
+      // only ship path is a narrow, owned, EXPIRING row in axeExceptions.ts.
+      const now = new Date();
+      const expired = expiredExceptions(now);
+      expect(expired, `EXPIRED axe exceptions — fix the violation or renew with a reason:\n${expired.map((e) => `${e.rule} @ ${e.route} (${e.owner}, expired ${e.expires})`).join('\n')}`).toEqual([]);
       const serious = results.violations
-        .filter((v) => v.impact === 'serious' || v.impact === 'critical')
         .map((v) => (v.id === 'color-contrast' ? { ...v, nodes: v.nodes.filter((n) => !isUnmeasurable(n)) } : v))
+        .map((v) => ({ ...v, nodes: v.nodes.filter((n) => !isExcepted(route, v.id, n.target?.join(' ') ?? '', now)) }))
         .filter((v) => v.nodes.length > 0);
       if (serious.length) {
-        console.log(`\n[a11y ${route} ${theme}] ${serious.length} serious/critical:`);
+        console.log(`\n[a11y ${route} ${theme}] ${serious.length} WCAG A/AA violation(s):`);
         for (const v of serious) {
           console.log(`  - ${v.id} (${v.impact}) ×${v.nodes.length}: ${v.help}`);
           for (const n of v.nodes.slice(0, 8)) {

@@ -1,11 +1,11 @@
 /**
  * Priority Matrix API client (ADR 0058). The lists / ideas / scores / planning
- * sessions surface under /v1/host/openwop-app/priority-matrix/*. An "idea" is a
+ * sessions surface under /host/openwop-app/priority-matrix/*. An "idea" is a
  * host.kanban card; statuses are the board's columns.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
-export type Aggregation = 'weighted-sum' | 'ratio';
+export type Aggregation = 'weighted-sum' | 'ratio' | 'product-ratio';
 export type CriterionDirection = 'benefit' | 'cost';
 export type PresetId = 'weighted' | 'wsjf' | 'rice' | 'ice' | 'value-effort';
 
@@ -42,14 +42,22 @@ export interface PriorityList {
   createdAt: string;
   updatedAt: string;
 }
+/** PMXU-1 (ADR 0590) — actor class stamped by the backend writer. Absent on
+ *  rows written before the stamp existed (pre-fix rows are NOT claimed human). */
+export type IdeaWriterSource = 'human' | 'workflow' | 'agent' | string;
+
 export interface RankedIdea {
   /** The underlying kanban card. `createdAt`/`createdBy`/`assigneeId` come through
    *  from the full `KanbanCard` (the agenda sorts on them). */
-  card: { id: string; title: string; description?: string; columnId: string; createdAt?: string; createdBy?: string; assigneeId?: string };
+  card: { id: string; title: string; description?: string; columnId: string; createdAt?: string; createdBy?: string; assigneeId?: string; source?: IdeaWriterSource };
   status: { columnId: string; columnName: string; terminal: boolean };
   scores: Record<string, number>;
   computedPriority: number;
   rank: number;
+  /** ADR 0667 D1c — how completely this idea is scored. `computedPriority === 0`
+   *  cannot distinguish "never touched" from "3 of 4 scored" (both are exactly 0 in
+   *  ratio mode), so the count is carried rather than inferred from the number. */
+  completeness: { declared: number; scored: number; missing: string[]; complete: boolean };
   /** Multi-voter only — how many members voted, and the caller's own vote. */
   voterCount?: number;
   myScores?: Record<string, number>;
@@ -76,7 +84,7 @@ export interface PortfolioItem {
 }
 export interface PortfolioListRef { listId: string; name: string; scoringModel: string; ideaCount: number }
 export type NormalizeMode = 'none' | 'list-relative' | 'percentile';
-export interface VoteBreakdownEntry { voterId: string; scores: Record<string, number>; updatedAt: string }
+export interface VoteBreakdownEntry { voterId: string; scores: Record<string, number>; updatedAt: string; source?: IdeaWriterSource }
 
 export interface FederatedPeer { id: string; label: string; baseUrl: string; createdAt: string }
 export interface PeerStatus { peerId: string; label: string; ok: boolean; count: number; error?: string }
@@ -108,14 +116,24 @@ export interface ScheduleRollup {
   health: 'on-track' | 'at-risk' | 'behind';
 }
 
-const base = `${config.baseUrl}/v1/host/openwop-app/priority-matrix`;
+const base = `${config.baseUrl}/host/openwop-app/priority-matrix`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
+
+/** PMX-8b (ADR 0590) — a typed failure carrying the HTTP status, so a caller
+ *  can DISCRIMINATE a 403 (a real authorization refusal) from a network/500
+ *  failure instead of inventing a permissions explanation for either. */
+export class PriorityMatrixApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message);
+    this.name = 'PriorityMatrixApiError';
+  }
+}
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
     let detail = '';
     try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    throw new PriorityMatrixApiError(detail || `${ctx} returned ${res.status}`, res.status);
   }
   return (await res.json()) as T;
 }
@@ -154,6 +172,25 @@ export async function listIdeas(listId: string): Promise<RankedIdea[]> {
 export async function submitIdea(listId: string, input: { title: string; description?: string }): Promise<unknown> {
   const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
   return asJson(res, 'submitIdea');
+}
+
+/** Edit an idea's title/description (ADR 0259). Scores/status/schedule unchanged. */
+export async function updateIdea(listId: string, cardId: string, patch: { title?: string; description?: string }): Promise<unknown> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
+  return asJson(res, 'updateIdea');
+}
+
+/** Delete an idea (ADR 0259). Idempotent — a 404 (already gone) is not an error. */
+export async function deleteIdea(listId: string, cardId: string): Promise<void> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok && res.status !== 404) throw new Error(`deleteIdea returned ${res.status}`);
+}
+
+/** Clone an idea (ADR 0259) — a new idea seeded with the source's title + description
+ *  (+ single-mode scores). An optional `title` overrides the default "… (copy)". */
+export async function cloneIdea(listId: string, cardId: string, input?: { title?: string }): Promise<unknown> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/clone`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input ?? {}) }));
+  return asJson(res, 'cloneIdea');
 }
 
 export async function moveIdeaStatus(listId: string, cardId: string, columnId: string): Promise<unknown> {
@@ -243,12 +280,100 @@ export async function clearIdeaSchedule(listId: string, cardId: string): Promise
   if (!res.ok && res.status !== 404) throw new Error(`clearIdeaSchedule returned ${res.status}`);
 }
 
+// ── intake + evidence + merge + promotion (ADR 0232) ──
+export type IntakeSourceChannel = 'form' | 'chat' | 'api' | 'manual';
+export interface IdeaIntake {
+  listId: string; cardId: string;
+  requester?: string; sourceChannel?: IntakeSourceChannel;
+  estimatedValue?: number; estimatedValueUnit?: string; notes?: string;
+  mergedInto?: string;
+  promotedTo?: { kind: 'initiative' | 'project'; id: string; strategyId?: string };
+  updatedBy: string; updatedAt: string;
+}
+export interface IdeaEvidence { evidenceId: string; listId: string; cardId: string; kind: 'document' | 'kb' | 'url'; ref: string; label?: string; addedBy: string; addedAt: string }
+
+export async function getIdeaIntake(listId: string, cardId: string): Promise<{ intake: IdeaIntake | null; evidence: IdeaEvidence[] }> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/intake`, fetchOpts({ headers: authedHeaders() }));
+  return asJson(res, 'getIdeaIntake');
+}
+/** Clear semantics: send `''` (strings) or `null` (value/channel) to clear a
+ *  field; omit to leave unchanged (JSON drops `undefined`). */
+export async function patchIdeaIntake(listId: string, cardId: string, patch: {
+  requester?: string; sourceChannel?: IntakeSourceChannel | null;
+  estimatedValue?: number | null; estimatedValueUnit?: string; notes?: string;
+}): Promise<IdeaIntake> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/intake`, fetchOpts({ method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(patch) }));
+  return asJson(res, 'patchIdeaIntake');
+}
+export async function addIdeaEvidence(listId: string, cardId: string, input: { kind: IdeaEvidence['kind']; ref: string; label?: string }): Promise<IdeaEvidence> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/evidence`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return asJson(res, 'addIdeaEvidence');
+}
+export async function removeIdeaEvidence(listId: string, cardId: string, evidenceId: string): Promise<void> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/evidence/${encodeURIComponent(evidenceId)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  // Tolerate 404 — delete is idempotent, so a double-click's second DELETE
+  // (already-removed id) is a no-op, not a spurious error (grade-code FE#9;
+  // matches deleteList/deletePeer).
+  if (!res.ok && res.status !== 204 && res.status !== 404) throw new Error(`removeIdeaEvidence returned ${res.status}`);
+}
+export async function mergeIdea(listId: string, canonicalCardId: string, duplicateCardId: string): Promise<void> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(canonicalCardId)}/merge`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ duplicateCardId }) }));
+  await asJson(res, 'mergeIdea');
+}
+/** PMX-2 (ADR 0590) — the backend now REPORTS the completion-lane move outcome:
+ *  `moved:false` means the project minted + promotion stamped but the card
+ *  could not be moved (surface it — never silently claim the full promotion). */
+export async function promoteIdeaToProject(listId: string, cardId: string): Promise<{ projectId: string; cardId: string; moved: boolean; movedToColumnId?: string }> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/promote-to-project`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  return asJson(res, 'promoteIdeaToProject');
+}
+
+// ── score history + "why ranked here" (ADR 0234 §C7 / STRAT-FE2) ──
+export interface ScoreChange { changeId: string; priorPriority?: number; newPriority?: number; scores: Record<string, number>; actor: string; voterId?: string; createdAt: string }
+export interface ScoreBreakdownRow { criterionId: string; name: string; weight: number; score?: number; weighted?: number }
+export async function getIdeaScoreHistory(listId: string, cardId: string): Promise<{ history: ScoreChange[]; breakdown: ScoreBreakdownRow[]; computedPriority?: number; rank?: number }> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/ideas/${encodeURIComponent(cardId)}/score-history`, fetchOpts({ headers: authedHeaders() }));
+  return asJson(res, 'getIdeaScoreHistory');
+}
+
+// ── planning-session scenarios (ADR 0235 §D1 / STRAT-FE2) ──
+export type ScenarioSelection = { mode: 'top-n'; n: number } | { mode: 'manual'; cardIds: string[] };
+export interface ScenarioConstraints { maxItems?: number; maxBudget?: number }
+export interface SessionScenario { scenarioId: string; name: string; selection: ScenarioSelection; constraints?: ScenarioConstraints; proposedBy?: 'agent'; planOfRecord?: boolean; createdBy: string; createdAt: string }
+export interface ResolvedScenarioLine { cardId: string; title: string; rank: number; estimatedValue?: number; droppedBy?: 'maxItems' | 'maxBudget' | 'selection' }
+/** `approvalStatus` (PMXU-2, ADR 0590) — decision state of the agent-proposal
+ *  gate, joined by the backend at read (absent for human scenarios). */
+export interface ResolvedScenario extends SessionScenario { aboveLine: ResolvedScenarioLine[]; belowLine: ResolvedScenarioLine[]; totalEstimatedValue: number; approvalStatus?: 'pending' | 'approved' | 'rejected' }
+
+export async function listScenarios(listId: string, sessionId: string): Promise<ResolvedScenario[]> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/sessions/${encodeURIComponent(sessionId)}/scenarios`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ scenarios: ResolvedScenario[] }>(res, 'listScenarios')).scenarios;
+}
+export async function addScenario(listId: string, sessionId: string, input: { name: string; selection: ScenarioSelection; constraints?: ScenarioConstraints }): Promise<SessionScenario> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/sessions/${encodeURIComponent(sessionId)}/scenarios`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return asJson(res, 'addScenario');
+}
+/** PMXU-2 (ADR 0590) — decline an agent-proposed scenario from the page (the
+ *  strategy check-in dismiss pattern); decides the SHARED approval row. */
+export async function rejectScenario(listId: string, sessionId: string, scenarioId: string): Promise<{ scenarioId: string; approvalStatus: 'rejected' }> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/sessions/${encodeURIComponent(sessionId)}/scenarios/${encodeURIComponent(scenarioId)}/reject`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  return asJson(res, 'rejectScenario');
+}
+export async function selectScenario(listId: string, sessionId: string, scenarioId: string): Promise<SessionScenario> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/sessions/${encodeURIComponent(sessionId)}/scenarios/${encodeURIComponent(scenarioId)}/select`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  return asJson(res, 'selectScenario');
+}
+export async function compareScenarios(listId: string, sessionId: string, a: string, b: string): Promise<{ a: ResolvedScenario; b: ResolvedScenario; gainedInB: Array<{ cardId: string; title: string }>; droppedInB: Array<{ cardId: string; title: string }> }> {
+  const res = await fetch(`${base}/lists/${encodeURIComponent(listId)}/sessions/${encodeURIComponent(sessionId)}/scenarios/compare?a=${encodeURIComponent(a)}&b=${encodeURIComponent(b)}`, fetchOpts({ headers: authedHeaders() }));
+  return asJson(res, 'compareScenarios');
+}
+
 // ── composed reads from sibling surfaces (for the create form) ──
 export async function listOrgs(): Promise<OrgRef[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ orgs: OrgRef[] }>(res, 'listOrgs')).orgs;
 }
 export async function listProjects(): Promise<ProjectRef[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/projects`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/projects`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ projects: ProjectRef[] }>(res, 'listProjects')).projects;
 }

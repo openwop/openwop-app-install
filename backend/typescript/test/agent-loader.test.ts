@@ -5,6 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { loadAgentsFromManifest, resolveDependencyDisposition } from '../src/packs/agentLoader.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
+import { attestPackDir } from './setup/attestPackFixture.js';
 
 // test/ → typescript → backend → repo root (3 up).
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
@@ -42,6 +43,11 @@ describe('agentLoader — RFC 0070 / RFC 0003 §C/§D manifest resolution', () =
           { agentId: 'local.test.agents.good', persona: 'Good', modelClass: 'general', systemPromptRef: 'prompts/ok.md' },
         ],
       }));
+      // ADR 0555 P0 — attest the fixture so the path-traversal agent is
+      // rejected for TRAVERSAL (RFC 0003 §C), not merely because the pack was
+      // untrusted. Otherwise this test would pass for the wrong reason and
+      // stop guarding the rule it exists to guard.
+      attestPackDir(dir);
       const loaded = loadAgentsFromManifest(dir);
       // The traversal agent is skipped; the well-formed one still loads.
       expect(loaded.map((a) => a.agentId)).toEqual(['local.test.agents.good']);
@@ -95,6 +101,9 @@ describe('loadAgentsFromManifest — RFC 0072 §C degraded[] + strict refuse', (
       peerDependencies, ...(meta ? { peerDependenciesMeta: meta } : {}),
       agents: [{ agentId: 'local.test.tiers.worker', persona: 'W', modelClass: 'general', systemPrompt: 'x' }],
     }));
+    // ADR 0555 P0 — the agent loader refuses unattested packs, so this fixture
+    // needs a real install marker. Attest LAST; the marker hashes the files.
+    attestPackDir(dir);
     return dir;
   }
 

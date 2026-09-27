@@ -19,6 +19,7 @@ function ev(type: string, payload: unknown, extra: Partial<RunEventDoc> = {}): R
   return {
     eventId: `e${seq}`,
     runId: 'run-1',
+    schemaVersion: 3,
     type,
     payload,
     timestamp: new Date(Date.UTC(2026, 5, 2, 12, 0, seq)).toISOString(),
@@ -84,7 +85,7 @@ describe('summarizeProvenance', () => {
     const snapshot = {
       runId: 'run-1', workflowId: 'wf', status: 'suspended',
       interrupt: { kind: 'approval', nodeId: 'n1', interruptToken: 't' },
-    } as RunSnapshot;
+    } as unknown as RunSnapshot; // partial fixture: the v2 snapshot requires owner + eventLogSchemaVersion
     const p = summarizeProvenance(events, snapshot);
     expect(p.human.open).toBe(true);
     expect(p.human.interrupts).toBeGreaterThanOrEqual(1);

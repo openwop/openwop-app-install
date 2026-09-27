@@ -17,6 +17,7 @@ import { useHub } from '../../chrome/hubContext.js';
 import { ConnectionsManager } from './ConnectionsManager.js';
 import { GovernancePanel } from './GovernancePanel.js';
 import { OAuthClientAdminPanel } from './OAuthClientAdminPanel.js';
+import { VaultAdminPanel } from './VaultAdminPanel.js';
 import { useOAuthCallbackToast } from './useOAuthCallback.js';
 
 export function ConnectionsPage(): JSX.Element {
@@ -27,12 +28,13 @@ export function ConnectionsPage(): JSX.Element {
   useOAuthCallbackToast();
 
   return (
-    <section className="u-grid u-gap-4">
+    <section data-walkthrough="connections.page" className="u-grid u-gap-4">
       {embedded ? null : <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />}
       <ConnectionsManager />
       {/* Superadmin-only panels (each hidden on 403): host OAuth client setup
           (ADR 0024 § host-managed OAuth) + workspace policy (ADR 0028). */}
       <OAuthClientAdminPanel />
+      <VaultAdminPanel />
       <GovernancePanel />
     </section>
   );

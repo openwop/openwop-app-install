@@ -20,8 +20,10 @@
 import type { InterruptRecord, NotificationRecord, RunRecord } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
+import { runNoticeAudience } from './runNoticeAudience.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
 import { getNotificationEmitter } from './emitter.js';
+import { deliverApprovalEmail } from '../host/emailApprovalDelivery.js';
 import { resolveNotificationRecipients } from '../host/approverResolution.js';
 
 const KIND_LABEL: Record<InterruptRecord['kind'], string> = {
@@ -31,15 +33,27 @@ const KIND_LABEL: Record<InterruptRecord['kind'], string> = {
   cancellation: 'Cancellation confirmation needed',
   'external-event': 'Waiting on external event',
   conversation: 'Conversation in progress',
+  // ADR 0267 — a timer self-resolves; it never emits a notification (guarded in
+  // suspendManager). Present only to keep the map total.
+  timer: 'Timed wait',
+  // ADR 0368 — the tour player resolves these live; suppressed like timer.
+  'tour-step': 'Tour step',
+  'walkthrough-step': 'Walkthrough step',
+  // RFC 0199 §C — the user must authorize a provider out of band (ADR 0753 D8).
+  credential: 'Authorization needed',
 };
 
 const KIND_TYPE: Record<InterruptRecord['kind'], NotificationRecord['type']> = {
-  approval: 'workflow.approval_needed',
+  approval: 'openwop-app.workflow.approval-needed',
   clarification: 'workflow.input_needed',
   refinement: 'workflow.input_needed',
-  cancellation: 'workflow.approval_needed',
+  cancellation: 'openwop-app.workflow.approval-needed',
   'external-event': 'workflow.input_needed',
   conversation: 'workflow.input_needed',
+  'tour-step': 'workflow.input_needed',
+  'walkthrough-step': 'workflow.input_needed',
+  timer: 'workflow.input_needed', // unused (timers never notify) — keeps the map total
+  credential: 'workflow.input_needed',
 };
 
 export async function emitInterruptNotification(
@@ -67,7 +81,7 @@ export async function emitInterruptNotification(
       : `${workflowLabel} needs your input`;
     const base = {
       tenantId: run.tenantId,
-      type: KIND_TYPE[interrupt.kind] ?? 'workflow.approval_needed',
+      type: KIND_TYPE[interrupt.kind] ?? 'openwop-app.workflow.approval-needed',
       priority: (interrupt.kind === 'approval' || interrupt.kind === 'cancellation' ? 'high' : 'normal') as 'high' | 'normal',
       title,
       message,
@@ -99,10 +113,29 @@ export async function emitInterruptNotification(
       : null;
     if (recipients && recipients.length > 0) {
       for (const recipientUserId of recipients) {
-        await getNotificationEmitter().emit({ ...base, recipientUserId });
+        const rec = await getNotificationEmitter().emit({ ...base, recipientUserId });
+        // ADR 0478 §2 — decide-by-email for ADDRESSED approval gates: the
+        // RFC 0093 token rides as an ARGUMENT (never persisted into the
+        // record — inbox reads must not hand out decide capability).
+        void deliverApprovalEmail(storage, {
+          tenantId: run.tenantId,
+          recipientUserId,
+          notificationId: rec.notificationId,
+          title: base.title,
+          message: base.message,
+          interruptToken: interrupt.token,
+        });
       }
     } else {
-      await getNotificationEmitter().emit(base); // broadcast (open gate / non-approval)
+      // ADR 0710 — an OPEN gate (nobody named) used to broadcast tenant-wide. In a
+      // multi-principal tenant that tells every member about a decision most of
+      // them cannot make; it is addressed to the operator role instead. A gate that
+      // should reach participants NAMES them, and takes the addressed branch above.
+      const gateAudience = runNoticeAudience({ tenantId: run.tenantId, metadata: run.metadata });
+      await getNotificationEmitter().emit({
+        ...base,
+        ...(gateAudience.recipientRole ? { recipientRole: gateAudience.recipientRole } : {}),
+      });
     }
   } catch {
     /* best-effort */
@@ -131,6 +164,18 @@ export async function emitRunFailureNotification(
     const workflowLabel = sanitizeForNotification(
       (run.metadata?.workflowName as string | undefined) || run.workflowId,
     );
+    // ADR 0710 option C — this emit set NEITHER `recipientUserId` NOR
+    // `recipientRole`, which the emitter's own contract defines as a TENANT-WIDE
+    // BROADCAST, and web push fanned it to every subscribed member. The message is
+    // carefully operator-shaped (it demands the classified `userMessage` so a
+    // provider's 401 text cannot echo a key) — correct for the audience it was
+    // WRITTEN for, and wrong for the one it reached. That is the same species of
+    // defect as ADR 0684's org id and ADR 0711's member scope: a component correct
+    // for its original audience, reused where the audience moved.
+    const audience = runNoticeAudience({ tenantId: run.tenantId, metadata: run.metadata });
+    if (audience.aggregatePerJobPerDay && await alreadyNoticedToday(storage, run.tenantId, run.workflowId)) {
+      return; // one per job per day — a broken reminder must not page once per participant
+    }
     await getNotificationEmitter().emit({
       tenantId: run.tenantId,
       type: 'workflow.failed',
@@ -141,7 +186,8 @@ export async function emitRunFailureNotification(
       runId,
       workflowId: run.workflowId,
       actionUrl: `/runs/${runId}`,
-      metadata: stripSecretsFromPersisted({ errorCode: error.code }),
+      ...(audience.recipientRole ? { recipientRole: audience.recipientRole } : {}),
+      metadata: stripSecretsFromPersisted({ errorCode: error.code, noticeAudience: audience.reason }),
     });
   } catch {
     /* best-effort */
@@ -224,4 +270,31 @@ const sanitizeForNotification = sanitizeFreeText;
 function truncate(s: string, max: number): string {
   const sanitized = sanitizeForNotification(s);
   return sanitized.length > max ? `${sanitized.slice(0, max - 1)}…` : sanitized;
+}
+
+/**
+ * ADR 0710 §Decision 2 — has this job already produced an operator failure notice
+ * today?
+ *
+ * Reads SHARED storage rather than an in-process cache: Cloud Run runs many
+ * instances, and a per-instance Map would aggregate per instance, i.e. not at all
+ * under the load that makes aggregation matter.
+ *
+ * The scan is BOUNDED, and that bound is a deliberate trade. `listNotifications`
+ * cannot filter by type or workflowId, so a very chatty tenant can push today's
+ * earlier notice past the window — in which case a second notice is emitted. It
+ * fails toward MORE notices, never fewer: a missed aggregation is noise, a false
+ * positive would silently swallow the only signal an operator gets.
+ */
+async function alreadyNoticedToday(storage: Storage, tenantId: string, workflowId: string): Promise<boolean> {
+  try {
+    const sinceMs = Date.now() - 24 * 60 * 60 * 1000;
+    const rows = await storage.listNotifications({ tenantId, limit: 200, includeArchived: true });
+    return rows.some((r) => r.type === 'workflow.failed'
+      && r.workflowId === workflowId
+      && Date.parse(r.createdAt) >= sinceMs);
+  } catch {
+    // A failed lookup must not suppress the notice — degrade to emitting.
+    return false;
+  }
 }

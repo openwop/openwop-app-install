@@ -1,0 +1,134 @@
+{
+  "name": "vendor.openwop-app.workflows.cms",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "CMS content workflows (RFC 0013 / ADR 0204 C6) — chains over the feature.cms.nodes governed verbs. `cms.localize-and-submit` translates ONE draft section into a target locale and submits the page for editorial review: read the draft section, AI-translate its base data (structure-preserving), store the overlay on the draft (sanitized like an editor save), then submit — the SAME approval-gate composition as the editor UI, so when `cms-approval-gate` is ON the run ends at a human ApprovalsInbox row. There is deliberately NO publish step: a node can draft and submit, never publish (the Phase-C architecture ruling). All tenant/org/page values are run parameters (replay-deterministic).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.1.0"
+  },
+  "keywords": [
+    "Content",
+    "cms",
+    "localization",
+    "i18n"
+  ],
+  "chains": [
+    {
+      "chainId": "cms.localize-and-submit",
+      "version": "1.0.0",
+      "label": "Localize a draft section & submit for review",
+      "description": "Translate one section of a DRAFT CMS page into a target locale and submit the page for editorial review. The overlay is drafted by AI (structure-preserving — URLs, media tokens, and {{vars}} are never translated), stored through the same sanitized write path as an editor save, and the submit queues a human approval when the org gates publishing. Nothing is published by this chain.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "pageId",
+          "sectionId",
+          "targetLocale"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The org that owns the page."
+          },
+          "pageId": {
+            "type": "string",
+            "description": "The DRAFT page to localize."
+          },
+          "sectionId": {
+            "type": "string",
+            "description": "The section whose base data is translated."
+          },
+          "targetLocale": {
+            "type": "string",
+            "description": "BCP-47 target locale, e.g. \"pt-BR\"."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "read",
+            "typeId": "feature.cms.nodes.get-draft-page",
+            "name": "Read draft section",
+            "position": {
+              "x": 0,
+              "y": 80
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "pageId": "{{params.pageId}}",
+              "sectionId": "{{params.sectionId}}"
+            }
+          },
+          {
+            "id": "translate",
+            "typeId": "feature.cms.nodes.translate-section",
+            "name": "AI translate (base → locale)",
+            "position": {
+              "x": 280,
+              "y": 80
+            },
+            "config": {
+              "targetLocale": "{{params.targetLocale}}"
+            }
+          },
+          {
+            "id": "store",
+            "typeId": "feature.cms.nodes.update-section-draft",
+            "name": "Store overlay on draft",
+            "position": {
+              "x": 560,
+              "y": 80
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "pageId": "{{params.pageId}}",
+              "sectionId": "{{params.sectionId}}",
+              "locale": "{{params.targetLocale}}"
+            }
+          },
+          {
+            "id": "submit",
+            "typeId": "feature.cms.nodes.submit-page",
+            "name": "Submit for review",
+            "position": {
+              "x": 840,
+              "y": 80
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "pageId": "{{params.pageId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "read.sectionData",
+            "to": "translate.data"
+          },
+          {
+            "from": "translate.overlay",
+            "to": "store.data"
+          },
+          {
+            "from": "store.updated",
+            "to": "submit.after"
+          }
+        ]
+      },
+      "outputs": {
+        "submitted": {
+          "type": "boolean",
+          "description": "Whether the page reached in_review (awaiting a human — a review row is queued under both toggle states)."
+        }
+      }
+    }
+  ]
+}

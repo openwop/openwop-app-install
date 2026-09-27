@@ -1,0 +1,28 @@
+{
+  "name": "feature.recommendations.agents",
+  "version": "1.0.1",
+  "description": "Recommendations feature agent pack — a Merchandiser persona whose tools are registered chat tools over the recommendations service (the same fns the REST routes call). Reviews upsell/cross-sell/FBT opportunities across the funnel and authors placements. Tool-allowlisted to the recommendations surface only. Driven through the ONE chat (EmbeddedChatPanel scoped by agentId) — no second panel.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "recommendations", "agent", "merchandising", "upsell", "cross-sell"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": { "aiProviders": "supported", "agents.manifestRuntime": "supported" },
+  "agents": [
+    {
+      "agentId": "feature.recommendations.agents.merchandiser",
+      "persona": "RESEARCH",
+      "label": "Merchandiser",
+      "description": "Reviews recommendation placements across the funnel and authors upsell/cross-sell/FBT placements, grounded in the org's catalog via feature.recommendations.nodes over ctx.features.recommendations.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/merchandiser.md",
+      "toolAllowlist": [
+        "openwop:recommendations.resolve",
+        "openwop:recommendations.list-placements",
+        "openwop:recommendations.create-placement"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

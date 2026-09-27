@@ -14,7 +14,7 @@ Multi-agent supervisor. Routes user tasks to specialized subagents via RFC 0007 
 
 Receives a user goal and the names of subagents available in the run. Plans which subagent handles which subtask, dispatches each via the host's RFC 0007 dispatch surface, awaits results, decides whether the goal is complete or needs another round, then synthesizes a final answer.
 
-Tool allowlist is intentionally narrow: only `openwop:core.dispatch.agent` (fire-and-forget subagent dispatch) and `openwop:core.dispatch.await` (block on a dispatched subagent). The supervisor does not call APIs, fetch URLs, or access files directly — that's the subagents' job.
+Tool allowlist is intentionally EMPTY: subagent dispatch (`agentRuntime.dispatch`) and await (`agentRuntime.await`) are host agent-runtime primitives (RFC 0007) the runtime performs on the supervisor's behalf — they are not `openwop:` node tools and must not be added to an allowlist. The supervisor does not call APIs, fetch URLs, or access files directly — that's the subagents' job.
 
 ## When to use it vs. when not to
 

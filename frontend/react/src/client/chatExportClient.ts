@@ -9,7 +9,7 @@ import { config, authedHeaders, fetchOpts } from './config.js';
  *  non-OK response so the caller can surface an error. */
 export async function exportConversation(sessionId: string, format: 'md' | 'json'): Promise<void> {
   const res = await fetch(
-    `${config.baseUrl}/v1/host/openwop-app/chat-export/${encodeURIComponent(sessionId)}?format=${format}`,
+    `${config.baseUrl}/host/openwop-app/chat-export/${encodeURIComponent(sessionId)}?format=${format}`,
     fetchOpts({ headers: authedHeaders() }),
   );
   if (!res.ok) throw new Error(`export_failed_${res.status}`);
@@ -32,7 +32,7 @@ export async function exportConversation(sessionId: string, format: 'md' | 'json
  *  JSON; `format` selects the parser ('openwop' round-trip, or 'chatgpt'). Returns the
  *  new session id. Throws on a non-OK response. */
 export async function importConversation(format: 'openwop' | 'chatgpt', data: unknown): Promise<{ sessionId: string; imported: number }> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/chat-export/import`, fetchOpts({
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/chat-export/import`, fetchOpts({
     method: 'POST', headers: authedHeaders({ 'content-type': 'application/json' }), body: JSON.stringify({ format, data }),
   }));
   if (!res.ok) throw new Error(`import_failed_${res.status}`);

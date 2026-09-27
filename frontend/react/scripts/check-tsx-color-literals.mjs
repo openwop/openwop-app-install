@@ -34,6 +34,15 @@ const ALLOWLIST = [
   // and are never re-colored (DESIGN.md §8) — sanctioned literal colors.
   'brand/vendor/',
   'ui/icons/',
+  // The CAD material library (ADR 0388 P5) — catalog PAINT DATA for the
+  // canvas.cad artifact model (the doc schema already accepts user hex
+  // colors); these are artifact data like the brand defaults, not UI styling.
+  // FE↔BE twin — the backend copy carries the same literals.
+  'features/cad/cadMaterials.ts',
+  // ADR 0401 — the inpaint mask painter's canvas PIXEL values are the mask
+  // WIRE ENCODING (white = repaint, black = keep — the provider contract),
+  // not theme colors; they must never follow tokens/dark mode.
+  'features/media/EditImageDialog.tsx',
 ];
 
 // Hex colors (#abc / #aabbcc / #aabbccdd) and functional color literals.

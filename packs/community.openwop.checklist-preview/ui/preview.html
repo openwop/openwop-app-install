@@ -1,0 +1,111 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  /* Plugin-local styles only — the sandbox has no host tokens by design. */
+  body { margin: 0; padding: 12px; font: 14px/1.5 system-ui, sans-serif; color: #1f2430; background: #fbfaf7; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+  li { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #d8d4c9; border-radius: 8px; background: #fff; }
+  li.done .text { text-decoration: line-through; opacity: 0.6; }
+  li.selected { outline: 3px solid #3b6ef6; outline-offset: 1px; }
+  .box { width: 16px; height: 16px; border: 2px solid #6b7280; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; }
+  li.done .box { background: #2f9e44; border-color: #2f9e44; color: #fff; }
+  .prio { margin-left: auto; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; padding: 1px 8px; border-radius: 999px; border: 1px solid #d8d4c9; }
+  .prio-high { background: #ffe3e3; border-color: #e03131; }
+  .prio-medium { background: #fff3bf; border-color: #f08c00; }
+  .prio-low { background: #e7f5ff; border-color: #4dabf7; }
+  .empty { opacity: 0.7; }
+</style>
+</head>
+<body>
+<h1 id="title"></h1>
+<ul id="list"></ul>
+<script>
+(function () {
+  'use strict';
+  var PROTO = 'ui-plugin/1';
+  var reqId = 1;
+  var selectedIndex = -1;
+
+  function post(msg) { parent.postMessage(msg, '*'); }
+
+  function render(doc) {
+    var titleEl = document.getElementById('title');
+    var listEl = document.getElementById('list');
+    titleEl.textContent = (doc && typeof doc.title === 'string' && doc.title) ? doc.title : 'Checklist';
+    listEl.textContent = '';
+    var items = (doc && Array.isArray(doc.items)) ? doc.items : [];
+    if (!items.length) {
+      var li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'No items yet.';
+      listEl.appendChild(li);
+      return;
+    }
+    items.forEach(function (item, i) {
+      var li = document.createElement('li');
+      var done = item && item.done === true;
+      li.className = (done ? 'done' : '') + (i === selectedIndex ? ' selected' : '');
+      var box = document.createElement('span');
+      box.className = 'box';
+      box.textContent = done ? '✓' : '';
+      var text = document.createElement('span');
+      text.className = 'text';
+      text.textContent = (item && typeof item.text === 'string') ? item.text : '';
+      li.appendChild(box);
+      li.appendChild(text);
+      if (item && typeof item.priority === 'string') {
+        var prio = document.createElement('span');
+        prio.className = 'prio prio-' + item.priority;
+        prio.textContent = item.priority;
+        li.appendChild(prio);
+      }
+      listEl.appendChild(li);
+    });
+  }
+
+  var lastDoc = null;
+  function parseAndRender(content) {
+    try { lastDoc = JSON.parse(content); } catch (e) { lastDoc = null; }
+    render(lastDoc);
+  }
+
+  function announce(message) {
+    post({ openwop: PROTO, id: reqId++, type: 'request', method: 'host.announce', params: { message: message } });
+  }
+
+  window.addEventListener('message', function (ev) {
+    var m = ev.data;
+    if (!m || m.openwop !== PROTO) return;
+    if (m.type === 'event' && m.event === 'host.init') {
+      post({ openwop: PROTO, id: reqId++, type: 'request', method: 'artifact.read', params: { artifactId: m.data && m.data.artifactId } });
+      return;
+    }
+    if (m.type === 'response' && m.ok && m.result && m.result.payload !== undefined) {
+      lastDoc = m.result.payload;
+      render(lastDoc);
+      return;
+    }
+    if (m.type === 'event' && m.event === 'host.documentChanged') {
+      parseAndRender(m.data && m.data.content);
+      return;
+    }
+    if (m.type === 'event' && m.event === 'host.selectionChanged') {
+      var sel = m.data && m.data.selection;
+      selectedIndex = sel && sel.kind === 'element' && sel.collection === 'items' && typeof sel.index === 'number' ? sel.index : -1;
+      render(lastDoc);
+      if (selectedIndex >= 0 && lastDoc && Array.isArray(lastDoc.items) && lastDoc.items[selectedIndex]) {
+        var it = lastDoc.items[selectedIndex];
+        announce('Previewing: ' + (typeof it.text === 'string' ? it.text : 'item ' + (selectedIndex + 1)));
+      }
+      return;
+    }
+  });
+
+  post({ openwop: PROTO, type: 'event', event: 'plugin.ready' });
+})();
+</script>
+</body>
+</html>

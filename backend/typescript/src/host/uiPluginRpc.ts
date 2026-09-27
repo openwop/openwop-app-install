@@ -27,14 +27,15 @@ export const UI_PLUGIN_PROTOCOL = 'ui-plugin/1';
  *  (`frontend-plugin-isolation`). */
 export const UI_PLUGIN_ISOLATION = 'cross-origin-iframe' as const;
 
-/** The plugin-facing surfaces a manifest may declare (RFC 0117 §4). */
-export const UI_PLUGIN_SURFACES = ['artifact-viewer', 'route', 'settings-panel'] as const;
+/** The plugin-facing surfaces a manifest may declare (RFC 0117 §4; `canvas-preview`
+ *  = RFC 0130 — the live preview mounted inside a host-owned canvas editor). */
+export const UI_PLUGIN_SURFACES = ['artifact-viewer', 'route', 'settings-panel', 'canvas-preview'] as const;
 
 /** The CLOSED host-API allowlist (RFC 0117 §3). A plugin may call only these methods,
  *  and only those it also declared in its manifest `hostApi[]`. NOTHING credential-/
  *  secret-bearing is here — a plugin can never read BYOK material
  *  (`frontend-plugin-no-byok`). */
-export const HOST_UI_PLUGIN_API = ['artifact.read', 'artifact.write', 'host.toast', 'host.navigate'] as const;
+export const HOST_UI_PLUGIN_API = ['artifact.read', 'artifact.write', 'host.toast', 'host.navigate', 'host.announce'] as const;
 export type HostUiPluginMethod = (typeof HOST_UI_PLUGIN_API)[number];
 
 /** Max bytes of a plugin's `entry` bundle the host will load (RFC 0117 §4). Mirrors the

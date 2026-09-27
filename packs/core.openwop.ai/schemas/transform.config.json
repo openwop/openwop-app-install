@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/transform.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/transform.config.json",
   "title": "AiTransformConfig",
   "type": "object",
   "properties": {
@@ -9,6 +9,10 @@
     },
     "examples": {
       "type": "array"
+    },
+    "outputSchema": {
+      "type": "object",
+      "description": "Optional JSON Schema for the transformed value — engages provider-native structured output (XCH-CORE-5)."
     }
   },
   "additionalProperties": false

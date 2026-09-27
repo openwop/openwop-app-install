@@ -46,6 +46,21 @@ describe('fromCanonicalDefinition — happy path', () => {
     expect(a.position).toEqual({ x: 1, y: 2 });
   });
 
+  it('reads the OpenWOP metadata.name when no top-level name (pack-instantiated templates)', () => {
+    // pack-instantiated defs carry the label in metadata.name, not top-level name
+    const res = fromCanonicalDefinition({
+      metadata: { name: 'Ad Performance Optimization Loop' },
+      nodes: [{ id: 'a', typeId: 'core.noop' }],
+      edges: [],
+    });
+    expect(res.name).toBe('Ad Performance Optimization Loop'); // not "Imported workflow"
+  });
+
+  it('top-level name wins over metadata.name; falls back to Imported workflow only when both absent', () => {
+    expect(fromCanonicalDefinition({ name: 'Top', metadata: { name: 'Meta' }, nodes: [{ id: 'a', typeId: 'core.noop' }], edges: [] }).name).toBe('Top');
+    expect(fromCanonicalDefinition({ nodes: [{ id: 'a', typeId: 'core.noop' }], edges: [] }).name).toBe('Imported workflow');
+  });
+
   it('accepts the backend `nodeId` alias for `id`', () => {
     const res = fromCanonicalDefinition({
       nodes: [{ nodeId: 'x', typeId: 'core.noop' }],

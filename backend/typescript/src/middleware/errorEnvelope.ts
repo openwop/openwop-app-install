@@ -13,7 +13,7 @@
  */
 
 import type { ErrorRequestHandler, Request, Response } from 'express';
-import type { ErrorEnvelope } from '@openwop/openwop';
+import type { HostErrorEnvelope } from '../types.js';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { sanitizeForErrorMessage, sanitizeDetails } from './sanitize.js';
@@ -32,7 +32,7 @@ const log = createLogger('error-envelope');
  * negotiated locale when i18n is enabled. `Content-Language` + `details.locale`
  * are set only when a translation was actually applied — never merely requested.
  */
-function emitEnvelope(req: Request, res: Response, status: number, envelope: ErrorEnvelope): void {
+function emitEnvelope(req: Request, res: Response, status: number, envelope: HostErrorEnvelope): void {
   if (hostI18nEnabled()) {
     const locale = negotiateLocale(
       req.header('accept-language'),
@@ -40,11 +40,55 @@ function emitEnvelope(req: Request, res: Response, status: number, envelope: Err
       hostDefaultLocale(),
     );
     const { envelope: out, localized } = localizeErrorEnvelope(envelope, locale);
-    if (localized) res.setHeader('Content-Language', locale);
+    // The catalog column actually used (ADR 0748: `es-419` is answered from `es`),
+    // so the header and `details.locale` can never disagree.
+    if (localized) res.setHeader('Content-Language', String(out.details?.locale ?? locale));
     res.status(status).json(out);
     return;
   }
   res.status(status).json(envelope);
+}
+
+/**
+ * Emit the canonical FLAT error envelope from an inline route handler
+ * (H27 / S22 / `spec/v1/rest-endpoints.md` §"Error response shape").
+ *
+ * The middleware above is the flat-envelope owner for THROWN errors. Route
+ * handlers that answer inline — a validation guard, a seam that must not
+ * unwind, a 404 with no exception to raise — go through here instead of
+ * hand-building a body, so there is exactly ONE envelope shape in the host.
+ *
+ * Between 2026-06 and 2026-08 a NESTED `{ error: { code, message, retriable } }`
+ * form drifted into ~92 inline sites (it was prescribed by four seam contracts
+ * and a few code-list entries in `rest-endpoints.md` itself). S22 settled it:
+ * `schemas/error-envelope.schema.json` is authoritative, `error` is a STRING,
+ * and `additionalProperties: false` means every extra fact — `retriable`,
+ * `retryAfter`, `provider`, `protocol` — lives under `details`, never at a new
+ * top level and never inside `error`.
+ *
+ * `code` is deliberately a plain `string`, not `OpenwopErrorCode`: several seams
+ * emit host-extension codes (`sandbox_pack_not_found`, `realtime_provider_error`,
+ * `nothing_to_compact`) that are not in the closed union, and widening that union
+ * is a separate decision from fixing the wire shape.
+ *
+ * Scrub + locale negotiation are identical to the thrown path — the same
+ * credential scrub, the same `Content-Language` + `details.locale` stamping —
+ * because an inline 4xx echoes user input just as readily as a thrown one.
+ */
+export function sendError(
+  res: Response,
+  status: number,
+  code: string,
+  message: string,
+  details?: Record<string, unknown>,
+): void {
+  if (res.headersSent) return;
+  const envelope: HostErrorEnvelope = {
+    error: code,
+    message: sanitizeForErrorMessage(message),
+    ...(details ? { details: sanitizeDetails(details) } : {}),
+  };
+  emitEnvelope(res.req, res, status, envelope);
 }
 
 export function errorEnvelopeMiddleware(): ErrorRequestHandler {
@@ -58,7 +102,7 @@ export function errorEnvelopeMiddleware(): ErrorRequestHandler {
       // outgoing message + details so user input can't weaponize the
       // error envelope as a leak channel.
       const env = err.toEnvelope();
-      const scrubbed: ErrorEnvelope = {
+      const scrubbed: HostErrorEnvelope = {
         ...env,
         message: sanitizeForErrorMessage(env.message ?? ''),
         ...(env.details ? { details: sanitizeDetails(env.details) } : {}),

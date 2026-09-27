@@ -170,3 +170,70 @@ routes. A future cross-host normative `artifact.created` event remains a separat
 | #2 / #3 | byte-store rename to `media:bytes` + read-fallback/migrate-on-read; multi-image capture; fail-open await | `inMemorySurfaces.ts`, `runArtifactStore.ts`, `media-bytes-migration.test.ts` — PR #532 |
 
 Deployed: Cloud Run `openwop-app-backend` rev `00262-rx9` (2026-06-20).
+
+## Amendment (2026-07-05) — the Library is an ASSET library, not a run log
+
+**Correction to the original framing.** P3 shipped the Library as "every artifact the
+AI produced," which in practice surfaced *every* run output — including the raw
+inline-JSON fallback (`deriveArtifact` → `kind:'data'`), producing a wall of `{`-named
+`data` rows sourced from "Run output." That is a run log, not the product intent.
+
+The Library's intent is a gallery of **generated assets**: slide decks, images, video,
+ads/campaigns, CADs, app designs, drawings, charts, code results, production plans, and
+documents. So `listArtifacts` now filters through **`isLibraryAsset`**
+(`host/artifactProjection.ts`): a row is an asset when its `source` is `document` or
+`media` (assets by construction), OR it is a `run-event` carrying a registered
+`artifactTypeId` (a typed artifact), OR `kind:'file'` (a concrete file link). The raw
+`run-event` fallback (`kind ∈ {data, text, markdown}`, no type) is dropped — it remains
+persisted and addressable from the run detail; it just isn't an *asset*.
+
+Filtering lives in the projection (not the FE list) so the ART-1 keyset cursor and
+"Load more" counts stay honest. The TYPE badge now shows a human category
+(`Slides`/`CAD`/`Image`/`Document`/…) via `artifactKindLabel` instead of the raw
+`kind`/id, and the page copy is reframed from "everything the AI produced" to "your
+generated assets." Tests: `library-asset-filter.test.ts`.
+
+### Gap closure (2026-07-05) — asset-node coverage audit
+
+A follow-up audit confirmed the **primary asset generators already land in the Library**:
+the six canvas render nodes (slides / CAD / drawings / app-builder / campaign / production),
+interactive + code-exec producers, `core.openwop.ai.image-generate` (→ media), and the
+document nodes all emit typed artifacts / media / documents. The asset filter does not
+strand them. The genuine gaps were narrow, in orphaned/edge code:
+
+- **`vendor.myndhyve.ads-image-generate` — FIXED.** Emitted `assets:[{base64}]` (a second,
+  divergent convention); converged onto the host `images:[{contentBase64|url}]` convention
+  so the producer mints each ad image as a media/file Library asset. Orphaned (unwired), so
+  a latent-conformance fix; verified by a `persistRunArtifact` round-trip unit test.
+- **`vendor.myndhyve.ads-video-generate` — DEFERRED (documented in-pack).** `asset:{url}`
+  matches no producer detector; the correct fix is a host-side `createAssetFromServeUrl`
+  mint, but that re-stores only a HOST token, which needs a live video path to confirm
+  `ctx.callVideoGenerator`'s URL shape. Orphaned + unverifiable ⇒ documented fix-when-wired
+  rather than a blind, untestable patch.
+- **`brand.kit` — NOT A GAP (reclassified).** The "registered type with zero producer"
+  audit heuristic conflates two kinds of artifact type: run-output *asset kinds*
+  (`interactive.*`, `code.execution-result`, `canvas.*` render outputs — these should
+  have a producer) and launch-studio *shared-artifact / canvas types* (`brand.kit`,
+  `canvas.brief`/`design`/`launch`). `brand.kit` is the latter: the `host.launchStudio`
+  backbone references it as a canvas (trivial `{name,colors[]}` schema, no renderer, sole
+  ref = the seeded `demo-launch-studio` `sharedArtifactRef`), and it becomes Library-visible
+  via the canvas→`document:` **materialization** path (ADR 0056), never run-*production*.
+  Producerless is correct. Building a producer would stand up an unrequested parallel
+  surface — rejected.
+- **`feature.app-builder.nodes.export` — NOT A GAP (leave raw).** The export is a
+  short-TTL (`EXPORT_TTL_SECONDS`) `application/zip` of framework-native SOURCE CODE — a
+  transient developer *download*, ephemeral by design. The app-builder's durable Library
+  asset is the DESIGN (`canvas.app-builder`, emitted by the sibling `render` node, already
+  Library-visible). Forcing the export in would fight its TTL model and clutter the asset
+  Library with dev-download zips. A code export is not a "generated asset" in the product
+  sense; the design canvas is.
+- **`feature.strategy.nodes.create-board-memo` degrade — NOT A GAP (correct degradation).**
+  The memo IS a Library `document:` on the normal path (Documents ON). The inline-markdown
+  branch fires only when Documents is OFF, where there is no document store to persist to;
+  surfacing it as a Library asset then would be a second degraded persistence path. Correct
+  graceful degradation, not a gap.
+
+**Net:** the asset filter did not strand any real generated-asset producer. The only
+actionable fix was one orphaned pack's field-naming (`ads-image-generate`, FIXED + tested);
+everything else the audit flagged was a studio type, an ephemeral download, a graceful
+degrade, or an orphaned pack — correctly not a durable Library asset.

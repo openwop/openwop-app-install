@@ -6,7 +6,9 @@
  * with zero further app changes. `onRecorded` lets the parent refresh derived
  * views (e.g. the §C2 quality analytics panel). See app-ux-enhancements §C1.
  */
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
+import { Notice } from '../ui/Notice.js';
 import { useTranslation } from 'react-i18next';
 import {
   getFeedbackCapability,
@@ -54,12 +56,12 @@ export function RunFeedback({ runId, onRecorded }: { runId: string; onRecorded?:
         <p className="muted u-m-0">{t('feedbackRecorded', { label: sent })}</p>
       ) : (
         <div className="button-row" role="group" aria-label={t('rateThisRun')}>
-          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 5 }, t('feedbackGood'))} aria-label={t('feedbackGood')}><ThumbsUpIcon size={14} /> {t('feedbackGood')}</button>
-          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 1 }, t('feedbackBad'))} aria-label={t('feedbackBad')}><ThumbsDownIcon size={14} /> {t('feedbackBad')}</button>
-          <button type="button" className="secondary" disabled={pending} onClick={() => send({ kind: 'flag' }, t('feedbackFlagged'))} aria-label={t('flagForReview')}><FlagIcon size={14} /> {t('flagForReview')}</button>
+          <Button variant="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 5 }, t('feedbackGood'))} aria-label={t('feedbackGood')}><ThumbsUpIcon size={14} /> {t('feedbackGood')}</Button>
+          <Button variant="secondary" disabled={pending} onClick={() => send({ kind: 'rating', rating: 1 }, t('feedbackBad'))} aria-label={t('feedbackBad')}><ThumbsDownIcon size={14} /> {t('feedbackBad')}</Button>
+          <Button variant="secondary" disabled={pending} onClick={() => send({ kind: 'flag' }, t('feedbackFlagged'))} aria-label={t('flagForReview')}><FlagIcon size={14} /> {t('flagForReview')}</Button>
         </div>
       )}
-      {error && <div className="alert error u-mt-2">{error}</div>}
+      {error && <div className="u-mt-2"><Notice variant="error">{error}</Notice></div>}
     </div>
   );
 }

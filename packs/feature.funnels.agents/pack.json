@@ -1,0 +1,29 @@
+{
+  "name": "feature.funnels.agents",
+  "version": "1.0.1",
+  "description": "Funnels feature agent pack — a Funnel Architect persona whose tools are feature.funnels.nodes over ctx.features.funnels. Reviews funnels and their per-step stats, drafts new funnels and step edits — drafts stay UNPUBLISHED for human review (public-surface change, the promotions firewall). Tool-allowlisted to the funnels surface only. Driven through the ONE chat.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "funnels", "agent", "marketing", "conversion"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": { "aiProviders": "supported", "agents.manifestRuntime": "supported" },
+  "agents": [
+    {
+      "agentId": "feature.funnels.agents.funnel-architect",
+      "persona": "RESEARCH",
+      "label": "Funnel Architect",
+      "description": "Reviews funnels and per-step conversion stats, proposes step changes and challenger-page experiments, and drafts funnels — drafts stay unpublished for a human to review, via feature.funnels.nodes over ctx.features.funnels.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/funnel-architect.md",
+      "toolAllowlist": [
+        "openwop:funnels.list",
+        "openwop:funnels.get",
+        "openwop:funnels.step-stats",
+        "openwop:funnels.draft"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

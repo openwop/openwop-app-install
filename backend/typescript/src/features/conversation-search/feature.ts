@@ -9,12 +9,14 @@
  * @see docs/adr/0112-conversation-full-text-search.md
  */
 import type { BackendFeature } from '../types.js';
+import { registerConversationSearchAgentTools } from './agentTools.js';
 import { registerConversationSearchRoutes } from './routes.js';
 
 export const conversationSearchFeature: BackendFeature = {
   id: 'conversation-search',
   registerRoutes: (deps) => {
     registerConversationSearchRoutes(deps);
+    registerConversationSearchAgentTools(deps.storage); // XCH-HOLE-5 (Wave 4) — openwop:conversations.search (ADR 0308 seam)
   },
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
 };

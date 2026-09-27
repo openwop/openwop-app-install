@@ -21,6 +21,8 @@ export const messages = {
   noneTitle: 'Aún no hay plantillas digitales',
   noneBody: 'Cargue datos de ejemplo para explorar las plantillas digitales de ejemplo con semanas de historial de ejecuciones.',
   loadExampleData: 'Cargar datos de ejemplo',
+  noneBodyClean: 'Las plantillas digitales aparecen aquí cuando sus agentes ejecutan trabajo real. Contrate su primer agente para empezar.',
+  hireFirstAgent: 'Contratar su primer agente',
   // Key-figure filter band
   filterAriaLabel: 'Qué necesita de usted: haga clic para filtrar',
   figureWorkforces: 'Plantillas digitales',
@@ -124,6 +126,10 @@ export const messages = {
 
   // Trace search panel
   traceSearch: 'Búsqueda de trazas',
+  traceColSelect: 'Seleccionar para comparar',
+  traceSelectRun: 'Seleccionar la ejecución {{runId}} para comparar',
+  traceCompareSelected: 'Comparar las dos ejecuciones seleccionadas',
+  traceCompareHint: 'Seleccione dos ejecuciones para compararlas lado a lado.',
   traceSearchHelp:
     'Busque ejecuciones en toda la plantilla digital por id de correlación, id de lote, id de ejecución, resultado o estado.',
   traceQueryAriaLabel: 'Consulta de trazas',
@@ -218,21 +224,22 @@ export const messages = {
 
   // Lifecycle / autonomy labels (DESIGN.md §5.3)
   statusShadowLabel: 'Sombra',
-  statusShadowGloss: 'Funciona junto a las personas, no realiza ninguna acción real',
   statusPilotingLabel: 'Pilotaje',
-  statusPilotingGloss: 'Actúa sobre trabajo en vivo, con revisión humana',
   statusProductionLabel: 'Producción',
-  statusProductionGloss: 'Autonomía limitada dentro de la política, en vivo',
-  autonomyReviewLabel: 'Revisión',
-  autonomyReviewGloss: 'Cada decisión espera la aprobación humana',
-  autonomyGuidedLabel: 'Guiada',
-  autonomyGuidedGloss: 'Actúa, pero deriva las decisiones clave para su revisión',
-  autonomyAutoLabel: 'Automática',
-  autonomyAutoGloss: 'Autonomía limitada dentro de su política',
+  autonomyReviewLabel: 'Supervisado',
+  autonomyGuidedLabel: 'Guiado',
+  autonomyAutoLabel: 'Autónomo',
   journeyShadowLabel: 'Observando',
   journeyShadowGloss: 'Observa a su equipo trabajar y aprende: aún no realiza ninguna acción real.',
   journeyPilotingLabel: 'Asistiendo',
   journeyPilotingGloss: 'Actúa sobre trabajo en vivo, con una persona revisando las excepciones.',
   journeyProductionLabel: 'Funcionando por sí misma',
   journeyProductionGloss: 'Funciona de forma autónoma dentro de los límites de su política.',
+
+  // §4.5 collection kit — búsqueda por nombre
+  filterGroup: 'Filtrar equipos de trabajo',
+  searchPlaceholder: 'Buscar equipos de trabajo…',
+  searchAria: 'Buscar equipos de trabajo por nombre',
+  signalsUnreadable: "No se pudieron comprobar por completo {{count}} plantilla(s): los recuentos de aprobaciones, preparación y políticas de abajo solo cubren las que sí pudimos leer.",
+  overviewSignalsUnreadable: "No se pudo comprobar por completo esta plantilla: las señales de aprobaciones, preparación y políticas pueden estar incompletas, así que no se muestra el visto bueno.",
 } as const;

@@ -1,0 +1,44 @@
+{
+  "name": "feature.profiles.nodes",
+  "version": "1.1.0",
+  "description": "Profiles feature node pack — reads over ctx.features.profiles (ADR 0172 / ADR 0624): list/get the tenant's profiles (read-only projections) so a workflow can branch or personalize on profile data. get takes { userId } and answers { profile, found } (an empty id is a typed validation_error failure; a real-id miss is found:false). Tenant-guarded; role:action (recorded).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "profiles",
+    "identity-adjacent"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.profiles.nodes.list",
+      "version": "1.1.0",
+      "label": "Profiles: List",
+      "description": "Lists the tenant's profiles over ctx.features.profiles.listProfiles. Output: { profiles }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [],
+      "outputSchemaRef": "schemas/list.output.json"
+    },
+    {
+      "typeId": "feature.profiles.nodes.get",
+      "version": "1.1.0",
+      "label": "Profiles: Get",
+      "description": "Reads one member's profile over ctx.features.profiles.getProfile. Inputs: { userId } (the opaque user:<id> in the run's tenant). Output: { profile|null, found }. An empty/absent userId is a typed validation_error node FAILURE (never success-with-null); a real id not in the tenant is { profile: null, found: false } so a chain branches on { falsy found }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [],
+      "inputSchemaRef": "schemas/get.input.json",
+      "outputSchemaRef": "schemas/get.output.json"
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

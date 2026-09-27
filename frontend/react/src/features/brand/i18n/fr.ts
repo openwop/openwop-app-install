@@ -1,5 +1,5 @@
 /**
- * `brand` namespace (ADR 0155) — fr. Texte destiné à l'utilisateur pour la
+ * `brand` namespace (ADR 0155) — fr. Texte destiné à l’utilisateur pour la
  * fonctionnalité Brand & Guardrails. Autonome ; les actions génériques
  * (enregistrer/annuler/supprimer) sont réutilisées de `common` via `t('common:…')`.
  */
@@ -22,10 +22,15 @@ export const messages = {
   channelsChip_one: '{{count}} règle de canal',
   channelsChip_other: '{{count}} règles de canal',
   lockedChip: 'Verrouillée',
+  lockNoticeFull: "Cette marque est verrouillée. Seul un administrateur de l'organisation peut enregistrer des modifications ; toute autre personne sera refusée au moment de l'enregistrement.",
+  lockNoticePartial: "Cette marque restreint la modification. Seuls son créateur, un éditeur autorisé ou un administrateur de l'organisation peuvent enregistrer des modifications.",
   archivedChip: 'Archivée',
 
   editorCreateTitle: 'Nouvelle marque',
   editorEditTitle: 'Modifier la marque',
+  auditTrail: "Historique des modifications",
+  auditLoadFailed: "Impossible de charger l'historique des modifications. C'est une lecture en échec, pas un historique vide.",
+  auditEmpty: "Aucune modification des règles enregistrée pour le moment.",
   secIdentity: 'Identité',
   secVoice: 'Voix',
   secPhrases: 'Formules clés',
@@ -72,8 +77,30 @@ export const messages = {
   channel_social_posts: 'Publications sociales',
 
   saveFailed: 'Impossible d’enregistrer la marque.',
+  saveConflict: 'Cette marque a changé depuis son ouverture — fermez l’éditeur, rechargez et réappliquez vos modifications.',
   deleteConfirmTitle: 'Supprimer cette marque ?',
   deleteConfirmBody: 'Les contenus de campagne fondés sur elle perdront leur référence de marque. Action irréversible.',
   noOrgTitle: 'Aucune organisation pour l’instant',
   noOrgBody: 'Créez d’abord une organisation : une marque appartient à une organisation.',
+  filterGroup: 'Filtres',
+  filterBrandsPlaceholder: 'Rechercher des marques…',
+  filterBrandsAria: 'Rechercher des marques par nom',
+  filterStatusLabel: 'Filtrer par statut',
+  allStatuses: 'Tous les statuts',
+  statusActive: 'Active',
+  noMatchTitle: 'Aucune correspondance',
+  noMatchBody: 'Rien ne correspond aux filtres actuels.',
+  clearFilters: 'Effacer les filtres',
+
+  // ADR 0399 OQ-1 — brand custom fonts for ad rendering
+  secAdFonts: 'Polices publicitaires',
+  adFontsLede: 'Importez une police pour les créations composées (TTF/OTF). Vous devez détenir les droits de redistribution.',
+  adFontRole_sans: 'Sans (titres et corps)',
+  adFontRole_serif: 'Serif',
+  adFontsAttest: 'J\u2019ai le droit d\u2019intégrer cette police dans les créations exportées.',
+  adFontsAttestFirst: 'Confirmez l\u2019attestation de licence avant d\u2019importer.',
+  adFontsChoose: 'Choisir un fichier de police {{role}}',
+  adFontsRemove: 'Retirer',
+  adFontsLoadFailed: 'Impossible de charger les polices de la marque.',
+  adFontsUploadFailed: 'L\u2019import de la police a échoué.',
 } as const;

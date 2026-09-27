@@ -1,0 +1,756 @@
+{
+  "name": "core.openwop.workflows.kicktodo-challenge-factory",
+  "version": "1.5.0",
+  "kind": "workflow-chain",
+  "description": "The Challenge Factory (ADR 0458) + its lesson-batch child — migrated from the deprecated builtins (ADR 0472 P4, the terminal quarantine step). chainIds keep the original ids; build-0..3 reference lesson-batch via RFC 0133 config.subChainRef (host-default binds it to the shared same-id child); truthy/falsy reject-safe barriers ride RFC 0134; produced vars (plan/evidenceSummary/evidenceClaims/planBrief/planEvidenceBrief) declared per RFC 0133 §2.2; 1.4.0 (ADR 0458 §2.2 correction) grounds the plan, the lessons and the skeptic on the STRUCTURED evidence.",
+  "keywords": [
+    "KickTodo"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "openwop-app.kicktodo.challenge-factory",
+      "version": "1.5.0",
+      "label": "Challenge Factory",
+      "description": "Research a topic → draft an outline → approve → build lesson batches (each checkpoint approved) → simulate with three personas → submit for publication.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "candidateId": {
+            "type": "string"
+          },
+          "topic": {
+            "type": "string"
+          },
+          "audience": {
+            "type": "string"
+          },
+          "authorSubject": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string",
+            "default": "anthropic"
+          },
+          "model": {
+            "type": "string",
+            "default": "claude-sonnet-4-6"
+          },
+          "checkpointEvery": {
+            "type": "string"
+          },
+          "credentialRef": {
+            "type": "string",
+            "description": "ADR 0706 — the Secrets Vault ref NAME (never a value) the four LLM nodes and the lesson-batch child pass to ctx.callAI. Set by the Challenge Author’s run tool from the workspace’s AI default; absent ⇒ the dispatcher’s exact/prefixed-ref ladder. Plain string, deliberately NOT x-openwop-sensitive: it carries a ref name, not a secret."
+          }
+        },
+        "required": [
+          "candidateId",
+          "topic",
+          "audience",
+          "authorSubject"
+        ]
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "research-frame",
+            "typeId": "feature.kicktodo.nodes.research-frame",
+            "inputs": {
+              "topic": "{{params.topic}}",
+              "audience": "{{params.audience}}"
+            }
+          },
+          {
+            "id": "search",
+            "typeId": "core.web.search",
+            "config": {
+              "suitability": "durable"
+            },
+            "inputs": {
+              "query": "{{params.topic}}",
+              "maxResults": 8,
+              "suitability": "durable"
+            }
+          },
+          {
+            "id": "normalize",
+            "typeId": "feature.kicktodo.nodes.source-normalize",
+            "inputs": {}
+          },
+          {
+            "id": "fetch",
+            "typeId": "core.web.fetch",
+            "name": "Read the sources",
+            "position": {
+              "x": 180,
+              "y": 140
+            },
+            "config": {
+              "maxPages": 6,
+              "extractReadable": true
+            }
+          },
+          {
+            "id": "extract-claims",
+            "typeId": "feature.kicktodo.nodes.claim-extract",
+            "name": "Extract cited claims",
+            "position": {
+              "x": 540,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "credentialRef": "{{params.credentialRef}}"
+            }
+          },
+          {
+            "id": "verify-claims",
+            "typeId": "feature.kicktodo.nodes.claim-verify",
+            "name": "Verify each claim against its source",
+            "position": {
+              "x": 720,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "credentialRef": "{{params.credentialRef}}"
+            }
+          },
+          {
+            "id": "evidence-graph",
+            "typeId": "feature.kicktodo.nodes.evidence-graph",
+            "inputs": {
+              "candidateId": "{{params.candidateId}}"
+            }
+          },
+          {
+            "id": "generate",
+            "typeId": "feature.kicktodo.nodes.plan-generate",
+            "inputs": {
+              "candidateId": "{{params.candidateId}}",
+              "topic": "{{params.topic}}",
+              "audience": "{{params.audience}}",
+              "evidenceSummary": {
+                "type": "variable",
+                "variableName": "evidenceSummary"
+              },
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "evidenceClaims": {
+                "type": "variable",
+                "variableName": "evidenceClaims"
+              },
+              "credentialRef": "{{params.credentialRef}}"
+            }
+          },
+          {
+            "id": "outline-approve",
+            "typeId": "core.chat.approvalGate",
+            "config": {
+              "title": "Approve the challenge outline?",
+              "artifactType": "challenge-outline",
+              "maxRequestChangesIterations": 0
+            },
+            "inputs": {
+              "artifact": {
+                "type": "variable",
+                "variableName": "plan"
+              }
+            }
+          },
+          {
+            "id": "plan-validate",
+            "typeId": "feature.kicktodo.nodes.plan-validate",
+            "inputs": {
+              "plan": {
+                "type": "variable",
+                "variableName": "plan"
+              }
+            }
+          },
+          {
+            "id": "checkpoint-plan",
+            "typeId": "feature.kicktodo.nodes.checkpoint-plan",
+            "inputs": {
+              "plan": {
+                "type": "variable",
+                "variableName": "plan"
+              },
+              "checkpointEvery": "{{params.checkpointEvery}}",
+              "evidenceClaims": {
+                "type": "variable",
+                "variableName": "evidenceClaims"
+              }
+            }
+          },
+          {
+            "id": "build-0",
+            "typeId": "core.subWorkflow",
+            "config": {
+              "waitForCompletion": true,
+              "onChildFailure": "absorb",
+              "inputMapping": {
+                "candidateId": "candidateId",
+                "authorSubject": "authorSubject",
+                "days": "batch0",
+                "generateMedia": "generateMedia",
+                "evidenceClaims": "evidenceClaims",
+                "provider": "provider",
+                "model": "model",
+                "credentialRef": "credentialRef"
+              },
+              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+            }
+          },
+          {
+            "id": "gate-0",
+            "typeId": "core.chat.approvalGate",
+            "config": {
+              "title": "Approve the lessons for checkpoint 1?",
+              "artifactType": "challenge-lesson-batch",
+              "maxRequestChangesIterations": 0
+            }
+          },
+          {
+            "id": "fail-0",
+            "typeId": "core.fail",
+            "config": {
+              "code": "checkpoint_rejected",
+              "message": "Checkpoint 1 was rejected — the factory run stops here."
+            }
+          },
+          {
+            "id": "build-1",
+            "typeId": "core.subWorkflow",
+            "config": {
+              "waitForCompletion": true,
+              "onChildFailure": "absorb",
+              "inputMapping": {
+                "candidateId": "candidateId",
+                "authorSubject": "authorSubject",
+                "days": "batch1",
+                "generateMedia": "generateMedia",
+                "evidenceClaims": "evidenceClaims",
+                "provider": "provider",
+                "model": "model",
+                "credentialRef": "credentialRef"
+              },
+              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+            }
+          },
+          {
+            "id": "gate-1",
+            "typeId": "core.chat.approvalGate",
+            "config": {
+              "title": "Approve the lessons for checkpoint 2?",
+              "artifactType": "challenge-lesson-batch",
+              "maxRequestChangesIterations": 0
+            }
+          },
+          {
+            "id": "fail-1",
+            "typeId": "core.fail",
+            "config": {
+              "code": "checkpoint_rejected",
+              "message": "Checkpoint 2 was rejected — the factory run stops here."
+            }
+          },
+          {
+            "id": "build-2",
+            "typeId": "core.subWorkflow",
+            "config": {
+              "waitForCompletion": true,
+              "onChildFailure": "absorb",
+              "inputMapping": {
+                "candidateId": "candidateId",
+                "authorSubject": "authorSubject",
+                "days": "batch2",
+                "generateMedia": "generateMedia",
+                "evidenceClaims": "evidenceClaims",
+                "provider": "provider",
+                "model": "model",
+                "credentialRef": "credentialRef"
+              },
+              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+            }
+          },
+          {
+            "id": "gate-2",
+            "typeId": "core.chat.approvalGate",
+            "config": {
+              "title": "Approve the lessons for checkpoint 3?",
+              "artifactType": "challenge-lesson-batch",
+              "maxRequestChangesIterations": 0
+            }
+          },
+          {
+            "id": "fail-2",
+            "typeId": "core.fail",
+            "config": {
+              "code": "checkpoint_rejected",
+              "message": "Checkpoint 3 was rejected — the factory run stops here."
+            }
+          },
+          {
+            "id": "build-3",
+            "typeId": "core.subWorkflow",
+            "config": {
+              "waitForCompletion": true,
+              "onChildFailure": "absorb",
+              "inputMapping": {
+                "candidateId": "candidateId",
+                "authorSubject": "authorSubject",
+                "days": "batch3",
+                "generateMedia": "generateMedia",
+                "evidenceClaims": "evidenceClaims",
+                "provider": "provider",
+                "model": "model",
+                "credentialRef": "credentialRef"
+              },
+              "subChainRef": "openwop-app.kicktodo.lesson-batch"
+            }
+          },
+          {
+            "id": "gate-3",
+            "typeId": "core.chat.approvalGate",
+            "config": {
+              "title": "Approve the lessons for checkpoint 4?",
+              "artifactType": "challenge-lesson-batch",
+              "maxRequestChangesIterations": 0
+            }
+          },
+          {
+            "id": "fail-3",
+            "typeId": "core.fail",
+            "config": {
+              "code": "checkpoint_rejected",
+              "message": "Checkpoint 4 was rejected — the factory run stops here."
+            }
+          },
+          {
+            "id": "decompose",
+            "typeId": "feature.kicktodo.nodes.decompose",
+            "inputs": {
+              "plan": {
+                "type": "variable",
+                "variableName": "plan"
+              },
+              "authorSubject": "{{params.authorSubject}}",
+              "candidateId": "{{params.candidateId}}"
+            }
+          },
+          {
+            "id": "sim-newcomer",
+            "typeId": "local.openwop-app.agent-runner",
+            "config": {
+              "offerTools": []
+            },
+            "inputs": {
+              "agentId": "feature.kicktodo.agents.sim-newcomer",
+              "task": {
+                "type": "variable",
+                "variableName": "planBrief"
+              },
+              "credentialRef": "managed:openwop-free"
+            }
+          },
+          {
+            "id": "sim-time-poor",
+            "typeId": "local.openwop-app.agent-runner",
+            "config": {
+              "offerTools": []
+            },
+            "inputs": {
+              "agentId": "feature.kicktodo.agents.sim-time-poor",
+              "task": {
+                "type": "variable",
+                "variableName": "planBrief"
+              },
+              "credentialRef": "managed:openwop-free"
+            }
+          },
+          {
+            "id": "sim-skeptic",
+            "typeId": "local.openwop-app.agent-runner",
+            "config": {
+              "offerTools": []
+            },
+            "inputs": {
+              "agentId": "feature.kicktodo.agents.sim-skeptic",
+              "task": {
+                "type": "variable",
+                "variableName": "planEvidenceBrief"
+              },
+              "credentialRef": "managed:openwop-free"
+            }
+          },
+          {
+            "id": "sim-collect",
+            "typeId": "feature.kicktodo.nodes.sim-collect",
+            "inputs": {
+              "candidateId": "{{params.candidateId}}"
+            }
+          },
+          {
+            "id": "submit",
+            "typeId": "feature.kicktodo.nodes.submit-publication",
+            "inputs": {
+              "candidateId": "{{params.candidateId}}"
+            }
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.fail",
+            "config": {
+              "code": "outline_rejected",
+              "message": "The challenge outline was rejected — the factory run stops here."
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "research-frame",
+            "to": "search"
+          },
+          {
+            "from": "search",
+            "to": "normalize"
+          },
+          {
+            "from": "evidence-graph",
+            "to": "generate"
+          },
+          {
+            "from": "generate",
+            "to": "outline-approve"
+          },
+          {
+            "from": "outline-approve",
+            "to": "plan-validate",
+            "triggerRule": "all_success",
+            "condition": {
+              "type": "truthy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "plan-validate",
+            "to": "checkpoint-plan",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "outline-approve",
+            "to": "gate-reject",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "checkpoint-plan",
+            "to": "build-0",
+            "triggerRule": "all_success",
+            "condition": {
+              "type": "truthy",
+              "left": "slot0Live"
+            }
+          },
+          {
+            "from": "build-0",
+            "to": "gate-0",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "gate-0",
+            "to": "fail-0",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "fail-0",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "checkpoint-plan",
+            "to": "build-1",
+            "triggerRule": "all_success",
+            "condition": {
+              "type": "truthy",
+              "left": "slot1Live"
+            }
+          },
+          {
+            "from": "build-1",
+            "to": "gate-1",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "gate-1",
+            "to": "fail-1",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "fail-1",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "checkpoint-plan",
+            "to": "build-2",
+            "triggerRule": "all_success",
+            "condition": {
+              "type": "truthy",
+              "left": "slot2Live"
+            }
+          },
+          {
+            "from": "build-2",
+            "to": "gate-2",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "gate-2",
+            "to": "fail-2",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "fail-2",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "checkpoint-plan",
+            "to": "build-3",
+            "triggerRule": "all_success",
+            "condition": {
+              "type": "truthy",
+              "left": "slot3Live"
+            }
+          },
+          {
+            "from": "build-3",
+            "to": "gate-3",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "gate-3",
+            "to": "fail-3",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "fail-3",
+            "to": "decompose",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "decompose",
+            "to": "sim-newcomer",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "decompose",
+            "to": "sim-time-poor",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "decompose",
+            "to": "sim-skeptic",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "sim-newcomer.result",
+            "to": "sim-collect.newcomer",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "sim-time-poor.result",
+            "to": "sim-collect.timePoor",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "sim-skeptic.result",
+            "to": "sim-collect.skeptic",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "sim-collect",
+            "to": "submit",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "search",
+            "to": "fetch",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "normalize.sources",
+            "to": "extract-claims.sources",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "fetch.pages",
+            "to": "extract-claims.pages",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "research-frame.questions",
+            "to": "extract-claims.questions",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "normalize.sources",
+            "to": "evidence-graph.sources",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "research-frame.questions",
+            "to": "evidence-graph.questions",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "extract-claims.claims",
+            "to": "verify-claims.claims",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "normalize.sources",
+            "to": "verify-claims.sources",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "fetch.pages",
+            "to": "verify-claims.pages",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "verify-claims.claims",
+            "to": "evidence-graph.claims",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "extract-claims.readSourceHashes",
+            "to": "evidence-graph.readSourceHashes",
+            "triggerRule": "all_success"
+          }
+        ]
+      },
+      "subChains": [
+        {
+          "ref": "openwop-app.kicktodo.lesson-batch"
+        }
+      ],
+      "producedVariables": [
+        {
+          "name": "evidenceSummary",
+          "producedBy": "evidence-graph",
+          "type": "object"
+        },
+        {
+          "name": "plan",
+          "producedBy": "generate",
+          "type": "object"
+        },
+        {
+          "name": "planBrief",
+          "producedBy": "checkpoint-plan",
+          "type": "string"
+        },
+        {
+          "name": "evidenceClaims",
+          "producedBy": "evidence-graph",
+          "type": "array"
+        },
+        {
+          "name": "planEvidenceBrief",
+          "producedBy": "checkpoint-plan",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "chainId": "openwop-app.kicktodo.lesson-batch",
+      "version": "1.2.0",
+      "label": "Lesson batch (Challenge Factory child)",
+      "description": "Builds one checkpoint of a challenge’s lessons. Internal — dispatched by the Challenge Factory, not run on its own.",
+      "internal": true,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "candidateId": {
+            "type": "string"
+          },
+          "authorSubject": {
+            "type": "string"
+          },
+          "days": {
+            "type": "string"
+          },
+          "generateMedia": {
+            "type": "string"
+          },
+          "evidenceClaims": {
+            "type": "array",
+            "description": "The structured evidence (claim ids + sources) the batch’s lessons are grounded on and validated against; seeded by the parent from its evidenceClaims bag variable."
+          },
+          "provider": {
+            "type": "string",
+            "description": "ADR 0706 — the AI provider the parent factory run froze at ignition; seeded by the parent’s inputMapping."
+          },
+          "model": {
+            "type": "string",
+            "description": "ADR 0706 — the model id frozen with provider."
+          },
+          "credentialRef": {
+            "type": "string",
+            "description": "ADR 0706 — the Secrets Vault ref NAME forwarded to ctx.callAI (not x-openwop-sensitive: a name, never a value)."
+          }
+        },
+        "required": [
+          "candidateId",
+          "authorSubject",
+          "days"
+        ]
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "lesson-batch-build",
+            "typeId": "feature.kicktodo.nodes.lesson-batch-build",
+            "inputs": {
+              "candidateId": "{{params.candidateId}}",
+              "authorSubject": "{{params.authorSubject}}",
+              "days": "{{params.days}}",
+              "generateMedia": "{{params.generateMedia}}",
+              "evidenceClaims": "{{params.evidenceClaims}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}",
+              "credentialRef": "{{params.credentialRef}}"
+            }
+          }
+        ],
+        "edges": []
+      }
+    }
+  ]
+}

@@ -102,7 +102,6 @@ export const messages = {
 
   // Prompt picker input
   pickerFailedToLoad: 'Falha ao carregar prompts: {{error}}',
-  pickerLoading: 'Carregando prompts…',
   pickerNone: '— nenhum —',
   pickerOptionWithName: '{{name}} ({{ref}})',
   pickerShowBody: 'Mostrar corpo do template',
@@ -112,4 +111,7 @@ export const messages = {
   lintNoOneOf: '`oneOf` — o Gemini descarta silenciosamente; prefira `anyOf` ou union com discriminador',
   lintObjectNeedsAdditionalPropertiesFalse:
     'esquema de objeto sem `additionalProperties: false` — obrigatório para o modo strict da OpenAI',
+  loadFailedTitle: "Não foi possível carregar a biblioteca de prompts",
+  loadFailedBody: "Esta é uma leitura que falhou, não uma biblioteca vazia: seus prompts continuam lá.",
+  retry: "Tentar novamente",
 } as const;

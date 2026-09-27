@@ -29,8 +29,8 @@
 // onAuthChanged subscription). Types are `import type` only — erased at build,
 // so they add no runtime firebase reference to the entry chunk.
 import type { FirebaseApp } from 'firebase/app';
-import type { AuthCredential, User, Auth } from 'firebase/auth';
-import { setCurrentIdToken } from '../client/config.js';
+import type { AuthCredential, User, Auth, TotpSecret, MultiFactorResolver } from 'firebase/auth';
+import { setCurrentIdToken, registerIdTokenRefresher } from '../client/config.js';
 import i18n from '../i18n/index.js';
 
 /** The lazily-imported `firebase/auth` module namespace. */
@@ -56,7 +56,7 @@ type AuthMod = typeof import('firebase/auth');
 const ATTEMPTED_PROVIDER_KEY = 'openwop.auth.attempted';
 const PENDING_LINK_KEY = 'openwop.auth.pendingLink';
 
-type ProviderId = 'google.com' | 'github.com';
+type ProviderId = 'google.com' | 'github.com' | 'microsoft.com';
 
 function setAttemptedProvider(id: ProviderId): void {
   try { sessionStorage.setItem(ATTEMPTED_PROVIDER_KEY, id); } catch { /* private mode */ }
@@ -65,7 +65,7 @@ function consumeAttemptedProvider(): ProviderId | null {
   try {
     const v = sessionStorage.getItem(ATTEMPTED_PROVIDER_KEY);
     sessionStorage.removeItem(ATTEMPTED_PROVIDER_KEY);
-    return v === 'google.com' || v === 'github.com' ? v : null;
+    return v === 'google.com' || v === 'github.com' || v === 'microsoft.com' ? v : null;
   } catch { return null; }
 }
 
@@ -96,7 +96,7 @@ function consumePendingLink(am: AuthMod): { cred: AuthCredential; attemptedProvi
 }
 
 /** Test affordance / sign-out cleanup. */
-export function clearPendingLinkState(): void {
+function clearPendingLinkState(): void {
   try {
     sessionStorage.removeItem(ATTEMPTED_PROVIDER_KEY);
     sessionStorage.removeItem(PENDING_LINK_KEY);
@@ -124,7 +124,7 @@ export class ExistingProviderSignInError extends Error {
     public readonly email: string,
     public readonly existingProviders: readonly string[],
     public readonly pendingCredential: AuthCredential | null,
-    public readonly attemptedProvider: 'google.com' | 'github.com',
+    public readonly attemptedProvider: ProviderId,
   ) {
     const friendly = existingProviders.map(friendlyProviderName).join(
       ` ${i18n.t('auth:or')} `,
@@ -145,6 +145,7 @@ function friendlyProviderName(providerId: string): string {
     case 'googleAuthProvider': return i18n.t('auth:providerGoogle');
     case 'github.com':
     case 'githubAuthProvider': return i18n.t('auth:providerGithub');
+    case 'microsoft.com': return i18n.t('auth:providerMicrosoft');
     case 'password': return i18n.t('auth:providerPassword');
     default: return providerId;
   }
@@ -210,6 +211,20 @@ async function ensureInitAsync(): Promise<Auth | null> {
         setCurrentIdToken(null);
       }
     });
+    // The sync fetch path can SEE that the cached token expired but cannot await a
+    // new one, so it calls this. The SDK's proactive refresh is a `setTimeout` and
+    // is throttled in background tabs — without a demand-driven path, a backgrounded
+    // session keeps posting a dead JWT until that timer finally fires. `true` forces
+    // past the SDK's own cache; the result lands via `onIdTokenChanged` above (and
+    // directly, in case the value is unchanged and no event fires).
+    registerIdTokenRefresher(() => {
+      const u = auth?.currentUser ?? cachedUser;
+      if (!u) return;
+      void u.getIdToken(true).then(
+        (token) => setCurrentIdToken(token),
+        () => { /* offline / revoked — the cooldown throttles the retry */ },
+      );
+    });
     return auth;
   })();
   return initPromise;
@@ -220,6 +235,9 @@ export interface AuthUser {
   email: string | null;
   displayName: string | null;
   photoURL: string | null;
+  /** Federated provider ids on the account ('google.com', 'microsoft.com', …) —
+   *  lets first-run surfaces seed vendor defaults from how the user signed in. */
+  providerIds: readonly string[];
 }
 
 function project(u: User | null): AuthUser | null {
@@ -229,6 +247,7 @@ function project(u: User | null): AuthUser | null {
     email: u.email,
     displayName: u.displayName,
     photoURL: u.photoURL,
+    providerIds: u.providerData.map((p) => p.providerId),
   };
 }
 
@@ -253,6 +272,23 @@ export async function signInWithGithub(): Promise<void> {
   await authMod.signInWithRedirect(a, new authMod.GithubAuthProvider());
 }
 
+/** Same as `signInWithGoogle`, for Microsoft (Entra ID / personal accounts).
+ *  Requires the operator to enable the Microsoft provider in the Firebase
+ *  console (an Azure app registration) AND to build with
+ *  `VITE_AUTH_MICROSOFT=true` — the button is gated on that flag so hosts
+ *  without the Azure app never show a dead sign-in path. */
+export async function signInWithMicrosoft(): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod) throw new Error('Firebase Auth not configured');
+  setAttemptedProvider('microsoft.com');
+  await authMod.signInWithRedirect(a, new authMod.OAuthProvider('microsoft.com'));
+}
+
+/** Build-time opt-in for the Microsoft sign-in button (see above). */
+export function microsoftSignInEnabled(): boolean {
+  return Boolean(import.meta.env.VITE_AUTH_MICROSOFT);
+}
+
 // ─── Email/password (ADR 0026 — Firebase owns credentials, not the host) ──────
 // These resolve IN-PAGE (no redirect), so `onIdTokenChanged` fires immediately
 // and the caller (AuthCard) runs `finalizeFirebaseSession()` itself rather than
@@ -270,11 +306,18 @@ export async function signUpWithEmail(email: string, password: string, displayNa
   try { await authMod.sendEmailVerification(cred.user); } catch { /* non-fatal — user can resend */ }
 }
 
-/** Sign in with a Firebase email/password account. */
+/** Sign in with a Firebase email/password account. Throws `MfaRequiredError`
+ *  when the account has an enrolled second factor (ADR 0389 P1) — the caller
+ *  prompts for the authenticator code and calls `completeMfaSignIn(code)`. */
 export async function signInWithEmail(email: string, password: string): Promise<void> {
   const a = await ensureInitAsync();
   if (!a || !authMod) throw new Error('Firebase Auth not configured');
-  await authMod.signInWithEmailAndPassword(a, email, password);
+  try {
+    await authMod.signInWithEmailAndPassword(a, email, password);
+  } catch (err) {
+    if (stashMfaChallenge(a, err)) throw new MfaRequiredError();
+    throw err;
+  }
 }
 
 /** Send a Firebase password-reset email (Firebase mints + delivers the link). */
@@ -305,6 +348,9 @@ export function describeAuthError(err: unknown): string {
     case 'auth/user-not-found': return i18n.t('auth:errInvalidCredential');
     case 'auth/too-many-requests': return i18n.t('auth:errTooManyRequests');
     case 'auth/operation-not-allowed': return i18n.t('auth:errOperationNotAllowed');
+    // ADR 0389 P1 — TOTP enrollment / challenge
+    case 'auth/invalid-verification-code': return i18n.t('auth:errInvalidMfaCode');
+    case 'auth/requires-recent-login': return i18n.t('auth:errRequiresRecentLogin');
     case 'auth/network-request-failed': return i18n.t('auth:errNetworkRequestFailed');
     default: return err instanceof Error && err.message ? err.message : i18n.t('auth:errGeneric');
   }
@@ -387,6 +433,12 @@ export async function processRedirectResult(): Promise<RedirectState> {
     return { kind: 'success', linked };
   } catch (err) {
     console.warn('openwop.auth: getRedirectResult threw', err);
+    // ADR 0389 P1: an OAuth redirect back for an MFA-enrolled account raises
+    // the second-factor challenge here. Stash the resolver; the sign-in UI
+    // detects MfaRequiredError and prompts for the authenticator code.
+    if (stashMfaChallenge(a, err)) {
+      return { kind: 'error', error: new MfaRequiredError() };
+    }
     type FbError = { code?: string; customData?: { email?: string } };
     const e = err as FbError;
     if (e.code === 'auth/account-exists-with-different-credential' && e.customData?.email && attemptedProvider) {
@@ -405,6 +457,158 @@ export async function processRedirectResult(): Promise<RedirectState> {
     }
     return { kind: 'error', error: err instanceof Error ? err : new Error(String(err)) };
   }
+}
+
+// ─── TOTP multi-factor (ADR 0389 P1 — Firebase-delegated; the host never sees
+// factor material, it only reads the resulting `firebase.sign_in_second_factor`
+// ID-token claim). Enrollment is a two-step client↔Firebase exchange; the
+// un-finalized TotpSecret lives ONLY in this module-scoped variable (never
+// sessionStorage — it's shared-secret material) and dies with the page.
+
+let pendingTotpSecret: TotpSecret | null = null;
+/** The in-flight MFA sign-in challenge (auth/multi-factor-auth-required).
+ *  Stashed so the code-entry UI can finish the sign-in via
+ *  `completeMfaSignIn()`. In-memory only — a page reload restarts sign-in. */
+let pendingMfaResolver: MultiFactorResolver | null = null;
+
+/** Raised when sign-in requires a second factor. The UI catches this, prompts
+ *  for the 6-digit authenticator code, and calls `completeMfaSignIn(code)`. */
+export class MfaRequiredError extends Error {
+  constructor() {
+    super(i18n.t('auth:mfaCodeRequired'));
+    this.name = 'MfaRequiredError';
+  }
+}
+
+/** One enrolled second factor, projected for the Security page. */
+export interface MfaFactor {
+  uid: string;
+  displayName: string | null;
+  enrolledAt: string | null;
+}
+
+/** Enrolled second factors of the signed-in user ([] when none / signed out). */
+export async function listMfaFactors(): Promise<MfaFactor[]> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod || !a.currentUser) return [];
+  return authMod.multiFactor(a.currentUser).enrolledFactors.map((f) => ({
+    uid: f.uid,
+    displayName: f.displayName ?? null,
+    enrolledAt: f.enrollmentTime ?? null,
+  }));
+}
+
+/**
+ * Step 1 of TOTP enrollment: mint a fresh shared secret with Firebase. Returns
+ * the base32 key (manual entry) + the `otpauth://` URL (authenticator-app
+ * deep link). The secret is held module-scoped until `completeTotpEnrollment`.
+ * Throws Firebase `auth/operation-not-allowed` when the project hasn't been
+ * upgraded to Identity Platform with TOTP enabled — surface it with the
+ * operator hint, don't swallow it.
+ */
+export async function startTotpEnrollment(): Promise<{ secretKey: string; otpauthUrl: string }> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod || !a.currentUser) throw new Error(i18n.t('auth:errNotSignedIn'));
+  const session = await authMod.multiFactor(a.currentUser).getSession();
+  const secret = await authMod.TotpMultiFactorGenerator.generateSecret(session);
+  pendingTotpSecret = secret;
+  const accountName = a.currentUser.email ?? a.currentUser.uid;
+  return {
+    secretKey: secret.secretKey,
+    otpauthUrl: secret.generateQrCodeUrl(accountName, 'OpenWOP'),
+  };
+}
+
+/** Step 2: verify the user's first authenticator code and finalize enrollment. */
+export async function completeTotpEnrollment(code: string, displayName?: string): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod || !a.currentUser) throw new Error(i18n.t('auth:errNotSignedIn'));
+  if (!pendingTotpSecret) throw new Error(i18n.t('auth:mfaNoPendingEnrollment'));
+  const assertion = authMod.TotpMultiFactorGenerator.assertionForEnrollment(pendingTotpSecret, code);
+  await authMod.multiFactor(a.currentUser).enroll(assertion, displayName);
+  pendingTotpSecret = null;
+}
+
+/** Abandon an in-flight enrollment (dialog closed) — drops the secret. */
+export function cancelTotpEnrollment(): void {
+  pendingTotpSecret = null;
+}
+
+/** Remove an enrolled factor. Firebase may demand a recent sign-in
+ *  (`auth/requires-recent-login`) — surfaced to the caller. */
+export async function unenrollMfaFactor(factorUid: string): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod || !a.currentUser) throw new Error(i18n.t('auth:errNotSignedIn'));
+  await authMod.multiFactor(a.currentUser).unenroll(factorUid);
+}
+
+/** Detect + stash the second-factor challenge from a failed sign-in. Returns
+ *  true when the error was the MFA challenge (caller should then raise
+ *  `MfaRequiredError` / show the code prompt). */
+function stashMfaChallenge(a: Auth, err: unknown): boolean {
+  const am = authMod;
+  if (!am) return false;
+  if ((err as { code?: string })?.code !== 'auth/multi-factor-auth-required') return false;
+  pendingMfaResolver = am.getMultiFactorResolver(
+    a,
+    err as Parameters<AuthMod['getMultiFactorResolver']>[1],
+  );
+  return true;
+}
+
+/** One TOTP factor of the pending MFA challenge, projected for the picker UI. */
+export interface PendingMfaHint {
+  uid: string;
+  displayName: string | null;
+}
+
+/** The pending challenge's enrolled TOTP factors ([] when no challenge). Lets
+ *  the sign-in UI offer a device picker when more than one authenticator is
+ *  enrolled (USERS-UX-1) — asserting only the FIRST hint locked out a user who
+ *  lost that device but still holds the second. */
+export function getPendingMfaHints(): PendingMfaHint[] {
+  const am = authMod;
+  if (!pendingMfaResolver || !am) return [];
+  return pendingMfaResolver.hints
+    .filter((h) => h.factorId === am.TotpMultiFactorGenerator.FACTOR_ID)
+    .map((h) => ({ uid: h.uid, displayName: h.displayName ?? null }));
+}
+
+/**
+ * Pure hint selection (exported for unit tests — the Firebase resolver itself
+ * needs a live challenge). An explicit `factorUid` selects EXACTLY that hint —
+ * `null` when absent, never silently a different device; without one, the
+ * single/first hint is the default (the pre-picker behavior).
+ */
+export function selectTotpHint<H extends { uid: string }>(
+  hints: readonly H[],
+  factorUid?: string,
+): H | null {
+  if (factorUid !== undefined) return hints.find((h) => h.uid === factorUid) ?? null;
+  return hints[0] ?? null;
+}
+
+/** Finish an MFA-challenged sign-in with the 6-digit authenticator code.
+ *  `factorUid` (from `getPendingMfaHints()`) picks WHICH enrolled authenticator
+ *  the code belongs to; omitted, the single/first TOTP hint is asserted. */
+export async function completeMfaSignIn(code: string, factorUid?: string): Promise<void> {
+  const a = await ensureInitAsync();
+  if (!a || !authMod) throw new Error('Firebase Auth not configured');
+  if (!pendingMfaResolver) throw new Error(i18n.t('auth:mfaNoPendingChallenge'));
+  const am = authMod;
+  const totpHints = pendingMfaResolver.hints.filter(
+    (h) => h.factorId === am.TotpMultiFactorGenerator.FACTOR_ID,
+  );
+  const totpHint = selectTotpHint(totpHints, factorUid);
+  if (!totpHint) throw new Error(i18n.t('auth:mfaNoTotpFactor'));
+  const assertion = am.TotpMultiFactorGenerator.assertionForSignIn(totpHint.uid, code);
+  await pendingMfaResolver.resolveSignIn(assertion);
+  pendingMfaResolver = null;
+}
+
+/** Whether an MFA sign-in challenge is pending (for UI state restoration). */
+export function hasPendingMfaChallenge(): boolean {
+  return pendingMfaResolver !== null;
 }
 
 export async function signOut(): Promise<void> {

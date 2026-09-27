@@ -1,4 +1,7 @@
 export const messages = {
+  compatOrgsFailed: 'No se han podido cargar tus organizaciones, así que no se ha podido leer la lista de endpoints. Es una lectura fallida: no significa que no haya endpoints configurados.',
+  compatRetry: 'Reintentar',
+  compatNoOrgs: 'Aún no hay ninguna organización: crea una para añadir un endpoint autoalojado.',
   rtGeminiAssurance: 'Gemini Live bloquea tu persona y herramientas en el servidor, pero la ejecución de herramientas y las transcripciones pasan por el navegador: menor garantía, no recomendado para inquilinos de gobernanza o auditoría. OpenAI Realtime las mantiene en el servidor.',
   // ADR 0141 real-time voice settings
   rtTitle: "Voz en tiempo real",
@@ -7,7 +10,10 @@ export const messages = {
   rtProviderOff: "Desactivado (voz grabada)",
   rtKey: "Clave de API",
   rtKeySelect: "Selecciona una clave guardada…",
+  rtKeysUnreadable: "No se pudieron cargar tus claves guardadas, así que esta tarjeta no puede saber si la clave configurada aún existe. Nada aquí es un veredicto sobre tu configuración: vuelve a cargar para comprobarlo.",
   rtNoKeys: "Primero añade una clave arriba.",
+  rtKeyMissing: "{{ref}} — no encontrada",
+  rtKeyMissingWarning: "Este espacio está configurado para usar la clave \"{{ref}}\", pero esa clave ya no existe. La voz en tiempo real no podrá iniciarse hasta que elijas una clave que siga guardada.",
   rtSave: "Guardar",
   rtSaving: "Guardando…",
   rtSaved: "Configuración de voz en tiempo real guardada.",
@@ -52,6 +58,9 @@ export const messages = {
   disconnect: 'Desconectar',
   deleteKeyLabel: 'Eliminar clave',
   disconnectAction: 'Desconectar',
+  stopUsingAction: 'Dejar de usar',
+  stopUsingLabel: 'Dejar de usar {{provider}} en este chat',
+  subscriptionModelLabel: '{{model}} · conectado mediante GitHub',
   deleteAction: 'Eliminar',
 
   // KeyEntry
@@ -68,6 +77,24 @@ export const messages = {
   storing: 'Guardando…',
   storeKey: 'Guardar clave',
   back: 'Atrás',
+  // ADR 0517 open question 1 — claves duplicadas por proveedor: inertes pero invisibles.
+  duplicateKeysWithActive_one: 'Tu chat usa {{active}}. La otra clave guardada aquí está inactiva; puedes eliminarla sin riesgo.',
+  duplicateKeysWithActive_other: 'Tu chat usa {{active}}. Las otras {{count}} guardadas aquí están inactivas; puedes eliminarlas sin riesgo.',
+  duplicateKeysNoneActive: 'Hay {{count}} claves de {{provider}} guardadas y tu chat no está vinculado a ninguna. Elige una en el chat o elimina las que ya no necesites.',
+  duplicateKeysUnknownActive: 'Hay {{count}} claves de {{provider}} guardadas. No pudimos leer cuál usa tu chat, así que compruébalo allí antes de eliminar ninguna.',
+  // ADR 0517 fix A — reutilizar una clave guardada en vez de volver a pedirla.
+  savedKeyFound: 'Ya tienes una clave de {{provider}} guardada',
+  savedKeyExplain: 'Está guardada en el servidor para este espacio de trabajo. Vuelve a conectarla: no hace falta pegarla otra vez.',
+  savedKeyUse: 'Usar mi clave guardada',
+  savedKeyUsing: 'Conectando…',
+  savedKeyReplaceHint: 'Introduce una clave abajo solo si quieres SUSTITUIR la guardada.',
+  replaceKey: 'Sustituir clave',
+  // ADR 0517 fix D — una sesión caducada no es una clave que falte.
+  sessionExpiredTitle: 'Tu sesión ha terminado',
+  sessionExpiredBody: 'Vuelve a iniciar sesión para reconectar este espacio de trabajo. Tu clave de API sigue guardada en el servidor: no necesitas volver a introducirla.',
+  sessionExpiredSignIn: 'Volver a iniciar sesión',
+  sessionExpiredSigningIn: 'Iniciando sesión…',
+  sessionExpiredUseKey: 'Configurar una clave',
 
   // ModelGrid
   modelIdRequired: 'El id del modelo es obligatorio.',
@@ -94,12 +121,11 @@ export const messages = {
   byokTitle: 'Use su propia clave (BYOK)',
   byokAbbrTitle: 'Bring Your Own Key',
   byokLedeBefore: 'significa que usted aporta la clave de API del proveedor de modelos que elija a continuación. El proveedor le factura directamente por su uso; OpenWOP no le cobra ni se queda una parte. El servidor reenvía cada solicitud al proveedor usando su clave y luego transmite la respuesta de vuelta.',
-  byokFineprintBefore: 'Su clave se almacena en el servidor (respaldada por sqlite, cifrada en reposo con AES-256-GCM) y se envía solo al proveedor que haya elegido. Establezca',
+  byokFineprintTrust: 'Su clave se almacena en el servidor (cifrada en reposo con AES-256-GCM) y se envía solo al proveedor que haya elegido.',
+  byokFineprintOperatorEyebrow: 'Para operadores',
+  byokFineprintBefore: 'Establezca',
   byokFineprintMid: 'en el servidor para cambiar a un modo solo en memoria que se borra al reiniciar. Los hosts de producción sustituyen este almacenamiento por un servicio gestionado de gestión de claves (KMS) como AWS KMS, GCP KMS o HashiCorp Vault: consulte',
   byokFineprintAfter: 'para conocer el patrón del adaptador.',
-  getProviderKey: 'Obtener una clave de API de {{provider}} →',
-
-  // KeysPage
   settingsEyebrow: 'Ajustes',
   apiKeysTitle: 'Claves de API',
   apiKeysLede: 'Gestione las claves de API que usan sus flujos de trabajo. Cada clave se almacena en el servidor (cifrada en reposo); los despachadores del chat y de los nodos de flujo de trabajo hacen referencia a una clave por su etiqueta. Añada varias claves por proveedor (p. ej., claves separadas de prod/test) y elija cuál usa un nodo de flujo de trabajo concreto desde el editor.',
@@ -142,22 +168,25 @@ export const messages = {
   labelFieldHint: '(se usa para identificar la clave en los nodos de flujo de trabajo)',
   labelPlaceholder: 'prod, test, personal, …',
   willBeStoredAs: 'Se almacenará como',
-  keyPlaceholderDefault: 'pegue aquí su clave',
+  keyPlaceholderDefault: 'Clave de API',
   getKeyFromProvider: 'Obtener una clave de {{provider}}',
   saving: 'Guardando…',
   saveKey: 'Guardar clave',
 
   // Clave de búsqueda web (ADR 0101 Fase 3)
+  searchAnswerOnly: 'Búsqueda: solo chat',
+  searchAnswerOnlyHint: 'La búsqueda web integrada de este proveedor puede fundamentar respuestas del chat, pero sus resultados no se pueden guardar como citas: las funciones que almacenan evidencia (como la Challenge Factory) necesitan una clave de búsqueda web abajo.',
   webSearch: {
     title: 'Búsqueda web',
     configured: 'Clave configurada',
-    body: 'Opcional. Una clave de proveedor de búsqueda (Brave, Tavily, …) permite a los agentes buscar en la web en el nivel gratuito o con proveedores sin búsqueda nativa. Los proveedores con grounding nativo (p. ej. Gemini) usan tu propia clave de modelo: no hace falta clave aquí.',
+    body: "Opcional. Una clave de proveedor de búsqueda permite a los agentes buscar en la web y es lo que hace funcionar las funciones que GUARDAN fuentes como evidencia (hoy, la Challenge Factory). Se admiten Exa, Brave y Tavily: pega cualquiera de sus claves y detectamos cuál es. El crédito gratuito de Exa cubre unas 2.800 búsquedas. Los proveedores con grounding nativo (p. ej. Gemini) usan tu propia clave de modelo para las respuestas del chat, pero sus resultados no se pueden guardar como citas.",
     keyLabel: 'Clave API del proveedor de búsqueda',
     placeholder: 'pega tu clave del proveedor de búsqueda',
   },
 
   // Endpoints autoalojados / compatibles con OpenAI (RFC 0108 / ADR 0121)
   compatTitle: 'Endpoints autoalojados / compatibles con OpenAI',
+  compatLoading: 'Cargando endpoints…',
   compatIntro: 'Conecta Ollama, LM Studio, vLLM o cualquier API compatible con OpenAI mediante la URL base (con una clave opcional). Declara lo que admite el endpoint: el host no puede sondear un endpoint privado, así que las capacidades se toman de lo que indiques aquí.',
   compatOrg: 'Organización',
   compatHasKey: 'clave configurada',
@@ -178,4 +207,33 @@ export const messages = {
   compatSaved: 'Endpoint añadido',
   compatError: 'No se pudo guardar el endpoint.',
   compatReadOnly: 'Tiene acceso de solo lectura a los endpoints de esta organización.',
+
+  // RFC 0121 AT-OWN-RISK subscription credential (ADR 0180)
+  sub: {
+    title: 'Suscripción personal (bajo tu propio riesgo)',
+    intro: 'Reutiliza una suscripción de consumidor personal y no medida (p. ej. ChatGPT Plus) como credencial de proveedor en lugar de una clave de API medida. Solo está disponible porque este host se ha configurado para permitirlo.',
+    riskDisclosure: 'Reutilizar tu suscripción personal puede violar los términos de servicio del proveedor y arriesgar la suspensión de la cuenta. Es un riesgo que aceptas tú — la credencial se vincula solo a tu cuenta de usuario y nunca se comparte con tu equipo.',
+    providerLabel: 'Proveedor',
+    valueLabel: 'Credencial de suscripción',
+    valuePlaceholder: 'Credencial de suscripción',
+    valueHelp: 'El valor permanece en el host y se envía solo al endpoint configurado por el operador.',
+    acknowledge: 'Entiendo que reutilizar mi suscripción personal puede violar los términos de servicio del proveedor y arriesgar la suspensión de la cuenta.',
+    save: 'Vincular suscripción',
+    saved: 'Credencial de suscripción vinculada a tu cuenta de usuario.',
+    boundTitle: 'Credencial vinculada',
+  },
+  copilot: {
+    pickerTitle: 'Tus suscripciones',
+    pickerDesc: 'Chatea con tu plan de GitHub Copilot conectado.',
+    title: 'GitHub Copilot',
+    intro: 'Usa tu propio plan de GitHub Copilot para el chat en tu espacio de trabajo personal. Cada solicitud cuenta para tu cuota de Copilot.',
+    scopeNote: 'GitHub te pedirá que autorices esta aplicación. No solicita ningún permiso (scope), así que no puede leer tus repositorios ni tus datos privados.',
+    connect: 'Conectar GitHub Copilot',
+    disconnect: 'Desconectar',
+    connected: 'GitHub Copilot está conectado a tu cuenta.',
+    disconnected: 'GitHub Copilot está desconectado.',
+    error: 'No se pudo conectar GitHub Copilot. Inténtalo de nuevo y asegúrate de haber iniciado sesión con la misma cuenta.',
+    personalOnly: 'Disponible solo en tu espacio de trabajo personal.',
+  },
+  getProviderKey: 'Obtener una clave de API de {{provider}} →',
 } as const;

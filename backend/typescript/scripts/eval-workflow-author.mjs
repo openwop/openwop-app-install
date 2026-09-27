@@ -9,8 +9,9 @@
  *   - structurally sane?     (>=1 node; every edge references declared nodes)
  *
  * Talks to a RUNNING app over HTTP (no in-process boot), so point it at a local
- * dev server or the deployed demo. The app MUST have the `workflow-author`
- * toggle ON and an AI provider configured (managed key or the caller's BYOK).
+ * dev server or the deployed demo. `workflow-author` is always-on (its toggle was
+ * retired), so the app only needs an AI provider configured (managed key or the
+ * caller's BYOK).
  *
  * Usage:
  *   OPENWOP_EVAL_BASE_URL=http://localhost:8080 \
@@ -37,7 +38,7 @@ const INTENTS = [
 
 if (!BASE) {
   console.log('⊘ eval-workflow-author: skipped — set OPENWOP_EVAL_BASE_URL to a running app');
-  console.log('  (the app must have the `workflow-author` toggle ON and an AI provider configured)');
+  console.log('  (`workflow-author` is always-on — the app just needs an AI provider configured)');
   process.exit(0);
 }
 
@@ -64,7 +65,7 @@ async function draft(intent) {
   const r = await fetch(url('/v1/host/openwop-app/workflow-author/draft'), {
     method: 'POST', headers, body: JSON.stringify({ intent }),
   });
-  if (r.status === 404) throw new Error('feature not enabled (turn the `workflow-author` toggle ON for this caller)');
+  if (r.status === 404) throw new Error('workflow-author draft route not found (404) — check OPENWOP_EVAL_BASE_URL points at an app serving this build (the feature is always-on; its toggle was retired)');
   if (!r.ok) throw new Error(`draft → ${r.status}: ${await r.text()}`);
   return r.json();
 }

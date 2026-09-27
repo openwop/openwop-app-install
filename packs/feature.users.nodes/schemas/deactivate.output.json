@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.users.nodes/1.0.1/deactivate.output.json",
+  "title": "UsersDeactivateOutput",
+  "description": "Ids-only outcome. A refusal (no acting user, missing scope, disabled actor, self-lockout, unknown target) is a TYPED node failure, never a success with a stale status.",
+  "type": "object",
+  "required": [
+    "userId",
+    "status"
+  ],
+  "properties": {
+    "userId": {
+      "type": "string",
+      "description": "The account acted on."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "disabled"
+      ],
+      "description": "The account's status after the write (`disabled` on success)."
+    }
+  },
+  "additionalProperties": false
+}

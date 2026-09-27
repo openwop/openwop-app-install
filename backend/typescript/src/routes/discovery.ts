@@ -6,17 +6,40 @@
  * for a real implementation.
  */
 
+import { oauthAdvertisementSnapshot, refreshOAuthAdvertisement } from '../features/connections/oauthAdvertisement.js';
+import { RUN_LIST } from '../host/runList.js';
+import { secretRotationOverlapSeconds, SUPPORTED_SIGNATURE_ALGORITHMS } from '../host/webhookStandardWebhooks.js';
 import { createHash } from 'node:crypto';
-import type { Express, Request } from 'express';
+import type { Express, Request, Response } from 'express';
 import { DEFAULT_SERVICE_DESCRIPTION, DEFAULT_SERVICE_VENDOR, type AppConfig } from '../index.js';
 import { requestOrigin } from '../host/requestOrigin.js';
-import { SUPPORTED_RUN_ENCODINGS } from '../host/restTransport.js';
+import { longTermMemoryDurable, memoryCapability } from '../host/memoryDimensions.js';
+import { contractProvenance } from '../host/contractProvenance.js';
+import { createLogger } from '../observability/logger.js';
+import {
+  certificationBundleUrl,
+  certificationBundleUrlV2,
+  conformanceClaims,
+  ensureCertificationEvidence,
+  evidenceFromOrigin,
+  servedBundle,
+  CERTIFICATION_BUNDLE_MAJOR2_PATH,
+  CERTIFICATION_BUNDLE_PATH,
+  CONFORMANCE_CLAIMS_PATH,
+} from '../host/conformanceClaims.js';
+import { SUPPORTED_RUN_ENCODINGS, ifNoneMatchSatisfied } from '../host/restTransport.js';
+import { minClientVersion, preferredVersion, protocolVersions, VENDOR_ROOT, PROTOCOL_VERSION_V1, negotiatedMajor, v1 } from '../middleware/protocolVersion.js';
+import { EVENT_LOG_SCHEMA_VERSION } from '../storage/eventEra.js';
+import { INTERRUPT_TOKEN_ALGS } from '../host/interruptToken.js';
+import { defaultRetentionDays } from '../storage/runRetentionStamp.js';
 import { a2uiDeltaTransportEnabled } from '../host/a2uiSurfaceDelta.js';
 import { MAX_MULTI_PARTY_PARTICIPANTS } from '../host/multiPartyConversation.js';
 import { channelPresenceEnabled } from '../features/channels/routes.js';
 import { listCapabilities } from '../executor/runtimeCapabilities.js';
+import { RUN_DURATION_CEILING_MS } from '../executor/executor.js';
 import { demoMode } from '../host/demoMode.js';
-import { hostI18nEnabled, hostDefaultLocale, hostSupportedLocales } from '../host/i18n/index.js';
+import { registerV2Extension, v2Extensions } from '../host/discoveryExtensions.js';
+import { hostI18nEnabled, hostDefaultLocale, hostSupportedLocales, hostContentLocales } from '../host/i18n/index.js';
 import type { Storage } from '../storage/storage.js';
 import { listHostSurfaces } from '../bootstrap/hostSurfaceRegistry.js';
 import { universalEnvelopeKinds } from '../host/envelopeAcceptor.js';
@@ -24,24 +47,62 @@ import { evalSuiteEnabled } from '../host/workforceEval.js';
 import { MAX_INLINE_MEDIA_BYTES } from './mediaAssets.js';
 import { INPUT_MODALITIES } from '../aiProviders/aiProvidersHost.js';
 import { hostAdvertisedSelfHosted } from '../host/compatEndpoints.js';
-import { imageGenerationAdvertised } from '../aiProviders/aiProvidersHost.js';
+import { imageGenerationAdvertised, videoGenerationAdvertised, subscriptionAdvertisedProviders, buildProviderAuthModes, advertisedSubscriptionOnlyProviders } from '../aiProviders/aiProvidersHost.js';
+import { selfHostedRunnerAdvertised } from '../host/selfHostedRunner.js';
 import { getFsSandboxRoot } from '../host/inMemorySurfaces.js';
-import { samlConfigured } from '../host/auth/samlSso.js';
+import { workspaceAdvertisable } from '../host/workspaceReadiness.js';
+import {
+  SUBJECT_LINK_KEY,
+  subjectLinkRealmAlignment,
+  samlProfileAdvertised,
+  scimProfileAdvertised,
+  combinedSubjectLinkingActive,
+} from '../host/auth/subjectLinkService.js';
 import { listLoadedConformanceFixtures } from '../host/index.js';
 import { conformanceNodesEnabled } from '../bootstrap/conformanceMockAgent.js';
 import { getPromptsHostConfig } from '../host/promptHostConfig.js';
+import { workflowChainPacksCapability } from '../host/workflowChainPackLoader.js';
 import { getEnvelopeReasoningConfig } from '../host/envelopeReasoningConfig.js';
 import { getModelCapabilityGateConfig } from '../host/modelCapabilityGateConfig.js';
 import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
-import { authorizationCapability } from '../host/protocolAuthorization.js';
+import { authorizationCapability, SCOPES_SUPPORTED } from '../host/protocolAuthorization.js';
 import { registeredFeatureSurfaceIds } from '../host/featureSurfaces.js';
 import { listArtifactTypes } from '../host/artifactTypes.js';
-import { triggerIngestionEnabled, MAX_INGEST_BODY_BYTES } from '../host/triggerIngestionService.js';
+import { triggerIngestionEnabled, streamCdcIngestionEnabled, MAX_INGEST_BODY_BYTES } from '../host/triggerIngestionService.js';
+import { purposePropagationEnabled } from '../features/destination-sync/destinationSyncService.js';
+import { dataResidencyAdvertised, dataResidencyRegions } from '../features/cdp/dataResidency.js';
+import { anonymousActorAdvertised, anonymousActorCapability } from '../host/anonymousActor.js';
 import { activationMode as proposalsActivationMode } from '../features/proposals/proposalsService.js';
 import { requiresBounds as goalsRequiresBounds } from '../features/goals/goalsService.js';
 import { uiPluginsCapability } from '../host/uiPluginRpc.js';
 import { dispatchCapability } from '../host/dispatchFanOut.js';
 import { presentationEnabled } from '../host/hostProfile.js';
+import { readOidcConfigFromEnv, OIDC_REVOCATION_WINDOW_S } from '../middleware/oidcVerifier.js';
+import { PRM_SEGMENT } from '../middleware/authChallenge.js';
+// RFC 0152/0153 §A — the version SSoTs. Imported so the advert is DERIVED
+// from the same constants the refusal/handshake paths read.
+import { A2A_PROFILES, A2A_SUPPORTED_VERSIONS, advertisedA2AProtocolVersion } from '../host/a2aProfile.js';
+// RFC 0151 §A — the compensation SSoT. Same reason as the two above: the
+// ordering model advertised here is the one `compensationUnwind.ts` sorts by and
+// `workflowDefinitionValidation.ts` accepts at registration, because all three
+// read this constant rather than a literal of their own.
+import { seamsFloorServed } from './conformanceSeams.js';
+import { COMPENSATION_CAPABILITY } from '../host/compensationCapability.js';
+import { MCP_CURRENT_FEATURES, MCP_PROFILES, MCP_SUPPORTED_VERSIONS, advertisedMcpProtocolVersion } from '../host/mcpProfile.js';
+import {
+  SAFE_FETCH_MAX_RESPONSE_BODY_BYTES,
+  SAFE_FETCH_REQUEST_TIMEOUT_MS,
+} from '../host/connectionInjection.js';
+import { FORK_MODES } from '../host/forkModes.js';
+import { WEBHOOK_MAX_ATTEMPTS } from '../host/webhookDeliveryWorker.js';
+import { V2_A2UI_ENVELOPE_CATALOG, a2uiV2AdmissionReachable } from '../host/a2uiSurfaceAdmission.js';
+import { V2_EFFECT_SEAMS_PATH } from './effectSeams.js';
+import {
+  advertisedWorkloadSchemes,
+  readWorkloadIdentityConfigFromEnv,
+} from '../host/workloadIdentity.js';
+
+const discoveryLog = createLogger('routes.discovery');
 
 /**
  * Auth profiles this host actually SERVES (review finding #10 / ADR 0002 C1).
@@ -52,14 +113,524 @@ import { presentationEnabled } from '../host/hostProfile.js';
  * when a synthetic IdP is wired (`OPENWOP_TEST_SAML_IDP_URL`); SCIM when either
  * the real bearer-authed endpoints (`OPENWOP_SCIM_BEARER`) or the conformance
  * seam (`OPENWOP_TEST_SCIM_URL`) is configured.
+ *
+ * RFC 0164 (ADR 0623) makes the SCIM⟷SAML leaver contract MANDATORY: a host
+ * advertising BOTH `openwop-auth-saml` AND `openwop-auth-scim` MUST also derive
+ * `subjectLinking:true` + `subjectLinkKey` — "both profiles + no subjectLinking"
+ * is a conformance FAILURE (was `inapplicable`). We enforce that invariant
+ * STRUCTURALLY here, at the single source both consumers read: when both profiles
+ * would otherwise be advertised but the deployment cannot honour the combined
+ * contract as a whole (`!combinedSubjectLinkingActive()` — either the realms
+ * MISALIGN, i.e. a configured production SAML SP whose `OPENWOP_SAML_TENANT`
+ * differs from `scimLinkRealm()`, OR no shared trust root is configurable for the
+ * SCIM lane, i.e. neither `OPENWOP_SCIM_IDP_ENTITY_ID` nor the seam's
+ * `OPENWOP_TEST_SCIM_URL`), we DROP `openwop-auth-scim` (keeping SAML — the
+ * operator's deliberate production SSO login path; the SCIM bearer endpoint still
+ * functions, we simply stop advertising a cross-lane link that cannot hold). That
+ * makes "both profiles ⇒ subjectLinking:true" hold by construction: the host never
+ * advertises both profiles without the leaver guarantee, and the SAML-lane runtime
+ * fail-closed (`subject_link_unbound`) reads the SAME `combinedSubjectLinkingActive()`
+ * predicate, so advert and enforcement can never disagree.
  */
+/**
+ * ADR 0730 C.3a — the v2 `auth` family, derived from the SAME gates the v1
+ * `auth.profiles[]` advert uses (`advertisedAuthProfiles`), reshaped to the
+ * corpus's `lanes[]`. Every lane row is a CLAIM with four required fields, so a
+ * lane appears only when this deployment actually serves it:
+ *   - `api-key` and `session` are unconditional (the bearer + cookie front doors);
+ *   - `anonymous` rides the anon-actor surface;
+ *   - `oidc` / `saml` / `scim` follow their v1 gates exactly;
+ *   - `workload` follows the advertised workload schemes.
+ * `revocation` and `minimumAssurance` are stated conservatively: this host
+ * re-checks a session epoch per request (`next-request`), honours a SAML
+ * assertion's NotOnOrAfter, and issues no sender-constrained credential, so
+ * every lane is `bearer` assurance.
+ */
+/**
+ * ADR 0730 C.3a — the v2 `aiProviders` family.
+ *
+ * The corpus family types `authModes` as a flat mode VOCABULARY (`string[]`),
+ * where v1 carries a per-provider MAP (`{provider: modes[]}`). That is a real
+ * shape difference, not a rename, so the map does not fit here: the family gets
+ * the vocabulary, and the per-provider detail travels in this host's own
+ * extension record (the `hostSurfaces` pattern — a host-specific fact belongs
+ * under `extensions`, not smuggled into a core facet).
+ */
+function v2AiProvidersFamily(): Record<string, unknown> {
+  const providers = ['anthropic', 'openai', 'google', 'minimax', ...hostAdvertisedSelfHosted(), ...advertisedSubscriptionOnlyProviders()];
+  const byProvider = subscriptionAdvertisedProviders();
+  const modes = new Set<string>(['api-key']);
+  if (byProvider.length > 0) modes.add('subscription');
+  return {
+    aiProviders: {
+      status: 'experimental',
+      since: '2.0',
+      until: '2.1',
+      witness: 'witnessable-gated',
+      providers,
+      authModes: [...modes],
+      // PHCD-3 — the accepted input modalities. Same owner the v1 root reads
+      // (`INPUT_MODALITIES`); without it a v2-only client cannot discover what
+      // this host accepts, which is a capability the schema declares and we
+      // simply were not answering.
+      input: { modalities: [...INPUT_MODALITIES] },
+      // SHAPE DIFFERS FROM v1, and copying the v1 expression here was a real
+      // defect the closed v2 schema caught: v1's `aiProviders.selfHosted` is the
+      // LIST of advertised self-hosted provider ids, v2's is a BOOLEAN
+      // (`capabilities.schema.json` → `aiProviders.properties.selfHosted`).
+      // Nothing is lost by the narrowing — the ids already ride `providers`
+      // above (line 151 spreads the same call), so v2 says "is a self-hosted
+      // class offered" and the identifiers stay discoverable.
+      selfHosted: hostAdvertisedSelfHosted().length > 0,
+    },
+  };
+}
+
+/**
+ * ADR 0730 C.3a — the per-provider subscription map the v2 `aiProviders` family
+ * cannot express. Registered as a v2 extension so the SPA's BYOK card has a v2
+ * home and stops needing the v1 discovery read.
+ */
+export function registerAiProvidersV2Extension(): void {
+  registerV2Extension('openwop-app.ai-providers', () => ({
+    subscriptionProviders: subscriptionAdvertisedProviders(),
+  }));
+}
+
+
+function v2AuthFamily(): Record<string, unknown> | null {
+  type Lane = { lane: string; issuers: string[]; revocation?: string; minimumAssurance: string; revocationWindowSeconds?: number };
+  const lanes: Lane[] = [
+    { lane: 'api-key', issuers: ['urn:openwop-app:env-key'], revocation: 'next-request', minimumAssurance: 'bearer' },
+    // The session lane IS the cookie. A deployment that disables cookies
+    // (`OPENWOP_AUTH_DISABLE_COOKIES`, the bearer-only posture) cannot
+    // authenticate a session at all, so advertising the lane there would claim a
+    // front door — and a revocation — that does not exist.
+    ...(process.env.OPENWOP_AUTH_DISABLE_COOKIES === 'true'
+      ? []
+      : [{ lane: 'session', issuers: ['urn:openwop-app:session'], revocation: 'next-request', minimumAssurance: 'bearer' }]),
+    // RFC 0170 owner ruling (openwop-77, 2026-09-26): an anonymous principal has
+    // no credential to revoke, and the lane schema makes `revocation` OPTIONAL on
+    // exactly this lane (#1540/#1553; the suite honours the omission from 2.39.x).
+    // Claiming `next-request` asserted a revocation nobody can perform.
+    { lane: 'anonymous', issuers: ['urn:openwop-app:anon'], minimumAssurance: 'bearer' },
+  ];
+  // THE OIDC LANE IS ADVERTISED WITH `exp-only` SINCE RFC 0210 (2026-09-23), and the
+  // history below is kept because it is the reason the member exists.
+  //
+  // What changed is the VOCABULARY, not this host's behaviour: RFC 0210 added
+  // `exp-only` — "honours `exp`, re-checks the trust root never" — which is exactly
+  // what `oidcVerifier.ts` does. Advertising it is honest where `exp-and-recheck` and
+  // `short-lived` were not, and it is not free: §B makes the window a bound this host
+  // MUST enforce, which `OidcVerifier.verify` now does on BOTH `exp − iat` and
+  // `exp − now`, refusing with the registered code `credential_lifetime_exceeded`.
+  // The window is read from the enforcement constant rather than restated here, the
+  // same discipline the `workload` lane below uses, so the number cannot drift from
+  // the refusal. (`exp-only` is schema-forbidden on `api-key` and `session`: there the
+  // host issued the credential itself, so revocation is in its own hands.)
+  //
+  // Gated on the verifier actually being configured — an advertised lane whose issuer
+  // this host does not verify against would be a lane nobody can use.
+  //
+  // --- the pre-0210 reasoning, preserved ---
+  //
+  // `identity.md` §2.2 assigns `oidc` the rule `exp-and-recheck` — "honor `exp`;
+  // re-check the issuer within the advertised `revocationWindowSeconds`" — and
+  // §2.2 further requires that window wherever the rule names one. C.3 asserted
+  // `exp-and-recheck` here and the major-2 conformance lane caught it
+  // (`v2-lane-issuer-advertised`), which is the scenario doing exactly its job:
+  // giving `auth` a v2 home un-skipped a probe that had never run.
+  //
+  // MEASURED: `middleware/oidcVerifier.ts` verifies signature, `iat`, `exp` and
+  // `nbf` and NOTHING else — no introspection, no userinfo, no revocation list.
+  // The subject is derived straight from the claims (`middleware/auth.ts:978`)
+  // with no host-side record consulted, and the code there notes a pre-MFA token
+  // "stays valid ~1h". A revoked user's token is accepted until its own `exp`.
+  // So there is no window to advertise: any integer would tell a verifier that
+  // revocation takes effect within it, which is false.
+  //
+  // The `revocation` enum has no value meaning "honours `exp`, never rechecks":
+  // `next-request` promises a per-request refusal this host does not perform,
+  // and `short-lived` promises a credential lifetime this host does not mint and
+  // cannot bound. Reported upstream as a vocabulary gap. Until either the enum
+  // gains an honest value or this host implements a real recheck, the lane is
+  // OMITTED — under-claiming a lane the host serves, which is the safe
+  // direction, rather than over-claiming a revocation latency it does not have.
+  //
+  // (No `void readOidcConfigFromEnv` guard is needed: the import stays live for
+  // the v1 advert at `:312` and `:379`. An earlier cut had one, which read as
+  // "referenced deliberately to silence an unused warning" and was simply
+  // false.)
+  const oidc = readOidcConfigFromEnv();
+  if (oidc) {
+    lanes.push({
+      lane: 'oidc',
+      issuers: [oidc.issuer],
+      revocation: 'exp-only',
+      revocationWindowSeconds: OIDC_REVOCATION_WINDOW_S,
+      minimumAssurance: 'bearer',
+    });
+  }
+  if (samlProfileAdvertised()) lanes.push({ lane: 'saml', issuers: samlIssuersForAdvert(), revocation: 'not-on-or-after', minimumAssurance: 'bearer' });
+  if (scimProfileAdvertised()) lanes.push({ lane: 'scim', issuers: samlIssuersForAdvert(), revocation: 'next-request', minimumAssurance: 'bearer' });
+  // The workload lane is advertised per SCHEME, and only when a trust root for
+  // it is configured — the same gate `workloadIdentityCapability()` uses on v1.
+  const wl = readWorkloadIdentityConfigFromEnv();
+  if (wl) {
+    for (const scheme of advertisedWorkloadSchemes(wl)) {
+      // CORRECTED 2026-09-23 (ADR 0743) — this advertised `short-lived` with a
+      // window, borrowing the MTLS row's rule. §2.2's `workload` row names exactly
+      // one rule, `delegation-expiry` ("enforce `delegation_expired`"), and a host
+      // MUST NOT advertise a rule its lane's row does not list — the 2.36 suite's
+      // `v2-lane-issuer-advertised` reds on it. The host does enforce that rule
+      // (`workloadIdentity.ts` refuses `delegation_expired`), and the rule names no
+      // window, so none is advertised. The mint-time ceiling (MAX_CREDENTIAL_TTL_S)
+      // is still enforced; it just is not what this lane's row asks a host to state.
+      lanes.push({
+        lane: 'workload',
+        issuers: [scheme],
+        revocation: 'delegation-expiry',
+        minimumAssurance: 'bearer',
+      });
+    }
+  }
+  return {
+    auth: {
+      status: 'experimental',
+      since: '2.0',
+      until: '2.1',
+      // `seam-gated` per spec/v2/declaration.json — the SAML/SCIM legs are
+      // witnessed through the operator-supplied synthetic IdP seam.
+      witness: 'seam-gated',
+      lanes,
+      // RFC 0163 §B — the identifier the SAML and SCIM lanes are joined on.
+      subjectLinkKey: 'opaque-idp',
+    },
+  };
+}
+
+/** The issuer list a lane advert may state: the configured SCIM trust root, else the synthetic-IdP seam's, else a self-describing urn. */
+function samlIssuersForAdvert(): string[] {
+  const configured = process.env.OPENWOP_SCIM_IDP_ENTITY_ID;
+  if (typeof configured === 'string' && configured.length > 0) return [configured];
+  return ['urn:openwop-app:saml-idp'];
+}
+
+/** ADR 0730 C.3a — the v2 `prompts` family from the SAME config the v1 root spreads (`getPromptsHostConfig`). Absent when the host serves no prompt surface. */
+/**
+ * v2 dropped `supported` from EVERY facet — `"supported"` appears **0** times in
+ * `schemas/v2/capabilities.schema.json`, against 175 in v1. Presence of the
+ * object is the claim now.
+ *
+ * The v1 owners still carry it, at the family level AND nested inside each
+ * facet (`attribution: { supported, emitsWriteEvents }`). This strips it at
+ * every depth rather than re-typing the facets by hand, because a hand-written
+ * v2 copy is a second source of truth for the same fact — which is exactly how
+ * `aiProviders.selfHosted` shipped a v1 `string[]` into a v2 `boolean` field.
+ *
+ * WHD-7 — THIS IS A MIRROR, AND IT IS A MIRROR ON PURPOSE. The corpus now ships
+ * the function (`@openwop/openwop-conformance/src/lib/v2-projection.ts`,
+ * `stripSupported()`), and the obvious adoption — import it — is not available
+ * to this file: the conformance package is a devDependency, and the runtime
+ * image is built with `npm ci --omit=dev` (Dockerfile:85), so a `src/` import of
+ * it typechecks, passes every test, and then fails to resolve at boot in the
+ * only place that matters. (`workflowChainPackLoader.ts` records the last time
+ * that exact trap shipped — ADR 0550 P2, an advertised seam answering 404.)
+ *
+ * So the function stays here and is PINNED instead:
+ * `test/whd7-v2-projection-parity.test.ts` imports both and asserts they agree
+ * on this host's real v1 document, which is the adoption a devDependency allows.
+ * For that to be an equality rather than an approximation this had to stop
+ * being a looser re-derivation — it recursed into objects but not ARRAYS, and
+ * ignored `required[]` — so both arms below follow the corpus line for line. If
+ * the corpus function moves, that test reds and this is what gets edited.
+ */
+export function stripSupported(value: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (k === 'supported') continue;
+    out[k] = stripSupportedAtDepth(v);
+  }
+  // A `required` list naming `supported` keeps a retired field mandatory. No
+  // advert VALUE carries one today — this arm is the schema-fragment half of the
+  // corpus function, kept so the two agree on every input and not only on the
+  // inputs this host happens to feed it.
+  const required = out['required'];
+  if (Array.isArray(required)) {
+    const kept = required.filter((r: unknown) => r !== 'supported');
+    if (kept.length > 0) out['required'] = kept;
+    else delete out['required'];
+  }
+  return out;
+}
+
+/** The `unknown`-typed half of {@link stripSupported}: arrays are walked, scalars pass through, objects recurse. */
+function stripSupportedAtDepth(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((v: unknown) => stripSupportedAtDepth(v));
+  if (value === null || typeof value !== 'object') return value;
+  // `{ ...value }` widens `object` to the index signature without a cast — the
+  // same move `v2MemoryFamily` makes below, for the same reason.
+  return stripSupported({ ...value });
+}
+
+/**
+ * ADR 0730 / PHCD-1 — `memory` at major 2. Derived from `memoryCapability()`,
+ * the same owner the v1 root reads (`host/memoryDimensions.ts`), so the two
+ * majors cannot disagree about what this host does.
+ *
+ * `witness: 'witnessable-gated'` is NOT chosen here — it is what
+ * `schemas/v2/declaration.json` assigns this family. Picking a different one
+ * would be a claim about how the family can be proven, which is the corpus's
+ * call, not ours.
+ */
+function v2MemoryFamily(): Record<string, unknown> | null {
+  const cap = memoryCapability();
+  if (!cap.supported) return null;
+  // `{ ...cap }` widens the typed record to the index signature `stripSupported`
+  // needs without an `as unknown as` cast — the object really does have string
+  // keys, so nothing is being asserted that the type system cannot see.
+  return {
+    memory: {
+      status: 'experimental',
+      since: '2.0',
+      until: '2.1',
+      witness: 'witnessable-gated',
+      ...stripSupported({ ...cap }),
+    },
+  };
+}
+
+/**
+ * ADR 0730 / PHCD-1 — `envelopes` at major 2. `reasoning` comes from
+ * `getEnvelopeReasoningConfig()` (the v1 root's own source) and the Tier-1
+ * posture from the single `TIER_ONE_SUBSET_COMPLIANCE` constant above.
+ *
+ * `witness: 'claims-check'` per the declaration — this family is a self-attested
+ * posture, and the corpus classifies it as one.
+ */
+function v2EnvelopesFamily(): Record<string, unknown> {
+  const reasoning = getEnvelopeReasoningConfig();
+  return {
+    envelopes: {
+      status: 'experimental',
+      since: '2.0',
+      until: '2.1',
+      witness: 'claims-check',
+      reasoning: { promptDirective: reasoning.promptDirective },
+      tierOneSubsetCompliance: TIER_ONE_SUBSET_COMPLIANCE,
+    },
+  };
+}
+
+/**
+ * RFC 0209 / ADR 0749 — the major-2 envelope-kind catalog (`events.md`
+ * §"The envelope-kind catalog"): `supportedEnvelopes`, `schemaVersions` and
+ * `envelopeStrictness`, printed from `V2_A2UI_ENVELOPE_CATALOG` — the SAME
+ * constant `host/a2uiSurfaceAdmission.ts` admits against, so the advert cannot
+ * claim a kind, a floor or a mode the admission does not enforce.
+ *
+ * `kinds` lists `ui.a2ui-surface` alone: it is the only non-universal kind with
+ * a major-2 admission path. `media.*` stays a v1 claim (the v1 root still lists
+ * it) until something at major 2 admits it. The floor is 2, so a version-1
+ * surface is below the floor and — under `warn` — validated against version 2.
+ * v1 keeps its own floor of 1 (`buildAdvertisement`); the majors are separate
+ * contracts. NEVER add `a2uiSurface.deltaTransport` here: RFC 0209 §D.15
+ * deprecates the delta frame for major 2 (a v2 host SHOULD NOT advertise it).
+ */
+function v2EnvelopeCatalogFamilies(since: string, until: string): Record<string, unknown> {
+  // Advertised only where something admits the kind (see `a2uiV2AdmissionReachable`).
+  if (!a2uiV2AdmissionReachable()) return {};
+  return {
+    supportedEnvelopes: { status: 'experimental', since, until, witness: 'witnessable-gated', kinds: [...V2_A2UI_ENVELOPE_CATALOG.kinds] },
+    schemaVersions: { status: 'experimental', since, until, witness: 'witnessable-gated', kinds: { ...V2_A2UI_ENVELOPE_CATALOG.schemaVersions } },
+    envelopeStrictness: { status: 'experimental', since, until, witness: 'claims-check', mode: V2_A2UI_ENVELOPE_CATALOG.strictness },
+  };
+}
+
+function v2PromptsFamily(): Record<string, unknown> | null {
+  const cfg = getPromptsHostConfig();
+  if (!cfg.supported) return null;
+  // WHD-7 — through the ONE strip, not a second one. This destructured
+  // `supported` off the top level only, behind an `as unknown as` cast: correct
+  // for today's flat config, and silently wrong the day a facet grows a nested
+  // `supported` — the exact depth the v1 owners carry it at everywhere else.
+  return { prompts: { status: 'experimental', since: '2.0', until: '2.1', witness: 'witnessable-gated', ...stripSupported({ ...cfg }) } };
+}
+
+/**
+ * ADR 0745 D3 — the v2 `toolCatalog` family, under the SAME gate as the v1 record
+ * (`OPENWOP_MCP_SERVER_ENABLED`: the catalog projects the `mcp` source, and without
+ * the mount the routes 404). The unversioned `/tools` + `/tools/{toolId}` reach the
+ * v1 handlers through the manifest-derived rewrite (`middleware/protocolVersion.ts`),
+ * so this is one surface with two spellings, not a second implementation. Facets
+ * mirror v1 exactly; `sessionLifecycle` stays absent because no session events are
+ * emitted (`openwop-tool-session-lifecycle` is opted out in `conformance/run.ts`).
+ */
+function v2ToolCatalogFamily(): Record<string, unknown> | null {
+  if (process.env.OPENWOP_MCP_SERVER_ENABLED !== 'true') return null;
+  return {
+    toolCatalog: {
+      status: 'experimental', since: '2.0', until: '2.1', witness: 'witnessable-gated',
+      sources: ['mcp'],
+      ...(process.env.OPENWOP_TOOLCATALOG_COMPACTVIEW === 'true' ? { compactView: true } : {}),
+    },
+  };
+}
+
+/** ADR 0730 C.3a — the v2 `secrets` family. Facets are the declaration's: scopes, resolution, resolveInPack. */
+function v2SecretsFamily(): Record<string, unknown> | null {
+  return {
+    secrets: {
+      status: 'experimental', since: '2.0', until: '2.1', witness: 'witnessable-gated',
+      scopes: ['tenant', 'user', 'run'],
+      resolution: 'host-managed',
+    },
+  };
+}
+
+/** ADR 0730 C.3a — the v2 `modelCapabilities` family from the same gate config the v1 root reads. Absent when the gate is off, which is what `supported:false` means. */
+function v2ModelCapabilitiesFamily(): Record<string, unknown> | null {
+  const cfg = getModelCapabilityGateConfig();
+  if (!cfg.supported) return null;
+  return {
+    modelCapabilities: {
+      status: 'experimental', since: '2.0', until: '2.1', witness: 'witnessable-gated',
+      advertised: cfg.advertised,
+      substitutionSupported: cfg.substitutionSupported,
+    },
+  };
+}
+
+/**
+ * WHD-7 — the v2 `workflowChainPacks.subChains` facet, from the SAME owner the
+ * v1 root reads (`workflowChainPacksCapability`). Absent when the owner
+ * withdraws it, because at major 2 presence of the facet IS the claim.
+ */
+function v2SubChainsFacet(): Record<string, unknown> {
+  const { subChains } = workflowChainPacksCapability();
+  return subChains === undefined ? {} : { subChains: stripSupported({ ...subChains }) };
+}
+
 function advertisedAuthProfiles(): string[] {
   const profiles: string[] = [];
   // `openwop-auth-saml` is honored by either the conformance test seam OR a real
   // SAML SP wired to a production IdP (Okta/Azure…) via the OPENWOP_SAML_* env.
-  if (process.env.OPENWOP_TEST_SAML_IDP_URL || samlConfigured()) profiles.push('openwop-auth-saml');
-  if (process.env.OPENWOP_SCIM_BEARER || process.env.OPENWOP_TEST_SCIM_URL) profiles.push('openwop-auth-scim');
+  // Read via the shared predicates so the profile list and the RFC 0164 combined
+  // -contract predicate cannot drift.
+  if (samlProfileAdvertised()) profiles.push('openwop-auth-saml');
+  if (scimProfileAdvertised()) profiles.push('openwop-auth-scim');
+  // `openwop-auth-oidc-user-bearer` (RFC 0010 §D): the bearer branch in
+  // middleware/auth.ts verifies iss/aud/exp/kid against the configured issuer's
+  // JWKS (middleware/oidcVerifier.ts) and maps the verified subject to a
+  // deterministic personal tenant. Advertised ONLY when the verifier is
+  // genuinely configured (OPENWOP_OIDC_ISSUER + OPENWOP_OIDC_AUDIENCE) — an
+  // unconfigured deploy makes no OIDC claim.
+  if (readOidcConfigFromEnv()) profiles.push('openwop-auth-oidc-user-bearer');
+  // RFC 0164 (ADR 0623) — the mandatory-both invariant, enforced structurally.
+  // If both profiles would be advertised but the combined contract cannot be
+  // honoured (realms misaligned OR no shared trust root configurable), we DROP
+  // `openwop-auth-scim` here rather than advertise a "both profiles" posture we
+  // cannot back with `subjectLinking:true`. SAML (the production login path) is
+  // kept. The two arms of the gate are witnessed independently in
+  // test/auth-subject-link.test.ts.
+  if (
+    profiles.includes('openwop-auth-saml') &&
+    profiles.includes('openwop-auth-scim') &&
+    !combinedSubjectLinkingActive()
+  ) {
+    return profiles.filter((p) => p !== 'openwop-auth-scim');
+  }
   return profiles;
+}
+
+/**
+ * `capabilities.auth.workloadIdentity` (RFC 0154 §A/§B, ADR 0556 P3) — emitted
+ * iff the profile is configured, on the same per-request read as the OIDC block
+ * so advert, middleware and seam can never disagree.
+ *
+ * Every value is DERIVED, none is a literal:
+ *   - `schemes[]` comes from the configured trust roots, so a scheme can only be
+ *     claimed by configuring a root that issues it. A literal list is how a host
+ *     ends up advertising `mtls-san` with no client-certificate termination
+ *     behind it — the advertised-but-unhonored posture the RFC calls the exact
+ *     failure the profile prevents.
+ *   - `senderConstraint[]` is what the host REQUIRES as proof-of-possession,
+ *     which is `[]` by default. RFC 0154 §C makes the empty array meaningful
+ *     rather than absent: it IS the explicit, policy-controlled bearer-fallback
+ *     advertisement, and a bearer-verified identity is distinguishable from a
+ *     key-bound one in the audit facts (`openwop.identity.sender_constraint`).
+ *     mTLS and DPoP are NOT claimed — this host implements neither.
+ *   - `delegation.maxChainDepth` is the bound `checkDelegation` actually
+ *     enforces, read from the same config object.
+ *
+ * The subject → principal mapping §A requires a host to document lives in
+ * `host/workloadIdentity.ts` (`principalIdFor`) and in ADR 0556 P3: an opaque
+ * `workload:<scheme>:<salted-hash>` under a per-tenant rotatable salt, never the
+ * presented subject.
+ */
+function workloadIdentityCapability(): {
+  workloadIdentity: {
+    supported: true;
+    schemes: string[];
+    senderConstraint: string[];
+    delegation: { supported: true; maxChainDepth: number };
+  };
+} | Record<string, never> {
+  const cfg = readWorkloadIdentityConfigFromEnv();
+  if (!cfg) return {};
+  return {
+    workloadIdentity: {
+      supported: true,
+      schemes: advertisedWorkloadSchemes(cfg),
+      senderConstraint: [...cfg.senderConstraints],
+      delegation: { supported: true, maxChainDepth: cfg.maxChainDepth },
+    },
+  };
+}
+
+/** `capabilities.auth.oidc` sub-block (RFC 0010 §D) — emitted iff the verifier
+ *  is configured, mirroring `advertisedAuthProfiles()` so profile + sub-block
+ *  can never disagree. Read per-request (env-driven, like the profiles). */
+function oidcCapability(): { oidc: { supported: true; issuers: string[]; audience: string } } | Record<string, never> {
+  const cfg = readOidcConfigFromEnv();
+  if (!cfg) return {};
+  return { oidc: { supported: true, issuers: [cfg.issuer], audience: cfg.audience } };
+}
+
+/** `capabilities.auth.subjectLinking` (RFC 0159 §B / ADR 0613) — the SCIM⟷SAML
+ *  combined leaver contract. Emitted `true` ONLY when BOTH `openwop-auth-saml`
+ *  AND `openwop-auth-scim` are genuinely advertised, because the contract needs
+ *  both lanes to exist: a host with only one profile has no cross-lane link to
+ *  maintain, so claiming it would be a dishonest wire statement (the §B honesty
+ *  rule; fails OPENWOP_REQUIRE_BEHAVIOR=true otherwise). DERIVED from the SAME
+ *  `advertisedAuthProfiles()` the profiles list is built from, so the flag and
+ *  the profiles can never disagree. */
+/** RFC 0163 §A adds `subjectLinkKey` — the CLASS of opaque, IdP-stable, non-PII
+ *  identifier the two lanes are joined on — REQUIRED (schema `if`/`then` +
+ *  auth-profiles MUST) whenever `subjectLinking:true`. It is DERIVED from
+ *  `SUBJECT_LINK_KEY` (the same const the link path honours), so the advertised
+ *  class and the class the host actually joins on cannot drift (§A.2 "advertise
+ *  only the class you honour"). openwop-app links on externalId↔persistent-NameID
+ *  ⇒ `opaque-idp`. */
+function subjectLinkingCapability(): { subjectLinking: true; subjectLinkKey: typeof SUBJECT_LINK_KEY } | Record<string, never> {
+  const profiles = advertisedAuthProfiles();
+  // USERS-13 — BOTH profiles AND realm alignment: a configured production SAML
+  // SP whose `OPENWOP_SAML_TENANT` differs from `OPENWOP_SCIM_TENANT` consults a
+  // deny realm the SCIM lanes never write, so the link cannot fire; advertising
+  // it would be a dishonest wire claim (the §B honesty rule). The boot log names
+  // the misalignment (`subject_link_realms_misaligned`, index.ts). When withheld,
+  // `subjectLinkKey` is withheld with it (RFC 0163 §A: the key is REQUIRED iff
+  // `subjectLinking:true`, and meaningless without it).
+  // RFC 0164 (ADR 0623): the `&& subjectLinkRealmAlignment().aligned` clause is
+  // now IMPLIED by `advertisedAuthProfiles()`, which already drops
+  // `openwop-auth-scim` whenever `!combinedSubjectLinkingActive()` (misaligned
+  // realms OR no shared trust root) — so when both profiles survive together the
+  // combined contract is necessarily active (and thus aligned). It is kept here as
+  // defense-in-depth (a single predicate guarding a false wire claim, even if a
+  // future refactor changes the profile-drop).
+  return profiles.includes('openwop-auth-saml') && profiles.includes('openwop-auth-scim') && subjectLinkRealmAlignment().aligned
+    ? { subjectLinking: true, subjectLinkKey: SUBJECT_LINK_KEY }
+    : {};
 }
 
 /**
@@ -89,16 +660,777 @@ interface Deps {
   config: AppConfig;
 }
 
+/**
+ * RFC 0149 §C — the protocol version this host speaks (strict `MAJOR.MINOR`).
+ * RFC 0165 §A — `protocolVersions` is the SAME constant as an array (ADR 0625):
+ * the scalar stays the v1.x negotiation input; the array is what a v2 client
+ * reads to pick a major. Derived, never two literals, so they cannot drift.
+ */
+export const PROTOCOL_VERSION = PROTOCOL_VERSION_V1;
+/**
+ * v2 charter Phase 4 (P4-B′) — this host now serves TWO majors through the
+ * overlap, so the array carries both and `preferredVersion` below names the 1.x
+ * member. The pair is inseparable: `versioning.md` §1.1 and the documented
+ * client-side default (`preferredVersion ?? max(protocolVersions[])`) mean that
+ * advertising `2.0` WITHOUT `preferredVersion: "1.1"` would move every existing
+ * client — and the conformance suite's own target-major default — onto major 2
+ * on the next fetch. Both are derived from `middleware/protocolVersion.ts`, the
+ * one place the negotiator reads them, so the advertisement cannot promise a
+ * major the front door refuses.
+ */
+export { protocolVersions, preferredVersion };
+
+/**
+ * The closed v2 root (`schemas/v2/capabilities.schema.json`,
+ * `spec/v2/core/capabilities.md` §3).
+ *
+ * Not a projection of the v1 document — a different document with a different
+ * shape. The v1 root is open and carries a deprecated `capabilities` wrapper
+ * plus dotted `host.*` mirrors; the v2 root is `additionalProperties: false`
+ * and admits exactly three kinds of key: a metadata key, a declared family
+ * record `{ status, since, witness, …facets }`, and `extensions.<org>.<name>`.
+ *
+ * WHY IT IS SHORT. `capabilities.md` §2 replaced the v1 `supported: true` flag
+ * with presence: "presence of the record is the claim, and a host that does not
+ * support a family MUST omit it". There is no honest way to mirror this host's
+ * ~60 v1 capability families into v2 records in one change, because each v2
+ * family record is a CLOSED shape with REQUIRED facets whose enums are narrower
+ * than the v1 fields (`interrupt.tokenAlgs` admits only `hs256`, and this host
+ * mints opaque store-backed interrupt tokens, not HMAC ones; `replay` REQUIRES
+ * an `effectSeamsManifest` path this host does not serve yet). Advertising them
+ * anyway would be a false statement that the closed schema would happily accept
+ * for the ones whose facets merely happen to type-check. So this root claims
+ * the two families whose v2 facets this host can state exactly and truthfully
+ * from what it already enforces, and stays silent about the rest. Later PRs in
+ * the v2 charter add records as the surfaces behind them land — an honest small
+ * root beats a complete dishonest one.
+ */
+/**
+ * RFC 0168 §E.2 / `capabilities.md` — the public keys this host signs
+ * certification bundles with, read from `OPENWOP_BUNDLE_SIGNING_KEYS`.
+ *
+ * WHY OPERATOR CONFIG AND NOT A CONSTANT. The key is per-deployment: an adopter
+ * of the white-label bundle signs with their own, and hard-coding ours would
+ * have every install advertise a key whose private half only we hold. Public
+ * key material is not a secret, so it rides a plain env var; the PRIVATE half
+ * never enters this process — it is used offline by whoever runs `--certify`,
+ * and on the reference deployment lives in Secret Manager.
+ *
+ * WHY A JSON ARRAY AND NOT THREE SCALARS. A retired key MUST stay listed —
+ * dropping it silently invalidates every bundle it already signed — so the
+ * config has to express a CURRENT key and a RETIRED one at once, which a
+ * single-value env var cannot:
+ *
+ *   OPENWOP_BUNDLE_SIGNING_KEYS='[{"keyId":"…","alg":"ed25519",
+ *     "publicKey":"<43-char base64url>","use":"certification-bundle"}]'
+ *
+ * `gcloud run --update-env-vars` splits on commas, so set this one with an
+ * alternate delimiter (`--update-env-vars ^##^OPENWOP_BUNDLE_SIGNING_KEYS=…`).
+ *
+ * MALFORMED IS WITHHELD, NOT GUESSED. Every entry is checked against the closed
+ * schema shape here — the 43-char base64url grammar included — and a value that
+ * fails is dropped with one warn, the same withhold-the-claim precedent as the
+ * workspace capability (`index.ts`, ADR 0551 P2). Advertising a key a verifier
+ * cannot resolve is worse than advertising none: a bundle signed under an
+ * unresolvable id FAILS the RFC 0168 Front door, whereas an absent array is an
+ * honest "this signature attests integrity only". The array is omitted entirely
+ * when nothing valid survives, because `capabilities.md` §2 makes PRESENCE the
+ * claim.
+ */
+/**
+ * RFC 0030 §B/§C — this host's self-attested Tier-1 structured-output posture.
+ *
+ * ONE owner, read by BOTH majors. It was a bare `'warn'` literal inside the v1
+ * root, and emitting the v2 `envelopes` family by copying that literal would
+ * have created a SECOND literal for one fact — two places to change, and
+ * nothing to notice when only one of them was. The v2 assembly block a few
+ * hundred lines below states the rule this restores: every facet is DERIVED
+ * from the thing it describes, not typed to match it.
+ *
+ * A self-attestation is legitimately a constant (nothing computes a posture),
+ * but it must be ONE constant.
+ */
+export const TIER_ONE_SUBSET_COMPLIANCE = 'warn' as const;
+
+const SIGNING_KEY_ID = /^[A-Za-z0-9._~-]{1,128}$/;
+const SIGNING_PUBLIC_KEY = /^[A-Za-z0-9_-]{43}$/;
+let signingKeysWarned = false;
+
+export function readBundleSigningKeys(): readonly Record<string, unknown>[] {
+  const raw = process.env.OPENWOP_BUNDLE_SIGNING_KEYS?.trim();
+  if (!raw) return [];
+  const withhold = (why: string): readonly Record<string, unknown>[] => {
+    if (!signingKeysWarned) {
+      signingKeysWarned = true;
+      discoveryLog.warn('bundle_signing_keys_withheld', { why });
+    }
+    return [];
+  };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return withhold('not JSON');
+  }
+  if (!Array.isArray(parsed)) return withhold('not a JSON array');
+  const out: Record<string, unknown>[] = [];
+  for (const entry of parsed) {
+    if (typeof entry !== 'object' || entry === null) return withhold('an entry is not an object');
+    const e = entry as Record<string, unknown>;
+    if (typeof e['keyId'] !== 'string' || !SIGNING_KEY_ID.test(e['keyId'])) return withhold('bad keyId');
+    if (e['alg'] !== 'ed25519') return withhold('alg MUST be ed25519');
+    if (typeof e['publicKey'] !== 'string' || !SIGNING_PUBLIC_KEY.test(e['publicKey'])) {
+      // The commonest operator error by far is pasting the PEM instead of the
+      // 32 raw bytes. Name the ENCODING, because "bad publicKey" sends people
+      // looking at the key rather than at how it is written down.
+      return withhold('publicKey MUST be the 32-byte Ed25519 key as unpadded base64url (43 chars) — not PEM');
+    }
+    if (e['use'] !== undefined && e['use'] !== 'certification-bundle') return withhold('unknown use');
+    if (e['retiredAt'] !== undefined && typeof e['retiredAt'] !== 'string') return withhold('retiredAt MUST be a string');
+    out.push({
+      keyId: e['keyId'],
+      alg: 'ed25519',
+      publicKey: e['publicKey'],
+      ...(e['use'] === undefined ? {} : { use: e['use'] }),
+      ...(e['retiredAt'] === undefined ? {} : { retiredAt: e['retiredAt'] }),
+    });
+  }
+  return out;
+}
+
+function v2OAuthFamily(since: string, until: string): Record<string, unknown> {
+  const snap = oauthAdvertisementSnapshot();
+  if (!snap.advertised) return {};
+  return {
+    oauth: {
+      status: 'experimental',
+      since,
+      until,
+      witness: 'witnessable-gated',
+      grants: ['authorization_code', 'refresh_token'],
+      providers: snap.providers,
+      credentialInterrupt: true,
+    },
+  };
+}
+
+export function buildV2Advertisement(config: AppConfig, req?: Request): Record<string, unknown> {
+  // `capabilities.md` §8 — the record's `status` IS the declared technical
+  // maturity, and `until` is REQUIRED whenever the status is not `stable`.
+  // `2.1` is the horizon by which each either stabilises or carries a removal
+  // row; it is not in the past while this host serves 2.0.
+  const EXPERIMENTAL_UNTIL = '2.1';
+  const SINCE = '2.0';
+  const signingKeys = readBundleSigningKeys();
+  return {
+    // ── metadata keys (§3.1) ────────────────────────────────────────────────
+    // `protocolVersion` is kept as `preferredVersion`'s twin for v1 readers
+    // through the overlap; it is removed after Phase 5.
+    protocolVersion: PROTOCOL_VERSION_V1,
+    protocolVersions: [...protocolVersions()],
+    preferredVersion: preferredVersion(),
+    minClientVersion: minClientVersion(),
+    // `persistence.md` §"The era key" / `versioning.md` §2.2 (axis 4) —
+    // "Discovery MUST advertise the value the host writes for new runs and
+    // nothing else". This IS the constant the storage seat stamps
+    // (`storage/eventEra.ts`), imported rather than re-typed, because
+    // persistence.md orders the two: "collapsing to one constant is a
+    // precondition for advertising, not a consequence". Before this change the
+    // host advertised no era at all and its runs carried none; both now say 3,
+    // and there is one place to change if that ever moves.
+    eventLogSchemaVersion: EVENT_LOG_SCHEMA_VERSION,
+    // RFC 0168 §E.2 — omitted entirely when unconfigured, because
+    // `capabilities.md` §2 makes presence the claim: an absent array says
+    // "this host publishes no bundle-signing key", which is the truth for a
+    // deployment that has not configured one, and is not the same statement
+    // as an empty array.
+    ...(signingKeys.length > 0 ? { signingKeys } : {}),
+    implementation: {
+      name: config.serviceName,
+      version: config.serviceVersion,
+      vendor: config.serviceVendor ?? DEFAULT_SERVICE_VENDOR,
+    },
+    fixtures: listLoadedConformanceFixtures(),
+    extensions: {
+      // `<org>.<name>`; `openwop` and `vendor` are the reserved orgs, so this
+      // host's records live under `openwop-app`.
+      'openwop-app.host': {
+        notes: 'OpenWOP reference application. Serving the v2 wire through the overlap; not production-hardened.',
+        demoMode: demoMode(),
+        // RFC 0181 / ADR 0652 — the org's proprietary path namespace, declared
+        // (not inferred): version-agnostic, outside the protocol contract, the
+        // `OpenWOP-Version` header selects nothing under it. `twin` is the
+        // overlap alias that retires atomically with `/v1`.
+        root: `${VENDOR_ROOT}/`,
+        twin: `/v1${VENDOR_ROOT}/`,
+        rfc: '0181',
+      },
+      // Feature-owned `<org>.<name>` records (host/discoveryExtensions.ts) — live, key-pattern + reserved-org checked at registration.
+      ...v2Extensions().extensions,
+    },
+    // ── family records (§3, {status, since, witness, …facets}) ──────────────
+    //
+    // `limits` — declared `technical: stable` in `spec/v2/declaration.json`, and
+    // this host genuinely enforces every number below (the run-duration ceiling
+    // is imported from the executor constant, the body cap equals the
+    // `express.json` limit). `stable` records MUST NOT carry `until`.
+    limits: {
+      status: 'stable',
+      since: SINCE,
+      witness: 'witnessable-gated',
+      clarificationRounds: 5,
+      schemaRounds: 3,
+      envelopesPerTurn: 32,
+      maxNodeExecutions: 1000,
+      maxRunDurationMs: RUN_DURATION_CEILING_MS,
+      maxRequestBodyBytes: 1_048_576,
+    },
+    // RFC 0199 (ADR 0753 D11) — `oauth`, with its `credentialInterrupt` facet, only
+    // while `oauthAdvertised()` holds: the SAME predicate the credential gate and
+    // `connector.auth-expired` read, so the claim and the behaviour cannot drift.
+    // `witness` is the declaration's (`spec/v2/declaration.json`), `experimental`
+    // per its technical maturity.
+    ...v2OAuthFamily(SINCE, EXPERIMENTAL_UNTIL),
+    // `i18n` + `content` (ADR 0748) — the v2 twins of the v1 blocks, from the SAME
+    // operator source (`OPENWOP_I18N_LOCALES` via host/i18n) and under the SAME
+    // gate, so the two majors cannot disagree about which locales are served.
+    // The ops the `content` record claims (`GET /content/pages/{slug}`, the §D
+    // admin ops) are served unconditionally by `features/cms/contentProtocolRoutes.ts`;
+    // what the gate withholds is the CLAIM that more than the base is negotiated.
+    // RFC 0103 §A invariants hold by construction: `content.baseLocale ==
+    // i18n.defaultLocale` (one function), base ∉ `content.supportedLocales`
+    // (`hostContentLocales` removes it), and content ⊆ i18n (a filter of it).
+    ...(hostI18nEnabled()
+      ? {
+        i18n: {
+          status: 'experimental', since: SINCE, until: EXPERIMENTAL_UNTIL, witness: 'witnessable-gated',
+          defaultLocale: hostDefaultLocale(),
+          supportedLocales: hostSupportedLocales(),
+        },
+        content: {
+          status: 'experimental', since: SINCE, until: EXPERIMENTAL_UNTIL, witness: 'witnessable-gated',
+          baseLocale: hostDefaultLocale(),
+          supportedLocales: hostContentLocales(),
+        },
+      }
+      : {}),
+    // `webhooks` — the host signs deliveries with the `v1` algorithm
+    // (`host/webhookDeliveryWorker.ts`), plus the RFC 0201 Standard Webhooks
+    // companion headers on subscriptions that opted in (ADR 0747).
+    //
+    // CORRECTED 2026-09-25 — `retryPolicy` was "deliberately absent" on the
+    // reasoning that "the v1 advertisement says `durable: false`". That reasoning
+    // was wrong twice: v2 has no `durable` flag, and webhooks.md §Durability binds
+    // EVERY host advertising `webhooks` to retry "per its advertised retryPolicy"
+    // and dead-letter rather than drop ("best-effort is not a conforming mode"),
+    // so the obligation applied anyway and the host was simply not naming its
+    // policy. The v1 `durable: false` stays: at v1 it means RFC 0083's trigger-
+    // bridge mode (state machine, dedupKey, dead-letter sink), which this host does
+    // not implement. Values are DERIVED from the worker, never restated: every row
+    // is enqueued with WEBHOOK_MAX_ATTEMPTS (`routes/webhooks.ts` enqueueDelivery,
+    // the one enqueue site) and retried on `webhookBackoffMs` (2s·2^(n-1)).
+    // MEASURED in production 2026-09-25: 500, 500, 204 arrived at +0 / +1.7 s / +4 s.
+    // A test pins advert ↔ worker (`test/webhooks-retry-policy-advert.test.ts`).
+    webhooks: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-gated',
+      // RFC 0201 / ADR 0747 — `standard-webhooks-1` beside `v1`, and the
+      // rotation facet, from the ONE list the routes validate against.
+      signatureAlgorithms: [...SUPPORTED_SIGNATURE_ALGORITHMS],
+      retryPolicy: { maxAttempts: WEBHOOK_MAX_ATTEMPTS, backoff: 'exponential' },
+      secretRotation: { overlapSeconds: secretRotationOverlapSeconds() },
+    },
+    // ── ADR 0730 C.3a — four families the v1 root advertised and the v2 root
+    // did not, which is why the SPA still read discovery through `v1Client`.
+    // Each is DERIVED from the same source the v1 advert uses, so the two
+    // majors cannot disagree, and each is gated the way v1 gates it: a family
+    // absent here means "this deployment does not serve it", never "we forgot".
+    // `spec/v2/declaration.json` gives all four an empty `floorScenarios`, so
+    // advertising them obliges facets, not a scenario floor.
+    ...(v2AuthFamily() ?? {}),
+    ...(v2PromptsFamily() ?? {}),
+    ...(v2ToolCatalogFamily() ?? {}),
+    ...(v2SecretsFamily() ?? {}),
+    ...(v2ModelCapabilitiesFamily() ?? {}),
+    ...v2AiProvidersFamily(),
+    ...(v2MemoryFamily() ?? {}),
+    ...v2EnvelopesFamily(),
+    ...v2EnvelopeCatalogFamilies(SINCE, EXPERIMENTAL_UNTIL),
+    // ── The four families this host honours and had simply never claimed ──
+    //
+    // Each facet below is DERIVED from the thing it describes, not typed to
+    // match it. That is the whole reason these can go out: a hand-written
+    // `tokenAlgs: ['hs256']` is a promise, while `INTERRUPT_TOKEN_ALGS` is the
+    // array the minting code actually iterates. Same for the manifest address
+    // and the fork modes. If any of those change, the advert changes with them
+    // rather than drifting into a false claim.
+    //
+    // WHY THESE WERE ABSENT UNTIL NOW, since the reason is instructive: the
+    // docblock above said `interrupt.tokenAlgs` admits only `hs256` "and this
+    // host mints opaque store-backed interrupt tokens", and that `replay`
+    // requires a manifest "this host does not serve yet". BOTH halves were
+    // stale. `host/interruptToken.ts` mints `ow2.<alg>.<kid>.<payload>.<mac>`
+    // and is wired at `executor/suspendManager.ts` + `routes/interrupts.ts`;
+    // the manifest shipped in ADR 0635. A certify run found 32 v2 assertions
+    // failing on "host MUST advertise the family.X profile", every one of them
+    // a claim this host could already make honestly, and ZERO behavioural.
+    //
+    // Under-advertising is not the safe direction. It removes external
+    // verification of behaviour that is actually shipping — the exclusive-cursor
+    // replay defect ADR 0633 fixed lived behind an unadvertised `replay`, where
+    // no corpus leg could reach it.
+    // `idempotency` — Layer 1 is real here: `POST /runs` with a repeated
+    // `Idempotency-Key` and the same body returns the SAME run; the same key
+    // with a different body is refused on the request-hash check
+    // (`idempotency.md` §Layer 1, `routes/runs.ts`). Layer 2 is the invocation
+    // log, now READABLE at `GET /runs/{runId}/effects` (RFC 0173 §C.2) — which
+    // is what `v2-effect-identity-business-key` requires and what kept this
+    // family withheld until now.
+    //
+    // `crossRegion: 'single-region'` is what this deployment IS. Claiming
+    // anything else would be the false facet the closed schema would happily
+    // accept, since the enum admits three values and only one of them is true.
+    idempotency: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-unaided',
+      crossRegion: 'single-region',
+    },
+    // `runList` — RFC 0182, ADR 0658. Facets are the ONE owner
+    // `host/runList.ts` that the handler enforces.
+    //
+    // CORRECTED 2026-09-11 (steward ruling, crosstalk `5d9b`): `since` is
+    // THIS HOST's minor, not the corpus minor that introduced the family. It
+    // shipped once as `2.1` / `2.2` — the corpus timeline — and that was
+    // wrong for two reasons the ruling makes plain. `since` carries the
+    // axis-1 grammar, the same grammar as `protocolVersions[]` members, so a
+    // record reading `2.1` on a host advertising `["1.1","2.0"]` puts `since`
+    // on the corpus timeline and `until` on this host's, in adjacent fields
+    // under one grammar. And `spec/v2/declaration.json` publishes `witness`
+    // and `maturity` per family but NO `since`, so there is nowhere to copy a
+    // corpus value from: a field with no source is a host claim. Hence the
+    // same constants every other experimental family here uses — one host,
+    // one timeline, no literals.
+    //
+    // `status` stays `experimental` even though RFC 0182 is Accepted: v1's
+    // "drop the marker once the owning RFC is accepted" rule did not carry
+    // into v2, and 82 of 85 declared families are experimental.
+    runList: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-gated',
+      maxPageSize: RUN_LIST.maxPageSize,
+      filters: [...RUN_LIST.filters],
+    },
+    // `replay` — CLAIMED as of ADR 0637, and the note it replaces is worth
+    // keeping in mind rather than deleting outright.
+    //
+    // This slot held a withholding for months: `replay` gates `v2-run-fork-prefix`,
+    // whose MUST (`runs.md` §Fork — a replay fork AT A SEQUENCE answers 201) this
+    // host answered 501 to. An earlier attempt claimed the family, watched
+    // `replay-fork-arbitrary.test.ts` go red, and concluded that two replay forks
+    // at one `fromSeq` produce genuinely different tails.
+    //
+    // They do not. MEASURED (ADR 0637): the fixture is three `core.noop` nodes,
+    // and the red was three host defects — replay resumed from no snapshot, it
+    // re-emitted `run.started` over the inherited prefix, and divergence detection
+    // read the two logs from different cursors. Each manufactured a
+    // `replay.diverged` event whose freshly-generated `replayEventId` was the only
+    // field that differed between replays. With those fixed the 501 is gone and
+    // mid-sequence replay is deterministic, so the withholding's own stated
+    // release condition — "until mid-sequence replay is deterministic" — is met.
+    //
+    // Both facets are DERIVED, which is the only reason this is safe to claim:
+    // `modes` is the array `POST /runs/{id}:fork` validates against, and the
+    // manifest address is computed from the route that serves it. Neither can
+    // drift into a false claim without the serving code moving first.
+    replay: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      // `witnessable-unaided`: a client can drive the whole property from the
+      // public wire — create a run, fork it twice at one `fromSeq`, compare the
+      // tails. No seam, no host cooperation.
+      witness: 'witnessable-unaided',
+      modes: [...FORK_MODES],
+      effectSeamsManifest: V2_EFFECT_SEAMS_PATH as '/host/effect-seams',
+    },
+    // `interrupt` — RFC 0176 token scheme. `tokenAlgs` is the module's own
+    // exported array, so this states what the minter can actually produce.
+    interrupt: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-unaided',
+      tokenAlgs: INTERRUPT_TOKEN_ALGS as readonly 'hs256'[],
+    },
+    // `eventLog` — the v2 snapshot carries `eventLogSchemaVersion: eraOf(run)`
+    // and the storage seat translates era-2 logs for a major-2 reader
+    // (`storage/eventEraAdapter.ts`). `crossEngineOrdering` is OMITTED rather
+    // than guessed: this host runs one engine, and an absent optional facet is
+    // honest where a fabricated one is not.
+    eventLog: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-unaided',
+    },
+    // `packs` — the RFC 0025 pack surface plus the `/v1/packs-test/*` mirror,
+    // which the ADR 0634 alias now makes reachable at its v2 address. That
+    // mirror IS the `testMode` facet, so it is claimed only when the seam
+    // surface is actually enabled rather than whenever the routes exist.
+    // ── ADR 0670 — TWO families this host has served at major 1 all along,
+    //    declared at major 2 for the first time.
+    //
+    // It was five until the major-2 ratchet ran. Declaring a family UN-SKIPS
+    // the scenarios gated on it (`behaviorGate`), and three of the five then
+    // executed for the first time and FAILED — see `major2Ledger.ts` for the
+    // measured reason on each. Advertising them would have been a false wire
+    // claim, which is the thing `discovery.ts` exists to prevent, so they went
+    // back on the ledger with their real reasons instead of their stale ones.
+    //
+    // The ledger's ORIGINAL reasons were genuinely stale — the v2 records they
+    // said did not exist do exist. What I got wrong was concluding from that
+    // that the rows should GO. A stale justification is not the same as a wrong
+    // decision, and for three of the five the decision was right on grounds
+    // nobody had written down.
+    //
+    // They sat on `MAJOR2_UNDECLARED_FAMILIES` with the reason "no closed v2
+    // record declared yet". MEASURED 2026-09-13: `schemas/v2/capabilities.schema.json`
+    // declares ALL of them (89 properties), each as `{status, since, witness}`
+    // plus facets. The reason outlived the corpus work that removed it — the
+    // same shape as the seam-floor comments retired yesterday, one layer over,
+    // in the ledger's justifications rather than its entries.
+    //
+    // Each record is the v1 facets MINUS `supported`: `capabilities.md` line 39
+    // — "presence of the record is the claim, and a host that does not support
+    // a family MUST omit it" — which is why this host's v2 document carries
+    // ZERO `supported` seats where its v1 document carries 168.
+    //
+    // `status: 'experimental'` is deliberate and conservative. The BEHAVIOUR is
+    // mature — every one of these has served the v1 wire for a long time — but
+    // what is new is the v2 RECORD, and a `stable` claim would assert that the
+    // v2 facet semantics are settled when this host is the first thing to
+    // exercise them. `until` is REQUIRED whenever status is not `stable` (§8),
+    // and `2.1` is the horizon by which each stabilises or carries a removal
+    // row. Downgrading a `stable` claim later is a breaking wire change;
+    // promoting an `experimental` one is not.
+    //
+    // Every `witness` here is `witnessable-gated`: a client can drive each
+    // property from the public wire — read a run's compensation projection,
+    // list form content packs, post and read back an annotation, instantiate a
+    // chain pack, list connection packs — but each needs an authenticated,
+    // tenant-scoped request. None needs a test seam, so none may claim
+    // `seam-gated`, and none is reachable anonymously, so none may claim
+    // `witnessable-unaided`.
+    //
+    // Declaring a family REMOVES it from `conformance/major2Ledger.ts` in the
+    // same commit. RFC 0148 §B forbids advertising and opting out at once, and
+    // `test/major2-undeclared-ledger.test.ts` derives one side from this
+    // function and fails on any overlap — the check that did not exist when
+    // `family.idempotency` shipped in both states at once.
+    // ADR 0746 — `conversationPrimitive` (RFC 0005), the same unconditional
+    // claim the v1 root makes (`conversationPrimitive: true`, below): this host
+    // runs `core.conversationGate` open/exchange/close on both majors, and the
+    // v2 record is the v1 flag with the declaration's fields (`witness:
+    // 'claims-check'`, `facets: []` — spec/v2/declaration.json). Its absence
+    // was an under-advert, not a withholding: nothing on `major2Ledger.ts`
+    // opted it out, and it gates RFC 0205's `v2-conversation-turn-parts`.
+    conversationPrimitive: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'claims-check',
+    },
+    feedback: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-gated',
+      targets: ['run', 'event', 'node'],
+      signals: ['rating', 'correction', 'label', 'flag'],
+    },
+    workflowChainPacks: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-gated',
+      // PRESENCE is the claim, at every depth. The sub-object declares NO
+      // `supported` property and set `additionalProperties: false`, so
+      // `{ supported: true }` — which is what the v1 record carries and what
+      // these schemas' own DESCRIPTIONS still say ("When `supported: true`…")
+      // — is schema-INVALID at v2. The description is stale corpus prose; the
+      // property list is the contract. Caught by reading `properties` instead
+      // of the sentence above it.
+      //
+      // WHD-7 — DERIVED from the v1 owner, where this was the literal `{}`. The
+      // literal was wrong twice, and the parity test found both before it had
+      // finished being written:
+      //   1. It was UNCONDITIONAL. `workflowChainPacksCapability()` withdraws
+      //      `subChains` under `OPENWOP_CHAIN_SUBCHAINS=0`, and `from-chain`
+      //      then refuses with `sub_chain_unsupported` — while major 2 went on
+      //      advertising the facet. The v2 schema's own text: a host that does
+      //      NOT advertise this block MUST refuse. We advertised AND refused.
+      //   2. It dropped `maxDepth`, which the v2 sub-object DOES declare. `{}`
+      //      reads as the schema default (8), so the advert was true only for as
+      //      long as `MAX_SUB_CHAIN_DEPTH` happened to equal it.
+      // Only `subChains` is taken: `deferredParameters` and `hostExpansionSeam`
+      // are v1-only — the closed v2 record declares neither — and no strip can
+      // know that, so that half is a named pick which the schema polices.
+      ...v2SubChainsFacet(),
+    },
+    packs: {
+      status: 'experimental',
+      since: SINCE,
+      until: EXPERIMENTAL_UNTIL,
+      witness: 'witnessable-gated',
+      // RFC 0025 §C point 1: `isolated` asserts a pack PUT through the mirror
+      // never appears in a production `/v1/packs/*` listing. That is a real
+      // guarantee here (`routes/packs-test.ts` serves an in-memory catalog
+      // distinct from the registry), not a restatement of the flag — the flag
+      // only decides whether the surface is mounted at all.
+      ...(process.env.OPENWOP_TEST_SEAM_ENABLED === 'true'
+        ? { testMode: { isolated: true } }
+        : {}),
+    },
+    // RFC 0168 §C.1 — the seams profile is METADATA, not a capability family,
+    // and it is a claim that `/conformance/seams/…` is actually mounted.
+    //
+    // Gating it on OPENWOP_TEST_SEAM_ENABLED alone is not enough: this repo's
+    // own harness sets that flag (`conformance/run.ts`), so the claim would go
+    // out under the harness while the seam space is not mounted — a live false
+    // advertisement, and precisely the kind the suite is built to catch. The
+    // claim is therefore gated on the seams being MOUNTED, which is a separate
+    // switch this PR never turns on. When the seam PR lands it flips
+    // `OPENWOP_V2_SEAMS_MOUNTED` and the advertisement follows the mount
+    // rather than the intent.
+    //
+    // WHD-6 — `conformance.certificationBundleUrl` is DELIBERATELY absent from
+    // this root even when the v1 document carries it. The slot exists at major 2
+    // (`schemas/v2/capabilities.schema.json`), but there it addresses
+    // `schemas/v2/certification-bundle.schema.json`, which pins `bundleVersion:
+    // "3"` — and `host/conformanceClaims.ts` serves `'2'` only (the in-process
+    // artifact; ADR 0735 makes the major-2 bundle a post-deploy CLI cut). A
+    // pointer to a document that is not what the pointer promises is a false
+    // claim; omission is fully conformant. Add it here only together with a
+    // reader that can serve a v3 bundle — `conformance-claims-routes.test.ts`
+    // pins the absence so a projection refactor cannot leak the v1 pointer.
+    //
+    // WHD-18 (2026-09-21) — that reader now exists, and the pointer is added
+    // exactly on the terms above: ONLY in origin mode (`OPENWOP_CERT_BUNDLE_ORIGIN`),
+    // ONLY when a `bundleVersion: "3"`, `suite.targetMajor: 2` bundle for THIS
+    // commit has verified against this host's own `signingKeys`, and pointing at
+    // the MAJOR-2 route, never the v1 one. Image mode still omits it, for the
+    // reason the paragraph above gives. The slot is the one the v2 schema already
+    // declares, so no new discovery field reaches the wire (RFC 0147 §A).
+    ...(() => {
+      const url = certificationBundleUrlV2(req ? requestOrigin(req) : 'http://localhost:8080');
+      const conformance = {
+        ...(seamsMounted() ? { seamsProfile: 'openwop-conformance-seams-v2' } : {}),
+        ...(url === undefined ? {} : { certificationBundleUrl: url }),
+      };
+      return Object.keys(conformance).length > 0 ? { conformance } : {};
+    })(),
+  };
+}
+
+/**
+ * Is the `/conformance/seams/…` space actually served? The v2 root advertises
+ * `conformance.seamsProfile` only when this is true — an advertisement is a
+ * claim about mounted routes, never about a feature flag's intent.
+ */
+function seamsMounted(): boolean {
+  // Derived, never asserted. The claim is that `/conformance/seams/…` is served,
+  // so it is read from the mount's own manifest (`routes/conformanceSeams.ts`),
+  // whose entries a test calls one by one. The previous form read
+  // `OPENWOP_V2_SEAMS_MOUNTED` — an env var nothing checked against reality, so
+  // setting it where the seams are absent advertised a path space the host does
+  // not serve. An env var can be wrong; a manifest a test exercises cannot be
+  // wrong in the direction that matters.
+  //
+  // CORRECTED 2026-09-12: this said "FALSE today, deliberately: four operations
+  // are missing and all four sit on the seams-v2 floor". ADR 0639 completed the
+  // floor (see the correction in `routes/conformanceSeams.ts`), so what this
+  // returns tracks ONE thing: `OPENWOP_TEST_SEAM_ENABLED`. It is false on the
+  // production service on purpose — the floor seams plant runs — so production
+  // advertises no `conformance.seamsProfile`, and a suite scenario that finds
+  // the profile absent records `inapplicable`, never `blocked` (RFC 0168 §E.1:
+  // `blocked` is bundle-wide fatal and is reserved for a profile that IS
+  // advertised while the seam answers 404). Unadvertised here is the honest
+  // posture, not a gap.
+  return seamsFloorServed();
+}
+
 export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
-  app.get('/.well-known/openwop', (req, res) => {
-    const advertisement = buildAdvertisement(_deps.config, req);
-    const etag = `"${createHash('sha256').update(JSON.stringify(advertisement)).digest('hex').slice(0, 16)}"`;
-    res.set('Capabilities-Etag', etag);
-    res.set('Cache-Control', 'public, max-age=60');
-    res.json(advertisement);
+  // RFC 0200 §A — protected-resource metadata (RFC 9728), unauthenticated.
+  //
+  // A REGEXP ROUTE because the document must answer at the URL RFC 9728 §3.1 FORMS FROM
+  // THE RESOURCE IDENTIFIER, and this backend is reached two ways: bare (`https://host`,
+  // local + direct Cloud Run) and behind the Hosting `/api` rewrite
+  // (`https://app.openwop.dev/api`), whose URL is the SUB-PATH form
+  // `/.well-known/oauth-protected-resource/api`. Serving only the root form is
+  // sabotage-leg (b) of `v2-protected-resource-metadata`. `firebase.json` already routes
+  // every `/.well-known` sub-path here, so no hosting change is needed. (Written
+  // without the glob on purpose: a `/` followed by two asterisks inside a line comment
+  // opens a block comment as far as the naive stripper in
+  // `test/whd18-certification-evidence.test.ts` is concerned, which swallowed two real
+  // `ensureCertificationEvidence(` call sites below and reddened that scan. Recorded
+  // because the failure named neither this file nor a glob.)
+  //
+  // §A.1 binds a host advertising an `oauth2`/`oidc` lane, and this host advertises the
+  // `oidc` lane exactly when the verifier is configured — so the SAME gate answers here.
+  // Unconfigured, the document would have no authorization server to name, and an empty
+  // `authorization_servers` is worse than a 404.
+  app.get(/^\/\.well-known\/oauth-protected-resource(?:\/.*)?$/, (req, res) => {
+    const oidc = readOidcConfigFromEnv();
+    if (!oidc) {
+      res.status(404).json({ error: 'not_found', message: 'This host advertises no OAuth-lane; RFC 0200 §A.1 does not bind it.' });
+      return;
+    }
+    // The suffix IS the resource's path component (RFC 9728 §3.1 inserts the segment
+    // between host and path), so `resource` echoes the identifier the URL was formed
+    // from rather than a second declaration of what this host calls itself.
+    const suffix = req.path.slice(PRM_SEGMENT.length).replace(/\/$/, '');
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json({
+      resource: `${requestOrigin(req)}${suffix}`,
+      // Exactly the URL-form issuers of the OAuth lanes — no more (an issuer the lanes
+      // do not name is a second declaration) and no fewer (a lane issuer left out hides
+      // an authorization server the caller must reach).
+      authorization_servers: [oidc.issuer],
+      // ADR 0745 D2 — exactly the scopes some protocol route refuses a caller for
+      // (`SCOPES_SUPPORTED` = the enforced core + ADR 0755 key-lane extension scopes,
+      // parity-tested against the call sites), not the
+      // thirteen-name vocabulary. (ADR 0743 omitted the field while nothing enforced
+      // any: a self-service key's declared scopes were ignored on protocol routes.)
+      scopes_supported: [...SCOPES_SUPPORTED],
+      // Deliberately no
+      // `dpop_bound_access_tokens_required` / `tls_client_certificate_bound_access_tokens`:
+      // the lane's minimumAssurance is `bearer`, and claiming a binding it does not
+      // require is the `sender-constraint-no-bearer-downgrade` violation.
+    });
   });
 
-  app.get('/v1/openapi.json', (_req, res) => {
+  app.get('/.well-known/openwop', async (req, res) => {
+    // `capabilities.md` §1 — ONE resource, two representations, selected by the
+    // `OpenWOP-Version` request header (the negotiator in
+    // `middleware/protocolVersion.ts` has already decided which). No header ⇒
+    // `preferredVersion`'s major ⇒ the v1 document, unchanged.
+    const major = negotiatedMajor(req);
+    // WHD-18 — the pointer below is decided from the origin cache, so make it
+    // current FIRST, inside this request (bounded to 2 s, and a Map lookup when
+    // cached). Awaited on purpose: under Cloud Run's CPU throttling a refresh
+    // started here and finished "later" may never finish (#3056). A no-op
+    // unless `OPENWOP_CERT_BUNDLE_ORIGIN` is set; never throws.
+    await ensureCertificationEvidence(major === 2 ? 2 : 1, readBundleSigningKeys());
+    // RFC 0199 (ADR 0753 D11) — same pattern: make the `oauth` claim current
+    // inside the request; the builders read the snapshot synchronously.
+    await refreshOAuthAdvertisement();
+    const advertisement = major === 2 ? buildV2Advertisement(_deps.config, req) : buildAdvertisement(_deps.config, req);
+    const body = JSON.stringify(advertisement);
+    // Per representation: the two documents differ, so their validators differ
+    // and an `If-None-Match` carrying the v1 ETag does not 304 the v2 read.
+    const etag = `"${createHash('sha256').update(body).digest('hex').slice(0, 16)}"`;
+    // `Capabilities-Etag` keeps its RFC negotiation-safety semantics through v1.x
+    // (deprecated, removeIn 2.0). RFC 0165 §C.2 (ADR 0625): the SAME validator
+    // is also the standard `ETag`, and a matching `If-None-Match` answers `304`
+    // through the helper the RFC 0115 run route uses. `headers.md` §"Removed in
+    // v2" removes it at the cut, so the v2 representation carries only `ETag`
+    // (the negotiator drops it on a major-2 response either way; setting it only
+    // under major 1 keeps the intent readable at the call site).
+    if (major === 1) res.set('Capabilities-Etag', etag);
+    res.set('ETag', etag);
+    res.set('Cache-Control', 'public, max-age=60');
+    if (ifNoneMatchSatisfied(req, etag)) {
+      res.status(304).end();
+      return;
+    }
+    res.type('application/json').send(body);
+  });
+
+  // ── ADR 0550 P4 — the public exact-profile claims ──────────────────────────
+  //
+  // Two reads, both UNAUTHENTICATED by design: a certification claim that only
+  // an authorized caller can fetch is not a public claim, and RFC 0089 §D's
+  // pointer is meant to be resolvable by "any third party (auditor, adopter,
+  // registry)". The bundle carries the discovery document (already public) and
+  // per-requirement dispositions; RFC 0148 §E forbids credentials in evidence
+  // and `conformance/certify.ts` scrubs the document with the environment sweep
+  // before writing it.
+  //
+  // 404 when this build carries no stamp. That is the honest answer for a source
+  // boot or an image built without the certify step — and it is why the
+  // discovery pointer is gated on the same stamp: the advert and the route
+  // cannot disagree, because both read `host/conformanceClaims.ts`.
+  //
+  // WHD-6 — "both" was one short. THREE surfaces name this URL: the route, the
+  // discovery pointer, and the claims document below (`evidence.bundlePath` +
+  // `bundleSha256`). All three now hang off the ONE predicate the route itself
+  // uses, `certificationBundle() !== undefined` (renamed `servedBundle(1)` by
+  // WHD-18, which made it mode-aware) — so a claims stamp sitting
+  // beside a missing or unservable bundle (e.g. the suite CLI's `bundleVersion:
+  // '3'` dropped into `build-meta/`, which this reader refuses) is withheld
+  // instead of pointing a third party at a 404.
+  //
+  // WHD-18 — and a FOURTH surface now exists: the major-2 route. It hangs off the
+  // same predicate per major (`servedBundle(m)`), which in origin mode is "a
+  // verified object for this commit exists", and nothing else.
+  const serveBundle = async (major: 1 | 2, res: Response): Promise<void> => {
+    await ensureCertificationEvidence(major, readBundleSigningKeys());
+    const served = servedBundle(major);
+    if (served === undefined) {
+      res.status(404).json({
+        error: 'not_found',
+        message: evidenceFromOrigin()
+          ? `No verified major-${major} certification bundle is published for this build yet. Evidence is cut against the DEPLOYED revision after it serves, then published out of the image (ADR 0735); until it verifies against this host's commit and signing keys, nothing is served (RFC 0089 §D: absence is conformant).`
+          : 'This build carries no conformance certification bundle. Absence is not a failed claim — it means no certified run was stamped into this artifact (ADR 0550 P4 / RFC 0089 §D).',
+      });
+      return;
+    }
+    // Image mode: immutable per artifact — a new bundle only arrives with a new
+    // image. Origin mode: immutable per KEY (the key is this build's commit),
+    // so the same five minutes is honest there too; a re-cut replaces the object
+    // and appears within the reader's positive TTL plus this.
+    res.set('Cache-Control', 'public, max-age=300');
+    if (served.source === 'image') {
+      res.json(served.doc);
+      return;
+    }
+    // The EXACT bytes that verified. Re-serialising would be harmless to the
+    // signature (it covers a digest of the rows, not the file) but it would
+    // change the file's own sha256 — the digest `publish-evidence.sh` and a
+    // third party compare against what was uploaded.
+    res.type('application/json').send(served.bytes);
+  };
+
+  app.get(CERTIFICATION_BUNDLE_PATH, async (_req, res) => {
+    await serveBundle(1, res);
+  });
+
+  app.get(CERTIFICATION_BUNDLE_MAJOR2_PATH, async (_req, res) => {
+    await serveBundle(2, res);
+  });
+
+  app.get(CONFORMANCE_CLAIMS_PATH, (_req, res) => {
+    const claims = conformanceClaims();
+    if (claims === undefined) {
+      res.status(404).json({
+        error: 'not_found',
+        message: evidenceFromOrigin()
+          ? 'This host serves its evidence as the suite CLI\'s signed v3 bundle (ADR 0735), whose per-profile `certified` verdicts ARE the claim — re-derive them with `openwop-conformance --verify`. No separate claims document is published in this mode: the only claims derivation this host has runs at build time and binds the in-image bundle this mode no longer serves.'
+          : 'This build publishes no conformance claims: it carries no claims stamp, or no servable certification bundle to substantiate one (ADR 0550 P4 / RFC 0156 §E).',
+      });
+      return;
+    }
+    res.set('Cache-Control', 'public, max-age=300');
+    res.json(claims);
+  });
+
+  app.get(v1('/openapi.json'), (_req, res) => {
     // Sample serves the published spec verbatim — points consumers at
     // the canonical openapi if they want full surface. Production hosts
     // ship a copy with their actual route subset.
@@ -222,7 +1554,19 @@ export function registerDiscoveryRoutes(app: Express, _deps: Deps): void {
   });
 }
 
-function buildAdvertisement(config: AppConfig, req?: Request): Record<string, unknown> {
+/** Exported for the ADR 0550 P3 attestation projection, which must digest the
+ *  SAME advertisement this host serves. It calls this directly rather than
+ *  fetching `/.well-known/openwop` over HTTP: a route that requests itself has
+ *  to guess its own port (wrong under a random-port test boot, fragile behind a
+ *  proxy) and burns a connection plus rate budget to learn what it already
+ *  knows. Caught by the route test, which got a 500. */
+// H51 — `longTermMemoryDurable()` MOVED to `host/memoryDimensions.ts`, the RFC
+// 0080 §A/§C single source of truth. It was defined here by H49 for the
+// `agents.memoryBackends` advert alone; the §C degraded projection needs the
+// SAME answer, and two derivations of "is memory durable" would be two claims
+// about one subsystem whose disagreement no schema catches.
+
+export function buildAdvertisement(config: AppConfig, req?: Request): Record<string, unknown> {
   // Honest advertise/enforce parity (capabilities.md): seam-only capabilities
   // are advertised ONLY when their (test-seam) implementation is reachable. A
   // default deploy claims only the production-wired surface — runTimeoutMs +
@@ -231,7 +1575,9 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
   // capability OMITS itself by default rather than over-claim in
   // /.well-known/openwop).
   const seamEnabled = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
-  const compactionEnabled = process.env.OPENWOP_TEST_TRIGGER_COMPACTION === 'true';
+  // (`OPENWOP_TEST_TRIGGER_COMPACTION` is read by `memoryCapability()` — the
+  // RFC 0080 §A model owns every `capabilities.memory` gate now, so the local
+  // hoist would have been a second reader of the same switch.)
   const phase5 = process.env.OPENWOP_MULTI_AGENT_EXECUTION_MODEL_PHASE_5 === 'true';
   // RFC 0090 — execution-model version 6 (verifier turn + convergence). Additive
   // on the ladder: v6 implies v1..v5, so it requires phase5 (the stateful loop)
@@ -239,8 +1585,39 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
   // the RFC 0090 verifier as a commit gate (host/agentDispatch.ts runVerifier) and
   // serves POST /v1/host/openwop-app/agents/verify-run.
   const phase6 = phase5 && process.env.OPENWOP_AGENT_VERIFIER_GATING === 'true';
+  const provenance = contractProvenance();
+  const signingKeys = readBundleSigningKeys();
   const advertisement = {
-    protocolVersion: '1.1',
+    protocolVersion: PROTOCOL_VERSION,
+    // RFC 0165 §A — a ROOT property (like `contractProvenance` below): not a
+    // capability family, not mirrored into the deprecated `capabilities` wrapper.
+    protocolVersions: [...protocolVersions()],
+    // `versioning.md` §1.1 — the header-less default, and through the overlap it
+    // MUST name the 1.x member. It ships in the SAME change as the `2.0` entry
+    // above, never after it: a `protocolVersions[]` carrying two majors with no
+    // `preferredVersion` makes every consumer following the documented
+    // `preferredVersion ?? max(protocolVersions[])` rule pick major 2, which is
+    // exactly the silent migration the overlap exists to prevent.
+    preferredVersion: preferredVersion(),
+    // RFC 0146 — which corpus revision this host implements against. A ROOT property
+    // (not a capability family, so it is deliberately outside `capabilities` and is not
+    // mirrored by the root spread below). Derived from the installed conformance
+    // package's CORPUS-STAMP.json, never a literal: a constant would satisfy the schema
+    // and drift on the first bump, reproducing the very defect the field detects.
+    // OMITTED entirely when the stamp is unreadable — silence is inapplicable, a guessed
+    // revision would be a false statement about the contract.
+    ...(provenance ? { contractProvenance: provenance } : {}),
+    // RFC 0168 §E.2 (corpus rc.11) — `signingKeys[]` is an optional v1.x
+    // additive root key as well as a v2 one, and it MUST be on both roots here.
+    // A certification bundle is v3 REGARDLESS of major: under the one-package
+    // decision a host measured at `--target-major 1` still emits a v3 bundle,
+    // and the Front door resolves that bundle's `signature.keyId` in whatever
+    // discovery document the host serves. Publishing only on the v2 root would
+    // leave every bundle from a `--target-major 1` run unattributable — which
+    // is the exact gap the key exists to close, reintroduced one major down.
+    // Same reader, same withhold-on-malformed rule; one key, both
+    // representations.
+    ...(signingKeys.length > 0 ? { signingKeys } : {}),
     implementation: {
       name: config.serviceName,
       version: config.serviceVersion,
@@ -300,10 +1677,25 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       maxNodeExecutions: 1000,
       // RFC 0058 — wall-clock ceiling per run; upper bound for
       // RunOptions.configurable.runTimeoutMs. Breach emits
-      // cap.breached{kind:'run-duration'} + error run_timeout. MUST equal
-      // RUN_DURATION_CEILING_MS in executor/executor.ts (advertise/enforce
-      // must agree).
-      maxRunDurationMs: 600_000,
+      // cap.breached{kind:'run-duration'} + error run_timeout.
+      //
+      // H97 — DERIVED, not duplicated. This line and `RUN_DURATION_CEILING_MS`
+      // used to be two independent literals that happened to both read
+      // `600_000`, while BOTH files carried a comment asserting they must
+      // agree — including, in `executor.ts`, the words "advertise/enforce must
+      // agree". Two comments declaring an invariant nothing enforced, on a
+      // WIRE-ADVERTISED limit: change the enforced ceiling and this document
+      // keeps promising the old number to every peer, which is a host
+      // advertising a limit it does not honour.
+      //
+      // It propagates further than the advert, too: `RUN_DISPATCH_LEASE_MS` is
+      // `RUN_DURATION_CEILING_MS + 120_000`, so the 12-minute crashed-executor
+      // recovery SLO moved with a constant nothing linked to the wire.
+      //
+      // Importing makes divergence UNREPRESENTABLE rather than merely tested —
+      // the same reason `A2A_PROFILES` is computed from
+      // `A2A_SUPPORTED_VERSIONS` instead of being kept in step by hand.
+      maxRunDurationMs: RUN_DURATION_CEILING_MS,
       // RFC 0058 + RFC 0061 — ceiling on agent-loop iterations (orchestrator
       // turns). Advertised ONLY under phase5, when host/agentLoop.ts's
       // re-entrant loop (the surface that actually counts turns + breaches
@@ -352,10 +1744,22 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
     // RFC 0059 — durable, {tenant, workspace}-scoped file layer (host/
     // workspaceStore.ts). §C CRUD + If-Match/etag + maxFileBytes, §E WCT-1
     // owner isolation + WSR-1 SR-1 redaction. Not `versioned` (latest-only).
-    workspace: {
-      supported: true,
-      maxFileBytes: 65_536,
-    },
+    //
+    // ADR 0551 P2 — READINESS-GATED. This was unconditional, which meant a
+    // `memory://` boot advertised a durable file layer backed by a store that
+    // dies with the process; `spec/v1/agent-workspace.md` §9 requires another
+    // host to observe the same snapshot, so on that profile the capability is
+    // genuinely absent. The predicate is `host/workspaceReadiness.ts`, whose
+    // only input is the SELECTED STORAGE ADAPTER's durability — see that file
+    // for why it is not a new "posture" concept.
+    ...(workspaceAdvertisable(config.storageDsn)
+      ? {
+          workspace: {
+            supported: true,
+            maxFileBytes: 65_536,
+          },
+        }
+      : {}),
     // Kanban boards — sample host-extension (non-normative). Demonstrates
     // the RFCS/0086 "named workflow agents" work surface: a card landing
     // in a trigger column starts a workflow run (RFC 0086 §E keeps the
@@ -404,18 +1808,43 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       subscriptionStates: ['active', 'paused', 'failed', 'dead-lettered'],
       dedup: true,
       retryPolicy: { maxAttempts: 3, backoff: 'fixed' },
-      sources: triggerIngestionEnabled() ? ['queue', 'webhook', 'email', 'form'] : ['queue'],
+      // RFC 0127 G4 (ADR 0286) — the honest-off advert FLIP. `stream`/`change` join
+      // `sources[]` + `ingestion.externalSources[]` ONLY when the operator turns on
+      // `OPENWOP_TRIGGER_STREAM_CDC_ENABLED` (mirrors the ingest-path gate
+      // `streamCdcIngestionEnabled()`), and ONLY now that RFC 0127 is Accepted +
+      // a REAL consumer (the signature-verified broker/CDC push → `ingestExternalEvent`
+      // in features/connections/inboundWebhooks.ts) backs the claim. Default OFF ⇒ the
+      // advert stays webhook/email/form, so OPENWOP_REQUIRE_BEHAVIOR=true never reads a
+      // hollow claim.
+      sources: triggerIngestionEnabled()
+        ? (streamCdcIngestionEnabled()
+            ? ['queue', 'webhook', 'email', 'form', 'stream', 'change']
+            : ['queue', 'webhook', 'email', 'form'])
+        : ['queue'],
       ...(triggerIngestionEnabled()
         ? {
             ingestion: {
-              externalSources: ['webhook', 'email', 'form'],
+              externalSources: streamCdcIngestionEnabled()
+                ? ['webhook', 'email', 'form', 'stream', 'change']
+                : ['webhook', 'email', 'form'],
               maxBodyBytes: MAX_INGEST_BODY_BYTES,
+              // A stream/change source is host-CONSUMED — the broker/CDC push is
+              // authenticated at the connection layer (a signed broker push, RFC 0095
+              // credential-brokered egress), so no new per-message wire verification mode
+              // is added; the webhook/email/form modes remain the advertised set.
               verification: ['webhook-signature', 'email-dmarc', 'form-origin'],
               registrationEndpoint: true,
             },
           }
         : {}),
     },
+    // RFC 0128 (Draft) purpose-propagation — advertised ONLY when the capability flag is
+    // on (default off ⇒ honest-off). The advert is honest because the behavior IS honored:
+    // the host re-emits/narrows/never-widens the `permittedPurposes` label on OpenWOP-envelope
+    // onward hops (routes/purposePropagationSeam.ts + features/cdp/purposeLabels.ts) and
+    // fail-closes `[]`. This is the graduation witness posture (advertise the honored behavior);
+    // the flag is turned OFF in production until RFC 0128 is Accepted.
+    ...(purposePropagationEnabled() ? { purposePropagation: { supported: true, propagatesOnward: true } } : {}),
     supportedTransports: ['rest', 'sse'],
     stream: { modes: ['values', 'updates', 'messages', 'debug'] },
     // Conformance fixtures loaded from in-tree `conformance/fixtures/`
@@ -446,7 +1875,29 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // `test/auth-scim.test.ts`). Behavioral leg gates on `OPENWOP_TEST_SCIM_URL`.
       //
       // Advertised ONLY when the seam is actually reachable (review finding #10).
-      auth: { profiles: advertisedAuthProfiles() },
+      auth: { profiles: advertisedAuthProfiles(), ...oidcCapability(), ...workloadIdentityCapability(), ...subjectLinkingCapability() },
+      // RFC 0076 §B + the `http-client-ssrf-guard` invariant. `supported`
+      // covers BOTH outbound-HTTP surfaces this host exposes:
+      //   - the node/tool egress (`openwop:core.openwop.http.fetch` →
+      //     webResearchSurface.fetchBatch — SSRF-guarded, 256 KiB body cap);
+      //   - the pack-facing `ctx.http.safeFetch` (executor ctx → host/
+      //     connectionInjection.ts) — resolve→pin→connect via the shared
+      //     guarded lookup (webhookEgressGuard.ts), `Connection: upgrade`
+      //     refused, response body + wall-clock clamped.
+      // The advertised numbers ARE the enforced constants (imported from
+      // connectionInjection.ts — advertise/enforce agree by construction).
+      // `egressPolicy` (RFC 0079) is DELIBERATELY absent: audience binding is
+      // enforced in substance (host-curated apiHosts match + redirect:error on
+      // token-bearing calls) but the host does not emit `egress.decided`
+      // decision events, which `egressPolicy.supported: true` would claim.
+      httpClient: {
+        supported: true,
+        ssrfGuard: true,
+        maxResponseBodyBytes: SAFE_FETCH_MAX_RESPONSE_BODY_BYTES,
+        requestTimeoutMs: SAFE_FETCH_REQUEST_TIMEOUT_MS,
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'],
+        safeFetch: { supported: true },
+      },
       // RFC 0049 (`Draft`) role→scope authorization (ADR 0006 Phase 3).
       // `supported` tracks ACTUAL enforcement on the protocol surface
       // (runs/artifacts) + the `/v1/host/openwop-app/authorization/decide` seam —
@@ -455,6 +1906,31 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // so the claim is never a false authorization-oracle (the conformance leg
       // `authorization-fail-closed.test.ts` runs non-vacuously iff this is on).
       authorization: authorizationCapability(),
+      // RFC 0129 (Active) / ADR 0290 — data-residency admission control. Advertised
+      // ONLY when the operator opts in (`OPENWOP_DATA_RESIDENCY_ENABLED`) AND pins at
+      // least one region (`OPENWOP_DATA_RESIDENCY_REGIONS`). HONEST-OFF: default unset
+      // ⇒ NO `dataResidency` key (this host makes no residency promise and ignores any
+      // `residency.region` on a run-create). The claim is honest because the behavior
+      // IS honored — `POST /v1/runs` rejects `residency_unavailable` (422, no run) for
+      // an unadvertised region (routes/runs.ts + features/cdp/dataResidency.ts), which
+      // the `data-residency-admission` conformance witness verifies non-vacuously.
+      // Falsifiability scoping: admission-control is the tested MUST; physical byte-
+      // location is an operator SHOULD (out-of-band, not host-enforced).
+      ...(dataResidencyAdvertised() ? { dataResidency: { supported: true, regions: dataResidencyRegions() } } : {}),
+      // RFC 0132 (Draft) — anonymous-actor authorization for public agent surfaces.
+      // Advertised ONLY when the operator opts in (`OPENWOP_ANON_ACTOR_ENABLED`);
+      // HONEST-OFF by default ⇒ NO `anonymousActor` key (any public surface stays on
+      // the runless no-tools single-turn gateway, out of this RFC's scope).
+      // `failClosed` is const-true (an absent/unresolvable anon grant denies — never a
+      // default-on baseline). The advert lists BOTH tiers because the reference host
+      // behaviorally honors both: the widget gateway dispatches an anon read-tier tool
+      // turn over EXACTLY the surface's default-deny grant, and the sample seam
+      // (routes/anonSurfaceSeam.ts) honors the bounded-write-egress tier — HITL-gated
+      // writes + audience-bound, credential-free egress via `decideAnonToolCall`. The
+      // production widget uses read only by config choice, not a capability gap.
+      // (features/chat-widget/publicGateway.ts + host/anonymousActor.ts.) Mirrors the
+      // dataResidency honest-off/env-gated shape.
+      ...(anonymousActorAdvertised() ? { anonymousActor: anonymousActorCapability() } : {}),
       secrets: {
         supported: true,
         scopes: ['tenant', 'user', 'run'],
@@ -479,8 +1955,19 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       aiProviders: {
         // RFC 0108 §A.1: `selfHosted` ⊆ `supported`, so the opaque `compat` class
         // joins `supported` exactly when it is advertised (dark/[] otherwise).
-        supported: ['anthropic', 'openai', 'google', 'minimax', ...hostAdvertisedSelfHosted()],
-        byok: ['anthropic', 'openai', 'google'],
+        // ADR 0757 — a configured subscription-only provider (GitHub Copilot) joins
+        // `supported` too: RFC 0067 requires `authModes` keys + `byok` ⊆ `supported`.
+        supported: ['anthropic', 'openai', 'google', 'minimax', ...hostAdvertisedSelfHosted(), ...advertisedSubscriptionOnlyProviders()],
+        // RFC 0121 §B.7 — `byok` + `authModes`. Each BYOK provider advertises its
+        // real `apiKey` mode; a provider advertises `subscription` ONLY when it has
+        // a CONFIGURED (lawful) subscription mechanism — which is ALWAYS none today
+        // (honest-off, deferred on RFC 0121 UQ1 / ToS-legal; the ADR 0121/selfHosted
+        // precedent). §B.7 invariant: a subscription provider is force-included in
+        // `byok`. By default `subscriptionAdvertisedProviders()` is `[]`, so no
+        // provider ever advertises `subscription` and `authModes` is `apiKey`-only.
+        // ADR 0182 Phase 1: with OPENWOP_SUBSCRIPTION_REQUIRE_LOGIN set, the set is
+        // additionally narrowed to providers with a detected local CLI login.
+        ...buildProviderAuthModes(['anthropic', 'openai', 'google'], subscriptionAdvertisedProviders()),
         // RFC 0108 §A — self-hosted / OpenAI-compatible provider class. DARK by
         // default; lights up (`['compat']`) only when OPENWOP_COMPAT_PROVIDER_ENABLED
         // + a reachable endpoint backs it (the §A.2 honesty rule). The id is opaque
@@ -511,7 +1998,7 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         // here exactly because the host accepts an `{type:'audio'}` ContentPart.
         input: { modalities: [...INPUT_MODALITIES] },
         imageGeneration: { supported: imageGenerationAdvertised() }, // ADR 0115 — true only when a provider is configured
-        videoGeneration: { supported: false },
+        videoGeneration: { supported: videoGenerationAdvertised() }, // ADR 0411 — honest-flip when a provider is wired
         // RFC 0105 §B — speech synthesis (text-to-speech). The const string
         // "supported" (the locked shape, parallel to imageGeneration); routable
         // TTS providers are discovered via aiProviders.supported[] (minimax),
@@ -549,6 +2036,12 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         // (GET /v1/host/openwop-app/assets/{token}) rather than inlined.
         maxInlineMediaBytes: MAX_INLINE_MEDIA_BYTES,
       },
+      // RFC 0122 — self-hosted runner (remote-driven local execution). Root-level
+      // capability block (sibling of aiProviders/connections/agents). HONEST-OFF:
+      // `supported:false` until RFC 0122 is Accepted (Phase 3) AND an operator opts
+      // in; the §19 seam is wired (soft-skip-proof) but the wire claim stays dark.
+      // `dispatchKinds:["model"]` = the ADR 0182 Phase-5 model-first arm.
+      selfHostedRunner: selfHostedRunnerAdvertised(),
       // RFC 0005 (MAS Phase 4) — the host implements `core.conversationGate`
       // (open/exchange/close) + honors the `conversation.*` suspend variants.
       // Advertising obligates the full contract (capabilities.md §conversationPrimitive).
@@ -590,11 +2083,20 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // i18n.defaultLocale; ({base} ∪ content.supportedLocales) ⊆ i18n.supportedLocales;
       // baseLocale ∉ content.supportedLocales. Same operator gate as i18n.
       ...(hostI18nEnabled()
-        ? { content: { supported: true, baseLocale: hostDefaultLocale(), supportedLocales: hostSupportedLocales().filter((l) => l !== hostDefaultLocale()) } }
+        ? { content: { supported: true, baseLocale: hostDefaultLocale(), supportedLocales: hostContentLocales() } }
+        : {}),
+      // RFC 0199 / RFC 0047 (ADR 0753 D11) — the v1 twin of the v2 `oauth` family,
+      // read from the same snapshot, so both representations make one claim.
+      ...(oauthAdvertisementSnapshot().advertised
+        ? { oauth: { supported: true, grants: ['authorization_code', 'refresh_token'], providers: oauthAdvertisementSnapshot().providers, credentialInterrupt: true } }
         : {}),
       interrupts: {
         supported: true,
-        kinds: ['approval', 'clarification', 'refinement', 'cancellation', 'external-event', 'conversation.start', 'conversation.exchange', 'conversation.close'],
+        kinds: [
+          'approval', 'clarification', 'refinement', 'cancellation', 'external-event', 'conversation.start', 'conversation.exchange', 'conversation.close',
+          // RFC 0199 §C — raised by this host only while `oauth` is advertised.
+          ...(oauthAdvertisementSnapshot().advertised ? ['credential'] : []),
+        ],
         // `interrupt-profiles.md` (FINAL v1) catalogs optional
         // interrupt profiles. Sample claims only the profiles its
         // implementation actually backs end-to-end today:
@@ -647,16 +2149,104 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // the observable run/node sequence against the source, emitting
       // `replay.diverged` on a mismatch (replay.md §"Failure surfaces").
       // `modes` is REQUIRED alongside `supported: true` (profiles.md
-      // §`openwop-replay-fork`; pinned by replayDeterminism.test.ts) and
-      // lists only `replay` — `branch` (re-execution from an arbitrary
-      // `fromSeq` checkpoint with an overlay) is NOT advertised because the
-      // sample doesn't reconstruct the executor's resume position, so a
-      // partial-checkpoint branch would double-emit the prefix. The same
-      // limit applies to mid-sequence replay: `POST :fork {mode:'replay'}`
-      // refuses `fromSeq > 0` with 501 (routes/runs.ts). Honest split;
-      // `fork: false` is the legacy spelling of that limitation, kept for
-      // existing consumers.
-      replay: { supported: true, modes: ['replay'], fork: false },
+      // §`openwop-replay-fork`) and lists only `replay`. `branch`
+      // (re-execution from an arbitrary `fromSeq` checkpoint) IS implemented
+      // host-side as of ADR 0326 P3b — the fork route rebuilds a resume
+      // snapshot from the copied event prefix, so the prefix no longer
+      // double-emits — but the advert flip is GATED on a clean branch-mode
+      // conformance witness (advertise only what conformance has proven;
+      // the flip trigger is recorded in ADR 0326). (CORRECTED, ADR 0751: this
+      // said mid-sequence replay 501s on `fromSeq > 0` — false since ADR 0637 —
+      // and that a suspended checkpoint 501s `fork_checkpoint_unsupported`,
+      // which ADR 0751 replaced by re-creating the gate on the fork.) `fork: false` is the
+      // legacy spelling of the advert limitation, kept for existing
+      // consumers.
+      // RFC 0140 — `sideEffectSuppression: 'recorded-outcome'` declares HOW this
+      // host discharges `replay.md` §"Determinism guarantees" caveat 1. It is an
+      // assurance declaration, never an opt-out: caveat 1 binds unconditionally,
+      // and `none` would mean "unprobeable here", not "allowed to re-fire".
+      //
+      // WITHDRAWN 2026-08-15 — `sideEffectSuppression` is now `none`, and that
+      // is a claim being removed, NOT a guarantee. Both mechanisms below are
+      // still in place and nothing escapes a replay; what changed is that this
+      // host can no longer demonstrate the stronger property the value asserts.
+      //
+      // The argument that used to sit here — reproduced beneath — held that the
+      // host qualified because it had BOTH halves:
+      //   (a) `executor/sideEffects.ts` + the `executor.ts` short-circuit serve
+      //       the SOURCE run's recorded outcome for a classified node (ADR 0341);
+      //   (b) `host/runEffectContext.ts` + `assertEffectAllowed()` at each seam,
+      //       so a node the classifier MISSED still cannot fire (ADR 0531).
+      //
+      // The spec steward has since ruled (upstream #999, suite 1.104.0) that
+      // requirements 1 and 2 are TWO obligations: (b) discharges "do not
+      // perform" and NOT "resolve the outcome". Only serving the source run's
+      // recorded outcome — keyed on `(sourceRunId, nodeId, attempt)` — is a
+      // discharge. **A throw-only path is safe and non-conformant**, and a
+      // generic seam error is not `replay_source_missing` and does not become
+      // it by also being safe.
+      //
+      // ADR 0572's measurement is why this is not merely theoretical: of the
+      // manifest typeIds in the requirement-4 floor, only a fraction were served
+      // by (a), plus the `ctx.callAI` class by the ADR 0326 invocation log
+      // (whose `replayInvocationsFromRunId` fallback DOES key on the source run
+      // — verified at `aiProviders/aiProvidersHost.ts:729-752`, not assumed).
+      // The rest reach (b) and would THROW where the advert promises
+      // reproduction.
+      //
+      // Rule 5 forbids advertising on classification alone because
+      // classification drifts invisibly — #2871 dropped 55 nodes with nothing
+      // going red, and ADR 0563 (blob-put) plus the ADR 0533 correction (ten
+      // `core.openwop.http.*` senders) each did it again. The honest reading is
+      // that the claim rested on an effect-sender inventory being complete, and
+      // that inventory is not self-verifying.
+      //
+      // WHERE THIS STANDS AFTER ADR 0572 PHASE 3 (2026-08-17). The derived
+      // manifest floor IS now the classifier — `isSideEffectingNode` consults
+      // `MANIFEST_FAST_PATH_SERVED`, so a pack node is protected by its own
+      // `role: "side-effect"` declaration instead of by someone remembering a
+      // regex. That moved the ratchet `undischarged 214 -> 43`. It is a large
+      // step and it is NOT the exit condition, for four separate reasons — do
+      // not restore the value on the strength of the number alone:
+      //
+      //   1. 43 undischarged floor typeIds can still fire. Requirement 5 is
+      //      WHOLE-RUN: no class may remain.
+      //   2. The floor is manifest-only by construction (ADR 0572 P1's scope
+      //      note) while requirement 5 binds the whole CATALOGUE, so "the
+      //      baseline reaches zero" is NECESSARY BUT NOT SUFFICIENT — a
+      //      correction to the exit condition as P2 stated it.
+      //   3. Requirement 6(b) needs a default-deny guard at EVERY host effect
+      //      seam. A served-set census cannot witness seam coverage.
+      //   4. Sharpest of the four: the `ai-opaque-not-invocation-logged` class,
+      //      23 typeIds wide. `core.agents.run` and the `aiEnvelope` nodes
+      //      reach AI through a host capability the build-time analysis cannot
+      //      follow, so they are held back and a replay of one THROWS at (b)
+      //      instead of reproducing. That is "safe and non-conformant" in the
+      //      spec's own words.
+      //
+      // The counter behind `GET /v1/host/sample/replay/effect-count` still sits
+      // on (b)'s allow branch, so the conformance scenario continues to probe
+      // the guarded seam itself rather than a bystander (ADR 0533).
+      replay: {
+        supported: true,
+        modes: ['replay', 'branch'],
+        fork: true,
+        sideEffectSuppression: 'none',
+      },
+      // RFC 0151 §A — generic compensation (Saga). What this claims, in §A's own
+      // words, is that the HOST orders, persists and retries the unwind, so a
+      // client can rely on it rather than hand-rolling one. ADR 0554 P0-P2 built
+      // exactly that: a durable obligation ledger, a `reverse-completion` unwind
+      // with retries and an RFC 0051 approval gate, the six §D events, and the
+      // §21 seams that let a black-box witness drive the REAL executor.
+      //
+      // The object is SPREAD from `host/compensationCapability.ts`, never
+      // re-typed. `compensation.md` §D pairs this advert with
+      // `RunSnapshot.compensationStatus` (non-advertiser MUST omit, advertiser
+      // MUST carry), and `routes/runs.ts` gates the projection on the SAME
+      // constant — so the pair cannot come apart, in either direction, without
+      // deleting the constant they share.
+      compensation: { ...COMPENSATION_CAPABILITY },
       // RFC 0115 — Run Transport Economy. The host emits a strong,
       // sequence-derived ETag and honors If-None-Match/304 on
       // GET /v1/runs/{runId}, and negotiates Content-Encoding on run reads.
@@ -692,6 +2282,21 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       agents: {
         supported: true,
         reasoning: { verbosity: 'full', tokenLimit: 512, streaming: true },
+        // RFC 0004 / `agent-memory.md` §"Capability advertisement" — long-term
+        // agent memory. DERIVED from the selected memory surface, never
+        // asserted: the §A dimension is "cross-run DURABLE store", and this
+        // host's default `memory` tier is process-local (the surface advert
+        // itself says "restarts wipe state"), so claiming it there would be an
+        // over-claim. Under `OPENWOP_SURFACE_MEMORY=durable` — the shared
+        // Storage, CAS-safe across instances (`host/durable/durableMemory.ts`)
+        // — the claim is true, and the host honours the three invariants the
+        // advertisement binds it to end-to-end: CTI-1 (tenant-bucketed reads
+        // plus fail-closed `memoryRef` shape validation), SR-1 (write-time
+        // redaction through `writeMemoryEntryRedacted`), and TTL (expired
+        // entries never surface). H49 implemented all three; before it, this
+        // key was absent — which is why the four `agentMemory*` scenarios
+        // skipped rather than lying.
+        ...(longTermMemoryDurable() ? { memoryBackends: ['long-term' as const] } : {}),
         // RFC 0070 — this host loads pack `agents[]` into an AgentRegistry
         // (RFC 0003 installAgents) and dispatches a manifest agent via the
         // floor seam (`POST /v1/host/openwop-app/agents/{agentId}/dispatch`),
@@ -724,17 +2329,22 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
               },
             }
           : {}),
-        // RFC 0097 standing goals — host-sample seam under `/v1/host/openwop-app/goals`.
-        // Advertised when `OPENWOP_GOALS_ENABLED=true`. Judge = `verifier` (this
-        // host's verifier turn; `host` judge honest-omitted). Continuation modes
-        // honored: schedule/commitment/manual (`heartbeat` omitted — no goal-
-        // retrigger beat). `requiresBounds` true ⇒ create without RFC 0058 bounds
-        // is 422 (`goal-standing-continuation`, non-vacuous).
+        // RFC 0097 standing goals — the ADR 0412 controller under
+        // `/v1/host/openwop-app/goals`. Advertised when
+        // `OPENWOP_GOALS_ENABLED=true`. HONESTY FLIP (ADR 0412 P5): every claim
+        // below is behaviorally honored — `judge: verifier` invokes the
+        // registered goal verifier over an immutable evidence snapshot
+        // (`evaluateGoal`, P1); `schedule` continuation arms a real scheduler
+        // job (P4); `manual` is the un-armed default. `commitment` was DROPPED
+        // from the advertisement (never wired — ADR 0412 P4 decision);
+        // `heartbeat` stays honest-omitted. `requiresBounds` true ⇒ create
+        // without RFC 0058 bounds is 422, and bounds are runtime-enforced (P2).
+        // `test/goals-advertisement-guard.test.ts` pins ad↔behavior parity.
         ...(process.env.OPENWOP_GOALS_ENABLED === 'true'
           ? {
               goals: {
                 judge: 'verifier',
-                continuation: ['schedule', 'commitment', 'manual'],
+                continuation: ['schedule', 'manual'],
                 requiresBounds: goalsRequiresBounds(),
               },
             }
@@ -789,6 +2399,19 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // override the single config module rather than editing two
       // call sites.
       prompts: { ...getPromptsHostConfig() },
+      // RFC 0013 (chain-pack expansion) + RFC 0124/WCP4 (per-run parameter
+      // deferral, Accepted #827). Read from the single source of truth in
+      // `host/workflowChainPackLoader.ts` (co-located with `expandChain`) so the
+      // advertisement can't drift from the implementation. `deferredParameters`
+      // is gated on the prompt-bearing rewrite precondition (prompts.supported +
+      // `variable` source). `hostExpansionSeam` is intentionally absent — this
+      // host serves neither `/v1/host/sample/workflow-chain:expand` nor
+      // `/v1/host/sample/chain/deferred-expand`, so those conformance scenarios
+      // soft-skip (host-expansion gates on `hostExpansionSeam` per
+      // openwop-conformance ≥1.51.0 / erratum #828; the deferred gated legs
+      // soft-skip on the 404). The deferred behavior is witnessed by the
+      // server-free deferred legs + this host's own gated runpath vitest.
+      workflowChainPacks: workflowChainPacksCapability(),
       // RFC 0030 envelope-track advertisement. The universal-kind payload
       // schemas (`schemas/envelopes/*.schema.json`) carry the OPTIONAL
       // `reasoning` field per RFC 0030 §A. The reference host injects a
@@ -813,7 +2436,7 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
           const cfg = getEnvelopeReasoningConfig();
           return { supported: cfg.supported, promptDirective: cfg.promptDirective };
         })(),
-        tierOneSubsetCompliance: 'warn',
+        tierOneSubsetCompliance: TIER_ONE_SUBSET_COMPLIANCE,
         // RFC 0032 §C envelope-reliability event vocabulary. The reference
         // host emits four events end-to-end from `dispatchStructured()`'s
         // retry loop (per-attempt failure classification → emit →
@@ -890,38 +2513,40 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
           substitutionSupported: cfg.substitutionSupported,
         };
       })(),
-      // `supported: false` — no standard four-op MemoryAdapter; this demo
-      // only does host-internal run-summary writes + the read-side
-      // (GET /v1/host/openwop-app/memory). RFC 0057: it DOES attribute those
-      // writes via the content-free `memory.written` event, so it advertises
-      // attribution independently of the adapter contract.
-      // RFC 0012 — compaction. The host distills its internal longTerm
-      // entries into one SR-1-redacted archive + emits `memory.compacted`,
-      // but the ONLY trigger is the `/v1/test/memory/{seed,compact}` seam
-      // (gated on OPENWOP_TEST_TRIGGER_COMPACTION) — there is no automatic
-      // host-managed or production client trigger. So advertise compaction
-      // ONLY when that seam is reachable, never on a default deploy.
-      memory: {
-        supported: false,
-        attribution: { supported: true, emitsWriteEvents: true },
-        ...(compactionEnabled ? { compaction: { supported: true, trigger: 'both' } } : {}),
-        // RFC 0113 — the memory read (`GET /v1/host/openwop-app/memory`) honors a
-        // `tokenBudget` that bounds the cumulative SIZE of the returned set
-        // (over-budget entries omitted whole, never truncated; ≥1 kept), reusing
-        // the ADR 0148 A4 `budgetByChars` primitive. The unit is content CHARS,
-        // declared honestly as `tokenCounter: "chars"` (this host counts chars,
-        // not BPE tokens). Ranking is recency-only — `memory.search` semantic
-        // (`modes:["semantic"]`) is NOT advertised, so per RFC 0113 `rank:"relevance"`
-        // is not offered.
-        injectionBudget: { supported: true, tokenCounter: 'chars' as const },
-      },
+      // RFC 0080 §A — the reconciled memory-capability model. The block is
+      // BUILT BY `host/memoryDimensions.ts`, which also computes the §C
+      // degraded projection `routes/agents.ts` stamps on the inventory, so the
+      // advertised model and the projected model are one derivation. Inlining
+      // it here again is what would let the two drift.
+      //
+      // H51 flipped `supported` false → true; the reasoning (and why `writable`
+      // is OMITTED rather than set false) lives on `memoryCapability()`.
+      memory: memoryCapability(),
       // RFC 0023 §B.2 — capabilities.conformance.mockAgent. Advertised
       // only when the conformance-only nodes are actually registered
       // (conformanceNodesEnabled() — on for dev/test/conformance, off by
       // default under NODE_ENV=production unless explicitly enabled). The
       // registration in bootstrap/nodes.ts reads the SAME switch, so the
       // advertisement can never claim a typeId the host didn't register.
-      conformance: { mockAgent: conformanceNodesEnabled() },
+      // ADR 0550 P4 — RFC 0089 §D / `conformance-certification.md` §D: the ONE
+      // spec-defined pointer at this host's published certification evidence.
+      // `capabilities.schema.json` has carried the slot since RFC 0089; nothing
+      // new reaches the wire here beyond a URL.
+      //
+      // Advertised ONLY when the image actually carries a bundle
+      // (`host/conformanceClaims.ts` reads the `build-meta/` stamp; a source
+      // checkout has none and the field is omitted). Omission is fully
+      // conformant — §D says clients MUST tolerate its absence — while
+      // advertising a pointer whose route 404s is the advertised-but-not-served
+      // defect the container lane already caught once in
+      // `workflowChainPacks.hostExpansionSeam`.
+      conformance: {
+        mockAgent: conformanceNodesEnabled(),
+        ...(() => {
+          const url = certificationBundleUrl(req ? requestOrigin(req) : 'http://localhost:8080');
+          return url === undefined ? {} : { certificationBundleUrl: url };
+        })(),
+      },
       // RFC 0025 — test-mode mirror namespace advertisement. The
       // /v1/packs-test/* routes (routes/packs-test.ts) only mount when
       // OPENWOP_PACKS_TEST_NAMESPACE_ENABLED=true; we advertise the
@@ -950,7 +2575,15 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // algorithm versioning"), durable retry queue NOT advertised as the
       // RFC 0083 trigger-bridge `durable` mode (the host's internal retry
       // queue is best-effort-plus, not the four-state subscription model).
-      webhooks: { supported: true, signed: true, signatureAlgorithms: ['v1'], durable: false },
+      // RFC 0201 / ADR 0747 — the Standard Webhooks companion scheme and its
+      // rotation facet, from the same source as the v2 facet.
+      webhooks: {
+        supported: true,
+        signed: true,
+        signatureAlgorithms: [...SUPPORTED_SIGNATURE_ALGORITHMS],
+        secretRotation: { overlapSeconds: secretRotationOverlapSeconds() },
+        durable: false,
+      },
       // RFC 0100 §1 — the `a2a` capability slot. Advertised ONLY when this host
       // actually exposes itself as an A2A agent (OPENWOP_A2A_SERVER_ENABLED) —
       // otherwise a cross-host caller would feature-detect an A2A surface that
@@ -988,6 +2621,33 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
                 streaming: process.env.OPENWOP_A2A_STREAMING === 'true',
                 pushNotifications: durable,
                 durableTasks: durable,
+                // RFC 0152 §A — exact-version discovery (ADR 0552 P1 §A).
+                //
+                // Held back until now for a reason worth keeping: the RFC was
+                // Accepted, but this repo pinned conformance 1.73.0 whose
+                // `capabilities.schema.json` marked this slot
+                // `additionalProperties: false`. Advertising the spec-correct
+                // fields would have emitted a document any peer validating
+                // against the PINNED artifact refuses — correct per the spec,
+                // invalid per the artifact. The residue was pinned by a
+                // tripwire rather than a comment, and the tripwire fired the
+                // moment the pin moved to 1.106.0.
+                //
+                // DERIVED from `host/a2aProfile.ts`, never literals: the
+                // advertisement and the `A2A-Version` header refusal
+                // (`routes/agents.ts`) must not be able to disagree about what
+                // this host serves. A second spelling here is how an advert
+                // starts claiming a version the refusal path rejects.
+                protocolVersions: [...A2A_SUPPORTED_VERSIONS],
+                preferredVersion: advertisedA2AProtocolVersion(),
+                // ADR 0552 P2 — the named composition profiles, DERIVED from the
+                // same array. §A forbids listing `a2a-X.Y` in `profiles` without
+                // `X.Y` in `protocolVersions`; deriving makes that structurally
+                // true rather than test-enforced. Claiming `a2a-1.0` is the
+                // stronger statement of the two — it says the host meets
+                // §C's floor (a 1.0 Agent Card and the JSON-RPC binding at 1.0),
+                // which `a2a-card-runtime-consistency.test.ts` is the witness for.
+                profiles: [...A2A_PROFILES],
               },
             };
           })()
@@ -1012,8 +2672,29 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // sandbox executes synthetic misbehaving packs via the
       // POST /v1/host/openwop-app/test/sandbox-{load,invoke} seams in
       // routes/testSeam.ts. Advertised only when OPENWOP_TEST_SANDBOX_MVP=true
-      // is set — the MVP is conformance-only (production deployments use
-      // wasmtime/nsjail for real isolation).
+      // is set — the MVP is conformance-only.
+      //
+      // CORRECTED 2026-08-18 (A+ audit). This sentence used to end "(production
+      // deployments use wasmtime/nsjail for real isolation)". That was FALSE,
+      // and it sat beside the sandbox advert where it reads as a statement
+      // about the host's security posture:
+      //
+      //   - ADR 0555 P2 records that nsjail and Firecracker are NOT available
+      //     on Cloud Run gen2. Production isolation is a FORKED NODE PROCESS
+      //     under `--permission` (isolation/childProcessAdapter.ts), not a VM
+      //     and not a jail.
+      //   - That adapter reports `network-denied: 'not-enforced'` — the Node 22
+      //     permission model has no network dimension — so the one guarantee a
+      //     jail would buy is precisely the one this host does not have. It is
+      //     pinned POSITIVELY by pack-isolation-escape.test.ts, which asserts
+      //     that `node:net` still connects.
+      //   - In production the adapter isolates an EMPTY population: untrusted
+      //     packs are refused before dispatch (fail-closed), so nothing
+      //     reaches it.
+      //
+      // `sandbox.supported` is therefore absent from the deployed wire, and it
+      // stays absent until the network invariant can be met — ADR 0555 P4,
+      // whose blocker is host evidence, not RFC 0035 adoption.
       //
       // The MVP proves 5 of 8 RFC 0035 §B failure-mode invariants by
       // construction:
@@ -1093,6 +2774,15 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
                   supported: true,
                   version,
                   ...(phase2 ? { confidenceEscalationFloor: floor } : {}),
+                  // RFC 0044 §B — how this host's confidence escalation
+                  // surfaces. The wire RunStatus enum has NO
+                  // `waiting-clarification` (run-snapshot.schema.json), so
+                  // this host maps a clarify-kind suspension to
+                  // `waiting-input` (executor inferWaitingKind); the vendor
+                  // kind names that mapping honestly instead of claiming the
+                  // canonical `clarification` → `waiting-clarification`
+                  // status this wire cannot produce.
+                  ...(phase2 ? { confidenceEscalationInterruptKind: 'x-host-openwop-app-clarification' } : {}),
                   // RFC 0040 §D — cross-host causation. A host advertising
                   // version >= 3 MUST advertise this sub-block with
                   // `supported: true` + a stable `hostId`; this host also
@@ -1171,6 +2861,26 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         indexable: false,
         fullTextSearch: false,
       },
+      // RFC 0053 — host.deadLetter. The RUN-level sink, deliberately distinct
+      // from `queueBus.deadLetterSupported` below (which dead-letters transport
+      // MESSAGES, not runs — the RFC calls out the confusion explicitly).
+      //
+      // Every terminally-failed run emits `run.dead_lettered` from the single
+      // terminal choke (`executor.emitTerminalFailure`) and stays fork-eligible
+      // — the fork route gates on ownership, never on status
+      // (`dead-letter-rfc0053.test.ts` pins both).
+      //
+      // `retentionDays` is RUNTIME-DERIVED from `defaultRetentionDays()`, the
+      // SAME function the retention sweeper reads, so the advert cannot drift
+      // from the behavior (the `restTransport.contentEncodings` honest-witness
+      // precedent). Run retention is operator OPT-IN and defaults to DISABLED,
+      // in which case there is no purge deadline at all — so the field is
+      // OMITTED rather than fabricated. The schema's `minimum: 1` makes
+      // omission the only honest encoding of "nothing is ever purged".
+      deadLetter: {
+        supported: true,
+        ...(defaultRetentionDays() > 0 ? { retentionDays: defaultRetentionDays() } : {}),
+      },
       // RFC 0017 — host.queueBus. Demo backend; in-memory pub/sub.
       queueBus: {
         supported: true,
@@ -1195,18 +2905,127 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
         presignSupported: true,
         maxObjectBytes: 50 * 1024 * 1024, // 50 MiB
       },
-      // RFC 0071/0075 — host artifact-type registry (ADR 0055). Host-native types
-      // only in v1; schemas served at the schemaEndpoint; per-type export facets.
+      // RFC 0071/0075 — host artifact-type registry (ADR 0055).
+      //
+      // SHAPE CORRECTED 2026-08-10 (ADR 0537 follow-on). This advert emitted a
+      // `types` ARRAY of `{artifactTypeId, title, schemaUrl, export,
+      // registrationSource}` plus a top-level `schemaEndpoint`. Both were host
+      // inventions: `host-capabilities.md` §host.artifactTypes has specified since
+      // RFC 0075 that `types` is a **MAP keyed by artifactTypeId** whose entries
+      // carry `{validated, validation, schemaVersion, store, render, export}`.
+      // MEASURED against the RFC 0144 declaration: the old shape failed ajv on two
+      // counts — `additionalProperties: schemaEndpoint`, and `/types must be object`.
+      //
+      // The drift survived because the family was UNDECLARED: nothing in this repo,
+      // and nothing in the conformance suite, could compare the advert to its own
+      // normative prose. Declaring it found the divergence in a day.
+      //
+      // `schemaEndpoint` and the per-type `schemaUrl` are both DELIBERATELY GONE, on
+      // the same argument: `artifact-type-packs.md` §"Schema distribution" fixes the
+      // canonical URL as `{HostBase}/schemas/artifacts/{artifactTypeId}.schema.json`,
+      // which any consumer holding an artifactTypeId derives for itself. A discovery
+      // key carrying computable information is the `host.forms` mistake again.
+      // (Serving those URLs is unchanged — only advertising them stops.)
+      //
+      // `title` and `registrationSource` are dropped as outside the spec'd facet set.
+      // `registrationSource` is the one with a real argument for reinstatement — it
+      // distinguishes host-native (served URL is the ONLY resolution path, P1-3 MUST)
+      // from pack-backed (schema travels in the tarball) — but that belongs upstream
+      // as a declared facet, not re-added unilaterally to a family just declared.
       artifactTypes: {
         supported: true,
-        schemaEndpoint: '/schemas/artifacts',
-        types: listArtifactTypes().map((t) => ({
-          artifactTypeId: t.artifactTypeId,
-          title: t.title,
-          schemaUrl: `/schemas/artifacts/${t.artifactTypeId}.schema.json`,
-          export: t.export,
-          registrationSource: t.registrationSource,
-        })),
+        types: Object.fromEntries(
+          listArtifactTypes().map((t) => [
+            t.artifactTypeId,
+            {
+              // Honest per §host.artifactTypes: `validated` is the runtime guarantee
+              // that this host validates the type BEFORE emit. It does —
+              // `runArtifactStore.detectTypedArtifact` gates on
+              // `isRegisteredArtifactType` then refuses to mint on
+              // `!validateArtifact(...).valid`.
+              validated: true,
+              // RFC 0145 — provenance. Requirement 3 binds this to agree with what
+              // `artifact.created` would carry for the type, so it is read from the
+              // SAME registry field the event's `registrationSource` comes from
+              // (`artifactTypes.validateArtifact` returns `t.registrationSource`).
+              // One source, so the two surfaces cannot drift into a false advert.
+              registrationSource: t.registrationSource,
+              // RFC 0142 §"Gating" — `store: true` is a promise about the TYPE, not
+              // a description of the host's best path to it. Per the 2026-08-10
+              // scope ruling it is universally quantified over paths that persist an
+              // artifact carrying a REGISTERED artifactTypeId: every such path must
+              // emit `artifact.created`.
+              //
+              // This host has two persisting paths and only one emits:
+              //   documents-generation node  → persists + EMITS (packs/feature.documents.nodes:125)
+              //   outputs-`artifact` envelope → persists via `persistRunArtifact`,
+              //                                 emits NOTHING by design (runArtifactStore.ts:18)
+              // The second gates on `isRegisteredArtifactType` and writes the row WITH
+              // the type, so it IS in scope for the facet — the unregistered-tier
+              // carve-out does not rescue it.
+              //
+              // MEASURED reachability, not assumed: the only artifactTypeIds any pack
+              // puts in an `outputs.artifact` envelope are app.research, canvas.*,
+              // code.execution-result, interactive.chart, kicktodo.plan-revision and
+              // production.plan — none `doc.*`; and `detectTypedArtifact` refuses any
+              // envelope carrying a `documentId`, which every document-backed artifact
+              // does. So `doc.*` types reach persistence ONLY through the emitting path.
+              // (`core.trigger.artifact` passes a caller-supplied artifactTypeId, but
+              // returns it FLAT, not under `outputs.artifact`, so it never reaches the
+              // typed persist path — checked, because it would otherwise falsify this.)
+              //
+              // The `doc.` prefix is the binding rule itself, not a naming convention:
+              // `documentsService.ts:507` derives a template's type as `doc.${seed.kind}`.
+              // Pinned by `artifact-types-store-reachability.test.ts`, which reds if a
+              // future pack routes an advertised type through the non-emitting path.
+              ...(t.artifactTypeId.startsWith('doc.') ? { store: true } : {}),
+              // Mirrors `ArtifactType.validation` — DERIVED from the registered
+              // schema rather than asserted, so a closed-world pack schema is
+              // reported closed instead of defaulting to the spec's `"open"`.
+              validation:
+                (t.schema as { additionalProperties?: unknown }).additionalProperties === false
+                  ? 'closed'
+                  : 'open',
+              ...(t.export.length > 0 ? { export: t.export } : {}),
+            },
+          ]),
+        ),
+      },
+      // RFC 0137 — host.forms.contentPacks. Advertised ONLY now that the §F1
+      // trust boundary is honored: pack-authored strings and publicly-submitted
+      // values are fenced when they reach a model (`agentToolProvider`
+      // `contentTrust` declaration → `fenceUntrustedBlock`), and the forms
+      // surface cannot bypass React escaping (ratcheted). `capabilities.md`
+      // requires advertising only what is behaviorally honored, and
+      // OPENWOP_REQUIRE_BEHAVIOR=true fails a dishonest advert — so this line
+      // deliberately did NOT ship with the wire translation in #2971.
+      //
+      // SPELLING — plain is canonical; the dotted key is a deprecated mirror.
+      // CORRECTION (2026-08-09): the comment that stood here justified the
+      // dotted-only key on the premise that the RFC 0137 conformance helper
+      // "reads exactly `capabilities['host.forms']`", so an un-prefixed advert
+      // "would make the behavioral leg SOFT-SKIP". That premise EXPIRED.
+      // RFC 0137 gap G16 (RESOLVED 2026-08-05) settled the plain family name as
+      // the canonical discovery key — `capabilities.schema.json` declares 80+
+      // properties and ZERO dotted host.* keys, and the `host.` prefix is the
+      // capability IDENTIFIER notation (§headings, pack `peerDependencies`,
+      // `error.capability`), not the document key. The helper
+      // (`conformance/src/lib/formContentPacks.ts`) now resolves
+      // plain-root → dotted-root → plain-wrapper → dotted-wrapper, so this host
+      // was being found on the MIGRATION arm, not the canonical one.
+      // Emitting plain also ends this family's divergence from every other one
+      // this host advertises (`artifactTypes`, `blobStorage`, …).
+      // The dotted key is retained as a DEPRECATED mirror for the v1.x window —
+      // exactly the treatment this file already gives the `capabilities`
+      // wrapper below — because `host-capabilities.md:505` still SHOWS the
+      // dotted spelling in prose, so a reader implementing from that snippet
+      // would look for it. Drop the mirror once that prose is corrected.
+      forms: {
+        contentPacks: true,
+      },
+      /** @deprecated dotted mirror; remove once `host-capabilities.md` §host.forms shows the plain key. */
+      'host.forms': {
+        contentPacks: true,
       },
       // RFC 0019 — host.cache.
       cache: {
@@ -1225,10 +3044,33 @@ function buildAdvertisement(config: AppConfig, req?: Request): Record<string, un
       // detail (transports, sampling/elicitation bridges) lives
       // under `mcp.serverMount` so it's namespaced without breaking
       // the canonical discoverability contract.
+      // RFC 0153 §A — exact-version discovery (ADR 0553 P1 §A). Same history
+      // as the `a2a` slot above: Accepted RFC, blocked by the PINNED 1.73.0
+      // schema's `additionalProperties: false`, released by the bump to
+      // 1.106.0 and detected by the `agrade-wire-blocked-residue` tripwire
+      // rather than by anyone remembering to re-check.
+      //
+      // DERIVED from `host/mcpProfile.ts`. `initializeVersionOutcome()` is what
+      // decides an actual `initialize` handshake, so a literal here could
+      // advertise a version the handshake refuses — the drift the ADR 0553 P1
+      // seam exists to prevent.
+      //
+      // ADR 0553 P2 — `profiles` + `features` join the advert, and they are the
+      // half that cannot be claimed without behaviour: `mcp-2026-07-28` means
+      // this document in full, and `features[]` names three MUSTs of the
+      // upstream revision. All four fields DERIVE from `host/mcpProfile.ts`,
+      // which is also what `selectMcpCodec` reads to decide which codec serves a
+      // request and what `server/discover` answers with — so the discovery
+      // document and the MCP discovery answer are two views of one fact and
+      // cannot disagree (RFC 0153 §B).
       mcp: process.env.OPENWOP_MCP_SERVER_ENABLED === 'true'
         ? {
             supported: true,
             serverUrls: ['/v1/host/openwop-app/mcp'],
+            protocolVersions: [...MCP_SUPPORTED_VERSIONS],
+            preferredVersion: advertisedMcpProtocolVersion(),
+            profiles: [...MCP_PROFILES],
+            features: [...MCP_CURRENT_FEATURES],
             serverMount: {
               supported: true,
               transports: ['streamable-http'] as const,

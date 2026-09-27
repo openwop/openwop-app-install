@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/invite.config.json",
+  "title": "OrgsInviteConfig",
+  "description": "Authoring-time configuration for one invitation. `email` is the chain-parameter position (`{{params.newHireEmail}}`, RFC 0013 Path A \u2014 frozen per instance); `role` and `orgId` are optional. Runtime inputs win on conflict (the merged-args idiom). Authorization is never configured here: it is the run's acting user holding host:members:manage in the target org (the SAME predicate the /orgs/:orgId/invites routes use), checked in the host surface.",
+  "type": "object",
+  "properties": {
+    "email": {
+      "type": "string",
+      "maxLength": 320,
+      "description": "Recipient address (fallback when no edge delivers `inputs.email`). Normalised lower-case at mint; must be email-shaped or the node fails typed (`invalid_email`)."
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "viewer",
+        "editor",
+        "admin"
+      ],
+      "default": "viewer",
+      "description": "The accessControl role the invite grants. Never `owner` \u2014 ownership is granted explicitly through accessControl."
+    },
+    "orgId": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Target org. Empty \u21d2 the run's workspace root (`orgId === tenantId`). A foreign or unknown org is a uniform not_found."
+    }
+  },
+  "additionalProperties": false
+}

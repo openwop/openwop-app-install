@@ -1,7 +1,7 @@
 {
   "name": "feature.cms.agents",
-  "version": "1.0.0",
-  "description": "CMS feature agent pack (ADR 0064 Phase 3 / RFC 0103) — a manifest agent shipped by the CMS feature whose tools are the feature.cms.nodes (get-page / translate-section) over the ctx.features.cms surface. The localization agent: it reads a published page's base content and drafts per-locale section overlays, tool-allowlisted to the CMS feature surface only (RFC 0003 agents[] + RFC 0002 §A14 allowlist). Drafts are reviewed + saved through the page editor (which sanitizes); the agent never persists.",
+  "version": "1.1.1",
+  "description": "CMS feature agent pack (content-editor C6) — manifest agents shipped by the CMS feature whose tools are the CFP-1 `openwop:cms.<verb>` agent tools (registerFeatureAgentTool, over the same ctx.features.cms surface owner as the feature.cms.nodes workflow nodes). `localizer` reads a published page's base content and drafts per-locale overlays (review-ready; never persists). `content-editor` additionally uses the governed write verbs — it can patch DRAFT sections and SUBMIT a page for review, but its allowlist has no publish tool: publishing stays a human action (route or ApprovalsInbox).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "cms", "content", "localization", "i18n", "agent", "rfc-0103"],
@@ -15,12 +15,30 @@
       "agentId": "feature.cms.agents.localizer",
       "persona": "WRITER",
       "label": "CMS Content Localizer",
-      "description": "Drafts per-locale overlays for a published CMS page's sections. Reads the base content with feature.cms.nodes.get-page, then drafts a structure-preserving translation for each section with feature.cms.nodes.translate-section (over ctx.features.cms + the run-scoped provider). Tools are allowlisted to the CMS feature surface only; the agent produces review-ready drafts and never persists.",
+      "description": "Drafts per-locale overlays for a published CMS page's sections. Reads the base content with openwop:cms.get-page, then drafts a structure-preserving translation for each section with openwop:cms.translate-section (over ctx.features.cms + the headless provider). Tools are allowlisted to the CMS feature surface only; the agent produces review-ready drafts and never persists.",
       "modelClass": "general",
       "systemPromptRef": "prompts/cms-localizer.md",
       "toolAllowlist": [
-        "openwop:feature.cms.nodes.get-page",
-        "openwop:feature.cms.nodes.translate-section"
+        "openwop:cms.get-page",
+        "openwop:cms.translate-section"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    },
+    {
+      "agentId": "feature.cms.agents.content-editor",
+      "persona": "WRITER",
+      "label": "CMS Content Editor",
+      "description": "Drafts, localizes, and SUBMITS CMS pages for review (ADR 0204 C6). Reads with openwop:cms.get-page / openwop:cms.list-pages / openwop:cms.get-draft-page, drafts translations with openwop:cms.translate-section, patches DRAFT sections with openwop:cms.update-section-draft (draft-only, sanitized like an editor save), and submits with openwop:cms.submit-page — the same approval-gate composition as the editor UI. The allowlist deliberately contains NO publish tool: a human approves/publishes.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/cms-content-editor.md",
+      "toolAllowlist": [
+        "openwop:cms.get-page",
+        "openwop:cms.list-pages",
+        "openwop:cms.get-draft-page",
+        "openwop:cms.translate-section",
+        "openwop:cms.update-section-draft",
+        "openwop:cms.submit-page"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }

@@ -26,7 +26,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://localhost:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await saveConfig({ ...voiceFeature.toggleDefault!, status: 'on' }, 'test');
 });
 afterAll(async () => { await __clearToggleStore(); await new Promise<void>((res) => server.close(() => res())); });

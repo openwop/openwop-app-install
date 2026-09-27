@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.devops-crew/1.0.0/executor.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.devops-crew/1.0.1/executor.task.schema.json",
   "title": "DevOpsExecutorTask",
   "type": "object",
   "required": ["step"],

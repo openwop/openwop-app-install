@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import type { OpenInterrupt } from '../client/interruptsClient.js';
 import { ApprovalCard } from './ApprovalCard.js';
 import { ClarificationDialog } from './ClarificationDialog.js';
+import { ConnectionRequiredDialog } from './ConnectionRequiredDialog.js';
 import { RefinementForm } from './RefinementForm.js';
 import { CancellationBanner } from './CancellationBanner.js';
 
@@ -22,6 +23,11 @@ interface Props {
 export function RenderInterrupt({ runId, active, onResolved }: Props) {
   const { t } = useTranslation('interrupts');
   if (!active) return null;
+  // ADR 0755 D3 — no token means this caller may read the gate but not answer it
+  // (`approvals:respond`); show that instead of cards whose submit must fail.
+  if (!active.token) {
+    return <div role="status" className="alert">{t('noRespondPermission')}</div>;
+  }
   const props = {
     runId,
     nodeId: active.nodeId,
@@ -33,16 +39,21 @@ export function RenderInterrupt({ runId, active, onResolved }: Props) {
     case 'approval':
       return <ApprovalCard {...props} />;
     case 'clarification':
-      return <ClarificationDialog {...props} />;
+      // ADR 0189 — a connection prompt rides the clarification kind but carries
+      // the `openwop-connection` profile; render the connect-to-continue dialog
+      // (Connect/Skip) instead of the free-text answer field. Mirrors the chat
+      // feed's ClarificationCard discrimination so both interrupt surfaces agree.
+      return (active.data as { profile?: unknown } | null)?.profile === 'openwop-connection'
+        ? <ConnectionRequiredDialog {...props} />
+        : <ClarificationDialog {...props} />;
     case 'refinement':
       return <RefinementForm {...props} />;
     case 'cancellation':
       return <CancellationBanner {...props} />;
     default:
       return (
-        <div className="alert warning">
-          {t('unknownKindPrefix')} <code>{active.kind}</code> {t('unknownKindMid')}
-          <code> RenderInterrupt</code> {t('unknownKindTail')} <code>interrupts/RenderInterrupt.tsx</code>.
+        <div role="status" className="alert warning">
+          {t('unknownKindBody', { kind: active.kind })}
         </div>
       );
   }

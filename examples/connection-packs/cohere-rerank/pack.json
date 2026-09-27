@@ -1,0 +1,32 @@
+{
+  "name": "core.openwop.connections.cohere-rerank",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Cohere Rerank connection pack (RFC 0095) — api_key provider for the KB retrieval pipeline's EXTERNAL reranker (ADR 0351 Phase 4 / CSG-KB-8): a collection whose retrieval config selects `rerank:{kind:'connection'}` reranks its hybrid candidates through Cohere's /v2/rerank with the tenant's connected key, resolved through the connections broker (KMS-enveloped, rotatable) and dispatched over the brokered-egress spine (SSRF-guarded, no-redirect, bounded timeout). Carries NO secret (ADR 0024 §7). A rerank failure degrades HONESTLY to the local deterministic reranker, labeled on the search response.",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "cohere-rerank",
+    "displayName": "Cohere Rerank",
+    "category": "other",
+    "auth": {
+      "kind": "api_key",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://docs.cohere.com/reference/rerank"
+      }
+    },
+    "consumerNodes": [
+      "feature.kb.nodes.rag"
+    ],
+    "docsUrl": "https://docs.cohere.com/docs/rerank-2",
+    "apiHosts": [
+      "api.cohere.com"
+    ]
+  }
+}

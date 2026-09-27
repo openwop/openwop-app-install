@@ -1,5 +1,5 @@
 /**
- * DATA-2 (CODEBASE-ASSESSMENT.md): the shared tenant-isolation primitives.
+ * DATA-2 (docs/steward/CODEBASE-ASSESSMENT.md): the shared tenant-isolation primitives.
  * assertTenantOwned is a load-or-404 IDOR guard — a cross-tenant resource and
  * an absent resource are INDISTINGUISHABLE to the caller (both 404), so an id's
  * existence in another tenant never leaks.

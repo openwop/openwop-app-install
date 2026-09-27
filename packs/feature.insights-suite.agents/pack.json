@@ -1,7 +1,7 @@
 {
   "name": "feature.insights-suite.agents",
-  "version": "1.0.0",
-  "description": "Insights & Drafting Agent Suite agent pack (ADR 0078 / RFC 0070) — three role-scoped manifest agents driven through the existing chat: Financial (Actual-vs-Plan variance analysis), Communication (in-voice recognition drafting, never auto-send), Talent (9-box readiness). Each is tool-allowlisted to the suite's nodes + the ADR 0076 read-only connectors + KB retrieval; none can write or send.",
+  "version": "1.1.1",
+  "description": "Insights & Drafting Agent Suite agent pack — three role-scoped manifest agents driven through the existing chat: Financial (Actual-vs-Plan variance analysis), Communication (in-voice recognition drafting, never auto-send), Talent (9-box readiness). Each is tool-allowlisted to the suite's pure compute nodes + KB retrieval (the read-only connector queries ride the workflow-run/executor path, not conversational tools); none can write or send. 1.1.0 (ADR 0600 \u00a78 / ISC-12): the Financial agent's description and prompt no longer promise SQL provenance or scheduled-run figures the pipeline cannot hand it.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "insights-suite", "agent", "financial", "communication", "talent"],
@@ -15,11 +15,10 @@
       "agentId": "feature.insights-suite.agents.financial",
       "persona": "RESEARCH",
       "label": "Financial Analyst",
-      "description": "Reads store financials read-only (BigQuery), computes Actual-vs-Plan variance for sales/margin/labor/shrink, and surfaces off-plan hot spots with the exact SQL for 'Verify Source'. Never writes; flags figures for human review.",
+      "description": "Computes Actual-vs-Plan variance for sales/margin/labor/shrink from figures the human supplies, and surfaces off-plan hot spots. Returns NO provenance (no SQL, no as-of timestamp) \u2014 it says so rather than implying a verification path that does not exist. Never writes; flags figures for human review.",
       "modelClass": "research",
       "systemPromptRef": "prompts/financial.md",
       "toolAllowlist": [
-        "openwop:core.bigquery.query",
         "openwop:feature.insights-suite.nodes.variance-compute",
         "openwop:knowledge.search"
       ],
@@ -34,9 +33,7 @@
       "modelClass": "research",
       "systemPromptRef": "prompts/communication.md",
       "toolAllowlist": [
-        "openwop:knowledge.search",
-        "openwop:core.workday.query",
-        "openwop:core.email.draft"
+        "openwop:knowledge.search"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }
@@ -49,7 +46,6 @@
       "modelClass": "research",
       "systemPromptRef": "prompts/talent.md",
       "toolAllowlist": [
-        "openwop:core.workday.query",
         "openwop:feature.insights-suite.nodes.talent-score",
         "openwop:knowledge.search"
       ],

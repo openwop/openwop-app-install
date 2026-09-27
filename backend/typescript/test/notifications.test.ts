@@ -46,7 +46,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -100,7 +100,7 @@ describe('storage: notification round-trip (sqlite memory)', () => {
     const a: NotificationRecord = {
       notificationId: 'n-1',
       tenantId: 'tenant-A',
-      type: 'workflow.approval_needed',
+      type: 'openwop-app.workflow.approval-needed',
       priority: 'high',
       status: 'unread',
       title: 'Approval needed',

@@ -11,7 +11,11 @@
  */
 import { probeProviderCapabilities } from '../../host/modelCapabilityProbe.js';
 import { getRouterConfig } from './configService.js';
+import { isRoutableProvider } from './routableProviders.js';
 import { routeTurn, type RouteDecision, type RouteState, type TurnFeatures } from './routeTurn.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('features.model-router.resolveRoute');
 
 export async function resolveModelRoute(
   tenantId: string,
@@ -22,5 +26,31 @@ export async function resolveModelRoute(
 ): Promise<RouteDecision | null> {
   const stored = await getRouterConfig(tenantId, orgId);
   if (!stored || !stored.enabled) return null; // off → caller keeps the explicit provider/model
-  return routeTurn(features, stored.config, probeProviderCapabilities, now, state);
+  const decision = routeTurn(features, stored.config, probeProviderCapabilities, now, state);
+  // ADR 0610 D4 / MRC-2 — resolve-time belt: refuse to select a non-routable target
+  // from a config that somehow bypassed the write-time allowlist (`asTarget`), so a
+  // fresh stamp is never created from one. This does NOT guard an ALREADY-durable
+  // `run.metadata.modelRoute` stamp (legacy/tampered/forked) — that read is guarded
+  // at dispatch by `effectiveModelTarget` (`applyRoute.ts`), which ignores a stamp
+  // naming a non-routable provider. The two together cover create + read.
+  if (decision && !isRoutableProvider(decision.target.provider)) {
+    log.warn('model_route_rejected_nonroutable_provider', { tenantId, orgId, provider: decision.target.provider, reason: decision.reason });
+    return null;
+  }
+  // ADR 0714 D1 — the SECOND invariant belt, same posture as the routable-provider one
+  // above (post-hoc check -> named warn -> null -> caller keeps the explicit model).
+  // `routeTurn` now filters the fallback itself, so this is defence in depth rather than
+  // the primary gate: it keeps the guarantee if a future caller reaches the selector by
+  // another path. It is ALSO the only lane that reports the refusal — a silent decline
+  // would leave an operator with a text-only fallback wondering why routing never
+  // applies to their attachment turns (ADR 0708's lesson: the downgrade may be right,
+  // its silence is not).
+  if (decision && features.hasAttachment && !probeProviderCapabilities(decision.target.provider).includes('vision-input')) {
+    log.warn('model_route_rejected_non_vision_target', { tenantId, orgId, provider: decision.target.provider, reason: decision.reason });
+    return null;
+  }
+  if (!decision && features.hasAttachment) {
+    log.warn('model_route_declined_no_vision_target', { tenantId, orgId });
+  }
+  return decision;
 }

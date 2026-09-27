@@ -16,7 +16,7 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
+import { enableTenantOverride, saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
 let BASE: string;
@@ -29,7 +29,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   for (const id of ['users', 'orgs']) {
     const def = getToggleDefault(id);
@@ -87,6 +87,12 @@ describe('org invitations over HTTP (reconciled with accessControl)', () => {
     const inv = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: bobEmail, role: 'editor' });
     expect(inv.status).toBe(201);
     expect(inv.body.token).toBeTruthy();
+    // DEF-2 — the HTTP contract carries the delivery outcome (Deferred Phase A):
+    // no sender identity / provider in this harness ⇒ 'skipped' (copy-link UX),
+    // alongside the invite record itself.
+    expect(inv.body.delivery).toBe('skipped');
+    expect(inv.body.invite?.inviteId).toBeTruthy();
+    expect(inv.body.invite?.email).toBe(bobEmail);
 
     const bobC = client();
     const bob = await signup(bobC, bobEmail);
@@ -139,5 +145,122 @@ describe('org invitations over HTTP (reconciled with accessControl)', () => {
     const anonC = client(); // never signs up → anonymous session
     const r = await anonC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: 'whatever' });
     expect(r.status).toBe(401);
+  });
+});
+
+describe('ORGINV-1 — accept gates on the INVITE tenant toggle, never the caller’s (the R2 F6 class, closed for accept)', () => {
+  // The vacuity that hid this defect: the harness enables `orgs` GLOBALLY, so
+  // the caller-tenant gate could never bite. This test configures a real
+  // per-tenant rollout instead: global OFF, ON only for the invite's tenant.
+  it('an invited outsider whose own tenant has the toggle OFF can still accept; both-off is refused', async () => {
+    const ownerC = client();
+    await signup(ownerC, uniqEmail('rollout-owner'));
+    const org = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'RollCo' })).body;
+    const bobEmail = uniqEmail('rollout-bob');
+    const carolEmail = uniqEmail('rollout-carol');
+    // Mint BOTH invites while the toggle is still globally on.
+    const invBob = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: bobEmail, role: 'viewer' });
+    const invCarol = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: carolEmail, role: 'viewer' });
+    expect(invBob.status).toBe(201);
+    const inviteTenant = invBob.body.invite?.tenantId as string;
+    expect(inviteTenant).toBeTruthy();
+
+    const def = getToggleDefault('orgs')!;
+    try {
+      // Per-tenant rollout: OFF everywhere, ON only for the INVITE's tenant.
+      // Bob's own (caller) tenant therefore resolves OFF — the exact shape
+      // under which the old `h`-wrapped accept 404'd a perfectly valid invite.
+      await saveConfig({ ...def, status: 'off' }, 'test');
+      expect(await enableTenantOverride('orgs', inviteTenant, 'test')).toBe('enabled');
+
+      const bobC = client();
+      await signup(bobC, bobEmail);
+      const acc = await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: invBob.body.token });
+      expect(acc.status, JSON.stringify(acc.body)).toBe(201); // the caller's tenant toggle is NOT the gate
+
+      // Both off (the override gone): the service's invite-tenant gate refuses,
+      // enumeration-uniform with a bad token.
+      await saveConfig({ ...def, status: 'off' }, 'test');
+      const carolC = client();
+      await signup(carolC, carolEmail);
+      const acc2 = await carolC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: invCarol.body.token });
+      expect(acc2.status, JSON.stringify(acc2.body)).toBe(400);
+      expect(acc2.body.details?.code).toBe('invalid_invite');
+    } finally {
+      await saveConfig({ ...def, status: 'on' }, 'test');
+    }
+  });
+});
+
+describe('ORGINV-4 — management wire shape: no tokenHash, expiry marked server-side', () => {
+  it('create/list responses never serialize tokenHash, and an expired row lists as expired, not pending', async () => {
+    const ownerC = client();
+    await signup(ownerC, uniqEmail('shape-owner'));
+    const org = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'ShapeCo' })).body;
+    const inv = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: uniqEmail('shape-bob'), role: 'viewer' });
+    expect(inv.status).toBe(201);
+    expect(inv.body.invite.tokenHash, 'the at-rest representation must not reach clients').toBeUndefined();
+    expect(inv.body.invite.expired).toBe(false);
+
+    // Age the row past expiry via direct store surgery.
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const store = new DurableCollection<{ inviteId: string; expiresAt: string }>('orgs:invite', (i) => i.inviteId);
+    const row = (await store.get(inv.body.invite.inviteId))!;
+    await store.put({ ...row, expiresAt: new Date(Date.now() - 60_000).toISOString() });
+
+    const list = await ownerC.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`);
+    expect(list.status).toBe(200);
+    const listed = list.body.invites.find((i: { inviteId: string }) => i.inviteId === inv.body.invite.inviteId);
+    expect(listed).toBeTruthy();
+    expect(listed.tokenHash).toBeUndefined();
+    expect(listed.expired, 'a dead invite must not list as pending').toBe(true);
+  });
+});
+
+describe('R2 IN-SP-1/IN-SP-8 — production mint honesty + the expired envelope (review F2: the wiring, not just the mechanism)', () => {
+  it('in PROD mode, a no-sender org is refused BEFORE minting — 422 {reason: undeliverable} and no row', async () => {
+    const ownerC = client();
+    await signup(ownerC, uniqEmail('prodowner'));
+    const org = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'ProdCo' })).body;
+
+    const prev = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production'; // exposeTokens() reads at CALL time (review F2)
+    try {
+      const inv = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: uniqEmail('nobody'), role: 'viewer' });
+      expect(inv.status, JSON.stringify(inv.body)).toBe(422);
+      expect(inv.body.details?.reason).toBe('undeliverable');
+      expect(inv.body.details?.cause).toBe('no_sender');
+      expect(inv.body.message).toContain('Email page'); // review F5 — a surface that EXISTS
+    } finally { process.env.NODE_ENV = prev; }
+
+    // NOTHING was minted (the F3 precheck fires before createInvitation).
+    const list = await ownerC.get(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`);
+    expect(list.status).toBe(200);
+    expect(list.body.invites).toHaveLength(0);
+  });
+
+  it('an expired invite carries details.reason=expired over HTTP (preview AND accept)', async () => {
+    const ownerC = client();
+    await signup(ownerC, uniqEmail('expowner'));
+    const org = (await ownerC.post('/v1/host/openwop-app/orgs', { name: 'ExpCo' })).body;
+    const bobEmail = uniqEmail('expbob');
+    const inv = await ownerC.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.orgId)}/invites`, { email: bobEmail, role: 'viewer' });
+    expect(inv.status).toBe(201);
+
+    // Age the row past expiry via direct store surgery.
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const store = new DurableCollection<{ inviteId: string; expiresAt: string }>('orgs:invite', (i) => i.inviteId);
+    const row = (await store.get(inv.body.invite.inviteId))!;
+    await store.put({ ...row, expiresAt: new Date(Date.now() - 60_000).toISOString() });
+
+    const preview = await client().get(`/v1/host/openwop-app/orgs/invitations/preview?token=${encodeURIComponent(inv.body.token)}`);
+    expect(preview.status).toBe(400);
+    expect(preview.body.details?.reason).toBe('expired');
+
+    const bobC = client();
+    await signup(bobC, bobEmail);
+    const accept = await bobC.post('/v1/host/openwop-app/orgs/invitations/accept', { token: inv.body.token });
+    expect(accept.status).toBe(400);
+    expect(accept.body.details?.reason).toBe('expired');
   });
 });

@@ -11,10 +11,13 @@
  *
  * @see docs/adr/0121-local-model-provider-support.md
  */
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { TextField, CheckboxField, SelectField } from '../ui/Field.js';
-import { Notice } from '../ui/index.js';
+import { Notice, Skeleton } from '../ui/index.js';
+import { InlineState } from '../ui/InlineState.js';
+import { useOrgSelection } from '../ui/useOrgSelection.js';
 import { confirm } from '../ui/confirm.js';
 import { listOrgs, type Org } from '../client/promptLibraryClient.js';
 import {
@@ -25,8 +28,13 @@ import {
 export function CompatEndpointsCard(): JSX.Element | null {
   const { t } = useTranslation('byok');
   const [available, setAvailable] = useState<boolean | null>(null);
-  const [orgs, setOrgs] = useState<Org[]>([]);
-  const [orgId, setOrgId] = useState('');
+  // The org read had `.catch(() => setOrgs([]))`, and this card is the purest
+  // instance of what that costs: the endpoints effect is gated `if (!orgId)
+  // return`, so a failed org read left `available === null` — and the ONLY
+  // `available === null` branch is `aria-busy="true"` "Loading endpoints…". This
+  // card had NO error surface at all, so a screen reader was told, forever, that
+  // a BYOK endpoint list was still arriving.
+  const { orgs, orgId, setOrgId, orgsFailed, retry: retryOrgs } = useOrgSelection<Org>(listOrgs);
   const [endpoints, setEndpoints] = useState<CompatEndpointView[]>([]);
   const [busy, setBusy] = useState(false);
   const [writeForbidden, setWriteForbidden] = useState(false);
@@ -42,10 +50,6 @@ export function CompatEndpointsCard(): JSX.Element | null {
   const [models, setModels] = useState('');
 
   useEffect(() => {
-    void listOrgs().then((o) => { setOrgs(o); setOrgId((cur) => cur || (o[0]?.orgId ?? '')); }).catch(() => setOrgs([]));
-  }, []);
-
-  useEffect(() => {
     if (!orgId) return;
     let active = true;
     setWriteForbidden(false); // a different org may grant write
@@ -55,7 +59,67 @@ export function CompatEndpointsCard(): JSX.Element | null {
     return () => { active = false; };
   }, [orgId]);
 
-  if (available === null || available === false) return null;
+  if (orgsFailed) {
+    // Above the loading branch: without this the card claims to be loading
+    // forever, because the endpoints read it is waiting for never starts.
+    return (
+      <section className="surface-card u-mt-4">
+        <h2 className="u-fs-16 u-m-0 u-mb-1">{t('compatTitle', { defaultValue: 'Self-hosted / OpenAI-compatible endpoints' })}</h2>
+        <Notice variant="error">{t('compatOrgsFailed')}</Notice>
+        <div className="u-mt-2">
+          <Button variant="secondary" size="sm" onClick={retryOrgs}>{t('compatRetry')}</Button>
+        </div>
+      </section>
+    );
+  }
+
+  // The read SUCCEEDED and this tenant has no organization. Same dependency edge
+  // as `orgsFailed` above, different fact: the endpoints effect is gated
+  // `if (!orgId) return`, so `available` stays `null` and the ONLY `available ===
+  // null` branch below announces "Loading endpoints…" forever.
+  //
+  // WHY A RENDERED STATE AND NOT `null`. Two things were checked rather than
+  // assumed. (1) The parent says nothing: `KeysPage` never reads the org list,
+  // and `CompatEndpointsPage` renders this card as the ENTIRE
+  // `/access?tab=endpoints` tab — so `null` would swap an endless spinner for a
+  // blank tab, which is the same silence in a quieter font. (2) Returning `null`
+  // is otherwise reserved for `available === false` (the operator opt-in is off),
+  // and conflating "no organization" with "this deployment does not offer
+  // endpoints" is a second lie. No new disclosure risk either: today's loading
+  // branch ALREADY renders this heading in exactly this state, so a
+  // compat-disabled host shows the same card it showed before — only now with a
+  // terminal, truthful line in it.
+  //
+  // WHY `InlineState kind="empty"` AND NOT `<Notice variant="info">`. `Notice`
+  // emits `role="status" aria-live="polite"`, so this empty state ANNOUNCED
+  // itself on every ordinary first visit — and DESIGN.md §4.6 rule 8 reserves
+  // announcing for FAILED reads (the `orgsFailed` branch above keeps its
+  // `Notice`, correctly). `InlineState` is the registry's compact designed-state
+  // primitive for a section inside a page (ADR 0510 §4 / DSA-030) and its `empty`
+  // arm renders silently. Copy is unchanged — `compatNoOrgs` is one sentence, so
+  // it maps onto `message` verbatim rather than being split into a `StateCard`
+  // title/body pair it was never written as.
+  if (orgs !== null && orgs.length === 0) {
+    return (
+      <section className="surface-card u-mt-4">
+        <h2 className="u-fs-16 u-m-0 u-mb-1">{t('compatTitle', { defaultValue: 'Self-hosted / OpenAI-compatible endpoints' })}</h2>
+        <InlineState kind="empty" message={t('compatNoOrgs')} />
+      </section>
+    );
+  }
+
+  if (available === null) {
+    return (
+      <section className="surface-card u-mt-4" aria-busy="true" aria-label={t('compatLoading', { defaultValue: 'Loading endpoints…' })}>
+        <h2 className="u-fs-16 u-m-0 u-mb-1">{t('compatTitle', { defaultValue: 'Self-hosted / OpenAI-compatible endpoints' })}</h2>
+        <div className="u-flex u-flex-col u-gap-2">
+          <Skeleton height={16} width="70%" />
+          <Skeleton height={38} />
+        </div>
+      </section>
+    );
+  }
+  if (available === false) return null;
 
   const canCreate = label.trim().length > 0 && baseUrl.trim().length > 0 && !busy;
 
@@ -100,7 +164,7 @@ export function CompatEndpointsCard(): JSX.Element | null {
       <h2 className="u-fs-16 u-m-0 u-mb-1">{t('compatTitle', { defaultValue: 'Self-hosted / OpenAI-compatible endpoints' })}</h2>
       <p className="field-help u-mb-2">{t('compatIntro', { defaultValue: 'Connect Ollama, LM Studio, vLLM, or any OpenAI-compatible API by base URL (with an optional key). Declare what the endpoint supports — the host can’t probe a private endpoint, so capabilities are taken from what you set here.' })}</p>
 
-      {orgs.length > 1 && (
+      {orgs !== null && orgs.length > 1 && (
         <div className="u-mb-2">
           <SelectField label={t('compatOrg', { defaultValue: 'Organization' })} value={orgId} onChange={(e) => setOrgId(e.target.value)}>
             {orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
@@ -114,7 +178,7 @@ export function CompatEndpointsCard(): JSX.Element | null {
             <li key={ep.id} className="surface-inset u-pad-2 u-flex u-items-center u-justify-between u-gap-2">
               <div className="u-flex u-flex-col u-gap-1">
                 <span className="u-fs-12 u-fw-600">{ep.label}</span>
-                <code className="u-fs-11 muted" style={{ overflowWrap: 'anywhere' }}>{ep.baseUrl}</code>
+                <code className="u-fs-11 muted u-break-anywhere">{ep.baseUrl}</code>
                 <div className="u-flex u-flex-wrap u-gap-1 u-fs-11">
                   {ep.hasKey && <span className="chip chip--muted">{t('compatHasKey', { defaultValue: 'key set' })}</span>}
                   {ep.capabilities.vision && <span className="chip chip--accent">{t('compatVision', { defaultValue: 'vision' })}</span>}
@@ -125,7 +189,7 @@ export function CompatEndpointsCard(): JSX.Element | null {
                   <span className="muted u-fs-11">{t('compatModelsList', { defaultValue: 'Models: {{list}}', list: ep.models.join(', ') })}</span>
                 )}
               </div>
-              <button type="button" className="btn-ghost u-fs-11" onClick={() => void remove(ep)} aria-label={t('compatDelete', { defaultValue: 'Remove endpoint' })}>{t('compatDelete', { defaultValue: 'Remove' })}</button>
+              <Button variant="quiet" className="u-fs-11" onClick={() => void remove(ep)} aria-label={t('compatDelete', { defaultValue: 'Remove endpoint' })}>{t('compatDelete', { defaultValue: 'Remove' })}</Button>
             </li>
           ))}
         </ul>
@@ -147,7 +211,7 @@ export function CompatEndpointsCard(): JSX.Element | null {
           <TextField label={t('compatModels', { defaultValue: 'Model ids (optional, comma-separated)' })} value={models} onChange={(e) => setModels(e.target.value)} placeholder="llama3.1, qwen2.5-coder" />
 
           <div className="u-flex u-gap-2 u-mt-2">
-            <button type="button" className="btn-primary" disabled={!canCreate} onClick={() => void create()}>{t('compatAdd', { defaultValue: 'Add endpoint' })}</button>
+            <Button variant="primary" disabled={!canCreate} onClick={() => void create()}>{t('compatAdd', { defaultValue: 'Add endpoint' })}</Button>
           </div>
         </>
       )}

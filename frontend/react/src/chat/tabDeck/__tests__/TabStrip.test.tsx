@@ -15,7 +15,6 @@ function setup(overrides: Partial<Parameters<typeof TabStrip>[0]> = {}) {
     onReorder: vi.fn(),
     onSetPinned: vi.fn(),
     onNewTab: vi.fn(),
-    onOpenLibrary: vi.fn(),
     ...overrides,
   };
   render(<TabStrip {...props} />);

@@ -2,31 +2,14 @@
  * `notebooks` namespace (es) — Research Notebooks (ADR 0084).
  */
 export const messages = {
-  // Page chrome
-  eyebrow: 'Investigación',
-  title: 'Cuadernos',
-  lede: 'Cuadernos de investigación fundamentados: reúne fuentes, toma notas y haz preguntas basadas en ellas.',
-  workspaceLede: 'Fuentes, notas y una pregunta fundamentada en este cuaderno.',
-
-  // Gating
-  notEnabledTitle: 'Los Cuadernos no están activados',
-  notEnabledBody: 'Pide a un administrador que active la función Cuadernos de investigación en Admin → Feature toggles.',
-
-  // Chooser
-  nameLabel: 'Nombre del cuaderno',
-  namePlaceholder: 'Investigación de mercado',
-  orgLabel: 'Organización',
-  createNotebook: 'Crear cuaderno',
-  created: 'Cuaderno creado.',
-  createFailed: 'No se pudo crear el cuaderno.',
+  // Textos de error — compartidos por los paneles siguientes.
   loadFailed: 'No se pudo cargar.',
-  deleteFailed: 'No se pudo eliminar.',
-  open: 'Abrir',
-  deleteNotebookLabel: 'Eliminar {{name}}',
-  deleteNotebookConfirm: '¿Eliminar “{{name}}”? Esta acción no se puede deshacer.',
-  emptyTitle: 'Aún no hay cuadernos',
-  emptyBody: 'Crea tu primer cuaderno de investigación con el formulario de arriba y luego añade fuentes y haz preguntas basadas en ellas.',
-  backToList: 'Volver a los cuadernos',
+  // NBU-2 / NBU-5 (ADR 0601) — cada panel informa su propio fallo de lectura.
+  retry: 'Reintentar',
+  sourcesFailedTitle: 'No se pudieron cargar tus fuentes',
+  notesFailedTitle: 'No se pudieron cargar tus notas',
+  transformationsFailedTitle: 'No se pudieron cargar tus transformaciones',
+  askFailedTitle: 'No se pudo ejecutar esa búsqueda',
 
   // Sources panel
   sourcesTitle: 'Fuentes',
@@ -44,7 +27,6 @@ export const messages = {
   uploading: 'Subiendo…',
   addFileHint: 'Sube un documento: su texto se extrae y se añade como fuente.',
   addAudioHint: 'Sube una grabación: se transcribe y se añade como fuente.',
-  addAudioBtn: 'Transcribir y añadir',
   audioEnqueued: 'Transcribiendo tu grabación: la fuente aparecerá en breve.',
   audioFailed: 'No se pudo iniciar la transcripción.',
   addYoutubeLabel: 'URL de YouTube',
@@ -80,12 +62,29 @@ export const messages = {
   transforming: 'Transformando…',
   transformLabel: 'Aplicar una transformación a {{title}}',
   transformHint: 'Aplica una plantilla de transformación — el resultado se guarda como un Documento.',
+  transformUnavailable: 'Transformar no disponible',
+  transformUnavailableHint: 'No se pudo cargar el catálogo de transformaciones; este cuaderno puede tener plantillas de todos modos.',
   transformStarted: 'Aplicando la transformación… el resultado aparecerá en Transformaciones.',
   transformFailed: 'No se pudo iniciar la transformación.',
   transformationsTitle: 'Transformaciones',
   transformationsNote: 'Los resultados de las transformaciones se guardan como Documentos propiedad de este cuaderno.',
   noTransformationsTitle: 'Aún no hay transformaciones',
   noTransformationsBody: 'Usa el menú Transformar en una fuente para generar un Resumen, Conceptos clave y más.',
+
+  // NBU-6 (ADR 0602) — un sondeo que se rinde LO DICE. El registro es deliberado:
+  // «dejamos de comprobar», nunca «no hay nada».
+  stalledIngestTitle: 'Seguimos esperando esa fuente',
+  stalledIngestBody: 'Dejamos de comprobar tras unos 30 segundos. Puede que la fuente siga procesándose: esto no significa que haya fallado.',
+  stalledSummarizeTitle: 'Seguimos esperando ese resumen',
+  stalledSummarizeBody: 'Dejamos de comprobar tras unos 20 segundos. Puede que el resumen siga generándose: esto no significa que haya fallado.',
+  stalledTransformTitle: 'Seguimos esperando esa transformación',
+  stalledTransformBody: 'Dejamos de comprobar tras unos 20 segundos. Puede que la transformación siga en curso: esto no significa que haya fallado.',
+  checkAgain: 'Comprobar de nuevo',
+  stalledRecheckedNothing_one: 'Comprobado {{count}} vez más: todavía nada nuevo.',
+  stalledRecheckedNothing_other: 'Comprobado {{count}} veces más: todavía nada nuevo.',
+  stalledRecheckFailed: 'No hemos podido comprobarlo ahora mismo: falló la conexión. Sigue sin ser un informe de fallo.',
+  stalledRecheckLanded: 'Ya llegó: la lista está actualizada.',
+  stalledViewRun: 'Ver la ejecución',
   openInDocuments: 'Abrir en Documentos',
 
   // Notes panel

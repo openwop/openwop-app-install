@@ -1,66 +1,187 @@
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { ADMIN_NAV_GROUPS, FEATURES } from '../chrome/features.js';
-import { useFeatureVisible } from '../featureToggles/FeatureAccessContext.js';
+import { GROUP_LABEL_KEYS, type NavGroup, type NavItem } from '../chrome/features.js';
+import { useFeatureBadge, useFeatureLocked } from '../featureToggles/FeatureAccessContext.js';
 import { PageHeader } from '../ui/PageHeader.js';
+import { Button } from '../ui/Button.js';
+import { StateCard } from '../ui/StateCard.js';
+import { useResolvedNav } from '../chrome/navConfig/NavConfigProvider.js';
+import { readRecentAdminDestinations } from '../chrome/adminRecents.js';
+import { setNavSource } from '../chrome/navSource.js';
+import { useReviewList, useReviewStatusStore } from '../chat/reviews/reviewStatusStore.js';
+import { getHealthSummary, OperationsRequestError } from '../client/operationsClient.js';
+import { ActivityIcon, AlertIcon, CheckIcon, ClockIcon, InboxIcon, LockIcon, SearchIcon } from '../ui/icons/index.js';
 
-/**
- * Admin home (`/admin`) — the landing surface behind the workspace rail's
- * single "Admin" entry. The card grid derives from the feature manifest's
- * admin tier, so a newly-declared admin feature appears here (and in the
- * embedded rail) with zero edits to this file.
- */
+const FEATURE_STORE = '/marketplace/bundles';
+
+type HealthState = 'idle' | 'loading' | 'ready' | 'degraded' | 'restricted' | 'unavailable';
+
+/** Admin home — decisions first, then a compact searchable projection of the
+ * same effective manifest used by the rail and command palette. */
 export function AdminOverviewPage(): JSX.Element {
   const { t } = useTranslation('settings');
-  const isVisible = useFeatureVisible();
-  // ADR 0144/0145 — keep the grid consistent with each consolidation console:
-  // hide a console's own tile until its toggle is enabled, and hide the tiles it
-  // subsumes once it is (so the index never lists both the console and its
-  // sub-pages). Scoped to the consoles only — every other tile keeps the page's
-  // show-all-admin behavior. An id with no registered feature resolves
-  // not-visible and the loop no-ops, so this list is forgiving of ordering.
-  // access-hub graduated to always-on (ADR 0144 §Correction 2026-06-26): no toggle,
-  // and its subsumed surfaces dropped their nav — the static grid already shows only
-  // the hub tile, so it needs no entry here. Models/chat-deployment stay gated.
-  const CONSOLE_IDS = ['models', 'chat-deployment'];
-  const hidden = new Set<string>(['/admin']);
-  for (const id of CONSOLE_IDS) {
-    const route = FEATURES.find((f) => f.nav?.featureId === id);
-    if (!isVisible(id)) {
-      if (route) hidden.add(route.path);
-    } else {
-      for (const f of FEATURES) if (f.nav?.hiddenWhenFeature === id) hidden.add(f.path);
+  const { t: tn } = useTranslation('nav');
+  const badgeFor = useFeatureBadge();
+  const lockedFor = useFeatureLocked();
+  const { admin } = useResolvedNav();
+  const reviews = useReviewList();
+  const reviewsLoading = useReviewStatusStore((state) => state.loading);
+  const reviewsError = useReviewStatusStore((state) => state.error);
+  const reviewsInitialized = useReviewStatusStore((state) => state.initialized);
+  const [query, setQuery] = useState('');
+  const [health, setHealth] = useState<HealthState>('idle');
+
+  const groups = useMemo(() => admin
+    .map((group) => ({ ...group, items: group.items.filter((item) => item.to !== '/admin') }))
+    .filter((group) => group.items.length > 0), [admin]);
+  const allItems = useMemo(() => groups.flatMap((group) => group.items), [groups]);
+  const operationsPath = allItems.find((item) => item.to === '/operations')?.to;
+
+  useEffect(() => {
+    if (!operationsPath) {
+      setHealth('idle');
+      return;
     }
-  }
-  const groups = ADMIN_NAV_GROUPS
-    .map((g) => ({ ...g, items: g.items.filter((item) => !hidden.has(item.to)) }))
-    .filter((g) => g.items.length > 0);
+    let active = true;
+    setHealth('loading');
+    void getHealthSummary().then((summary) => {
+      if (active) setHealth(summary.status);
+    }).catch((error: unknown) => {
+      if (!active) return;
+      setHealth(error instanceof OperationsRequestError && error.status === 403
+        ? 'restricted'
+        : 'unavailable');
+    });
+    return () => { active = false; };
+  }, [operationsPath]);
+
+  const translatedGroup = (group: NavGroup): string => group.custom
+    ? group.label
+    : tn(GROUP_LABEL_KEYS[group.id] ?? '', { defaultValue: group.label });
+  const translatedLabel = (item: NavItem): string => item.labelKey
+    ? tn(item.labelKey, { defaultValue: item.label })
+    : item.label;
+  const translatedHint = (item: NavItem): string => item.hintKey
+    ? tn(item.hintKey, { defaultValue: item.hint })
+    : item.hint;
+
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const filteredGroups = groups.map((group) => ({
+    ...group,
+    items: normalizedQuery
+      ? group.items.filter((item) => `${translatedLabel(item)} ${translatedHint(item)} ${translatedGroup(group)}`.toLocaleLowerCase().includes(normalizedQuery))
+      : group.items,
+  })).filter((group) => group.items.length > 0);
+  const filteredCount = filteredGroups.reduce((count, group) => count + group.items.length, 0);
+
+  const itemByPath = new Map(allItems.map((item) => [item.to, item]));
+  const recentItems = readRecentAdminDestinations()
+    .map((path) => itemByPath.get(path))
+    .filter((item): item is NavItem => item !== undefined);
+
+  const healthCopy: Record<HealthState, string> = {
+    idle: t('adminHealthRestricted'),
+    loading: t('adminHealthLoading'),
+    ready: t('adminHealthReady'),
+    degraded: t('adminHealthDegraded'),
+    restricted: t('adminHealthRestricted'),
+    unavailable: t('adminHealthUnavailable'),
+  };
+
+  const destination = (item: NavItem, compact = false): JSX.Element => {
+    const Icon = item.icon;
+    const locked = lockedFor(item.featureId);
+    const badge = badgeFor(item.featureId);
+    return (
+      <Link
+        key={item.to}
+        to={locked ? FEATURE_STORE : item.to}
+        className={compact ? 'admin-home-recent-link' : 'admin-directory-link'}
+        title={locked ? t('adminLockedHint') : undefined}
+        onClick={() => setNavSource('hub')}
+      >
+        <span className="admin-directory-icon" aria-hidden><Icon size={18} /></span>
+        <span className="admin-directory-meta">
+          <span className="admin-directory-label">{translatedLabel(item)}</span>
+          {!compact ? <span className="admin-directory-hint">{translatedHint(item)}</span> : null}
+        </span>
+        {locked ? <span className="chip"><LockIcon size={12} /> {t('adminLocked')}</span>
+          : badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
+      </Link>
+    );
+  };
+
+  const attentionText = (!reviewsInitialized || reviewsLoading) && reviews.length === 0
+    ? t('adminAttentionLoading')
+    : reviewsError && reviews.length === 0
+      ? t('adminAttentionUnavailable')
+      : reviews.length > 0
+        ? t('adminAttentionPending', { count: reviews.length })
+        : t('adminAttentionEmpty');
+
   return (
-    <section className="admin-overview">
-      <PageHeader
-        eyebrow={t('adminEyebrow')}
-        title={t('adminTitle')}
-        lede={t('adminLede')}
-      />
-      {groups.map((group) => (
-        <div key={group.label}>
-          <h3 className="admin-overview-group">{group.label}</h3>
-          <div className="admin-overview-grid">
-            {group.items.map((item) => {
-              const Icon = item.icon;
-              return (
-                <Link key={item.to} to={item.to} className="surface-card admin-overview-card">
-                  <span className="admin-overview-icon" aria-hidden><Icon size={20} /></span>
-                  <span className="admin-overview-meta">
-                    <span className="admin-overview-label">{item.label}</span>
-                    <span className="admin-overview-hint">{item.hint}</span>
-                  </span>
-                </Link>
-              );
-            })}
+    <section data-walkthrough="admin.page" className="admin-overview">
+      <PageHeader eyebrow={t('adminEyebrow')} title={t('adminTitle')} lede={t('adminLede')} />
+
+      <div className="admin-home-status-grid">
+        <article className={`surface-card admin-home-status${reviews.length > 0 ? ' is-attention' : ''}`}>
+          <span className="admin-home-status-icon" aria-hidden>{reviews.length > 0 ? <AlertIcon size={20} /> : <InboxIcon size={20} />}</span>
+          <div>
+            <h2>{t('adminAttentionHeading')}</h2>
+            <p>{attentionText}</p>
+            <Link className="btn-link" to="/inbox" onClick={() => setNavSource('hub')}>{t('adminOpenInbox')}</Link>
+          </div>
+        </article>
+        <article className={`surface-card admin-home-status${health === 'degraded' || health === 'unavailable' ? ' is-attention' : ''}`}>
+          <span className="admin-home-status-icon" aria-hidden>{health === 'ready' ? <CheckIcon size={20} /> : <ActivityIcon size={20} />}</span>
+          <div>
+            <h2>{t('adminHealthHeading')}</h2>
+            <p aria-live="polite">{healthCopy[health]}</p>
+            {operationsPath ? <Link className="btn-link" to={operationsPath} onClick={() => setNavSource('hub')}>{t('adminOpenOperations')}</Link> : null}
+          </div>
+        </article>
+      </div>
+
+      <section className="admin-home-recent" aria-labelledby="admin-recent-heading">
+        <h2 id="admin-recent-heading"><ClockIcon size={18} aria-hidden /> {t('adminRecentHeading')}</h2>
+        {recentItems.length > 0
+          ? <div className="admin-home-recent-list">{recentItems.map((item) => destination(item, true))}</div>
+          : <p className="muted">{t('adminRecentEmpty')}</p>}
+      </section>
+
+      <section className="admin-directory" aria-labelledby="admin-directory-heading">
+        <div className="admin-directory-head">
+          <div>
+            <h2 id="admin-directory-heading">{t('adminAllSettingsHeading')}</h2>
+            <p>{t('adminAllSettingsLede')}</p>
+          </div>
+          <div className="admin-directory-search">
+            <label htmlFor="admin-settings-search">{t('adminSearchLabel')}</label>
+            <span className="admin-directory-search-control">
+              <SearchIcon size={17} aria-hidden />
+              <input id="admin-settings-search" type="search" className="ui-input" value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t('adminSearchPlaceholder')} />
+            </span>
+            <span className="admin-directory-result-count" aria-live="polite">{t('adminSearchResultCount', { count: filteredCount })}</span>
           </div>
         </div>
-      ))}
+        {filteredGroups.length > 0 ? filteredGroups.map((group) => {
+          const headingId = `admin-group-${group.id.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`;
+          return (
+            <section key={group.id} className="admin-directory-group" aria-labelledby={headingId}>
+              <h3 id={headingId}>{translatedGroup(group)}</h3>
+              <div className="admin-directory-list">{group.items.map((item) => destination(item))}</div>
+            </section>
+          );
+        }) : (
+          <StateCard
+            icon={<SearchIcon size={20} />}
+            title={t('adminSearchNoResultsTitle')}
+            body={t('adminSearchNoResultsBody')}
+            action={<Button variant="secondary" size="sm" onClick={() => setQuery('')}>{t('adminClearSearch')}</Button>}
+          />
+        )}
+      </section>
     </section>
   );
 }

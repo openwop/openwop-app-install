@@ -14,7 +14,7 @@
  */
 
 import { sanitizeFreeText, sanitizeFreeTextDeep } from '../byok/textRedaction.js';
-import { maskPiiDeep } from '../host/dataClassification.js';
+import { maskPiiDeep, maskEmailsInText } from '../host/dataClassification.js';
 
 const LEVELS = ['debug', 'info', 'warn', 'error'] as const;
 type Level = (typeof LEVELS)[number];
@@ -29,6 +29,12 @@ const SCRUB_ENABLED = process.env.OPENWOP_LOG_SCRUB !== 'off';
 // over-mask operational fields. Heuristic sub-pass also default ON (high precision).
 const MASK_PII = process.env.OPENWOP_LOG_MASK_PII !== 'off';
 const MASK_PII_HEURISTIC = process.env.OPENWOP_LOG_MASK_PII_HEURISTIC !== 'off';
+// ADR 0733 — the VALUE-shaped pass. SEPARATE from the heuristic flag because it is a
+// different precision/recall trade: the heuristic guesses at PII field NAMES, this
+// rewrites email-shaped runs inside any string VALUE. Default ON (the measured leak is
+// real), but an operator debugging a bounce needs the address back: a typo like
+// `alcie@example.com` IS the diagnosis, and the hash of a typo correlates with nothing.
+const MASK_PII_VALUES = process.env.OPENWOP_LOG_MASK_PII_VALUES !== 'off';
 
 export interface Logger {
   debug(msg: string, fields?: Record<string, unknown>): void;
@@ -49,8 +55,22 @@ function scrubFields(fields: Record<string, unknown> | undefined): Record<string
   // Each gates on its own flag. Both preserve shape; runs inside emit()'s try/catch.
   let out: unknown = fields;
   if (SCRUB_ENABLED) out = sanitizeFreeTextDeep(out);
-  if (MASK_PII) out = maskPiiDeep(out, { heuristic: MASK_PII_HEURISTIC });
+  if (MASK_PII) out = maskPiiDeep(out, { heuristic: MASK_PII_HEURISTIC, values: MASK_PII_VALUES });
   return out as Record<string, unknown>;
+}
+
+/**
+ * CLNP-4 — the `msg` string gets the SAME two passes as `fields`, in the same order
+ * (secret scrub, then the ADR 0733 value-shaped email mask). It used to get only the
+ * scrub, so one address logged on one line came out masked under a field and verbatim
+ * in the message — and `msg` is reachable from tenant- and AI-authored text through the
+ * shipped `core.openwop.obs` log node. There is no key on a bare string, so only the
+ * VALUE-shaped pass applies; it gates on the same two flags as the fields pass.
+ */
+function scrubMsg(msg: string): string {
+  let out = SCRUB_ENABLED ? sanitizeFreeText(msg) : msg;
+  if (MASK_PII && MASK_PII_VALUES) out = maskEmailsInText(out);
+  return out;
 }
 
 function emit(level: Level, component: string, msg: string, fields?: Record<string, unknown>): void {
@@ -61,7 +81,7 @@ function emit(level: Level, component: string, msg: string, fields?: Record<stri
       time: new Date().toISOString(),
       level,
       component,
-      msg: SCRUB_ENABLED ? sanitizeFreeText(msg) : msg,
+      msg: scrubMsg(msg),
       ...scrubFields(fields),
     });
   } catch (err) {
@@ -73,8 +93,15 @@ function emit(level: Level, component: string, msg: string, fields?: Record<stri
       time: new Date().toISOString(),
       level,
       component,
-      msg: SCRUB_ENABLED ? sanitizeFreeText(msg) : msg,
-      logFieldsError: err instanceof Error ? err.message : String(err),
+      msg: scrubMsg(msg),
+      // ADR 0733 — the catch branch is OUTSIDE `scrubFields`, so the deep passes never
+      // see it. A throwing `toJSON()` puts arbitrary caller text here: MEASURED,
+      // `JSON.stringify({x:{toJSON(){throw new Error('row alice@example.com failed')}}})`
+      // surfaces that message verbatim. Scrub it on the way out or the fallback line
+      // becomes the one hole in the sink.
+      logFieldsError: ((m) => (MASK_PII && MASK_PII_VALUES ? maskEmailsInText(m) : m))(
+        err instanceof Error ? err.message : String(err),
+      ),
     });
   }
   if (level === 'error') {

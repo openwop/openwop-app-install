@@ -22,7 +22,7 @@ const goodBriefSurface = {
 };
 
 describe('feature.campaign-channels.nodes — generate', () => {
-  it('exports generate + content-quality-check + the five publish nodes', () => {
+  it('exports generate + content-quality-check + the five publish nodes + render-concepts', () => {
     expect(Object.keys(nodePack).sort()).toEqual([
       'feature.campaign-channels.nodes.content-quality-check',
       'feature.campaign-channels.nodes.generate',
@@ -31,6 +31,7 @@ describe('feature.campaign-channels.nodes — generate', () => {
       'feature.campaign-channels.nodes.publish-email-sequence',
       'feature.campaign-channels.nodes.publish-landing-page',
       'feature.campaign-channels.nodes.publish-social-posts',
+      'feature.campaign-channels.nodes.render-concepts',
     ]);
   });
 
@@ -118,10 +119,36 @@ describe('campaign-channels — channel workflows', () => {
 });
 
 describe('campaign-channels — agent pack', () => {
-  it('loads the Channel Generator with its tool-allowlist', () => {
+  it('loads the Channel Generator with its registered tool-allowlist', () => {
+    // CFP-1: the generator drives channel generation through two REAL registered
+    // tools (catalog/readiness read + channel-workflow igniter), not phantom node
+    // typeIds — the resolution tripwire is test/agent-allowlist-resolution.test.ts.
     const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.campaign-channels.agents'));
     expect(loaded.length).toBe(1);
     expect(loaded[0].agentId).toBe('feature.campaign-channels.agents.channel-generator');
-    expect(loaded[0].toolAllowlist).toContain('openwop:feature.campaign-channels.nodes.generate');
+    expect([...(loaded[0].toolAllowlist ?? [])].sort()).toEqual([
+      'openwop:campaign-channels.channels',
+      'openwop:campaign-channels.generate',
+    ]);
+  });
+});
+
+describe('R2 CRB-SP-6 — creative_briefs prompt↔schema parity (the promptCatalogParity discipline)', () => {
+  it('every field the system prompt promises is expressible in the response schema', async () => {
+    // The prompt demanded "2-3 direction variants per format" while the schema
+    // (additionalProperties:false) had no `directions` property — the model
+    // could never return them, the landing code's `vb.directions` was dead, and
+    // every generated managed brief arrived direction-less, immediately
+    // triggering the app's own "No creative directions" warning.
+    const { CHANNEL_SPEC } = await import('../../../packs/feature.campaign-channels.nodes/index.mjs');
+    const spec = (CHANNEL_SPEC as Record<string, { system: string; schema: { properties: Record<string, { items?: { properties?: Record<string, unknown>; required?: string[] } }> }; itemsKey: string }>).creative_briefs;
+    expect(spec.system).toMatch(/direction variants/);
+    const itemProps = spec.schema.properties[spec.itemsKey]!.items!.properties!;
+    expect(itemProps).toHaveProperty('directions');
+    const dirItems = (itemProps.directions as { items: { properties: Record<string, unknown>; required: string[] } }).items;
+    expect(dirItems.properties).toHaveProperty('label');
+    expect(dirItems.required).toContain('label');
+    // Both halves of the entity's own SSoT claim ("2-3 creative-direction
+    // variants") are now structurally reachable: prompt promises, schema admits.
   });
 });

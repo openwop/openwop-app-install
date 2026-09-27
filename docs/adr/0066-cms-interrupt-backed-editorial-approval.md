@@ -2,6 +2,22 @@
 
 **Status:** implemented (Phases 1–3, 2026-06-18).
 
+> **Correction note (chat-first-port C1, 2026-07-22).** The original split let the
+> `cms-approval-gate` toggle decide whether the in_review→publish decision rode the
+> shared approval row AT ALL: OFF ⇒ the decision was a *bespoke* direct
+> `transitionPage('approve')` on `/pages/:id/approve`, bypassing the ApprovalsInbox
+> (a second decision path — chat-first-port law 4). Reconciled to ONE decision
+> path: `submit` now ALWAYS queues the `content-publish` approval
+> (`queueContentApproval`, regardless of the toggle), and the `approve`/`reject`
+> header buttons RESOLVE that shared row through the shared decision core
+> (`claimApproval`/`rejectApproval` → `decideContentPublish`) — so page-decide ≡
+> inbox-decide. The `/pages/:id/approve|reject` routes remain, but are now thin
+> adapters over the shared core (zero decision logic), never a direct transition.
+> The toggle's role narrows to the direct-`publish` bypass only (ON ⇒ publish must
+> go through the review; OFF ⇒ an admin may publish a draft directly, which clears
+> any pending row). The `cms-approval-gate` route test was rewritten to pin the new
+> single-path behavior.
+
 ### Phase → implementation ledger
 | Phase | What shipped | Files |
 |---|---|---|
@@ -23,6 +39,15 @@ approval" open question / Alternative 1.
 editorial workflow is byte-identical to today — a status-only state machine with
 RBAC authority; no approval row is created and the direct `approve` route works
 unchanged.
+
+> **CORRECTION 2026-08-21 (ADR 0593 / `CMSA-5`, `CMSAWF-4`).** The paragraph
+> above is the PRE-C1 design and is now FALSE. The chat-first-port C1 correction
+> (recorded at the top of this ADR) made `submit` queue the shared approval row
+> **unconditionally** — under both toggle states — so the `in_review` decision is
+> always that ONE row, resolved through the shared decision core. The toggle
+> gates only the direct-publish **bypass**. Left in place rather than rewritten
+> because the reasoning trail is the point; the C1 note is the live design.
+> `cms-approval-gate.test.ts:90` pins the corrected behaviour.
 **RFC gate:** **No new RFC.** Pure host composition under
 `/v1/host/openwop-app/*` — composes the existing host approval queue
 (`host/approvalService.ts`) and the existing CMS workflow. No wire surface.
@@ -87,6 +112,13 @@ When `cms-approval-gate` is ON for the org:
   through the queue); `reject`/`unpublish`/`archive` are unchanged.
 
 When OFF: nothing changes — no approval row, direct `approve` works (byte-identical).
+
+> **CORRECTED 2026-09-13 (ADR 0672 D5).** This sentence and the one at §Decision above are
+> **false at HEAD**: post-ADR 0593 C1 `submit` queues the approval row **UNCONDITIONALLY**,
+> under both toggle states. The toggle gates whether a DIRECT PUBLISH is refused, not whether
+> the review row exists. The original text is preserved because the reasoning trail is the
+> point — and because this pair was missed by a sweep that re-grepped the PHRASINGS it had
+> already found (`byte-identical|status-only|IfGated`) rather than the CLAIM.
 
 ### 3. RBAC / isolation (preserve `WORKFLOW_RULES` exactly)
 - `submit` = `workspace:write` (an editor proposes).

@@ -109,8 +109,8 @@ export async function putChart(input: {
   const memberIds = new Set(input.members.map((m) => m.rosterId));
 
   for (const m of input.members) {
-    const entry = await getRosterEntry(m.rosterId);
-    if (!entry || entry.tenantId !== input.tenantId) {
+    const entry = await getRosterEntry(input.tenantId, m.rosterId);
+    if (!entry) {
       return { error: { code: 'cross_tenant_member', message: 'Every member MUST reference a roster entry in this tenant.', detail: m.rosterId } };
     }
     if (!deptIds.has(m.departmentId)) {
@@ -187,7 +187,7 @@ export async function responsibilityView(
   const scope = recursive ? departmentSubtree(chart, departmentId) : new Set([departmentId]);
   const members = chart.members.filter((m) => scope.has(m.departmentId));
   const portfolios = await Promise.all(
-    members.map(async (m) => (await getRosterEntry(m.rosterId))?.workflows ?? []),
+    members.map(async (m) => (await getRosterEntry(tenantId, m.rosterId))?.workflows ?? []),
   );
   const responsibilities = [...new Set(portfolios.flat())];
   return { department, members, responsibilities };

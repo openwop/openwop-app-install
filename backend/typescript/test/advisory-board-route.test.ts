@@ -16,6 +16,7 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { createBoard as createBoardService } from '../src/features/advisory-board/service.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
@@ -29,7 +30,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'kb', 'advisory-board']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -169,6 +170,30 @@ describe('advisory-board — visibility + IDOR', () => {
     // Owner can.
     expect((await owner.patch(`${B}/${encodeURIComponent(bid)}`, { name: 'Renamed' })).body.name).toBe('Renamed');
     expect((await owner.del(`${B}/${encodeURIComponent(bid)}`)).status).toBe(204);
+  });
+
+  it('a demo-seeded board is adopted by the first user to edit it (then owner-only again)', async () => {
+    const tenantId = `org:ab-${Date.now()}-${n++}`;
+    const adopter = client();
+    await signup(adopter, { tenantId });
+    const member = client();
+    const memberUser = await signup(member, { tenantId });
+    const a = await makeAdvisor(adopter, 'Ada');
+    const org = await adopter.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    await adopter.post(`/v1/host/openwop-app/orgs/${encodeURIComponent(org.body.orgId)}/members`, { displayName: 'M', subject: memberUser.userId, roles: ['editor'] });
+    // Seeded the way the demo provisioners stamp boards: a synthetic `demo:*`
+    // actor no caller identity ever matches — pre-fix, permanently uneditable.
+    const seeded = await createBoardService(tenantId, org.body.orgId, 'demo:advisory-seed', { name: 'Seeded Council', advisors: [a], visibility: 'shared' });
+    const path = `${B}/${encodeURIComponent(seeded.boardId)}`;
+    // First edit by a signed-in tenant user succeeds and ADOPTS the board.
+    const renamed = await adopter.patch(path, { name: 'My Council' });
+    expect(renamed.status, JSON.stringify(renamed.body)).toBe(200);
+    expect(renamed.body.name).toBe('My Council');
+    // Ownership re-stamped: a co-tenant member is back to owner-only 403 —
+    // adoption is a one-time claim of a seed-actor board, not an open door.
+    expect((await member.patch(path, { name: 'Hijack' })).status).toBe(403);
+    // The adopter (now owner) can keep editing.
+    expect((await adopter.patch(path, { name: 'My Council v2' })).body.name).toBe('My Council v2');
   });
 });
 

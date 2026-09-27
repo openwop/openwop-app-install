@@ -1,6 +1,6 @@
 /**
  * Project schedule client (ADR 0046 follow-on) — drives
- * /v1/host/openwop-app/projects/:id/schedules. A project schedule is a
+ * /host/openwop-app/projects/:id/schedules. A project schedule is a
  * `ScheduledJob` owned by the `project:<id>` subject on the ONE scheduler; this
  * client just lists/creates/updates/deletes the project's own jobs.
  */
@@ -14,11 +14,16 @@ export interface ProjectSchedule {
   timezone?: string;
   enabled: boolean;
   lastRunAt?: string;
+  /** Paired with `lastRunAt` — the run it links to. */
+  lastRunId?: string;
+  /** WF-PRJ-2 — a fire that consumed its slot and produced no run. */
+  lastSkippedAt?: string;
+  lastSkipReason?: string;
   nextFireAt?: number;
   createdAt?: string;
 }
 
-const baseFor = (projectId: string): string => `${config.baseUrl}/v1/host/openwop-app/projects/${encodeURIComponent(projectId)}/schedules`;
+const baseFor = (projectId: string): string => `${config.baseUrl}/host/openwop-app/projects/${encodeURIComponent(projectId)}/schedules`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

@@ -37,6 +37,12 @@ export interface ProviderConfig {
    *  sign-in (if anon) or directly activates the provider (if authed).
    *  apiKey* / customModel* fields below are not required when managed. */
   managed?: boolean;
+  /** ADR 0101 Phase 4 — may this provider's NATIVE search results be stored as
+   *  durable citations? A LICENSING fact, not a capability one: Google's Grounding
+   *  links are licensed for display alongside the answer they produced, so features
+   *  that save sources as evidence cannot cite them. Surfaced in the UI so a user
+   *  learns this when CHOOSING a provider, not when a run refuses. */
+  searchSuitability?: 'durable' | 'answer-only' | 'none';
   /** Hidden providers are NOT rendered in the BYOK wizard tile list and
    *  are NOT pickable directly by the user. They still live in
    *  providers.json so the backend can read their capability surface
@@ -45,6 +51,12 @@ export interface ProviderConfig {
    *  the real underlying provider, but we don't want users to pick it
    *  by name because the steward is paying for it. */
   hidden?: boolean;
+  /** ADR 0757 follow-up — an RFC 0121 CLEARED subscription provider (GitHub
+   *  Copilot). Its credential is the user's OAuth-connected token, not a pasted
+   *  key: the wizard binds it without a key step, and removing the chat binding
+   *  unbinds it WITHOUT deleting the connection (that is Disconnect, on the keys
+   *  page). Frontend-only — never in providers.json, which the backend reads. */
+  subscription?: boolean;
   /** Hint shown beneath a managed-provider tile to signed-out users
    *  (e.g., "Sign in to use"). Ignored for non-managed providers. */
   signedInHint?: string;
@@ -121,8 +133,26 @@ function assertProviderShape(p: unknown): asserts p is ProviderConfig {
 const validated = validateProvidersDocument(providersData);
 export const PROVIDERS: readonly ProviderConfig[] = validated.providers;
 
+/** ADR 0757 follow-up — GitHub Copilot, the RFC 0121 cleared subscription
+ *  provider. Kept OUT of providers.json on purpose: the backend reads that file
+ *  for its model catalog, and Copilot must stay dark there unless the host is
+ *  configured (RFC 0121 §B.9). `default` lets Copilot pick the user's default
+ *  model — the model set differs by plan, so the app never guesses ids. */
+export const COPILOT_PROVIDER_ID = 'github.copilot';
+export const COPILOT_CREDENTIAL_REF = `subscription:${COPILOT_PROVIDER_ID}`;
+export const COPILOT_DEFAULT_MODEL = 'default';
+export const SUBSCRIPTION_PROVIDERS: readonly ProviderConfig[] = [{
+  id: COPILOT_PROVIDER_ID,
+  label: 'GitHub Copilot',
+  badgeColor: 'var(--ink)',
+  description: 'Your own GitHub Copilot plan, connected through GitHub.',
+  hidden: true,
+  subscription: true,
+  models: [{ id: COPILOT_DEFAULT_MODEL, label: 'Copilot default model', contextWindow: 0, capabilities: ['text'], recommended: true }],
+}];
+
 export function getProvider(id: ProviderId): ProviderConfig {
-  const p = PROVIDERS.find((x) => x.id === id);
+  const p = PROVIDERS.find((x) => x.id === id) ?? SUBSCRIPTION_PROVIDERS.find((x) => x.id === id);
   if (!p) throw new Error(`Unknown provider: ${id}`);
   return p;
 }

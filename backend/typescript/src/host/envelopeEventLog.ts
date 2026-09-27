@@ -43,7 +43,7 @@ const _eventLog = new Map<string /* runId */, TestRunEvent[]>();
  *  event. */
 export function appendTestEvent(input: Omit<TestRunEvent, 'sequence' | 'eventId' | 'timestamp'> & Partial<Pick<TestRunEvent, 'sequence' | 'eventId' | 'timestamp'>>): TestRunEvent {
   const arr = _eventLog.get(input.runId) ?? (_eventLog.set(input.runId, []).get(input.runId)!);
-  const sequence = input.sequence ?? arr.length + 1;
+  const sequence = input.sequence ?? arr.length;
   const eventId = input.eventId ?? `evt-${input.runId}-${sequence}-${Math.random().toString(36).slice(2, 8)}`;
   const timestamp = input.timestamp ?? new Date().toISOString();
   const event: TestRunEvent = {

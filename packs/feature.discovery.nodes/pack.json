@@ -1,0 +1,39 @@
+{
+  "name": "feature.discovery.nodes",
+  "version": "1.0.0",
+  "description": "Discovery feature node pack (MERCH-C chat-drivability) — nodes over the ctx.features.discovery surface. `search` runs faceted product search; `collection-upsert` authors a manual/dynamic collection; `merch-rule-upsert` authors a pin/boost/bury/hide rule. Collections/rules carry no money and are reversible ⇒ direct agent authoring. All role:'action' (recorded → replay-safe over the mutable catalog).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "discovery", "commerce", "search", "collections", "merchandising"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.discovery.nodes.search",
+      "version": "1.0.0",
+      "label": "Discovery Search",
+      "description": "Faceted product search (optional collection scope) over ctx.features.discovery. role:'action' (recorded — the catalog is mutable). Inputs: orgId, q?, collectionId?.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.discovery.nodes.collection-upsert",
+      "version": "1.0.0",
+      "label": "Discovery Collection Upsert",
+      "description": "Authors a collection — manual (productIds) or dynamic (rule by category/tag/price). Inputs: orgId, name, type, productIds?|rule?.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.discovery.nodes.merch-rule-upsert",
+      "version": "1.0.0",
+      "label": "Discovery Merch-Rule Upsert",
+      "description": "Authors a merchandising rule (pin/boost/bury/hide over a query/collection scope) with optional holdout. Inputs: orgId, name, scope, actions:[…], holdoutPct?.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

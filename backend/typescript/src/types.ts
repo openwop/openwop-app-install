@@ -16,6 +16,42 @@ import type {
 
 export type { CreateRunRequest, ErrorEnvelope, RunStatus, StreamMode };
 
+/**
+ * ADR 0601 — HOW this principal authenticated, stamped at the ONE boundary that
+ * knows (`middleware/auth.ts`, plus `routes/mcp.ts` for the conformance seam).
+ *
+ * This exists because `principalId` is an IDENTITY, not an AUTHORITY, and the
+ * two are not interchangeable for every credential the host accepts. Membership
+ * rows are keyed on a caller's RBAC subject (`user:<id>` / `oidc:<sub>`), so a
+ * member lookup keyed on `principalId` can only ever match the cookie/OIDC
+ * lanes: an API-key principal is minted as `bearer:<first 8 chars of the key>`
+ * or `apikey:<keyId>`, neither of which is a subject anyone could seed a member
+ * row for (and the first of which changes on rotation).
+ *
+ * A consumer that must answer "what may this caller DO" reads this discriminant
+ * instead of pattern-matching the id string. Pattern-matching a prefix is a
+ * heuristic over a value some other module chose; this is provenance recorded by
+ * the module that made the choice.
+ */
+export type PrincipalAuth =
+  /** Cookie session bound to a durable user, or an OIDC bearer. `principalId` IS
+   *  the RBAC subject, so membership resolution is meaningful. */
+  | { kind: 'subject' }
+  /** Anonymous cookie session (`session:<sid>` in an `anon:<sid>` tenant). Never
+   *  a member of anything; authority comes from the single-principal rules. */
+  | { kind: 'anon' }
+  /** An operator credential configured in the host's own environment
+   *  (`OPENWOP_API_KEYS`). Whoever set it IS the deployment operator, so it acts
+   *  as the tenant's own principal in the tenant the config pinned it to. */
+  | { kind: 'env-key' }
+  /** A self-service ADR 0270 `owk_` key: a DELEGATION. `issuer` is the RBAC
+   *  subject that minted it (`ApiKeyRecord.createdBy`) and `scopes` are the
+   *  key's own declared scopes — empty meaning "undeclared", not "none". */
+  | { kind: 'api-key'; issuer: string; scopes: readonly string[] }
+  /** The `OPENWOP_TEST_SEAM_ENABLED` conformance principal. Deliberately carries
+   *  no authority of its own. */
+  | { kind: 'test-seam' };
+
 /** Synthetic principal returned by the stub auth middleware. */
 export interface Principal {
   /** Opaque principal identifier (Bearer-token claim or stub-derived). */
@@ -24,6 +60,11 @@ export interface Principal {
   tenants: readonly string[];
   /** Bearer token presented (sample only — never log in production). */
   token: string;
+  /** ADR 0601 — the credential provenance (see `PrincipalAuth`). Optional: a
+   *  principal minted outside the auth boundary carries none, and an authority
+   *  resolver that finds none MUST fall back to subject resolution (fail-closed
+   *  for a credential lane, never open). */
+  auth?: PrincipalAuth;
 }
 
 /** Persisted run record. Wire shape derives from this via projection. */
@@ -44,6 +85,10 @@ export interface RunRecord {
   createdAt: string;
   updatedAt: string;
   completedAt?: string;
+  /** ADR 0371 — precomputed retention deadline (completedAt + TTL), stamped by
+   *  the storage layer when a patch carries a terminal status. The sweeper
+   *  range-scans this; definition overrides/pins re-validate at sweep time. */
+  removalAt?: string;
   error?: { code: string; message: string };
   /** Current node, when in a running/waiting state. */
   currentNodeId?: string;
@@ -63,6 +108,13 @@ export interface RunRecord {
    *  implicitly: terminal/`waiting-*` status excludes a run from the sweep. */
   dispatchOwner?: string | null;
   dispatchLeaseExpiresAt?: number | null;
+  /** `spec/v2/core/persistence.md` §"The era key" — `eventLogSchemaVersion`,
+   *  the per-run key naming the vocabulary this run's event log is written in.
+   *  `3` = the v2 era (v2 event-type names stored verbatim); ABSENT = the v1
+   *  era, which reads as `2` and is never backfilled. The only writer is the
+   *  storage seat (`storage/eventEraAdapter.ts`), which stamps `3` on every
+   *  run this host creates; no route or service sets it. */
+  eventLogSchemaVersion?: number;
 }
 
 /** Persisted run event with monotonic sequence per run. */
@@ -75,6 +127,17 @@ export interface EventRecord {
   payload: unknown;
   timestamp: string;
   causationId?: string;
+  /** `spec/v2/core/events.md` §"The envelope" (RFC 0171 §A, RFC 0172 §B axis 5)
+   *  — the PER-EVENT schema version, REQUIRED on a major-2 `RunEventDoc` and
+   *  OPTIONAL in the v1 schema. It is NOT a stored column: this host has never
+   *  versioned an event payload, so every event it has ever written is version
+   *  `1` and a column would hold one constant forever. The value is supplied at
+   *  the storage seat (`storage/eventEraAdapter.ts`) on a major-2 read, the same
+   *  place and the same way `persistence.md` §"The era key" lets a host
+   *  synthesize `eventLogSchemaVersion` for a run that predates it. A producer
+   *  that starts versioning a payload sets the field and the seat leaves it
+   *  alone. */
+  schemaVersion?: number;
 }
 
 /** Persisted RFC 0056 annotation (a per-run side-resource — NOT a replayable
@@ -93,7 +156,7 @@ export interface InterruptRecord {
   interruptId: string;
   runId: string;
   nodeId: string;
-  kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation';
+  kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation' | 'timer' | 'tour-step' | 'walkthrough-step' | 'credential';
   /** Signed token usable via POST /v1/interrupts/{token}. */
   token: string;
   data: unknown;
@@ -120,9 +183,50 @@ export interface WebhookSubscriptionRecord {
   url: string;
   events: readonly string[];
   tags?: readonly string[];
-  /** HMAC-SHA256 secret. Stored in plaintext in this sample (use KMS in production). */
+  /** HMAC-SHA256 secret, SEALED at rest via the BYOK KMS envelope when KMS is
+   *  configured (`host/webhookSecretCodec.ts` — always sealed in the
+   *  enterprise/auth posture, whose boot guard mandates KMS); plaintext only
+   *  in the local/demo posture (legacy rows pass through on read). */
   secret: string;
   createdAt: string;
+  /**
+   * The protocol major this subscriber speaks, stamped from the negotiated
+   * contract at REGISTRATION and fixed for the subscription's lifetime
+   * (ADR 0629 / `spec/v2/core/versioning.md` §5).
+   *
+   * WHY THE SUBSCRIPTION AND NOT THE EVENT. Under major 2 a runId is the
+   * tenant-bound `<tenantId>/<opaque>` projection, and `run-event.schema.json`
+   * binds `runId` to that grammar by `$ref` — so a v2 delivery carrying a bare
+   * uuid is non-conformant. But a delivery is not a response to a versioned
+   * request: it is an EMISSION, with no header to negotiate from. The only
+   * major a subscriber has ever seen ids in is the one it registered under.
+   *
+   * ABSENT MEANS 1, and that is the load-bearing half. Every row written
+   * before this field existed, and every `/v1/webhooks` registration, keeps
+   * receiving the bare id it receives today — projecting unconditionally would
+   * silently rewrite the identifiers live v1 integrations correlate on, which
+   * is the same defect (an id the receiver cannot match) in the other
+   * direction.
+   */
+  protocolMajor?: 1 | 2;
+  /**
+   * RFC 0201 §B — the signature schemes the dispatcher applies, fixed at
+   * registration. ABSENT MEANS `["v1"]`: every row written before ADR 0747 and
+   * every registration that did not send the field is a non-opted subscription,
+   * and RFC 0201 §B.8 binds it to today's behaviour byte for byte (no
+   * `webhook-*` headers, no verification, no rotation). Present only when the
+   * registration carried the field.
+   */
+  signatureAlgorithms?: readonly string[];
+  /** RFC 0201 §E — the secret a rotation replaced, in the same at-rest form as
+   *  `secret`. It signs ONLY while `previousSecretExpiresAt` is in the future;
+   *  past that instant it is inert even though the row still holds it
+   *  (§E.20 "the previous secret MUST NOT sign anything"). */
+  previousSecret?: string;
+  /** Epoch ms — end of the rotation overlap. */
+  previousSecretExpiresAt?: number;
+  /** Epoch ms — the most recent rotation. */
+  rotatedAt?: number;
 }
 
 /**
@@ -139,8 +243,27 @@ export interface WebhookSubscriptionRecord {
 export interface WebhookDeliveryRecord {
   deliveryId: string;
   subscriptionId: string;
+  /** Exact subscription id emitted on the delivery wire. Major-2 rows carry
+   *  the tenant-bound form; absent on historical/major-1 rows means the stored
+   *  `subscriptionId` remains the wire value. Persisted because a retry after
+   *  restart must emit the same deduplication key as its first attempt. */
+  wireSubscriptionId?: string | null;
+  /** Owning tenant of the subscription, stamped at enqueue (RFC 0215 §A.3,
+   *  ADR 0752 P2) so the dispatcher can bound one tenant's in-flight attempts.
+   *  NULL on rows enqueued before the column existed: those are not tenant-capped. */
+  tenantId?: string | null;
   url: string;
-  /** HMAC-SHA256 secret captured at enqueue time (the subscription may be deleted before delivery). */
+  /** ADR 0747 — WRITTEN, NO LONGER READ. The worker signs with the
+   *  SUBSCRIPTION's secrets at send time, because a secret copied at enqueue
+   *  would keep signing after an RFC 0201 §E rotation retired it (§E.20). The
+   *  column is still written so a rollback to a revision that reads it keeps
+   *  delivering. Original doc follows.
+   *
+   *  HMAC-SHA256 secret captured at enqueue time. (CORRECTED WHD-16: this used
+   *  to say "the subscription may be deleted before delivery"; deleting a
+   *  subscription now removes its PENDING rows, so a delivery never outlives
+   *  its subscription — the capture keeps an in-flight claim signable.) Carries the subscription's AT-REST form —
+   *  sealed when KMS is configured; the worker opens it at signing time. */
   secret: string;
   eventType: string;
   /** The exact JSON body to POST (a serialized EventRecord). */
@@ -156,6 +279,59 @@ export interface WebhookDeliveryRecord {
   lastError?: string | null;
   createdAt: number;
   updatedAt: number;
+}
+
+/**
+ * ADR 0551 P1 — one durable dispatch intent, keyed by the run it starts.
+ *
+ * The row is appended in the SAME atomic storage operation that makes the run
+ * visible, so `HTTP 201` means both the run and the intent to start it are
+ * durable. `setImmediate(executeRun)` is now only a WAKEUP HINT: if the process
+ * dies before it fires, this row is what makes the run start anyway.
+ *
+ * Identity is `runId` (PRIMARY KEY), so a second append for the same run is a
+ * write error rather than a second delivery.
+ *
+ * A completed row is DELETED rather than marked terminal (the ADR 0549
+ * `releaseIdempotentResponse` reasoning): the table is a queue, and a queue that
+ * only ever grows is a defect. `dead` is the one retained state — attempts
+ * exhausted, kept for the operator surface ADR 0551 P2 owns.
+ */
+export interface DispatchOutboxRecord {
+  runId: string;
+  tenantId: string;
+  workflowId: string;
+  status: 'pending' | 'dead';
+  attempts: number;
+  /** Epoch ms; a row is due when `status === 'pending'` AND `nextAttemptAt <= now`. */
+  nextAttemptAt: number;
+  /** Claim lease: worker id + expiry (epoch ms). A due row whose lease is absent or expired is re-claimable. */
+  claimedBy?: string | null;
+  claimExpiresAt?: number | null;
+  lastError?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * ADR 0551 P2 — the whole-queue facts an operator surface and the backlog
+ * metrics need, computed by the adapter rather than by counting a listing.
+ *
+ * A listing is capped, so counting one under-reports exactly when the queue is
+ * in trouble — the "counts computed over a capped sample must SAY so" problem
+ * the Operations webhook summary already carries. These are unbounded
+ * aggregates, so the numbers are true at any depth.
+ *
+ * `oldestPendingCreatedAt` is the row's CREATION time, not its `nextAttemptAt`:
+ * the question the oldest-age signal answers is "how long has an accepted run
+ * been waiting for someone to start it", and a rescheduled row's next attempt
+ * is always near-future no matter how long it has been stuck.
+ */
+export interface DispatchOutboxStats {
+  pending: number;
+  dead: number;
+  /** ISO-8601 `createdAt` of the oldest PENDING row, or null when there is none. */
+  oldestPendingCreatedAt: string | null;
 }
 
 /** Idempotency key replay entry. */
@@ -224,7 +400,7 @@ export interface InternalCreateRunRequest extends CreateRunRequest {
  * snake_case → camelCase translation done by the row mapper.
  *
  * `type` is a dotted-namespace string. Today's emitters use:
- *   - `workflow.approval_needed` — HITL interrupt opened (action: resume the run)
+ *   - `openwop-app.workflow.approval-needed` — HITL interrupt opened (action: resume the run)
  *   - `workflow.input_needed`    — clarification/refinement interrupt
  *   - `workflow.failed`          — run terminated with an error
  *   - `system.alert`             — operator-level signal
@@ -232,7 +408,7 @@ export interface InternalCreateRunRequest extends CreateRunRequest {
  * The set is open — clients render unknown types via a generic shape.
  */
 export type NotificationType =
-  | 'workflow.approval_needed'
+  | 'openwop-app.workflow.approval-needed'
   | 'workflow.input_needed'
   | 'workflow.failed'
   | 'workflow.completed'
@@ -382,7 +558,27 @@ export interface UserAgentRecord {
  * ADR 0048, to avoid regressing existing agents). `advisor` names eligibility for
  * an advisory board (ADR 0040) — a capability, NOT a kind (an advisor is an agent).
  */
-export type AgentCapabilityId = 'assistant' | 'knowledge' | 'cognition' | 'advisor';
+/**
+ * ADR 0442 (KickBot) — `coaching` names an agent's operating rhythm as a
+ * persistent guide: it coordinates a participant's daily plan, explains the next
+ * step, and helps recovery (PRD §6.8). Like `cognition`'s gating (ADR 0048), the
+ * RUNTIME that reads this flag lands incrementally — P1 ships the capability +
+ * its by-capability resolver (`features/kicktodo-core/coachingCapability.ts`),
+ * P2/P5 wire the daily-coach presentation and specialist dispatch that consume
+ * it. It lives at the CORE level, activated per named agent via
+ * `AgentProfile.capabilities` — never fused to a `roleKey` (David's law); KickBot
+ * is just the agent that activates it.
+ *
+ * ADR 0458 (Challenge Author) — `challenge-authoring` names an agent that drives
+ * the Challenge Factory: it converses a creator through a challenge concept and
+ * ignites the `challenge-factory` workflow through its assigned workflows. Like
+ * `coaching`, it lives at the CORE level and is activated per named agent via
+ * `AgentProfile.capabilities` — never fused to a `roleKey` (David's law); the
+ * pack's Challenge Author persona is just the agent that activates it. The
+ * runtime that reads it lands incrementally — P1 provisions the capability + the
+ * per-tenant named agent (`features/kicktodo-creator/challengeAuthoringCapability.ts`).
+ */
+export type AgentCapabilityId = 'assistant' | 'knowledge' | 'cognition' | 'advisor' | 'deep-investigation' | 'coaching' | 'challenge-authoring';
 
 export interface AgentProfile {
   /** The owning agent's id — `rosterId` (preferred, for standing agents) or
@@ -395,6 +591,18 @@ export interface AgentProfile {
    *  capability behavior (e.g. the assistant loops/approvals) on this list —
    *  NEVER on `roleKey`. Absent/empty ⇒ no core capabilities activated. */
   capabilities?: AgentCapabilityId[];
+  /** ADR 0442 P3 — how this agent's long-term/knowledge MEMORY namespace is
+   *  keyed when it recalls memory into a turn (a HOST-LOCAL profile field —
+   *  deliberately NOT on the wire-frozen `memoryShape`, which is
+   *  `additionalProperties:false` per RFC 0003/0004). Default `'agent'` = the
+   *  shared `agent:<profileId>` scope (every existing agent — byte-identical to
+   *  before). `'per-user'` = the ACTING participant's OWN `user:<subject>` scope,
+   *  so a standing agent shared across a cohort tenant recalls each participant's
+   *  own memory and NEVER another user's (the ADR 0442 F1 isolation invariant).
+   *  Resolved generically by `resolveAgentMemoryScope` — no agent-id special-case
+   *  (David's law). Fail-closed: `per-user` with no acting user recalls nothing,
+   *  never the shared scope. */
+  memoryScope?: 'agent' | 'per-user';
   department?: { departmentId: string; name: string; roleId?: string; roleName?: string };
   /** Free-form per-twin config (thresholds, calendars, approval matrices). */
   configParameters?: Record<string, unknown>;
@@ -449,6 +657,15 @@ export interface AgentProfile {
  */
 export type OpenwopErrorCode =
   | 'invalid_request'
+  // ADR 0621 — live-session revocation (host-ext, never on the wire). The three
+  // 401 refusals a durable-user session can receive per request, the two 503
+  // authority faults (D6 / the unregistered seam), and the D7 self-lockout refusal.
+  | 'account_disabled'
+  | 'account_erased'
+  | 'session_revoked'
+  | 'session_authority_unavailable'
+  | 'session_authority_unregistered'
+  | 'self_lockout'
   | 'validation_error'
   | 'unauthenticated'
   | 'forbidden'
@@ -464,23 +681,128 @@ export type OpenwopErrorCode =
   | 'interrupt_expired'
   | 'invalid_interrupt_token'
   | 'idempotency_key_conflict'
-  | 'idempotency_key_replay_mismatch'
+  // `idempotency.md` §"Concurrent duplicates" naming note (2026-08-18, SP-03):
+  // the spec named no mismatch error until v1.5, so implementations diverged.
+  // `idempotency_key_mismatch` is canonical — the only spelling already present
+  // in more than one shipped artifact (the gRPC mapping + the published SDK) —
+  // and the suite asserts it. THIS host was the "tier-1 host emitting
+  // `idempotency_key_replay_mismatch`" that note names; H63 is the move.
+  | 'idempotency_key_mismatch'
+  // `spec/v2/core/idempotency.md` §"Layer 1" (RFC 0170 §D.3) — an
+  // `Idempotency-Key` outside `^[A-Za-z0-9._~-]{22,128}$`. Major 2 only:
+  // narrowing the v1 wire's free-form key would be a new refusal on a shipped
+  // contract. `400`, and MUST NOT be cached.
+  | 'idempotency_key_invalid'
+  // `spec/v2/core/identity.md` §5 (RFC 0170 §D.1) — a tenant-bound id whose
+  // tenant segment is not the caller's. `403`, and the refusal MUST NOT
+  // disclose whether the resource exists (`runs.md` §Identity).
+  | 'id_tenant_mismatch'
+  // `spec/v2/core/identity.md` §4 (RFC 0170 §E.1) — a resume token outside the
+  // `ow2.<alg>.<kid>.<payload>.<mac>` grammar, or carrying an `alg` this host
+  // does not advertise, a `kid` it does not hold, or a MAC that does not
+  // verify. `401`, one code for all four states.
+  | 'interrupt_token_invalid'
+  // RFC 0199 §B.3/§B.4/§E.2 (ADR 0753 P3) — an MCP-reach provider whose discovered
+  // metadata does not verify against its manifest (or its pin); no authorization
+  // URL is issued. `422`, not retriable.
+  | 'connection_auth_metadata_mismatch'
+  // ADR 0549 P4 — the in-flight code, paired with `details.retryAfter`.
+  // `idempotency.md` §"Concurrent duplicates": when a second request arrives on
+  // a live claim, the server MAY block and return the same response, or MAY
+  // answer `409 Conflict` with `{ error: "idempotency_in_flight", message,
+  // details: { retryAfter } }`. This host chooses the 409 — and once it does,
+  // that BODY SHAPE is prescribed, not optional. It previously answered
+  // `idempotency_key_conflict` with no `retryAfter`, so a caller was told
+  // "conflict" with no indication that waiting is the correct response.
+  //
+  // TWO CORRECTIONS, both to claims made here without checking (2026-08-18):
+  //
+  //  1. This comment cited `idempotency.md:62`. That line is the Layer-1 record
+  //     digest/state rule and says nothing about concurrency; the in-flight
+  //     contract is §"Concurrent duplicates". A precise-looking citation is
+  //     trusted more than prose, so a wrong one is worse than none.
+  //  2. It also called the old answer unsafe because it echoed the caller's key
+  //     — "§F: keys MUST NOT reach logs, and an error body is a logged surface".
+  //     FALSE on this host. Measured: `middleware/errorEnvelope.ts:111` logs
+  //     only path/method/message/stack and fires ONLY for non-`OpenwopError`
+  //     failures, so an `OpenwopError` envelope is never logged and `details`
+  //     reaches no log line; `observability/metrics.ts:76` already lists
+  //     `idempotencyKey` in `FORBIDDEN_LABELS`; and no response-body logging
+  //     middleware exists. §F binds logs and spans. An error body returned to
+  //     the caller WHO SUPPLIED THE KEY is neither, and tells them nothing they
+  //     did not send.
+  //
+  // So `details.idempotencyKey` stays. Removing it on a rationale that does not
+  // apply would be a small dishonesty of its own. (Caught by openwop-app-54,
+  // who went to reuse the reasoning and verified it first.)
+  | 'idempotency_in_flight'
   | 'host_capability_missing'
   | 'capability_not_provided'
+  // `capabilities.md` §"Unsupported capability — refusal contract" names a
+  // CLOSED set of refusal codes: `validation_error` (broadest),
+  // `capability_required` ("specific — preferred when the host wants to be
+  // unambiguous"), or `not_found`. This host had only the broad one, so an
+  // author whose workflow was refused for a MISSING CAPABILITY could not tell
+  // that apart from a malformed document — the two need different fixes.
+  // Added for RFC 0151's `settings.compensation` refusal (ADR 0554 P2), whose
+  // schema names this code explicitly; it is the general code, not a
+  // compensation one.
+  | 'capability_required'
   | 'credential_required'
   | 'credential_forbidden'
+  // RFC 0121 §B.8 — a subscription-mode credential MUST bind at `user` scope;
+  // a tenant/workspace binding is forbidden (the subscription-scope safety rail).
+  | 'credential_scope_forbidden'
+  // RFC 0122 — self-hosted runner: no owning-subject runner is registered for a
+  // dispatch (retriable; a runner may (re)connect). See host/selfHostedRunner.ts.
+  | 'runner_unavailable'
+  // ADR 0187 — application-layer egress firewall: the target host is denied by
+  // the tenant's egress policy (or the always-on SSRF baseline). See host/egressPolicy.ts.
+  | 'egress_blocked'
+  // RFC 0129 / ADR 0290 — data-residency admission control: a run-create request
+  // pinned a `residency.region` this host does not advertise. Fail-closed at 422;
+  // no run is created (routes/runs.ts + features/cdp/dataResidency.ts).
+  | 'residency_unavailable'
+  // Host-ext (ADR 0217 / gap plan B3): a money-adjacent commerce mutation met the
+  // tenant's commerce-spend approval threshold — a PendingApproval was parked in the
+  // reviews inbox; retry the same call after the human decision (409, details carry
+  // { approvalId, approvalStatus }).
+  | 'approval_required'
+  // Host-ext (CONS-4 / WF-CONS-1), same shape as `approval_required` above: a
+  // destructive compliance action (DSAR subject erasure, retention purge) was
+  // refused because the tenant is under a LEGAL HOLD. GDPR Art. 17(3)(b)/(e)
+  // makes a hold override erasure, so this is a refusal the operator must SEE
+  // — 409 with `details: { held: true, reason, since }`, never a silent skip or
+  // a 200 that reads as "erased". The exit is named: lift the hold, retry.
+  | 'legal_hold'
+  // ADR 0657 D10 — the erasure tombstone is a WRITE barrier: a consent write on an
+  // erased subject is refused (409) until an administrator re-admits them; a public
+  // writer racing a DSAR must never re-insert the record it just lost its CAS to.
+  | 'subject_erased'
+  // ADR 0657 D5 — the consent store could not be READ on a public lane: 503, never a
+  // 500 and never "recorded" (the analytics beacon).
+  | 'consent_unreadable'
   | 'credential_unavailable'
   // Managed-provider preflight in POST /v1/runs (routes/runs.ts): an
   // anon caller submitting a workflow that pins any node to a
   // `managed:*` credentialRef. Same code the managed dispatch path
   // emits at chat-node execution time, just surfaced earlier.
   | 'sign_in_required'
-  | 'fork_invalid_seq'
+  /** `runs.md` §Fork — a fromSeq naming no event in the source log (422).
+   *  Registered in `spec/v2/errors.json`, so it travels UNPREFIXED; the retired
+   *  `fork_invalid_seq` was ours and namespaced to `openwop-app.*`. */
+  | 'fork_from_seq_unsupported'
+  | 'fork_point_invalid'
   | 'fork_unsupported_mode'
   // Honest-split refusal for `mode: 'replay'` with `fromSeq > 0` (501):
   // this sample supports deterministic replay only as a full re-execution
   // from sequence 0 (see routes/runs.ts :fork + discovery `replay.modes`).
-  | 'fork_from_seq_unsupported'
+  // (`fork_checkpoint_unsupported` REMOVED, ADR 0751: a fork at a suspended
+  // checkpoint re-creates the gate instead of refusing — no spec licensed the 501.)
+  // ADR 0751 — a fork whose inherited open gate names a source interrupt that is
+  // missing or outside its ancestry fails closed on this code (a node.failed-style
+  // run failure, never a request refusal).
+  | 'fork_interrupt_unavailable'
   | 'rate_limited'
   | 'unsupported_stream_mode'
   | 'internal_error'
@@ -497,6 +819,12 @@ export type OpenwopErrorCode =
   // documented at node-packs.md §"PUT /v1/packs/{name}/-/{version}.tgz".
   | 'tarball_gunzip_failed'
   | 'tarball_too_large'
+  // RFC 0177 §A.1 / §B.1 — the two install-time refusals `spec/v2/core/packs.md`
+  // requires of a major-2 host. `pack_runtime_requirement_unmet` is deliberately
+  // NOT reused: packs.md says it "remains a runtime-requirement code and MUST
+  // NOT be used for the protocol major".
+  | 'pack_engine_unsupported'
+  | 'pack_peer_dependency_undefined'
   | 'tarball_manifest_missing'
   | 'tarball_manifest_too_large'
   | 'tarball_manifest_not_json'
@@ -511,15 +839,84 @@ export type OpenwopErrorCode =
   | 'pack_integrity_failure'
   | 'unsupported_runtime'
   | 'conflict'
+  // ADR 0305 grade pass — the canvas optimistic-concurrency conflict (409), so the
+  // editor's stale-save path is a typed envelope, never a 500 internal_error.
+  | 'canvas_version_conflict'
+  // ADR 0359 Phase 6 — an external write to a live `canvas.document` room (409):
+  // no generic apply path for an XmlFragment, so the veto is typed + honest.
+  | 'canvas_room_live'
   | 'version_conflict'
+  // ADR 0592 §7 — CMS AI translation produced unusable model output after the
+  // ONE bounded error-fed repair (502): a typed failure, never success-with-
+  // empty (the authoring-path invariant).
+  | 'translation_invalid'
   | 'unpublish_window_expired'
   // Webhook codes per spec/v1/webhooks.md
   | 'webhook_url_rejected'
+  // RFC 0201 §D.14 — an opted-in registration whose endpoint did not echo the
+  // verification challenge (400, non-retriable; `spec/v2/errors.json`).
+  | 'webhook_endpoint_unverified'
   | 'subscription_not_found'
   // Connection-pack codes per spec/v1/connection-packs.md (RFC 0095)
   | 'connection_pack_credential_material'
   | 'connection_provider_unresolved'
-  | 'connection_provider_conflict';
+  | 'connection_provider_conflict'
+  // RFC 0157 (× RFC 0151 §B) — chain-expansion refusals, named in
+  // `spec/v1/workflow-chain-packs.md` §"Error codes" as codes a host operating
+  // on workflow-chain packs MUST use. They are TOP-LEVEL codes here rather than
+  // `details.code` under a generic `validation_error`: the two failures need
+  // different author fixes (reconcile a policy vs. delete one of two
+  // contradictory node declarations), and burying them would leave the flat
+  // envelope unable to tell them apart. Joining the closed union is also what
+  // makes a new code a compile error at every exhaustive switch rather than a
+  // silent 500.
+  //
+  /** HTTP 409. The chain declares a `compensation` policy and the parent
+   *  workflow already carries a `settings.compensation` that is not deep-equal.
+   *  Expansion MUST NOT merge — `details.chainId`. */
+  | 'chain_compensation_policy_conflict'
+  /** HTTP 400, non-retriable. A fragment node declares BOTH
+   *  `irreversibleEffect: true` and a `compensation` — an effect cannot both
+   *  have and lack an inverse. `details.nodeId` + `details.chainId`. */
+  | 'chain_irreversible_with_compensation'
+  // v2 charter Phase 4 (P4-C) — `spec/v2/errors.json` row `event_type_unmapped`
+  // (500, since 2.0, RFC 0176 §A.3: "a run whose log the host cannot translate
+  // is not readable"). Raised at the storage seat when an era-2 row carries a
+  // type the codemap does not name on its v1 side and that has no vendor prefix.
+  | 'event_type_unmapped'
+  // RFC 0021 §"Trust boundary" / RFC 0209 §C.12 (ADR 0749) — an approval bound
+  // to an A2UI surface that untrusted content touched cannot be resolved (403).
+  // Not in the v2 registry, so major 2 carries it vendor-prefixed.
+  | 'untrusted_content_blocks_approval';
+
+/**
+ * The envelope as this host BUILDS it — before `v2ErrorCode` translation.
+ *
+ * SDK 2.x narrowed `ErrorEnvelope.error` to `ErrorCode | VendorErrorCode`: the
+ * 97 registered spec codes, or a dotted vendor code. This host's internal
+ * vocabulary is neither. It is the v1 spelling plus host-extension codes
+ * (`run_not_found`, `forbidden_scope`, the ADR 0621 session codes), and 14 of
+ * its 21 members are in neither set.
+ *
+ * That is not a wire defect, and MEASURED on the live host it is not reaching
+ * the wire: `GET /runs/<missing>` answers `run_not_found` under major 1 and
+ * `not_found` under major 2, because `middleware/protocolVersion.ts`
+ * translates at the emitter — a registered code passes through, a known v1
+ * spelling is aliased onto its registered twin, and anything else is
+ * namespaced `openwop-app.<code>`, which is exactly the SDK's
+ * `VendorErrorCode` shape.
+ *
+ * So the SDK type is correct about the WIRE and wrong about this struct. The
+ * two are different values either side of `v2ErrorCode`, and conflating them
+ * is what the 1.7→2.1 bump surfaced. Typing the pre-translation envelope as
+ * the post-translation one would have needed a cast, and a cast here would
+ * have silenced a correct narrowing rather than answering it.
+ */
+export interface HostErrorEnvelope {
+  error: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
 
 export class OpenwopError extends Error {
   constructor(
@@ -532,7 +929,11 @@ export class OpenwopError extends Error {
     this.name = 'OpenwopError';
   }
 
-  toEnvelope(): ErrorEnvelope {
+  /** The PRE-translation envelope — see `middleware/errorEnvelope.ts`'s
+   *  `HostErrorEnvelope`. `this.code` is the host vocabulary, which
+   *  `v2ErrorCode` maps onto a registered or vendor-namespaced code at the
+   *  emitter; the SDK's `ErrorEnvelope` describes that output, not this one. */
+  toEnvelope(): HostErrorEnvelope {
     return {
       error: this.code,
       message: this.message,

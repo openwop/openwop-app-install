@@ -53,3 +53,40 @@ describe('classifyColumn — structured terminalKind (CHATP-4)', () => {
     expect(classifyColumn(b, 'done').isCancelled).toBe(false);
   });
 });
+
+/**
+ * PMX-2 (ADR 0590) — the promote route used to hard-code lane 'done'. The lane
+ * is now RESOLVED from the board's own columns (the R2 PM2-M3
+ * `resolveIdeaCancellationLane` mirror): structured `terminalKind:'completion'`
+ * first, the stable seeded id next, and null when the board simply has no
+ * completion lane (the caller refuses BEFORE minting anything).
+ */
+import { completionColumnOf } from '../src/features/priority-matrix/priorityMatrixService.js';
+
+describe('completionColumnOf — renamed-board completion lane (PMX-2)', () => {
+  it('a RENAMED completion lane with terminalKind resolves; the cancellation lane never does', () => {
+    const b = board([
+      { id: 'open', name: 'Offen' },
+      { id: 'cancelled-de', name: 'Abgebrochen', terminal: true, terminalKind: 'cancellation' },
+      { id: 'done-de', name: 'Erledigt', terminal: true, terminalKind: 'completion' },
+    ]);
+    expect(completionColumnOf(b)).toBe('done-de');
+  });
+
+  it('the default seeded board resolves the stable `done` id', () => {
+    const b = board([
+      { id: 'new', name: 'New' },
+      { id: 'wont-do', name: "Won't Do", terminal: true, terminalKind: 'cancellation' },
+      { id: 'done', name: 'Done', terminal: true, terminalKind: 'completion' },
+    ]);
+    expect(completionColumnOf(b)).toBe('done');
+  });
+
+  it('a board with ONLY a cancellation lane has NO completion lane (null, never the cancellation lane)', () => {
+    const b = board([
+      { id: 'open', name: 'Open' },
+      { id: 'wont-do', name: "Won't Do", terminal: true, terminalKind: 'cancellation' },
+    ]);
+    expect(completionColumnOf(b)).toBeNull();
+  });
+});

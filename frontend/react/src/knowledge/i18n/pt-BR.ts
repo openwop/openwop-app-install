@@ -8,6 +8,9 @@
 export const messages = {
   // SubjectKnowledgePanel — errors / notices
   loadError: 'Falha ao carregar o conhecimento.',
+  orgsFailed: 'Não foi possível carregar seus espaços de trabalho, então esta não é uma lista vazia — ela é desconhecida.',
+  orgsFailedInline: 'Escolha um espaço de trabalho quando a lista carregar.',
+  orgsNoneYet: 'Ainda não há espaços de trabalho — crie um para adicionar uma fonte de conhecimento.',
   actionError: 'A ação falhou.',
   sourceCreated: 'Fonte de conhecimento criada.',
   documentAdded: 'Documento adicionado.',
@@ -46,4 +49,12 @@ export const messages = {
   syncedNotice: 'Esta coleção é mantida em sincronia com seus itens de {{source}}. Gerencie-os naquela página; os documentos aqui são somente leitura.',
   syncedSource_strategy: 'Estratégia',
   'syncedSource_priority-matrix': 'Matriz de Prioridades',
+  deleteDocConfirm: 'Excluir este documento?',
+  unbindConfirm: 'Desvincular esta fonte?',
+  // KB-UX-3 / ADR 0583 — uma fonte que FALHOU é nomeada, nunca confundida com “sem correspondências”.
+  retrievePartial: 'Parte deste conhecimento não pôde ser buscada, então esta resposta está incompleta.',
+  retrievePartialSources: 'Não buscado: {{sources}}',
+  retrieveSource_kb: 'documentos',
+  retrieveSource_memory: 'notas',
+  errorAnnounce: 'O painel de conhecimento relatou um problema — os detalhes estão na tela.',
 } as const;

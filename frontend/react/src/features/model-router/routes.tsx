@@ -6,7 +6,6 @@
  * @see docs/adr/0130-rule-based-model-router.md
  */
 import { lazy } from 'react';
-import { WorkflowIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -16,19 +15,13 @@ const routes: FeatureRoute[] = [
   {
     path: '/model-router',
     element: <ModelRouterPage />,
-    tier: 'admin',
-    nav: {
-      // ADR 0145 — a model concern; sits in Platform (with the leaderboard) when
-      // the Models console is OFF, and is subsumed by it when ON.
-      group: 'Platform',
-      label: 'Model routing',
-      icon: WorkflowIcon,
-      hint: 'Route each chat turn to a provider/model by rule',
-      // ADR 0145 — subsumed by the Models console once `models` is enabled.
-      hiddenWhenFeature: 'models',
-    },
-    // ADR 0145 — also a tab in the Models console (/models). Always-on surface,
-    // so no `featureId` gate on the tab.
+    tier: 'admin', archetype: 'admin',
+    // ADR 0145 + ADR 0434 — NO standalone nav entry: the Models console is
+    // always-on, so this surface is permanently subsumed by it and lives only as
+    // a console tab (the ADR 0144 access-hub precedent — a graduated console's
+    // subsumed surfaces drop their nav rather than keep a `hiddenWhenFeature`
+    // that can never fire). The route itself stays reachable at /model-router.
+    // Always-on surface, so no `featureId` gate on the tab.
     hubTab: { hub: 'models', order: 1 },
   },
 ];

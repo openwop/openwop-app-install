@@ -57,7 +57,7 @@ describe('ADR 0083 — run-artifact producer', () => {
     expect(await persistRunArtifact({ tenantId: 't1', runId: 'r', nodeId: 'n', role: 'deliverable', output: null, now: 'x' })).toBeNull();
   });
 
-  it('projects a run-event artifact through artifactProjection + lists it in the Library', async () => {
+  it('projects a run-event artifact; a raw output is addressable but not a Library asset', async () => {
     await persistRunArtifact({ tenantId: 't1', runId: 'run9', nodeId: 'final', role: 'deliverable', output: '# Report\nQ3 variance', now: '2026-06-20T00:00:00Z' });
     const proj = await getArtifact('t1', undefined, 'run-event:run9:final');
     expect(proj?.source).toBe('run-event');
@@ -67,8 +67,10 @@ describe('ADR 0083 — run-artifact producer', () => {
     expect(proj?.provenance.runId).toBe('run9');
     const rev = await getArtifactRevision('t1', undefined, 'run-event:run9:final', 'run9:final:1');
     expect(rev?.content).toContain('Q3 variance');
+    // ADR 0083 §Amendment — the Library is asset-only: a raw markdown run OUTPUT (no
+    // artifactTypeId) stays addressable via getArtifact but is NOT listed as an asset.
     const lib = await listArtifacts('t1', undefined);
-    expect(lib.some((a) => a.artifactId === 'run-event:run9:final')).toBe(true);
+    expect(lib.some((a) => a.artifactId === 'run-event:run9:final')).toBe(false);
   });
 
   it('cross-tenant isolation: another tenant cannot read the row', async () => {

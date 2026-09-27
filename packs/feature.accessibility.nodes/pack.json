@@ -1,0 +1,30 @@
+{
+  "name": "feature.accessibility.nodes",
+  "version": "1.0.0",
+  "description": "Accessibility node pack (ADR 0363) — check authored content for WCAG issues (missing image alt text, skipped heading levels, non-descriptive link text, low color contrast) and generate AI alt text for a media asset, both over ctx.features.accessibility. Enables workflows to gate publishing on zero blocking a11y issues or auto-alt-text a media library.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "accessibility", "a11y", "wcag", "alt-text", "content"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.accessibility.nodes.check",
+      "version": "1.0.0",
+      "label": "Accessibility: Check Content",
+      "description": "Runs the shared content-accessibility rules over an inline normalized model via ctx.features.accessibility.checkContent. Inputs: { images?, headings?, links?, colorPairs? }. Output: { issues: [{ kind, severity, wcag, nodeRef? }], count }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.accessibility.nodes.alt-text-generate",
+      "version": "1.0.0",
+      "label": "Accessibility: Generate Alt Text",
+      "description": "Generates AI alt text for an image media asset via ctx.features.accessibility.generateAltText (composes the ADR 0108 vision seam; media enforces IDOR + provider-absence). Inputs: { orgId, assetId }. Output: { assetId, altText } (empty altText = decorative).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

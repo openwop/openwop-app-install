@@ -69,3 +69,7 @@ OPENWOP_SURFACE_BLOB=s3 docker compose --profile blob up --build
 - For signed-in tenants (`OPENWOP_DEPLOY_POSTURE=auth`) wire an OIDC issuer and
   a real KMS key — at that point a cloud pack (`../aws`, `../azure`, `../gcp`)
   is usually the better fit. See `../README.md`.
+  In that posture the boot guard (ADR 0636) requires every surface that HAS a
+  durable adapter to use one: add `OPENWOP_SURFACE_OBSERVABILITY=memory` (no
+  durable adapter exists) and either `--profile blob` with `OPENWOP_SURFACE_BLOB=s3`
+  or `OPENWOP_SURFACE_BLOB=memory` + `OPENWOP_ALLOW_INMEMORY_SURFACES=blob`.

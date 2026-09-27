@@ -10,7 +10,7 @@
  *
  * MULTI-INSTANCE FIRE-ONCE: the app scales to max=10 instances, each running
  * this poll loop. A naive loop would fire each due job up to 10×. We guard every
- * fire with `storage.claimIdempotency(key)` — an atomic insert-if-absent where
+ * fire with `storage.claimOnce(key)` — an atomic insert-if-absent where
  * exactly one concurrent caller gets `claimed: true` (Postgres
  * `INSERT … ON CONFLICT DO NOTHING RETURNING`; a single write txn on sqlite).
  * The key is `(jobId, nextFireAt-slot)`, so the job fires exactly once per slot
@@ -19,7 +19,7 @@
  * lease their work per-row rather than electing a leader.
  *
  * MISSED-WINDOW: when the daemon (or the whole fleet) was down, a job's
- * `nextFireAt` is in the past. It fires once now and `markJobFired` advances
+ * `nextFireAt` is in the past. It fires once now and `advanceJobSlot` advances
  * `nextFireAt` to the next FUTURE slot — collapsing the backlog to a single
  * recovery run (§B.4), never N.
  *
@@ -32,10 +32,12 @@
  */
 
 import type { StartRunDeps } from './runStarter.js';
+import { runUnderWorkerContract } from '../storage/eventEraAdapter.js';
 import { startWorkflowRun } from './runStarter.js';
-import { listJobs, markJobFired, recordJobRun, currentTick, scheduleSubject } from './schedulingService.js';
+import { listJobs, advanceJobSlot, recordJobRun, recordJobSkipped, currentTick, scheduleSubject } from './schedulingService.js';
 import { subjectScope } from './subject.js';
 import { checkAutonomousRunBudget, pruneRunBudget } from './runBudgetService.js';
+import { resolveOne } from './featureToggles/service.js';
 import { getInstanceId } from './instanceId.js';
 import { createLogger } from '../observability/logger.js';
 
@@ -74,10 +76,10 @@ export async function processDueSchedules(
   for (const job of due) {
     const slot = job.nextFireAt!;
     const claimKey = `${CLAIM_KEY_PREFIX}${job.jobId}:${slot}`;
-    const claim = await deps.storage.claimIdempotency(claimKey, new Date(now).toISOString());
+    const claim = await deps.storage.claimOnce(claimKey, new Date(now).toISOString());
     if (!claim.claimed) {
       // Another instance is firing (or already fired) this slot — skip. We'll
-      // see the advanced nextFireAt once the winner's markJobFired lands.
+      // see the advanced nextFireAt once the winner's advanceJobSlot lands.
       continue;
     }
     // Advance nextFireAt to the next slot BEFORE dispatching. The claim row is
@@ -87,7 +89,41 @@ export async function processDueSchedules(
     // poll sees a future nextFireAt and carries on. Cross-instance dedup still
     // holds: a racing instance advances to the same value (idempotent) and the
     // claim already serialized the single fire.
-    await markJobFired(job.jobId, currentTick(), undefined, now);
+    // WF-COS-4 — advance the SLOT ONLY. This used to be `markJobFired`, which
+    // also stamps `lastRunAt` — a claim that a run happened, made BEFORE
+    // dispatch and never retracted by the three bail-outs below.
+    // `recordJobRun` / `recordJobSkipped` record which of the two actually
+    // occurred; the advance-before-dispatch anti-wedge property is unchanged.
+    await advanceJobSlot(job.jobId, currentTick(), now);
+    // ADR 0599 §6 — OWNING-FEATURE gate, resolved PER TENANT at fire time.
+    // Absent `featureId` ⇒ ungated (every pre-existing job), so this is purely
+    // additive. When present, the job fires only while the feature is enabled
+    // for THIS job's tenant — which is the fix for a disarm posture that was
+    // backwards in both directions: a per-tenant override to `off` used to tear
+    // down nothing and keep firing, while a global flip to `off` hard-deleted
+    // the jobs of tenants the same request had explicitly kept enabled. A
+    // listener on the toggle-CREATION lane is not a gate on the USE lane.
+    // Non-destructive by construction: the row survives, so re-enabling resumes.
+    // Fail-closed on a resolution error — a toggle we cannot read is not a
+    // licence to fire someone's workflow.
+    if (job.featureId) {
+      let enabled = false;
+      try {
+        enabled = (await resolveOne(job.featureId, { tenantId: job.tenantId }))?.enabled === true;
+      } catch (err) {
+        log.warn('schedule fire dropped — owning-feature toggle could not be resolved', {
+          jobId: job.jobId, tenantId: job.tenantId, featureId: job.featureId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      if (!enabled) {
+        log.info('schedule fire dropped — owning feature is disabled for this tenant', {
+          jobId: job.jobId, tenantId: job.tenantId, featureId: job.featureId,
+        });
+        await recordJobSkipped(job.jobId, 'feature-disabled', now);
+        continue;
+      }
+    }
     // Autonomous-run budget: drop (don't queue) a fire that would exceed the
     // tenant's window ceiling. nextFireAt already advanced, so the schedule just
     // skips this slot and resumes next window — it cannot run away on cost.
@@ -96,6 +132,7 @@ export async function processDueSchedules(
       log.warn('schedule fire dropped — tenant over autonomous-run budget', {
         jobId: job.jobId, tenantId: job.tenantId, current: budget.current, limit: budget.limit,
       });
+      await recordJobSkipped(job.jobId, 'budget', now);
       continue;
     }
     try {
@@ -103,6 +140,12 @@ export async function processDueSchedules(
         tenantId: job.tenantId,
         workflowId: job.workflowId!,
         ...(job.configurable !== undefined ? { configurable: job.configurable } : {}),
+        // Per-fire inputs seed the run's variable bag (`seedRunVariables`). A
+        // workflow that declares `variables[]` — the KickTodo daily loop
+        // declares `enrollmentId`/`ownerSubject` — runs with them UNDEFINED
+        // unless the job carries them. This was previously dropped, so every
+        // scheduled daily-loop tick fired with no enrollment identity.
+        ...(job.inputs !== undefined ? { inputs: job.inputs } : {}),
         // `ScheduledJob.metadata` documents itself as "free-form attribution
         // carried onto a schedule-fired run's metadata" — honor that (it was
         // previously dropped). The assistant loops (ADR 0023 §12 T2) rely on
@@ -145,6 +188,7 @@ export async function processDueSchedules(
           workflowId: job.workflowId,
           slot,
         });
+        await recordJobSkipped(job.jobId, 'workflow-unresolved', now);
       }
     } catch (err) {
       // nextFireAt already advanced above, so a dispatch error can't wedge the
@@ -153,6 +197,7 @@ export async function processDueSchedules(
         jobId: job.jobId,
         error: err instanceof Error ? err.message : String(err),
       });
+      await recordJobSkipped(job.jobId, 'dispatch-error', now).catch(() => undefined);
     }
   }
   return fired;
@@ -162,7 +207,7 @@ export async function processDueSchedules(
  *  table stays bounded. Best-effort: a prune failure must not fail the tick. */
 export async function pruneStaleScheduleClaims(deps: StartRunDeps, now: number = Date.now()): Promise<number> {
   try {
-    return await deps.storage.pruneIdempotencyByPrefix(CLAIM_KEY_PREFIX, new Date(now - CLAIM_PRUNE_AGE_MS).toISOString());
+    return await deps.storage.pruneOnceByPrefix(CLAIM_KEY_PREFIX, new Date(now - CLAIM_PRUNE_AGE_MS).toISOString());
   } catch (err) {
     log.warn('schedule claim prune failed', { error: err instanceof Error ? err.message : String(err) });
     return 0;
@@ -171,6 +216,49 @@ export async function pruneStaleScheduleClaims(deps: StartRunDeps, now: number =
 
 export interface ScheduleDaemon {
   stop(): void;
+}
+
+// ADR 0690 — LIVENESS, so a readiness report can say "the daemon that fires
+// every reminder is actually ticking on this instance" rather than "a route
+// exists" (PRD §8.2: a route existing is not enough). Module-level because
+// there is one daemon per process; `ageMs` is the honest signal — a started
+// daemon whose last tick is minutes old is starved (CPU throttling at
+// minScale 0), which is the exact production shape this was written to expose.
+let daemonStartedAt: string | null = null;
+let daemonLastTickAt: string | null = null;
+
+export interface ScheduleDaemonLiveness {
+  started: boolean;
+  startedAt: string | null;
+  lastTickAt: string | null;
+  /** ms since the last completed tick; null before the first. */
+  ageMs: number | null;
+  pollIntervalMs: number;
+  instanceId: string;
+}
+
+export function scheduleDaemonLiveness(): ScheduleDaemonLiveness {
+  return {
+    started: daemonStartedAt !== null,
+    startedAt: daemonStartedAt,
+    lastTickAt: daemonLastTickAt,
+    ageMs: daemonLastTickAt ? Math.max(0, Date.now() - Date.parse(daemonLastTickAt)) : null,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    instanceId: getInstanceId(),
+  };
+}
+
+/** Test-only: record a start + tick without running the daemon. */
+export function __noteScheduleDaemonTickForTest(): void {
+  const now = new Date().toISOString();
+  daemonStartedAt ??= now;
+  daemonLastTickAt = now;
+}
+
+/** Test-only: forget liveness. */
+export function __resetScheduleDaemonLivenessForTest(): void {
+  daemonStartedAt = null;
+  daemonLastTickAt = null;
 }
 
 /**
@@ -191,9 +279,11 @@ export function startScheduleDaemon(deps: StartRunDeps): ScheduleDaemon {
       log.warn('schedule daemon tick error', { error: err instanceof Error ? err.message : String(err) });
     } finally {
       running = false;
+      daemonLastTickAt = new Date().toISOString();
     }
   };
-  const timer = setInterval(() => void tick(), POLL_INTERVAL_MS);
+  daemonStartedAt = new Date().toISOString();
+  const timer = setInterval(() => void runUnderWorkerContract(tick), POLL_INTERVAL_MS);
   if (typeof timer.unref === 'function') timer.unref();
   log.info('schedule daemon started', { pollIntervalMs: POLL_INTERVAL_MS, instanceId: getInstanceId() });
   return { stop: () => clearInterval(timer) };

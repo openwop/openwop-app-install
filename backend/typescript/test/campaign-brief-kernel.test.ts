@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { createPersona, __clearPersonas } from '../src/features/campaign-brief/personaService.js';
-import { createBrief, __clearBriefs } from '../src/features/campaign-brief/briefService.js';
+import { createBrief, updateBrief, setKernel, getBrief, __clearBriefs } from '../src/features/campaign-brief/briefService.js';
 import { assembleBriefContextText } from '../src/features/campaign-brief/briefContext.js';
 import { buildCampaignBriefSurface } from '../src/features/campaign-brief/surface.js';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
@@ -62,9 +62,20 @@ describe('campaign-brief surface', () => {
 });
 
 describe('feature.campaign-brief.nodes — node pack', () => {
-  it('exports validate + generate-kernel', () => {
+  it('exports the full ADR 0156/0356/0403 node set', () => {
     expect(Object.keys(nodePack).sort()).toEqual([
+      'feature.campaign-brief.nodes.build-targeting',
+      'feature.campaign-brief.nodes.extract-seeds',
+      'feature.campaign-brief.nodes.extract-voc',
+      'feature.campaign-brief.nodes.generate-angles',
       'feature.campaign-brief.nodes.generate-kernel',
+      'feature.campaign-brief.nodes.get-brief',
+      'feature.campaign-brief.nodes.get-targeting-pack',
+      'feature.campaign-brief.nodes.list-angles',
+      'feature.campaign-brief.nodes.list-briefs',
+      'feature.campaign-brief.nodes.list-hooks',
+      'feature.campaign-brief.nodes.list-personas',
+      'feature.campaign-brief.nodes.list-targeting-packs',
       'feature.campaign-brief.nodes.validate',
     ]);
   });
@@ -81,7 +92,9 @@ describe('feature.campaign-brief.nodes — node pack', () => {
         setKernel: async (a: unknown) => { calls.setKernel = a; return { brief: { id: 'b1' } }; },
       },
       brand: { resolveVoice: async () => ({ voice: 'VOICE' }) },
-      kb: { rag: async () => ({ augmentedPrompt: 'GROUNDED', citations: [{ docId: 'doc-7' }] }) },
+      // Real kb.rag citations carry `documentId` (KB-CODE-1); the legacy `docId`
+      // shape is still read as a fallback — pin both.
+      kb: { rag: async () => ({ augmentedPrompt: 'GROUNDED', citations: [{ documentId: 'doc-7', title: 'D7' }, { docId: 'doc-legacy' }] }) },
     };
     const callAI = async (req: { messages: Array<{ content: string }> }) => {
       calls.prompt = req.messages[0].content;
@@ -91,7 +104,7 @@ describe('feature.campaign-brief.nodes — node pack', () => {
     expect(out.status).toBe('success');
     const kernel = out.outputs?.kernel as Record<string, unknown>;
     expect(kernel.headline).toBe('Pick faster');
-    expect(kernel.sourceDocIds).toEqual(['doc-7']); // KB citation tracing
+    expect(kernel.sourceDocIds).toEqual(['doc-7', 'doc-legacy']); // KB citation tracing (real shape + legacy fallback)
     expect(String(calls.prompt)).toContain('VOICE'); // brand voice composed
     expect(String(calls.prompt)).toContain('GROUNDED'); // KB grounding composed
     expect((calls.setKernel as { briefId: string }).briefId).toBe('b1'); // persisted
@@ -105,11 +118,81 @@ describe('feature.campaign-brief.nodes — node pack', () => {
   });
 });
 
+describe('protected-field re-approval (BRIEF-1) — order-insensitive diff', () => {
+  beforeEach(async () => {
+    initHostExtPersistence(openSqliteStorage(':memory:'));
+    await __clearBriefs();
+  });
+
+  const KERNEL = {
+    headline: 'H', supportingStatement: 'S', proofPoints: ['p'], primaryCta: 'go', secondaryCta: 'see',
+    tone: 'warm', channelTones: {}, sourceDocIds: [], generatedAt: '2026-07-01T00:00:00Z',
+  };
+
+  it('does NOT demote a confirmed brief when a re-send only reorders open channel.config keys', async () => {
+    const brief = await createBrief(TENANT, 'o1', 'u1', {
+      name: 'Camp', productName: 'FlashPick',
+      channels: [{ type: 'landing_page', enabled: true, config: { a: '1', b: '2', c: '3' } }],
+    });
+    await setKernel(TENANT, brief.id, KERNEL);
+    await updateBrief(TENANT, brief.id, { status: 'confirmed' }, 'u1');
+
+    // Re-send the SAME content with config keys in a different order.
+    const updated = await updateBrief(TENANT, brief.id, {
+      channels: [{ type: 'landing_page', enabled: true, config: { c: '3', a: '1', b: '2' } }],
+    }, 'u1');
+
+    expect(updated!.status).toBe('confirmed'); // NOT demoted to draft
+    expect(updated!.kernelStale).not.toBe(true); // kernel still valid
+    const reread = await getBrief(TENANT, brief.id);
+    expect(reread!.status).toBe('confirmed');
+  });
+
+  it('R2 CB-SP-9: setKernel does NOT promote an INVALID brief to validated — model output alone cannot advance status', async () => {
+    // No personas, no value prop — validateBrief fails. The old setKernel
+    // force-promoted status:'validated' anyway, purely on model output, while
+    // the tool/pack/prompt adverts all said generation never auto-approves.
+    const brief = await createBrief(TENANT, 'o1', 'u1', {
+      name: 'Camp', productName: 'FlashPick',
+      channels: [{ type: 'landing_page', enabled: true, config: {} }],
+    });
+    const after = await setKernel(TENANT, brief.id, KERNEL);
+    expect(after!.status).toBe('draft'); // NOT promoted
+    expect(after!.kernel).toBeTruthy(); // the kernel still saves — it is reviewable content
+
+    // Polarity: a brief that actually VALIDATES still promotes.
+    const valid = await createBrief(TENANT, 'o1', 'u1', {
+      name: 'Camp2', productName: 'FlashPick',
+      personaIds: ['p1'],
+      messaging: { primaryValueProp: 'Fast', proofPoints: [], ctaStrategy: '' },
+      channels: [{ type: 'landing_page', enabled: true, config: {} }],
+    });
+    const promoted = await setKernel(TENANT, valid.id, KERNEL);
+    expect(promoted!.status).toBe('validated');
+  });
+
+  it('STILL demotes when a protected field genuinely changes', async () => {
+    const brief = await createBrief(TENANT, 'o1', 'u1', {
+      name: 'Camp', productName: 'FlashPick',
+      channels: [{ type: 'landing_page', enabled: true, config: { a: '1' } }],
+    });
+    await setKernel(TENANT, brief.id, KERNEL);
+    await updateBrief(TENANT, brief.id, { status: 'confirmed' }, 'u1');
+
+    const updated = await updateBrief(TENANT, brief.id, { name: 'Renamed' }, 'u1');
+    expect(updated!.status).toBe('draft'); // demoted — re-approval required
+    expect(updated!.kernelStale).toBe(true);
+  });
+});
+
 describe('feature.campaign-brief.agents — agent pack', () => {
   it('loads the Brief Strategist with its tool-allowlist', () => {
     const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.campaign-brief.agents'));
     expect(loaded.length).toBe(1);
     expect(loaded[0].agentId).toBe('feature.campaign-brief.agents.brief-strategist');
-    expect(loaded[0].toolAllowlist).toContain('openwop:feature.campaign-brief.nodes.generate-kernel');
+    // CFP-1: the Strategist now carries the REAL registered agent tools
+    // (`openwop:campaign-brief.<verb>`) — `generate-kernel` ignites the
+    // messaging-kernel builtin workflow (assemble → callAI → setKernel → human gate).
+    expect(loaded[0].toolAllowlist).toContain('openwop:campaign-brief.generate-kernel');
   });
 });

@@ -36,7 +36,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -207,5 +207,22 @@ describe('SSE Last-Event-ID resume — chat-improvements §2B.4', () => {
     const body = (await res.json()) as { error?: string; details?: { header?: string } };
     expect(body.error).toBe('invalid_request');
     expect(body.details?.header).toBe('Last-Event-ID');
+  });
+
+  it('ADR 0744 — under major 2 a malformed Last-Event-ID is 400 validation_error naming the field', async () => {
+    // `invalid_request` has no v2 registry row (the negotiator vendor-prefixed
+    // it); `validation_error` + `details.field` is the registered answer
+    // (openwop RFC 0213 §A draft: malformed SHOULD 400 validation_error).
+    const res = await fetch(`${BASE}/runs/${encodeURIComponent(runId)}/events`, {
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'openwop-version': '2',
+        'last-event-id': 'not-a-number',
+      },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error?: string; details?: { field?: string } };
+    expect(body.error).toBe('validation_error');
+    expect(body.details?.field).toBe('Last-Event-ID');
   });
 });

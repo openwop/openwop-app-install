@@ -9,6 +9,7 @@
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
 import { getAgentProfile } from '../../host/agentProfileService.js';
+import { resolveAgentIdentity } from '../../host/agentIdentity.js';
 
 export interface VoiceSession {
   sessionId: string;
@@ -89,13 +90,24 @@ export interface AgentVoice {
   provider?: string;
   voiceId?: string;
   /** BYOK credential for a non-managed TTS provider (ElevenLabs/OpenAI/Google) — an opaque
-   *  `credentialRef` into the tenant's BYOK store, resolved tenant-scoped in `/speak`. */
+   *  `credentialRef` into the tenant's BYOK store, resolved tenant-scoped in `/speak`.
+   *
+   *  ADR 0499: no persisted credentialRef in THIS module's own store. `AgentVoice`
+   *  is not a row here — it is read out of the agent profile's `configParameters`,
+   *  so the delete-guard consumer is registered as `agent-profile:voice` by
+   *  `host/agentProfileService.ts`, which owns that collection. The unrelated
+   *  `VoiceSession` store below holds no credentialRef. */
   credentialRef?: string;
 }
 
 export async function resolveAgentVoice(tenantId: string, agentId: string | undefined): Promise<AgentVoice | null> {
   if (!agentId) return null;
-  const profile = await getAgentProfile(tenantId, agentId);
+  // ADR 0277 — the per-agent voice lives on the rosterId-keyed profile; an
+  // agent-scoped TAB passes the `user.*` registry id, which previously missed
+  // the profile → the agent's configured voice silently fell back to the host
+  // default. Per-session/per-speak call sites only, so the reverse scan is fine.
+  const identity = await resolveAgentIdentity(tenantId, agentId, { allowReverseScan: true });
+  const profile = await getAgentProfile(tenantId, identity.profileId);
   const v = (profile?.configParameters as { voice?: unknown } | undefined)?.voice;
   if (!v || typeof v !== 'object') return null;
   const { provider, voiceId, credentialRef } = v as AgentVoice;

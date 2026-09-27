@@ -11,7 +11,7 @@ vi.mock('mermaid', () => ({ default: { initialize: vi.fn(), render: renderMock }
 // CodeBlock pulls i18n; give it a trivial t().
 vi.mock('react-i18next', () => ({ useTranslation: () => ({ t: (k: string) => k }) }));
 
-import { MermaidDiagram, buildMermaidSrcdoc, svgHeightPx, SVG_CSP_FOR_TEST } from '../MermaidDiagram.js';
+import { MermaidDiagram, buildMermaidSrcdoc, svgHeightPx } from '../MermaidDiagram.js';
 
 afterEach(() => { renderMock.mockReset(); cleanup(); });
 

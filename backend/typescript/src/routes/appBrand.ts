@@ -20,6 +20,7 @@ import type { Express } from 'express';
 import { createHash } from 'node:crypto';
 import { requireSuperadmin } from '../host/superadmin.js';
 import { getAppBrand, editAppBrand } from '../host/systemBrand.js';
+import { publishBrandAsset } from '../host/brandAssets.js';
 import type { BrandIdentity } from '../features/brand/types.js';
 
 /** Weak ETag over the public identity payload — busts whenever an edit changes it. */
@@ -64,6 +65,30 @@ export function registerAppBrandRoutes(app: Express): void {
       if (body.identity !== undefined) patch.identity = body.identity;
       const brand = await editAppBrand(patch, req.principal?.principalId ?? 'superadmin');
       res.json({ brand });
+    } catch (err) { next(err); }
+  });
+
+  // ── ADMIN (superadmin): publish a brand asset (ADR 0511 copy-on-select) ──
+  // Copies validated bytes into the reserved `host:brand` media scope and
+  // returns the copy's capability serve URL; the editor then writes that URL
+  // through the PUT above (same `safeBrandAsset` validation as ever). Copying
+  // severs the public logo from any tenant's asset lifecycle. Raster-only —
+  // SVG is rejected here (no sanitizer dependency; ADR 0511 §2).
+  app.post('/v1/host/openwop-app/app-brand/assets', async (req, res, next) => {
+    try {
+      requireSuperadmin(req, 'App-brand editing');
+      const body = (req.body ?? {}) as { slot?: unknown; contentBase64?: unknown; contentType?: unknown };
+      if (typeof body.slot !== 'string' || typeof body.contentBase64 !== 'string' || body.contentBase64.length === 0 || typeof body.contentType !== 'string') {
+        res.status(400).json({ error: 'invalid_argument', message: 'slot, contentBase64, and contentType are required' });
+        return;
+      }
+      const result = await publishBrandAsset(body.slot, body.contentBase64, body.contentType);
+      if (!result.ok) {
+        const status = result.failure.kind === 'too_large' ? 413 : result.failure.kind === 'unsupported_type' ? 415 : 400;
+        res.status(status).json({ error: result.failure.kind, message: result.failure.message });
+        return;
+      }
+      res.status(201).json({ url: result.url });
     } catch (err) { next(err); }
   });
 }

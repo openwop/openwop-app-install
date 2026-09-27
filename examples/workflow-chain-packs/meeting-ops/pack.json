@@ -1,0 +1,218 @@
+{
+  "name": "core.openwop.workflows.meeting-ops",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "Meeting-ops chains (RFC 0013): less time in and around meetings — an agenda from a stated goal, and notes turned into owned action items. In-app and draft sinks only; replay-deterministic.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "Meeting ops"
+  ],
+  "chains": [
+    {
+      "chainId": "meeting.agenda-prep",
+      "version": "1.0.0",
+      "label": "Goal → Meeting Agenda",
+      "description": "Turns a one-line meeting goal into a tight, time-boxed agenda and posts it to the team as an in-app notification.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["triggerEventName"],
+        "properties": {
+          "minutes": {
+            "type": "string",
+            "default": "30",
+            "description": "Meeting length in minutes."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Meeting scheduled",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "agenda",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Build agenda",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Turn this meeting goal into a tight agenda for a {{params.minutes}}-minute meeting: 3-5 time-boxed items, each with an owner-shaped prompt and the decision it should reach. Add a one-line desired outcome at the top.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.notifications.nodes.notify",
+            "name": "Share agenda",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": { "audience": "tenant" },
+            "inputs": { "title": "Goal → Meeting Agenda" }
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "agenda"
+          },
+          {
+            "from": "agenda",
+            "to": "notify"
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    },
+    {
+      "chainId": "meeting.notes-to-actions",
+      "version": "1.1.0",
+      "label": "Notes → Owned Action Items",
+      "description": "Debriefs raw meeting notes into decisions and action items; a human confirms, and each action becomes a tracked task.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["triggerEventName"],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "default": "",
+            "description": "Org the tasks belong to."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Notes submitted",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "debrief",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Extract decisions + actions",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "From these meeting notes produce: Decisions (each in one line) · Action items (each a specific task in one line) · Open questions. Extract only what the notes support — do not invent owners or dates.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Confirm actions",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Confirm the action items before filing tasks",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no tasks filed",
+            "position": {
+              "x": 840,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "task",
+            "typeId": "feature.crm.nodes.create-task",
+            "name": "File action task",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "title": "Meeting action item"
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "debrief"
+          },
+          {
+            "from": "debrief.content",
+            "to": "gate.artifact"
+          },
+          {
+            "from": "gate",
+            "to": "task",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "gate",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    }
+  ]
+}

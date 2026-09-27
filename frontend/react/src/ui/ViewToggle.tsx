@@ -1,8 +1,9 @@
 /**
  * <ViewToggle> — the ONE grid/list switch for collection pages (the §4.5
- * "Collection view canon"). A `.segmented` control (the documented view-toggle
- * primitive, sibling of <DensityToggle>) with two `aria-pressed` buttons:
- * Grid (cards in a `.card-grid`) · List (dense rows in a `.list-view`).
+ * "Collection view canon"), and the ONE user-facing table-view toggle now that
+ * the comfortable/compact density toggle is retired. A `.segmented` control with
+ * two `aria-pressed` buttons: Grid (cards in a `.card-grid`) · List (dense rows
+ * in a `.list-view`, or the sortable <DataTable>).
  *
  * Extracted from the hand-rolled toggle on `/agents` so every collection
  * surface (Projects, Documents, Advisors, Strategy, Priority-matrix, Agents)
@@ -11,6 +12,7 @@
  * persist the choice per-surface in `localStorage`.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BoxesIcon, ListIcon } from './icons/index.js';
@@ -39,12 +41,12 @@ export function ViewToggle({
       role="group"
       aria-label={t('viewToggleLabel')}
     >
-      <button type="button" aria-pressed={value === 'grid'} title={gridLabel} onClick={() => onChange('grid')}>
+      <Button variant="primary" aria-pressed={value === 'grid'} title={gridLabel} onClick={() => onChange('grid')}>
         <BoxesIcon size={14} aria-hidden /> <span className="view-toggle-label">{gridLabel}</span>
-      </button>
-      <button type="button" aria-pressed={value === 'list'} title={listLabel} onClick={() => onChange('list')}>
+      </Button>
+      <Button variant="primary" aria-pressed={value === 'list'} title={listLabel} onClick={() => onChange('list')}>
         <ListIcon size={14} aria-hidden /> <span className="view-toggle-label">{listLabel}</span>
-      </button>
+      </Button>
     </div>
   );
 }

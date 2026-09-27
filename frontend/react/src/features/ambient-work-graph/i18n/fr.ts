@@ -10,6 +10,8 @@ export const messages = {
   accepted: 'Ouverture de l’auteur de flux…',
   loadOrgsFailed: 'Échec du chargement des organisations.',
   loadFailed: 'Échec du chargement des suggestions.',
+  loadFailedTitle: 'Impossible de charger les habitudes de travail',
+  retry: 'Réessayer',
   refreshFailed: 'Échec de l’analyse des exécutions.',
   dismissFailed: 'Échec du rejet de la suggestion.',
   acceptFailed: 'Échec de l’ouverture de l’auteur de flux.',
@@ -24,4 +26,13 @@ export const messages = {
   statusAccepted: 'accepté',
   makeWorkflow: 'Créer un flux',
   dismiss: 'Ignorer',
+
+  // §4.5 collection kit — suggestions status facet
+  statusSuggested: 'suggéré',
+  filterGroup: 'Filtres',
+  filterStatusLabel: 'Filtrer par statut',
+  allStatuses: 'Tous les statuts',
+  noMatchTitle: 'Aucune correspondance',
+  noMatchBody: 'Rien ne correspond au filtre actuel.',
+  clearFilters: 'Effacer les filtres',
 };

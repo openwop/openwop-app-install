@@ -1,16 +1,11 @@
-/**
- * `chat-deployment` namespace (es) — Chat deployment console (ADR 0145).
- */
+/** `chat-deployment` — consola de Chat siempre activo (ADR 0145). */
 export const messages = {
   eyebrow: 'Plataforma',
-  title: 'Despliegue del chat',
-  lede: 'Pon tu chat de IA a trabajar sin que nadie esté al mando: prográmalo o inclúyelo en tu sitio web.',
-
-  tablistLabel: 'Secciones de despliegue del chat',
-
-  'tab_scheduled-chats': 'Ejecuciones programadas',
-  tab_widgets: 'Widget para el sitio web',
-
-  emptyTitle: 'Aún no hay nada desplegado',
-  emptyBody: 'Las ejecuciones programadas y los widgets del sitio web aparecerán aquí a medida que se habiliten para tu espacio de trabajo.',
+  title: 'Chat siempre activo',
+  lede: 'Dos maneras de que el chat funcione sin ti: con una programación — un resumen diario, un informe de los lunes, publicado en una conversación — o en tu sitio web, respondiendo a visitantes que nunca inician sesión.',
+  tablistLabel: 'Dónde se ejecuta el chat',
+  'tab_scheduled-chats': 'Con programación',
+  tab_widgets: 'En tu sitio web',
+  emptyTitle: 'Aún no hay nada funcionando solo',
+  emptyBody: 'Las programaciones y los widgets web están desactivados en este espacio. Un administrador puede activarlos en Interruptores de funciones.',
 } as const;

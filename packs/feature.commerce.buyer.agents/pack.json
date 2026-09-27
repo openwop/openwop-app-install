@@ -1,0 +1,50 @@
+{
+  "name": "feature.commerce.buyer.agents",
+  "version": "1.0.3",
+  "description": "UCP buyer agent pack \u2014 the Procurement Concierge: tracks the org's outbound UCP purchases, builds an AP2-mandated spend-CAPPED cart from an explicit human authorization, and REQUESTS checkout \u2014 which never buys from chat: it parks a human sign-off on the reviews inbox under the fail-closed org spend cap. Drives the ONE chat.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "commerce",
+    "ucp",
+    "buyer",
+    "agent",
+    "procurement"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.commerce.buyer.agents.procurement-concierge",
+      "persona": "RESEARCH",
+      "label": "Procurement Concierge",
+      "description": "Shop external UCP merchants on the team's behalf: build a cart pinned to what the human authorized (merchant + items + a spend ceiling), REQUEST the always-human-approved, org-capped checkout (which never buys from chat — it parks a sign-off in the reviews inbox), and track delivery. Purchases and outbound purchase state read under the caller's org RBAC.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/procurement-concierge.md",
+      "toolAllowlist": [
+        "openwop:feature.commerce.buyer.nodes.list-purchases",
+        "openwop:feature.commerce.buyer.nodes.track-order",
+        "openwop:feature.commerce.buyer.nodes.build-cart",
+        "openwop:feature.commerce.buyer.nodes.checkout"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

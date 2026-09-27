@@ -1,0 +1,32 @@
+{
+  "name": "vendor.myndhyve.market-intel-shift-detect",
+  "version": "1.0.0",
+  "description": "MyndHyve market-intel.shift-detect — the WIRED version of MyndHyve's Partial MarketShiftDetectionService. A DETERMINISTIC diff (no AI call) of two prior market-research run artifacts → a MarketShiftAlert: new / resolved / intensified pain points, angle-score deltas, and intent-stage shifts. Pure transform ⇒ replay/fork-safe. Extends the insights-suite variance-compute pattern for the market-intel cohort.",
+  "author": "MyndHyve",
+  "license": "Apache-2.0",
+  "repository": "https://github.com/openwop/openwop",
+  "keywords": ["vendor", "myndhyve", "market-intel", "shift-detection", "variance", "research"],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  },
+  "nodes": [
+    {
+      "typeId": "market-intel.shift-detect",
+      "version": "1.0.0",
+      "label": "Detect market shift",
+      "description": "Diff two market-research result sets (previous vs current) into a MarketShiftAlert. Inputs: { previous: { records?, angles? }, current: { records?, angles? } } where records = VoC records ({ quote, tagType }) and angles = scored angles ({ id|name, score }). Output: { alert: { newPains[], resolvedPains[], intensifiedPains[], angleDeltas[], summary, hasShift } }. Deterministic set/score diff — NO AI call, NO side effects; pure transform.",
+      "category": "transform",
+      "role": "action",
+      "capabilities": [],
+      "configSchemaRef": "schemas/shift-detect.config.json",
+      "inputSchemaRef": "schemas/shift-detect.input.json",
+      "outputSchemaRef": "schemas/shift-detect.output.json"
+    }
+  ]
+}

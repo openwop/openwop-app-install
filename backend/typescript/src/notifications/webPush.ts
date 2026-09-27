@@ -77,15 +77,47 @@ export async function pushNotification(
 ): Promise<{ delivered: number; pruned: number }> {
   if (!configured) return { delivered: 0, pruned: 0 };
   const allSubs = await storage.listPushSubscriptions(notification.tenantId);
-  // ADR 0050 — an addressed notification pushes ONLY to its recipient's
-  // devices. Legacy subs with no owner (userId absent) can't be safely matched
-  // to a user, so they receive broadcasts only, never addressed pushes. A
-  // broadcast (no recipientUserId) still fans out to every tenant device.
-  const subs = notification.recipientUserId
-    ? allSubs.filter((s) => s.userId === notification.recipientUserId)
-    : allSubs;
-  if (subs.length === 0) return { delivered: 0, pruned: 0 };
+  return deliverToSubs(storage, notification, filterSubsForRecipient(notification, allSubs));
+}
 
+/**
+ * ADR 0214 D3 — BATCHED fan-out: deliver many records (all the SAME tenant) while
+ * loading the tenant's subscription table ONCE. The per-record `pushNotification`
+ * re-scans that table on every call, so an N-member channel post would be N scans;
+ * this collapses it to one. Per-record delivery is otherwise identical (addressed
+ * filter + dead-endpoint prune).
+ */
+export async function pushNotificationsBatch(
+  storage: Storage,
+  notifications: NotificationRecord[],
+): Promise<{ delivered: number; pruned: number }> {
+  if (!configured || notifications.length === 0) return { delivered: 0, pruned: 0 };
+  const allSubs = await storage.listPushSubscriptions(notifications[0]!.tenantId);
+  let delivered = 0;
+  let pruned = 0;
+  for (const n of notifications) {
+    const r = await deliverToSubs(storage, n, filterSubsForRecipient(n, allSubs));
+    delivered += r.delivered;
+    pruned += r.pruned;
+  }
+  return { delivered, pruned };
+}
+
+/** ADR 0050 — an addressed notification pushes ONLY to its recipient's devices;
+ *  legacy owner-less subs (no userId) receive broadcasts only. A broadcast (no
+ *  recipientUserId) still fans out to every tenant device. */
+function filterSubsForRecipient(n: NotificationRecord, allSubs: readonly PushSubscriptionRecord[]): readonly PushSubscriptionRecord[] {
+  return n.recipientUserId ? allSubs.filter((s) => s.userId === n.recipientUserId) : allSubs;
+}
+
+/** Send ONE record's payload to a pre-filtered subscription list, pruning dead
+ *  (404/410) endpoints. The shared core of the single + batched push paths. */
+async function deliverToSubs(
+  storage: Storage,
+  notification: NotificationRecord,
+  subs: readonly PushSubscriptionRecord[],
+): Promise<{ delivered: number; pruned: number }> {
+  if (subs.length === 0) return { delivered: 0, pruned: 0 };
   const payload = JSON.stringify({
     title: notification.title,
     body: notification.message,
@@ -94,18 +126,14 @@ export async function pushNotification(
     priority: notification.priority,
     actionUrl: notification.actionUrl ?? null,
   });
-
   let delivered = 0;
   let pruned = 0;
   await Promise.all(subs.map(async (sub) => {
     try {
       await webpush.sendNotification(toWebPushSubscription(sub), payload, {
-        // Higher urgency for action-needed types so battery-saving
-        // browsers still deliver promptly.
-        urgency: notification.priority === 'urgent' || notification.priority === 'high'
-          ? 'high' : 'normal',
-        // TTL: low for ephemeral signals (4h) so a phone that's been
-        // offline for a day doesn't get a stale stack on reconnect.
+        // Higher urgency for action-needed types so battery-saving browsers deliver promptly.
+        urgency: notification.priority === 'urgent' || notification.priority === 'high' ? 'high' : 'normal',
+        // TTL: low (4h) so a phone offline for a day doesn't get a stale stack on reconnect.
         TTL: 4 * 60 * 60,
       });
       delivered++;
@@ -113,13 +141,9 @@ export async function pushNotification(
       const status = (err as { statusCode?: number }).statusCode;
       if (status === 404 || status === 410) {
         // Subscription is dead (uninstalled extension, revoked perm).
-        try {
-          await storage.deletePushSubscription(sub.subscriptionId);
-          pruned++;
-        } catch { /* best-effort */ }
+        try { await storage.deletePushSubscription(sub.subscriptionId); pruned++; } catch { /* best-effort */ }
       } else {
-        // Don't log the error message — push services occasionally
-        // include endpoint URLs (sensitive) in error text.
+        // Don't log the error message — push services occasionally include endpoint URLs (sensitive).
         log.warn('web-push delivery failed', { subscriptionId: sub.subscriptionId, status });
       }
     }

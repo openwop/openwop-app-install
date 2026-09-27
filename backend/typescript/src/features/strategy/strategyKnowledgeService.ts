@@ -27,6 +27,7 @@
 import { createLogger } from '../../observability/logger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { createCollection, deleteDocument, getCollection, getDocument, upsertDocument } from '../kb/kbService.js';
+import { kbMutated, type KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3 — silent per-row sweeps + ONE batch event
 import { type ShareableKbProvider } from '../../host/shareableKb.js';
 import { listStrategies } from './strategyService.js';
 import type { Strategy } from './types.js';
@@ -56,7 +57,7 @@ async function getOrCreateCollection(tenantId: string, orgId: string, actor: str
   const id = collectionIdFor(orgId);
   const existing = await getCollection(tenantId, orgId, id);
   if (existing) return existing;
-  const col = await createCollection(tenantId, orgId, actor, { name: COLLECTION_NAME, collectionId: id, managed: MANAGED });
+  const col = await createCollection(tenantId, orgId, actor, { name: COLLECTION_NAME }, { collectionId: id, managed: MANAGED });
   // First creation ⇒ backfill the org's PRE-EXISTING shared strategies. Always-on
   // gating only catches future CRUD, so without this a strategy that predates the
   // toggle flip stays invisible (the user wants existing items guaranteed in).
@@ -75,7 +76,15 @@ async function getOrCreateCollection(tenantId: string, orgId: string, actor: str
  */
 export const strategyShareableKbProvider: ShareableKbProvider = {
   kind: 'strategy',
-  resolveCollectionIds: async (tenantId, orgId) => ((await getCollection(tenantId, orgId, collectionIdFor(orgId))) ? [collectionIdFor(orgId)] : []),
+  // ADR 0667 D6 (PMXWF-13 / the GEN-RCL-1 arity class) — takes the 3-ary contract's
+  // `opts` even though it does not branch on it. This kind's shareable set is a
+  // SINGLETON whose only predicate is existence, and its visibility carve-out is
+  // applied at the DOC layer during indexing, which cannot change WHICH collection id
+  // resolves — so the `forUnshare` superset is provably identical to the normal set
+  // for every input, today. The parameter is accepted anyway because a provider that
+  // does not ACCEPT it cannot be proved inert BY ITS SIGNATURE: the next carve-out
+  // added here would silently skip unshare, with nothing in the type to catch it.
+  resolveCollectionIds: async (tenantId, orgId, _opts) => ((await getCollection(tenantId, orgId, collectionIdFor(orgId))) ? [collectionIdFor(orgId)] : []),
   ensureCollectionIds: async (tenantId, orgId, actor) => [(await getOrCreateCollection(tenantId, orgId, actor)).collectionId],
 };
 
@@ -115,11 +124,11 @@ export function formatStrategyForKb(s: Strategy): string {
  * Reconcile a strategy's KB presence with its current scope+status. Shared+live
  * ⇒ upsert (stable id = strategy.id); private or archived ⇒ remove. Best-effort.
  */
-export async function indexStrategy(tenantId: string, strategy: Strategy, actor: string): Promise<void> {
+export async function indexStrategy(tenantId: string, strategy: Strategy, actor: string, emit: KbEmitOptions = {}): Promise<void> {
   try {
     if (!(await gatesOpen(tenantId, actor))) return;
     if (!shouldIndex(strategy)) {
-      await removeStrategy(tenantId, strategy.orgId, strategy.id);
+      await removeStrategy(tenantId, strategy.orgId, strategy.id, emit);
       return;
     }
     const col = await getOrCreateCollection(tenantId, strategy.orgId, actor);
@@ -127,6 +136,7 @@ export async function indexStrategy(tenantId: string, strategy: Strategy, actor:
       title: strategy.title,
       text: formatStrategyForKb(strategy),
       contentTrust: 'trusted',
+      ...emit, // ADR 0643 D3 — the backfill sweep passes `{ silent: true }`
     });
   } catch (err) {
     log.warn('strategy_kb_index_failed', { strategyId: strategy.id, err: String(err) });
@@ -143,7 +153,10 @@ export async function indexStrategy(tenantId: string, strategy: Strategy, actor:
  */
 export async function backfillStrategyKb(tenantId: string, orgId: string): Promise<number> {
   const all = await listStrategies(tenantId, { orgId, includeArchived: true });
-  for (const s of all) await indexStrategy(tenantId, s, s.createdBy);
+  // ADR 0643 D3 — a BULK lane: silent per row, ONE `document.ingested { count }`.
+  for (const s of all) await indexStrategy(tenantId, s, s.createdBy, { silent: true });
+  const count = all.filter(shouldIndex).length;
+  if (count > 0) await kbMutated({ entity: 'document', verb: 'ingested', tenantId, orgId, collectionId: collectionIdFor(orgId), count });
   return all.length;
 }
 
@@ -152,16 +165,28 @@ export async function backfillStrategyKb(tenantId: string, orgId: string): Promi
  * — a no-op when the collection or doc never existed (so it tolerates a
  * first-index remove). Best-effort; never gated (removal must succeed even if a
  * toggle flips off between index and delete).
+ *
+ * ADR 0597 §Correction 6 — RETURNS the outcome instead of only swallowing it.
+ * `true` means the doc is provably absent (deleted, or was never there);
+ * `false` means the attempt FAILED and a doc may still be sitting in that org's
+ * shared, `contentTrust:'trusted'` collection. The caller that evicts on an ORG
+ * MOVE needs that distinction because, unlike an archive, a failed eviction
+ * there is a cross-org exposure with NO self-heal: `backfillStrategyKb` is
+ * driven by `listStrategies(tenantId, {orgId})`, and a relocated strategy now
+ * carries the NEW orgId, so re-indexing the OLD org never visits it and nothing
+ * anywhere enumerates KB docs looking for one with no backing strategy.
  */
-export async function removeStrategy(tenantId: string, orgId: string, strategyId: string): Promise<void> {
+export async function removeStrategy(tenantId: string, orgId: string, strategyId: string, emit: KbEmitOptions = {}): Promise<boolean> {
   try {
     const collectionId = collectionIdFor(orgId);
     const col = await getCollection(tenantId, orgId, collectionId);
-    if (!col) return;
+    if (!col) return true;
     const doc = await getDocument(tenantId, orgId, collectionId, strategyId);
-    if (!doc) return; // never indexed / already removed — idempotent
-    await deleteDocument(tenantId, orgId, collectionId, strategyId);
+    if (!doc) return true; // never indexed / already removed — idempotent
+    await deleteDocument(tenantId, orgId, collectionId, strategyId, undefined, emit);
+    return true;
   } catch (err) {
     log.warn('strategy_kb_remove_failed', { strategyId, err: String(err) });
+    return false;
   }
 }

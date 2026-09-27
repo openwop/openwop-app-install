@@ -5,9 +5,9 @@
 export const messages = {
   title: 'MCP tools',
   probing: 'Probing host MCP seam…',
-  disabledPrefix: "This host doesn't expose an MCP server mount (",
+  disabledPrefix: 'The MCP server is disabled on this deployment. An operator can enable it with the ',
   disabledSuffix:
-    ' is off). When enabled, the host advertises its registered workflows as MCP tools here.',
+    ' deployment setting. Once enabled, registered workflows are advertised as MCP tools here.',
   noToolsAdvertised: 'MCP mount is enabled, but no tools are advertised.',
   inputSchema: 'input schema',
   endpointReturned: 'MCP endpoint returned {{status}}',

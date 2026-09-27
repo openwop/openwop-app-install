@@ -42,6 +42,21 @@ const streamCounts = new Map<string, number>();
  *  0 disables the cap. */
 const DEFAULT_MAX_STREAMS = 20;
 
+/** ADR 0395 — the operator system-health panel's snapshot: total live SSE
+ *  streams + the top holders, THIS process only (the counts map is per
+ *  process — a multi-instance deploy sees one revision-instance's view; the
+ *  panel renders that caveat). Read-only, superadmin-gated at the route. */
+export function snapshotSseStreams(): { totalStreams: number; keys: number; max: number; top: Array<{ key: string; streams: number }> } {
+  let total = 0;
+  const rows: Array<{ key: string; streams: number }> = [];
+  for (const [key, count] of streamCounts) {
+    total += count;
+    rows.push({ key, streams: count });
+  }
+  rows.sort((a, b) => b.streams - a.streams);
+  return { totalStreams: total, keys: streamCounts.size, max: maxStreams(), top: rows.slice(0, 10) };
+}
+
 function maxStreams(): number {
   const raw = process.env.OPENWOP_SSE_MAX_STREAMS_PER_TENANT;
   if (raw === undefined) return DEFAULT_MAX_STREAMS;
@@ -100,6 +115,17 @@ export interface SseChannelOptions {
  *   are not yet flushed at throw time).
  */
 export function openSseChannel(req: Request, res: Response, opts: SseChannelOptions = {}): SseChannel {
+  // A client that aborted while the route ran its pre-open auth awaits has
+  // ALREADY emitted 'close' — the `req.on('close', teardown)` below would
+  // never fire, so the counter incremented here would leak its cap slot until
+  // the instance recycles (nothing else releases it). Refuse to open instead:
+  // nobody is listening to this response, and the route's `catch → next(err)`
+  // writes the error into the same dead socket, harmlessly. The check is safe
+  // as a one-shot: everything from here to the listener attach is synchronous,
+  // so a later abort's 'close' emission always lands on the attached listener.
+  if (req.destroyed || req.socket.destroyed || res.destroyed || res.writableEnded) {
+    throw new OpenwopError('invalid_request', 'Client disconnected before the stream opened.', 408, { reason: 'client_gone' });
+  }
   // `null` key → exempt (trusted operator); skip the cap AND the counter so
   // teardown has nothing to release.
   const key = capKey(req);

@@ -13,17 +13,38 @@
  */
 
 import { registerArtifactType } from '../../host/artifactTypes.js';
+import { SLIDE_BLOCKS } from './blockCatalog.js';
 
 /** JSON Schema (2020-12) for a `canvas.slides` deck. Closed shape per slide. */
 export function slidesSchema(): Record<string, unknown> {
   return {
+    $defs: {
+      slideBlock: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['type'],
+        properties: {
+          // Grade pass 2026-07-10 (I1): the closed vocabulary is enforced at
+          // the ARTIFACT boundary too (the seam AI output actually crosses),
+          // single-sourced from the block catalog — not just on editor PATCH.
+          type: { type: 'string', enum: SLIDE_BLOCKS.map((b) => b.type) },
+          props: { type: 'object' },
+          children: { type: 'array', maxItems: 40, items: { $ref: '#/$defs/slideBlock' } },
+          // ADR 0344 2b (additive): the chassis tree traits — the shared editor
+          // panel can set them on any tree-trait type, so the slides renderer +
+          // export honor `hidden` and the editor refuses gestures on `locked`.
+          hidden: { type: 'boolean' },
+          locked: { type: 'boolean' },
+        },
+      },
+    },
     $schema: 'https://json-schema.org/draft/2020-12/schema',
     type: 'object',
     required: ['slides'],
     properties: {
       title: { type: 'string', maxLength: 200 },
       // Named theme token; the renderer maps unknown themes to the default.
-      theme: { type: 'string', enum: ['default', 'light', 'dark', 'editorial', 'vibrant'] },
+      theme: { type: 'string', enum: ['default', 'light', 'dark', 'editorial', 'vibrant', 'brand'] },
       slides: {
         type: 'array',
         minItems: 1,
@@ -32,7 +53,15 @@ export function slidesSchema(): Record<string, unknown> {
           type: 'object',
           required: ['layout'],
           properties: {
-            layout: { type: 'string', enum: ['title', 'title-bullets', 'section', 'quote', 'image', 'blank'] },
+            layout: { type: 'string', enum: ['title', 'title-bullets', 'section', 'quote', 'image', 'blank', 'blocks'] },
+          // ADR 0328 Phase 3 — blocks-based slides: a closed component tree
+          // (geometry belongs to `variant`; blocks never carry x/y).
+          variant: { type: 'string', enum: ['full', 'hero', 'split', 'two-col'] },
+          blocks: {
+            type: 'array',
+            maxItems: 40,
+            items: { $ref: '#/$defs/slideBlock' },
+          },
             title: { type: 'string', maxLength: 240 },
             subtitle: { type: 'string', maxLength: 400 },
             bullets: { type: 'array', maxItems: 12, items: { type: 'string', maxLength: 400 } },
@@ -42,6 +71,17 @@ export function slidesSchema(): Record<string, unknown> {
             imageUrl: { type: 'string', maxLength: 2000 },
             // Speaker notes — rendered only in the workbench, not on the slide.
             notes: { type: 'string', maxLength: 4000 },
+            // ADR 0328 Phase 4 — presenter semantics: a skipped slide stays in
+            // the deck but is passed over in present mode (and dimmed in the strip).
+            skip: { type: 'boolean' },
+            // ADR 0328 Phase 5 — motion: how this slide ENTERS in present mode
+            // ('magic' = content-key state-diff matching, the Keynote model).
+            transition: { type: 'string', enum: ['none', 'fade', 'magic'] },
+            // Blocks slides only: reveal blocks one step per advance (the
+            // build order IS the block order — blocks-not-freeform).
+            build: { type: 'boolean' },
+          // ADR 0328 Phase 2 — a closed per-slide background accent.
+          background: { type: 'string', enum: ['default', 'accent'] },
           },
           additionalProperties: false,
         },

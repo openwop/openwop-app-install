@@ -1,0 +1,64 @@
+# Known-red `v2-*` scenario files at TARGET MAJOR 2 — the ratchet for
+# scripts/check-conformance-major2.sh. One file stem per line, `# reason` after.
+# An unlisted red FAILS the gate; a listed file that passes ALSO fails (remove it).
+# Every line here is a wire gap this host admits to; keep it short and dated.
+# EMPTY as of ADR 0633 (2026-09-05): the one entry, `v2-poll-cursor-v2`, went green
+# when the zero-based sequence fix landed. An empty list is the correct steady
+# state, not a broken file — the ratchet fails on an UNLISTED red either way.
+
+# ── 2026-09-06, ADR 0639 ────────────────────────────────────────────────────────
+# These four are NOT new gaps. They are pre-existing MUST violations that became
+# VISIBLE when `forceEffectTransportRetry` completed the seam floor and the host
+# began advertising `openwop-conformance-seams-v2`: every one of these scenarios
+# is gated on `seamsProfileAdvertised(doc)` and had been soft-skipping.
+#
+# Recorded rather than re-hidden. Withholding the seams advert would turn the
+# lane green by making the host unverifiable, which is the direction
+# `routes/discovery.ts` argues against: "Under-advertising is not the safe
+# direction. It removes external verification of behaviour that is actually
+# shipping." Each line is a real obligation with a measured symptom.
+# `v2-unmapped-type-refused` REMOVED 2026-09-13, ADR 0687 — it PASSES (3/3).
+# The block that used to sit here recorded a two-stage deferral: first the suite
+# could not SEE the defect (2.0.5 soft-skipped it on published-layout hosts,
+# fixed by 2.0.7's D1+D2), then the host could not legally FIX it — `extensions`
+# held only `example`, reserved and never assignable, so the strict reading of
+# `events.md:36` would have refused every vendor-shaped type. The steward ruled
+# against tightening and took registration through RFC 0180.
+#
+# Both halves closed: `openwop-app` is registered from spec-artifacts 2.0.12,
+# ADR 0682 moved this host's five squatting types under it, and `isVendorType`
+# now gates on the org. RFC 0180 §A.4a — the amendment that would have made
+# readers tolerate an unregistered org — was WITHDRAWN (openwop#1347).
+
+# (`v2-fork-a-v1-run` REMOVED 2026-09-06 — it PASSES. Two host defects, both in
+#  the seed seam's neighbourhood rather than the fork path the symptom named:
+#  (1) the seam planted `workflowId: 'sample.era2-seed'`, absent from every
+#      catalog, so the fork's definition lookup answered 404 "Workflow not found"
+#      — a run pointing at a workflow that does not exist cannot be forked by
+#      anyone. It now honours the `workflowId` the caller seeds in
+#      `run.started.payload`, which is where the corpus puts a real fixture.
+#  (2) `projectV2OwnerEcho` returned an owner-LESS payload unchanged, skipping
+#      exactly the runs identity.md §1.2 governs ("on EVERY read of a run created
+#      before the host began emitting subjects, the host MUST stamp
+#      `issuer: urn:openwop:legacy`"). Absence was read as "nothing to do" rather
+#      than as the condition itself.)
+# `v2-v1-events-translated` REMOVED 2026-09-13, ADR 0687 — it PASSES (3/3), and
+# the reason is worth keeping because it moved TWICE in one change.
+#
+# The line used to read "answers 404 … same root cause as the line above — the
+# translation never refuses". Closing the refusal made the fork read, the 404
+# went away, and the scenario went from 3 red to 1 red — on a defect that had
+# been hiding UNDER the 404 the whole time: the prefix-copy loop in
+# `routes/runs.ts` omitted `timestamp`, so every inherited event was stamped
+# with fork time. `persistence.md` §"The reader rule" says `timestamp` passes
+# through untouched; a copy that re-stamps is not a copy.
+#
+# So this entry's stated root cause was right about the symptom and wrong about
+# the cause, and only fixing the first defect could show that. Both are fixed
+# here; the lane is EXIT=0 at major 2 (490 files, 263 executed-pass, 0 red) and
+# this list is EMPTY again — which is the correct steady state, not a broken
+# file. An unlisted red fails the gate either way.
+
+# (ADR 0749's `v2-a2ui-v09-surface` entry RETIRED by ADR 0751: a fork at a
+# checkpoint inside a suspended run now inherits the open gate instead of
+# answering `501 fork_checkpoint_unsupported`, and `recorded-as-recorded` passes.)

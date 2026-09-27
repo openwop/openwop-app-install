@@ -36,7 +36,7 @@
       "memoryShape": {
         "scratchpad": true,
         "conversation": false,
-        "longTerm": true
+        "longTerm": false
       },
       "handoff": {
         "taskSchemaRef": "schemas/sales-coach.task.schema.json",

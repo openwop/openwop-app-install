@@ -194,13 +194,19 @@ function parseVariants(content, placements, placementTextLimits, log) {
 
 function fallbackParse(content, placements, placementTextLimits) {
   const lines = String(content ?? '').split('\n').filter((l) => l.trim());
+  // XCH-MI-2 (LLM-EXCHANGE-AUDIT Wave 2): salvaging the model's REAL prose
+  // into one variant is honest reuse; fabricating a "Generated Ad" placeholder
+  // from an empty reply is not — that case is a typed failure.
+  if (!lines.length) {
+    throw Object.assign(new Error('AI reply was empty — no ad copy to parse or salvage'), { code: 'AI_OUTPUT_UNPARSEABLE' });
+  }
   return [{
     id: randomUUID(),
     angle: 'Generated',
-    headline: lines[0]?.slice(0, 40) || 'Generated Ad',
+    headline: lines[0].slice(0, 40),
     description: lines[1],
     platformAdaptations: adaptToPlacements(
-      { headline: lines[0] || 'Generated Ad', description: lines[1] },
+      { headline: lines[0], description: lines[1] },
       placements,
       placementTextLimits,
     ),
@@ -245,6 +251,7 @@ export async function copyGenerate(ctx) {
   let model;
   let usage;
   try {
+    // XCH-MI-1 (Wave 4): responseSchema engages provider-native JSON mode.
     const result = await ctx.callAI({
       provider: config.provider,
       model: config.model,
@@ -252,8 +259,10 @@ export async function copyGenerate(ctx) {
       messages: [{ role: 'user', content: prompt }],
       temperature: config.temperature ?? DEFAULT_TEMPERATURE,
       maxTokens: config.maxTokens ?? DEFAULT_MAX_TOKENS,
+      responseSchema: { type: 'array', items: { type: 'object' } },
     });
-    variants = parseVariants(result?.content, placements, inputs.placementTextLimits, log);
+    const raw = Array.isArray(result?.data) ? JSON.stringify(result.data) : result?.content;
+    variants = parseVariants(raw, placements, inputs.placementTextLimits, log);
     model = result?.model;
     usage = result?.usage
       ? {
@@ -283,7 +292,7 @@ export async function copyGenerate(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'ads.copy.generate': copyGenerate,
 };
 

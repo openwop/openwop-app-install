@@ -13,12 +13,12 @@ const routes: FeatureRoute[] = [
     // 0010/0024 graduation), so the nav entry is ungated.
     path: '/kb',
     element: <KnowledgeBasePage />,
-    tier: 'admin',
+    tier: 'admin', archetype: 'admin',
     nav: {
-      group: 'Access & data',
-      label: 'Knowledge Base',
+      group: 'Data & knowledge',
+      label: 'Knowledge Base', labelKey: 'kbLabel',
       icon: DatabaseIcon,
-      hint: 'Document collections + semantic search (RAG)',
+      hint: 'Document collections + semantic search (RAG)', hintKey: 'kbHint',
       
     },
   },

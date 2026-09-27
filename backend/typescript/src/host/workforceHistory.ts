@@ -230,11 +230,29 @@ export function generateWorkforceHistory(opts: WorkforceHistoryOptions): Workfor
       });
     };
 
-    ev('run.started', { workflowId, workforceId, inputDigest: makeId('inp', seed, i), correlationId, batchId });
+    // ADR 0722 — `runStarted` is closed except for `metadata`, which is
+    // `additionalProperties: true`; the four host keys have a legal seat there.
+    // ADR 0722/0723 + corpus 2.3.2 — the fixture writes the SEATED shapes, not
+    // host-private keys: `nodeStarted` requires `typeId`; `nodeSuspended` /
+    // `interruptResolved` require `interruptId` (bound on the major-2 read);
+    // `approval.requested` IS `suspend-request` (`{kind, key, data: ApprovalData}`,
+    // no hatch) — the old `{prompt}` was the wrong MODEL, not an extra key;
+    // `resolvedBy` is a Subject; `run.completed` seats results under `outputs`
+    // and `run.failed` under `error`. Deterministic like everything else here.
+    const typeIdOf = (node: string): string => `feature.workforce.nodes.${node.replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())}`;
+    const interruptId = makeId('int', seed, i);
+    const reviewer = { issuer: 'urn:openwop:legacy', subjectId: 'reviewer:demo', tenant: tenantId, lane: 'session', kind: 'user' } as const;
+    const approvalData = {
+      artifactId: makeId('inv', seed, i), artifactType: 'invoice',
+      title: 'Approve invoice posting over $5,000?',
+      description: 'Invoice matched and extracted; posting exceeds the auto-approve threshold.',
+      actions: ['accept', 'reject'],
+    };
+    ev('run.started', { workflowId, metadata: { workforceId, inputDigest: makeId('inp', seed, i), correlationId, batchId } });
 
     // extract + match always run and complete (auto-safe nodes)
     for (const node of ['invoice-extract', 'invoice-match'] as const) {
-      ev('node.started', { nodeId: node }, node);
+      ev('node.started', { nodeId: node, typeId: typeIdOf(node), attempt: 0 }, node);
       const inTok = 400 + Math.floor(rng() * 1600);
       const outTok = 80 + Math.floor(rng() * 600);
       // cost drifts DOWN across the window (cheaper models / fewer retries as it matures)
@@ -257,40 +275,43 @@ export function generateWorkforceHistory(opts: WorkforceHistoryOptions): Workfor
 
     switch (outcome) {
       case 'clean': {
-        ev('node.started', { nodeId: postNode }, postNode);
+        ev('node.started', { nodeId: postNode, typeId: typeIdOf(postNode), attempt: 0 }, postNode);
         ev('node.completed', { nodeId: postNode }, postNode);
-        ev('run.completed', { outcome: 'cleared' });
+        ev('run.completed', { outputs: { outcome: 'cleared' } });
         status = 'completed';
         break;
       }
       case 'escalated': {
-        ev('node.suspended', { nodeId: postNode, reason: 'over-threshold' }, postNode);
-        ev('approval.requested', { nodeId: postNode, prompt: 'Approve invoice posting over $5,000?' }, postNode);
-        ev('approval.granted', { nodeId: postNode, principal: 'reviewer:demo', decision: 'approve' }, postNode);
+        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: `${postNode}:approval`, reason: 'over-threshold' }, postNode);
+        ev('approval.requested', { kind: 'approval', key: `${postNode}:approval`, data: approvalData }, postNode);
+        // `decision` is an ENUM as of corpus 2.2.0 (RFC 0183 §A.3, adopted in ADR 0705):
+        // `granted | rejected | overridden`. `approve`/`reject` validated only while the
+        // field was an open string. Mapping per `interrupt.md` §Backward-compat.
+        ev('approval.granted', { nodeId: postNode, interruptId, kind: 'approval', resolvedBy: reviewer, decision: 'granted', action: 'accept' }, postNode);
         ev('node.completed', { nodeId: postNode }, postNode);
-        ev('run.completed', { outcome: 'cleared', escalated: true });
+        ev('run.completed', { outputs: { outcome: 'cleared', escalated: true } });
         status = 'completed';
         break;
       }
       case 'overridden': {
-        ev('node.suspended', { nodeId: postNode, reason: 'over-threshold' }, postNode);
-        ev('approval.requested', { nodeId: postNode, prompt: 'Approve invoice posting over $5,000?' }, postNode);
-        ev('approval.overridden', { nodeId: postNode, principal: 'reviewer:demo', decision: 'reject', reason: 'vendor not on master list' }, postNode);
-        ev('run.completed', { outcome: 'held', overridden: true });
+        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: `${postNode}:approval`, reason: 'over-threshold' }, postNode);
+        ev('approval.requested', { kind: 'approval', key: `${postNode}:approval`, data: approvalData }, postNode);
+        ev('approval.overridden', { nodeId: postNode, interruptId, kind: 'approval', resolvedBy: reviewer, decision: 'rejected', action: 'reject', reason: 'vendor not on master list' }, postNode);
+        ev('run.completed', { outputs: { outcome: 'held', overridden: true } });
         status = 'completed';
         break;
       }
       case 'failed-recovered': {
-        ev('node.started', { nodeId: postNode }, postNode);
+        ev('node.started', { nodeId: postNode, typeId: typeIdOf(postNode), attempt: 0 }, postNode);
         ev('node.failed', { nodeId: postNode, error: { code: 'erp_timeout', message: 'ERP post timed out' } }, postNode);
-        ev('run.failed', { outcome: 'failed', recoverable: true });
+        ev('run.failed', { error: { code: 'erp_timeout', message: 'ERP post timed out', retryable: true }, failedNodeId: postNode });
         status = 'failed';
         break;
       }
       case 'false-positive': {
-        ev('node.started', { nodeId: postNode }, postNode);
+        ev('node.started', { nodeId: postNode, typeId: typeIdOf(postNode), attempt: 0 }, postNode);
         ev('node.completed', { nodeId: postNode }, postNode);
-        ev('run.completed', { outcome: 'cleared' });
+        ev('run.completed', { outputs: { outcome: 'cleared' } });
         status = 'completed';
         annotations.push({
           annotationId: makeId('ann', seed, i),
@@ -302,8 +323,8 @@ export function generateWorkforceHistory(opts: WorkforceHistoryOptions): Workfor
         break;
       }
       case 'open': {
-        ev('node.suspended', { nodeId: postNode, reason: 'over-threshold' }, postNode);
-        ev('approval.requested', { nodeId: postNode, prompt: 'Approve invoice posting over $5,000?' }, postNode);
+        ev('node.suspended', { nodeId: postNode, interruptId, kind: 'approval', key: `${postNode}:approval`, reason: 'over-threshold' }, postNode);
+        ev('approval.requested', { kind: 'approval', key: `${postNode}:approval`, data: approvalData }, postNode);
         status = 'waiting-approval';
         break;
       }

@@ -1,12 +1,18 @@
 {
   "name": "feature.campaign-studio.agents",
-  "version": "1.0.0",
-  "description": "Campaign Strategist agent (ADR 0153 Phase 3). Turns a marketing goal into a structured multi-channel campaign rendered in the EXISTING chat artifact workbench — composes the AI chat + the feature.campaign-studio.nodes pack; no new chat surface. Pure-agent pack.",
+  "version": "1.0.2",
+  "description": "Campaign Strategist agent. Turns a marketing goal into a structured multi-channel campaign rendered in the EXISTING chat artifact workbench \u2014 composes the AI chat + the feature.campaign-studio.nodes pack; no new chat surface. Pure-agent pack.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/feature.campaign-studio.agents",
   "repository": "https://github.com/openwop/openwop-app",
-  "keywords": ["feature", "agents", "campaign-studio", "canvas", "marketing"],
+  "keywords": [
+    "feature",
+    "agents",
+    "campaign-studio",
+    "canvas",
+    "marketing"
+  ],
   "engines": {
     "openwop": ">=1.1.0 <2.0.0"
   },
@@ -19,11 +25,12 @@
       "agentId": "feature.campaign-studio.agents.default",
       "persona": "Campaign Strategist",
       "label": "Campaign Strategist",
-      "description": "Turns a marketing goal into a structured multi-channel campaign (channels, funnel, content assets) rendered live in the artifact workbench. Uses openwop:feature.campaign-studio.nodes.render.",
+      "description": "Turns a marketing goal into a structured multi-channel campaign (channels, funnel, content assets) rendered live in the artifact workbench. Uses openwop:campaign-studio.render and openwop:campaign-studio.get-design.",
       "modelClass": "general",
       "systemPromptRef": "prompts/campaign-strategist.md",
       "toolAllowlist": [
-        "openwop:feature.campaign-studio.nodes.render"
+        "openwop:campaign-studio.get-design",
+        "openwop:campaign-studio.render"
       ],
       "memoryShape": {
         "scratchpad": true,

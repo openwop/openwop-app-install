@@ -40,6 +40,12 @@ export async function submitIdea(ctx) {
     listId: str(i.listId),
     title: str(i.title),
     ...(str(i.description) ? { description: str(i.description) } : {}),
+    // ADR 0246 — when supplied (the forms→intake bridge), the surface asserts
+    // the target list belongs to this org (write-boundary org guard).
+    ...(str(i.orgId) ? { orgId: str(i.orgId) } : {}),
+    // ADR 0247 OQ-5 — the originating form submission; the surface stamps it +
+    // sourceChannel:'form' on the new idea's intake overlay for provenance.
+    ...(str(i.sourceSubmissionId) ? { sourceSubmissionId: str(i.sourceSubmissionId) } : {}),
   });
   return { status: 'success', outputs: out };
 }
@@ -76,6 +82,73 @@ export async function listPortfolio(ctx) {
   return { status: 'success', outputs: { items: out.items ?? [] } };
 }
 
+
+/**
+ * ADR 0235 §D1 — PROPOSE a what-if scenario on a planning session (stamped
+ * proposedBy:'agent'). A scenario is inert until a HUMAN selects it as plan of
+ * record — structurally proposal-safe (node calls bypass the capability
+ * firewall; the gate lives in the owning surface).
+ */
+export async function proposeScenario(ctx) {
+  const pm = ensurePriorityMatrix(ctx);
+  if (typeof pm.proposeScenario !== 'function') {
+    return { status: 'error', error: { code: 'host_capability_missing', message: 'ctx.features[priority-matrix].proposeScenario is not exposed on this host (ADR 0235).' } };
+  }
+  const i = ctx.inputs ?? {};
+  const out = await pm.proposeScenario({
+    listId: str(i.listId),
+    sessionId: str(i.sessionId),
+    name: i.name,
+    selection: i.selection,
+    ...(i.constraints !== undefined ? { constraints: i.constraints } : {}),
+    ...(ctx.runId ? { actor: `run:${ctx.runId}` } : {}),
+  });
+  return { status: 'success', outputs: { scenario: out.scenario ?? null } };
+}
+
+/**
+ * ADR 0232 §7 (STRAT-PM1) — intake node verbs. Read + fields/evidence writes,
+ * the same content-metadata class as `submit-idea`. Promotion is deliberately
+ * absent (it creates work containers = authority-granting; stays human/route).
+ */
+export async function getIntake(ctx) {
+  const pm = ensurePriorityMatrix(ctx);
+  if (typeof pm.getIntake !== 'function') {
+    return { status: 'error', error: { code: 'host_capability_missing', message: "ctx.features['priority-matrix'].getIntake is not exposed on this host (ADR 0232)." } };
+  }
+  const i = ctx.inputs ?? {};
+  const out = await pm.getIntake({ listId: str(i.listId), cardId: str(i.cardId) });
+  return { status: 'success', outputs: { intake: out.intake ?? null, evidence: out.evidence ?? [] } };
+}
+
+export async function updateIntake(ctx) {
+  const pm = ensurePriorityMatrix(ctx);
+  if (typeof pm.updateIntake !== 'function') {
+    return { status: 'error', error: { code: 'host_capability_missing', message: "ctx.features['priority-matrix'].updateIntake is not exposed on this host (ADR 0232)." } };
+  }
+  const i = ctx.inputs ?? {};
+  const patch = {};
+  for (const k of ['requester', 'sourceChannel', 'estimatedValue', 'estimatedValueUnit', 'notes', 'sourceSubmissionId']) {
+    if (i[k] !== undefined) patch[k] = i[k];
+  }
+  const out = await pm.updateIntake({ listId: str(i.listId), cardId: str(i.cardId), patch, ...(ctx.runId ? { actor: `run:${ctx.runId}` } : {}) });
+  return { status: 'success', outputs: { intake: out.intake ?? null } };
+}
+
+export async function addEvidence(ctx) {
+  const pm = ensurePriorityMatrix(ctx);
+  if (typeof pm.addEvidence !== 'function') {
+    return { status: 'error', error: { code: 'host_capability_missing', message: "ctx.features['priority-matrix'].addEvidence is not exposed on this host (ADR 0232)." } };
+  }
+  const i = ctx.inputs ?? {};
+  const out = await pm.addEvidence({
+    listId: str(i.listId), cardId: str(i.cardId), kind: str(i.kind), ref: str(i.ref),
+    ...(str(i.label) ? { label: str(i.label) } : {}),
+    ...(ctx.runId ? { actor: `run:${ctx.runId}` } : {}),
+  });
+  return { status: 'success', outputs: { evidence: out.evidence ?? null } };
+}
+
 export const nodes = {
   'feature.priority-matrix.nodes.list-lists': listLists,
   'feature.priority-matrix.nodes.list-portfolio': listPortfolio,
@@ -84,6 +157,10 @@ export const nodes = {
   'feature.priority-matrix.nodes.score-idea': scoreIdea,
   'feature.priority-matrix.nodes.generate-agenda': generateAgenda,
   'feature.priority-matrix.nodes.schedule-status': scheduleStatus,
+  'feature.priority-matrix.nodes.propose-scenario': proposeScenario,
+  'feature.priority-matrix.nodes.get-intake': getIntake,
+  'feature.priority-matrix.nodes.update-intake': updateIntake,
+  'feature.priority-matrix.nodes.add-evidence': addEvidence,
 };
 
 export default nodes;

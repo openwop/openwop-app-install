@@ -7,7 +7,7 @@
  * isolation (the write keys on the scope tenant, never on args).
  */
 import { describe, it, expect, beforeEach, beforeAll, afterAll } from 'vitest';
-import { nodes as nodePack } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
+import { nodes as nodePack, appendUtm } from '../../../packs/feature.campaign-channels.nodes/index.mjs';
 import { openStorage } from '../src/storage/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -87,12 +87,14 @@ describe('publish-email-sequence — mapper + fail-closed', () => {
   it('passes the emails + a deterministic idemBase through to the surface', async () => {
     let captured: any;
     const email = { createDraftCampaign: async (a: any) => { captured = a; return { campaignIds: ['c1', 'c2'], templateIds: ['t1', 't2'], steps: 2 }; } };
-    const out = await publishEmail({ features: { email, 'campaign-brief': briefSurface('org-9') }, inputs: { draft: emailDraft, stage: 'lead' }, runId: 'r2', nodeId: 'n2' });
+    const out = await publishEmail({ features: { email, 'campaign-brief': briefSurface('org-9') }, inputs: { draft: emailDraft, stage: 'lead', briefId: 'b-prov' }, runId: 'r2', nodeId: 'n2' });
     expect(out.status).toBe('success');
     expect(captured.orgId).toBe('org-9');
-    expect(captured.idemBase).toBe('r2:n2');
+    expect(captured.idemBase).toBe('n2:b-prov');
     expect(captured.stage).toBe('lead');
     expect(captured.emails).toHaveLength(2);
+    // ADR 0245 — provenance to the source brief threads through.
+    expect(captured.sourceBriefId).toBe('b-prov');
   });
 });
 
@@ -138,14 +140,16 @@ describe('real cms surface delegation — DRAFT-only + idempotent + tenant-isola
 describe('real email surface delegation — one draft template+campaign per step, idempotent, unsent', () => {
   beforeEach(async () => { await __resetEmailStore(); });
 
-  it('publishes a 2-email sequence as 2 draft templates + 2 draft campaigns (nothing orphaned, nothing sent)', async () => {
+  it('publishes a 2-email sequence as 2 draft templates + 2 draft campaigns (nothing orphaned, nothing sent), stamping brief provenance', async () => {
     const email = buildEmailSurface({ tenantId: 't1', runId: 'run-E' });
-    const res = await email.createDraftCampaign({ orgId: 'o1', name: 'Drip', emails: emailDraft.emails, stage: 'lead', idemBase: 'run-E:n1' });
+    const res = await email.createDraftCampaign({ orgId: 'o1', name: 'Drip', emails: emailDraft.emails, stage: 'lead', sourceBriefId: 'brief-XYZ', idemBase: 'run-E:n1' });
     expect(res.steps).toBe(2);
     const tpls = await listTemplates('t1', 'o1');
     const cmps = await listCampaigns('t1', 'o1');
     expect(tpls).toHaveLength(2);
     expect(cmps).toHaveLength(2);
+    // ADR 0245 — every email draft carries the source brief provenance (each step).
+    expect(cmps.every((c) => c.sourceBriefId === 'brief-XYZ')).toBe(true);
     // every campaign references a real template (no orphans) and is DRAFT (unsent)
     for (const c of cmps) {
       expect(c.status).toBe('draft');
@@ -171,5 +175,29 @@ describe('real email surface delegation — one draft template+campaign per step
     await email.createDraftCampaign({ orgId: 'o1', name: 'Drip', emails: [emailDraft.emails[0]], stage: 'not-a-stage', idemBase: 'run-F:n1' });
     const cmps = await listCampaigns('t1', 'o1');
     expect(cmps[0].audience.stage).toBeUndefined();
+  });
+});
+
+
+describe('publishAdVariants — platform + UTM safety (grade-code AUDIT-9/10)', () => {
+  it('appendUtm stamps a RELATIVE landing URL instead of dropping the utm params', () => {
+    const out = appendUtm('/pricing?ref=nl', { source: 'email', campaign: 'launch' }, 'brief-1');
+    expect(out.startsWith('/pricing')).toBe(true);
+    expect(out).toContain('utm_campaign=launch');
+    expect(out).toContain('utm_source=email');
+    expect(out).toContain('ref=nl'); // existing param preserved
+  });
+  it('appendUtm falls back to briefId for utm_campaign and preserves absolute URLs', () => {
+    const out = appendUtm('https://ex.com/x', {}, 'brief-9');
+    expect(out.startsWith('https://ex.com/x')).toBe(true);
+    expect(out).toContain('utm_campaign=brief-9');
+  });
+  it('a non-empty typo\'d platform FAILS rather than silently dispatching to Meta', async () => {
+    const out = await nodePack['feature.campaign-channels.nodes.publish-ad-variants']({
+      inputs: { platform: 'googel', adAccountId: 'act_1', briefId: 'b1' },
+      ads: { publishAd: async () => ({ outcome: 'no_connection' }) },
+    });
+    expect(out.status).toBe('failed');
+    expect(out.error?.code).toBe('unknown_platform');
   });
 });

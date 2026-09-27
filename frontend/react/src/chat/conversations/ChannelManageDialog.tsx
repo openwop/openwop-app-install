@@ -1,22 +1,31 @@
 /**
- * Channel settings dialog (ADR 0154 Phase 2) — chat CHROME launched from the
- * channel-only settings control in the header. Rename · archive · members, all
- * OWNER-gated. Ownership is decided by the SERVER (`detail.viewerIsOwner`) — the
- * client never reconstructs the backend identity (ownerUserId is `oidc:<sub>` /
- * `user:<hash>`, not the raw uid); the backend `assertChannelManage` is the real
- * authority regardless. Visibility is read-only (fixed at creation). Archive
- * confirms INLINE (not via a second Modal — stacked Modals fight over Escape +
- * the focus trap).
+ * Channel details dialog (ADR 0154 Phase 2, re-grounded by ADR 0192 D8) — chat
+ * CHROME launched from the header's channel controls (settings gear + the
+ * facepile) and the roster panel. THE one full-roster surface:
+ *   - everyone: resolved member list (names + avatars, never raw ids),
+ *     visibility, description;
+ *   - the owner: rename (normalized), description edit, add people/agents via
+ *     name-resolving pickers, remove members, archive (inline confirm — stacked
+ *     Modals fight over Escape + the focus trap);
+ *   - a non-owner member: Leave channel (the owner's exit is archive — the
+ *     backend 409s an owner leave).
+ * Ownership is decided by the SERVER (`detail.viewerIsOwner`); the backend
+ * `assertChannelManage` is the real authority regardless.
  */
 
+import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
 import {
   getChannel, renameChannel, archiveChannel, addChannelMember, addChannelAgent, removeChannelMember, removeChannelAgent,
+  updateChannelDescription, leaveChannel, setChannelAgentPolicy,
   type ChannelDetail,
 } from '../../client/channelsClient.js';
-import { BotIcon } from '../../ui/icons/index.js';
+import { Avatar } from '../../ui/Avatar.js';
+import { MemberPicker, AgentPicker } from './MemberPickers.js';
+import { ChannelSchedulePanel } from './ChannelSchedulePanel.js';
+import { normalizeChannelName } from './channelName.js';
 
 interface Props {
   channelId: string;
@@ -25,25 +34,23 @@ interface Props {
   onChanged: () => void | Promise<void>;
   /** The channel was archived — the surface should drop it (reset/close). */
   onArchived: () => void;
+  /** The viewer left the channel — the surface should drop it (reset/close). */
+  onLeft?: () => void;
 }
 
-/** `user:abc` / `agent:abc` → `abc` for display (no name resolution in v1). */
-function subjectLabel(ref: string): string {
-  const i = ref.indexOf(':');
-  return i >= 0 ? ref.slice(i + 1) : ref;
-}
-
-export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived }: Props): JSX.Element {
+export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived, onLeft }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const { t: tc } = useTranslation('common');
   const [detail, setDetail] = useState<ChannelDetail | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
   const [name, setName] = useState('');
-  const [newMember, setNewMember] = useState('');
-  const [newAgent, setNewAgent] = useState('');
+  const [description, setDescription] = useState('');
+  const [addUserIds, setAddUserIds] = useState<string[]>([]);
+  const [addAgentIds, setAddAgentIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [confirmingArchive, setConfirmingArchive] = useState(false);
+  const [confirmingLeave, setConfirmingLeave] = useState(false);
 
   const reload = useCallback(async (): Promise<void> => {
     setLoadFailed(false);
@@ -51,6 +58,7 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived 
       const d = await getChannel(channelId);
       setDetail(d);
       setName(d.channel?.name ?? '');
+      setDescription(d.channel?.description ?? '');
     } catch {
       setLoadFailed(true);
     }
@@ -59,6 +67,8 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived 
   useEffect(() => { void reload(); }, [reload]);
 
   const isOwner = detail?.viewerIsOwner === true;
+  const roster = detail?.roster ?? [];
+  const viewerRef = detail?.viewerSubjectRef ?? null;
 
   const run = useCallback(async (op: () => Promise<unknown>): Promise<void> => {
     setBusy(true);
@@ -80,16 +90,22 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived 
     void run(() => renameChannel(channelId, trimmed));
   };
 
-  const onAdd = (): void => {
-    const uid = newMember.trim();
-    if (!uid) return;
-    void run(async () => { await addChannelMember(channelId, uid); setNewMember(''); });
+  const onSaveDescription = (): void => {
+    if (description.trim() === (detail?.channel?.description ?? '')) return;
+    void run(() => updateChannelDescription(channelId, description.trim()));
   };
 
-  const onAddAgent = (): void => {
-    const aid = newAgent.trim();
-    if (!aid) return;
-    void run(async () => { await addChannelAgent(channelId, aid); setNewAgent(''); });
+  const onAddSelected = (): void => {
+    if (!addUserIds.length && !addAgentIds.length) return;
+    // Sequential adds are safe to retry: addParticipant/addChannelAgent are
+    // idempotent server-side (an existing member is a no-op), so a mid-loop
+    // failure + retry can't duplicate anyone.
+    void run(async () => {
+      for (const uid of addUserIds) await addChannelMember(channelId, uid);
+      for (const aid of addAgentIds) await addChannelAgent(channelId, aid);
+      setAddUserIds([]);
+      setAddAgentIds([]);
+    });
   };
 
   const doArchive = (): void => {
@@ -109,42 +125,75 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived 
     })();
   };
 
+  const doLeave = (): void => {
+    setBusy(true);
+    setError(null);
+    void (async () => {
+      try {
+        await leaveChannel(channelId);
+        await onChanged();
+        onLeft?.();
+        onClose();
+      } catch {
+        setError(t('leaveChannelError'));
+        setBusy(false);
+        setConfirmingLeave(false);
+      }
+    })();
+  };
+
   // Load-failure terminal state — never a perpetual skeleton (the Modal's
   // `loading` only covers the in-flight fetch).
   if (loadFailed) {
     return (
-      <Modal onClose={onClose} label={t('manageChannelTitle')} showClose error={t('manageError')}>
-        <h2 className="u-mt-0 u-fs-16">{t('manageChannelTitle')}</h2>
+      <Modal onClose={onClose} label={t('channelDetailsTitle')} showClose error={t('manageError')}>
+        <h2 className="u-mt-0 u-fs-16">{t('channelDetailsTitle')}</h2>
         <div className="u-flex u-justify-end u-gap-2 u-mt-3">
-          <button type="button" className="secondary" onClick={onClose}>{tc('close')}</button>
-          <button type="button" className="btn-primary" onClick={() => void reload()}>{tc('retry')}</button>
+          <Button variant="secondary" onClick={onClose}>{tc('close')}</Button>
+          <Button variant="primary" onClick={() => void reload()}>{tc('retry')}</Button>
         </div>
       </Modal>
     );
   }
 
-  const members = detail?.participants ?? [];
+  const memberIdsInChannel = roster.filter((r) => r.kind === 'user').map((r) => r.subjectRef.slice('user:'.length));
+  const agentIdsInChannel = roster.filter((r) => r.kind === 'agent').map((r) => r.subjectRef.slice('agent:'.length));
 
   return (
-    <Modal onClose={onClose} label={t('manageChannelTitle')} showClose loading={detail === null} {...(error ? { error } : {})}>
-      <h2 className="u-mt-0 u-fs-16">{t('manageChannelTitle')}</h2>
+    <Modal onClose={onClose} label={t('channelDetailsTitle')} showClose loading={detail === null} {...(error ? { error } : {})}>
+      <h2 className="u-mt-0 u-fs-16">{t('channelDetailsTitle')}</h2>
 
-      {/* Name — the owner edits; everyone else sees static text. */}
+      {/* Name + description — the owner edits; everyone else reads. */}
       {isOwner ? (
         <>
           <label className="field">
             <span className="field-label">{t('renameChannelLabel')}</span>
             <input value={name} onChange={(e) => setName(e.target.value)} disabled={busy} maxLength={80} />
           </label>
+          {/* Live normalized preview — parity with the create dialog (names are
+              lowercase slugs; the server is authoritative). */}
+          {normalizeChannelName(name) && normalizeChannelName(name) !== name.trim() && (
+            <p className="muted u-fs-11 u-mt-0 u-mb-1">{t('channelNamePreview', { name: `#${normalizeChannelName(name)}` })}</p>
+          )}
           <div className="u-flex u-justify-end u-mb-2">
-            <button type="button" className="secondary btn-sm" disabled={busy || !name.trim() || name.trim() === detail?.channel?.name} onClick={onRename}>{tc('save')}</button>
+            <Button variant="secondary" size="sm" disabled={busy || !name.trim() || name.trim() === detail?.channel?.name} onClick={onRename}>{tc('save')}</Button>
+          </div>
+          <label className="field">
+            <span className="field-label">{t('channelDescriptionLabel')}</span>
+            <textarea value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t('channelDescriptionPlaceholder')} rows={2} maxLength={1000} disabled={busy} />
+          </label>
+          <div className="u-flex u-justify-end u-mb-2">
+            <Button variant="secondary" size="sm" disabled={busy || description.trim() === (detail?.channel?.description ?? '')} onClick={onSaveDescription}>{tc('save')}</Button>
           </div>
         </>
       ) : (
-        <p className="u-fs-12 u-mb-2">
-          <span className="field-label">{t('renameChannelLabel')}: </span>
-          <span>{detail?.channel?.name}</span>
-        </p>
+        <>
+          <p className="u-fs-13 u-mb-1">
+            <span className="field-label">{t('renameChannelLabel')}: </span>
+            <span>#{detail?.channel?.name}</span>
+          </p>
+          {detail?.channel?.description && <p className="muted u-fs-12 u-mb-2">{detail.channel.description}</p>}
+        </>
       )}
 
       {/* Visibility — always read-only (fixed at creation; no mutate route). */}
@@ -153,24 +202,53 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived 
         <span className="muted">{detail?.channel?.visibility === 'private' ? t('visibilityPrivate') : t('visibilityPublic')}</span>
       </p>
 
-      {/* Members. */}
+      {/* Members — the RESOLVED roster (ADR 0192 D2): names + avatars, never raw refs. */}
       <h3 className="u-fs-13 u-mb-1">{t('membersLabel')}</h3>
       <ul className="u-list-none u-m-0 u-p-0 u-mb-2">
-        {members.map((m) => {
-          const isAgent = m.subjectRef.startsWith('agent:');
-          const id = subjectLabel(m.subjectRef);
+        {roster.map((m) => {
+          const isAgent = m.kind === 'agent';
+          const isSelf = viewerRef !== null && m.subjectRef === viewerRef;
           const roleLabel = m.role === 'owner' ? t('roleOwner') : isAgent ? t('roleAgent') : t('roleMember');
           return (
             <li key={m.subjectRef} className="u-flex u-items-center u-justify-between u-gap-2 u-fs-12 u-pad-1-2">
               <span className="u-flex u-items-center u-gap-1-5">
-                {isAgent ? <span aria-hidden className="u-iflex"><BotIcon size={12} /></span> : null}
-                {id} <span className="muted">· {roleLabel}</span>
+                <Avatar name={m.displayName} size={22} kind={isAgent ? 'agent' : 'user'} />
+                <span className="u-truncate">{m.displayName}</span>
+                {isAgent && <span className="msgbubble-bot-badge">{t('botBadge')}</span>}
+                {isSelf && <span className="chip chip--muted u-fs-10">{t('rosterYou')}</span>}
+                <span className="muted">· {isAgent && m.mentionSlug ? `@${m.mentionSlug}` : roleLabel}</span>
               </span>
+              {/* ADR 0202 D1/D4 — the agent's reply policy, visible + owner-editable
+                  (the invisible sole-agent auto-reply, now a real control). */}
+              {isAgent && (
+                isOwner ? (
+                  <label className="u-flex u-items-center u-gap-1 u-fs-11 muted">
+                    {t('responsePolicyLabel')}
+                    <select
+                      className="chanroster-policy-select"
+                      value={m.responsePolicy ?? 'mention'}
+                      disabled={busy}
+                      onChange={(e) => void run(() => setChannelAgentPolicy(channelId, m.subjectRef.slice('agent:'.length), e.target.value === 'all' ? 'all' : 'mention'))}
+                      aria-label={t('responsePolicyAria', { agent: m.displayName })}
+                    >
+                      <option value="all">{t('responsePolicyAll')}</option>
+                      <option value="mention">{t('responsePolicyMention')}</option>
+                    </select>
+                  </label>
+                ) : (
+                  <span className="muted u-fs-11">{t('responsePolicyLabel')}: {m.responsePolicy === 'all' ? t('responsePolicyAll') : t('responsePolicyMention')}</span>
+                )
+              )}
               {/* The owner can remove any non-owner member — a user or an agent. */}
               {isOwner && m.role !== 'owner' ? (
-                <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => void run(() => (isAgent ? removeChannelAgent(channelId, id) : removeChannelMember(channelId, id)))} aria-label={t('removeMemberAria', { member: id })}>
+                <Button
+                  variant="secondary" size="sm"
+                  disabled={busy}
+                  onClick={() => void run(() => (isAgent ? removeChannelAgent(channelId, m.subjectRef.slice('agent:'.length)) : removeChannelMember(channelId, m.subjectRef.slice('user:'.length))))}
+                  aria-label={t('removeMemberAria', { member: m.displayName })}
+                >
                   {tc('remove')}
-                </button>
+                </Button>
               ) : null}
             </li>
           );
@@ -179,41 +257,48 @@ export function ChannelManageDialog({ channelId, onClose, onChanged, onArchived 
 
       {isOwner ? (
         <>
-          <label className="field">
-            <span className="field-label">{t('addMemberLabel')}</span>
-            <div className="u-flex u-gap-2">
-              <input value={newMember} onChange={(e) => setNewMember(e.target.value)} placeholder={t('addMemberPlaceholder')} disabled={busy} />
-              <button type="button" className="secondary" disabled={busy || !newMember.trim()} onClick={onAdd}>{t('addMemberSubmit')}</button>
-            </div>
-          </label>
-          {/* ADR 0154 Phase 4 — add an AGENT member; an addressed agent responds in-channel. */}
-          <label className="field">
-            <span className="field-label">{t('addAgentLabel')}</span>
-            <div className="u-flex u-gap-2">
-              <input value={newAgent} onChange={(e) => setNewAgent(e.target.value)} placeholder={t('addAgentPlaceholder')} disabled={busy} aria-describedby="channel-add-agent-hint" />
-              <button type="button" className="secondary" disabled={busy || !newAgent.trim()} onClick={onAddAgent} aria-label={t('addAgentSubmit')}>{t('addMemberSubmit')}</button>
-            </div>
-          </label>
-          <p id="channel-add-agent-hint" className="muted u-fs-11 u-mt-1 u-mb-2">{t('addAgentHint')}</p>
+          {/* Add people + agents — the same pickers as the create flow (no raw IDs). */}
+          <MemberPicker selectedIds={addUserIds} onChange={setAddUserIds} excludeUserIds={memberIdsInChannel} />
+          <AgentPicker selectedIds={addAgentIds} onChange={setAddAgentIds} excludeAgentIds={agentIdsInChannel} />
+          <div className="u-flex u-justify-end u-mb-2">
+            <Button variant="secondary" size="sm" disabled={busy || (!addUserIds.length && !addAgentIds.length)} onClick={onAddSelected}>{t('addMemberSubmit')}</Button>
+          </div>
+
+          {/* ADR 0202 D3 — recurring agent posts, bound to a channel-member agent. */}
+          <ChannelSchedulePanel
+            channelId={channelId}
+            agents={roster.filter((r) => r.kind === 'agent').map((r) => ({ agentId: r.subjectRef.slice('agent:'.length), displayName: r.displayName }))}
+          />
 
           {confirmingArchive ? (
             <div className="u-mt-3">
               {/* Archive is reversible → no danger treatment (ConfirmDialog convention). */}
               <p className="u-fs-12 u-mb-1">{t('archiveChannelConfirm')}</p>
               <div className="u-flex u-gap-2 u-justify-end">
-                <button type="button" className="secondary" disabled={busy} onClick={() => setConfirmingArchive(false)}>{tc('cancel')}</button>
-                <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={doArchive}>{t('archiveChannelCta')}</button>
+                <Button variant="secondary" disabled={busy} onClick={() => setConfirmingArchive(false)}>{tc('cancel')}</Button>
+                <Button variant="primary" size="sm" disabled={busy} onClick={doArchive}>{t('archiveChannelCta')}</Button>
               </div>
             </div>
           ) : (
             <div className="u-flex u-justify-between u-items-center u-mt-3">
-              <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => setConfirmingArchive(true)}>{t('archiveChannelCta')}</button>
-              <button type="button" className="secondary" onClick={onClose}>{tc('close')}</button>
+              <Button variant="secondary" size="sm" disabled={busy} onClick={() => setConfirmingArchive(true)}>{t('archiveChannelCta')}</Button>
+              <Button variant="secondary" onClick={onClose}>{tc('close')}</Button>
             </div>
           )}
         </>
+      ) : confirmingLeave ? (
+        <div className="u-mt-3">
+          <p className="u-fs-12 u-mb-1">{t('leaveChannelConfirmBody')}</p>
+          <div className="u-flex u-gap-2 u-justify-end">
+            <Button variant="secondary" disabled={busy} onClick={() => setConfirmingLeave(false)}>{tc('cancel')}</Button>
+            <Button variant="primary" size="sm" disabled={busy} onClick={doLeave}>{t('leaveChannelCta')}</Button>
+          </div>
+        </div>
       ) : (
-        <p className="muted u-fs-12 u-mt-2">{t('ownerOnlyNote')}</p>
+        <div className="u-flex u-justify-between u-items-center u-mt-3">
+          <Button variant="secondary" size="sm" disabled={busy} onClick={() => setConfirmingLeave(true)}>{t('leaveChannelCta')}</Button>
+          <Button variant="secondary" onClick={onClose}>{tc('close')}</Button>
+        </div>
       )}
     </Modal>
   );

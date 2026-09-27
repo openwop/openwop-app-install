@@ -25,6 +25,30 @@
 >
 > **All four ADR 0163 follow-ons are now landed.**
 
+> **Correction / completion note (2026-07-01) — the legacy PREMADE set is retired.**
+> P4 only *demoted* the hardcoded toy templates to a "Starter examples" gallery and still
+> **seeded them into "Your workflows"** on first visit (both the builder dashboard and the chat
+> `WelcomeCard`). That left the throwaway toy graphs (`noop/delay/uppercase` faking RAG/ETL —
+> assumption #2) as visible dead weight. Now closed:
+> - **Deleted** `builder/templates/premadeWorkflows.ts` (`PREMADE_WORKFLOWS`, `TemplateCard`,
+>   `cloneTemplateToUserWorkflow`) + the localStorage `topUpSeededWorkflows` seed + the
+>   "Starter examples" gallery section + the orphaned `category*`/`templatesStarter`/`requiresByok`
+>   i18n keys (all 4 locales).
+> - **Replaced the seed** with `preloadZeroConfigTemplates()` (`builder/persistence/backendStore.ts`):
+>   once per browser, instantiate the **zero-config** installed pack templates (no required params)
+>   into "Your workflows" so a new user lands on real, runnable workflows. Parameterized templates
+>   stay in the gallery for one-click Use. Shared by the dashboard and the `WelcomeCard` (first
+>   surface wins; the welcome quick-cards now point at the real templates).
+> - **Template card chip** now shows a per-pack **category** sourced from the pack manifest's
+>   top-level `keywords` (already schema-permitted — **host-only, no RFC 0013 / manifest-schema
+>   change**; the closed chain object is untouched), replacing the uniform "Pack" chip. Each
+>   vendored pack declares one domain keyword (Sales/Finance/Marketing/Executive/People/IT/Research).
+> - **One-time cleanup for existing installs** — `cleanupLegacyToyWorkflows()` (run once per
+>   browser from the dashboard + welcome card) removes, from both the backend ownership index and
+>   localStorage, any workflow whose `(name, nodeCount)` still exactly matches a pristine toy seed.
+>   Edited or renamed copies are preserved (their signature no longer matches) — so real work is
+>   never destroyed, only the untouched dead weight.
+
 > **How packs reach production (decision, architect-reviewed 2026-06-28).** A
 > workflow-chain pack reaches the live host's gallery via **registry boot-install**
 > — its name@version is listed in `OPENWOP_INSTALL_PACKS`, and at boot
@@ -197,10 +221,38 @@ normative contract (unlikely — it reuses the registry API), that's the only RF
 - [ ] **The ADR 0149 catalog as chain packs:** author the 20 real-work workflows as
   workflow-chain packs (over published nodes) to feed the gallery — how many ship vendored
   vs installed-on-demand?
-- [ ] **`PREMADE_WORKFLOWS` disposition:** delete, or convert the genuinely-useful ones
-  (RAG, approval-gate) into vendored chain packs so nothing regresses.
+- [x] **`PREMADE_WORKFLOWS` disposition: DELETE (2026-07-01).** The legacy toy templates
+  (`noop/delay/uppercase` graphs faking RAG/ETL/review — assumption #2) were **deleted**,
+  not converted: the vendored workflow-chain packs (lighthouse/market-intel/exec-ops/… over
+  real nodes) now fully cover the gallery, so nothing real regressed. See the correction note
+  below.
 - [ ] **Parameter-prompt UX:** "Use template" on a chain with `parameters` needs a form
   (RFC 0013 author-time params) before expand — new builder UI.
+
+  > **Correction note — 2026-07-04 (`{{params.*}}` substitution timing → Path A).**
+  > This ADR's original model treated a dropped chain tile as a *reusable,
+  > re-parameterizable* workflow: `expandChain` materialized the chain's
+  > `parameters` into `variables[]` and rewrote `{{params.x}}` → `{{inputs.x}}`,
+  > resolved per run from a private variable bag (see ADR 0237). The RFC 0013
+  > amendment (2026-07-04) adjudicated the substitution-timing question and
+  > **reaffirmed expansion-time substitution as a `MUST`**: there is no runtime
+  > `{{...}}` interpolation surface over `WorkflowNode.config`/`inputs`, so a
+  > persisted `{{inputs.*}}` (or `{{params.*}}`) token ships verbatim to any other
+  > host and breaks RFC 0013's cross-host portability invariant. The host was
+  > therefore moved to **expansion-time substitution ("Path A")**: `expandChain`
+  > now FREEZES the resolved param values into `config`/`inputs`, emits **no**
+  > `variables[]` for chain params, and stamps `metadata.expandedFrom`
+  > (`{chainId, version, params}`) so a caller re-parameterizes by *re-expanding*
+  > with new params (a fresh owned instance), not by overriding at run time.
+  > A required correctness fix landed with it: because Path A freezes params into
+  > `config`, `deterministicExpansionId` now folds the **canonical params** into
+  > the hash — otherwise two drops of the same chain with different params would
+  > collide on the same `workflowId` and overwrite each other in the owned-workflow
+  > store (this landed in the spec's `workflow-chain-packs.md §Expansion semantics`
+  > step 6). The reusable "fill values per run" ergonomic this ADR wanted is now
+  > the separate, capability-gated **deferred mode** (RFC 0124 / WCP4), for which
+  > this host is reference implementer #1. The "Parameter-prompt UX" form above is
+  > the natural surface for collecting the params Path A freezes at drop time.
 - [ ] **Tenant/RBAC:** which roles may instantiate / assign / delete registry workflows.
 - [ ] **Connector affordance scope:** extend `missingHostSurfaces` to connectors, or a
   new `requiresConnections` node-catalog field surfaced from pack manifests.

@@ -27,9 +27,15 @@ const certificatePem = publicKey.export({ format: 'pem', type: 'spki' }).toStrin
 const digest = (s: string): string => createHash('sha256').update(s, 'utf8').digest('base64');
 const sign = (s: string): string => createSign('RSA-SHA256').update(s, 'utf8').sign(privateKey, 'base64');
 
+// RFC 0163 §B / suite ≥1.147.0: the `<saml:Issuer>` is INSIDE the signed element
+// (byte-for-byte identical to `createSyntheticSamlIdp.canonicalAssertion`). The
+// host validator reconstructs the same shape — omit it and every `valid`
+// assertion fails `bad-signature`.
+const ISSUER = 'urn:openwop:conformance:idp';
 function canonical(id: string, subject: string, nb: string, noa: string): string {
   return (
     `<saml:Assertion ID="${id}" Version="2.0">` +
+    `<saml:Issuer>${ISSUER}</saml:Issuer>` +
     `<saml:Conditions NotBefore="${nb}" NotOnOrAfter="${noa}"/>` +
     `<saml:Subject><saml:NameID>${subject}</saml:NameID></saml:Subject>` +
     `</saml:Assertion>`
@@ -92,6 +98,8 @@ describe('SAML ACS validator (RFC 0050 §A)', () => {
     expect(r.valid, `expected valid; got reason=${r.reason}`).toBe(true);
     expect(r.principal?.principalId).toBe('saml:user_42@example.com-opaque');
     expect(r.principal?.groups).toEqual([]); // no group attributes in the synthetic assertion
+    // RFC 0163 §B — the SIGNED issuer is surfaced for trust-root scoping.
+    expect(r.principal?.issuer).toBe(ISSUER);
   });
 
   const negatives: ReadonlyArray<[Exclude<Variant, 'valid'>, string]> = [

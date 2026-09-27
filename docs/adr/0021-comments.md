@@ -236,3 +236,50 @@ to `packs.openwop.dev` (decoupled from toggle state for replay).
 | Tests | `test/comments-route.test.ts` — 11/11 (CRUD + IDOR + unknown-type/404 + toggle-off 404, string-notification emit + self-activity skip, **delete-cascade authorization** [non-admin foreign-reply 409 + admin cascade + own-replies delete], surface/node smoke, well-known advert) |
 | Verify | `tsc --noEmit` clean; `comments-route` 11/11; full suite green apart from the 8 known pre-existing pack/runtime failures (identical on `origin/main`). Frontend `npm run build` gate green (tsc + token/CSS/bundle/CSP) |
 | Deferred | presence/live cursors (alt. 3), per-subject notification targeting, `comment.create` envelope, moderation panel, rich text, `<CommentsPanel>` embed in CMS/KB |
+
+## Extension — `chat_message` commentable type (2026-07-02)
+
+Make an inline chat message commentable (inline comments on agent output).
+openwop-app's Comments feature (this ADR) is exactly the substrate — a
+threaded-comment store with a resolver registry where **"a new commentable type is
+one map entry."** So inline chat comments are **one registry entry**, NOT a new
+feature (no-parallel-architecture):
+
+- `commentsService.ts` — `chat_message` added to `ResourceType` / `RESOURCE_TYPES` /
+  `TARGETS`. Its `resourceId` is `${sessionId}#${messageId}`: the `sessionId` is
+  validated by **tenant ownership** (`hostExtStorage().getChatSession(tenantId, …)`
+  returns null outside the caller's tenant ⇒ the uniform 404, no cross-tenant leak),
+  and the `messageId` is the **opaque UI anchor**. A chat session carries no
+  org/owner field (it is tenant-private, unlike the org-shared cms/kb resources), so
+  the target `ownerId` is empty — a top-level chat comment emits **no** notification
+  (no distinct owner), while a reply notifies the parent author, both via the
+  existing emit seam (no new type/channel).
+
+**v1 scope (honest):** INTRA-TENANT — a user comments on a chat message in **their
+own** tenant (owner + same-tenant users). **Cross-tenant commenting on a SHARED
+session** (an RFC 0122 share grantee commenting under the owner's tenant) is a
+follow-up: it needs the `chat_message` validate to also accept a share-grant proof,
+not just tenant ownership. **Frontend (Phase 2 — SHIPPED):** inline-in-chat
+rendering now anchors a thread to each settled user/assistant message in the feed:
+
+- `chat/MessageComments.tsx` — a collapsed per-message affordance that expands the
+  **reused** `features/comments/CommentsPanel` scoped to `chat_message` /
+  `${sessionId}#${messageId}`. The panel is mounted **only while open**, so a chat's
+  initial render fires **no** comment fetch (no N+1 / rate-limit fan-out on load).
+- `chat/hooks/useCommentsContext.ts` — resolves the org namespace once per surface
+  (the caller's primary org via `listOrgs()`), gated by the `comments` toggle;
+  returns null when off / no org ⇒ the affordance is simply absent.
+- Threaded `commentsContext?` through `MessageFeed` → `ConversationView`; only the
+  full `ChatSidebar` surface supplies it, so **embeds stay comment-free** (ADR 0073).
+- `commentsClient.ts` adds `chat_message` to the `ResourceType` union but NOT to
+  `RESOURCE_TYPES` (it has no picker — it's anchored inline / deep-linked).
+- 4-locale i18n (en/es/fr/pt-BR); DESIGN tokens + reused `ui/` primitives only.
+
+No second comment system — this is the ADR's "one commentable type = one registry
+entry" surfaced inline (no-parallel-architecture).
+
+Verified: `test/comments-route.test.ts` (+block) — post/list a chat-message comment,
+unknown-session 404, cross-tenant IDOR 404 (12 total). Frontend:
+`chat/__tests__/MessageComments.test.tsx` (2) — collapsed ⇒ no fetch, expand ⇒ thread
+scoped to `${sessionId}#${messageId}`. FE build gate + 344 chat/comments tests green;
+tsc clean.

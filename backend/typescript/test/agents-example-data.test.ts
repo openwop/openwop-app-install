@@ -33,7 +33,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -68,7 +68,7 @@ describe('agents-demo backend foundations', () => {
     expect(first.status).toBe(200);
     expect(first.body.seeded).toBe(true);
     expect(first.body.agents).toBe(10); // 8 twins + Iris + Executive Operations (ADR 0032)
-    expect(first.body.domains).toEqual(['user-agents', 'roster', 'boards', 'cards', 'schedules', 'org-chart']);
+    expect(first.body.domains).toEqual(['user-agents', 'roster', 'workflows', 'boards', 'cards', 'schedules', 'org-chart']);
 
     const roster = await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster');
     expect(roster.body.roster.length).toBe(10);
@@ -90,7 +90,7 @@ describe('agents-demo backend foundations', () => {
     // Re-seed is a no-op (does not clobber the existing roster).
     const second = await api<{ seeded: boolean; domains: string[] }>('/v1/host/openwop-app/example-data/seed', { method: 'POST', body: '{}' });
     expect(second.body.seeded).toBe(false);
-    expect(second.body.domains).toEqual(['user-agents', 'roster', 'boards', 'cards', 'schedules', 'org-chart']);
+    expect(second.body.domains).toEqual(['user-agents', 'roster', 'workflows', 'boards', 'cards', 'schedules', 'org-chart']);
     const rosterAgain = await api<{ roster: RosterEntry[] }>('/v1/host/openwop-app/roster');
     expect(rosterAgain.body.roster.length).toBe(10);
   });
@@ -113,7 +113,7 @@ describe('agents-demo backend foundations', () => {
     // The roster↔inventory link: the persona's inventory agentId is the
     // deterministic `user.<tenant>.<slug>` the roster entry's agentRef points at.
     const idris = inv.body.agents.find((a) => a.persona === 'Idris')!;
-    expect(idris.agentId).toBe('user.default.idris');
+    expect(idris.agentId).toBe('user.idris');
     expect(idris.modelClass).toBe('chat');
     expect(idris.packName).toBe('user:default'); // tenant-scoped provenance (ownerTenant)
   });
@@ -280,16 +280,20 @@ describe('agents-demo backend foundations', () => {
     // vitest isolates module state per file, so this reset can't leak into other
     // suites.
     getAgentRegistry()._resetForTest();
-    expect(getAgentRegistry().get('user.default.idris')).toBeNull(); // cold: not in-process
+    expect(getAgentRegistry().get('user.idris', 'default')).toBeNull(); // cold: not in-process
 
     // resolve() falls through to the agent-pack resolver, which now hydrates a
     // user/seeded agent from storage on a miss — so the chat-responder dispatch
     // and the by-id inventory routes route correctly on any instance.
-    const hydrated = await getAgentRegistry().resolve('user.default.idris');
+    // ADR 0379 P2 — user agents live under the (tenant, agentId) registry key,
+    // so the read-through carries the tenant (as every production caller does).
+    const hydrated = await getAgentRegistry().resolve('user.idris', 'default');
     expect(hydrated?.persona).toBe('Idris');
     expect(hydrated?.ownerTenant).toBe('default'); // tenant-scoping preserved
     // Now cached in-process (last-write-wins register).
-    expect(getAgentRegistry().get('user.default.idris')?.persona).toBe('Idris');
+    expect(getAgentRegistry().get('user.idris', 'default')?.persona).toBe('Idris');
+    // A tenant-less lookup deliberately sees pack agents only.
+    expect(getAgentRegistry().get('user.idris')).toBeNull();
   });
 });
 

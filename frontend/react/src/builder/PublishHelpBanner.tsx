@@ -4,6 +4,7 @@
  * for the PR-based registry submission flow.
  */
 
+import { Button } from '../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { formatBytes } from '../i18n/format.js';
 
@@ -71,7 +72,7 @@ export function PublishHelpBanner({ publishHelp, onClose }: PublishHelpBannerPro
         </li>
       </ol>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={onClose}>{t('common:close')}</button>
+        <Button variant="secondary" onClick={onClose}>{t('common:close')}</Button>
       </div>
     </div>
   );

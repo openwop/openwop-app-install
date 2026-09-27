@@ -1,11 +1,20 @@
 {
   "name": "feature.campaign-brief.agents",
-  "version": "1.0.0",
-  "description": "Personas & Campaign Brief agent pack (ADR 0156 / ADR 0014) — the Campaign Brief Strategist, a manifest agent whose tools are feature.campaign-brief.nodes over ctx.features['campaign-brief']. It validates a brief and generates the grounded messaging kernel from the AI chat. Tool-allowlisted to the Campaign Brief surface only.",
+  "version": "1.3.1",
+  "description": "Personas & Campaign Brief agent pack \u2014 the Campaign Brief Strategist, a manifest agent whose tools are the registered openwop:campaign-brief.* chat tools (get-brief, validate, generate-kernel, research.run) sharing the campaign-brief routes' workspace access. It reads and validates a brief, ignites the grounded messaging-kernel workflow, and runs the market-intel research pipeline from the AI chat \u2014 each stopping at a human approval gate. Tool-allowlisted to the Campaign Brief surface only.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "campaign-brief", "agent", "strategist", "kernel", "marketing"],
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "campaign-brief",
+    "agent",
+    "strategist",
+    "kernel",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
   "peerDependencies": {
     "aiProviders": "supported",
     "agents.manifestRuntime": "supported"
@@ -15,16 +24,27 @@
       "agentId": "feature.campaign-brief.agents.brief-strategist",
       "persona": "RESEARCH",
       "label": "Campaign Brief Strategist",
-      "description": "Validates a campaign brief and generates its messaging kernel — the shared strategic foundation every channel echoes — grounded in the knowledge base and brand voice, via feature.campaign-brief.nodes. Recommends; the human approves the kernel.",
+      "description": "Reads and validates a campaign brief and ignites its messaging kernel \u2014 the shared strategic foundation every channel echoes \u2014 grounded in the knowledge base and brand voice, plus the market-intel research pipeline, via the openwop:campaign-brief.* chat tools. Recommends; the human approves the kernel.",
       "modelClass": "research",
       "systemPromptRef": "prompts/brief-strategist.md",
       "toolAllowlist": [
-        "openwop:feature.campaign-brief.nodes.validate",
-        "openwop:feature.campaign-brief.nodes.generate-kernel"
+        "openwop:campaign-brief.get-brief",
+        "openwop:campaign-brief.validate",
+        "openwop:campaign-brief.research.run",
+        "openwop:campaign-brief.generate-kernel"
       ],
-      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
-      "confidence": { "defaultThreshold": 0.6 }
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
     }
   ],
-  "runtime": { "language": "remote", "entry": "pack.json" }
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
 }

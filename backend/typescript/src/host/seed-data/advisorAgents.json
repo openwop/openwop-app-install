@@ -135,7 +135,6 @@
       "handle": "titans",
       "name": "Titans of Tech & Industry",
       "personaKind": "living",
-      "livingPersonaAck": true,
       "visibility": "shared",
       "advisors": ["elon-trask", "geoff-bezor", "steve-jobes", "sam-oltman"]
     },

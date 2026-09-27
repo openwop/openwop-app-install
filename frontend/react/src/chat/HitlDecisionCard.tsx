@@ -32,12 +32,14 @@ interface Props {
 
 type IconKind = 'check' | 'x' | 'ban';
 
-const KIND_VERB: Record<string, string> = {
-  approval: 'Approved',
-  clarification: 'Clarified',
-  refinement: 'Refined',
-  cancellation: 'Confirmed cancellation',
-  'external-event': 'Received',
+// i18n keys in the `chat` namespace — the verb is user-visible text AND the
+// aria-label, so it must localize (CHAT-3).
+const KIND_VERB_KEY: Record<string, string> = {
+  approval: 'hitlVerbApproved',
+  clarification: 'hitlVerbClarified',
+  refinement: 'hitlVerbRefined',
+  cancellation: 'hitlVerbCancelConfirmed',
+  'external-event': 'hitlVerbReceived',
 };
 
 const KIND_ICON: Record<string, IconKind> = {
@@ -50,10 +52,10 @@ const KIND_ICON: Record<string, IconKind> = {
 
 const KIND_COLOR: Record<string, string> = {
   approval: 'var(--color-success)',
-  clarification: 'var(--color-accent)',
-  refinement: 'var(--color-accent)',
-  cancellation: 'var(--color-text-muted)',
-  'external-event': 'var(--color-accent)',
+  clarification: 'var(--clay-text)',
+  refinement: 'var(--clay-text)',
+  cancellation: 'var(--ink-3)',
+  'external-event': 'var(--clay-text)',
 };
 
 function StatusIcon({ kind, color }: { kind: IconKind; color: string }): JSX.Element {
@@ -65,7 +67,7 @@ function StatusIcon({ kind, color }: { kind: IconKind; color: string }): JSX.Ele
 
 export function HitlDecisionCard({ entry, nodeName }: Props): JSX.Element {
   const { t } = useTranslation('chat');
-  const verb = KIND_VERB[entry.kind] ?? 'Resolved';
+  const verb = t(KIND_VERB_KEY[entry.kind] ?? 'hitlVerbResolved');
   const icon = KIND_ICON[entry.kind] ?? 'check';
   const color = KIND_COLOR[entry.kind] ?? 'var(--color-success)';
 
@@ -78,7 +80,7 @@ export function HitlDecisionCard({ entry, nodeName }: Props): JSX.Element {
   // Approval card sends `action: 'reject'` for the reject button;
   // we surface that distinctly so the user sees they rejected, not
   // "Approved" (which would be misleading).
-  const effectiveVerb = rejected ? 'Rejected' : verb;
+  const effectiveVerb = rejected ? t('hitlVerbRejected') : verb;
   const effectiveIcon: IconKind = rejected ? 'x' : icon;
   const effectiveColor = rejected ? 'var(--color-danger)' : color;
 
@@ -97,7 +99,7 @@ export function HitlDecisionCard({ entry, nodeName }: Props): JSX.Element {
       className="hitl-card"
       style={{
         background: `color-mix(in oklch, ${effectiveColor} 7%, transparent)`,
-        border: `1px solid color-mix(in oklch, ${effectiveColor} 26%, var(--color-border))`,
+        border: `1px solid color-mix(in oklch, ${effectiveColor} 26%, var(--rule))`,
         // Signature: a status-colored left accent bar — reads the outcome
         // (approved / rejected / cancelled) at a glance, and pairs the color cue
         // with a line-weight cue (thicker on reject) for high-contrast users.

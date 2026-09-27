@@ -62,8 +62,8 @@ describe('roster service (pure)', () => {
 
   it('updates the portfolio + enabled flag', async () => {
     const e = await createRosterEntry({ tenantId: 't1', persona: 'Sally', agentRef: { agentId: 'a.b.c.d' } });
-    await updateRosterEntry(e.rosterId, { workflows: ['wf-1', 'wf-2'], enabled: false });
-    const after = await getRosterEntry(e.rosterId);
+    await updateRosterEntry(e.tenantId, e.rosterId, { workflows: ['wf-1', 'wf-2'], enabled: false });
+    const after = await getRosterEntry(e.tenantId, e.rosterId);
     expect(after?.workflows).toEqual(['wf-1', 'wf-2']);
     expect(after?.enabled).toBe(false);
   });
@@ -73,14 +73,14 @@ describe('roster service (pure)', () => {
     const e = await createRosterEntry({ tenantId: 't1', persona: 'Sally', agentRef: { agentId: 'a.b.c.d' } });
     expect(e.avatarUrl).toBeUndefined();
     // set
-    await updateRosterEntry(e.rosterId, { avatarUrl: dataUri });
-    expect((await getRosterEntry(e.rosterId))?.avatarUrl).toBe(dataUri);
+    await updateRosterEntry(e.tenantId, e.rosterId, { avatarUrl: dataUri });
+    expect((await getRosterEntry(e.tenantId, e.rosterId))?.avatarUrl).toBe(dataUri);
     // undefined patch leaves it untouched
-    await updateRosterEntry(e.rosterId, { workflows: ['wf-9'] });
-    expect((await getRosterEntry(e.rosterId))?.avatarUrl).toBe(dataUri);
+    await updateRosterEntry(e.tenantId, e.rosterId, { workflows: ['wf-9'] });
+    expect((await getRosterEntry(e.tenantId, e.rosterId))?.avatarUrl).toBe(dataUri);
     // null clears it
-    await updateRosterEntry(e.rosterId, { avatarUrl: null });
-    expect((await getRosterEntry(e.rosterId))?.avatarUrl).toBeUndefined();
+    await updateRosterEntry(e.tenantId, e.rosterId, { avatarUrl: null });
+    expect((await getRosterEntry(e.tenantId, e.rosterId))?.avatarUrl).toBeUndefined();
   });
 });
 
@@ -102,7 +102,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     await __resetRosterStore();
     await __resetKanbanStore();
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
 
@@ -272,7 +272,7 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
 
     // A negative cadence is rejected.
     expect(
-      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: -1 }) })).status,
+      (await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: -2 }) })).status, // -1 is now the ADR 0313 OFF sentinel; other negatives still reject
     ).toBe(400);
 
     // A positive cadence + autonomy level persist and round-trip on GET.
@@ -288,6 +288,32 @@ describe('roster routes + board attribution (sqlite memory app)', () => {
     // 0 disables the heartbeat (the field is cleared, not stored as 0).
     await jsonFetch(`/v1/host/openwop-app/roster/${id}`, { method: 'PATCH', body: JSON.stringify({ heartbeatIntervalMs: 0 }) });
     expect((await jsonFetch<{ heartbeatIntervalMs?: number }>(`/v1/host/openwop-app/roster/${id}`)).body.heartbeatIntervalMs).toBeUndefined();
+  });
+
+  it('decorates GET responses with the resolved heartbeat cadence (ADR 0313 D3)', async () => {
+    const created = await jsonFetch<{ rosterId: string; heartbeat?: { effectiveIntervalMs: number; agentTurnFallback: boolean } }>('/v1/host/openwop-app/roster', {
+      method: 'POST',
+      body: JSON.stringify({ persona: 'HbChip', agentRef: { agentId: 'core.openwop.agents.brief-writer' } }),
+    });
+    const id = created.body.rosterId;
+
+    // Unconfigured entry ⇒ the host default (10 min in this test env) surfaces read-time.
+    const fresh = await jsonFetch<{ heartbeatIntervalMs?: number; heartbeat?: { effectiveIntervalMs: number; agentTurnFallback: boolean } }>(`/v1/host/openwop-app/roster/${id}`);
+    expect(fresh.body.heartbeatIntervalMs).toBeUndefined(); // decoration, never stored
+    expect(fresh.body.heartbeat?.effectiveIntervalMs).toBe(600_000);
+    expect(typeof fresh.body.heartbeat?.agentTurnFallback).toBe('boolean');
+
+    // The -1 sentinel resolves to 0 (checks off) on the wire.
+    const off = await jsonFetch<{ heartbeat?: { effectiveIntervalMs: number } }>(`/v1/host/openwop-app/roster/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ heartbeatIntervalMs: -1 }),
+    });
+    expect(off.body.heartbeat?.effectiveIntervalMs).toBe(0);
+
+    // The list surface carries the same decoration.
+    const list = await jsonFetch<{ roster: Array<{ rosterId: string; heartbeat?: { effectiveIntervalMs: number } }> }>('/v1/host/openwop-app/roster');
+    const row = list.body.roster.find((r) => r.rosterId === id);
+    expect(row?.heartbeat?.effectiveIntervalMs).toBe(0);
   });
 
   it('does NOT fire the trigger when the bound roster member is disabled (RFC 0086 §A)', async () => {

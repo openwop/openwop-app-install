@@ -14,6 +14,11 @@ import {
   type ArtifactProjection, type ArtifactRevision,
 } from '../artifactClient.js';
 import { ArtifactWorkbench } from '../ArtifactWorkbench.js';
+// The interactive-artifact renderers (interactive.mermaid, …) register the
+// `editable` flag the workbench's Edit canvas gates on. Production wires this at
+// chat boot (ChatTab); this isolated component test must establish the same
+// precondition (idempotent — the registry guards against double-registration).
+import { registerDefaultArtifactRenderers } from '../defaultRenderers.js';
 
 const mockGet = vi.mocked(getArtifact);
 const mockRevs = vi.mocked(listArtifactRevisions);
@@ -30,7 +35,7 @@ const REV: ArtifactRevision = {
   content: 'Q3 variance was within plan.', createdBy: { kind: 'run', id: 'run1' }, createdAt: '2026-06-20T00:00:00.000Z',
 };
 
-beforeEach(() => { mockGet.mockReset(); mockRevs.mockReset(); mockRev.mockReset(); });
+beforeEach(() => { registerDefaultArtifactRenderers(); mockGet.mockReset(); mockRevs.mockReset(); mockRev.mockReset(); });
 afterEach(cleanup);
 
 describe('ArtifactWorkbench (ART-2)', () => {

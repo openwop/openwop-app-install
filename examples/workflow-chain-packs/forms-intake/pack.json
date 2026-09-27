@@ -1,0 +1,40 @@
+{
+  "name": "vendor.openwop-app.workflows.forms-intake",
+  "version": "1.3.0",
+  "kind": "workflow-chain",
+  "description": "Self-serve intake portal (ADR 0246/0247, STRAT-PORTAL). Bridges the forms feature to priority-matrix idea intake WITHOUT either feature importing the other: a public/authed form submission emits host.forms.submission.created (ADR 0208), this chain re-reads the submission under authz via ctx.features.forms.getSubmission, and — when the form's owner has configured an intake binding — files it as an idea on the bound priority-matrix list through the existing submit-idea verb, which also stamps the idea's intake overlay with sourceChannel='form' + the sourceSubmissionId for provenance (ADR 0247 OQ-5). A form with no binding cleanly no-ops (the conditional edge). The anonymous submitter never chooses the list (owner-configured binding); the target list's org-ownership is enforced at the submit-idea write boundary (expectedOrgId). Bind it per tenant to host.forms.submission.created via the ADR 0208 event→workflow bindings.",
+  "author": "openwop-app",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "keywords": ["Forms", "Priority Matrix", "Intake"],
+  "chains": [
+    {
+      "chainId": "forms-intake.route-submission",
+      "version": "1.3.0",
+      "label": "Forms: Route Submission to Intake",
+      "description": "On host.forms.submission.created, re-read the submission under authz and — if the form has an intake binding — file it as a priority-matrix idea (title/notes from the bound fields, list from the owner-configured binding), stamping form provenance (sourceChannel='form' + submissionId) on the idea. No binding ⇒ no-op. If the owner-bound list was deleted after binding, submit-idea 404s but the run still COMPLETES cleanly via the `done` terminal's `all_complete` edge (RFC 0125 fan-in / error-routing) — the submission is always captured, so a stale binding degrades gracefully instead of failing the run (ADR 0247 OQ-2). 1.2.0 (ADR 0584): the `file → done` edge is PORT-QUALIFIED (WF-FORM-1) so the declared output is reachable and a degraded run is distinguishable from a filed one, and a third branch off `get` turns 'there is no submission to route' into a TYPED failure instead of a green empty run (WF-FORM-2). 1.3.0 (ADR 0584 §Correction, WF-FORM-5): the three branches off `get` are MUTUALLY EXCLUSIVE. They were `equals willFile yes` / `notEquals willFile yes` / `falsy found`, and on a miss the middle two were BOTH true, so `skip` and `refuse` fired together — the test passed only because `stop-and-error` terminates the run, i.e. it was pinned to a resolution rule rather than to the routing. They now switch on one three-valued `route` output ('file' | 'skip' | 'refuse'), so a future change to terminal resolution cannot silently re-green the manual run. Also (FORM-QUAR-1) a QUARANTINED submission answers `willFile:'no'` → `route:'skip'`: a held row is stored for a human to review and is never filed as intake.",
+      "parameters": { "type": "object", "additionalProperties": false, "required": [], "properties": {} },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "trigger", "typeId": "core.trigger.event", "name": "Form submission created", "position": { "x": 0, "y": 0 }, "config": { "eventName": "host.forms.submission.created" }, "inputs": {} },
+          { "id": "get", "typeId": "feature.forms.nodes.get-submission", "name": "Read submission + binding", "position": { "x": 320, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "file", "typeId": "feature.priority-matrix.nodes.submit-idea", "name": "File as idea (+ provenance)", "position": { "x": 640, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "skip", "typeId": "core.flow.noop", "name": "No binding — nothing to file", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "refuse", "typeId": "core.flow.stop-and-error", "name": "No submission to route — fail honestly (WF-FORM-2)", "position": { "x": 640, "y": 320 }, "config": { "code": "FORMS_SUBMISSION_NOT_FOUND", "message": "There is no submission to route. This chain is EVENT-IGNITED: it reads the ids that host.forms.submission.created carries, so a manual run from the workflow picker has no payload and nothing to fetch. Bind it to that event on the Event Bindings page instead." }, "inputs": {} },
+          { "id": "done", "typeId": "core.flow.noop", "name": "Filing attempted — complete regardless (OQ-2)", "position": { "x": 960, "y": 0 }, "config": {}, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "trigger.payload", "to": "get" },
+          { "from": "get", "to": "file", "condition": { "type": "equals", "left": "route", "right": "file" } },
+          { "from": "get", "to": "skip", "condition": { "type": "equals", "left": "route", "right": "skip" } },
+          { "from": "get", "to": "refuse", "condition": { "type": "equals", "left": "route", "right": "refuse" } },
+          { "from": "file.cardId", "to": "done.value", "triggerRule": "all_complete" }
+        ]
+      },
+      "outputs": {
+        "value": { "type": "string", "description": "The filed idea's card id. WF-FORM-1: this used to be declared as `cardId` and was STRUCTURALLY UNREACHABLE — `outputRole:'primary'` lands on the `done` noop, which returns only `{value: ctx.inputs.value}`, and the bare `file → done` edge delivered `{cardId,title,status}` (no key named `value`). So every run — filed, degraded, skipped — reported `{value: undefined}`, and the ADR 0247 OQ-2 graceful degrade was indistinguishable from a success at the run boundary. Port-qualifying BOTH ends makes the declared output reachable AND the two paths distinguishable in one change. Absent when the form has no intake binding, or when the owner-bound list was deleted (the degrade path)." }
+      }
+    }
+  ]
+}

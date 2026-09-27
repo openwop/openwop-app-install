@@ -1,0 +1,66 @@
+{
+  "name": "feature.entities.nodes",
+  "version": "1.1.0",
+  "description": "Entities feature node pack (ADR 0386 Phase 6) — read/query/write user-defined content types over ctx.features.entities. Tenant-guarded; creates are idempotent via deterministic entity:<runId>:<nodeId> ids (ADR 0162). 'On entity written' automation rides host-event bindings (host.entities.entity.written), not a pack trigger node.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "entities", "content-modeling", "headless"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.entities.nodes.types-read",
+      "version": "1.0.0",
+      "label": "Entities Types Read",
+      "description": "Lists the workspace's entity types, or one type's full field schema by typeName, over ctx.features.entities. Read-only.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.entities.nodes.query",
+      "version": "1.0.0",
+      "label": "Entities Query",
+      "description": "Queries records of a type with typed filters (eq/neq/in/gt/gte/lt/lte/contains), sort and limit, over ctx.features.entities. Optional locale resolves localized values (exact -> family -> base, ADR 0406). Read-only.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.entities.nodes.get",
+      "version": "1.0.0",
+      "label": "Entities Get",
+      "description": "Reads one record by typeName + entityId over ctx.features.entities. Optional locale resolves localized values (ADR 0406). Read-only.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.entities.nodes.create",
+      "version": "1.0.0",
+      "label": "Entities Create",
+      "description": "Creates a record of a type through closed-world validation. Idempotent: an explicit entityId wins, else the deterministic entity:<runId>:<nodeId> id makes re-runs/forks safe (ADR 0162).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.entities.nodes.update",
+      "version": "1.0.0",
+      "label": "Entities Update",
+      "description": "Patches a record's values (provided keys replace; null clears a non-required key) through closed-world validation. Update-only — replay/fork safe.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.entities.nodes.delete",
+      "version": "1.0.0",
+      "label": "Entities Delete",
+      "description": "Deletes a record by typeName + entityId. Relationship onDelete policies are enforced fail-closed (restrict default).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

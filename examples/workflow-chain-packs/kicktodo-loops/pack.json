@@ -1,0 +1,69 @@
+{
+  "name": "core.openwop.workflows.kicktodo-loops",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "KickTodo enrollment + scheduled loops (enrollment, daily-loop, reminder-loop), migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids so scheduler-continuation ignition + replay resolve unchanged. Enrollment demonstrates RFC 0133 produced variables: `enroll` writes `enrollmentId` to the bag, `materialize` reads it. v1.1.0 (ADR 0689): the reminder-loop gains a second node — after the consent-gated reminder, `coach-turn` enqueues one proactive KickBot turn into the participant's own 1:1.",
+  "keywords": ["KickTodo"],
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "openwop-app.kicktodo.enrollment",
+      "version": "1.0.0",
+      "label": "Enroll in a challenge",
+      "description": "Enroll (idempotent) then materialize today's plan.",
+      "parameters": {
+        "type": "object", "additionalProperties": false, "required": ["ownerSubject", "challengeId"],
+        "properties": {
+          "ownerSubject": { "type": "string", "description": "The participant subject." },
+          "challengeId": { "type": "string", "description": "The challenge to enroll in." },
+          "challengeVersion": { "type": "number", "description": "The immutable challenge revision.", "default": 1 },
+          "timezone": { "type": "string", "description": "The participant timezone." }
+        }
+      },
+      "producedVariables": [
+        { "name": "enrollmentId", "producedBy": "enroll", "type": "string", "description": "The enrollment id the enroll node writes to the run bag; materialize reads it (RFC 0133 §2)." }
+      ],
+      "dag": {
+        "nodes": [
+          { "id": "enroll", "typeId": "feature.kicktodo.nodes.enroll", "name": "Enroll", "inputs": { "ownerSubject": "{{params.ownerSubject}}", "challengeId": "{{params.challengeId}}", "challengeVersion": "{{params.challengeVersion}}", "timezone": "{{params.timezone}}" } },
+          { "id": "materialize", "typeId": "feature.kicktodo.nodes.materialize-today", "name": "Materialize today", "inputs": { "enrollmentId": { "type": "variable", "variableName": "enrollmentId" } } }
+        ],
+        "edges": [ { "from": "enroll", "to": "materialize", "triggerRule": "all_success" } ]
+      }
+    },
+    {
+      "chainId": "openwop-app.kicktodo.daily-loop",
+      "version": "1.0.0",
+      "label": "Daily checkpoint",
+      "description": "Materialize today then evaluate progress.",
+      "parameters": {
+        "type": "object", "additionalProperties": false, "required": ["enrollmentId", "ownerSubject"],
+        "properties": { "enrollmentId": { "type": "string" }, "ownerSubject": { "type": "string" } }
+      },
+      "dag": {
+        "nodes": [
+          { "id": "materialize", "typeId": "feature.kicktodo.nodes.materialize-today", "name": "Materialize today", "inputs": { "enrollmentId": "{{params.enrollmentId}}" } },
+          { "id": "evaluate", "typeId": "feature.kicktodo.nodes.evaluate-progress", "name": "Evaluate progress", "inputs": { "enrollmentId": "{{params.enrollmentId}}", "ownerSubject": "{{params.ownerSubject}}" } }
+        ],
+        "edges": [ { "from": "materialize", "to": "evaluate", "triggerRule": "all_success" } ]
+      }
+    },
+    {
+      "chainId": "openwop-app.kicktodo.reminder-loop",
+      "version": "1.1.0",
+      "label": "Reminder checkpoint",
+      "description": "Send the opt-in reminder if the enrollment is active + has a pending action, then let KickBot speak first about it in the participant's own conversation (ADR 0689).",
+      "parameters": {
+        "type": "object", "additionalProperties": false, "required": ["enrollmentId", "ownerSubject"],
+        "properties": { "enrollmentId": { "type": "string" }, "ownerSubject": { "type": "string" } }
+      },
+      "dag": {
+        "nodes": [
+          { "id": "remind", "typeId": "feature.kicktodo.nodes.remind-today", "name": "Remind today", "inputs": { "enrollmentId": "{{params.enrollmentId}}", "ownerSubject": "{{params.ownerSubject}}" } },
+          { "id": "coach-turn", "typeId": "feature.kicktodo.nodes.kickbot-coach-turn", "name": "KickBot speaks first", "inputs": { "enrollmentId": "{{params.enrollmentId}}", "ownerSubject": "{{params.ownerSubject}}", "occasion": "reminder" } }
+        ],
+        "edges": [ { "from": "remind", "to": "coach-turn", "triggerRule": "all_success" } ]
+      }
+    }
+  ]
+}

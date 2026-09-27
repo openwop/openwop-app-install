@@ -1,0 +1,34 @@
+{
+  "name": "core.openwop.kanban-work-items",
+  "version": "1.1.0",
+  "description": "Core reusable Kanban WorkItem materialization. Converts an extension-owned reviewed plan into durable, dependency-aware Kanban work-item aggregates and board-card projections through ctx.kanban; it knows no canvas or feature-specific data model.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["core", "kanban", "work-items", "workflow", "canvas"],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "host.kanban": "supported"
+  },
+  "nodes": [
+    {
+      "typeId": "core.openwop.kanban.work-items.materialize",
+      "version": "1.1.0",
+      "label": "Materialize Kanban work items",
+      "description": "Materializes a reviewed, namespaced plan into the selected board's reusable WorkItems and card projections. The host derives tenant scope and a deterministic delivery key from the run; a retry converges without duplicate cards. Compose after a review gate when the source process requires approval.",
+      "category": "coordination",
+      "role": "side-effect",
+      "capabilities": ["cacheable", "side-effectful"],
+      "configSchemaRef": "schemas/materialize.config.json",
+      "inputSchemaRef": "schemas/materialize.input.json",
+      "outputSchemaRef": "schemas/materialize.output.json"
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

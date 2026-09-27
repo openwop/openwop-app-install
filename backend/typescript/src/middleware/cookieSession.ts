@@ -15,6 +15,7 @@
  */
 
 import type { Response } from 'express';
+import { readSecretEnv } from '../host/secretEnv.js';
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createLogger } from '../observability/logger.js';
 
@@ -52,6 +53,25 @@ export interface SessionPayload {
    *  after a switch); this is always the caller's own `user:<hash>` / `anon:<sid>`
    *  so the implicit personal-owner check stays correct across switches. */
   personalTenant?: string;
+  /** True when the sign-in that produced this session verified a second factor
+   *  (ADR 0389 Phase 1). Stamped from the Firebase ID token's
+   *  `firebase.sign_in_second_factor` claim at OIDC bind / bearer promotion —
+   *  the host never sees or stores factor material (enrollment is fully
+   *  delegated to Identity Platform). Absent ⇒ single-factor session; the
+   *  tenant `requireMfa` gate (Phase 4) fails closed on absence. */
+  mfa?: boolean;
+  /** True ⇒ the sliding-window refresh MUST NOT extend this session (ADR 0389
+   *  P3 grade-pass SEC-C2: the break-glass 10-minute session was silently
+   *  re-issued for 24h by the refresh branch — a "short-lived" emergency
+   *  session became an indefinitely renewable superadmin cookie). */
+  noRefresh?: boolean;
+  /** ADR 0621 D2 — the `User.sessionEpoch` this session was minted under.
+   *  Compared per request against the durable row: a mismatch is
+   *  `401 session_revoked` ("sign out everywhere", disable, erase, factor
+   *  removal all bump the row's epoch). Absent on a pre-ADR cookie ⇒ read as 0,
+   *  which matches a row that was never bumped. Only meaningful alongside
+   *  `userId`; anon / unbound-subject sessions carry none. */
+  epoch?: number;
   iat: number;
   exp: number;
 }
@@ -76,7 +96,7 @@ export function base64urlDecode(s: string): Buffer {
  * fallback, so this is null outside production.
  */
 export function sessionSecretConfigError(): string | null {
-  const s = process.env.OPENWOP_SESSION_SECRET;
+  const s = readSecretEnv('OPENWOP_SESSION_SECRET');
   if (s && s.length >= 32) return null;
   if (process.env.NODE_ENV === 'production') {
     return 'OPENWOP_SESSION_SECRET must be set in production (>=32 chars) — cookie-session minting will fail without it';
@@ -88,7 +108,7 @@ export function sessionSecretConfigError(): string | null {
  *  unset/too short) or a stable per-process dev fallback. Exported so OTHER same-secret signers
  *  (e.g. `host/runStreamToken`) reuse the SAME resolution + prod gate, never a drifting copy. */
 export function readSessionSecret(): string {
-  const s = process.env.OPENWOP_SESSION_SECRET;
+  const s = readSecretEnv('OPENWOP_SESSION_SECRET');
   if (s && s.length >= 32) return s;
   const configError = sessionSecretConfigError();
   if (configError) {
@@ -150,25 +170,70 @@ export function mintAnonSession(): SessionPayload {
  */
 export function issueUserSession(
   res: Response,
-  opts: { userId: string; tenantId: string; personalTenant?: string; subject?: string },
+  opts: { userId: string; tenantId: string; personalTenant?: string; subject?: string; mfa?: boolean; epoch: number },
 ): void {
+  setSessionCookie(res, mintUserSessionCookieValue(opts));
+}
+
+/**
+ * The signed user-session cookie VALUE — the one payload builder every user
+ * session is minted through (`issueUserSession` sets it on a response; the
+ * RFC 0170 mint seam returns it as a cookie-presented credential).
+ */
+export function mintUserSessionCookieValue(
+  opts: { userId: string; tenantId: string; personalTenant?: string; subject?: string; mfa?: boolean; epoch: number },
+): string {
   const now = Math.floor(Date.now() / 1000);
   const session: SessionPayload = {
     sid: base64urlEncode(randomBytes(18)),
     tenantId: opts.tenantId,
     tier: 'user',
     userId: opts.userId,
+    // ADR 0621 D2 — REQUIRED: every mint site stamps the user's CURRENT epoch
+    // (a login reads the row; a re-mint such as the workspace switch carries the
+    // epoch the middleware just validated). Making it required is what keeps a
+    // new mint site from shipping a cookie the revocation check cannot see.
+    epoch: opts.epoch,
     // OIDC bind (ADR 0003 Phase 4a) carries the `oidc:<sub>` so a follow-up bearer
     // request matches this cookie and resolves the bound `user:<userId>`. Absent
     // for password login (no bearer to match against).
     ...(opts.subject ? { subject: opts.subject } : {}),
+    // ADR 0389 P1: carry the verified-second-factor mark across re-issues
+    // (bind, workspace switch) so the session doesn't silently lose it.
+    ...(opts.mfa ? { mfa: true } : {}),
     // The caller's intrinsic tenant — defaults to the active tenant at login
     // (their personal workspace), preserved verbatim across a later switch.
     personalTenant: opts.personalTenant ?? opts.tenantId,
     iat: now,
     exp: now + COOKIE_TTL_SECONDS,
   };
-  setSessionCookie(res, signSession(session));
+  return signSession(session);
+}
+
+/**
+ * ADR 0621 D1 — expire the session cookie on the response. ONE definition,
+ * shared by the logout route and the middleware's per-request refusal
+ * (`account_disabled` / `account_erased` / `session_revoked`). Replaces any
+ * pending same-name Set-Cookie (a sliding refresh or a membership re-pin that
+ * already ran on this response) — the same one-cookie-per-response rule
+ * `setSessionCookie` keeps, so the clear cannot lose to an earlier re-issue.
+ * The attribute set mirrors `setSessionCookie` (SameSite/Secure) so browsers
+ * treat it as the SAME cookie and actually drop it.
+ */
+export function clearSessionCookie(res: Response): void {
+  const secure = process.env.NODE_ENV === 'production' || process.env.OPENWOP_COOKIE_SECURE === 'true';
+  const sameSite = secure ? 'None' : 'Lax';
+  const parts = [`${COOKIE_NAME}=`, 'Path=/', 'Max-Age=0', 'HttpOnly', `SameSite=${sameSite}`];
+  if (secure) parts.push('Secure');
+  if (typeof res.getHeader === 'function' && typeof res.setHeader === 'function') {
+    const prior = res.getHeader('Set-Cookie');
+    const others = (Array.isArray(prior) ? prior : typeof prior === 'string' ? [prior] : [])
+      .map(String)
+      .filter((c) => !c.startsWith(`${COOKIE_NAME}=`));
+    res.setHeader('Set-Cookie', [...others, parts.join('; ')]);
+  } else {
+    res.append('Set-Cookie', parts.join('; '));
+  }
 }
 
 export function readCookie(header: string | undefined, name: string): string | undefined {
@@ -210,5 +275,21 @@ export function setSessionCookie(res: Response, signed: string): void {
     `SameSite=${sameSite}`,
   ];
   if (secure) parts.push('Secure');
-  res.append('Set-Cookie', parts.join('; '));
+  // ONE session cookie per response. A cookieless request that ends in a login
+  // (test/login, OAuth callback, password login) first gets an auto-minted anon
+  // Set-Cookie from the request middleware, then the user Set-Cookie here —
+  // and which same-name cookie a client keeps is implementation-defined
+  // (browsers keep the last; some proxy/jar stacks kept the FIRST, leaving the
+  // caller anonymous despite a 201 login). Replace any pending same-name
+  // cookie instead of appending a competitor.
+  if (typeof res.getHeader === 'function' && typeof res.setHeader === 'function') {
+    const prior = res.getHeader('Set-Cookie');
+    const others = (Array.isArray(prior) ? prior : typeof prior === 'string' ? [prior] : [])
+      .map(String)
+      .filter((c) => !c.startsWith(`${COOKIE_NAME}=`));
+    res.setHeader('Set-Cookie', [...others, parts.join('; ')]);
+  } else {
+    // Minimal res stubs (tests) without header introspection: plain append.
+    res.append('Set-Cookie', parts.join('; '));
+  }
 }

@@ -1,0 +1,85 @@
+# Test files permitted to issue a REAL `fetch` from jsdom (ADR 0661).
+#
+# SHRINK-ONLY. Adding a line means a unit test is making a live network call —
+# which is legal here only as a recorded exception, never as a default. Removing
+# one is an ordinary PR and the point of the file.
+#
+# WHY THIS EXISTS: an unmocked `fetch` has no symptom. The component under test
+# silently enters a failure branch the test never asked for, and whether it does
+# so before or after the assertion is a race — load-sensitive in the normal lane,
+# deterministic in the +365d date-bomb lane. One instance cost about a day across
+# two sessions and was attributed in turn to worker starvation, contention,
+# missing cleanup, `isolate: false`, and file ordering. None of those was it.
+#
+# THE USUAL CAUSE: a `vi.mock('…Client.js', async (importOriginal) => ({
+# ...(await importOriginal()), … }))` factory that overrides most exports and
+# misses one. The real function then runs. Check what the component calls that
+# your factory does not name.
+#
+# Paths are relative to frontend/react/ and must exist — see
+# scripts/check-live-fetch-allowlist.mjs.
+#
+# 59 entries. This number is a LOWER BOUND, not a census: it came from observing
+# one full run, and some of these calls are FIRE-AND-FORGET effects that race the
+# end of the test — `failedReadDecisions.test.tsx` did not fetch during the
+# measurement run and does fetch in others, on an unchanged tree. So expect the
+# guard to surface further files for a while. Each is a one-line addition here,
+# and that is the mechanism working, not a regression.
+src/__tests__/failedReadDecisions.test.tsx  # racy: a fire-and-forget approvals read that may not fire before the test ends — witnessed in some full runs, not others, on an unchanged tree
+src/agents/__tests__/agentAuthorEntry.test.tsx
+src/builder/inspector/__tests__/Inspector.test.tsx
+src/builder/inspector/__tests__/presetInputsEditable.test.tsx
+src/canvas/__tests__/useCollab.test.tsx
+src/chat/__tests__/ChatInputVoiceControl.test.tsx
+src/chat/__tests__/MessageComments.test.tsx
+src/chat/__tests__/selectionRewrite.test.tsx
+src/chat/tabDeck/__tests__/TabChatDeck.p7.test.tsx
+src/chat/tabDeck/__tests__/TabChatDeck.persistence.test.tsx
+src/chat/tabDeck/__tests__/TabChatDeck.railDeepLink.test.tsx
+src/chat/tabDeck/__tests__/TabChatDeck.security.test.tsx
+src/chat/tabDeck/__tests__/TabChatDeck.test.tsx
+src/chrome/__tests__/Sidebar.lock.test.tsx
+src/chrome/__tests__/publicShellLiveRegion.test.tsx
+src/features/analytics/__tests__/eventsReadHonesty.test.tsx
+src/features/analytics/__tests__/orgsFailedGuard.test.tsx
+src/features/campaign-brief/__tests__/BriefValidation.test.tsx
+src/features/cms/__tests__/CmsPage.test.tsx
+src/features/cms/__tests__/honestyBatch.test.tsx
+src/features/cms/__tests__/orgsFailedNotSubset.test.tsx
+src/features/comments/__tests__/commentsDeepLink.test.tsx
+src/features/creative-briefs/__tests__/BriefLifecycle.test.tsx
+src/features/crm/__tests__/companyDealsHonesty.test.tsx
+src/features/crm/__tests__/orgsFailedNotEmpty.test.tsx
+src/features/crm/__tests__/secondaryReadHonesty.test.tsx
+src/features/csm/__tests__/orgsFailedInertForm.test.tsx
+src/features/dashboard/__tests__/customizeUpgrade.test.tsx
+src/features/dashboard/__tests__/uxUpgradeAug.test.tsx
+src/features/documents/__tests__/documentsFailedReads.test.tsx
+src/features/documents/__tests__/documentsP2P3.test.tsx
+src/features/email/__tests__/campaignLogDeepLink.test.tsx
+src/features/email/__tests__/sendConfirm.test.tsx
+src/features/evals/__tests__/ArenaPage.test.tsx
+src/features/kb/__tests__/writeFeedback.test.tsx
+src/features/kicktodo-circles/__tests__/CirclesProposals.test.tsx
+src/features/kicktodo/__tests__/unknownNotEmpty.test.tsx
+src/features/marketplace/__tests__/buyScopeGate.test.tsx
+src/features/marketplace/__tests__/failedReadStates.test.tsx
+src/features/marketplace/__tests__/orgsFailedGuard.test.tsx
+src/features/marketplace/__tests__/purchaseReturn.test.tsx
+src/features/operations/__tests__/opsHealthHonesty.test.tsx
+src/features/podcasts/__tests__/orgsFailedNotEmpty.test.tsx
+src/features/profiles/__tests__/profilePageStates.test.tsx
+src/features/projects/__tests__/charterUnsavedGuard.test.tsx
+src/features/projects/__tests__/deleteReceipt.test.tsx
+src/features/projects/__tests__/failuresAsAnswers.test.tsx
+src/features/strategy/__tests__/alignmentReads.test.tsx
+src/features/tutorials/__tests__/TutorialsPage.progress.test.tsx
+src/features/twin/__tests__/twinLinkNotOfferedOnFailedRead.test.tsx
+src/kanban/__tests__/boardMutationRefresh.test.tsx
+src/notifications/__tests__/contentReviewCard.test.tsx
+src/notifications/__tests__/liveTruthAndKinds.test.tsx
+src/runs/__tests__/branchForkLiveEffectsConfirm.test.tsx
+src/runs/__tests__/emailErasedHintLink.test.tsx
+src/runs/__tests__/eventReadHonesty.test.tsx
+src/runs/__tests__/runRefreshHonesty.test.tsx
+src/workforces/__tests__/unreadableSignals.test.tsx

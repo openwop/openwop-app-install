@@ -84,6 +84,36 @@ export async function hydrateRunVariables(runId: string): Promise<void> {
  * absent." Callers that need a stricter "MUST seed" contract
  * should validate via the workflow's inputSchema before calling.
  */
+/**
+ * RFC 0124 G1 — translate a run's `configurable` overlay (keyed by the BARE chain
+ * parameter name — the portable override key) onto the deferred workflow's
+ * collision-safe prefixed variable names, producing an `inputs`-shaped overlay that
+ * {@link seedRunVariables} consumes. A `configurable` override WINS over any
+ * `inputs` value for the same materialized variable. Returns `inputs` unchanged for
+ * a non-deferred workflow (no `metadata.deferredParameterAliases`) or no overlay.
+ *
+ * This is what makes the deferred-mode bare-param override actually reach the bag:
+ * `POST /v1/runs {configurable:{productIdea:'…'}}` → `variables[<prefixed>]` = '…',
+ * resolved by the executor per run; a `:fork` re-applies the inherited/overridden
+ * `configurable` the same way (replay/fork determinism).
+ */
+export function deferredConfigurableInputs(
+  definition: { metadata?: Record<string, unknown> } | undefined,
+  configurable: Record<string, unknown> | undefined,
+  inputs: unknown,
+): unknown {
+  const aliases = definition?.metadata?.deferredParameterAliases as Record<string, string> | undefined;
+  if (!aliases || !configurable || typeof configurable !== 'object') return inputs;
+  const base: Record<string, unknown> =
+    inputs && typeof inputs === 'object' && !Array.isArray(inputs)
+      ? { ...(inputs as Record<string, unknown>) }
+      : {};
+  for (const [bare, varName] of Object.entries(aliases)) {
+    if (Object.prototype.hasOwnProperty.call(configurable, bare)) base[varName] = configurable[bare];
+  }
+  return base;
+}
+
 export function seedRunVariables(
   runId: string,
   variableDecls: ReadonlyArray<VariableDecl> | undefined,
@@ -137,8 +167,12 @@ export function setRunVariable(runId: string, name: string, value: unknown): voi
   persistBag(runId);
 }
 
-/** Drop the bag for `runId` — used by tenant-hard-delete cascades
- *  and the test-seam reset. Safe to call on absent runIds. */
+/** Drop the bag for `runId` (memory + durable). Grade-data G4 correction
+ *  (2026-07-09): the durable row's deletion is owned by the STORAGE cascades
+ *  (`deleteRun` / `pruneTerminalRuns` / `deleteAllTenantData` delete the
+ *  `runvars:<id>` kv key directly — an earlier comment here claimed cascade
+ *  wiring that didn't exist). This helper remains for test-seam resets and
+ *  any host-side caller that retires a bag mid-lifecycle. */
 export function clearRunVariables(runId: string): void {
   runVariables.delete(runId);
   const storage = tryDurableStorage();

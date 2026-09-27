@@ -22,7 +22,7 @@ export interface Org { orgId: string; name: string }
 
 /** The caller's orgs (the dashboard org picker). */
 export async function listOrgs(): Promise<Org[]> {
-  return (await http<{ orgs: Org[] }>('/v1/host/openwop-app/orgs')).orgs ?? [];
+  return (await http<{ orgs: Org[] }>('/host/openwop-app/orgs')).orgs ?? [];
 }
 
 export interface LeaderboardRow {
@@ -35,7 +35,7 @@ export interface LeaderboardRow {
   elo: number;
 }
 
-const BASE = (orgId: string): string => `/v1/host/openwop-app/evals/orgs/${encodeURIComponent(orgId)}`;
+const BASE = (orgId: string): string => `/host/openwop-app/evals/orgs/${encodeURIComponent(orgId)}`;
 
 export async function fetchLeaderboard(orgId: string): Promise<LeaderboardRow[]> {
   return (await http<{ leaderboard: LeaderboardRow[] }>(`${BASE(orgId)}/leaderboard`)).leaderboard ?? [];

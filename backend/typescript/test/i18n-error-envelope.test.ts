@@ -28,7 +28,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => {
+    server = app.listen(0, '127.0.0.1', () => {
       BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       res();
     });

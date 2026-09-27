@@ -47,6 +47,28 @@ export interface BriefChannel {
   config: Record<string, unknown>;
 }
 
+/** A campaign spend plan (campaign gap plan §5C C8). Minor currency units,
+ *  mirroring the ads adapter's `dailyBudgetMinor`. Advisory — enforcement is
+ *  the adapter's spend gate (§5B B3) + the pacing chain (C7). */
+export interface BriefBudget {
+  /** Total plan for the campaign, minor units. */
+  totalMinor?: number;
+  /** ISO-4217, display-only (the store never converts). */
+  currency?: string;
+  /** Per-channel plan lines, minor units, keyed by channel type. */
+  perChannel?: Partial<Record<CampaignChannel, number>>;
+}
+
+/** The UTM schema stamped onto outbound URLs at publish time (feeds the C5
+ *  attribution join — utm_campaign is the deterministic key). */
+export interface BriefUtm {
+  source?: string;
+  medium?: string;
+  campaign?: string;
+  term?: string;
+  content?: string;
+}
+
 /** Messaging parameters the user sets (steer generation). */
 export interface BriefMessaging {
   primaryValueProp: string;
@@ -82,19 +104,63 @@ export interface CampaignBrief {
   brandId?: string;
   personaIds: string[];
   kbCollectionId?: string;
+  /** ADR 0355 P5 — competitor names to differentiate against in generation
+   *  (prompt block + a QA guard that drafts never parrot their claims). */
+  competitors?: string[];
+  /** ADR 0351 Phase 2 — how generation treats KB grounding. `off` = skip
+   *  retrieval; `best-effort` (default) = ground when possible, proceed
+   *  otherwise; `strict` = FAIL CLOSED when retrieval is unavailable or
+   *  coverage is `none` (never a silently ungrounded draft). */
+  groundingPolicy?: 'off' | 'best-effort' | 'strict';
   /** Product the campaign is about. */
   productName: string;
   productDescription: string;
   industryVertical: string;
   channels: BriefChannel[];
   messaging: BriefMessaging;
+  /** Spend plan (C8). */
+  budget?: BriefBudget;
+  /** UTM schema for outbound URLs (C8 — feeds C5's attribution join). */
+  utm?: BriefUtm;
   status: BriefStatus;
   kernel?: MessagingKernel;
   /** True when the brief changed after a kernel was generated (regen needed). */
   kernelStale: boolean;
+  /** Monotonic content revision (campaign gap plan §5B B4). Rows written before
+   *  versioning read back as 1. */
+  version?: number;
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+}
+
+/** An immutable brief revision snapshot (the CMS `PageVersion` precedent). */
+export interface BriefVersion {
+  versionId: string;
+  tenantId: string;
+  orgId: string;
+  briefId: string;
+  /** The brief `version` this snapshot captured. */
+  version: number;
+  snapshot: {
+    name: string;
+    objective: string;
+    brandId?: string;
+    personaIds: string[];
+    productName: string;
+    productDescription: string;
+    industryVertical: string;
+    channels: BriefChannel[];
+    messaging: BriefMessaging;
+    budget?: BriefBudget;
+    utm?: BriefUtm;
+    status: BriefStatus;
+    kernel?: MessagingKernel;
+  };
+  actor: string;
+  at: string;
+  /** Monotonic tiebreaker for same-millisecond snapshots. */
+  seq: number;
 }
 
 /** A validation finding from `brief.validate`. */

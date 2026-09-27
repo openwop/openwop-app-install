@@ -24,7 +24,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.image-gen.agents'));
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -36,11 +36,16 @@ describe('ADR 0115 Phase 6 — Image Generator agent pack', () => {
     expect(agent?.label).toBe('Image Generator');
   });
 
-  it('resolves at GET /v1/agents/{id} + declares the image-generate node (manifest)', async () => {
+  it('resolves at GET /v1/agents/{id} + carries no phantom chat tools (manifest)', async () => {
     const res = await fetch(`${BASE}/v1/agents/${encodeURIComponent(AGENT)}`, { headers: H });
     expect(res.status).toBe(200);
     expect(((await res.json()) as { agentId?: string }).agentId).toBe(AGENT);
+    // CFP-1: `core.openwop.ai.image-generate` is a NODE, never a conversational
+    // tool — no provider projected it, so the old allowlist entry was a lie to
+    // the model. Image generation is deliberately a media-path / workflow-node
+    // capability (unchanged); the agent is now a prompt-composer guide with no
+    // chat tools. Its allowlist is therefore empty.
     const pack = JSON.parse(readFileSync(join(REPO_ROOT, 'packs', 'feature.image-gen.agents', 'pack.json'), 'utf8')) as { agents: Array<{ toolAllowlist?: string[] }> };
-    expect(pack.agents[0]!.toolAllowlist).toContain('openwop:core.openwop.ai.image-generate');
+    expect(pack.agents[0]!.toolAllowlist ?? []).toEqual([]);
   });
 });

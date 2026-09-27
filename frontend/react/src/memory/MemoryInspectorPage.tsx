@@ -2,9 +2,9 @@
  * `/memory` route — MemoryAdapter inspector (RFC 0004 read-side).
  *
  * Lists the authenticated tenant's memory entries (host-extension
- * GET /v1/host/openwop-app/memory), with a free-text search over content + tags
+ * GET /host/openwop-app/memory), with a free-text search over content + tags
  * and an optional server-side tag filter. Each row can be deleted via the
- * demo-only DELETE /v1/host/openwop-app/memory/:memoryId route.
+ * demo-only DELETE /host/openwop-app/memory/:memoryId route.
  *
  * Companion to RunMemoryPanel (which shows the same ledger scoped to a single
  * run); this is the standalone, run-agnostic browser. Reuses the same
@@ -15,23 +15,22 @@
  * layer's job — so it cannot cross a tenant boundary.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
-import { formatDateTime, formatNumber } from '../i18n/format.js';
+import { formatNumber } from '../i18n/format.js';
 import { deleteMemoryEntry, listMemory, type MemoryEntry } from './lib/memoryClient.js';
-import { DatabaseIcon, LockIcon, TrashIcon } from '../ui/icons/index.js';
+import { DatabaseIcon, TrashIcon } from '../ui/icons/index.js';
 import { PageHeader } from '../ui/PageHeader.js';
-import { DataTable, DensityToggle, type DataColumn } from '../ui/DataTable.js';
+import { DataTable, type DataColumn } from '../ui/DataTable.js';
+import { ViewToggle, useViewMode } from '../ui/ViewToggle.js';
+import { MemoryCard, MemoryContent, MemoryTags, MemoryCreated } from './MemoryViews.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { TextField } from '../ui/Field.js';
 import { toast } from '../ui/toast.js';
-
-function isRedacted(content: string): boolean {
-  return /\[REDACTED:[^\]]*\]/.test(content);
-}
 
 export function MemoryInspectorPage(): JSX.Element {
   const { t } = useTranslation('memory');
@@ -41,7 +40,9 @@ export function MemoryInspectorPage(): JSX.Element {
   const [search, setSearch] = useState('');
   const [tag, setTag] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
+  // List/grid collection view (§4.5 canon), persisted per-user. `list` keeps the
+  // selectable table (bulk-delete is a list-only affordance); `grid` shows cards.
+  const [view, setView] = useViewMode('memory', 'list');
 
   const refresh = useCallback(async () => {
     try {
@@ -50,8 +51,12 @@ export function MemoryInspectorPage(): JSX.Element {
       setEntries(res.entries);
       setMemoryRef(res.memoryRef);
     } catch (err) {
+      // TWIN-8 — a FAILED read used to resolve to `[]`, i.e. an empty ledger,
+      // which is a claim ("you have no memories") the read never established.
+      // `null` keeps it out of the list branch; the error Notice below is what
+      // the user sees, and the skeleton is suppressed so it cannot spin forever.
       setError(err instanceof Error ? err.message : String(err));
-      setEntries([]);
+      setEntries(null);
     }
   }, [tag]);
 
@@ -77,8 +82,11 @@ export function MemoryInspectorPage(): JSX.Element {
       toast.success(t('deleteSuccess'));
       await refresh();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-      toast.error(t('deleteError'));
+      // TWIN-8 — this used to `setError(...)`, and the list branch is guarded by
+      // `!error`, so ONE failed row delete UNMOUNTED THE WHOLE LEDGER. `error` is
+      // the READ's state; a write failure is reported by its own toast, exactly
+      // as `onBulkDelete` already does (`:86-96`, the correct sibling).
+      toast.error(err instanceof Error ? err.message : t('deleteError'));
     }
   }
 
@@ -98,60 +106,59 @@ export function MemoryInspectorPage(): JSX.Element {
     {
       key: 'content',
       header: t('columnContent'),
-      render: (e) => (
-        <>
-          {isRedacted(e.content) && (
-            <span className="memory-redacted-badge" title={t('redactedTitle')}>
-              <LockIcon size={12} /> {t('redactedBadge')}
-            </span>
-          )}
-          <span className="memory-content">{e.content}</span>
-        </>
-      ),
+      render: (e) => <MemoryContent entry={e} />,
     },
     {
       key: 'tags',
       header: t('columnTags'),
       cellClassName: 'memory-tags',
-      render: (e) => e.tags.map((t) => <span key={t} className="memory-tag">{t}</span>),
+      render: (e) => <MemoryTags entry={e} />,
     },
     {
       key: 'created',
       header: t('columnCreated'),
       cellClassName: 'memory-created',
       sortValue: (e) => (e.createdAt ? Date.parse(e.createdAt) : 0),
-      render: (e) => (
-        <span title={e.createdAt}>
-          {formatDateTime(e.createdAt)}
-          {e.expiresAt && <span className="muted" title={t('expiresTitle', { date: formatDateTime(e.expiresAt) })}> · {t('ttlSuffix')}</span>}
-        </span>
-      ),
+      render: (e) => <MemoryCreated entry={e} />,
     },
     {
       key: 'actions',
       header: '',
       align: 'right',
       render: (e) => (
-        <button className="secondary btn-sm" onClick={() => { void onDelete(e); }} title={t('deleteEntryTitle')} aria-label={t('deleteEntryAria', { id: e.id })}>
+        <Button variant="secondary" size="sm" onClick={() => { void onDelete(e); }} title={t('deleteEntryTitle')} aria-label={t('deleteEntryAria', { id: e.id })}>
           <TrashIcon size={13} />
-        </button>
+        </Button>
       ),
     },
   ];
 
+  // Shared empty node — rendered for BOTH the grid and the list so the two views
+  // stay consistent.
+  const emptyCard = (
+    <StateCard
+      icon={<DatabaseIcon size={28} />}
+      title={search || tag ? t('emptyNoMatchTitle') : t('emptyNoEntriesTitle')}
+      body={search || tag ? t('emptyNoMatchBody') : t('emptyNoEntriesBody')}
+      {...(search || tag
+        ? { action: <Button variant="secondary" size="sm" onClick={() => { setSearch(''); setTag(''); }}>{t('clearFilters')}</Button> }
+        : {})}
+    />
+  );
+
   return (
-    <section>
+    <section data-walkthrough="memory.page">
       <PageHeader
         eyebrow={t('eyebrow')}
         title={t('inspectorTitle')}
         lede={<>{t('inspectorLedePrefix')}{memoryRef && <> {t('inspectorLedeShowing')} <code>{memoryRef}</code>.</>}</>}
-        actions={<button className="secondary" onClick={() => { void refresh(); }}>{t('common:refresh')}</button>}
+        actions={<Button variant="secondary" onClick={() => { void refresh(); }}>{t('common:refresh')}</Button>}
       />
       <div className="surface-card">
 
-        <div className="form-row u-flex u-gap-2 u-wrap u-items-end">
+        <div className="filterbar u-items-end">
           <TextField
-            className="memory-search-field"
+            className="filterbar-search"
             label={<>{t('searchLabel')} <span className="muted">{t('searchHint')}</span></>}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
@@ -169,7 +176,7 @@ export function MemoryInspectorPage(): JSX.Element {
 
         {error && <Notice variant="error">{error}</Notice>}
 
-        {entries === null && <SkeletonRows rows={5} columns={[24, '60%', 120, 140, 60]} />}
+        {entries === null && !error && <SkeletonRows rows={5} columns={[24, '60%', 120, 140, 60]} />}
 
         {entries !== null && !error && (
           <>
@@ -178,35 +185,34 @@ export function MemoryInspectorPage(): JSX.Element {
                 {t('entryCount', { count: filtered.length, n: formatNumber(filtered.length) })}
                 {entries.length !== filtered.length ? ` ${t('entryCountOf', { shown: formatNumber(filtered.length), total: formatNumber(entries.length) })}` : ''}
               </p>
-              <DensityToggle value={density} onChange={setDensity} />
+              <ViewToggle value={view} onChange={setView} />
             </div>
-            <DataTable
-              rows={filtered}
-              rowKey={(e) => e.id}
-              columns={columns}
-              density={density}
-              caption={t('tableCaption')}
-              initialSort={{ key: 'created', dir: 'desc' }}
-              selectable
-              selected={selected}
-              onSelectionChange={setSelected}
-              bulkActions={(rows) => (
-                <button className="secondary btn-sm" onClick={() => { void onBulkDelete(rows); }}>
-                  <TrashIcon size={13} /> {t('deleteSelected')}
-                </button>
-              )}
-              empty={
-                <StateCard
-                  icon={<DatabaseIcon size={28} />}
-                  title={search || tag ? t('emptyNoMatchTitle') : t('emptyNoEntriesTitle')}
-                  body={
-                    search || tag
-                      ? t('emptyNoMatchBody')
-                      : t('emptyNoEntriesBody')
-                  }
-                />
-              }
-            />
+            {filtered.length === 0 ? (
+              emptyCard
+            ) : view === 'grid' ? (
+              <div className="card-grid">
+                {filtered.map((e) => (
+                  <MemoryCard key={e.id} entry={e} onDelete={(x) => { void onDelete(x); }} />
+                ))}
+              </div>
+            ) : (
+              <DataTable
+                rows={filtered}
+                rowKey={(e) => e.id}
+                columns={columns}
+                caption={t('tableCaption')}
+                initialSort={{ key: 'created', dir: 'desc' }}
+                selectable
+                selected={selected}
+                onSelectionChange={setSelected}
+                bulkActions={(rows) => (
+                  <Button variant="secondary" size="sm" onClick={() => { void onBulkDelete(rows); }}>
+                    <TrashIcon size={13} /> {t('deleteSelected')}
+                  </Button>
+                )}
+                empty={emptyCard}
+              />
+            )}
           </>
         )}
       </div>

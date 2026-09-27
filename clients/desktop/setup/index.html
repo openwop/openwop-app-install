@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';" />
+  <title>Connect to OpenWOP</title>
+  <style>
+    :root { color-scheme: light dark; --clay: #b95c3a; }
+    body { font: 15px/1.5 system-ui, sans-serif; margin: 0; display: grid; place-items: center; min-height: 100vh; }
+    main { width: min(440px, 88vw); padding: 24px; }
+    .brand { display: flex; align-items: center; gap: 10px; margin-bottom: 18px; }
+    .brand svg { width: 34px; height: 34px; }
+    .brand span { font-weight: 700; font-size: 17px; letter-spacing: 0.2px; }
+    h1 { font-size: 20px; margin: 0 0 4px; }
+    p { opacity: 0.7; margin: 0 0 20px; }
+    label { display: block; font-size: 13px; margin-bottom: 6px; }
+    input { width: 100%; box-sizing: border-box; padding: 10px 12px; border-radius: 8px; border: 1px solid rgba(128,128,128,0.4); background: transparent; color: inherit; font: inherit; }
+    button.primary { margin-top: 14px; width: 100%; padding: 10px; border: 0; border-radius: 8px; font: inherit; font-weight: 600; cursor: pointer; background: var(--clay); color: #fff; }
+    .demo { margin-top: 10px; width: 100%; padding: 9px; border: 1px solid rgba(128,128,128,0.4); background: transparent; color: inherit; border-radius: 8px; font: inherit; cursor: pointer; }
+    .err { color: #c0392b; font-size: 13px; margin-top: 10px; min-height: 1.2em; }
+    .recent { margin-top: 18px; }
+    .recent h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; opacity: 0.55; margin: 0 0 6px; }
+    .recent button { display: block; width: 100%; text-align: left; padding: 8px 10px; margin-bottom: 4px; border: 1px solid rgba(128,128,128,0.25); background: transparent; color: inherit; border-radius: 8px; font: inherit; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .recent button:hover, .demo:hover { border-color: var(--clay); }
+    .recent[hidden], .demo[hidden], .brand [hidden] { display: none; }
+    .monogram { width: 34px; height: 34px; border-radius: 9px; background: var(--clay); color: #fff; display: grid; place-items: center; font-weight: 700; font-size: 18px; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand" aria-hidden="true">
+      <svg viewBox="0 0 768 768" xmlns="http://www.w3.org/2000/svg"><g fill="none"><path fill="#b95c3a" fill-opacity="0.3" stroke="#b95c3a" stroke-width="24" stroke-linejoin="round" d="m594.4 84.4h144v144h-144z"/><circle cx="661.6" cy="385.1" r="76.8" fill="#b95c3a" fill-opacity="0.3" stroke="#b95c3a" stroke-width="24" stroke-linejoin="round"/><path fill="#b95c3a" fill-opacity="0.3" stroke="#b95c3a" stroke-width="24" stroke-linejoin="round" d="m580 613.8 86.4-86.4 86.4 86.4-86.4 86.4z"/><path stroke="#b95c3a" stroke-width="24" stroke-linejoin="round" d="m391.7 385.3h56.6v-228.9h56.7M391.7 385.3h57.5v228.5h40.3M391.7 385.3h104.4"/><rect x="64.9" y="270.9" width="276" height="230.3" rx="87.1" stroke="currentColor" stroke-width="24" stroke-linejoin="round"/><circle cx="145.9" cy="370.5" r="36" fill="currentColor"/><circle cx="260" cy="370.5" r="36" fill="currentColor"/><circle cx="202.9" cy="175.2" r="36" fill="currentColor"/><path stroke="currentColor" stroke-width="24" stroke-linejoin="round" d="m202.9 165v105.8"/><path stroke="currentColor" stroke-width="24" stroke-linejoin="round" d="m340.9 338.2h25.4c14 0 25.4 21.1 25.4 47.1 0 26-11.4 47.1-25.4 47.1h-25.4zM64.9 433.2h-25.4c-14 0-25.4-21.1-25.4-47.1 0-26 11.4-47.1 25.4-47.1h25.4zM236.9 429.4c-9 9-21.2 14.1-33.9 14.1-12.8 0-25-5.1-34-14.1"/><path fill="#b95c3a" d="m505 120.9 79.8 35.5-79.8 35.5zM496.2 350.6l79.8 35.4-79.8 35.5zM489.5 578.3l79.8 35.5-79.8 35.4z"/></g></svg>
+      <div class="monogram" id="monogram" hidden></div>
+      <span>OpenWOP</span>
+    </div>
+    <h1>Connect to your OpenWOP host</h1>
+    <p>Enter the URL of a running OpenWOP server. The desktop app loads that host's own interface.</p>
+    <label for="host">Host URL</label>
+    <input id="host" type="text" placeholder="http://localhost:8000" autocomplete="off" spellcheck="false" />
+    <button id="connect" class="primary" type="button">Connect</button>
+    <button id="demo" class="demo" type="button" hidden>Use the hosted demo (app.openwop.dev)</button>
+    <div class="err" id="err" role="alert"></div>
+    <div class="recent" id="recent" hidden>
+      <h2>Recent hosts</h2>
+      <div id="recent-list"></div>
+    </div>
+  </main>
+  <script>
+    const input = document.getElementById('host');
+    const err = document.getElementById('err');
+    input.value = 'http://localhost:8000';
+
+    async function connectTo(value) {
+      err.textContent = '';
+      const api = window.openwopSetup;
+      if (!api) { err.textContent = 'Setup bridge unavailable.'; return; }
+      const res = await api.saveHost(value);
+      if (!res || !res.ok) err.textContent = 'That does not look like a valid http(s) host URL.';
+      // On success the main process navigates this window to the host origin.
+    }
+    document.getElementById('connect').addEventListener('click', () => connectTo(input.value));
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') connectTo(input.value); });
+
+    // White-label branding (ADR 0291): the shell's branding.json drives the
+    // setup chrome — product name, mark (stock SVG vs monogram), accent,
+    // default host, and the demo quick-connect (demo posture only). The static
+    // markup above is the fallback when the bridge is unavailable.
+    (async () => {
+      const api = window.openwopSetup;
+      const b = api && typeof api.branding === 'function'
+        ? await api.branding().catch(() => null) : null;
+      if (!b) {
+        // Bridge unavailable — stock fallback keeps the demo quick-connect alive.
+        const demo = document.getElementById('demo');
+        demo.addEventListener('click', () => connectTo('https://app.openwop.dev'));
+        demo.hidden = false;
+        return;
+      }
+      document.documentElement.style.setProperty('--clay', b.accent);
+      document.title = `Connect to ${b.productName}`;
+      document.querySelector('.brand span').textContent = b.productName;
+      if (!b.stockMark) {
+        document.querySelector('.brand svg').setAttribute('hidden', '');
+        const mono = document.getElementById('monogram');
+        mono.textContent = b.productName.slice(0, 1).toUpperCase();
+        mono.hidden = false;
+      }
+      document.querySelector('h1').textContent = `Connect to your ${b.productName} host`;
+      document.querySelector('main > p').textContent =
+        `Enter the URL of a running ${b.productName} server. The desktop app loads that host's own interface.`;
+      input.value = b.defaultHost;
+      input.placeholder = b.defaultHost;
+      const demo = document.getElementById('demo');
+      if (b.mode === 'demo' && b.demoHost) {
+        demo.textContent = `Use the hosted demo (${new URL(b.demoHost).host})`;
+        demo.addEventListener('click', () => connectTo(b.demoHost));
+        demo.hidden = false;
+      }
+    })();
+
+    // Recent hosts (persisted by the shell; rendered here so switching servers
+    // is one click — the list was previously stored but never shown).
+    (async () => {
+      const api = window.openwopSetup;
+      if (!api || typeof api.recentHosts !== 'function') return;
+      const hosts = await api.recentHosts().catch(() => []);
+      if (!Array.isArray(hosts) || hosts.length === 0) return;
+      const list = document.getElementById('recent-list');
+      for (const h of hosts.slice(0, 8)) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = String(h);
+        b.addEventListener('click', () => connectTo(String(h)));
+        list.appendChild(b);
+      }
+      document.getElementById('recent').hidden = false;
+    })();
+  </script>
+</body>
+</html>

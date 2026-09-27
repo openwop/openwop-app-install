@@ -28,9 +28,10 @@ import {
 } from '../src/features/assistant/assistantService.js';
 import { buildAssistantSurface } from '../src/features/assistant/surface.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
+import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import { getJob, resetScheduling } from '../src/host/schedulingService.js';
 import { getRosterEntry } from '../src/host/rosterService.js';
-import { findChiefOfStaff } from '../src/features/assistant/chiefOfStaff.js';
+import { findAssistantAgent } from '../src/features/assistant/capability.js';
 
 let BASE: string;
 const TOKEN = 'dev-token';
@@ -45,7 +46,7 @@ beforeAll(async () => {
   await __resetAssistantStore();
   await resetScheduling();
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 afterAll(async () => {
@@ -200,18 +201,34 @@ describe('briefing composer (ADR 0023 §12 T3 — loop 5)', () => {
 
 });
 
+/**
+ * WF-COS-1 — resolve a workflow the way the RUNTIME does, not the way one
+ * registry does. These six moved from `registerWorkflow(<in-tree literal>)` to
+ * `registerChainBackedWorkflow(<chainId>)`, which lands them in a different
+ * registry that the host catalog resolves alongside the first. Asserting
+ * through `getRegisteredWorkflow` alone would have pinned the MECHANISM, so the
+ * migration would read as a regression while dispatch worked fine.
+ *
+ * Node ids are expansion-prefixed after the migration (`<chain>_<hash>_fetch`),
+ * so lookups match on the SUFFIX rather than on equality.
+ */
+const resolveWorkflow = (id: string) => getRegisteredWorkflow(id) ?? getChainBackedWorkflow(id);
+type ResolvedDef = NonNullable<ReturnType<typeof getRegisteredWorkflow>>;
+const nodeBySuffix = (def: ResolvedDef, id: string): ResolvedDef['nodes'][number] | undefined =>
+  def.nodes.find((n) => n.nodeId === id || n.nodeId.endsWith(`_${id}`));
+
 describe('loop routes (RFC 0052 activation surface)', () => {
   it('registers the loop workflows at boot — schema-clean configs (the credential opt-in is run-level, Option C)', () => {
     for (const wfId of ['assistant.loop.calendar-ingest', 'assistant.loop.drive-ingest']) {
-      const def = getRegisteredWorkflow(wfId);
+      const def = resolveWorkflow(wfId);
       expect(def, `${wfId} must be in the catalog`).toBeDefined();
-      const fetchNode = def!.nodes.find((n) => n.nodeId === 'fetch');
+      const fetchNode = nodeBySuffix(def!, 'fetch');
       expect(fetchNode?.typeId).toBe('core.openwop.http.fetch');
       // ADR 0024 §4 / Option C: NOTHING connection-shaped in node config — the
       // pack's published config schema stays authoritative; the opt-in lives
       // on the scheduler job (asserted below) as run.configurable.connections.
       expect(fetchNode?.config?.connection).toBeUndefined();
-      expect(def!.nodes.find((n) => n.nodeId === 'ingest')?.typeId).toBe('feature.assistant.nodes.ingest-commitments');
+      expect(nodeBySuffix(def!, 'ingest')?.typeId).toBe('feature.assistant.nodes.ingest-commitments');
     }
   });
 
@@ -241,11 +258,11 @@ describe('loop routes (RFC 0052 activation surface)', () => {
     // ADR 0023 (corrected) — the loop is the Chief-of-Staff AGENT's recurring
     // task: the job carries its REAL rosterId/agentId and resolves to a roster
     // member, so it shows in that agent's Schedules tab (not tenant-only).
-    const cos = await findChiefOfStaff('default');
+    const cos = await findAssistantAgent('default');
     expect(cos).not.toBeNull();
     expect(job?.rosterId).toBe(cos!.rosterId);
     expect(job?.agentId).toBe(cos!.agentRef.agentId);
-    expect(await getRosterEntry(job!.rosterId!)).not.toBeNull();
+    expect(await getRosterEntry(job!.tenantId, job!.rosterId!)).not.toBeNull();
 
     const after = await jf<{ loops: Array<{ loopId: string; enabled: boolean; cronExpr?: string }> }>('/v1/host/openwop-app/assistant/loops');
     const cal = after.body.loops.find((l) => l.loopId === 'calendar-ingest');
@@ -270,7 +287,7 @@ describe('loop routes (RFC 0052 activation surface)', () => {
   });
 
   it('the morning-briefing loop workflow is registered notify-on', () => {
-    const def = getRegisteredWorkflow('assistant.loop.morning-briefing');
+    const def = resolveWorkflow('assistant.loop.morning-briefing');
     expect(def).toBeDefined();
     expect(def!.nodes[0]?.typeId).toBe('feature.assistant.nodes.compose-briefing');
     expect(def!.nodes[0]?.config?.notify).toBe(true);

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/create-task.output.json",
+  "title": "CrmCreateTaskOutput",
+  "description": "The created (or original, on an explicit existing id) org-scoped task. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
+  "type": "object",
+  "required": [
+    "success",
+    "task"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "task": {
+      "type": "object",
+      "required": [
+        "taskId"
+      ],
+      "properties": {
+        "taskId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "The task row as the surface projects it (host bookkeeping columns `tenantId`/`orgId`/`createdBy`/`updatedBy` stripped)."
+    }
+  },
+  "additionalProperties": false
+}

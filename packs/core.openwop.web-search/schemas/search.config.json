@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.web-search/1.0.0/search.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.web-search/1.1.0/search.config.json",
   "title": "WebSearchConfig",
   "type": "object",
   "properties": {
     "engine": {
       "type": "string",
-      "description": "Preferred search engine identifier (e.g. `google-cse`, `bing`, `brave`). Advisory — the host MAY route to a different engine. Absent means host default.",
+      "description": "Preferred search engine identifier (e.g. `google-cse`, `bing`, `brave`). Advisory \u2014 the host MAY route to a different engine. Absent means host default.",
       "minLength": 1
     },
     "maxResults": {
@@ -15,6 +15,14 @@
       "maximum": 50,
       "default": 5,
       "description": "Maximum number of results to return."
+    },
+    "suitability": {
+      "type": "string",
+      "enum": [
+        "answer-only",
+        "durable"
+      ],
+      "description": "ADR 0101 P4 licensing gate: `durable` means results will be STORED as evidence, so a provider licensed only for answer-display must not back the call. Read from config OR inputs (ADR 0502). Declared per ADR 0525 (GRD-8)."
     }
   },
   "additionalProperties": false

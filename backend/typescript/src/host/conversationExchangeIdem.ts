@@ -116,7 +116,13 @@ export async function releaseExchange(
   await claims.delete(`${tenantId}:${conversationId}:${exchangeKey}`);
 }
 
-/** Test-only: clear the index. */
-export async function __clearExchangeIdem(): Promise<void> {
-  await claims.__clear();
+/** ADR 0288 P2 — drop every exchange-idempotency claim for a DELETED
+ *  conversation (direct call from the chat delete route). Bounded; idempotent. */
+export async function deleteExchangeClaimsForConversation(tenantId: string, conversationId: string): Promise<number> {
+  let n = 0;
+  for (const c of await claims.listByPrefix(`${tenantId}:${conversationId}:`)) {
+    await claims.delete(`${c.tenantId}:${c.conversationId}:${c.exchangeKey}`);
+    n += 1;
+  }
+  return n;
 }

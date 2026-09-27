@@ -38,7 +38,7 @@
       "memoryShape": {
         "scratchpad": true,
         "conversation": false,
-        "longTerm": true
+        "longTerm": false
       },
       "handoff": {
         "taskSchemaRef": "schemas/sdr.task.schema.json",

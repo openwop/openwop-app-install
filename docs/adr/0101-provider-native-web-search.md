@@ -1,5 +1,9 @@
 # ADR 0101 — Provider-native web search (one capability, provider-aware backing)
 
+> **Note:** a second ADR was also created as 0101 on 2026-06-22 and has been renumbered to
+> [ADR 0493](0493-fold-profile-into-instructions-and-enforce-guardrails.md) (agent Guardrails).
+> This document keeps 0101 as the first-created of the pair.
+
 Status: implemented (Phases 1–3 + both Phase 2 deferrals — per-exchange toggle and OpenAI native search via the Responses API; OpenAI/Anthropic capability flags pending one live check)
 
 ## Why this exists
@@ -149,6 +153,37 @@ The /architect pre-review narrowed Phase 2 on Boundaries + capability-honesty gr
 - **Per-exchange toggle — DONE (the RFC concern was over-conservative).** Re-checking the wire: `validateResumeValue` only validates `kind === 'approval'` interrupts and returns early for a **conversation** resume; the external-event path explicitly *tolerates extra fields*. So `ConversationResolve` is a host-internal type whose conversation payload is **not** schema-validated — adding a `webSearch` field is **not a wire-shape change and needs no RFC**. Implemented end-to-end: the resolve carries `webSearch`, `handleConversationResolve` derives a per-exchange override that beats `run.inputs.webSearch`, threaded into `dispatchReply` + `runConversationAgentToolTurn`; the FE sends the current toggle on every exchange. A mid-chat toggle now takes effect on the next turn (not just a new chat).
 - **OpenAI native search — DONE, isolated.** `webSearch + openai` routes through a new **Responses API** round (`openAIResponsesToolsRound`) hosting the built-in `web_search` tool alongside flattened function tools; non-search OpenAI turns stay on Chat Completions, so the existing path can't regress (the fork is contained to the search case — the Boundaries concern). Citations come from `output[].content[].annotations` (`url_citation`). **Unit-tested (mocked); the model `webSearch` flag stays off until a live GPT-5.x check** (capability honesty — same posture as Anthropic).
 
+### The live check now has a script — 2026-08-02
+
+Both remaining flag flips (Anthropic, OpenAI) are blocked on the same thing: a live
+check nobody has run. It stayed unrun for months partly because "run a live check"
+was a sentence, not a command. It is now
+**`scripts/check-anthropic-websearch-live.sh`**:
+
+```
+ANTHROPIC_API_KEY=sk-ant-… bash scripts/check-anthropic-websearch-live.sh
+```
+
+It sends *exactly* what `dispatchAnthropicTools.ts:259` sends — the
+`web_search_20250305` server tool with `anthropic-version: 2023-06-01` and **no
+beta header** — and exercises the same parse path the dispatcher uses
+(`web_search_tool_result` → `content[]` → `web_search_result.url`). Three verdicts:
+
+| Verdict | Meaning | Action |
+|---|---|---|
+| **PASS** | 200 + citations parsed | flip `webSearch: true` for that model; paste the output here |
+| **FAIL** | non-200 | flag stays off; if the error mentions a beta header, add it to the dispatcher first |
+| **INCONCLUSIVE** | 200 but no `web_search_tool_result` | shape accepted, model didn't search — re-run with a harder question; flag stays off |
+
+Deliberately **not** a vitest test: it costs money and needs a real key, so a green
+CI run must never be able to imply it passed. That would recreate the very problem
+this ADR names — a mocked test standing in for verification. The script is a
+one-command human gate, and its output is the record.
+
+**Still unrun as of 2026-08-02** — no Anthropic key was available in the session
+that wrote it, and inventing a PASS is the failure mode, not the fix. OpenAI needs
+the same treatment against `openAIResponsesToolsRound`; the script is the template.
+
 ## Compatibility
 
 **Additive.** New optional `webSearch` plumbing; the host-tool path is preserved
@@ -163,3 +198,92 @@ as the fallback. No wire-shape break, no event-shape change, no `MUST` relaxed.
 | FE `webSearch` flag duplicates `providers.json` | Phase 3 — single-source it |
 | Citation events for native grounding in the loop | Phase 2 (capture parity with the chat path) |
 | Phase 1 captures `webSearch` at conversation OPEN (run.inputs), so a mid-conversation toggle applies on the next new chat, not the current one | acceptable for Phase 1; per-exchange override is a Phase 2 refinement (carry `webSearch` on the resolve) |
+
+---
+
+## Phase 4 — the workflow leg, and the SUITABILITY gate (2026-07-25)
+
+**Status: implemented.**
+
+### What was still broken
+
+Phases 1–3 delivered the decision for the **chat/agent** lane. The **workflow**
+lane — `core.web.search` → `host/webResearchSurface.ts` — still ended at
+`exampleSearch()` returning `engine: 'demo'`. That is the exact silent-stub this
+ADR was written to kill, surviving in the one owner this ADR named as needing
+reconciliation.
+
+It surfaced from the other end in ADR 0491: the KickTodo Challenge Factory is
+fail-closed on demo sources, so with no `web-search` key **every** Factory run was
+dead on arrival — and an agent narrated an approval gate that could never arrive.
+
+### The correction to this ADR's own model
+
+This ADR's resolution order (`native → host tool → none`) assumed capability was
+the only axis. It is not. **Whether a provider's native search results may be
+STORED is a separate, licensing axis**, and it does not follow from capability:
+
+> Google's Gemini API terms for Grounding with Google Search state the developer
+> "will not modify, or intersperse any other content with, the Grounded Results",
+> will not "redirect end users away from the destination pages", and may not
+> "extract or collect one or more of these components for another purpose";
+> storing and resubmitting Grounded Results obliges displaying the accompanying
+> Search Suggestions.
+
+Google also returns per-request `vertexaisearch…/grounding-api-redirect/<token>`
+URIs rather than publisher URLs — so even setting licensing aside, the same
+article would hash differently on every run, breaking the dossier's
+claim→source provenance.
+
+**So Gemini grounding is a first-class backing for a grounded ANSWER (this ADR's
+original use) and is NOT a valid backing for a durable evidence artifact.**
+Resolving the redirect to the publisher URL — the obvious technical workaround —
+is precisely what the terms forbid, so it was rejected rather than built.
+
+### Decision (additive to the original)
+
+Search resolution carries a **suitability tier** alongside the capability check:
+
+| Tier | Meaning |
+|---|---|
+| `durable` | real publisher URLs, storable as citations in a durable artifact |
+| `answer-only` | licensed for display WITH the grounded answer it produced |
+| `none` | no native search |
+
+- **Capability** stays the per-**model** `webSearch` flag in `providers.json`.
+- **Suitability** is a new per-**provider** `searchSuitability` field in the same
+  SSoT — a licensing fact, so provider-level, and maintained by
+  `/refresh-model-catalog` alongside the capability flags.
+- `host/webSearchCapability.ts` is the ONE predicate combining them.
+- `webResearchSurface.search()` takes `suitability` (default `answer-only`) and
+  resolves **host key → native → honest demo**. A host-key *error* now falls
+  through to native rather than straight to demo.
+- `liveWebSearchConfigured(tenantId, suitability)` reads the SAME predicate, so a
+  pre-flight can never disagree with what the search will do.
+- **Defence in depth at the point of persistence:** `engineIsDurable(engine)`
+  gates the consumer that STORES. The Challenge Factory's dossier guard widened
+  from "not a stub" to "may this be stored", so a runtime fall-through to an
+  answer-only engine is refused where it matters rather than where it was asked.
+
+### Consequence
+
+A BYOK tenant on a `durable` provider needs **no second search key**. A tenant on
+Google gets native search for chat and an honest refusal for the dossier — with a
+message naming the actual fix, instead of a run that dies two nodes in.
+
+### Implementation record
+
+| Change | Test |
+|---|---|
+| `host/webSearchCapability.ts` (capability × suitability, `engineIsDurable`) | `test/web-search-capability.test.ts` — sabotage-probed by mislabelling Google `durable` |
+| `providers.json` `searchSuitability` + `ProviderModel.webSearch` type sync | same |
+| `resolveNativeWebSearch` (SR-1 closure, tenant's default provider/model) | same |
+| `webResearchSurface` resolution order + `liveWebSearchConfigured(suitability)` | `test/web-search-capability.test.ts` |
+| `fetchOne` reports the FINAL redirected URL (`res.url`), `requestedUrl` when they differ | `test/web-research-final-url.test.ts` |
+| Dossier guard widened to `engineIsDurable` | `test/kicktodo-research-provenance.test.ts` — sabotage-probed by narrowing it back |
+
+**Cost note:** native search spends the tenant's LLM budget rather than a search
+vendor's quota. The ADR 0178 BYOK spend warnings already cover the surface; this
+is a deliberate change in cost attribution, not an oversight.
+
+**No wire change; no RFC** — same posture as Phases 1–3.

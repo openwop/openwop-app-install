@@ -8,12 +8,11 @@
  * of the sample list. Component callsites don't change.
  */
 
-import { authedHeaders, config, fetchOpts } from '../client/config.js';
-import { getCapabilities } from '../client/runsClient.js';
+import { getCapabilities, getSdkClient } from '../client/runsClient.js';
+import { loadDemoMode } from '../client/demoMode.js';
 import { BUNDLED_PROMPTS } from './bundledPrompts.js';
 import { listUserPrompts } from './userPrompts.js';
-import type { PromptKind, PromptRef, PromptTemplate } from './types.js';
-import { parseRef } from './types.js';
+import type { PromptKind, PromptTemplate } from './types.js';
 
 interface ListResponse {
   items: PromptTemplate[];
@@ -26,8 +25,6 @@ export interface ListPromptsFilter {
   modelClass?: string;
   source?: 'host' | 'pack' | 'user';
 }
-
-const ENDPOINT_BASE = `${config.baseUrl}/v1/prompts`;
 
 /** Returns true when the host advertises RFC 0027 prompts support. The
  *  result is cached for the page lifetime — the capability is a wire-shape
@@ -43,6 +40,10 @@ const ENDPOINT_BASE = `${config.baseUrl}/v1/prompts`;
  *  does need tenant-scoped capabilities, clear the cache from
  *  `setCurrentIdToken` in `client/config.ts`. */
 let cachedSupport: boolean | null = null;
+
+/** Drop the memoized capability answer. Mirrors `clearCapabilitiesCache` —
+ *  tests that stub discovery need the next call to actually read it. */
+export function clearPromptsSupportCache(): void { cachedSupport = null; }
 async function hostSupportsPrompts(): Promise<boolean> {
   if (cachedSupport !== null) return cachedSupport;
   try {
@@ -52,6 +53,9 @@ async function hostSupportsPrompts(): Promise<boolean> {
     const caps = (await getCapabilities()) as {
       capabilities?: { prompts?: { supported?: boolean } };
     };
+    // REVERTED from the v2 presence test (ADR 0730 C.3). `getCapabilities()`
+    // reads the v1 document again — see the correction note in `runsClient.ts` —
+    // so the v1 shape is the one that is actually served here.
     cachedSupport = caps?.capabilities?.prompts?.supported === true;
   } catch {
     cachedSupport = false;
@@ -61,61 +65,54 @@ async function hostSupportsPrompts(): Promise<boolean> {
 
 export async function listPrompts(filter: ListPromptsFilter = {}): Promise<PromptTemplate[]> {
   if (await hostSupportsPrompts()) {
-    const params = new URLSearchParams();
-    if (filter.kind) params.set('kind', filter.kind);
-    if (filter.tag) params.set('tag', filter.tag);
-    if (filter.modelClass) params.set('modelClass', filter.modelClass);
-    if (filter.source) params.set('source', filter.source);
-    const query = params.toString();
-    const url = `${ENDPOINT_BASE}${query ? `?${query}` : ''}`;
     try {
-      const res = await fetch(url, fetchOpts({ headers: authedHeaders() }));
-      if (res.ok) {
-        const body = (await res.json()) as ListResponse;
-        // BE has canonical entries → return them merged with user
-        // prompts (user prompts ride along regardless of BE state).
-        if (body.items.length > 0) {
-          return applyFilter([...listUserPrompts(), ...body.items], filter);
-        }
-        // BE returned empty — same as the old "no canonical set yet"
-        // fallback. Drop through to the sample-library merge below.
+      // ADR 0730 C.4 — `GET /prompts` on the major-2 client. The four filters
+      // are the request shape verbatim, so the hand-built query string went
+      // away with the raw fetch.
+      const body = await getSdkClient().prompts.list({
+        ...(filter.kind ? { kind: filter.kind } : {}),
+        ...(filter.tag ? { tag: filter.tag } : {}),
+        ...(filter.modelClass ? { modelClass: filter.modelClass } : {}),
+        ...(filter.source ? { source: filter.source } : {}),
+      }) as ListResponse;
+      // BE has canonical entries → return them merged with user
+      // prompts (user prompts ride along regardless of BE state).
+      if (body.items.length > 0) {
+        return applyFilter([...listUserPrompts(), ...body.items], filter);
       }
+      // BE returned empty — same as the old "no canonical set yet"
+      // fallback. Drop through to the sample-library merge below.
     } catch {
       /* fall through to samples */
     }
   }
-  // No host support OR BE empty OR fetch errored — merge user prompts
-  // on top of the bundled samples so users see both groups in one list.
-  // Without this fallback, a user with no user-prompts and a BE that
-  // returns `{items:[]}` would see an empty prompt library.
-  return applyFilter([...listUserPrompts(), ...BUNDLED_PROMPTS], filter);
+  // No host support OR BE empty OR fetch errored — merge user prompts on top
+  // of the bundled samples ONLY on the demo host (ADR 0196 Gate A / DEMO-4):
+  // the bundled set is wire-teaching material (`author: 'openwop-sample'`),
+  // not enterprise starter content, so a clean install's library starts
+  // genuinely empty (its designed empty state shows). Resolution-by-id
+  // (`resolveLocal`) still honors bundled ids so an explicit historical
+  // reference never breaks.
+  const samples = (await loadDemoMode()) ? BUNDLED_PROMPTS : [];
+  return applyFilter([...listUserPrompts(), ...samples], filter);
 }
 
 export async function getPrompt(templateId: string, version?: string): Promise<PromptTemplate | null> {
   if (await hostSupportsPrompts()) {
-    const params = new URLSearchParams();
-    if (version) params.set('version', version);
-    const url = `${ENDPOINT_BASE}/${encodeURIComponent(templateId)}${
-      params.toString() ? `?${params.toString()}` : ''
-    }`;
     try {
-      const res = await fetch(url, fetchOpts({ headers: authedHeaders() }));
-      if (res.ok) {
-        return (await res.json()) as PromptTemplate;
-      }
+      // The SDK already returns `null` on a not-found, which is the same
+      // signal the old `!res.ok` check produced: fall through to the local
+      // library rather than surfacing an error.
+      const found = await getSdkClient().prompts.get({
+        templateId,
+        ...(version ? { version } : {}),
+      }) as PromptTemplate | null;
+      if (found) return found;
     } catch {
       /* fall through to samples */
     }
   }
   return resolveLocal(templateId, version);
-}
-
-export async function getPromptByRef(ref: PromptRef): Promise<PromptTemplate | null> {
-  const parsed = typeof ref === 'string'
-    ? parseRef(ref)
-    : { templateId: ref.templateId, version: ref.version };
-  if (!parsed) return null;
-  return getPrompt(parsed.templateId, parsed.version);
 }
 
 function resolveLocal(templateId: string, version?: string): PromptTemplate | null {
@@ -144,7 +141,8 @@ function applyFilter(prompts: PromptTemplate[], filter: ListPromptsFilter): Prom
  *  variables raise; unresolved optional variables render as empty string
  *  (matching RFC 0027's `onUnresolved: 'empty'` semantics). Computes a
  *  sha256 hash of the rendered body so the preview stays consistent with
- *  the future `POST /v1/prompts:render` deterministic-render invariant. */
+ *  the future `POST /prompts:render` deterministic-render invariant (the
+ *  major-2 spelling — this client speaks major 2 since ADR 0730 C.4). */
 export function renderLocal(
   template: PromptTemplate,
   variables: Record<string, unknown>,

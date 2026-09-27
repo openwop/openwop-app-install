@@ -13,12 +13,16 @@
  *
  * The host expresses the boardroom on the EXISTING RFC 0005 conversation wire
  * (`conversation.opened`/`conversation.exchanged`, NOT a parallel runtime — ADR
- * 0040 § Correction 2026-06-15). A board's cohort is the `agent:<agentId>`
- * participants on the conversation's `ConversationMeta` (stamped by
- * `markAsBoardGroup` at `@@`-summon). This module derives the AgentRef roster from
- * that meta and enforces the RFC 0101 speaker rule — defense-in-depth: the chat
- * only ever seats cohort members, so a non-participant speaker is an invariant
- * violation, rejected fail-closed.
+ * 0040 § Correction 2026-06-15). A multi-party cohort is the `agent:<agentId>`
+ * participants on the conversation's `ConversationMeta` — seated by
+ * `markAsBoardGroup` at `@@`-summon for a board, by `POST /projects/:id/chat` for
+ * a project, and by `POST /chat/sessions/:id/participants` generically. This
+ * module derives the AgentRef roster from that meta and enforces the RFC 0101
+ * speaker rule — defense-in-depth: the chat only ever seats cohort members, so a
+ * non-participant speaker is an invariant violation, rejected fail-closed.
+ *
+ * The roster is derived from the SHAPE (a group conversation that seats agents),
+ * never from which feature created it — see `participantRosterOf`.
  *
  * @see docs/adr/0040-board-of-advisors.md (Phase 6)
  * @see ../openwop/RFCS/0101-multi-party-group-conversation.md
@@ -38,23 +42,46 @@ export interface ParticipantAgentRef {
 
 /**
  * The participant agent roster (RFC 0101 `participants`) of a conversation, derived
- * from its `ConversationMeta` — the `agent:<agentId>` members of a board group.
- * Returns `null` for a conversation that declares NO multi-party roster (a 1:1 or
- * ungrouped chat) so the speaker rule applies ONLY to multi-party conversations
- * (additive — legacy chats are untouched). A board group with no agent members
- * still returns `[]` (a declared-but-empty roster), which the speaker rule treats
- * as "no agent may speak" — fail-closed.
+ * from its `ConversationMeta`.
+ *
+ * ADR 0608 D6 (`CPWF-1`) — CORRECTED 2026-08-24. This used to require
+ * `meta.boardId`, and the comment that stood here asserted that "everything else
+ * is single-agent / ungrouped". **That was false**, and the falseness is what let
+ * the defect survive a full grade loop: a PROJECT group chat is `type:'group'`
+ * with `ownerSubject: project:<id>` and NO `boardId` (`features/projects/routes.ts:436-441`),
+ * seating every `agent:` member of the project. So the roster came back `null`, the
+ * fail-closed speaker rule at `conversationExchange.ts:333-341` never fired, and
+ * the `multiPartyConversation` capability the host ADVERTISES
+ * (`routes/discovery.ts:841`) was unenforced for that producer. `boardId` is a
+ * PROVENANCE SPELLING; the invariant is "a group conversation that seats agents".
+ *
+ * The rule now:
+ *   - not a group meta                    ⇒ `null` (1:1 / ungrouped — untouched).
+ *   - a BOARD group                       ⇒ the derived roster, EVEN IF EMPTY. A
+ *     board declares a cohort explicitly, so an empty cohort means "no agent may
+ *     speak" and stays fail-closed (unchanged behaviour).
+ *   - any other group WITH `agent:` seats ⇒ the derived roster. This is the arm
+ *     that was missing; projects and the generic
+ *     `POST /chat/sessions/:id/participants` route both land here.
+ *   - any other group with ZERO agent seats ⇒ `null`, deliberately. A group that
+ *     seats no agents has declared no roster, and returning `[]` for it would make
+ *     every agent turn a 422 — e.g. a kicktodo accountability circle
+ *     (`kicktodo-accountability/circleService.ts:106`) seats no agents at create.
+ *     Turning a missing guard into a wedge is not an improvement, so the empty
+ *     case keeps legacy behaviour for non-board groups.
+ *
+ * This is the SPEAKER arm only. The participant CAP is deliberately not enforced
+ * here — see ADR 0608 D6 for why it must land separately and behind an audit.
  */
 export function participantRosterOf(meta: ConversationMeta | null | undefined): ParticipantAgentRef[] | null {
-  // Only a board-seeded group conversation declares a speaker roster; everything
-  // else is single-agent / ungrouped and keeps the optional-attribution behavior.
-  if (!meta || meta.type !== 'group' || !meta.boardId) return null;
+  if (!meta || meta.type !== 'group') return null;
   const agents: ParticipantAgentRef[] = [];
   for (const p of meta.participants) {
     const m = /^agent:(.+)$/.exec(p.subjectRef);
     if (m && m[1]) agents.push({ agentId: m[1] });
   }
-  return agents;
+  if (meta.boardId) return agents;
+  return agents.length > 0 ? agents : null;
 }
 
 /** Is `agentId` a declared participant of `roster`? */

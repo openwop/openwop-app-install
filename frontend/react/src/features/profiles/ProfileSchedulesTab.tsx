@@ -21,6 +21,10 @@ const toRow = (j: ScheduledJob): SubjectScheduleRow => ({
   ...(j.timezone !== undefined ? { timezone: j.timezone } : {}),
   ...(j.lastRunAt !== undefined ? { lastRunAt: j.lastRunAt } : {}),
   ...(j.lastRunId !== undefined ? { lastRunId: j.lastRunId } : {}),
+  // GEN-PRJ-1 — surface the daemon's skip record (dead schedules must be visible).
+  ...(j.lastSkippedAt !== undefined ? { lastSkippedAt: j.lastSkippedAt } : {}),
+  ...(j.lastSkipReason !== undefined ? { lastSkipReason: j.lastSkipReason } : {}),
+  ...(j.nextFireAt !== undefined ? { nextFireAt: j.nextFireAt } : {}),
 });
 const labelFor = (wf: string, cron: string): string => `${workflowName(wf)} · ${cadenceLabel(cron)}`;
 

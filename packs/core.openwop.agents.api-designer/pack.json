@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.api-designer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "API design agent. Authors OpenAPI 3.1, AsyncAPI 3.0, and JSON Schema 2020-12 documents from natural-language briefs. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -27,13 +27,11 @@
       "agentId": "core.openwop.agents.api-designer.default",
       "persona": "API Designer",
       "label": "API Designer Agent",
-      "description": "Authors OpenAPI 3.1 / AsyncAPI 3.0 / JSON Schema 2020-12 documents from briefs. Self-validates via openwop:core.data.json-schema-validate. Writes to disk via openwop:core.files.fs-write when outputPath is set.",
+      "description": "Authors OpenAPI 3.1 / AsyncAPI 3.0 / JSON Schema 2020-12 documents from briefs. Self-validates via openwop:core.openwop.data.json-schema-validate and returns the spec for the enclosing workflow to persist.",
       "modelClass": "coding",
       "systemPromptRef": "prompts/api-designer.md",
       "toolAllowlist": [
-        "openwop:core.openwop.data.json-schema-validate",
-        "openwop:core.files.write",
-        "openwop:core.files.read"
+        "openwop:core.openwop.data.json-schema-validate"
       ],
       "memoryShape": {
         "scratchpad": true,

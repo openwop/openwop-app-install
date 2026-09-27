@@ -1,0 +1,33 @@
+{
+  "name": "core.openwop.connections.openai-images",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "OpenAI Images connection pack (RFC 0095) — api_key provider for the host image-generation seam's `openai` provider (gpt-image, ADR 0115 / ADR 0229 / ADR 0244): the Images API host, auth kind, and the consumer nodes. **ADR 0244:** the image seam now RESOLVES THE API KEY THROUGH THE CONNECTIONS BROKER — installing this pack + connecting an OpenAI key provides the per-tenant, KMS-enveloped, rotatable credential (a workspace-scoped Connection wins over the host-wide `OPENWOP_IMAGE_PROVIDER_KEY[_OPENAI]` env fallback). The host operator STILL configures the ENDPOINT (`OPENWOP_IMAGE_PROVIDER_ENDPOINT[_OPENAI]`, honest-off until set) — the endpoint is non-secret host infra, not a credential. Carries NO secret (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "openai-images",
+    "displayName": "OpenAI Images",
+    "category": "other",
+    "auth": {
+      "kind": "api_key",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://platform.openai.com/docs/api-reference/images"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.ai.image-generate",
+      "feature.campaign-channels.nodes.render-concepts"
+    ],
+    "docsUrl": "https://platform.openai.com/docs/guides/image-generation",
+    "apiHosts": [
+      "api.openai.com"
+    ]
+  }
+}

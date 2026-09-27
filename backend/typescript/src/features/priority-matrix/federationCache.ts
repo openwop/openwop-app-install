@@ -102,7 +102,3 @@ export function __resetFanoutCache(): void {
   inflight.clear();
 }
 
-/** Test/diagnostics: current number of cached keys. */
-export function __fanoutCacheSize(): number {
-  return store.size;
-}

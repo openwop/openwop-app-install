@@ -7,9 +7,10 @@
  * delete round-trips, the validation guards, and that one tenant can never read
  * another's form (`getForm` tenant/org guard).
  *
- * `recordSubmission` (the only path that reaches out to `crmService.createContact`)
- * is exercised only with `createToContact: false`, so the test stays pure — no
- * CRM dependency, no network.
+ * `recordSubmission` no longer reaches into CRM at all (ADR 0330 — destination
+ * effects run through the submission-sink seam, and no sink is registered in
+ * this unit harness), so the whole file stays pure — no CRM dependency, no
+ * network. Sink mechanics are covered in `forms-submission-sinks.test.ts`.
  */
 
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -66,6 +67,30 @@ describe('formsService (service layer, in-memory durable)', () => {
     expect(got).not.toBeNull();
     expect(got!.formId).toBe(form.formId);
     expect(got!.title).toBe('Contact us');
+  });
+
+  // UX_UPGRADE-forms F-G1 — per-field help text.
+  it('round-trips a field `description`, bounds it, and CLEARS a whitespace-only one', async () => {
+    const long = 'x'.repeat(400);
+    const form = await createForm({
+      tenantId: TENANT_A, orgId: ORG, title: 'Help text', createdBy: USER,
+      fields: [
+        { key: 'name', label: 'Name', type: 'text', required: true, description: '  As it appears on your ID.  ' },
+        { key: 'note', label: 'Note', type: 'textarea', required: false, description: '   ' },
+        { key: 'bio', label: 'Bio', type: 'textarea', required: false, description: long },
+      ],
+    } as Parameters<typeof createForm>[0]);
+
+    // Trimmed, not merely stored.
+    expect(form.fields[0]!.description).toBe('As it appears on your ID.');
+    // Whitespace-only clears — a blank help slot would render an empty line.
+    expect(form.fields[1]!.description).toBeUndefined();
+    // Bounded like every other authored string.
+    expect(form.fields[2]!.description!.length).toBe(300);
+
+    // …and it survives the store round-trip, not just the sanitize call.
+    const got = await getForm(TENANT_A, ORG, form.formId);
+    expect(got!.fields[0]!.description).toBe('As it appears on your ID.');
   });
 
   it('listForms returns only the (tenant, org) slice, newest first', async () => {
@@ -175,5 +200,44 @@ describe('formsService (service layer, in-memory durable)', () => {
     expect(subs[0].values).toEqual({ name: 'Ada', email: 'ada@example.com' });
     // tenant B sees nothing
     expect(await listSubmissions(TENANT_B, ORG, form.formId)).toHaveLength(0);
+  });
+
+  // Grade pass 2026-07-10 (FORMS-2): the reads go through the GOV-1 tenant
+  // index (listForTenantIndexed) — a two-tenant probe proves the index slice
+  // doesn't bleed across tenants (and never regresses back to a full scan).
+  it('submissions read via the tenant index — no cross-tenant bleed at volume', async () => {
+    const fa = await make(TENANT_A);
+    const fb = await make(TENANT_B);
+    for (let i = 0; i < 5; i++) await recordSubmission(fa, validateValues(fa, { name: `A${i}`, email: `a${i}@x.test` }), {});
+    for (let i = 0; i < 3; i++) await recordSubmission(fb, validateValues(fb, { name: `B${i}`, email: `b${i}@x.test` }), {});
+    expect(await listSubmissions(TENANT_A, ORG, fa.formId)).toHaveLength(5);
+    expect(await listSubmissions(TENANT_B, ORG, fb.formId)).toHaveLength(3);
+    // A's form id queried under B's tenant yields nothing (index is per-tenant).
+    expect(await listSubmissions(TENANT_B, ORG, fa.formId)).toHaveLength(0);
+  });
+});
+
+describe('R2 F4 — a required checkbox must be TRUE (consent semantics)', () => {
+  beforeEach(async () => {
+    initHostExtPersistence(openSqliteStorage(':memory:'));
+    await __resetFormsStore();
+  });
+
+  it('check-then-uncheck (false) fails required; true passes; optional false records false', async () => {
+    const form = await createForm({
+      tenantId: TENANT_A, orgId: ORG, title: 'Consent', createdBy: 'u1',
+      fields: [
+        { key: 'agree', label: 'I agree', type: 'checkbox', required: true },
+        { key: 'news', label: 'Newsletter', type: 'checkbox', required: false },
+      ],
+    } as Parameters<typeof createForm>[0]);
+
+    // The void-consent shape: present but false.
+    expect(() => validateValues(form, { agree: false })).toThrow(/required/);
+    expect(() => validateValues(form, { agree: 'true', news: false }))
+      .not.toThrow();
+    const out = validateValues(form, { agree: true, news: false });
+    expect(out.agree).toBe(true);
+    expect(out.news).toBe(false); // an OPTIONAL checkbox still records an explicit no
   });
 });

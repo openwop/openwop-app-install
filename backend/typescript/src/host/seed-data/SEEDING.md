@@ -56,6 +56,16 @@ interface ExampleDataSeeder {
 }
 ```
 
+A seeder may declare `dependsOn?: string[]` (ids of seeders whose data it builds
+on). Since 2026-07-06 (grade-data), `dependsOn` is **enforced on seed**: running a
+selection auto-includes each step's transitive ancestors, in registry order, and
+marks them `autoIncluded: true` in the step results — so seeding `workforces`
+alone also (idempotently) seeds `agents` first, and a dependent seeder never
+lands its rows under a fallback scope because its substrate was missing.
+**Clearing never expands**: a destructive operation stays exactly the explicit
+selection (dependents of a cleared step may keep now-dangling demo refs — they
+are demo rows; re-seed or clear them explicitly).
+
 The status / run / clear endpoints and the dashboard all derive from the
 `EXAMPLE_DATA_SEEDERS` array, so **adding a new example data type is one entry** — no
 endpoint or UI edits:
@@ -75,12 +85,13 @@ Endpoints (host extension): `GET /v1/host/openwop-app/demo/status`,
 | Env var | Default | Controls |
 |---|---|---|
 | `OPENWOP_DEMO_MODE` (`../demoMode.ts`) | **off** | Everything AUTOMATIC: the boot `__showcase__` seed, the workforce showcase fallback, and the frontend's silent auto-seed. **Off ⇒ a clean / white-label install boots empty** — production-grade out of the gate. The public demo sets it `true` (and the synthetic data it surfaces is BADGED illustrative). |
-| `OPENWOP_DEMO_SEED_ENABLED` (`../exampleDataSeed.ts`) | on | Whether explicit, user-triggered seeding is *available at all* (the `/example-data` dashboard + "Load example data" actions). A hardened production deploy can set this `false` to remove the capability entirely. |
+| `OPENWOP_DEMO_SEED_ENABLED` (`../exampleDataSeed.ts`) | on — **except the enterprise (`auth`) posture, where it defaults OFF** (DUR-3, ADR 0195) | Whether explicit, user-triggered seeding is *available at all* (the `/example-data` dashboard + "Load example data" actions). Opt-in under `OPENWOP_DEPLOY_POSTURE=auth` (set `true` explicitly to enable); set `false` to remove the capability on any posture. |
 
 So: **clean install** = `DEMO_MODE` off → nothing auto-seeds, no showcase
 data, honest empty states; example data is still loadable on demand from
 `/example-data` (unless `DEMO_SEED_ENABLED=false`). **Public demo** = `DEMO_MODE=true`
-→ populated + badged.
+→ populated + badged. **Enterprise (`auth` posture)** = seeding OFF unless
+`DEMO_SEED_ENABLED=true` is set explicitly.
 
 ## To ship NO example content (clean tenant)
 
@@ -101,3 +112,34 @@ Seeding is **per-persona idempotent** and **non-destructive**: each persona is
 created only if missing, so a re-seed never duplicates and never clobbers a
 user's own edits. There is no version/hash gate (unlike myndhyve's workflow
 content-hash gate) — the empty-roster check is the whole contract.
+
+## Seeder safety invariants (the `demo-*` phases — learned the hard way)
+
+Two rules every `demo-*` seeder MUST follow. Both come from real review blockers
+(#1344 CRITICAL/HIGH) and prevent one tenant's seed from corrupting another's —
+or a seed's `clear()` from deleting a user's own data:
+
+1. **Never mint a fixed id on a store whose `DurableCollection` key isn't
+   tenant-prefixed.** `access-orgs` is keyed by `orgId` alone and `deleteOrg`
+   cascades by `orgId` alone, so a fixed per-tenant id (`org-solstice-demo`) lets
+   tenant B's seed overwrite tenant A's row — and B's `clear()` cascade-delete
+   A's teams/members. Let the service mint its random id and mark ownership with a
+   `createdBy`/actor marker instead. Fixed ids are ONLY for deliberately
+   **host-global** rows (`host-site`, ADR 0027). Check the collection's key
+   function before choosing a fixed id.
+
+2. **Never delete a by-natural-key-matched entity (name, code, shared key)
+   without an ownership marker.** If a seeder REUSES a name/code-matched
+   pre-existing entity (a user's own "Sales" team, a shared coupon code, a
+   like-named pipeline), `clear()` deleting it by that same key destroys user
+   data. Delete only rows carrying your `createdBy`/actor marker, or (where the
+   store has no creator field) a full canonical-value match that a user's row
+   can't accidentally satisfy, or namespace your ids/codes (`SOLSTICE-*`,
+   `demo-<phase>-<slug>`). When neither is possible, leave the residue and
+   document it — never a blind name/code delete.
+
+Corollaries: **`deleteOrg` refuses while the org holds business rows** (#1370,
+returns `blocked:{rows}`) — a per-feature `clear()` must treat that as an honest
+skip, not an error (the registry's reverse-order full clear empties dependents
+first). And **`dependsOn` is load-bearing**: `runExampleDataSeed` auto-includes
+transitive `dependsOn` ancestors on seed (#1362), so declare them accurately.

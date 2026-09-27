@@ -34,7 +34,7 @@ beforeAll(async () => {
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
-  server = app.listen(0);
+  server = app.listen(0, '127.0.0.1');
 });
 
 afterAll(async () => {
@@ -108,5 +108,19 @@ describe('connectionReadiness — requiredConnections activation gate (ADR 0033 
     const r = await resolveConnectionReadiness(TENANT, AGENT);
     expect(r.allConfigured).toBe(false);
     expect(r.missing).toEqual(['sendgrid']);
+  });
+
+  it('a capability token is satisfied by ANY configured provider of that category', async () => {
+    await seedProfile(['capability:email-calendar']); // "needs an email/calendar connection"
+    // fail-closed until the user configures some email-calendar provider
+    const none = await resolveConnectionReadiness(TENANT, AGENT);
+    expect(none.allConfigured).toBe(false);
+    expect(none.missing).toEqual(['capability:email-calendar']);
+    // configure ANY provider of that category (sendgrid → email-calendar) → satisfied
+    await createSecretConnection({ tenantId: TENANT, provider: 'sendgrid', kind: 'api_key', secret: 'SG.x', scope: 'workspace' });
+    const ok = await resolveConnectionReadiness(TENANT, AGENT);
+    expect(ok.allConfigured).toBe(true);
+    expect(ok.entries.find((e) => e.provider === 'capability:email-calendar')?.configured).toBe(true);
+    expect(gateAutonomyByReadiness('auto', ok)).toBe('auto');
   });
 });

@@ -10,6 +10,8 @@ export const messages = {
   accepted: 'Opening the workflow author…',
   loadOrgsFailed: 'Failed to load organizations.',
   loadFailed: 'Failed to load suggestions.',
+  loadFailedTitle: 'Couldn\u2019t load work patterns',
+  retry: 'Retry',
   refreshFailed: 'Failed to scan runs.',
   dismissFailed: 'Failed to dismiss the suggestion.',
   acceptFailed: 'Failed to open the workflow author.',
@@ -24,4 +26,13 @@ export const messages = {
   statusAccepted: 'accepted',
   makeWorkflow: 'Make a workflow',
   dismiss: 'Dismiss',
+
+  // §4.5 collection kit — suggestions status facet
+  statusSuggested: 'suggested',
+  filterGroup: 'Filters',
+  filterStatusLabel: 'Filter by status',
+  allStatuses: 'All statuses',
+  noMatchTitle: 'No matches',
+  noMatchBody: 'Nothing matches the current filter.',
+  clearFilters: 'Clear filters',
 };

@@ -1,11 +1,19 @@
 {
   "name": "feature.app-builder.nodes",
-  "version": "1.0.0",
-  "description": "App-builder canvas producer node pack (ADR 0153 Phase 2). The `render` node emits a typed `canvas.app-builder` artifact — a structured app design { name, screens[], connectors[] } with a component tree per screen — that flows through the run-output producer (ADR 0083) and renders inline in the chat artifact workbench. Constrained typed JSON, never executable code; pure transform; replay-safe.",
+  "version": "1.9.0",
+  "description": "App-builder canvas producer node pack (+ code export and a canvas-to-work proposal adapter). The `render` node emits a typed `canvas.app-builder` artifact \u2014 a structured app design { name, screens[], connectors[] } with a component tree per screen \u2014 that renders inline in the chat artifact workbench. The `export` node generates framework-native source (React/Vue/HTML) from an app design \u2192 a downloadable Media-asset token via ctx.features['app-builder'].export. The proposal adapter reads an existing canvas and emits generic Kanban work inputs; core Kanban owns the board write. Constrained typed JSON, never executable code; replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "app-builder", "canvas", "screens", "components"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "app-builder",
+    "canvas",
+    "screens",
+    "components"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.app-builder.nodes.render",
@@ -14,7 +22,128 @@
       "description": "Emit a `canvas.app-builder` artifact. Inputs: { app } (or `source` JSON) = { name, description?, theme?, screens: [{ id, name, route?, isInitial?, components: [tree] }], connectors?: [{ from, to, trigger?, label? }] }. Components reference the host app-builder catalog by `type`. Output: a typed canvas.app-builder artifact. Pure transform.",
       "category": "transform",
       "role": "action"
+    },
+    {
+      "typeId": "feature.app-builder.nodes.export",
+      "version": "1.0.0",
+      "label": "Export app source",
+      "description": "Generate framework-native source from an app design over ctx.features['app-builder'].export. Inputs: { target: 'react-tailwind'|'react-styled'|'vue-tailwind'|'html-css', app?: <inline canvas.app-builder model>, canvasId?: <stored canvas id> }. Output: { assetToken, serveUrl, fileName, fileCount, warnings }. The token downloads a ZIP via /assets/:token. Recorded output \u2192 replay-safe.",
+      "category": "integration",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.app-builder.nodes.research",
+      "version": "1.0.0",
+      "label": "App research",
+      "description": "ONE BYOK call producing structured product research \u2014 personas[], brand voice, visualDirection (incl. theme-color suggestions) \u2014 from { idea, prd }. SOFT-FAILS loudly (warning carries the error code). Output: { content: JSON string, research?, planContext, warning? } \u2014 planContext is the PRD+research combined text intended as the downstream chat node's SOLE input (multi-port prompts are dropped by toMessages).",
+      "category": "ai",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.app-builder.nodes.deepen",
+      "version": "1.0.0",
+      "label": "Deepen screens",
+      "description": "Per-screen content depth (ADR 0325): enriches the \u22644 thinnest screens (component count < minComponents, default 5) with one BYOK call each, re-normalized through the SAME gate as render; the input artifact is DEEP-CLONED (never mutated \u2014 the scheduler delivers by reference). Config { maxScreens clamped 0..4, minComponents }. Output: { artifact, deepened[], warning? }.",
+      "category": "ai",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.app-builder.nodes.audit",
+      "version": "1.0.0",
+      "label": "Quality audit",
+      "description": "DETERMINISTIC (zero AI) semantic quality checks: unreachable screens, empty screens, dangling navigateTo, duplicate routes, indistinct theme pair, deepen-skipped (from upstreamWarning). Output: { artifact (pass-through), report: { score, findings[], summary } } \u2014 deliberately NO top-level string outputs (the approval gate folds strings into picker options) and the whole map flows to the gate so detectTypedArtifact finds `.artifact`.",
+      "category": "transform",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.app-builder.nodes.capture",
+      "role": "pure",
+      "name": "Capture typed artifact",
+      "description": "Wraps an upstream value into a typed artifact envelope (config: artifactTypeId, title) so the run persists a schema-validated typed deliverable.",
+      "inputs": {
+        "value": {
+          "description": "The value to capture."
+        }
+      },
+      "outputs": {
+        "artifact": {
+          "description": "The typed artifact envelope (absent when the input was empty)."
+        }
+      }
+    },
+    {
+      "typeId": "feature.app-builder.nodes.repair",
+      "role": "action",
+      "name": "Repair app design",
+      "description": "Governed repair: reads the current canvas.app-builder design through the feature surface, applies the repair instructions with one AI call, and re-normalizes the candidate through the render gate. Outputs the candidate artifact plus the CAS basis (canvasId, baseVersion).",
+      "inputs": {
+        "canvasId": {
+          "description": "The canvas to repair."
+        },
+        "instructions": {
+          "description": "What to repair \u2014 finding codes or a description."
+        }
+      },
+      "outputs": {
+        "artifact": {
+          "description": "The repaired candidate (canvas.app-builder envelope)."
+        },
+        "canvasId": {},
+        "baseVersion": {
+          "description": "The version the candidate was built from (the applyRepair CAS basis)."
+        }
+      }
+    },
+    {
+      "typeId": "feature.app-builder.nodes.apply-repair",
+      "role": "action",
+      "capabilities": ["side-effectful"],
+      "name": "Apply approved repair",
+      "description": "CAS-writes the APPROVED repair candidate as a new working-copy version through the feature surface (expectedVersion = the candidate's basis; concurrent edits 409).",
+      "inputs": {
+        "artifact": {},
+        "canvasId": {},
+        "baseVersion": {}
+      },
+      "outputs": {
+        "applied": {
+          "description": "{ canvasId, newVersion }"
+        }
+      }
+    },
+    {
+      "typeId": "feature.app-builder.nodes.propose-kanban-work",
+      "version": "1.0.0",
+      "label": "Propose App Builder work",
+      "description": "Reads a stored canvas.app-builder design through its feature surface and emits the generic { scope, source, items } proposal consumed by core.openwop.kanban.work-items.materialize. Each screen becomes a task; forward screen-flow connectors become safe dependency edges, while back-navigation is reported and never creates a cycle. This node does not write a board.",
+      "category": "transform",
+      "role": "action"
+    },
+    {
+      "typeId": "feature.app-builder.nodes.deploy-app",
+      "version": "1.0.0",
+      "label": "App Builder: Deploy App",
+      "description": "Deploys an exported app (prebuilt image, symbolic env keys ONLY) to the operator-configured provider via ctx.features['app-builder'].deployApp (ADR 0424). Sub-toggle `app-builder.deploy` gated + honest-off without a provider. Idempotent on (service, exportHash, image) \u2014 a replay never re-deploys. Compose AFTER core.approvalGate. Inputs: { orgId, service, image, exportHash, envKeys[] }. Output: { deployment }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.app-builder.nodes.deployment-status",
+      "version": "1.0.0",
+      "label": "App Builder: Deployment Status",
+      "description": "Reads a governed deployment record by deployKey (tenant-guarded read). Inputs: { deployKey }. Output: { deployment | null }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

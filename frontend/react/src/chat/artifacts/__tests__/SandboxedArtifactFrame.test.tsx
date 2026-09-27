@@ -7,8 +7,9 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 
 let enabled = true;
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled, status: enabled ? 'on' : 'off', isBeta: false, variant: null }),
+  useFeatureAccess: () => makeFeatureAccess({ enabled, status: enabled ? 'on' : 'off', isBeta: false, variant: null }),
 }));
 import { SandboxedArtifactFrame, buildArtifactSrcdoc, ARTIFACT_SANDBOX, ARTIFACT_CSP } from '../SandboxedArtifactFrame.js';
 

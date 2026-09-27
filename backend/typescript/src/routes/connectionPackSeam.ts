@@ -42,6 +42,7 @@ import {
 import { getProvider } from '../features/connections/providerRegistry.js';
 import { hostMatchesApi } from '../host/connectionInjection.js';
 import { createLogger } from '../observability/logger.js';
+import { sendError } from '../middleware/errorEnvelope.js';
 
 const log = createLogger('routes.connection-pack-seam');
 
@@ -79,7 +80,7 @@ function planConsent(providerId: string, requested: Array<'read' | 'write'>): Co
 function handleInstall(req: Request, res: Response): void {
   const body = (req.body ?? {}) as { manifest?: unknown };
   if (body.manifest === undefined || body.manifest === null || typeof body.manifest !== 'object') {
-    res.status(400).json({ error: 'validation_error', details: { message: 'manifest (object) required' } });
+    sendError(res, 400, 'validation_error', 'manifest (object) required');
     return;
   }
   res.status(200).json(installConnectionPackManifest(body.manifest));
@@ -88,7 +89,7 @@ function handleInstall(req: Request, res: Response): void {
 function handleResolve(req: Request, res: Response): void {
   const body = (req.body ?? {}) as { provider?: unknown; simulateBuiltinVersion?: unknown };
   if (typeof body.provider !== 'string' || body.provider.length === 0) {
-    res.status(400).json({ error: 'validation_error', details: { message: 'provider (string) required' } });
+    sendError(res, 400, 'validation_error', 'provider (string) required');
     return;
   }
   const simulate = typeof body.simulateBuiltinVersion === 'string' ? body.simulateBuiltinVersion : undefined;
@@ -101,15 +102,12 @@ function handleConsentPlan(req: Request, res: Response): void {
     ? body.requested.filter((r): r is 'read' | 'write' => r === 'read' || r === 'write')
     : [];
   if (typeof body.provider !== 'string' || requested.length === 0) {
-    res.status(400).json({
-      error: 'validation_error',
-      details: { message: 'provider (string) + requested (("read"|"write")[]) required' },
-    });
+    sendError(res, 400, 'validation_error', 'provider (string) + requested (("read"|"write")[]) required');
     return;
   }
   const steps = planConsent(body.provider, requested);
   if (steps === null) {
-    res.status(422).json({ error: 'connection_provider_unresolved', details: { provider: body.provider } });
+    sendError(res, 422, 'connection_provider_unresolved', `No connection provider is registered for "${body.provider}".`, { provider: body.provider });
     return;
   }
   res.status(200).json({ steps });
@@ -130,7 +128,7 @@ function handleEgressCheck(req: Request, res: Response): void {
     typeof body.provider !== 'string' || body.provider.length === 0 ||
     typeof body.requestHost !== 'string' || body.requestHost.length === 0
   ) {
-    res.status(400).json({ error: 'validation_error', details: { message: 'provider (string) + requestHost (string) required' } });
+    sendError(res, 400, 'validation_error', 'provider (string) + requestHost (string) required');
     return;
   }
   const manifest = getProvider(body.provider);

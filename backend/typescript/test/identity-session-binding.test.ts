@@ -18,6 +18,8 @@ import { openSqliteStorage } from '../src/storage/sqlite/index.js';
 import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { authMiddleware, issueUserSession } from '../src/middleware/auth.js';
 import { __resetUsersStore, createUser } from '../src/features/users/usersService.js';
+import { __resetSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { usersSessionAuthority } from '../src/features/users/feature.js';
 import { resolveCallerUser } from '../src/features/users/usersGuards.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'owop-id-'));
@@ -28,35 +30,60 @@ process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-chars-long
 
 /** Capture the cookie value issueUserSession sets, then replay it through
  *  authMiddleware as an incoming request. Returns the resolved request. */
-async function roundTripSession(setCookieHeader: string): Promise<{ userId?: string; principalId?: string; tenantId?: string }> {
+async function roundTripSession(setCookieHeader: string): Promise<{ userId?: string; principalId?: string; tenantId?: string; nextErr?: unknown }> {
   // Set-Cookie: __session=<value>; Path=/; ...   -> extract the value.
   const value = /__session=([^;]+)/.exec(setCookieHeader)?.[1] ?? '';
   const req: any = { method: 'GET', path: '/v1/host/openwop-app/users/me', query: {}, header: (h: string) => (h.toLowerCase() === 'cookie' ? `__session=${value}` : undefined) };
   const res: any = { append() {}, setHeader() {}, getHeader() {}, status() { return res; }, json() {}, end() {} };
   let nexted = false;
+  let nextErr: unknown;
   await new Promise<void>((resolve) => {
-    void authMiddleware()(req, res, () => { nexted = true; resolve(); });
+    void authMiddleware()(req, res, (err?: unknown) => { nexted = true; nextErr = err; resolve(); });
     // give a sync handler a tick to fall through if it didn't call next
     setTimeout(resolve, 50);
   });
   expect(nexted, 'authMiddleware should pass the bound session through').toBe(true);
-  return { userId: req.userId, principalId: req.principal?.principalId, tenantId: req.tenantId };
+  return { userId: req.userId, principalId: req.principal?.principalId, tenantId: req.tenantId, nextErr };
 }
 
 describe('ADR 0003: session binding round-trip', () => {
+  // ADR 0621 — a `userId`-bearing cookie is validated per request through the
+  // session-authority seam, which has NO permissive default. This bare
+  // (no-createApp) harness registers the users feature's real authority, and
+  // the row the cookie names must exist (an unknown id is `account_erased`).
+  beforeEach(async () => {
+    __resetHostExtPersistence();
+    initHostExtPersistence(openSqliteStorage(join(dir, 'bind.db')));
+    await __resetUsersStore();
+    registerSessionAuthority(usersSessionAuthority);
+  });
+
   it('issueUserSession -> authMiddleware yields req.userId + opaque user principal', async () => {
+    const u = await createUser({ tenantId: 'acme', principalId: 'password:abc@acme.test', source: 'password' });
     let cookie = '';
     const res: any = { append: (k: string, v: string) => { if (k.toLowerCase() === 'set-cookie') cookie = Array.isArray(v) ? v[0] : v; } };
-    issueUserSession(res, { userId: 'user:abc-123', tenantId: 'acme' });
+    issueUserSession(res, { userId: u.userId, tenantId: 'acme', epoch: 0 });
     expect(cookie).toContain('__session=');
 
     const resolved = await roundTripSession(cookie);
-    expect(resolved.userId).toBe('user:abc-123');
-    expect(resolved.principalId).toBe('user:abc-123'); // NOT session:<sid>, NOT double-prefixed
+    expect(resolved.nextErr).toBeUndefined();
+    expect(resolved.userId).toBe(u.userId);
+    expect(resolved.principalId).toBe(u.userId); // NOT session:<sid>, NOT double-prefixed
     expect(resolved.tenantId).toBe('acme');
     // RFC 0048: the principal is opaque + carries no PII (no email).
     expect(resolved.principalId).not.toMatch(/@/);
     expect(resolved.principalId!.startsWith('user:')).toBe(true);
+  });
+
+  it('ADR 0621 — with NO session authority registered, a userId-bearing cookie is refused 503 (no permissive default)', async () => {
+    const u = await createUser({ tenantId: 'acme', principalId: 'password:noauth@acme.test', source: 'password' });
+    let cookie = '';
+    const res: any = { append: (k: string, v: string) => { if (k.toLowerCase() === 'set-cookie') cookie = Array.isArray(v) ? v[0] : v; } };
+    issueUserSession(res, { userId: u.userId, tenantId: 'acme', epoch: 0 });
+    __resetSessionAuthority();
+    const resolved = await roundTripSession(cookie);
+    expect(resolved.nextErr).toMatchObject({ code: 'session_authority_unregistered', httpStatus: 503 });
+    expect(resolved.userId).toBeUndefined();
   });
 });
 

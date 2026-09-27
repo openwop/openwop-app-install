@@ -40,7 +40,39 @@
 import { createVerify, createPublicKey, type KeyObject, type JsonWebKeyInput } from 'node:crypto';
 
 const JWKS_CACHE_TTL_MS = 10 * 60 * 1000;
+/**
+ * Minimum gap between signature-failure-driven JWKS refetches. A signature that
+ * fails against a CACHED key may mean the issuer re-used a `kid` for a new key
+ * (a rotation the kid-miss refetch cannot see), so one refetch is worth trying —
+ * but an unauthenticated caller can present a bad signature at will, and without
+ * this bound every forged token would cost this host an outbound JWKS fetch.
+ */
+const JWKS_SIG_REFETCH_COOLDOWN_MS = 30 * 1000;
 const DEFAULT_CLOCK_SKEW_S = 60;
+
+/**
+ * The `exp-only` revocation window this host advertises AND enforces (RFC 0210 §B).
+ *
+ * On an `exp-only` lane the host re-checks the trust root NEVER — no introspection,
+ * no userinfo, no revocation list, no host-side epoch (measured: {@link OidcVerifier.verify}
+ * below checks signature, `iss`, `aud`, `iat`, `exp`, `nbf`, `sub` and nothing else).
+ * A subject revoked upstream therefore keeps access for the credential's full remaining
+ * life, and this window is the ONLY bound on that. Advertising it is a claim the host
+ * owes enforcement for, which is why this constant is the single source for both: the
+ * advert reads it (`routes/discovery.ts` `v2AuthFamily`) and the refusal below compares
+ * against it, so they cannot drift.
+ *
+ * 3600 s because that is exactly what Firebase Auth mints (`exp − iat === 3600`), and
+ * RFC 0210 §C.7 asks for "one hour or less" while deliberately setting no MUST ceiling.
+ *
+ * NO SKEW TOLERANCE IS ADDED TO THIS BOUND, unlike the `exp`/`nbf` checks. Tolerating
+ * δ seconds here would mean accepting a credential with `window + δ` of remaining life
+ * while advertising `window` — a quiet over-claim of exactly the kind this RFC exists to
+ * stop. A host whose clock lags the issuer therefore refuses slightly early, which is
+ * the fail-closed direction; the alternative fails open on the one number the lane
+ * promises.
+ */
+export const OIDC_REVOCATION_WINDOW_S = 3600;
 
 export type SupportedAlgorithm = 'RS256' | 'ES256';
 
@@ -69,6 +101,10 @@ export interface OidcClaims {
   readonly sub: string;
   readonly nbf?: number;
   readonly email?: string;
+  /** OIDC Core §5.1 — `true` ONLY when the IdP itself verified `email`. The
+   *  host threads `email` into the durable `User` row ONLY under this flag
+   *  (ADR 0622 D7 / USERS-20); an unverified or absent claim writes nothing. */
+  readonly email_verified?: boolean;
   readonly name?: string;
   readonly [key: string]: unknown;
 }
@@ -86,7 +122,13 @@ export class OidcVerificationError extends Error {
       | 'not_yet_valid'
       | 'missing_iat'
       | 'missing_sub'
-      | 'jwks_unavailable',
+      | 'jwks_unavailable'
+      // RFC 0210 §B.6 — a DISTINCT code, not a generic refusal: it is what lets an
+      // outside party tell "the advertised lifetime bound was enforced" from "the host
+      // refused for some other reason". Registered in the v2 error envelope
+      // (schemas/v2/error-envelope.schema.json), so it rides the wire unaliased rather
+      // than being namespaced to `openwop-app.*` by `v2ErrorCode`.
+      | 'credential_lifetime_exceeded',
     message: string,
   ) {
     super(message);
@@ -145,6 +187,8 @@ function derEncodeEcdsa(r: Buffer, s: Buffer): Buffer {
 
 export class OidcVerifier {
   private cache: JwksCache | null = null;
+  /** When the last signature-failure-driven refetch ran (see JWKS_SIG_REFETCH_COOLDOWN_MS). */
+  private lastSigRefetchAt: number | null = null;
 
   constructor(private readonly config: OidcVerifierConfig) {
     if (!config.issuer) throw new Error('OidcVerifier: config.issuer is required');
@@ -275,21 +319,39 @@ export class OidcVerifier {
     if (typeof header.kid !== 'string' || !header.kid) {
       throw new OidcVerificationError('malformed_jwt', 'JWT header MUST include a non-empty kid');
     }
-    const key = await this.resolveKey(header.kid);
-    if (key.alg !== alg) {
-      throw new OidcVerificationError(
-        'unsupported_algorithm',
-        `JWT alg="${alg}" does not match key alg="${key.alg}"`,
-      );
-    }
-
     const signingInput = `${headerSeg}.${payloadSeg}`;
-    const signatureRaw = base64UrlDecode(signatureSeg);
-    const signatureForVerify = normalizeSignature(alg, signatureRaw);
-    const verifier = createVerify('sha256');
-    verifier.update(signingInput, 'utf8');
-    if (!verifier.verify(key.key, signatureForVerify)) {
-      throw new OidcVerificationError('invalid_signature', 'JWT signature does not verify');
+    const signatureForVerify = normalizeSignature(alg, base64UrlDecode(signatureSeg));
+    const signatureVerifies = (key: JwksKey): boolean => {
+      if (key.alg !== alg) {
+        throw new OidcVerificationError(
+          'unsupported_algorithm',
+          `JWT alg="${alg}" does not match key alg="${key.alg}"`,
+        );
+      }
+      const verifier = createVerify('sha256');
+      verifier.update(signingInput, 'utf8');
+      return verifier.verify(key.key, signatureForVerify);
+    };
+    const fetchedBefore = this.cache?.fetchedAt;
+    if (!signatureVerifies(await this.resolveKey(header.kid))) {
+      // The key came from the CACHE (not a fetch this call made) — the issuer may
+      // have re-used this `kid` for a new key, which a kid-miss refetch never sees
+      // and which would otherwise refuse every token for the rest of the cache TTL.
+      // Refetch ONCE, bounded by the cooldown so a forged signature cannot turn
+      // into an outbound fetch per request. MEASURED: the conformance harness mints
+      // every synthetic issuer with kid `openwop-conformance-key-0`, so the second
+      // oidc scenario in one run was checked against the first one's key.
+      const now = Date.now();
+      const fromCache = this.cache !== null && this.cache.fetchedAt === fetchedBefore;
+      const cooled = this.lastSigRefetchAt === null || now - this.lastSigRefetchAt >= JWKS_SIG_REFETCH_COOLDOWN_MS;
+      if (!fromCache || !cooled) {
+        throw new OidcVerificationError('invalid_signature', 'JWT signature does not verify');
+      }
+      this.lastSigRefetchAt = now;
+      this.cache = null;
+      if (!signatureVerifies(await this.resolveKey(header.kid))) {
+        throw new OidcVerificationError('invalid_signature', 'JWT signature does not verify');
+      }
     }
 
     let claims: OidcClaims;
@@ -316,10 +378,38 @@ export class OidcVerifier {
     }
     const nowSeconds = Math.floor(Date.now() / 1000);
     if (typeof claims.iat !== 'number') {
-      throw new OidcVerificationError('missing_iat', 'JWT MUST include numeric iat');
+      // RFC 0210 §B.4, second sentence: the total-lifetime bound below cannot be
+      // evaluated without `iat`, and §2.1 fails CLOSED rather than skipping a bound it
+      // cannot check. So this is the lifetime refusal, carrying the lifetime code —
+      // not a separate `missing_iat` reason, which would let a token escape the bound
+      // by omitting the claim the bound is computed from.
+      throw new OidcVerificationError(
+        'credential_lifetime_exceeded',
+        `JWT carries no numeric iat, so its total lifetime cannot be bounded against the advertised ${OIDC_REVOCATION_WINDOW_S}s window`,
+      );
     }
     if (typeof claims.exp !== 'number' || claims.exp <= nowSeconds - this.clockSkewSeconds) {
       throw new OidcVerificationError('expired', 'JWT is expired');
+    }
+    // THE `exp-only` LIFETIME BOUND (RFC 0210 §B.4). TWO bounds, and neither implies
+    // the other — this is a disjunction, and a host enforcing only one over-claims:
+    //   - `exp − iat` alone accepts a ten-year token minted ten years ago (short
+    //     remaining life, unbounded total lifetime);
+    //   - `exp − now` alone accepts a freshly minted ten-year token in its ninth year
+    //     (bounded remaining life, unbounded total lifetime).
+    // Each is therefore refused on its own, and the suite isolates them with an `iat`
+    // skewed behind / ahead of this host's clock (`v2-lane-exp-only-bound.test.ts`).
+    if (claims.exp - claims.iat > OIDC_REVOCATION_WINDOW_S) {
+      throw new OidcVerificationError(
+        'credential_lifetime_exceeded',
+        `JWT total lifetime (exp − iat = ${claims.exp - claims.iat}s) exceeds the advertised ${OIDC_REVOCATION_WINDOW_S}s revocation window`,
+      );
+    }
+    if (claims.exp - nowSeconds > OIDC_REVOCATION_WINDOW_S) {
+      throw new OidcVerificationError(
+        'credential_lifetime_exceeded',
+        `JWT remaining lifetime (exp − now = ${claims.exp - nowSeconds}s) exceeds the advertised ${OIDC_REVOCATION_WINDOW_S}s revocation window`,
+      );
     }
     if (typeof claims.nbf === 'number' && claims.nbf > nowSeconds + this.clockSkewSeconds) {
       throw new OidcVerificationError('not_yet_valid', 'JWT nbf is in the future');

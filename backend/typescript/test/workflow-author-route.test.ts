@@ -1,8 +1,10 @@
 /**
  * AI Workflow Author (ADR 0072) — ROUTE harness. Boots the real app and drives
  * the host-extension routes over HTTP:
- *   - toggle gating (404 on catalog + draft when `workflow-author` is off)
- *   - the authoring catalog endpoint returns the runnable node menu when on
+ *   - always-on (no toggle): catalog + draft never 404 for a feature-flag reason
+ *     (the `workflow-author` toggle was retired — see the `always-on (no toggle)`
+ *     describe block below, which asserts draft 400s on bad input rather than 404s)
+ *   - the authoring catalog endpoint returns the runnable node menu
  *   - draft validates its input (400 on missing intent) and, on a valid intent,
  *     dispatches the meta-workflow run (201 + runId)
  *   - the node-catalog extraction still serves the builder palette
@@ -24,7 +26,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -87,6 +89,53 @@ describe('workflow-author — draft dispatch', () => {
     expect(r.status, JSON.stringify(r.body)).toBe(201);
     expect(typeof r.body.runId).toBe('string');
     expect(r.body.workflowId).toBe('openwop-app.workflow-author');
+  });
+});
+
+// ── ADR 0596 §Correction 4 (`WFAU-2`) — the WIRE hop of "made readable". ──────
+// The three provenance witnesses in `workflow-author-node-pack.test.ts` all stop
+// at `getOwned()`: an adversarial review DELETED the `authoredVia` projection
+// line in `routes/workflows.ts` and six suites stayed 96-green. The row reaching
+// the ownership store is only half the claim — the other half is that the list
+// the dashboard and the `/` picker actually read carries it.
+describe('WFAU-2 — provenance survives the wire, not just the ownership row', () => {
+  const LIST = '/v1/host/openwop-app/workflows';
+  const noopDef = (id: string) => ({
+    workflowId: id,
+    nodes: [{ nodeId: 'n1', typeId: 'core.noop', outputRole: 'primary' as const }],
+  });
+
+  it('an AI-authored workflow arrives on GET /workflows carrying authoredVia; a hand-built one does not', async () => {
+    const c = client();
+    await signup(c);
+    // CONTROL, and the tenant probe in one move: the builder's own REST lane
+    // records ownership with NO provenance. If the route stamped `authoredVia`
+    // itself rather than projecting the row, this row would carry it too and the
+    // assertion below would be meaningless. Creating it over HTTP also tells us
+    // the caller's tenant without assuming one — the list route projects
+    // `listOwned(tenantOf(req))`, so the authored write must land in the same
+    // tenant or the test would pass vacuously on an absent row.
+    const created = await c.post(LIST, {
+      workflowId: 'plain.route-hand-built',
+      nodes: [{ nodeId: 'n1', typeId: 'core.noop', outputRole: 'primary' }],
+    });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const { allOwnershipByWorkflow } = await import('../src/host/workflowOwnership.js');
+    const tenantId = (await allOwnershipByWorkflow()).get('plain.route-hand-built')?.[0];
+    expect(typeof tenantId, 'the REST create must have recorded ownership').toBe('string');
+
+    const { persistAuthoredWorkflow } = await import('../src/features/workflow-author/workflowAuthorService.js');
+    await persistAuthoredWorkflow(noopDef('authored.route-prov'), { tenantId: tenantId! });
+
+    const list = await c.get(LIST);
+    expect(list.status, JSON.stringify(list.body)).toBe(200);
+    const rows = list.body.workflows as Array<{ workflowId: string; authoredVia?: string }>;
+    const authored = rows.find((w) => w.workflowId === 'authored.route-prov');
+    const handBuilt = rows.find((w) => w.workflowId === 'plain.route-hand-built');
+    expect(authored, 'the authored workflow must be in the owner scoped list').toBeDefined();
+    expect(handBuilt, 'the hand-built workflow must be in the owner scoped list').toBeDefined();
+    expect(authored!.authoredVia).toBe('workflow-author');
+    expect(handBuilt!.authoredVia).toBeUndefined();
   });
 });
 

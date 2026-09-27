@@ -32,7 +32,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -167,9 +167,12 @@ describe('approval inbox — agents propose, humans dispose', () => {
       // 'cs-manager' has no bound User, so it canonicalizes to itself and is notified.
       const esc = captured.find((r) => r.recipientUserId === 'cs-manager');
       expect(esc).toBeTruthy();
-      expect(esc?.actionUrl).toBe('/inbox');
+      // Deep-links to the specific pending approval on /inbox (ADR 0336 Rec Phase 3).
+      const approvalId = checked.body.approvalId;
+      expect(approvalId).toBeTruthy();
+      expect(esc?.actionUrl).toBe(`/inbox?approval=${encodeURIComponent(String(approvalId))}`);
       expect(esc?.metadata?.rosterId).toBe(cleo.rosterId);
-      expect(esc?.metadata?.approvalId).toBe(checked.body.approvalId);
+      expect(esc?.metadata?.approvalId).toBe(approvalId);
     } finally {
       unsub();
     }

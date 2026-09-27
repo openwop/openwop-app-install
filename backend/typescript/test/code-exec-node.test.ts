@@ -5,7 +5,7 @@
  */
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error — .mjs pack module has no type declarations (pure-JS node pack).
-import { run } from '../../packs/feature.code-exec.nodes/index.mjs';
+import { run } from '../../../packs/feature.code-exec.nodes/index.mjs';
 
 describe('feature.code-exec.nodes.run', () => {
   it('throws capability_not_provided when no sandbox adapter is wired (honest-off)', async () => {

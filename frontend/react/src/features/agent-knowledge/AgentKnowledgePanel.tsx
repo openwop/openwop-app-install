@@ -17,6 +17,7 @@
  * + the Lucide icon set (no emoji-as-icon). NON-NORMATIVE host-ext config.
  */
 
+import { Button } from '../../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation, Trans } from 'react-i18next';
 import { confirm } from '../../ui/confirm.js';
@@ -46,6 +47,7 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
   const { t } = useTranslation('agent-knowledge');
   const [view, setView] = useState<AgentKnowledgeView | null>(null);
   const [orgs, setOrgs] = useState<Org[]>([]);
+  const [orgsFailed, setOrgsFailed] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -60,7 +62,15 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
     setLoading(true);
     void (async () => {
       try {
-        const [v, o] = await Promise.all([getAgentKnowledge(rosterId), listOrgs().catch(() => [])]);
+        // `listOrgs` is a companion read — a failure must not take the whole
+        // knowledge panel down. But falling back to `[]` made the document
+        // section render "create an organization first", instructing the user to
+        // redo work that may already exist on the authority of a read that never
+        // landed. Tracked separately so the empty state stays a real claim.
+        const [v, o] = await Promise.all([
+          getAgentKnowledge(rosterId),
+          listOrgs().catch(() => { if (!cancelled) setOrgsFailed(true); return []; }),
+        ]);
         if (cancelled) return;
         setView(v);
         setOrgs(o);
@@ -89,8 +99,12 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
 
   return (
     <div className="u-grid u-gap-4 agentknowledge-root">
-      {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {/* KB-UX-9 (closed 2026-09-03) — see the sibling note in
+          `knowledge/SubjectKnowledgePanel.tsx`. `error` here is a raw
+          `err.message` (`:78`, `:94`), so the announced text is a `t()`
+          sentence and the wire string stays visible rather than spoken. */}
+      {error ? <Notice variant="error" announce={t('errorAnnounce')}>{error}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
       <p className="muted u-fs-13 u-m-0">
         <Trans t={t} i18nKey="intro" values={{ persona }} components={[<span key="0" />, <strong key="1" />, <span key="2" />, <strong key="3" />]} />
@@ -99,6 +113,8 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
       <DocumentsSection
         view={view}
         orgs={orgs}
+        orgsFailed={orgsFailed}
+        persona={persona}
         onCreate={(orgId, name) => run(() => createBoundCollection(rosterId, orgId, name).then(() => undefined), t('collectionCreated'))}
         onIngest={(orgId, collectionId, title, text) => run(() => ingestText(rosterId, orgId, collectionId, title, text).then(() => undefined), t('documentIngested'))}
         onImport={(orgId, collectionId, ref) => run(() => importFromConnection(rosterId, orgId, collectionId, 'google', ref).then(() => undefined), t('importedFromDrive'))}
@@ -119,10 +135,13 @@ export function AgentKnowledgePanel({ rosterId, persona }: { rosterId: string; p
 /* ───────────────────────────── documents ───────────────────────────── */
 
 function DocumentsSection({
-  view, orgs, onCreate, onIngest, onImport, onUnbind, onDeleteDoc,
+  view, orgs, orgsFailed, persona, onCreate, onIngest, onImport, onUnbind, onDeleteDoc,
 }: {
   view: AgentKnowledgeView | null;
   orgs: Org[];
+  /** ADR 0664 D2 — named in the audience disclosure, so it says WHICH agent. */
+  persona: string;
+  orgsFailed: boolean;
   onCreate: (orgId: string, name: string) => Promise<void>;
   onIngest: (orgId: string, collectionId: string, title: string, text: string) => Promise<void>;
   onImport: (orgId: string, collectionId: string, ref: string) => Promise<void>;
@@ -141,11 +160,16 @@ function DocumentsSection({
     <div className="surface-card agentknowledge-card">
       <SectionHead icon={<FileTextIcon size={16} />} title={t('documentsTitle')} hint={t('documentsHint')} />
 
-      {orgs.length === 0 ? (
+      {orgsFailed ? (
+        // "Create an organization first" is a claim about what EXISTS; a read that
+        // failed may not make it. The instruction would send the user to redo
+        // work they may already have done.
+        <Notice variant="error" announce={t('documentsOrgsFailed')}>{t('documentsOrgsFailed')}</Notice>
+      ) : orgs.length === 0 ? (
         <Notice variant="info">{t('documentsCreateOrgFirst')}</Notice>
       ) : (
         <form
-          className="action-bar u-gap-2 u-items-end u-wrap u-mb-3"
+          className="surface-form u-mb-3"
           onSubmit={(e) => {
             e.preventDefault();
             if (!name.trim() || !orgId || busy) return;
@@ -157,11 +181,24 @@ function DocumentsSection({
             {orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
           </SelectField>
           <TextField label={t('newCollectionNameLabel')} value={name} onChange={(e) => setName(e.target.value)} placeholder={t('newCollectionNamePlaceholder')} containerStyle={{ minWidth: '14rem' }} />
-          <button type="submit" className="primary" disabled={!name.trim() || !orgId || busy}>
+          <Button variant="primary" type="submit" disabled={!name.trim() || !orgId || busy}>
             <PlusIcon size={14} /> {t('createCollection')}
-          </button>
+          </Button>
         </form>
       )}
+
+      {/*
+        ADR 0664 D2 — the audience disclosure, on the door that actually grants.
+        ADR 0643 R3 decided that a binding IS the grant: anyone who can address this agent
+        may retrieve what is bound to it, and that access does not lapse with the binder's
+        own. That decision stands; what was missing is that nobody was ever told. This panel
+        had ZERO strings about who can see a bound corpus.
+        Placed here rather than on a bind-existing control because there is no such control
+        in the SPA — `bindCollection` has no importer; create-collection is the grant door.
+      */}
+      <p className="muted u-fs-13 u-m-0">
+        <Trans t={t} i18nKey="audienceDisclosure" values={{ persona }} components={[<strong key="0" />]} />
+      </p>
 
       {collections.length === 0 ? (
         <p className="muted u-fs-13 u-m-0">{t('noDocumentsBound')}</p>
@@ -207,9 +244,9 @@ function CollectionCard({
           <strong>{col.name}</strong>
           <span className="chip chip--muted">{t('docCount', { count: col.documentCount })}</span>
         </div>
-        <button type="button" className="secondary u-text-danger" onClick={() => { void confirm({ title: t('unbindConfirm', { name: col.name }), danger: true }).then((ok) => { if (ok) void onUnbind(); }); }}>
+        <Button variant="danger" onClick={() => { void confirm({ title: t('unbindConfirm', { name: col.name }), danger: true }).then((ok) => { if (ok) void onUnbind(); }); }}>
           {t('unbind')}
-        </button>
+        </Button>
       </div>
 
       {col.documents.length > 0 ? (
@@ -245,14 +282,14 @@ function CollectionCard({
           {(w) => <textarea {...w} rows={3} value={text} onChange={(e) => setText(e.target.value)} placeholder={t('documentTextPlaceholder')} />}
         </Field>
         <div className="action-bar">
-          <button type="submit" className="primary" disabled={!text.trim() || busy}>
+          <Button variant="primary" type="submit" disabled={!text.trim() || busy}>
             <PlusIcon size={14} /> {t('addDocument')}
-          </button>
+          </Button>
         </div>
       </form>
 
       <form
-        className="action-bar u-gap-2 u-items-end u-wrap u-mt-2"
+        className="surface-form u-mt-2"
         onSubmit={(e) => {
           e.preventDefault();
           if (!driveRef.trim() || importing) return;
@@ -267,9 +304,9 @@ function CollectionCard({
           placeholder={t('importFromDrivePlaceholder')}
           containerStyle={{ minWidth: '18rem' }}
         />
-        <button type="submit" className="secondary" disabled={!driveRef.trim() || importing}>
+        <Button type="submit" variant="secondary" disabled={!driveRef.trim() || importing}>
           {t('importFromDrive')}
-        </button>
+        </Button>
       </form>
       <p className="muted u-fs-12 u-m-0 u-mt-1">{t('importFromDriveHint')}</p>
     </div>
@@ -320,24 +357,37 @@ function RetrieveSection({ rosterId, persona }: { rosterId: string; persona: str
   return (
     <div className="surface-card agentknowledge-card">
       <SectionHead icon={<SparklesIcon size={16} />} title={t('retrieveTitle')} hint={t('retrieveHint', { persona })} />
-      {err ? <Notice variant="error">{err}</Notice> : null}
+      {err ? <Notice variant="error" announce={err}>{err}</Notice> : null}
       <form
-        className="action-bar u-gap-2 u-items-end u-wrap"
+        className="surface-form"
         onSubmit={(e) => {
           e.preventDefault();
           if (!query.trim() || busy) return;
           setBusy(true);
           setErr(null);
+          // Clear the previous answer BEFORE the request: a failure that left it
+          // up would render the last query's chunks (or "No matches") under the
+          // new question — the same stale-claim family as KB-UX-1.
+          setResult(null);
           void retrieve(rosterId, query.trim())
             .then(setResult)
-            .catch((e2) => setErr(e2 instanceof Error ? e2.message : String(e2)))
+            .catch((e2) => { setResult(null); setErr(e2 instanceof Error ? e2.message : String(e2)); })
             .finally(() => setBusy(false));
         }}
       >
         <TextField label={t('queryLabel')} value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t('queryPlaceholder')} containerStyle={{ minWidth: '18rem', flex: 1 }} />
-        <button type="submit" className="secondary" disabled={!query.trim() || busy}><SearchIcon size={14} /> {t('retrieve')}</button>
+        <Button type="submit" variant="secondary" disabled={!query.trim() || busy}><SearchIcon size={14} /> {t('retrieve')}</Button>
       </form>
 
+      {/* KB-UX-3 — a source whose retrieval leg FAULTED is reported, never
+          folded into "No matches". The partial notice sits above the results
+          because it qualifies them: some of the corpus was not searched. */}
+      {result && (result.failedSources?.length ?? 0) > 0 ? (
+        <Notice variant="warning" announce={t('retrievePartial')}>
+          {t('retrievePartial')}{' '}
+          <span className="muted">{t('retrievePartialSources', { sources: result.failedSources!.map((s) => t(`retrieveSource_${s}`)).join(', ') })}</span>
+        </Notice>
+      ) : null}
       {result ? (
         result.hasResults ? (
           <ul className="u-list-none u-m-0 u-p-0 u-grid u-gap-2 u-mt-3">
@@ -349,7 +399,8 @@ function RetrieveSection({ rosterId, persona }: { rosterId: string; persona: str
               </li>
             ))}
           </ul>
-        ) : (
+        ) : (result.failedSources?.length ?? 0) > 0 ? null : (
+          // Reachable ONLY from a retrieval where every source answered.
           <p className="muted u-fs-13 u-mt-3 u-mb-0">{t('retrieveNoMatches')}</p>
         )
       ) : null}

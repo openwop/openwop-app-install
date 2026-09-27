@@ -138,11 +138,22 @@ const PG_MEM_INCOMPAT = new Set<string>([
   'appendEvent assigns +1 per call (impl-defined offset)',
   'listEvents returns sequence-ordered events',
   'getMaxSequence increases monotonically per append',
+  // ADR 0754 — needs appendEvent (above); real Postgres runs it in the
+  // testcontainers parity file.
+  'findFirstEventByPayload finds the first matching event',
   'first call claims; second returns existing',
-  'putIdempotency upgrades the pending placeholder',
+  'putOnce upgrades the pending placeholder',
   'insertWebhook → getWebhook round-trips',
   'deleteWebhook removes the row',
+  // WHD-16 — a data-modifying CTE (`WITH … DELETE … DELETE`), which pg-mem
+  // rejects; the statement was run against a REAL Postgres 16 when it landed.
+  'deleteWebhook drops pending deliveries',
   'deleteAllTenantData cascades runs + events + interrupts + secrets',
+  // ADR 0551 P1 — the outbox claim uses `FOR UPDATE SKIP LOCKED`, which pg-mem
+  // rejects outright (it refuses ASTs it would silently ignore). The claim is
+  // covered against a REAL Postgres in the testcontainers parity file; the
+  // sqlite half runs here.
+  'dispatch outbox claim \u2192 reschedule \u2192 complete',
 ]);
 function skipPgMem(name: BackendName, testName: string): boolean {
   return name === 'postgres' && PG_MEM_INCOMPAT.has(testName);
@@ -189,6 +200,67 @@ describe('Storage parity: runs lifecycle', () => {
     expect(got).toBeNull();
   });
 
+  // ADR 0551 P1 — the dispatch outbox has to behave identically on both
+  // adapters, because the durability guarantee is stated per deployment and
+  // Postgres is the one production actually runs. The claim path in particular
+  // is written twice (one sqlite write transaction vs `FOR UPDATE SKIP
+  // LOCKED`), which is exactly the shape that drifts unnoticed.
+  it.each(backendNames)('%s: insertRun with a dispatch intent writes both rows', async (name) => {
+    const s = S(name);
+    const run = mkRun(`parity-outbox-${name}`);
+    await s.insertRun(run, { dispatchOutbox: { nextAttemptAt: 1_000 } });
+
+    expect((await s.getRun(run.runId))?.runId).toBe(run.runId);
+    expect(await s.getDispatchOutbox(run.runId)).toMatchObject({
+      runId: run.runId,
+      tenantId: run.tenantId,
+      workflowId: run.workflowId,
+      status: 'pending',
+      attempts: 0,
+      nextAttemptAt: 1_000,
+      claimedBy: null,
+      claimExpiresAt: null,
+    });
+  });
+
+  it.each(backendNames)('%s: insertRun without a dispatch intent writes no outbox row', async (name) => {
+    const s = S(name);
+    const run = mkRun(`parity-no-outbox-${name}`);
+    await s.insertRun(run);
+    expect(await s.getDispatchOutbox(run.runId)).toBeNull();
+  });
+
+  it.each(backendNames)('%s: dispatch outbox claim → reschedule → complete', async (name) => {
+    if (trackedSkipPgMem(name, 'dispatch outbox claim → reschedule → complete')) return;
+    const s = S(name);
+    const run = mkRun(`parity-outbox-claim-${name}`);
+    await s.insertRun(run, { dispatchOutbox: { nextAttemptAt: 1_000 } });
+
+    // Not due yet.
+    expect(await s.claimDispatchOutbox('w1', 999, 60_000, 10)).toEqual([]);
+    // Due → claimed, with a lease.
+    const claimed = await s.claimDispatchOutbox('w1', 1_000, 60_000, 10);
+    expect(claimed.map((r) => r.runId)).toContain(run.runId);
+    expect((await s.getDispatchOutbox(run.runId))?.claimExpiresAt).toBe(61_000);
+    // Leased → invisible to the next claimer.
+    expect((await s.claimDispatchOutbox('w2', 1_001, 60_000, 10)).map((r) => r.runId)).not.toContain(run.runId);
+
+    await s.rescheduleDispatchOutbox(run.runId, 5_000, false, 'try again');
+    expect(await s.getDispatchOutbox(run.runId)).toMatchObject({
+      status: 'pending', attempts: 1, nextAttemptAt: 5_000, claimedBy: null, claimExpiresAt: null, lastError: 'try again',
+    });
+
+    await s.rescheduleDispatchOutbox(run.runId, 9_000, true, 'gave up');
+    expect((await s.getDispatchOutbox(run.runId))?.status).toBe('dead');
+    // A dead row is never claimed again, however far the clock advances.
+    expect((await s.claimDispatchOutbox('w3', 10_000_000, 60_000, 10)).map((r) => r.runId)).not.toContain(run.runId);
+
+    await s.completeDispatchOutbox(run.runId);
+    expect(await s.getDispatchOutbox(run.runId)).toBeNull();
+    // Idempotent — a duplicate delivery must not fail on the second retire.
+    await s.completeDispatchOutbox(run.runId);
+  });
+
   it.each(backendNames)('%s: listRuns filters by tenantId', async (name) => {
     const s = S(name);
     await s.insertRun(mkRun(`list-a-1-${name}`, { tenantId: `list-tenant-a-${name}` }));
@@ -199,6 +271,57 @@ describe('Storage parity: runs lifecycle', () => {
     expect(aRuns.length).toBe(2);
     expect(bRuns.length).toBe(1);
     expect(aRuns.every((r) => r.tenantId === `list-tenant-a-${name}`)).toBe(true);
+  });
+
+  // ADR 0287 correction — retention must retire a run's ARTIFACT rows
+  // (hostext:runartifact:<runId>:<nodeId>) with the run: the original cascade
+  // deleted only the three exact-key write-throughs, stranding every artifact
+  // forever (48k orphans-in-waiting found in prod 2026-07-15). Another run's
+  // artifacts and non-artifact kv must survive.
+  it.each(backendNames)('%s: pruneTerminalRuns retires the run\'s artifact kv rows only', async (name) => {
+    const s = S(name);
+    const old = mkRun(`art-old-${name}`, { status: 'completed', createdAt: '2020-01-01T00:00:00.000Z', updatedAt: '2020-01-02T00:00:00.000Z' });
+    const kept = mkRun(`art-kept-${name}`, { status: 'running' });
+    await s.insertRun(old);
+    await s.insertRun(kept);
+    await s.kvSet(`hostext:runartifact:${old.runId}:node-a`, '{"a":1}');
+    await s.kvSet(`hostext:runartifact:${old.runId}:node-b`, '{"b":2}');
+    await s.kvSet(`hostext:runartifact:${kept.runId}:node-a`, '{"keep":true}');
+    await s.kvSet(`hostext:runartifactother:${old.runId}`, '{"not-an-artifact-collection":true}');
+    const res = await s.pruneTerminalRuns('2021-01-01T00:00:00.000Z', 10);
+    // The ARTIFACT cascade (per-run LIKE deletes — the new behavior under test)
+    // is asserted on BOTH backends below. The run-row + `= ANY(...)` child
+    // deletes are asserted on sqlite only: pg-mem does not implement
+    // `DELETE … WHERE x = ANY($1)` (silent no-op), so real-Postgres coverage
+    // for those lives in the live-container retention test (ci:full).
+    expect(res.childRows).toBeGreaterThanOrEqual(2);
+    if (name === 'sqlite') {
+      expect(res.runs).toBe(1);
+      expect(await s.getRun(old.runId)).toBeNull();
+    }
+    expect(await s.kvGet(`hostext:runartifact:${old.runId}:node-a`)).toBeNull();
+    expect(await s.kvGet(`hostext:runartifact:${old.runId}:node-b`)).toBeNull();
+    expect(await s.kvGet(`hostext:runartifact:${kept.runId}:node-a`)).not.toBeNull();
+    expect(await s.kvGet(`hostext:runartifactother:${old.runId}`)).not.toBeNull();
+  });
+
+  // listRunsByParent replaced the O(tenant) listRuns+filter child scan in the
+  // run snapshot + cancel cascade (the 2026-07-14 statement-timeout incident) —
+  // it must return exactly the children of the given parent, nothing else.
+  it.each(backendNames)('%s: listRunsByParent returns only that parent\'s children', async (name) => {
+    const s = S(name);
+    const parent = mkRun(`byparent-parent-${name}`);
+    await s.insertRun(parent);
+    await s.insertRun(mkRun(`byparent-child-1-${name}`, { parentRunId: parent.runId }));
+    await s.insertRun(mkRun(`byparent-child-2-${name}`, { parentRunId: parent.runId }));
+    await s.insertRun(mkRun(`byparent-other-${name}`, { parentRunId: `byparent-not-this-${name}` }));
+    await s.insertRun(mkRun(`byparent-orphan-${name}`));
+    const children = await s.listRunsByParent(parent.runId);
+    expect(children.map((r) => r.runId).sort()).toEqual([
+      `run-byparent-child-1-${name}`,
+      `run-byparent-child-2-${name}`,
+    ]);
+    expect(await s.listRunsByParent(`byparent-no-children-${name}`)).toEqual([]);
   });
 });
 
@@ -230,6 +353,22 @@ describe('Storage parity: events monotonic sequence', () => {
     expect(events[0]?.type).toBe('run.started');
     expect(events[1]?.type).toBe('run.completed');
     expect(events[0]?.sequence ?? Number.MAX_SAFE_INTEGER).toBeLessThan(events[1]?.sequence ?? -1);
+  });
+
+  it.each(backendNames)('%s: findFirstEventByPayload finds the first matching event', async (name) => {
+    if (trackedSkipPgMem(name, 'findFirstEventByPayload finds the first matching event')) return;
+    const s = S(name);
+    const run = mkRun(`event-find-${name}`);
+    await s.insertRun(run);
+    await s.appendEvent({ runId: run.runId, type: 'artifact.created', payload: { artifactId: 'a-1', n: 1 }, timestamp: baseTime, eventId: 'ef1' });
+    await s.appendEvent({ runId: run.runId, type: 'node.completed', payload: { artifactId: 'a-2' }, timestamp: baseTime, eventId: 'ef2' });
+    await s.appendEvent({ runId: run.runId, type: 'artifact.created', payload: { artifactId: 'a-2', n: 3 }, timestamp: baseTime, eventId: 'ef3' });
+    await s.appendEvent({ runId: run.runId, type: 'artifact.created', payload: { artifactId: 'a-2', n: 4 }, timestamp: baseTime, eventId: 'ef4' });
+    // The first of the right TYPE, not the first mention of the value.
+    expect((await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'a-2'))?.payload).toEqual({ artifactId: 'a-2', n: 3 });
+    expect(await s.findFirstEventByPayload(run.runId, 'artifact.created', 'artifactId', 'nope')).toBeNull();
+    expect(await s.findFirstEventByPayload('no-such-run', 'artifact.created', 'artifactId', 'a-1')).toBeNull();
+    await expect(s.findFirstEventByPayload(run.runId, 'artifact.created', "x') OR 1=1 --", 'a-1')).rejects.toThrow(/invalid payload key/);
   });
 
   it.each(backendNames)('%s: getMaxSequence increases monotonically per append', async (name) => {
@@ -294,26 +433,26 @@ describe('Storage parity: idempotency claim', () => {
     if (trackedSkipPgMem(name, 'first call claims; second returns existing')) return;
     const s = S(name);
     const key = `idem-${name}-${Math.random().toString(36).slice(2)}`;
-    const first = await s.claimIdempotency(key, baseTime);
+    const first = await s.claimOnce(key, baseTime);
     expect(first.claimed).toBe(true);
     expect(first.existing).toBeNull();
-    const second = await s.claimIdempotency(key, baseTime);
+    const second = await s.claimOnce(key, baseTime);
     expect(second.claimed).toBe(false);
     expect(second.existing).not.toBeNull();
   });
 
-  it.each(backendNames)('%s: putIdempotency upgrades the pending placeholder', async (name) => {
-    if (trackedSkipPgMem(name, 'putIdempotency upgrades the pending placeholder')) return;
+  it.each(backendNames)('%s: putOnce upgrades the pending placeholder', async (name) => {
+    if (trackedSkipPgMem(name, 'putOnce upgrades the pending placeholder')) return;
     const s = S(name);
     const key = `idem-upgrade-${name}-${Math.random().toString(36).slice(2)}`;
-    await s.claimIdempotency(key, baseTime);
-    await s.putIdempotency({
+    await s.claimOnce(key, baseTime);
+    await s.putOnce({
       key,
       responseBody: '{"runId":"r-upgrade"}',
       responseStatus: 201,
       createdAt: baseTime,
     });
-    const second = await s.claimIdempotency(key, baseTime);
+    const second = await s.claimOnce(key, baseTime);
     expect(second.existing?.responseBody).toBe('{"runId":"r-upgrade"}');
     expect(second.existing?.responseStatus).toBe(201);
   });
@@ -337,6 +476,116 @@ describe('Storage parity: webhooks', () => {
     await s.insertWebhook(wh);
     await s.deleteWebhook(wh.subscriptionId);
     expect(await s.getWebhook(wh.subscriptionId)).toBeNull();
+  });
+
+  // WHD-16 — unregistering STOPS delivery. Pending rows of a deleted
+  // subscription kept POSTing to the withdrawn URL and starved live
+  // subscriptions (MEASURED in production: 1,600 failed attempts to one dead
+  // receiver in 20 min, after its subscriptions were deleted).
+  it.each(backendNames)('%s: deleteWebhook drops that subscription’s PENDING deliveries only', async (name) => {
+    if (trackedSkipPgMem(name, 'deleteWebhook drops pending deliveries')) return;
+    const s = S(name);
+    const gone = mkWebhook(`${name}-gone`);
+    const kept = mkWebhook(`${name}-kept`);
+    await s.insertWebhook(gone);
+    await s.insertWebhook(kept);
+    const t = 1_700_000_000_000;
+    const row = (id: string, sub: string, status: 'pending' | 'delivered' | 'dead') => ({
+      deliveryId: `${name}-${id}`, subscriptionId: sub, url: 'https://x.test/hook', secret: 's', eventType: 'run.completed',
+      payload: '{}', status, attempts: 1, maxAttempts: 5, nextAttemptAt: t, createdAt: t, updatedAt: t,
+    });
+    await s.enqueueWebhookDelivery(row('p1', gone.subscriptionId, 'pending'));
+    await s.enqueueWebhookDelivery(row('p2', gone.subscriptionId, 'pending'));
+    await s.enqueueWebhookDelivery(row('dead', gone.subscriptionId, 'dead'));
+    await s.enqueueWebhookDelivery(row('other', kept.subscriptionId, 'pending'));
+
+    await s.deleteWebhook(gone.subscriptionId);
+
+    const claimed = await s.claimDueWebhookDeliveries(`w-${name}`, t + 1, 60_000, 50);
+    const mine = claimed.filter((c) => c.deliveryId.startsWith(`${name}-`)).map((c) => c.deliveryId);
+    expect(mine, 'only the surviving subscription’s pending row is still deliverable').toEqual([`${name}-other`]);
+    // History survives: the dead row is not a pending delivery, so it stays.
+    expect(await s.pruneWebhookDeliveries(t + 1)).toBeGreaterThanOrEqual(1);
+  });
+
+  // RFC 0201 §E.20 / ADR 0747 — rotation is ONE statement, so a second rotation
+  // inside an overlap retires the OLDEST secret; and the opt-in list survives
+  // the round trip (absent stays absent — §B.8).
+  it.each(backendNames)('%s: rotateWebhookSecret shifts current → previous in one statement', async (name) => {
+    if (trackedSkipPgMem(name, 'rotateWebhookSecret shifts current → previous')) return;
+    const s = S(name);
+    const plain = mkWebhook(`${name}-plain`);
+    await s.insertWebhook(plain);
+    expect((await s.getWebhook(plain.subscriptionId))?.signatureAlgorithms).toBeUndefined();
+    const wh = { ...mkWebhook(`${name}-rot`), secret: 's1', signatureAlgorithms: ['v1', 'standard-webhooks-1'] };
+    await s.insertWebhook(wh);
+    expect(await s.rotateWebhookSecret(wh.subscriptionId, { secret: 's2', rotatedAt: 10, previousSecretExpiresAt: 70 })).toBe(true);
+    expect(await s.rotateWebhookSecret(wh.subscriptionId, { secret: 's3', rotatedAt: 20, previousSecretExpiresAt: 80 })).toBe(true);
+    const got = await s.getWebhook(wh.subscriptionId);
+    expect(got?.signatureAlgorithms).toEqual(['v1', 'standard-webhooks-1']);
+    expect([got?.secret, got?.previousSecret, got?.rotatedAt, got?.previousSecretExpiresAt]).toEqual(['s3', 's2', 20, 80]);
+    expect(await s.rotateWebhookSecret(`${name}-missing`, { secret: 'x', rotatedAt: 1, previousSecretExpiresAt: 2 })).toBe(false);
+  });
+
+  // `/grade-data` 2026-09-26 WHROT-1 — a retired previous secret leaves the row
+  // once its overlap ends; an in-overlap one (and the rotation history) stays.
+  it.each(backendNames)('%s: retireExpiredWebhookSecrets clears only lapsed previous secrets', async (name) => {
+    if (trackedSkipPgMem(name, 'retireExpiredWebhookSecrets clears lapsed previous secrets')) return;
+    const s = S(name);
+    const lapsed = { ...mkWebhook(`${name}-lapsed`), secret: 'a1', signatureAlgorithms: ['v1', 'standard-webhooks-1'] };
+    const live = { ...mkWebhook(`${name}-live`), secret: 'b1', signatureAlgorithms: ['v1', 'standard-webhooks-1'] };
+    await s.insertWebhook(lapsed);
+    await s.insertWebhook(live);
+    await s.rotateWebhookSecret(lapsed.subscriptionId, { secret: 'a2', rotatedAt: 10, previousSecretExpiresAt: 50 });
+    await s.rotateWebhookSecret(live.subscriptionId, { secret: 'b2', rotatedAt: 10, previousSecretExpiresAt: 500 });
+    expect(await s.retireExpiredWebhookSecrets(100)).toBeGreaterThanOrEqual(1);
+    const a = await s.getWebhook(lapsed.subscriptionId);
+    expect([a?.secret, a?.previousSecret, a?.rotatedAt, a?.previousSecretExpiresAt]).toEqual(['a2', undefined, 10, 50]);
+    expect((await s.getWebhook(live.subscriptionId))?.previousSecret).toBe('b1');
+  });
+
+  // WHROT-2 — a delivered row keeps no copy of the secret it was enqueued with.
+  it.each(backendNames)('%s: markWebhookDeliveryDelivered blanks the enqueue-time secret copy', async (name) => {
+    if (trackedSkipPgMem(name, 'markWebhookDeliveryDelivered blanks the secret copy')) return;
+    const s = S(name);
+    const t = 1_700_000_000_000;
+    const deliveryId = `${name}-blank`;
+    await s.enqueueWebhookDelivery({
+      deliveryId, subscriptionId: `${name}-blank-sub`, url: 'https://x.test/hook', secret: 'sealed-copy', eventType: 'run.completed',
+      payload: '{}', status: 'pending', attempts: 0, maxAttempts: 5, nextAttemptAt: t, createdAt: t, updatedAt: t,
+    });
+    await s.markWebhookDeliveryDelivered(deliveryId, t + 1);
+    const got = (await s.listWebhookDeliveries({ limit: 500 })).find((d) => d.deliveryId === deliveryId);
+    expect(got?.status).toBe('delivered');
+    expect(got?.secret).toBe('');
+    // A lapsed-lease worker's late failure must not re-arm the delivered row.
+    await s.rescheduleWebhookDelivery(deliveryId, t + 2, t + 3, false, 'late failure');
+    const after = (await s.listWebhookDeliveries({ limit: 500 })).find((d) => d.deliveryId === deliveryId);
+    expect(after?.status).toBe('delivered');
+  });
+
+  // WHROT-3 — a row reaching `dead` drops its copy too (a manual retry signs from
+  // the subscription), and the backfill reaches terminal rows written before
+  // either transition blanked. `pending` rows keep theirs (pre-0747 rollback).
+  it.each(backendNames)('%s: dead transition + backfill blank terminal secret copies, pending keeps its copy', async (name) => {
+    if (trackedSkipPgMem(name, 'dead transition + backfill blank terminal secret copies')) return;
+    const s = S(name);
+    const t = 1_700_000_000_000;
+    const row = (id: string, status: 'pending' | 'delivered' | 'dead') => ({
+      deliveryId: `${name}-w3-${id}`, subscriptionId: `${name}-w3-sub`, url: 'https://x.test/hook', secret: 'sealed-copy', eventType: 'run.completed',
+      payload: '{}', status, attempts: 0, maxAttempts: 5, nextAttemptAt: t, createdAt: t, updatedAt: t,
+    });
+    for (const [id, st] of [['dying', 'pending'], ['old-dead', 'dead'], ['old-done', 'delivered'], ['live', 'pending']] as const) {
+      await s.enqueueWebhookDelivery(row(id, st));
+    }
+    await s.rescheduleWebhookDelivery(`${name}-w3-dying`, t + 1, t + 2, true, 'gave up');
+    let drained = 0;
+    for (let n = await s.blankTerminalDeliverySecrets(1); n > 0; n = await s.blankTerminalDeliverySecrets(1)) drained += n;
+    expect(drained).toBeGreaterThanOrEqual(2);
+    const byId = new Map((await s.listWebhookDeliveries({ limit: 500 })).map((d) => [d.deliveryId, d]));
+    expect(byId.get(`${name}-w3-dying`)?.status).toBe('dead');
+    expect([`${name}-w3-dying`, `${name}-w3-old-dead`, `${name}-w3-old-done`].map((id) => byId.get(id)?.secret)).toEqual(['', '', '']);
+    expect(byId.get(`${name}-w3-live`)?.secret).toBe('sealed-copy');
   });
 });
 
@@ -532,3 +781,21 @@ describe('Storage parity: PG_MEM_INCOMPAT skip-set integrity guard', () => {
     ).toEqual([]);
   });
 });
+
+  // Grade-pass DEL-1 — deleteRun (the API delete + workforce teardown path)
+  // must cascade exactly like retention: envelope correlations, the agent
+  // activity row, and the run's ARTIFACT kv rows all retire with the run;
+  // another run's artifacts survive.
+  it.each(backendNames)('%s: deleteRun retires artifact kv rows with the run', async (name) => {
+    const s = S(name);
+    const doomed = mkRun(`del-doomed-${name}`, { status: 'completed' });
+    const kept = mkRun(`del-kept-${name}`);
+    await s.insertRun(doomed);
+    await s.insertRun(kept);
+    await s.kvSet(`hostext:runartifact:${doomed.runId}:node-a`, '{"a":1}');
+    await s.kvSet(`hostext:runartifact:${kept.runId}:node-a`, '{"keep":true}');
+    expect(await s.deleteRun(doomed.runId)).toBe(true);
+    expect(await s.getRun(doomed.runId)).toBeNull();
+    expect(await s.kvGet(`hostext:runartifact:${doomed.runId}:node-a`)).toBeNull();
+    expect(await s.kvGet(`hostext:runartifact:${kept.runId}:node-a`)).not.toBeNull();
+  });

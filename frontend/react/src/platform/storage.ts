@@ -166,3 +166,205 @@ export function writeJson(spec: StorageKeySpec, value: unknown): boolean {
     return false;
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Subject-scoped `content` keys (ADR 0434 Phase 3)
+//
+// The four class-`content` keys above held user-authored work under a BARE key,
+// so the content was per-device by construction and, on a shared machine, the
+// next person to use the browser saw the previous user's chat threads, prompts,
+// and draft workflows.
+//
+// The scheme — deliberately the SIMPLEST one that works:
+//   signed in  → `<key>:<uid>`
+//   anonymous  → `<key>`  (the bare key IS the anonymous key)
+//
+// Two consequences make this the right call rather than merely the easiest:
+//   1. NO migration is required. Every payload sitting at a bare key today is
+//      already correctly placed as anonymous content, and a visitor who never
+//      signs in keeps it exactly where it is.
+//   2. It mirrors the backend, where the anon sandbox is the default that gets
+//      ADOPTED into the user tenant on sign-in (ADR 0003 Phase 4c). Local
+//      adoption below is the client-side half of the same idea.
+//
+// A per-device generated id was REJECTED: it would introduce a third identity
+// concept with no owner, beside the Firebase uid and the backend session.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The storage key for `spec` scoped to `subject` (null/undefined ⇒ anonymous,
+ *  which is the bare key). */
+export function scopedKey(spec: StorageKeySpec, subject: string | null | undefined): string {
+  return subject ? `${spec.key}:${subject}` : spec.key;
+}
+
+/** A subject-scoped spec, usable with the readRaw/writeRaw/readJson helpers. */
+export function scopedSpec(spec: StorageKeySpec, subject: string | null | undefined): StorageKeySpec {
+  return { ...spec, key: scopedKey(spec, subject) };
+}
+
+/** Versioned envelope for subject-scoped content. The `subject` field is
+ *  redundant with the key suffix ON PURPOSE — belt and braces, mirroring
+ *  `sanitizeTabDeck`, so a payload that somehow lands under the wrong key is
+ *  still refused on read rather than shown to the wrong person. */
+export interface ScopedEnvelope<T> {
+  v: number;
+  subject: string | null;
+  data: T;
+}
+
+/**
+ * Read subject-scoped content. Returns `fallback` when absent, corrupt, of a
+ * different version, or — critically — stamped with a DIFFERENT subject.
+ * Module-internal: callers reach it through `adoptAnonScoped`, or read via
+ * their own shape guard (the four content modules have different shapes).
+ */
+function readScoped<T>(
+  spec: StorageKeySpec,
+  subject: string | null | undefined,
+  version: number,
+  guard: (v: unknown) => v is T,
+  fallback: T,
+): T {
+  const raw = readRaw(scopedSpec(spec, subject));
+  if (raw === null) return fallback;
+  try {
+    const env = JSON.parse(raw) as Partial<ScopedEnvelope<unknown>>;
+    if (env.v !== version) return fallback;
+    // Never surface another subject's content, even if the key matched.
+    if ((env.subject ?? null) !== (subject ?? null)) return fallback;
+    return guard(env.data) ? env.data : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+/** Write subject-scoped content. Returns false on quota/serialization failure —
+ *  callers that are merging MUST check it, or a quota failure silently loses
+ *  the merged result. */
+export function writeScoped<T>(
+  spec: StorageKeySpec,
+  subject: string | null | undefined,
+  version: number,
+  data: T,
+): boolean {
+  const env: ScopedEnvelope<T> = { v: version, subject: subject ?? null, data };
+  try {
+    return writeRaw(scopedSpec(spec, subject), JSON.stringify(env));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Adopt anonymous content into a freshly signed-in subject's scope — the
+ * client-side mirror of the backend's anon-sandbox adoption.
+ *
+ * `merge(anon, user)` decides the result; each caller supplies it because the
+ * shapes differ (a keyed workflow map genuinely merges; a single current chat
+ * thread cannot). The invariant every caller must honor: **union, never
+ * destroy, and prefer the signed-in copy on a true collision.**
+ *
+ * Idempotent: the anonymous payload is removed only after the merged write is
+ * CONFIRMED, so a quota failure leaves the source intact for a later retry
+ * rather than dropping the user's work on the floor.
+ */
+export function adoptAnonScoped<T>(
+  spec: StorageKeySpec,
+  subject: string,
+  version: number,
+  guard: (v: unknown) => v is T,
+  merge: (anon: T, user: T | null) => T,
+): boolean {
+  const anonRaw = readRaw(spec); // the bare key — anonymous content
+  if (anonRaw === null) return false;
+
+  // The anon payload predates this scheme (no envelope) OR was written under
+  // it; accept both so content authored before Phase 3 still follows the user.
+  let anonData: unknown;
+  try {
+    const parsed: unknown = JSON.parse(anonRaw);
+    const asEnv = parsed as Partial<ScopedEnvelope<unknown>>;
+    anonData = asEnv && typeof asEnv === 'object' && 'v' in asEnv && 'data' in asEnv ? asEnv.data : parsed;
+  } catch {
+    return false;
+  }
+  if (!guard(anonData)) return false;
+
+  const existing = readScoped<T | null>(spec, subject, version, (v): v is T | null => guard(v), null);
+  const merged = merge(anonData, existing);
+  if (!writeScoped(spec, subject, version, merged)) return false; // quota — keep the source
+  removeRaw(spec);
+  return true;
+}
+
+/**
+ * The subject whose `content` keys this browser tab is currently reading and
+ * writing. `null` = anonymous (the bare key).
+ *
+ * Module-level rather than threaded through every call site: `localStore`,
+ * `userPrompts`, and the chat caches are plain modules invoked from dozens of
+ * places, and passing a subject down all of them would spread identity across
+ * the codebase — the opposite of the single-owner rule. ONE writer sets this
+ * (the auth layer, on `onAuthChanged`); every content module reads it. A
+ * module-level singleton is the right shape here (Firebase's own `auth` is one);
+ * it is made OBSERVABLE below so React consumers re-render on change, per the
+ * `useSyncExternalStore` contract.
+ *
+ * ADR 0434 / IDN-3 — `resolved` distinguishes "auth has not settled yet" from
+ * "settled, anonymous". Before this, reads during the boot window returned
+ * `null` and were INDISTINGUISHABLE from a real anonymous session, so a
+ * returning signed-in user briefly read the anonymous key. That conflation was
+ * the defect; `authStateReady()` / the first `onAuthChanged` is what resolves
+ * it. `getStorageSubject()` still returns the bare `string | null` (a pending
+ * read yields `null` = the anonymous key, which is safe — an anonymous read can
+ * never expose another user's content), but React consumers can now gate on
+ * `resolved` and render a skeleton instead of empty content.
+ */
+let currentSubject: string | null = null;
+let subjectResolved = false;
+
+const subjectListeners = new Set<() => void>();
+
+export function setStorageSubject(subject: string | null): void {
+  const changed = currentSubject !== subject || !subjectResolved;
+  currentSubject = subject;
+  subjectResolved = true;
+  if (changed) for (const fn of subjectListeners) fn();
+}
+
+export function getStorageSubject(): string | null {
+  return currentSubject;
+}
+
+/** True once the auth layer has settled the initial state (signed-in OR
+ *  anonymous). False only during the boot window. */
+export function isStorageSubjectResolved(): boolean {
+  return subjectResolved;
+}
+
+/** Subscribe to subject changes (the `useSyncExternalStore` contract). Returns
+ *  an unsubscribe. */
+export function subscribeStorageSubject(listener: () => void): () => void {
+  subjectListeners.add(listener);
+  return () => { subjectListeners.delete(listener); };
+}
+
+/** Snapshot for `useSyncExternalStore`. A primitive so the default `Object.is`
+ *  comparison is correct: `<subject>` when resolved, the `'\0pending'` sentinel
+ *  while the boot window is open (an impossible real subject, so it never
+ *  collides with an anonymous `null` rendered as its own state). */
+export function storageSubjectSnapshot(): string | null {
+  return subjectResolved ? currentSubject : PENDING_SUBJECT;
+}
+
+/** Sentinel snapshot value for the unresolved boot window. Exported so the React
+ *  hook can map it to a `pending` status without re-deriving the rule. */
+export const PENDING_SUBJECT = '\0pending';
+
+/** For tests — reset the module singleton so parallel suites don't bleed
+ *  (ADR 0434 / IDN-4). Not for production paths. */
+export function __resetStorageSubjectForTest(): void {
+  currentSubject = null;
+  subjectResolved = false;
+  subjectListeners.clear();
+}

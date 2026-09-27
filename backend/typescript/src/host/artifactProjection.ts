@@ -23,6 +23,7 @@
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
 import { resolveEffectiveAccess } from './accessControlService.js';
+import { resolveSubjectAccess, levelSatisfies } from './subjectAccess.js';
 import { isRegisteredArtifactType } from './artifactTypes.js';
 import { diffText, diffJson, type TextDiff, type JsonDiff } from './textDiff.js';
 import {
@@ -248,7 +249,16 @@ async function authorizeDocument(tenantId: string, subject: string | undefined, 
   const doc = await getDocumentByIdForTenant(tenantId, documentId);
   if (!doc) return null;
   const access = await resolveEffectiveAccess(tenantId, { ...(subject ? { subject } : {}), orgId: doc.orgId });
-  return access.scopes.includes('workspace:read') ? doc : null;
+  if (!access.scopes.includes('workspace:read')) return null;
+  // ADR 0610 D3′ / CPC-15 — a project-owned document is membership-scoped; the
+  // org gate is not sufficient (the artifact lane is a SECOND door over the same
+  // rows the documents feature guards). Consult the ONE subjectAccess seam. Null
+  // ⇒ not membership-scoped ⇒ org gate stands. → null (404) on refusal.
+  if (doc.ownerSubject) {
+    const level = await resolveSubjectAccess(tenantId, doc.ownerSubject, subject);
+    if (level !== null && !levelSatisfies(level, 'read')) return null;
+  }
+  return doc;
 }
 
 /** Resolve `(tenantId, subject, artifactId)` to its DocumentRecord, or null when
@@ -262,8 +272,9 @@ async function resolveDocumentArtifact(tenantId: string, subject: string | undef
 /** Resolve a Media-backed artifact, enforcing org access FROM the asset record
  *  (mirrors the document path). The third source, `run-event:<…>`, is now LIVE
  *  (ADR 0083 — `resolveRunArtifact` below) and is populated by the run-artifact
- *  producer (`host/runArtifactStore.ts`); host-internal, still no normative
- *  `artifact.created` wire event. */
+ *  producer (`host/runArtifactStore.ts`). A row a node ANNOUNCED on the wire
+ *  (`artifact.created`) is also readable through the protocol `getArtifact`
+ *  (ADR 0746, `host/runArtifactRead.ts`), which reuses this module's document gate. */
 async function resolveMediaArtifact(tenantId: string, subject: string | undefined, artifactId: string): Promise<MediaAsset | null> {
   const parsed = parseArtifactId(artifactId);
   if (!parsed || parsed.source !== 'media') return null;
@@ -317,6 +328,21 @@ export async function getArtifactRevision(tenantId: string, subject: string | un
  * ONCE per distinct org (batched), never per artifact, to avoid the N+1 fan-out
  * (CLAUDE.md rate-limit gotcha). Run-event artifacts are org === tenantId by construction.
  */
+/**
+ * ADR 0083 §Amendment 2026-07-05 — the Library is an ASSET library, not a run log.
+ * Documents and media are assets by construction. A run-event is an asset only when
+ * it is a typed artifact (`artifactTypeId` — a slide deck / CAD / campaign / app
+ * design / drawing / chart / interactive / production plan / doc.*) or a concrete
+ * file link (`kind:'file'`). The raw inline-output fallback (`deriveArtifact` mints
+ * `kind:'data'|'text'|'markdown'` with no type) is a run OUTPUT, not a generated
+ * asset — it produced the `{`-named rows and is filtered out here. The raw output
+ * still exists and stays addressable from the run detail; it just isn't an asset.
+ */
+export function isLibraryAsset(a: ArtifactProjection): boolean {
+  if (a.source !== 'run-event') return true;
+  return Boolean(a.artifactTypeId) || a.kind === 'file';
+}
+
 export async function listArtifacts(tenantId: string, subject: string | undefined): Promise<ArtifactProjection[]> {
   const [docs, assets, runs] = await Promise.all([
     listDocumentsForTenant(tenantId),
@@ -341,11 +367,24 @@ export async function listArtifacts(tenantId: string, subject: string | undefine
       });
     }
   });
+  // ADR 0610 D3′ / CPC-15 — the Library LIST is the SECOND half of the artifact
+  // door-pair whose single-GET (`authorizeDocument`) is project-gated; without
+  // this it enumerates a private project's docs to a non-member org viewer. A
+  // project-owned doc is membership-scoped: consult the ONE subjectAccess seam
+  // (null ⇒ org gate stands). Media/run rows carry no project owner.
+  const visibleDocs = (await Promise.all(docs.map(async (d) => {
+    if (!canRead.get(d.orgId)) return null;
+    if (d.ownerSubject) {
+      const level = await resolveSubjectAccess(tenantId, d.ownerSubject, subject);
+      if (level !== null && !levelSatisfies(level, 'read')) return null;
+    }
+    return d;
+  }))).filter((d): d is NonNullable<typeof d> => d !== null);
   const projections: ArtifactProjection[] = [
-    ...docs.filter((d) => canRead.get(d.orgId)).map(documentToArtifact),
+    ...visibleDocs.map(documentToArtifact),
     ...assets.filter((a) => canRead.get(a.orgId)).map(mediaToArtifact),
     ...runs.filter((r) => canRead.get(r.orgId)).map(runArtifactToArtifact),
-  ];
+  ].filter(isLibraryAsset);
   // Stable newest-first ordering, tie-broken by id, so the ART-1 keyset cursor is well-defined.
   return projections.sort((a, b) => {
     const ca = artifactCursor(a), cb = artifactCursor(b);
@@ -362,7 +401,7 @@ const MAX_LIBRARY_LIMIT = 500;
 const MAX_DIFF_CHARS = 1_500_000;
 /** Keyset cursor key: `${createdAt}\0${artifactId}` — matches the desc sort in `listArtifacts`. */
 function artifactCursor(a: ArtifactProjection): string {
-  return `${a.createdAt} ${a.artifactId}`;
+  return `${a.createdAt}\u0000${a.artifactId}`;
 }
 
 export interface ListArtifactsPage { artifacts: ArtifactProjection[]; nextCursor?: string }

@@ -13,9 +13,13 @@
  *     `argsHash` is the JCS (RFC 8785) + SHA-256 digest of the args, with
  *     SR-1 secret redaction applied to the preimage FIRST so a hashed
  *     argument can never carry a secret (the content-free-audit guarantee).
- *   - `agent.toolReturned` gains `{ status: 'ok'|'forbidden'|'rate_limited',
- *     durationMs }`. `durationMs` is absent when the call never started
- *     (forbidden / rate_limited).
+ *   - `agent.toolReturned` gains `{ status: 'ok'|'error'|'forbidden'|
+ *     'rate_limited', durationMs, error? }`. `durationMs` is absent when the
+ *     call never started (forbidden / rate_limited / capability-precondition).
+ *     §F: a non-success return carries a populated `error` (`_errorObject`,
+ *     SR-1-redacted) — `status:'error'` for a ran-and-threw failure (with
+ *     `durationMs`), or a gate status. See `extractToolErrorCode` +
+ *     `CAPABILITY_PRECONDITION_CODES` for the production emitter's classifier.
  *   - Authorization is fail-closed (reuses RFC 0049's `forbidden` error +
  *     `authorization-fail-closed` invariant): if `requiredScopes` are
  *     declared and the principal does not demonstrably hold all of them,
@@ -31,8 +35,9 @@
 import { createHash } from 'node:crypto';
 import { canonicalize } from '../providers/llmCacheKey.js';
 import { sanitizeFreeTextDeep } from '../byok/textRedaction.js';
+import { scrubSecretShaped } from './redactSecrets.js';
 
-export type ToolHookStatus = 'ok' | 'forbidden' | 'rate_limited';
+export type ToolHookStatus = 'ok' | 'error' | 'forbidden' | 'rate_limited';
 export type ToolTransport = 'mcp' | 'http' | 'native';
 
 export interface ToolHookRequest {
@@ -49,6 +54,11 @@ export interface ToolHookRequest {
   transport?: ToolTransport;
   /** Conformance hook: force the rate-limit branch deterministically. */
   simulateRateLimitExhausted?: boolean;
+  /** RFC 0064 §F conformance hook: force a ran-and-threw tool-execution
+   *  failure — the tool PASSES the gates and runs, then fails, so the return
+   *  carries a populated `error` + `status:'error'` + a non-negative
+   *  `durationMs` (NOT a gate status). Drives `tool-hooks-failure-honesty`. */
+  simulateToolError?: boolean;
 }
 
 export interface ToolCalledFields {
@@ -62,6 +72,10 @@ export interface ToolReturnedFields {
   toolName: string;
   status: ToolHookStatus;
   durationMs?: number;
+  /** RFC 0064 §F — the populated failure discriminator on `status:'error'`
+   *  (`_errorObject`, SR-1-redacted). Absent on `ok` and on the
+   *  `forbidden`/`rate_limited` gate statuses. */
+  error?: { code: string; message: string };
 }
 
 export interface ToolHookResult {
@@ -82,6 +96,59 @@ export interface ToolHookResult {
 export function computeArgsHash(args: unknown): string {
   const redacted = sanitizeFreeTextDeep(args ?? null);
   return createHash('sha256').update(canonicalize(redacted), 'utf8').digest('hex');
+}
+
+/**
+ * RFC 0064 §E — the capability-precondition error codes. A tool that fails
+ * because its owning feature is toggled OFF or not composed for this tenant
+ * NEVER RAN: its `agent.toolReturned` carries a populated `error` + `status:'error'`
+ * but NO `durationMs` (like the `forbidden`/`rate_limited` gate statuses). Sourced
+ * from `featureSurfaces.ts` (`host_capability_disabled`) and `AiProviderError`
+ * (`host_capability_missing`) — the only two thrown codes that mean "gate, not run".
+ */
+export const CAPABILITY_PRECONDITION_CODES: ReadonlySet<string> = new Set([
+  'host_capability_disabled',
+  'host_capability_missing',
+]);
+
+/**
+ * RFC 0064 §E — extract a stable, wire-safe error CODE from a thrown
+ * tool-execution error for `agent.toolReturned.error.code`. Honors a structured
+ * `.code` (the `featureSurfaces` gate, `AiProviderError`, `OpenwopError`); falls
+ * back to the generic `tool_execution_failed` for an unstructured throw. The code
+ * is a discriminator, never secret-bearing — the free-text lives in `message`,
+ * which the caller SR-1-redacts.
+ */
+export function extractToolErrorCode(err: unknown): string {
+  const code = (err as { code?: unknown } | null | undefined)?.code;
+  return typeof code === 'string' && code.length > 0 ? code : 'tool_execution_failed';
+}
+
+/**
+ * RFC 0064 §F — derive the wire `error.code` for a FAILED tool result
+ * (`isError`). The tool provider swallows a THROWN error into
+ * `{ content, isError, errorCode }` (capturing the structured `.code` via
+ * `extractToolErrorCode`), and stringifies a RETURNED structured failure as
+ * `{ content: JSON.stringify({ code | error, message }), isError }`. This reads
+ * whichever is present so the real code reaches `error.code` instead of a
+ * blanket `tool_execution_failed`:
+ *   1. an explicit `errorCode` (a swallowed throw's structured code) wins;
+ *   2. else parse `content` as JSON and read `.code` (or `.error`);
+ *   3. else the generic `tool_execution_failed`.
+ * The code is a discriminator, never secret-bearing — the free text lives in the
+ * `message` the caller SR-1-redacts. Pairs with `CAPABILITY_PRECONDITION_CODES`
+ * to decide `durationMs` presence at the emit site.
+ */
+export function deriveToolErrorCode(execOut: { content: string; errorCode?: string }): string {
+  if (typeof execOut.errorCode === 'string' && execOut.errorCode.length > 0) return execOut.errorCode;
+  try {
+    const parsed = JSON.parse(execOut.content) as { code?: unknown; error?: unknown };
+    const code = typeof parsed?.code === 'string' && parsed.code.length > 0 ? parsed.code
+      : typeof parsed?.error === 'string' && parsed.error.length > 0 ? parsed.error
+      : undefined;
+    if (code) return code;
+  } catch { /* content is not structured JSON (e.g. a plain `tool_failed: …` string) — fall through */ }
+  return 'tool_execution_failed';
 }
 
 /** Per-`(principal, tool)` token bucket. Module-scoped — best-effort;
@@ -160,6 +227,25 @@ export function evaluateToolHook(req: ToolHookRequest, now: number = Date.now())
       toolReturned: { toolName: req.toolName, status: 'rate_limited' },
       httpStatus: 429,
       errorCode: 'rate_limited',
+    };
+  }
+
+  // RFC 0064 §F — a ran-and-threw tool-execution failure. The tool PASSED the
+  // authz + rate-limit gates and RAN, then failed: `status:'error'` + a populated
+  // `error` (`_errorObject`, SR-1-redacted) + a non-negative `durationMs` (it ran,
+  // unlike the `forbidden`/`rate_limited` gate statuses). The seam call itself
+  // succeeds (HTTP 200) — the failure lives in the returned tool event, not the
+  // transport. Mirrors the production emitter in `agentDispatch.ts`.
+  if (req.simulateToolError === true) {
+    return {
+      toolCalled,
+      toolReturned: {
+        toolName: req.toolName,
+        status: 'error',
+        error: { code: 'tool_execution_failed', message: scrubSecretShaped('simulated tool execution failure') },
+        durationMs: 0,
+      },
+      httpStatus: 200,
     };
   }
 

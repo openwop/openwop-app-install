@@ -61,6 +61,29 @@ default in `src/brand/defaults.ts`.
 > (`OPENWOP_DEPLOY_POSTURE=auth`), or front the whole deployment with your
 > own access control (IAP, VPN, basic auth at the proxy).
 
+### Enterprise lockdown recipe (SHELL-1)
+
+The public demo deliberately ships `mode=none` (anonymous cookie tenancy so
+evaluators land straight in the app). An enterprise / white-label install
+locks the deployment down with **three settings together** — each covers a
+different layer, and none substitutes for the others:
+
+| Layer | Setting | What it does |
+|---|---|---|
+| SPA shell | `VITE_BRAND_APP_GATE_MODE=sign-in` (frontend build env) | The app renders the Firebase sign-in gate before any UI; identity is mandatory from the first paint |
+| Backend API | `OPENWOP_DEPLOY_POSTURE=auth` (Cloud Run env) | Managed-tier turns require a signed-in identity server-side — the API is protected even for callers that bypass the SPA |
+| Identity | Firebase Auth providers; enterprise SSO via SAML/SCIM (ADR 0002, RFC 0050) | Who can sign in at all; SCIM keeps membership in sync with your IdP |
+
+Then govern *what signed-in members can do* with roles (ADR 0006): built-in
+`viewer`/`editor`/`admin`/`owner`, plus custom roles (protocol scopes only)
+managed under **Organizations → Members / Roles**. Admin-tier pages enforce
+this in the shell too (ADR 0203).
+
+Do NOT use `mode=password` for a production install — see the caveat above
+(bundle-inlined secret, client-side unlock, API stays open). If you need
+network-perimeter protection as well, front the deployment with IAP/VPN/proxy
+auth — the app gate is an application-layer control, not a network one.
+
 **Example `.env.production.local`:**
 
 ```dotenv
@@ -128,6 +151,18 @@ bash scripts/check-branding.sh frontend/react/dist
 (The guard is a *fork* tool — the upstream OpenWOP build legitimately carries
 these strings, so it's expected to report leaks there.)
 
+The instance-name check reads `dist/brand-info.json`, which the build emits
+from the resolved brand (the same resolver that renders the sidebar) — so run
+it against a dist produced by the current tree; a dist without that file is a
+hard error rather than a pass. The stock defaults compile into every bundle
+whether or not you override them, which is why that check cannot be a grep.
+
+The same run also scans the **native shells'** white-label configs
+(`clients/desktop/branding.json` + builder identity, `clients/ios/project.yml`)
+so a rebranded web app can't silently ship desktop/iOS artifacts under the
+OpenWOP identity — see §6. Skip that half with
+`OPENWOP_SKIP_SHELL_BRANDING=1` if you don't ship the shells.
+
 ---
 
 ## 2. Rebrand the colors + typography (`src/brand/brand.css`)
@@ -192,7 +227,7 @@ in data files, and the runtime fallbacks are brand-neutral. Configure via env
 | `OPENWOP_SERVICE_VENDOR` | `openwop-app` | `service.vendor` in `/.well-known/openwop` — set this so your discovery doc doesn't advertise the reference-sample vendor tag |
 | `OPENWOP_MANAGED_SYSTEM_PROMPT` | *(brand-neutral generic assistant prompt)* | Grounding prompt for the managed "try it free" chat tier. **The code fallback is generic** — set this to your own grounding (the reference deploy supplies the OpenWOP blurb here) |
 | `OPENWOP_DEMO_MODE` | `false` | **Demo-deployment switch.** Off (the default) = production-grade clean: NO auto-seed, NO synthetic `__showcase__` data — a fresh install boots empty, every surface reads only the tenant's own real data. Set `true` only for a public showcase (e.g. app.openwop.dev), which boot-seeds the showcase tenant + lets dashboards fall back to it — that data is BADGED illustrative in the UI. |
-| `OPENWOP_DEMO_SEED_ENABLED` | `true` | Whether explicit, user-triggered seeding (the `/example-data` dashboard + "Load example data" actions) is available at all. Set `false` to remove the capability entirely. Independent of `OPENWOP_DEMO_MODE`. |
+| `OPENWOP_DEMO_SEED_ENABLED` | `true` (OFF by default under `OPENWOP_DEPLOY_POSTURE=auth` — opt-in, DUR-3/ADR 0195) | Whether explicit, user-triggered seeding (the `/example-data` dashboard + "Load example data" actions) is available at all. Set `false` to remove the capability entirely; set `true` to enable it in the `auth` posture. Independent of `OPENWOP_DEMO_MODE`. |
 | `OPENWOP_DEPLOY_POSTURE` | `cookie-per-visitor` | Backend auth posture: `bearer-shared`, `cookie-per-visitor`, or `auth` |
 | `OPENWOP_MANAGED_ANON_SIGNIN_REQUIRED` | *(derived)* | Optional override for the managed free-tier sign-in wall (`true`/`false`); demo postures allow anon by default, `auth` requires sign-in |
 | `OPENWOP_MANAGED_GLOBAL_DAILY_TOKEN_CAP` | *(unset = off)* | Operator spend backstop: total managed-tier tokens per day across ALL tenants. **Set this on any login-free public demo** — the per-tenant cap alone is evadable on cookie-per-visitor deploys (every fresh cookie jar is a fresh anon tenant) |
@@ -293,12 +328,56 @@ The app is **two independent deploys** — backend (Cloud Run) and frontend
    The production build **aborts** unless `VITE_OPENWOP_BASE_URL` is set
    and non-default (guards against shipping a localhost-pointed bundle).
 
-3. **Verify**: load the page and confirm the tab title, header wordmark,
+3. **Point the backend at your SPA shell.** `firebase.json` rewrites `/` to the
+   BACKEND, not to the static shell — the root is server-rendered so the landing
+   page can be CMS-driven. The backend fetches the shell from Hosting, so it
+   needs the URL:
+
+   ```sh
+   gcloud run services update <your-backend> --region <region> --project <project> \
+     --update-env-vars="OPENWOP_SPA_SHELL_URL=https://<your-site>.web.app/app-shell.html"
+   ```
+
+   Skip this and `/` returns a 404 reading *"No SPA shell is configured on this
+   host."* — while every in-app route (`/chat`, your feature routes) serves
+   correctly from the `**` rewrite, which makes it look like a broken deploy
+   when it is one missing variable. Note the build emits **`app-shell.html`**,
+   not `index.html`; `dist/` having no `index.html` is expected.
+
+4. **Verify**: load the page and confirm the tab title, header wordmark,
    icon mark, and footer all show your brand; `curl https://<your-domain>/`
    should reference the same `assets/index-<hash>.js` your local `dist/`
-   just built.
+   just built. Check `/` AND one in-app route — they are served by different
+   rewrites and fail independently.
 
 ---
+
+## 6. The native shells (desktop + iOS) — included in the bundle
+
+The white-label bundle ships the native clients too:
+**[`clients/desktop/`](../../clients/desktop/README.md)** (Electron) and
+**[`clients/ios/`](../../clients/ios/README.md)** (SwiftUI + WKWebView). Both
+are thin shells that load your host origin's **server-served SPA** — so a
+shell pointed at your deployment automatically shows your `VITE_BRAND_*` +
+`brand.css` branding with zero shell work. What the shells brand themselves is
+only the **pre-connection chrome** (the "connect to host" screen, native menu,
+app name/icon), via a seam that mirrors this document's vocabulary:
+
+| Shell | Where the knobs live | Recipe |
+|---|---|---|
+| Desktop | `clients/desktop/branding.json` → `npm run apply-branding` + `tools/make-icon.js` | `clients/desktop/README.md` § White-labeling |
+| iOS | `clients/ios/project.yml` (`OWP*` Info.plist keys) → `xcodegen generate` | `clients/ios/README.md` § White-labeling |
+
+Both shells run in one of two **postures** (ADR 0291):
+
+- **`demo`** (stock) — the setup screen offers a one-click hosted-demo
+  connect (`demoHost`, default `app.openwop.dev`) plus free host entry.
+- **`enterprise`** — every demo affordance is removed; set `lockedHost`
+  (`OWPLockedHost` on iOS) to pin the shell to your company origin: the setup
+  screen and "Change Server" disappear entirely, and a stale saved host can
+  never unpin it. Pair with the SHELL-1 lockdown above
+  (`VITE_BRAND_APP_GATE_MODE=sign-in` + `OPENWOP_DEPLOY_POSTURE=auth` + your
+  IdP) — the shell inherits the sign-in gate because it renders your SPA.
 
 ## File map
 

@@ -30,15 +30,21 @@
  * @see RFCS/0070-agent-manifest-runtime.md
  */
 
-import Ajv2020 from 'ajv/dist/2020.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
-import { computeArgsHash } from './toolHooks.js';
+import { computeArgsHash, extractToolErrorCode, deriveToolErrorCode, CAPABILITY_PRECONDITION_CODES } from './toolHooks.js';
+import { scrubSecretShaped } from './redactSecrets.js';
 import { evaluateToolPermission, agentToolPermissionsEnabled, type ToolPermissions } from './agentToolPermissions.js';
 import { resolveAgentToolPermissions } from './agentProfileService.js';
-import { resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
+import { effectiveToolAllowlist, resolveAgentToolAllowlistOverride } from './agentToolAllowlistService.js';
 import { applyToolResultTransform } from './toolResultTransform.js';
+import { toModelToolResult } from './toModelToolResult.js';
+import { acceptEnvelope, loadEnvelopePayloadSchema } from './envelopeAcceptor.js';
 import type { CompactionDecision } from '../executor/types.js';
-import { neutralizeUntrusted, fenceUntrustedItems, fenceUntrustedBlock } from './untrustedContent.js';
+import { neutralizeUntrusted, fenceUntrustedItems, defangUntrustedFence } from './untrustedContent.js';
+// Value import, but cycle-safe: agentKnowledgeComposition imports ONLY types
+// from this module (erased at runtime). Shared so the two composition sites
+// cannot drift into different owner attributions (RCL-6).
+import { borrowedRecallPreamble, degradationNotice } from './agentKnowledgeComposition.js';
 import type {
   AiCallRequest,
   AiCallResult,
@@ -49,6 +55,8 @@ import type {
 } from '../executor/types.js';
 import { resolveModelForClass, type ResolveModelOptions } from './modelClassResolver.js';
 import { createLogger } from '../observability/logger.js';
+// ADR 0547 — the ONE validator for the tool-inputSchema class.
+import { validateToolInput, toolSchemaCompiles } from './toolSchemaValidation.js';
 
 const log = createLogger('host.agentDispatch');
 
@@ -60,8 +68,6 @@ const DEFAULT_MAX_TOOL_ROUNDS = 5;
  *  call sites (mcpServerRouter, envelopeAcceptor); tool `$id`s are stripped
  *  before compile to avoid the long-lived-instance `$id` collision the agent
  *  registry warns about. */
-const toolAjv = new Ajv2020({ strict: false, allErrors: true });
-
 export class AgentNotFoundError extends Error {
   constructor(public agentId: string) {
     super(`agent '${agentId}' is not installed on this host`);
@@ -70,8 +76,16 @@ export class AgentNotFoundError extends Error {
 }
 
 export interface AgentDispatchRequest {
+  /** ADR 0433 — optional delegation provenance, echoed verbatim onto the
+   *  result. Optional BY DESIGN: a required field would break every existing
+   *  caller on a shared seam the moment it landed. */
+  provenance?: AgentDispatchProvenance;
   /** The manifest agentId to dispatch. */
   agentId: string;
+  /** ADR 0379 P2 — the dispatching tenant. Required to find USER-authored
+   *  agents in the (tenant, agentId)-keyed registry; pack agents resolve
+   *  without it (a2a + eval paths dispatch pack agents tenant-less). */
+  tenantId?: string;
   /** Inbound task payload (validated against handoff.taskSchemaRef). */
   task?: unknown;
   /** Tool surface the host offers this turn; intersected with toolAllowlist. */
@@ -96,6 +110,57 @@ export interface AgentEvent {
   [k: string]: unknown;
 }
 
+/**
+ * ADR 0433 — the PRD §13 delegation record, CALLER-SUPPLIED and echoed
+ * verbatim. `runAgentDispatch` is a pure function over its request: it cannot
+ * know which named agent delegated, which project the work serves, or what
+ * budget the caller set, so it records what it is told and never infers. A
+ * caller that supplies nothing gets no provenance — honest, not guessed.
+ *
+ * NAMED `provenance`, not "delegation": `host/approvalDelegations.ts` already
+ * owns that word for act-on-my-behalf approval coverage, and one noun with two
+ * meanings in the same directory is exactly the drift the boundaries audit
+ * exists to catch.
+ */
+export interface AgentDispatchProvenance {
+  /** The named agent that delegated this work, and its stable subject. */
+  parentAgentId?: string;
+  parentSubject?: string;
+  /** The project the work serves (descriptive membership, never authority). */
+  projectSubject?: string;
+  /** The specialist's pack version — identity alone is not reproducible. */
+  specialistVersion?: string;
+  /** The dispatching workflow/node, with versions. */
+  workflowId?: string;
+  workflowVersion?: string;
+  nodeId?: string;
+  nodeVersion?: string;
+  /** OPAQUE refs to the handed-over context — ids only, NEVER content (a
+   *  provenance record holding content would be a second copy to leak). */
+  contextRefs?: string[];
+  /** Budget the caller set, and what the turn consumed. */
+  budget?: { maxUsd?: number; maxTokens?: number; spentUsd?: number; spentTokens?: number };
+  /** What the PARENT did with the output — stamped by the merging caller AFTER
+   *  the turn returns; the dispatcher never judges its own output. */
+  mergeDecision?: 'pending' | 'accepted' | 'accepted-with-edits' | 'rejected';
+}
+
+/** ADR 0433 — echo provenance onto the result, defaulting `mergeDecision` to
+ *  `pending` so "supplied but unjudged" is distinguishable from "not recorded". */
+export function echoProvenance(p: AgentDispatchProvenance | undefined): AgentDispatchProvenance | undefined {
+  if (!p) return undefined;
+  return { ...p, mergeDecision: p.mergeDecision ?? 'pending' };
+}
+
+/** ADR 0433 P2 — stamp what the parent decided once it has merged (or not).
+ *  Pure: returns a new record, never mutates the dispatched result. */
+export function recordMergeDecision(
+  p: AgentDispatchProvenance | undefined,
+  decision: NonNullable<AgentDispatchProvenance['mergeDecision']>,
+): AgentDispatchProvenance | undefined {
+  return p ? { ...p, mergeDecision: decision } : undefined;
+}
+
 export interface AgentDispatchResult {
   agentId: string;
   persona: string;
@@ -115,6 +180,9 @@ export interface AgentDispatchResult {
    *  (absent for the deterministic seam). */
   provider?: string;
   model?: string;
+  /** ADR 0433 — the caller's provenance, echoed verbatim (never re-resolved,
+   *  so a fork reproduces it rather than recomputing against a moved world). */
+  provenance?: AgentDispatchProvenance;
 }
 
 /** RFC 0002 §A14 — intersect the host-offered tools with the agent's allowlist.
@@ -162,7 +230,7 @@ function stubScalar(type: string | undefined): unknown {
  * agentId is not in the registry (caller maps to 404).
  */
 export function runAgentDispatch(req: AgentDispatchRequest): AgentDispatchResult {
-  const agent = getAgentRegistry().get(req.agentId);
+  const agent = getAgentRegistry().get(req.agentId, req.tenantId);
   if (!agent) throw new AgentNotFoundError(req.agentId);
 
   const validate = req.validateHandoff !== false;
@@ -177,9 +245,15 @@ export function runAgentDispatch(req: AgentDispatchRequest): AgentDispatchResult
     ? req.confidenceThreshold
     : (agent.confidence?.defaultThreshold ?? 0.7);
 
+  // ADR 0433 — provenance is echoed VERBATIM from the request onto every
+  // result shape this dispatch can return (success, escalation, failure), so a
+  // delegation is attributable regardless of outcome.
+  const provenance = echoProvenance(req.provenance);
   const base = (status: AgentDispatchResult['status'], extra: Partial<AgentDispatchResult>): AgentDispatchResult => ({
     agentId: agent.agentId, persona: agent.persona, modelClass: agent.modelClass,
-    status, toolSurface, confidence, threshold, events: [], ...extra,
+    status, toolSurface, confidence, threshold, events: [],
+    ...(provenance ? { provenance } : {}),
+    ...extra,
   });
 
   // §D inbound task validation (RFC 0003 §D), gated on handoffValidation. Uses
@@ -194,7 +268,7 @@ export function runAgentDispatch(req: AgentDispatchRequest): AgentDispatchResult
   // The deterministic turn: a reasoning event, then a decision. (No model call,
   // no credentials — SR-1 holds by construction.)
   const events: AgentEvent[] = [
-    { type: 'agent.reasoned', agentId: agent.agentId, summary: `${agent.persona} evaluated the task against ${toolSurface.length} permitted tool(s).` },
+    { type: 'agent.reasoned', agentId: agent.agentId, reasoning: `${agent.persona} evaluated the task against ${toolSurface.length} permitted tool(s).` },
   ];
 
   // §F confidence escalation — below threshold MUST escalate, not proceed.
@@ -238,10 +312,15 @@ export interface AgentToolDef {
 export type ResolveAgentTool = (name: string) => AgentToolDef | undefined;
 
 /** Execute one model-requested tool call. Injected so this module stays free
- *  of the host tool-hook / MCP construction and is unit-testable with a mock. */
+ *  of the host tool-hook / MCP construction and is unit-testable with a mock.
+ *  RFC 0064 §F: an implementation that swallows a THROWN tool error into an
+ *  `isError` result SHOULD surface the thrown error's structured code via
+ *  `errorCode` so the emitter can name it + suppress `durationMs` for a
+ *  capability-precondition (a returned structured failure carries its code in
+ *  `content` JSON instead — see `deriveToolErrorCode`). */
 export type ExecuteAgentTool = (
   call: { name: string; input: Record<string, unknown> },
-) => Promise<{ content: string; isError?: boolean }>;
+) => Promise<{ content: string; isError?: boolean; errorCode?: string }>;
 
 /** Bound `ctx.callAIWithTools` (a single Anthropic tool-calling round). */
 export type CallAiWithTools = (req: AiToolCallRequest) => Promise<AiToolCallResult>;
@@ -255,8 +334,14 @@ export type CallAiWithTools = (req: AiToolCallRequest) => Promise<AiToolCallResu
  *  knowledge (ADR 0038 §C, review fix): the turn read untrusted KB/memory, so its
  *  result may echo it. Recall FENCES tagged entries (never re-injects them as
  *  trusted), closing the second-order launder via the agent's own output. The
- *  adapter maps this tag onto `read().contentTrust` (recency + RAG metadata). */
-export const MEMORY_UNTRUSTED_TAG = 'derived-from-untrusted';
+ *  adapter maps this tag onto `read().contentTrust` (recency + RAG metadata).
+ *
+ *  The definition now lives in the leaf `host/memoryTrust.ts` and is RE-EXPORTED
+ *  here so every pre-existing importer is unchanged. It moved because
+ *  `inMemorySurfaces.ts` needs it for AGMEM-3 compaction trust carry-forward and
+ *  importing this module there would close a cycle. */
+export { MEMORY_UNTRUSTED_TAG } from './memoryTrust.js';
+import { MEMORY_UNTRUSTED_TAG } from './memoryTrust.js';
 
 export interface AgentMemoryPort {
   /** Resolve a memory scope to its entries (most-relevant-first). The OPTIONAL
@@ -281,8 +366,26 @@ export interface AgentMemoryPort {
  *  auto-ingest) are FENCED at injection, never presented as agent-trusted;
  *  `'trusted'` (default) is the tenant's own manually-curated content. Composed
  *  in the host route layer. */
+/** Which composed source a retrieval leg came from — and, when it faults, which
+ *  one the caller must NOT report as "no matches" (KB-UX-3 / ADR 0583). */
+export type KnowledgeSourceKind = 'kb' | 'memory';
+
+/** The degradation label for a faulted BORROWED (twin owner-corpus) read. One
+ *  constant so the two sites that can raise it — a full throw and a per-source
+ *  sink (`WF-TWIN-2`) — cannot drift into two different sentences for one fault. */
+const BORROWED_SOURCE_LABEL = "your owner's shared corpus";
+
 export type AgentKnowledgeRetrieve = (
   query: string,
+  /**
+   * Called ONCE per source whose retrieval leg threw. The composition is
+   * deliberately best-effort — a KB backend fault must not fail a live agent
+   * turn — but "best-effort" was silently indistinguishable from "the corpus
+   * has nothing", and three human-facing retrieval previews rendered an
+   * internal error as the confident "No matches". Dispatch and chat still call
+   * `retrieve(query)` and ignore this; the previews pass it and say so.
+   */
+  onSourceError?: (source: KnowledgeSourceKind) => void,
 ) => Promise<ReadonlyArray<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust?: 'trusted' | 'untrusted' }>>;
 
 export interface LiveDispatchDeps {
@@ -333,6 +436,12 @@ export interface LiveDispatchDeps {
    *  a live `TwinGrant` is active (`twinService.getActiveGrant`). Absent ⇒ no
    *  cross-subject recall (today's behavior). Best-effort. */
   borrowedRetrieve?: AgentKnowledgeRetrieve;
+  /** RCL-6 / WF-RCL-5 — the twin OWNER's display name, labeling the borrowed
+   *  fence's preamble ("recalled from <owner>'s shared memory") so the model
+   *  can attribute whose memory shaped the answer. Already consented
+   *  disclosure (the link UI names the owner). Absent ⇒ a generic
+   *  second-person label. Neutralized before composition (user text). */
+  borrowedOwnerName?: string;
   /** RFC 0090 — an independent critic over the actor's result. When present, the
    *  live turn runs it before completing, emits `agent.verified`, and (when
    *  `verifierGating`) gates: a non-`pass` verdict escalates instead of
@@ -340,6 +449,16 @@ export interface LiveDispatchDeps {
   verifier?: AgentVerifier;
   /** RFC 0090 §B — enforce the verdict as a commit gate. */
   verifierGating?: boolean;
+  /** ADR 0150 / ADR 0135 — the composition-aware capability firewall the caller
+   *  threads through to the tool loop, so the RUN lane (workflow / scheduled /
+   *  heartbeat dispatch via `agentRunnerNode`) gates a SENSITIVE_APPROVAL_TOOLS
+   *  call (code-exec / file-write / off-host egress) exactly like the chat lane.
+   *  A `require-approval` verdict has NO interactive card on this lane, so it
+   *  surfaces as a pending approval → an ESCALATED result (a human sees the held
+   *  action + why), never a silent completion that dropped the side-effect.
+   *  Absent ⇒ no firewall (today's behavior). Structural type = the chat loop's
+   *  `firewall` so core dispatch stays feature-free (built in the host layer). */
+  firewall?: ChatToolLoopOpts['firewall'];
 }
 
 /** An independent critic over an actor's result (RFC 0090). Returns a verdict;
@@ -395,7 +514,17 @@ function resolveAgentTools(
   const out: CompiledTool[] = [];
   for (const name of toolSurface) {
     const def = resolveTool(name);
-    if (def) out.push({ def, validate: compileToolValidator(def.inputSchema) });
+    if (!def) continue;
+    // ADR 0547 D2 — a tool whose `inputSchema` cannot compile gets NO argument
+    // validation, so offering it would hand the model a tool with an unchecked
+    // boundary. Drop it, matching the rule one line above: a host that can't
+    // describe a tool does not offer it. Measured: 0 of 199 registered tools
+    // fail today, so this is defence in depth, not a live repair.
+    if (!toolSchemaCompiles(def.inputSchema)) {
+      log.warn('agent_tool_dropped_uncompilable_schema', { toolName: name });
+      continue;
+    }
+    out.push({ def, validate: compileToolValidator(def.inputSchema) });
   }
   return out;
 }
@@ -419,26 +548,32 @@ export function compileAgentTools(
   return resolveAgentTools(filterTools([...availableTools], allow), resolveTool);
 }
 
-/** Pre-compile an args validator for a tool's `inputSchema`. A schema that
- *  fails to compile yields a permissive validator (so a malformed descriptor
- *  never hard-fails dispatch) — the real MCP path uses strict Ajv per
- *  `mcp-server-untrusted-args`. */
+/** Pre-compile an args validator for a tool's `inputSchema`.
+ *
+ *  ADR 0547 D1 — this used to own a SEVENTH Ajv instance (`toolAjv`), compiling
+ *  the same schema class the MCP router compiles, with no shared cache and a
+ *  different `$id` treatment. It now delegates to `host/toolSchemaValidation`,
+ *  so both callers of this one class share one instance, one cache and one set
+ *  of semantics.
+ *
+ *  A schema that fails to compile still yields a permissive validator here (so a
+ *  malformed descriptor never hard-fails dispatch); `resolveAgentTools` is what
+ *  keeps such a tool out of the offered surface (ADR 0547 D2), which is the
+ *  layer where "we cannot describe this tool" is already handled. */
 function compileToolValidator(
   schema: Record<string, unknown>,
 ): (input: Record<string, unknown>) => { ok: boolean; errors?: string } {
-  try {
-    const { $id: _drop, ...rest } = schema as Record<string, unknown>;
-    const validate = toolAjv.compile(rest);
-    return (input) => {
-      const ok = validate(input) as boolean;
-      return ok ? { ok: true } : { ok: false, errors: toolAjv.errorsText(validate.errors) };
-    };
-  } catch (err) {
-    // Tool-arg schema failed to compile — fail open (accept args) but log it,
-    // since silently skipping validation weakens the tool boundary (ENG-4).
-    log.warn('agent_tool_schema_compile_failed', { error: err instanceof Error ? err.message : String(err) });
-    return () => ({ ok: true });
-  }
+  return (input) => {
+    const r = validateToolInput(schema, input);
+    if (r.schemaBroken) {
+      // Unreachable for any tool that passed `toolSchemaCompiles` at resolve
+      // time; retained so a direct caller cannot silently lose validation
+      // (ENG-4). Fails OPEN here by design — the drop happens upstream.
+      log.warn('agent_tool_schema_compile_failed', { error: r.errors });
+      return { ok: true };
+    }
+    return r.ok ? { ok: true } : { ok: false, ...(r.errors ? { errors: r.errors } : {}) };
+  };
 }
 
 // ── Cross-run agent memory (A4 — RFC 0004 four-op MemoryAdapter, host-internal) ──
@@ -477,6 +612,19 @@ async function buildInitialMessages(
   // trusted (closes the second-order launder via the agent's own output).
   const memoryRecalled = memoryEnabled(agent, deps);
   let memoryRecall = '';
+  /**
+   * MEM-UX-14 / WF-AKM-6 (ADR 0587 §4) — what could NOT be read this turn.
+   *
+   * A failed read is not an empty one. A memory read that threw used to be
+   * swallowed into `entries = []`, so the model produced a reply with no memory
+   * that is INDISTINGUISHABLE from one where the agent genuinely has none — and
+   * because this is dispatch, THE MODEL'S REPLY ITSELF is the false empty. The
+   * widget layer already learned this lesson (a dedicated `failed` flag, a
+   * `storedUnknown` counter, copy reading "This is a failed read, not an empty
+   * memory"); dispatch did not. The model is now TOLD, inside the fence so the
+   * notice cannot be mistaken for content it may act on.
+   */
+  const degradedSources: string[] = [];
   if (memoryRecalled) {
     let entries: ReadonlyArray<{ content: string; contentTrust?: 'trusted' | 'untrusted' }> = [];
     try {
@@ -486,6 +634,7 @@ async function buildInitialMessages(
     } catch (err) {
       log.warn('agent_memory_read_failed', { error: err instanceof Error ? err.message : String(err) });
       entries = [];
+      degradedSources.push('your long-term memory');
     }
     const trustedMem = entries.filter((e) => e.contentTrust !== 'untrusted');
     if (trustedMem.length > 0) memoryRecall = trustedMem.map((e) => `- ${e.content}`).join('\n');
@@ -501,11 +650,22 @@ async function buildInitialMessages(
   let knowledgeBlock = '';
   if (deps.knowledgeRetrieve) {
     let chunks: ReadonlyArray<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust?: 'trusted' | 'untrusted' }> = [];
+    // WF-AKM-6 — the `onSourceError` sink has existed on this signature since
+    // ADR 0583 and NO model-facing lane passed it; only a REST preview and a node
+    // output zero chains consume did. So the honesty fix reached everywhere except
+    // the lane the finding names as worst. Passed here, and surfaced below.
+    const faulted: KnowledgeSourceKind[] = [];
     try {
-      chunks = await deps.knowledgeRetrieve(task);
+      chunks = await deps.knowledgeRetrieve(task, (src) => { if (!faulted.includes(src)) faulted.push(src); });
     } catch (err) {
       log.warn('agent_knowledge_retrieve_failed', { error: err instanceof Error ? err.message : String(err) });
       chunks = [];
+      degradedSources.push('your knowledge base');
+    }
+    for (const src of faulted) {
+      log.warn('agent_knowledge_source_failed', { source: src });
+      const label = src === 'kb' ? 'part of your knowledge base' : 'part of your long-term memory';
+      if (!degradedSources.includes(label)) degradedSources.push(label);
     }
     const filtered = memoryRecalled ? chunks.filter((c) => c.kind !== 'memory') : chunks;
     const trusted = filtered.filter((c) => c.contentTrust !== 'untrusted');
@@ -520,31 +680,64 @@ async function buildInitialMessages(
   }
 
   // ADR 0044 §C/Phase 2 — BORROWED content (a twin agent recalling its owner's
-  // corpus). Structurally fenced: EVERY chunk goes to the untrusted block, no
+  // corpus). Structurally fenced: EVERY chunk goes to an untrusted block, no
   // trusted path exists here (the security invariant is in the code shape, not a
   // marking convention). `kind`/`contentTrust` are ignored — second-party personal
   // data is always cited-as-data. Best-effort.
+  //
+  // RCL-6 / WF-RCL-5 — borrowed chunks get their OWN fenced block (below), with
+  // an owner-naming preamble inside the fence, instead of merging into the same
+  // `untrustedItems` array as untrusted agent-KB chunks: the model could not
+  // previously distinguish the owner's personal memory from a fenced Drive
+  // import, so it could neither attribute nor weigh them differently.
+  const borrowedItems: string[] = [];
   if (deps.borrowedRetrieve) {
     let borrowed: ReadonlyArray<{ content: string; title?: string }> = [];
     try {
-      borrowed = await deps.borrowedRetrieve(task);
+      // WF-TWIN-2 — pass the per-source sink. `resolveSubjectKnowledgeRetrieve`
+      // catches each leg's error INTERNALLY, so a faulted KB/memory read never
+      // throws out to the `catch` below: without this the turn saw an empty array
+      // and reported "your owner shared nothing" for what was actually a fault.
+      borrowed = await deps.borrowedRetrieve(task, (source) => {
+        log.warn('agent_borrowed_source_failed', { source });
+        if (!degradedSources.includes(BORROWED_SOURCE_LABEL)) degradedSources.push(BORROWED_SOURCE_LABEL);
+      });
     } catch (err) {
       log.warn('agent_borrowed_retrieve_failed', { error: err instanceof Error ? err.message : String(err) });
       borrowed = [];
+      if (!degradedSources.includes(BORROWED_SOURCE_LABEL)) degradedSources.push(BORROWED_SOURCE_LABEL);
     }
     for (const c of borrowed) {
-      untrustedItems.push(c.title ? `- [${neutralize(c.title)}] ${neutralize(c.content)}` : `- ${neutralize(c.content)}`);
+      borrowedItems.push(c.title ? `- [${neutralize(c.title)}] ${neutralize(c.content)}` : `- ${neutralize(c.content)}`);
     }
   }
 
-  const consumedUntrusted = untrustedItems.length > 0;
-  if (!memoryRecall && !knowledgeBlock && !consumedUntrusted) {
+  const consumedUntrusted = untrustedItems.length > 0 || borrowedItems.length > 0;
+  // MEM-UX-14 — the degradation notice is itself a reason to build a scaffold: a
+  // turn whose ONLY finding is "I could not read my memory" must still say so,
+  // rather than short-circuiting to a bare task and answering as if nothing failed.
+  if (!memoryRecall && !knowledgeBlock && !consumedUntrusted && degradedSources.length === 0) {
     return { messages: [{ role: 'user', content: task }], consumedUntrusted: false };
   }
   const sections: string[] = [];
+  if (degradedSources.length > 0) {
+    // `RCLWF-4` — call the ONE owner instead of re-typing the sentence. This was a hand-inlined
+    // copy of `degradationNotice`, and the two had ALREADY DRIFTED: "could not be read" here vs
+    // "could not be searched" there, "missing from the context below" vs "missing from the
+    // context". Two wordings of the single statement that stops a model reporting a failed read
+    // as an empty one is exactly the drift a shared helper exists to prevent.
+    sections.push(degradationNotice(degradedSources));
+  }
   if (knowledgeBlock) sections.push(`Relevant knowledge for this agent (cite the bracketed source):\n${knowledgeBlock}`);
-  if (consumedUntrusted) {
+  if (untrustedItems.length > 0) {
     sections.push(fenceUntrustedItems(untrustedItems));
+  }
+  // RCL-6 — the borrowed block is its OWN fence, opened by the owner-naming
+  // preamble (shared with the chat lane via `borrowedRecallPreamble` so the two
+  // sites cannot drift). Still structurally untrusted — the preamble sits
+  // INSIDE the fence and the label changes nothing about the data-only rule.
+  if (borrowedItems.length > 0) {
+    sections.push(fenceUntrustedItems([borrowedRecallPreamble(deps.borrowedOwnerName), ...borrowedItems]));
   }
   if (memoryRecall) sections.push(`Relevant memory from earlier runs:\n${memoryRecall}`);
   sections.push(`Task:\n${task}`);
@@ -622,7 +815,7 @@ export async function runAgentDispatchLive(
   req: AgentDispatchRequest,
   deps: LiveDispatchDeps,
 ): Promise<AgentDispatchResult> {
-  const agent = getAgentRegistry().get(req.agentId);
+  const agent = getAgentRegistry().get(req.agentId, req.tenantId);
   if (!agent) throw new AgentNotFoundError(req.agentId);
 
   const validate = req.validateHandoff !== false;
@@ -632,7 +825,8 @@ export async function runAgentDispatchLive(
   // `host:` restriction — pack agents (e.g. the Chief of Staff) are covered. Absent
   // override ⇒ the manifest allowlist.
   const overrideAllow = deps.tenantId ? await resolveAgentToolAllowlistOverride(deps.tenantId, agent.agentId) : undefined;
-  const toolSurface = filterTools(req.availableTools ?? [], overrideAllow ?? agent.toolAllowlist);
+  // ADR 0315 — override (full-replace) ?? manifest ∪ default-on baseline.
+  const toolSurface = filterTools(req.availableTools ?? [], effectiveToolAllowlist(agent.toolAllowlist, overrideAllow));
   const threshold = typeof req.confidenceThreshold === 'number'
     ? req.confidenceThreshold
     : (agent.confidence?.defaultThreshold ?? 0.7);
@@ -701,7 +895,7 @@ export async function runAgentDispatchLive(
   // a numeric confidence (we never fabricate one for a live turn).
   const confidence = confidenceFromData(out.data) ?? (typeof req.simulateConfidence === 'number' ? req.simulateConfidence : 1);
   const events: AgentEvent[] = [
-    { type: 'agent.reasoned', agentId: agent.agentId, summary: `${agent.persona} ran a ${resolved.provider}/${resolved.model} turn over ${toolSurface.length} permitted tool(s).` },
+    { type: 'agent.reasoned', agentId: agent.agentId, reasoning: `${agent.persona} ran a ${resolved.provider}/${resolved.model} turn over ${toolSurface.length} permitted tool(s).` },
   ];
   if (confidence < threshold) {
     events.push({ type: 'agent.decided', agentId: agent.agentId, decision: 'escalate', confidence });
@@ -741,6 +935,17 @@ interface ToolLoopCtx {
 
 /** Inputs to the shared observe→act core (`runChatToolLoop`). */
 export interface ChatToolLoopOpts {
+  /**
+   * ADR 0680 D3 — the tenant the loop runs for, threaded ONLY so the
+   * `tool_output_compacted` savings telemetry can be attributed. Optional because
+   * `anonymousActor` is the ratchet's EXEMPT lane and supplies no compaction decision, so
+   * `applyToolResultTransform` short-circuits before the observer fires there.
+   *
+   * Honest scope: the observer only fires when the output SHRANK, and `lossless` saves zero on
+   * this host's already-minified tool output (0 of 336 `JSON.stringify` sites indent), so this
+   * attributes the rows a `lossy`-opt-in agent produces — not a flow of rows that exists today.
+   */
+  tenantId?: string;
   provider: string;
   model: string;
   credentialRef: string;
@@ -777,7 +982,13 @@ export interface ChatToolLoopOpts {
    *  within-turn set of tools already run vs the tool about to run. `deny` → forbidden;
    *  `require-approval` → the same per-tool deferral as the ADR 0132 approval. Absent ⇒
    *  no firewall (the unchanged path). */
-  firewall?: { evaluate: (seenToolNames: readonly string[], nextToolName: string) => { decision: 'allow' | 'deny' | 'require-approval'; reason?: string } };
+  firewall?: { evaluate: (seenToolNames: readonly string[], nextToolName: string) => { decision: 'allow' | 'deny' | 'require-approval'; reason?: string; ruleId?: string } };
+  /** ADR 0397 Phase 1 — best-effort sink for a firewall verdict that narrowed a tool
+   *  call (`deny` / `require-approval`). The host closure captures the tenant + run and
+   *  records it to the unified governance decision log; this loop stays feature-free and
+   *  record-free (it only calls the injected callback, symmetric with `firewall.evaluate`
+   *  and `onEvent`). A throw is swallowed — observability must never break the turn. */
+  onFirewallDecision?: (d: { toolName: string; decision: 'deny' | 'require-approval'; reason?: string; ruleId?: string }) => void;
   /** Best-effort per-event sink so a host can stream live tool progress
    *  (`agent.reasoned` / `agent.toolCalled` / `agent.toolReturned`). A throw is
    *  swallowed — observability must never break the turn. */
@@ -824,6 +1035,31 @@ export interface ChatToolLoopResult {
  *     result (ADR 0099) before it re-enters the model context.
  * The loop ends when the model stops calling tools or `maxRounds` is hit.
  */
+/** XCH-ENV-2 (LLM-EXCHANGE-AUDIT Wave 5) — the LIVE RFC 0021 `schema.request`
+ *  round-trip the discovery doc has advertised all along. Extracts ONE fenced
+ *  JSON envelope from a final (no-tool-calls) assistant reply; only the
+ *  `schema.request` kind is handled here (clarifications ride interrupts,
+ *  `result` is terminal prose). Returns null when the text carries no
+ *  handleable envelope. Host-internal: honors the already-Accepted RFC 0021 —
+ *  no new wire surface. */
+export function extractSchemaRequestEnvelope(text: string): Record<string, unknown> | null {
+  const fences = [...text.matchAll(/```json\s*\n([\s\S]*?)```/g)];
+  for (const m of fences) {
+    try {
+      const candidate: unknown = JSON.parse(m[1]!);
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)
+        && (candidate as { type?: unknown }).type === 'schema.request') {
+        return candidate as Record<string, unknown>;
+      }
+    } catch { /* not JSON — keep scanning */ }
+  }
+  return null;
+}
+
+/** The per-turn `schema.request` cap — matches the `schemaRounds: 3` the
+ *  discovery doc advertises (routes/discovery.ts). */
+const SCHEMA_ROUNDS_PER_TURN = 3;
+
 export async function runChatToolLoop(
   opts: ChatToolLoopOpts,
   deps: {
@@ -857,11 +1093,13 @@ export async function runChatToolLoop(
     events.push(e);
     if (opts.onEvent) { try { await opts.onEvent(e); } catch { /* best-effort observability */ } }
   };
-  await emit({ type: 'agent.reasoned', agentId, summary: `${persona} ran a ${provider}/${model} tool-using turn over ${tools.length} permitted tool(s).` });
+  await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} ran a ${provider}/${model} tool-using turn over ${tools.length} permitted tool(s).` });
 
   let lastText = '';
   let lastData: unknown;
   let rounds = 0;
+  // XCH-ENV-2 — per-turn schema.request budget (the advertised schemaRounds).
+  let schemaRoundsUsed = 0;
   // Native web-search/grounding sources accumulated across rounds, deduped by
   // URL, appended as a Sources footer (ADR 0101 Phase 2).
   const citationsByUrl = new Map<string, AiCitation>();
@@ -880,8 +1118,48 @@ export async function runChatToolLoop(
     if (out.data !== undefined) lastData = out.data;
     for (const c of out.citations ?? []) { if (c.url && !citationsByUrl.has(c.url)) citationsByUrl.set(c.url, c); }
     const calls = out.toolCalls ?? [];
-    if (calls.length === 0) break; // model produced a final answer
-    if (out.content) messages.push({ role: 'assistant', content: out.content });
+    if (calls.length === 0) {
+      // XCH-ENV-2 (Wave 5): before treating this as the final answer, honor a
+      // fenced `schema.request` envelope — the model asking the app for node
+      // schemas through the advertised RFC 0021 channel. Validate through the
+      // real acceptor (round-capped per the advertised schemaRounds), answer
+      // from the live registry, and continue the loop with the
+      // `schema.response` envelope injected.
+      const reqEnvelope = out.content ? extractSchemaRequestEnvelope(out.content) : null;
+      if (reqEnvelope && schemaRoundsUsed < SCHEMA_ROUNDS_PER_TURN) {
+        schemaRoundsUsed += 1;
+        const outcome = acceptEnvelope(reqEnvelope, { counters: { schemaRounds: { current: schemaRoundsUsed, cap: SCHEMA_ROUNDS_PER_TURN } } });
+        // XCH-F1-3 — defang fence markers in MODEL output before it re-enters the
+        // message array. If a model echoes `BEGIN/END UNTRUSTED CONTENT` while
+        // summarising a fenced tool result, that text becomes conversation history
+        // and a LATER round would read it as a real delimiter — a model-authored
+        // fence spoof, closing the fence early and promoting attacker text to
+        // trusted prompt structure. Same breakout `defangUntrustedFence` already
+        // prevents from INSIDE a fenced payload; this closes the round-trip.
+        messages.push({ role: 'assistant', content: defangUntrustedFence(out.content!) });
+        if (outcome.status === 'accepted') {
+          // Per `schema.request.schema.json`: the payload names an ENVELOPE
+          // KIND, and the host's answer is an OUT-OF-BAND context injection
+          // (`schema.response` is the model's optional ack, not our vehicle).
+          // Node/component/artifact schemas ride the `openwop:schema.lookup`
+          // tool instead — a different, tool-mediated ask-path.
+          const envelopeType = String((reqEnvelope.payload as { envelopeType?: unknown })?.envelopeType ?? '');
+          const schema = loadEnvelopePayloadSchema(envelopeType);
+          await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} asked for the '${envelopeType}' envelope schema via schema.request (round ${schemaRoundsUsed}/${SCHEMA_ROUNDS_PER_TURN}).` });
+          if (schema) {
+            messages.push({ role: 'user', content: `schema.request answered (correlationId ${String(reqEnvelope.correlationId)}). The JSON Schema for envelope kind '${envelopeType}':\n\`\`\`json\n${JSON.stringify(schema)}\n\`\`\`\nContinue and produce your answer.` });
+          } else {
+            messages.push({ role: 'user', content: `schema.request refused: unknown_envelope_kind — this host ships no schema for '${envelopeType}'. Continue without it.` });
+          }
+        } else {
+          await emit({ type: 'agent.reasoned', agentId, reasoning: `${persona} emitted a schema.request the acceptor did not accept (${outcome.status}).` });
+          messages.push({ role: 'user', content: `Your schema.request envelope was ${outcome.status}${'reason' in outcome && outcome.reason ? ` (${outcome.reason})` : ''}. Correct it or answer without it.` });
+        }
+        continue;
+      }
+      break; // model produced a final answer
+    }
+    if (out.content) messages.push({ role: 'assistant', content: defangUntrustedFence(out.content) });
     for (const call of calls) {
       const compiled = tools.find((t) => t.def.name === call.name);
       // §A14 — a call to a tool not on the allowlist is refused, never executed.
@@ -953,12 +1231,15 @@ export async function runChatToolLoop(
           // ADR 0102 perm gate's `agent_tool_permission_denied`). No secret material
           // (tool name + reason only); the verdict is also recorded as a run event.
           log.info('capability_firewall_blocked', { agentId, toolName: call.name, decision: 'deny', reason: fw.reason });
+          // ADR 0397 Phase 1 — decision observability (best-effort, host records it).
+          try { opts.onFirewallDecision?.({ toolName: call.name, decision: 'deny', ...(fw.reason ? { reason: fw.reason } : {}), ...(fw.ruleId ? { ruleId: fw.ruleId } : {}) }); } catch { /* observability never breaks the turn */ }
           await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'forbidden' });
           messages.push({ role: 'user', content: `Tool "${call.name}" is blocked by the capability firewall: ${fw.reason ?? 'risky combination'}.` });
           continue;
         }
         if (fw.decision === 'require-approval') {
           log.info('capability_firewall_blocked', { agentId, toolName: call.name, decision: 'require-approval', reason: fw.reason });
+          try { opts.onFirewallDecision?.({ toolName: call.name, decision: 'require-approval', ...(fw.reason ? { reason: fw.reason } : {}), ...(fw.ruleId ? { ruleId: fw.ruleId } : {}) }); } catch { /* observability never breaks the turn */ }
           if (!pendingApprovals.some((p) => p.toolName === call.name)) {
             pendingApprovals.push({ toolName: call.name, callId: call.id, input: call.input });
           }
@@ -969,29 +1250,63 @@ export async function runChatToolLoop(
       }
       const v = compiled.validate(call.input);
       if (!v.ok) {
-        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'invalid_args' });
+        // RFC 0064 §E — an argument-validation failure is a non-success where the
+        // tool NEVER RAN and is NOT a gate case: it MUST carry `error` populated +
+        // `status:'error'` (the old `status:'invalid_args'` was never a valid wire
+        // enum member — `ok|error|forbidden|rate_limited`), with NO `durationMs`.
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code: 'invalid_args', message: scrubSecretShaped(`arguments failed validation: ${v.errors ?? 'invalid'}`) } });
         messages.push({ role: 'user', content: `Tool "${call.name}" arguments failed validation: ${v.errors ?? 'invalid'}.` });
         continue;
       }
       firewallSeen.push(call.name); // ADR 0135 — this tool's classes now count toward later combinations this turn
       await emit({ type: 'agent.toolCalled', agentId, toolName: call.name, callId: call.id, argsHash: computeArgsHash(call.input), transport: 'native' });
       const startedAt = Date.now();
-      let execOut: { content: string; isError?: boolean };
+      let execOut: { content: string; isError?: boolean; errorCode?: string };
       try {
         execOut = await deps.executeTool({ name: call.name, input: call.input });
       } catch (err) {
-        execOut = { content: `tool_execution_failed: ${err instanceof Error ? err.message : String(err)}`, isError: true };
+        // RFC 0064 §E — carry the thrown error's structured code (the
+        // `featureSurfaces` capability gate, `AiProviderError`, `OpenwopError`)
+        // so a capability-precondition failure is nameable + duration-suppressed
+        // below; unstructured throws fall back to `tool_execution_failed`.
+        execOut = { content: `tool_execution_failed: ${err instanceof Error ? err.message : String(err)}`, isError: true, errorCode: extractToolErrorCode(err) };
       }
-      await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: execOut.isError ? 'error' : 'ok', durationMs: Date.now() - startedAt });
-      const compactedContent = applyToolResultTransform(execOut.content, { decision: opts.compaction, toolName: call.name });
-      // RFC 0021 prompt-injection boundary: a tool result is untrusted, model-
-      // and (for web-search/HTTP tools) attacker-influenceable content. Fence it
-      // as data-only before it re-enters the context so embedded instructions
-      // ("ignore previous…", a spoofed task) can't hijack the agent loop — the
-      // same posture KB/memory get (`fenceUntrustedItems` above), structure
-      // preserved so JSON/multi-result bodies stay parseable. Compact THEN fence,
-      // so the fence wraps exactly what the model sees.
-      messages.push({ role: 'user', content: `Result of ${call.name}: ${fenceUntrustedBlock(compactedContent, `tool ${call.name}`)}` });
+      if (execOut.isError) {
+        // RFC 0064 §F — a failure MUST carry `error` populated + `status:'error'`
+        // (a bare `status:'error'` with no `error` is the WFAU-4 gap: a failure a
+        // consumer cannot distinguish from an empty success). `error` ⊥ `outcome`
+        // (this host never sets `outcome` on tool-return — the result goes to the
+        // model via compaction, not the wire). The code is DERIVED (a swallowed
+        // throw's structured code, else the code the tool stringified into its
+        // content JSON, else generic) so a real failure code reaches the wire, not
+        // a blanket `tool_execution_failed`. `durationMs` is present iff the tool
+        // ACTUALLY RAN: a capability-precondition never ran, so it is absent (like
+        // `forbidden`/`rate_limited`). `message` is SR-1-redacted.
+        const code = deriveToolErrorCode(execOut);
+        const toolRan = !CAPABILITY_PRECONDITION_CODES.has(code);
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'error', error: { code, message: scrubSecretShaped(execOut.content) }, ...(toolRan ? { durationMs: Date.now() - startedAt } : {}) });
+      } else {
+        await emit({ type: 'agent.toolReturned', agentId, toolName: call.name, callId: call.id, status: 'ok', durationMs: Date.now() - startedAt });
+      }
+      const compactedContent = toModelToolResult(
+        call.name,
+        applyToolResultTransform(execOut.content, { decision: opts.compaction, toolName: call.name, ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) }),
+        execOut.isError,
+      );
+      // `compactedContent` is ALREADY fenced when the tool declares
+      // `contentTrust: 'untrusted'` — `toModelToolResult` above is the single
+      // decision point (its docstring owns the RFC 0021 threat model).
+      //
+      // There used to be a SECOND, unconditional `fenceUntrustedBlock(...)` here.
+      // It was removed deliberately, not by accident: two mechanisms answering
+      // "is this result untrusted?" disagreed on 13 tools, and because the outer
+      // fence defangs its argument, the inner fence's markers were mangled into
+      // `BEGIN_UNTRUSTED_CONTENT` inside every untrusted result. Re-adding a
+      // blanket fence here would make `contentTrust` decorative on this path
+      // again and re-wrap closed catalogs (`slides.catalog`,
+      // `app-builder.catalog`) in a distrust warning about the very vocabulary
+      // the model must author against.
+      messages.push({ role: 'user', content: `Result of ${call.name}: ${compactedContent}` });
     }
   }
   // WSRCH-3 — observability for provider-native web search: when a turn ASKED for
@@ -1063,6 +1378,8 @@ async function runToolLoop(
   // verifier, persistTurnSummary) that the chat path does not need.
   const loop = await runChatToolLoop(
     {
+      // ADR 0680 D3 — attribute the compaction savings telemetry.
+      tenantId: deps.tenantId,
       provider, model, credentialRef,
       systemPrompt: agent.systemPrompt,
       messages: initial.messages,
@@ -1072,11 +1389,18 @@ async function runToolLoop(
       ...(typeof deps.maxToolRounds === 'number' ? { maxRounds: deps.maxToolRounds } : {}),
       ...(req.compaction ? { compaction: req.compaction } : {}),
       ...(toolPermissions ? { toolPermissions } : {}),
+      // ADR 0150 — the RUN lane's capability firewall (built by the host caller,
+      // e.g. agentRunnerNode). A `deny` blocks the call; a `require-approval` is
+      // collected as a pending approval (surfaced as an escalation below).
+      ...(deps.firewall ? { firewall: deps.firewall } : {}),
     },
     { callAIWithTools: deps.callAIWithTools!, executeTool: deps.executeTool! },
   );
   const events = loop.events;
 
+  // ADR 0433 — the LIVE path echoes provenance identically to the
+  // deterministic seam, so an audit cannot tell them apart by attribution.
+  const liveProvenance = echoProvenance(req.provenance);
   const finish = (status: AgentDispatchResult['status'], extra: Partial<AgentDispatchResult>): AgentDispatchResult => ({
     agentId: agent.agentId,
     persona: agent.persona,
@@ -1087,6 +1411,7 @@ async function runToolLoop(
     threshold,
     events,
     live: true,
+    ...(liveProvenance ? { provenance: liveProvenance } : {}),
     provider,
     model,
     ...extra,
@@ -1094,6 +1419,26 @@ async function runToolLoop(
 
   if (loop.error) {
     return finish('failed', { error: loop.error });
+  }
+
+  // ADR 0150 — a SENSITIVE tool the firewall held for approval (the RUN lane has
+  // no interactive approval card) surfaces as an ESCALATED outcome: the turn
+  // stopped short of the side-effect and a human must see WHICH tool + WHY, never
+  // a silent "completed" that dropped the action. The escalation carries the held
+  // tool names in the result so the runner can render them honestly. Evaluated
+  // BEFORE the §F/§D/verifier tail — a held approval means the turn could not
+  // fully act, so escalate first.
+  if (loop.pendingApprovals?.length) {
+    const heldTools = loop.pendingApprovals.map((p) => p.toolName);
+    events.push({ type: 'agent.decided', agentId: agent.agentId, decision: 'escalate', reason: 'awaiting_approval', heldTools });
+    return finish('escalated', {
+      result: {
+        status: 'awaiting_approval',
+        heldTools,
+        message: `This turn requested ${heldTools.length === 1 ? 'a tool that requires' : 'tools that require'} human approval (${heldTools.join(', ')}). It was not performed — a person must approve it from a chat where an approval card can be shown.`,
+        ...(loop.finalText ? { text: loop.finalText } : {}),
+      },
+    });
   }
 
   const lastData = loop.finalData;

@@ -20,6 +20,7 @@
  *   - Outputs / error / footer (runId + builder link + elapsed).
  */
 
+import { Button } from '../../ui/Button.js';
 import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
@@ -27,7 +28,8 @@ import { StepList, STATUS_COLORS, STATUS_LABEL_KEYS } from './StepList.js';
 import { formatElapsed } from './formatters.js';
 import { formatNumber } from '../../i18n/format.js';
 import type { ChatMessage } from '../hooks/useChatSession.js';
-import { PauseIcon, XIcon, WorkflowIcon } from '../../ui/icons/index.js';
+import { PauseIcon, WorkflowIcon } from '../../ui/icons/index.js';
+import { LeftRailPanelHeader } from '../leftRail/LeftRailPanelHeader.js';
 import { StateCard } from '../../ui/StateCard.js';
 
 /** Render-time humanization for the pointer-chip copy. Maps the raw
@@ -95,17 +97,12 @@ export function WorkflowProgressPanel({
       onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
       aria-labelledby={headingId}
     >
-      <header className="wfprog-header">
-        <strong id={headingId} className="u-flex-1 u-fs-13">{t('workflowProgress')}</strong>
-        <button
-          type="button"
-          className="secondary wfprog-close-btn"
-          onClick={onClose}
-          aria-label={t('closeWorkflowProgress')}
-        >
-          <XIcon size={14} />
-        </button>
-      </header>
+      <LeftRailPanelHeader
+        titleId={headingId}
+        title={t('workflowProgress')}
+        onClose={onClose}
+        closeLabel={t('closeWorkflowProgress')}
+      />
 
       {workflowRunMessages.length === 0 ? (
         <StateCard
@@ -160,10 +157,10 @@ function RunSwitcher({
                 className="wfprog-run-btn"
                 style={{
                   background: isActive
-                    ? 'color-mix(in oklch, var(--color-accent) 18%, transparent)'
+                    ? 'color-mix(in oklch, var(--clay-text) 18%, transparent)'
                     : 'transparent',
                   borderLeft: isActive
-                    ? '2px solid var(--color-accent)'
+                    ? '2px solid var(--clay-text)'
                     : '2px solid transparent',
                   fontWeight: isActive ? 600 : 400,
                 }}
@@ -225,14 +222,13 @@ function FocusedRunView({
             {t(STATUS_LABEL_KEYS[run.status])}
           </span>
           {canCancel && (
-            <button
-              type="button"
-              className="secondary u-ml-auto u-fs-11 u-pad-2x10 u-minh-0"
+            <Button
+              variant="secondary" className="u-ml-auto u-fs-11 u-pad-2x10 u-minh-0"
               onClick={() => { void onCancel(message.id); }}
               title={t('cancelThisRun')}
             >
               Cancel
-            </button>
+            </Button>
           )}
         </div>
 
@@ -310,10 +306,10 @@ function FocusedRunView({
 
       {/* Footer */}
       <div className="muted wfprog-footer">
-        <code>/{run.slug}</code>
+        {run.slug && <code>/{run.slug}</code>}
         {run.runId && (
           <>
-            <span>·</span>
+            {run.slug && <span>·</span>}
             <Link to={`/runs/${run.runId}`} title={t('openRunDetail')}>
               run {run.runId.slice(0, 12)}
             </Link>

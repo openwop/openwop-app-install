@@ -1,9 +1,9 @@
 /**
  * Standing agent roster + org-chart client (RFCS/0086 + 0087 reference impl).
  *
- *   GET/POST/DELETE /v1/host/openwop-app/roster[/{rosterId}]   — named agents + portfolios
- *   GET/PUT/DELETE  /v1/host/openwop-app/org-chart              — departments/roles/reportsTo
- *   GET            /v1/host/openwop-app/org-chart/{departmentId} — responsibility roll-up
+ *   GET/POST/DELETE /host/openwop-app/roster[/{rosterId}]   — named agents + portfolios
+ *   GET/PUT/DELETE  /host/openwop-app/org-chart              — departments/roles/reportsTo
+ *   GET            /host/openwop-app/org-chart/{departmentId} — responsibility roll-up
  *
  * Tenant scoping is the backend's job (ownership from the caller's principal);
  * the client never sends a tenantId.
@@ -42,6 +42,10 @@ export interface RosterEntry {
   autonomyLevel?: 'auto' | 'guided' | 'review';
   /** Seed role template (e.g. 'chief-of-staff') — exact theme + role identity. */
   roleKey?: string;
+  /** ADR 0313 D3 — read-time heartbeat decoration from the backend (never
+   *  stored): the resolved autonomous cadence (0 = checks off) and whether
+   *  bare todo cards have a registered agent-turn fallback. */
+  heartbeat?: { effectiveIntervalMs: number; agentTurnFallback: boolean };
   createdAt: string;
   updatedAt: string;
 }
@@ -55,13 +59,24 @@ export type AgentRosterLevel = 'auto' | 'guided' | 'review';
 /**
  * Rich `agentProfile` host-extension (ADR 0031) — the full "enterprise digital
  * work twin" property set attached to a standing agent. NON-NORMATIVE: this is
- * host-local product config under `/v1/host/openwop-app/agents/:id/profile`, NOT a
+ * host-local product config under `/host/openwop-app/agents/:id/profile`, NOT a
  * field on the RFC 0003 manifest. `:id` is the owning `rosterId`.
  */
 export interface AgentProfile {
   profileId: string;
   tenantId: string;
   roleKey: string;
+  /** AST-UX-2 — the CORE capabilities activated on this agent (ADR 0031 /
+   *  ADR 0023 §Correction, e.g. `['assistant']`). The backend resolves the
+   *  assistant runtime by THIS, never by `roleKey`
+   *  (`features/assistant/capability.ts`), and the field was already persisted
+   *  and returned by `GET …/agents/:id/profile` — it simply was not declared
+   *  here, which is why the SPA's only assistant control surface was still
+   *  gated on the roleKey the backend calls an architecture violation. Typed
+   *  as a widenable string list rather than a closed union: the host owns the
+   *  capability vocabulary, and a capability the SPA has never heard of must
+   *  not make this read fail. */
+  capabilities?: string[];
   department?: { departmentId: string; name: string; roleId?: string; roleName?: string };
   /** Free-form per-twin config (thresholds, calendars, approval matrices). */
   configParameters?: Record<string, unknown>;
@@ -139,8 +154,8 @@ export interface OrgMember { rosterId: string; departmentId: string; roleId: str
 export interface OrgChart { tenantId: string; departments: OrgDepartment[]; members: OrgMember[]; updatedAt: string | null }
 export interface ResponsibilityView { department: OrgDepartment; members: OrgMember[]; responsibilities: string[] }
 
-const rosterBase = `${config.baseUrl}/v1/host/openwop-app/roster`;
-const orgBase = `${config.baseUrl}/v1/host/openwop-app/org-chart`;
+const rosterBase = `${config.baseUrl}/host/openwop-app/roster`;
+const orgBase = `${config.baseUrl}/host/openwop-app/org-chart`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 /** The named agents. Advisor-subject agents (ADR 0040) are excluded by default —
@@ -201,7 +216,7 @@ export async function seedExampleAgents(opts: { heal?: boolean } = {}): Promise<
   domains?: string[];
   healed?: { boards: number; schedules: number; orgChart: boolean };
 }> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/example-data/seed`, fetchOpts({
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/example-data/seed`, fetchOpts({
     method: 'POST',
     headers: jsonHeaders(),
     // heal:true = explicit restore (the "Load demo data" buttons); the silent
@@ -263,7 +278,7 @@ export interface ConnectionReadiness {
  *  missing, and the effective autonomy after the fail-closed gate. */
 export async function getConnectionReadiness(rosterId: string): Promise<ConnectionReadiness> {
   const res = await fetch(
-    `${config.baseUrl}/v1/host/openwop-app/agents/${encodeURIComponent(rosterId)}/connection-readiness`,
+    `${config.baseUrl}/host/openwop-app/agents/${encodeURIComponent(rosterId)}/connection-readiness`,
     fetchOpts({ headers: authedHeaders() }),
   );
   if (!res.ok) throw new Error(`getConnectionReadiness returned ${res.status}`);
@@ -318,7 +333,7 @@ export async function getFleetActivity(
   if (opts.rosterId) qs.set('rosterId', opts.rosterId);
   if (opts.limit) qs.set('limit', String(opts.limit));
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/fleet/activity${suffix}`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/fleet/activity${suffix}`, fetchOpts({ headers: authedHeaders() }));
   if (!res.ok) throw new Error(`getFleetActivity returned ${res.status}`);
   const body = (await res.json()) as { items: AgentActivityItem[]; truncated?: boolean };
   return { items: body.items, truncated: body.truncated ?? false };

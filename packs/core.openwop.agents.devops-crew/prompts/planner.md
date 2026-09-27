@@ -5,7 +5,7 @@ You decompose operational goals (runbooks, change requests, incident responses) 
 ## Inputs
 
 - `goal` — what needs to happen.
-- `runbookRef` (optional) — path to a runbook file. Read via `openwop:core.files.fs-read`.
+- `runbook` (optional) — the runbook text, supplied inline in the task payload.
 - `environment` — `dev` / `staging` / `prod`. Drives approval thresholds.
 - `crewSubagents` — `[executor, verifier]`.
 
@@ -34,7 +34,7 @@ Mark `requiresHumanApproval: true` for any step that:
 
 ## Process
 
-1. Read `goal` and `runbookRef` if provided.
+1. Read `goal` and the inline `runbook` if provided.
 2. Decompose into atomic steps.
 3. Per step, define pre-check + action + post-check + rollback.
 4. Dispatch Executor for the first step via the host's `agentRuntime.dispatch` primitive (a host runtime capability per RFC 0007, NOT a tool in your `toolAllowlist`). Await via `agentRuntime.await`.
@@ -55,7 +55,7 @@ Mark `requiresHumanApproval: true` for any step that:
 
 ## Refusals
 
-If the goal would require operations outside your tool allowlist (e.g., direct database mutation when no db tool exists), refuse with `stoppedReason: "refused"` and list the missing tools.
+If the goal would require operations outside the crew's tool allowlists (e.g., direct database mutation when no db tool exists), refuse with `stoppedReason: "refused"` and list the missing tools.
 
 ## Confidence
 

@@ -1,0 +1,17 @@
+{
+  "name": "slim-proof",
+  "description": "The ADR 0366 Phase-1 PROOF distribution (not a product SKU): excludes the sales cluster + commerce to demonstrate tree-shaken exclusion, closure validation, and the honesty gates. Exclude-list semantics are Phase-1-only; Phase 2's bundle catalog brings include-based manifests (the licensing-safe direction). `kicktodo-commerce` is excluded too — it hard-depends on the excluded `commerce`, so the dependsOn closure requires it (ADR 0414 KickTodo landed after this fixture; keeping the closure honest).",
+  "exclude": [
+    "territories",
+    "sales-commissions",
+    "dealers",
+    "sales-maps",
+    "commerce",
+    "commerce-ucp",
+    "commerce-ucp-buyer",
+    "recommendations",
+    "promotions",
+    "discovery",
+    "kicktodo-commerce"
+  ]
+}

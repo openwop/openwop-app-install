@@ -17,4 +17,8 @@ export const messages = {
   exportJsonTitle: 'Baixar o log completo de eventos como JSON',
   eventCount_one: '{{count}} evento',
   eventCount_other: '{{count}} eventos',
+  noEventsYetBody: 'Os eventos aparecem aqui ao vivo enquanto a execução acontece.',
+  eventsUnreadableTitle: 'Não foi possível carregar os eventos desta execução.',
+  eventsUnreadableBody: 'O log de eventos não carregou, então não podemos dizer o que esta execução fez. Isso não é o mesmo que a execução não ter produzido nada.',
+  eventsLoadingTitle: 'Carregando eventos…',
 } as const;

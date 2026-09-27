@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { groupConversations, isUnread, sectionOf, SECTION_ORDER } from '../conversationGroups.js';
+import { groupConversations, isUnread, mentionCountOf, sectionOf, selfParticipant, unreadCountOf, SECTION_ORDER } from '../conversationGroups.js';
 import type { ChatSessionHeader, ConversationParticipant } from '../../../client/chatSessionsClient.js';
 
 function owner(lastReadAt?: string): ConversationParticipant {
@@ -64,6 +64,45 @@ describe('groupConversations', () => {
 
   it('exposes a stable section render order', () => {
     expect(SECTION_ORDER).toEqual(['Agents', 'Channels', 'Groups', 'Workspace']);
+  });
+});
+
+// ADR 0192 — the caller's own row (isSelf-first, owner-role fallback) drives
+// the two-tier unread signal.
+describe('selfParticipant / unreadCountOf / mentionCountOf', () => {
+  const member = (extra: Partial<ConversationParticipant> = {}): ConversationParticipant =>
+    ({ subjectRef: 'user:u2', role: 'member', addedAt: '2026-01-01T00:00:00Z', ...extra });
+
+  it('prefers the isSelf-stamped row over the owner heuristic (a member viewer)', () => {
+    const c = conv({ participants: [owner('2026-02-01T00:00:00Z'), member({ isSelf: true, readMessageCount: 2 })], messageCount: 5 });
+    expect(selfParticipant(c)?.subjectRef).toBe('user:u2');
+    expect(unreadCountOf(c)).toBe(3); // 5 − the MEMBER's marker, not the owner's
+  });
+
+  it('falls back to the owner row for legacy metas without isSelf', () => {
+    const c = conv({ participants: [owner()], messageCount: 2 });
+    expect(selfParticipant(c)?.role).toBe('owner');
+  });
+
+  it('returns null (boolean fallback) when the marker predates counting', () => {
+    expect(unreadCountOf(conv({ participants: [owner('2026-02-01T00:00:00Z')], messageCount: 2 }))).toBeNull();
+  });
+
+  it('never goes negative and reads mentions off the self row', () => {
+    const c = conv({ participants: [member({ isSelf: true, readMessageCount: 9, mentionCount: 2 })], messageCount: 7 });
+    expect(unreadCountOf(c)).toBe(0);
+    expect(mentionCountOf(c)).toBe(2);
+    expect(mentionCountOf(conv({ participants: [owner()] }))).toBe(0);
+  });
+
+  it('count-differencing drives isUnread when available (exact, not timestamp-based)', () => {
+    // Read marker is TIMESTAMP-stale but the count says fully read → not unread.
+    const c = conv({
+      messageCount: 4,
+      updatedAt: '2026-03-01T00:00:00Z',
+      participants: [member({ isSelf: true, lastReadAt: '2026-02-01T00:00:00Z', readMessageCount: 4 })],
+    });
+    expect(isUnread(c)).toBe(false);
   });
 });
 

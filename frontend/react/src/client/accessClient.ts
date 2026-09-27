@@ -1,7 +1,7 @@
 /**
  * Access-control host-extension client (non-normative).
  *
- * Wraps /v1/host/openwop-app/{roles,access,orgs,…} — organizations, teams, named
+ * Wraps /host/openwop-app/{roles,access,orgs,…} — organizations, teams, named
  * members, and the built-in role catalog. Roles map to RFC 0049 scopes;
  * authority resolves only from a member's explicit roles (never the org-chart).
  *
@@ -86,9 +86,13 @@ export interface EffectiveAccess {
   memberId?: string;
   directRoles?: string[];
   groupRoles?: string[];
+  /** The caller is a superadmin (env-bound / wildcard bearer / dev-open) —
+   *  projected by the route for the caller's own resolution only. Absent on a
+   *  backend older than this field, and on every preview of someone else. */
+  superadmin?: boolean;
 }
 
-const base = `${config.baseUrl}/v1/host/openwop-app`;
+const base = `${config.baseUrl}/host/openwop-app`;
 
 /**
  * "View as member" demo seam (reference host only). When set, every access
@@ -135,10 +139,21 @@ export async function listRoles(): Promise<AccessRole[]> {
   return (await asJson<{ roles: AccessRole[] }>(res, 'listRoles')).roles;
 }
 
-export async function getEffectiveAccess(opts: { memberId?: string; subject?: string } = {}): Promise<EffectiveAccess> {
+/**
+ * `orgId` scopes the resolution to ONE organization — the route has always
+ * accepted it (`routes/accessControl.ts` → `resolveEffectiveAccess({…, orgId})`)
+ * and this client never passed it. Without it the backend resolves the FIRST
+ * member row for the subject in the tenant, so a person who is an editor in org
+ * B and a viewer in org A resolves as an editor while looking at org A. Any
+ * caller gating an ORG-SCOPED control (the comments composer, ADR 0659 D7 /
+ * `CMNT-UX-20`) MUST pass it. No wire field is invented here: the query
+ * parameter already exists on this non-normative host-extension route.
+ */
+export async function getEffectiveAccess(opts: { memberId?: string; subject?: string; orgId?: string } = {}): Promise<EffectiveAccess> {
   const qs = new URLSearchParams();
   if (opts.memberId) qs.set('memberId', opts.memberId);
   if (opts.subject) qs.set('subject', opts.subject);
+  if (opts.orgId) qs.set('orgId', opts.orgId);
   const suffix = qs.toString() ? `?${qs.toString()}` : '';
   const res = await fetch(`${base}/access/effective${suffix}`, fetchOpts({ headers: acHeaders() }));
   return asJson<EffectiveAccess>(res, 'getEffectiveAccess');

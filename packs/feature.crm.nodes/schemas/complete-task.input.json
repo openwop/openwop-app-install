@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/complete-task.input.json",
+  "title": "CrmCompleteTaskInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) — chain-authored config and DAG-forwarded inputs are both legal sources, so nothing is `required` here; the SURFACE refuses a missing key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string",
+      "description": "Owning org."
+    },
+    "taskId": {
+      "type": "string",
+      "description": "The task to mark done."
+    }
+  },
+  "additionalProperties": true
+}

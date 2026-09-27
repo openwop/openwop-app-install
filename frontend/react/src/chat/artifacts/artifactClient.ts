@@ -1,12 +1,12 @@
 /**
  * Chat artifact workbench client (ADR 0069) — the FE surface for the type-neutral
- * host `/v1/host/openwop-app/artifacts/*` projection over durable artifacts
+ * host `/host/openwop-app/artifacts/*` projection over durable artifacts
  * (Documents-backed in v1). Mirrors `host/artifactProjection.ts`.
  */
 
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
-const BASE = '/v1/host/openwop-app/artifacts';
+const BASE = '/host/openwop-app/artifacts';
 
 export interface ArtifactProjection {
   artifactId: string;

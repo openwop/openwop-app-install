@@ -6,19 +6,18 @@
  * console.warn).
  */
 
-import { useEffect, useState } from 'react';
+import { Button } from '../../ui/Button.js';
+import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../../client/interruptsClient.js';
 import { registerCard } from './CardRegistry.js';
 import type { CardProps } from './types.js';
-import { TextField } from '../../ui/Field.js';
-import { AssetPreview } from '../reviews/AssetPreview.js';
-import { AssetPreviewModal } from '../reviews/AssetPreviewModal.js';
-import type { ReviewAsset } from '../reviews/reviewClient.js';
-import { getArtifactRevision } from '../artifacts/artifactClient.js';
-import { FileTextIcon, SearchIcon } from '../../ui/icons/index.js';
+import { ConnectionRequiredCard } from '../cards/ConnectionRequiredCard.js';
+import { TextField, TextareaField } from '../../ui/Field.js';
+import { GateEvidence, hasGateEvidence } from '../reviews/GateEvidence.js';
 import { Notice } from '../../ui/index.js';
 import { useReviewStatusByRunNode } from '../reviews/reviewStatusStore.js';
+import { confirm } from '../../ui/confirm.js';
 import i18n from '../../i18n/index.js';
 
 interface ApprovalOption {
@@ -54,27 +53,53 @@ interface InterruptPayload {
      *  string `option`) by fetching the artifact revision on demand. */
     artifactId?: string;
     revisionId?: string;
+    /** ADR 0193 — a `kind:'approval'` suspend raised by `core.email.send` before
+     *  it sends AS the connected human. `profile` discriminates this from an
+     *  ordinary gate (mirrors ADR 0189's `openwop-connection`); `message` carries
+     *  the rendered, about-to-be-sent envelope so the approver sees EXACTLY what
+     *  will leave their mailbox — the approved-bytes-verbatim preview. */
+    profile?: string;
+    message?: {
+      to?: string | readonly string[];
+      subject?: string;
+      bodyPreview?: string;
+      html?: string;
+      provider?: string;
+    };
   };
 }
 
 /** The gate's friendly name (builder label, e.g. "Legal review") as a card
  *  eyebrow — so a reviewer always knows WHICH gate a card is, even for a single
  *  gate (the prior per-stack chip only showed when ≥2 gates were open). */
-function GateEyebrow({ name }: { name?: string | undefined }): JSX.Element | null {
+export function GateEyebrow({ name }: { name?: string | undefined }): JSX.Element | null {
   if (!name) return null;
   return <div className="approval-card-eyebrow">{name}</div>;
 }
 
 // ── interrupt.approval ─────────────────────────────────────────────────
 
+// Localized labels for the canonical approval actions — shared with the
+// run-detail twin via the `interrupts` namespace (CHAT-2). Unknown actions
+// (hosts may extend `data.actions`) fall back to the raw string.
+const ACTION_LABEL_KEYS: Record<string, string> = {
+  approve: 'interrupts:actionApprove',
+  reject: 'interrupts:actionReject',
+  'request-changes': 'interrupts:actionRequestChanges',
+  defer: 'interrupts:actionDefer',
+  escalate: 'interrupts:actionEscalate',
+};
+
 function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
   const { t } = useTranslation('chat');
   const data = (payload as InterruptPayload).data ?? {};
   const [comment, setComment] = useState('');
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [artifactAssets, setArtifactAssets] = useState<ReviewAsset[] | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
+  // DESIGN.md §11 (CHAT-4): move focus into the response form when the gate
+  // appears, mirroring the run-detail cards' focus behavior — a keyboard/SR
+  // user is taken to the new gate instead of discovering it by scroll.
+  const focusRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { focusRef.current?.focus(); }, []);
   const prompt = data.prompt ?? t('pleaseApprove');
   const actions = (data.actions ?? ['approve', 'reject', 'request-changes', 'defer', 'escalate']);
   const options = data.options ?? [];
@@ -87,37 +112,19 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
   // `options`; everything else (an email-draft object, a variance result, an LLM draft) is
   // fetched on demand from the durable run-artifact the gate persisted (`data.artifactId`),
   // so the approver ALWAYS sees what they're approving — never a dead-end card.
-  const inlineAssets: ReviewAsset[] = options.map((o) => ({ label: o.label, content: o.content }));
-  const artifactId = typeof data.artifactId === 'string' ? data.artifactId : undefined;
-  const revisionId = typeof data.revisionId === 'string' ? data.revisionId : undefined;
-  const canPreview = inlineAssets.length > 0 || !!artifactId;
-  const previewAssets: ReviewAsset[] = inlineAssets.length > 0 ? inlineAssets : (artifactAssets ?? []);
   // The single-content approve/reject case shows the content INLINE (auto-loaded)
   // so the reviewer never has to click into a modal just to see what they're
   // approving. The ≥2-options case keeps the per-option picker below instead.
-  const showInlinePreview = !hasOptions && canPreview;
-  const inlinePreviewAsset = previewAssets[0];
+  // ADR 0600 §Correction 1 — the ADR 0193 send-approval envelope used to be a
+  // SECOND preview block open-coded right here, and `interrupts/ApprovalCard`
+  // had no copy of it. That is precisely the drift §2 said one shared component
+  // would end; §2 shared the artifact/options lanes and left this one behind, so
+  // the inbox card rendered "Nothing was captured for this gate" over a payload
+  // holding the exact bytes about to be sent as the user. `GateEvidence` owns
+  // the envelope now, `hasGateEvidence` counts it, and this card has no private
+  // rendering left to drift with.
+  const showInlinePreview = !hasOptions && hasGateEvidence(data);
 
-  async function loadArtifact(): Promise<void> {
-    if (inlineAssets.length === 0 && artifactId && revisionId && artifactAssets === null) {
-      setPreviewLoading(true);
-      try {
-        const rev = await getArtifactRevision(artifactId, revisionId);
-        setArtifactAssets([{ label: prompt, content: rev.content ?? '', artifactId, revisionId }]);
-      } catch {
-        setArtifactAssets([]); // surface the empty-state inline rather than failing
-      } finally {
-        setPreviewLoading(false);
-      }
-    }
-  }
-
-  // Auto-load the artifact-backed content for the inline preview on mount, so the
-  // approver sees the draft without a click. Inline `options` are already present.
-  useEffect(() => {
-    if (showInlinePreview) void loadArtifact();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showInlinePreview, artifactId, revisionId]);
 
   // ADR 0074 — if this review was decided on ANOTHER surface (Reviews tab, Runs
   // screen, another client), the shared store knows before this run's SSE swaps
@@ -126,6 +133,25 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
   const liveStatus = useReviewStatusByRunNode(context.runId, context.nodeId);
   const resolvedElsewhere = liveStatus !== undefined && liveStatus !== 'pending';
   const disabled = isLoading || resolvedElsewhere;
+
+  // ADR 0600 §Correction 5 (`ISU-12`) — §7 confirmed REJECT on
+  // `interrupts/ApprovalCard` and left THIS card, which is the other half of the
+  // same pair §2 had just finished unifying. The verb is identical on both: a
+  // rejected `core.approvalGate` appends `run.failed` with `approval_rejected`
+  // and never resolves the suspend, discarding the query, the model call and the
+  // reviewer's attention. A confirm on one of two surfaces is not a confirm.
+  // APPROVE stays ungated here for §7's stated reason — friction on the common
+  // path is what teaches people to click through the one that matters — and the
+  // ≥2-option "Pick this" button is an approve, so it is ungated too.
+  async function resolveWithRejectConfirm(action: string): Promise<void> {
+    if (action === 'reject' && !(await confirm({
+      title: t('interrupts:rejectConfirmTitle'),
+      body: t('interrupts:rejectConfirmBody'),
+      danger: true,
+      confirmLabel: t('interrupts:actionReject'),
+    }))) return;
+    await onAction('resolve', { action, comment: comment || undefined });
+  }
 
   return (
     <div className="card u-bg-surface-2 approval-card">
@@ -137,34 +163,11 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
       <p className="u-mbox-b2 u-fs-13">{prompt}</p>
       {resolvedElsewhere && <Notice variant="info">{t('reviewResolvedElsewhere')}</Notice>}
 
-      {showInlinePreview ? (
-        <div className="approval-preview u-mbox-b2">
-          <div className="approval-preview-head">
-            <span className="approval-preview-label u-iflex u-items-center u-gap-1-5">
-              <FileTextIcon size={13} aria-hidden /> {t('underReview')}
-            </span>
-            {inlinePreviewAsset?.content ? (
-              <button
-                type="button"
-                className="btn-ghost u-fs-11 u-pad-2x8 u-iflex u-items-center u-gap-1"
-                onClick={() => setPreviewOpen(true)}
-              >
-                <SearchIcon size={12} aria-hidden /> {t('viewFull')}
-              </button>
-            ) : null}
-          </div>
-          <div className="approval-preview-body">
-            {previewLoading
-              ? <p className="muted u-fs-12 u-m-0">{t('previewLoading')}</p>
-              : inlinePreviewAsset
-                ? <AssetPreview asset={inlinePreviewAsset} hideLabel />
-                : <p className="muted u-fs-12 u-m-0">{t('assetPreviewNone')}</p>}
-          </div>
-        </div>
-      ) : null}
-      {previewOpen ? (
-        <AssetPreviewModal open assets={previewAssets} title={prompt} onClose={() => setPreviewOpen(false)} />
-      ) : null}
+      {/* ADR 0600 §2 — the evidence block is now ONE component shared with
+          `interrupts/ApprovalCard`, which rendered none of this. The ≥2-option
+          PICKER below stays here: it chooses a resume VALUE, which only this
+          card can carry. */}
+      {showInlinePreview ? <GateEvidence data={data} title={prompt} /> : null}
 
       {hasOptions && (
         <div className="defcards-options">
@@ -175,17 +178,15 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
                 <div className="u-flex u-justify-between u-items-center u-gap-2">
                   <span className="u-fw-600 u-fs-12">{opt.label}</span>
                   <div className="u-flex u-gap-1-5">
-                    <button
-                      type="button"
-                      className="secondary u-fs-11 u-pad-2x8"
+                    <Button
+                      variant="secondary" className="u-fs-11 u-pad-2x8"
                       onClick={() => setExpanded((s) => ({ ...s, [opt.key]: !isOpen }))}
                       aria-expanded={isOpen}
                     >
                       {isOpen ? t('hide') : t('view')}
-                    </button>
-                    <button
-                      type="button"
-                      className="u-fs-11 u-pad-2x10"
+                    </Button>
+                    <Button
+                      variant="primary" className="u-fs-11 u-pad-2x10"
                       disabled={disabled}
                       // Resume payload shape is wedged between two
                       // constraints:
@@ -216,7 +217,7 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
                       })}
                     >
                       {t('pickThis')}
-                    </button>
+                    </Button>
                   </div>
                 </div>
                 {isOpen && (
@@ -229,6 +230,7 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
       )}
 
       <TextField
+        ref={focusRef}
         label={t('commentOptional')}
         value={comment}
         onChange={(e) => setComment(e.target.value)}
@@ -244,14 +246,14 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
           // etc.) still render.
           .filter((action) => !(hasOptions && action === 'approve'))
           .map((action) => (
-            <button
+            <Button
               key={action}
-              className={action === 'approve' && !hasOptions ? '' : 'secondary'}
+              variant={action === 'approve' && !hasOptions ? 'primary' : 'secondary'}
               disabled={disabled}
-              onClick={() => onAction('resolve', { action, comment: comment || undefined })}
+              onClick={() => { void resolveWithRejectConfirm(action); }}
             >
-              {action}
-            </button>
+              {ACTION_LABEL_KEYS[action] ? t(ACTION_LABEL_KEYS[action]) : action}
+            </Button>
           ))}
       </div>
     </div>
@@ -260,22 +262,37 @@ function ApprovalCard({ payload, onAction, isLoading, context }: CardProps): JSX
 
 // ── interrupt.clarification ────────────────────────────────────────────
 
-function ClarificationCard({ payload, onAction, isLoading, context }: CardProps): JSX.Element {
+// ADR 0189 — a connection prompt rides the clarification kind but carries a
+// distinct profile; dispatch to the connect-to-continue card instead of the
+// free-text answer field. The dispatcher is HOOK-FREE so both branches obey
+// rules-of-hooks (the old inline guard made every hook below it conditional).
+function ClarificationCard(props: CardProps): JSX.Element {
+  const profile = ((props.payload as InterruptPayload).data as { profile?: unknown } | undefined)?.profile;
+  if (profile === 'openwop-connection') {
+    return <ConnectionRequiredCard {...props} />;
+  }
+  return <FreeTextClarificationCard {...props} />;
+}
+
+function FreeTextClarificationCard(props: CardProps): JSX.Element {
+  const { payload, onAction, isLoading, context } = props;
   const { t } = useTranslation('chat');
   const data = (payload as InterruptPayload).data ?? {};
   const [answer, setAnswer] = useState('');
+  // Labeled field + focus-on-appear, mirroring the run-detail
+  // ClarificationDialog (CHAT-1 / CHAT-4).
+  const focusRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { focusRef.current?.focus(); }, []);
   return (
     <div className="card u-bg-surface-2">
       <GateEyebrow name={context?.nodeName} />
       <h3 className="u-mbox-b2 u-fs-13">{t('clarificationNeeded')}</h3>
       <p className="u-mbox-b2 u-fs-13">{data.question ?? t('pleaseClarify')}</p>
-      <div className="form-row">
-        <textarea rows={3} value={answer} onChange={(e) => setAnswer(e.target.value)} />
-      </div>
+      <TextareaField ref={focusRef} label={t('interrupts:answerLabel')} rows={3} value={answer} onChange={(e) => setAnswer(e.target.value)} />
       <div className="button-row">
-        <button disabled={isLoading || !answer.trim()} onClick={() => onAction('resolve', { answer })}>
+        <Button variant="primary" disabled={isLoading || !answer.trim()} onClick={() => onAction('resolve', { answer })}>
           {t('submit')}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -287,15 +304,17 @@ function RefinementCard({ payload, onAction, isLoading, context }: CardProps): J
   const { t } = useTranslation('chat');
   const seed = (payload as InterruptPayload).data?.current ?? '';
   const [draft, setDraft] = useState(typeof seed === 'string' ? seed : JSON.stringify(seed, null, 2));
+  // Labeled field + focus-on-appear, mirroring the run-detail RefinementForm
+  // (CHAT-1 / CHAT-4).
+  const focusRef = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => { focusRef.current?.focus(); }, []);
   return (
     <div className="card u-bg-surface-2">
       <GateEyebrow name={context?.nodeName} />
       <h3 className="u-mbox-b2 u-fs-13">{t('refinementRequested')}</h3>
-      <div className="form-row">
-        <textarea rows={6} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} />
-      </div>
+      <TextareaField ref={focusRef} label={t('interrupts:draftLabel')} rows={6} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} />
       <div className="button-row">
-        <button
+        <Button variant="primary"
           disabled={isLoading}
           onClick={() => {
             let parsed: unknown = draft;
@@ -304,7 +323,7 @@ function RefinementCard({ payload, onAction, isLoading, context }: CardProps): J
           }}
         >
           {t('submitRefinement')}
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -321,12 +340,12 @@ function CancellationCard({ payload, onAction, isLoading, context }: CardProps):
       <h3 className="u-mbox-b2 u-fs-13">{t('cancellationRequested')}</h3>
       <div className="alert warning u-mb-2">{reason}</div>
       <div className="button-row">
-        <button disabled={isLoading} onClick={() => onAction('resolve', { acknowledged: true, confirm: true })}>
+        <Button variant="primary" disabled={isLoading} onClick={() => onAction('resolve', { acknowledged: true, confirm: true })}>
           {t('confirmCancel')}
-        </button>
-        <button className="secondary" disabled={isLoading} onClick={() => onAction('resolve', { acknowledged: true, confirm: false })}>
+        </Button>
+        <Button variant="secondary" disabled={isLoading} onClick={() => onAction('resolve', { acknowledged: true, confirm: false })}>
           {t('decline')}
-        </button>
+        </Button>
       </div>
     </div>
   );

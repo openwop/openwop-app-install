@@ -1,11 +1,12 @@
 {
   "name": "core.openwop.workflows.market-intel",
-  "version": "1.0.0",
+  "version": "1.1.2",
   "kind": "workflow-chain",
-  "description": "Real-work workflow pack (RFC 0013, ADR 0149/0150). A competitive / market-intelligence digest authored entirely over PUBLISHED node packs (vendor.myndhyve.market-intel-* + core.openwop.ai), so it expands + runs on any conformant host. The thin-slice proof that the real-work workflows publish to packs.openwop.dev. Published under the `core.openwop.workflows.*` namespace (openwop-team signing key); the registry adds `signing` at publish time.",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0149/0150 + ADR 0174). Market-intelligence digest + a SHIFT digest (research the current period, then diff against the prior run via market-intel.shift-detect → an in-voice shift summary) authored entirely over PUBLISHED node packs (vendor.myndhyve.market-intel-* + core.openwop.ai), so they expand + run on any conformant host. Published under the `core.openwop.workflows.*` namespace (openwop-team signing key); the registry adds `signing` at publish time.",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": ["Research"],
   "chains": [
     {
       "chainId": "market-intel.digest",
@@ -18,7 +19,9 @@
         "required": ["topic"],
         "properties": {
           "topic": { "type": "string", "description": "The market/topic to research (e.g. 'AI workflow orchestration for mid-market ops teams')." },
-          "audience": { "type": "string", "default": "", "description": "Optional audience framing for the synthesis." }
+          "audience": { "type": "string", "default": "", "description": "Optional audience framing for the synthesis." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
         }
       },
       "capabilities": ["side-effectful"],
@@ -54,7 +57,9 @@
             "name": "Synthesize digest",
             "position": { "x": 780, "y": 0 },
             "config": {
-              "systemPrompt": "You are a market analyst. Synthesize a concise competitive/market-intel digest with recommended actions for the topic \"{{params.topic}}\"{{params.audience}}, using the discovered sources, voice-of-customer signals, and opportunity scores."
+              "systemPrompt": "You are a market analyst. Synthesize a concise competitive/market-intel digest with recommended actions for the topic \"{{params.topic}}\"{{params.audience}}, using the discovered sources, voice-of-customer signals, and opportunity scores.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
             },
             "inputs": {}
           }
@@ -67,6 +72,45 @@
       },
       "outputs": {
         "digest": { "type": "string", "description": "The synthesized market-intel digest with recommended actions." }
+      }
+    },
+    {
+      "chainId": "market-intel.shift-digest",
+      "version": "1.0.0",
+      "label": "Market-intel SHIFT digest (vs prior run)",
+      "description": "Research the current period (discover → voc → score), diff it against the PRIOR run's synthesized records/angles via market-intel.shift-detect, then synthesize a concise shift digest (what's new / resolved / intensifying + angle-score moves). Schedule it (RFC 0052) to get a recurring shift watch. Portable: every node is a published typeId.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic", "previous"],
+        "properties": {
+          "topic": { "type": "string", "description": "The market/topic to re-research (same framing as the prior run)." },
+          "previous": { "type": "object", "description": "The PRIOR run's synthesized result — { records: [{quote,tagType,confidence?}], angles: [{id|name,score}] } — to diff against.", "additionalProperties": true },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "discover", "typeId": "market-intel.ai-discovery", "name": "Discover sources", "position": { "x": 0, "y": 0 }, "config": { "query": "{{params.topic}}" }, "inputs": {} },
+          { "id": "voc", "typeId": "market-intel.voc-extraction", "name": "Extract voice-of-customer", "position": { "x": 260, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "score", "typeId": "market-intel.opportunity-scoring", "name": "Score opportunities", "position": { "x": 520, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "shift", "typeId": "market-intel.shift-detect", "name": "Detect market shift", "position": { "x": 780, "y": 0 }, "config": { "previous": "{{params.previous}}" }, "inputs": {} },
+          { "id": "synthesize", "typeId": "core.ai.chatCompletion", "name": "Synthesize shift digest", "position": { "x": 1040, "y": 0 }, "config": { "systemPrompt": "You are a market analyst. Given the detected market shift (new / resolved / intensifying pain points and angle-score deltas) for the topic \"{{params.topic}}\", write a concise SHIFT digest: what changed since the last run and the recommended next actions. If no material shift was detected, say so plainly.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "discover", "to": "voc" },
+          { "from": "voc", "to": "score" },
+          { "from": "score", "to": "shift" },
+          { "from": "shift", "to": "synthesize" }
+        ]
+      },
+      "outputs": {
+        "shiftDigest": { "type": "string", "description": "The synthesized market-shift digest (what changed + recommended actions)." }
       }
     }
   ]

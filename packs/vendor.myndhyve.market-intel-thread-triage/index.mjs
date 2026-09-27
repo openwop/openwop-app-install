@@ -377,13 +377,16 @@ export async function threadTriage(ctx) {
     tokenBudget: inputs.tokenBudgetRemaining ?? 50000,
   });
 
+    // XCH-MI-1 (Wave 4): hoisted so the bounded repair can replay the prompt.
+  const promptMessages = [{ role: 'user', content: buildUserPrompt(inputs) }];
   let aiResult;
   try {
     aiResult = await ctx.callAI({
       provider: config.provider,
       model: config.model,
       systemPrompt: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: buildUserPrompt(inputs) }],
+      messages: promptMessages,
+      responseSchema: { type: 'object' },
       temperature: config.temperature ?? 0.3,
       maxTokens: config.maxTokens ?? 4096,
     });
@@ -392,18 +395,36 @@ export async function threadTriage(ctx) {
     return { status: 'error', error: { code: 'THREAD_TRIAGE_FAILED', message: String(err?.message ?? err), retryable: true } };
   }
 
-  const parsed = parseJSONFromAI(aiResult?.content);
+  let parsed = (aiResult && typeof aiResult.data === 'object' && aiResult.data !== null)
+    ? aiResult.data
+    : parseJSONFromAI(aiResult?.content);
   if (!parsed) {
-    log.warn('AI response could not be parsed as JSON, returning empty triage');
-    return {
-      status: 'success',
-      outputs: {
-        ...emptyOutput('AI response could not be parsed as JSON'),
-        model: aiResult?.model,
-        usage: aiResult?.usage,
-        success: true,
-      },
-    };
+    // XCH-MI-1 (LLM-EXCHANGE-AUDIT Wave 4): ONE bounded repair — replay the
+    // prompt with the failed reply and a corrective instruction before the
+    // Wave-2 typed failure. responseSchema engages provider-native JSON mode
+    // where supported, making this path rare.
+    log.warn('AI response could not be parsed as JSON — attempting one bounded repair');
+    try {
+      const retry = await ctx.callAI({
+        provider: config.provider,
+        model: config.model,
+        systemPrompt: SYSTEM_PROMPT,
+        messages: [
+          ...promptMessages,
+          { role: 'assistant', content: String(aiResult?.content ?? '') },
+          { role: 'user', content: 'Your previous reply was not parseable JSON. Return ONLY the JSON object the instructions describe — no prose, no code fences.' },
+        ],
+        temperature: 0,
+        responseSchema: { type: 'object' },
+      });
+      parsed = (retry && typeof retry.data === 'object' && retry.data !== null) ? retry.data : parseJSONFromAI(retry?.content);
+    } catch { /* fall through to the typed failure */ }
+  }
+  if (!parsed) {
+    // XCH-MI-2 (Wave 2): an unparseable model reply is a FAILURE, not an
+    // empty result.
+    log.warn('AI response could not be parsed as JSON after repair — failing typed');
+    return { status: 'error', error: { code: 'AI_OUTPUT_UNPARSEABLE', message: 'AI response could not be parsed as JSON (after one repair attempt)', retryable: true } };
   }
 
   const validated = validateOutput(parsed);
@@ -431,7 +452,7 @@ export async function threadTriage(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'market-intel.thread-triage': threadTriage,
 };
 

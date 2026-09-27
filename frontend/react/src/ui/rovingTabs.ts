@@ -40,3 +40,37 @@ export function handleTablistKeyDown(e: KeyboardEvent<HTMLElement>): void {
   }
   tabs[next]?.focus();
 }
+
+/**
+ * WAI-ARIA roving keyboard navigation for a hand-rolled `role="radiogroup"` of
+ * `role="radio"` buttons (star ratings, single-select chip clusters).
+ *
+ * Unlike a tablist, a radiogroup uses SELECTION-FOLLOWS-FOCUS: an arrow key
+ * moves focus AND selects the newly-focused radio (WAI-ARIA APG). So this
+ * focuses the next radio and `.click()`s it, firing that radio's own `onClick`
+ * — no per-site selection callback needed, the same DOM-driven shape as
+ * `handleTablistKeyDown`. Pair each radio with a roving
+ * `tabIndex={checked ? 0 : -1}` (and `0` on the first when none is checked) so
+ * the group is a single tab stop.
+ */
+export function handleRadiogroupKeyDown(e: KeyboardEvent<HTMLElement>): void {
+  if (!NAV_KEYS.has(e.key)) return;
+  const radios = Array.from(
+    e.currentTarget.querySelectorAll<HTMLElement>('[role="radio"]:not([disabled])'),
+  );
+  if (radios.length === 0) return;
+  e.preventDefault();
+  const cur = radios.findIndex((el) => el === document.activeElement);
+  let next: number;
+  switch (e.key) {
+    case 'Home': next = 0; break;
+    case 'End': next = radios.length - 1; break;
+    case 'ArrowRight':
+    case 'ArrowDown': next = cur < 0 ? 0 : (cur + 1) % radios.length; break;
+    default: next = cur < 0 ? 0 : (cur - 1 + radios.length) % radios.length;
+  }
+  const el = radios[next];
+  if (!el) return;
+  el.focus();
+  el.click(); // selection follows focus
+}

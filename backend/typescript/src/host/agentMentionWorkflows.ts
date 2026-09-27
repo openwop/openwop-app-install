@@ -19,6 +19,7 @@
 
 import type { WorkflowDefinition } from '../executor/types.js';
 import { AGENT_RUNNER_TYPE_ID } from './agentRunnerNode.js';
+import { byokRunConfigurable } from './runCredentials.js';
 
 export const AGENT_MENTION_WORKFLOW_ID = 'openwop-app.agent-mention';
 
@@ -56,7 +57,6 @@ export const agentMentionWorkflowDefinition: WorkflowDefinition = {
  * A managed ref (`managed:*`) needs no secret, so the configurable stays empty.
  */
 export function agentMentionConfigurable(credentialRef?: string): Record<string, unknown> {
-  return credentialRef && !credentialRef.startsWith('managed:')
-    ? { credentialRefs: [credentialRef] }
-    : {};
+  // ADR 0706 — the recipe is shared with every other BYOK run starter.
+  return byokRunConfigurable(credentialRef);
 }

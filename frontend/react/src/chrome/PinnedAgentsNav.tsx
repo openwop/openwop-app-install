@@ -11,8 +11,16 @@ import { useTranslation } from 'react-i18next';
 import { NavLink, useLocation } from 'react-router-dom';
 import { getMyProfile, setAgentPinned } from '../features/profiles/profilesClient.js';
 import { listRoster, type RosterEntry } from '../agents/rosterClient.js';
-import { roleThemeForAgent } from '../agents/roleTemplates.js';
-import { ChevronDownIcon } from '../ui/icons/index.js';
+// The portfolio-FREE resolver from the `roleTheme.ts` leaf, NOT
+// `roleTemplates.ts` — this file is entry-chunk chrome, and importing the full
+// role-template catalog here dragged ~7 kB of persona prompts + workflow
+// metadata into the entry, which is exactly the leak roleTheme.ts documents its
+// split as preventing. Cost of the swap: a roleKey-less custom agent whose
+// portfolio happens to match a template shows the Bot glyph in this sub-nav
+// (the lazy agent pages still infer); every seeded/roleKey-stamped agent
+// resolves identically.
+import { roleThemeForAgentId } from '../agents/roleTheme.js';
+import { ChevronDownIcon, LockIcon } from '../ui/icons/index.js';
 import { navItemIsActive, type NavItem } from './features.js';
 
 // Per-user, per-device: whether the pinned-agents sub-menu is expanded.
@@ -65,7 +73,7 @@ function usePinnedAgents(): RosterEntry[] {
  * sub-menu. Replaces the bare NavLink for the `/agents` item so the toggle can
  * live on the same row without disturbing the generic nav loop.
  */
-export function AgentsNavItem({ item, badge }: { item: NavItem; badge?: string | null }): JSX.Element {
+export function AgentsNavItem({ item, badge, locked = false }: { item: NavItem; badge?: string | null; locked?: boolean }): JSX.Element {
   const { t } = useTranslation('chrome');
   const { t: tn } = useTranslation('nav');
   const location = useLocation();
@@ -85,15 +93,16 @@ export function AgentsNavItem({ item, badge }: { item: NavItem; badge?: string |
     <li>
       <div className="app-nav-row">
         <NavLink
-          to={item.to}
-          {...(item.end !== undefined ? { end: item.end } : {})}
-          className={`app-nav-link${active ? ' is-active' : ''}`}
-          {...(active ? { 'aria-current': 'page' as const } : {})}
-          title={item.hintKey ? tn(item.hintKey, { defaultValue: item.hint }) : item.hint}
+          to={locked ? '/marketplace/bundles' : item.to}
+          {...(!locked && item.end !== undefined ? { end: item.end } : {})}
+          className={`app-nav-link${active && !locked ? ' is-active' : ''}`}
+          {...(active && !locked ? { 'aria-current': 'page' as const } : {})}
+          title={locked ? t('navLocked') : item.hintKey ? tn(item.hintKey, { defaultValue: item.hint }) : item.hint}
         >
           <span className="app-nav-icon" aria-hidden><Icon size={16} /></span>
           <span className="app-nav-label">{item.labelKey ? tn(item.labelKey, { defaultValue: item.label }) : item.label}</span>
-          {badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
+          {locked ? <span role="img" className="app-nav-lock" aria-label={t('navLocked')}><LockIcon size={13} /></span>
+            : badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
         </NavLink>
         {hasPinned ? (
           <button
@@ -122,7 +131,7 @@ function PinnedAgentsList({ agents }: { agents: RosterEntry[] }): JSX.Element {
   return (
     <ul className="app-nav-subitems" aria-label={t('pinnedAgents')}>
       {agents.map((a) => {
-        const Icon = roleThemeForAgent(a.agentRef?.agentId, a.workflows, a.roleKey).Icon;
+        const Icon = roleThemeForAgentId(a.agentRef?.agentId, a.roleKey).Icon;
         const to = `/agents/${encodeURIComponent(a.rosterId)}`;
         const active = location.pathname === to || location.pathname.startsWith(`${to}/`);
         return (

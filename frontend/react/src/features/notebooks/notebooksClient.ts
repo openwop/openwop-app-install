@@ -1,6 +1,6 @@
 /**
  * Research Notebooks client (ADR 0084) — host-extension, non-normative. Wraps
- * /v1/host/openwop-app/notebooks/*. 404s when the `notebooks` toggle is off.
+ * /host/openwop-app/notebooks/*. 404s when the `notebooks` toggle is off.
  *
  * A notebook IS a project (`facet:'notebook'`) composing the existing seams:
  * sources → a bound KB collection, notes → subject memory, search → KB RAG over
@@ -91,7 +91,7 @@ export interface Transformation {
   createdAt: string;
 }
 
-const base = `${config.baseUrl}/v1/host/openwop-app/notebooks`;
+const base = `${config.baseUrl}/host/openwop-app/notebooks`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -245,8 +245,20 @@ export async function listNotes(id: string): Promise<NotebookNote[]> {
   return (await asJson<{ notes: NotebookNote[] }>(res, 'listNotes')).notes;
 }
 
-export async function addNote(id: string, text: string): Promise<NotebookNote[]> {
-  const res = await fetch(`${base}/${encodeURIComponent(id)}/notes`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ text }) }));
+/**
+ * ADR 0601 — where a note's TEXT came from, declared by the lane that submits it.
+ *   - `'authored'`    — the human composed it in the note composer ⇒ agent-trusted.
+ *   - `'third-party'` — copied verbatim out of a retrieved source passage ("save to
+ *                       notes"). The CLICK is the user's; the WORDS are the source's,
+ *                       and a source is ingested `contentTrust:'untrusted'` precisely
+ *                       because it may carry instructions ⇒ fenced on recall.
+ * REQUIRED (no default) on purpose: the backend fails closed on an absent/unknown
+ * value, so a caller that forgets gets the SAFE answer, never the trusted one.
+ */
+export type NoteContentOrigin = 'authored' | 'third-party';
+
+export async function addNote(id: string, text: string, origin: NoteContentOrigin): Promise<NotebookNote[]> {
+  const res = await fetch(`${base}/${encodeURIComponent(id)}/notes`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ text, origin }) }));
   return (await asJson<{ notes: NotebookNote[] }>(res, 'addNote')).notes;
 }
 
@@ -268,6 +280,6 @@ export async function ensureNotebookChat(id: string): Promise<{ conversationId: 
 
 /** Orgs the caller can create a notebook in (shared host-extension route). */
 export async function listOrgs(): Promise<Org[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ orgs: Org[] }>(res, 'listOrgs')).orgs;
 }

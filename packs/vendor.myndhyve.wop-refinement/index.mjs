@@ -506,7 +506,7 @@ export async function featureRefine(ctx) {
 
 /* ─── default export — typeId → executor map ───────────── */
 
-const nodes = {
+export const nodes = {
   'wop.feature.refine': featureRefine,
 };
 

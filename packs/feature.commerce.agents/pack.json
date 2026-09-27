@@ -1,0 +1,53 @@
+{
+  "name": "feature.commerce.agents",
+  "version": "1.2.1",
+  "description": "E-Commerce agent pack \u2014 the Store Assistant, a manifest agent whose tools are commerce READS (catalog / orders / coupons / quotes / price explanation) plus one draft-grade action (draft a quote), registered via registerFeatureAgentTool and shared with the commerce HTTP routes' org RBAC. Money-moving order/fulfillment/refund/inventory/coupon actions stay on the human admin + approval surfaces. Tool-allowlisted to the commerce surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "commerce",
+    "agent",
+    "store",
+    "assistant"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.commerce.agents.store-assistant",
+      "persona": "RESEARCH",
+      "label": "Store Assistant",
+      "description": "Browse the catalog, look up orders, coupons, and quotes, explain a product's effective price, and DRAFT a quote \u2014 grounded in real store state. Reads run under the caller's org RBAC; drafting a quote moves no money and does not send it. Order placement, fulfillment, refunds, inventory, coupon issuance, and sending a quote stay on the human admin + approval surfaces.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/store-assistant.md",
+      "toolAllowlist": [
+        "openwop:feature.commerce.nodes.list-products",
+        "openwop:feature.commerce.nodes.get-order",
+        "openwop:feature.commerce.nodes.list-orders",
+        "openwop:feature.commerce.nodes.list-coupons",
+        "openwop:feature.commerce.nodes.get-quote",
+        "openwop:feature.commerce.nodes.list-quotes",
+        "openwop:feature.commerce.nodes.resolve-price",
+        "openwop:feature.commerce.nodes.create-quote"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

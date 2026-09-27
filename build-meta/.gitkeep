@@ -1,0 +1,12 @@
+# Keeps `build-meta/` present in a fresh checkout.
+#
+# The Dockerfile does `COPY build-meta ./build-meta`, and COPY fails the image
+# build when its source does not exist. The real payload — `commit.txt`, written
+# by `scripts/write-build-commit.mjs` — is GITIGNORED, so without this file the
+# directory would vanish from a clean clone and every image build would break.
+#
+# Same pattern as `backend/typescript/vendor/.gitkeep` (the CPython-WASI runtime),
+# which is COPYed the same way and is likewise optional at runtime.
+#
+# This file is also the sentinel `buildInfo.ts` walks parent directories to find,
+# so do not rename it without updating `locateRepoDir(..., 'build-meta', '.gitkeep')`.

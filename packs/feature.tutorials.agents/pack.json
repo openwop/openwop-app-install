@@ -1,0 +1,30 @@
+{
+  "name": "feature.tutorials.agents",
+  "version": "1.0.0",
+  "description": "Tutorials agent pack (ADR 0488 P6) — the Tutor, a manifest agent driven from the ONE AI chat that helps a learner find the right tutorial, explains what a step asks for, and reports where they left off. Tool-allowlisted to the registered tutorials READ tools (openwop:tutorials.*). It GUIDES; it cannot drive the UI — a backend turn has no live walkthrough player.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "tutorials", "learning", "onboarding", "agent", "tutor"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.tutorials.agents.tutor",
+      "persona": "RESEARCH",
+      "label": "Tutor",
+      "description": "Helps you learn this product: finds the tutorial that matches what you are trying to do, explains any step in your own words, and tells you where you left off. Points you at the guided walkthrough to run — it cannot press the buttons for you.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/tutor.md",
+      "toolAllowlist": [
+        "openwop:tutorials.catalog",
+        "openwop:tutorials.get"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": true, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

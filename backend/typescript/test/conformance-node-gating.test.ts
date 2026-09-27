@@ -1,5 +1,5 @@
 /**
- * ENG-2 / ENG-1 (CODEBASE-ASSESSMENT.md): the conformance-only node typeIds
+ * ENG-2 / ENG-1 (docs/steward/CODEBASE-ASSESSMENT.md): the conformance-only node typeIds
  * must be OFF by default in production, and the sub-run dispatcher must NOT
  * fall back to a guessable literal credential under enforced auth.
  */
@@ -83,7 +83,7 @@ describe('resolveInternalToken', () => {
   it('does NOT throw under plain NODE_ENV=production (cookie-per-visitor) — uses the dev literal', () => {
     // A prod cookie deploy isn't bearer-enforcing; throwing would break sub-run
     // dispatch. The dev literal isn't honored as a wildcard API key in prod
-    // (readValidKeys withdraws it), so the round-trip falls through to anon.
+    // (readKeyTenants withdraws it), so the round-trip falls through to anon.
     delete process.env.OPENWOP_INTERNAL_TOKEN;
     delete process.env.OPENWOP_API_KEYS;
     delete process.env.OPENWOP_API_KEY;

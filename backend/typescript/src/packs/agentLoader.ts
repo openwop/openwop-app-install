@@ -19,6 +19,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join, isAbsolute, normalize, relative } from 'node:path';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
 import { getAgentRegistry, type ResolvedAgentManifest, type AgentSchemaValidator } from '../executor/agentRegistry.js';
+import { classifyPackDir } from '../host/packTrust.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('packs.agentLoader');
@@ -141,6 +142,59 @@ export function loadAgentsFromManifest(packDir: string, opts: LoadAgentsOptions 
     return [];
   }
   if (!Array.isArray(manifest.agents) || manifest.agents.length === 0) return [];
+
+  // ── ADR 0555 P0: trust gate ─────────────────────────────────────────────
+  //
+  // Until this landed, the agent path performed NO verification of any kind —
+  // not signature, not install marker, not content hash — while the node path
+  // at least had the marker branch. `loadAllLocalAgents()` eager-loads every
+  // directory in the pack dir at boot, so any directory dropped there got its
+  // personas, tool allowlists and prompts registered unconditionally.
+  //
+  // An agent manifest is not inert data. Its `systemPrompt` steers a model, its
+  // `toolAllowlist` decides which host tools that model may invoke, and its
+  // handoff schemas gate what the dispatch path will accept. Registering one
+  // from unattested bytes is an execution decision, so it takes the same gate
+  // as node code.
+  //
+  // Refusing REGISTRATION (rather than refusing at dispatch, as the node path
+  // does with stubs) is the honest shape here: an agent has no separate
+  // execute seam to wrap — being in the registry IS being dispatchable.
+  //
+  // ADR 0555 P1 closes P0's residue (b): the refusal is now RECORDED with its
+  // tier + reason via `registerRefused`, so an untrusted pack's agents are
+  // visibly refused rather than invisible. They land in a separate map the
+  // dispatch lookups never read, and carry no `systemPrompt` / `toolAllowlist`
+  // / handoff schema — see `agentRegistry.ts` for why identity plus a reason is
+  // the whole safe payload.
+  const trust = classifyPackDir(packDir);
+  if (!trust.dispatchable) {
+    log.error('pack is not dispatchable — refusing to register its agents (ADR 0555 P0)', {
+      packDir,
+      pack: trust.packName,
+      version: trust.version,
+      tier: trust.tier,
+      reason: trust.reason,
+      agents: manifest.agents.length,
+      ...(trust.detail ? { detail: trust.detail } : {}),
+    });
+    const registry = getAgentRegistry();
+    for (const raw of manifest.agents) {
+      if (!raw || typeof raw.agentId !== 'string' || raw.agentId.length === 0) continue;
+      registry.registerRefused({
+        agentId: raw.agentId,
+        ...(typeof raw.label === 'string' ? { label: raw.label } : {}),
+        ...(typeof raw.description === 'string' ? { description: raw.description } : {}),
+        packName: trust.packName,
+        packVersion: trust.version ?? (typeof manifest.version === 'string' ? manifest.version : '0.0.0'),
+        tier: trust.tier,
+        reason: trust.reason,
+        ...(trust.detail ? { detail: trust.detail } : {}),
+        dispatchable: false,
+      });
+    }
+    return [];
+  }
 
   const packName = typeof manifest.name === 'string' ? manifest.name : packDir;
   const packVersion = typeof manifest.version === 'string' ? manifest.version : '0.0.0';

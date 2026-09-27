@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/rag.output.json",
+  "title": "KbRagOutput",
+  "type": "object",
+  "required": [
+    "augmentedPrompt",
+    "citations",
+    "contexts"
+  ],
+  "properties": {
+    "augmentedPrompt": {
+      "type": "string",
+      "description": "The grounded prompt to feed a downstream callPrompt/agent. Generation is the DOWNSTREAM node's job \u2014 this node never calls a model."
+    },
+    "citations": {
+      "type": "array",
+      "description": "`{documentId, title}` per cited source, deduped in context order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "contexts": {
+      "type": "array",
+      "description": "The retrieved chunks backing the prompt.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

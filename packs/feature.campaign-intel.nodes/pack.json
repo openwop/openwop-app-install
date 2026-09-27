@@ -1,11 +1,19 @@
 {
   "name": "feature.campaign-intel.nodes",
-  "version": "1.0.0",
-  "description": "Campaign Intelligence node pack (ADR 0160 / ADR 0014) — `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
+  "version": "1.1.1",
+  "description": "Campaign Intelligence node pack \u2014 `budget-optimize` (heuristic marginal-ROAS reallocation over the performance store, plus an optional ctx.callAI scenario narrative) and `forecast` (creative-fatigue detection + outcome projection). Over ctx.features['campaign-intel']. The natural-language analysis the Campaign Intelligence Analyst calls.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "campaign-intel", "budget", "forecast", "marketing"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "campaign-intel",
+    "budget",
+    "forecast",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.campaign-intel.nodes.budget-optimize",
@@ -24,7 +32,35 @@
       "category": "integration",
       "role": "action",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.attribution",
+      "version": "1.0.0",
+      "role": "read",
+      "label": "Attribution Report",
+      "description": "Last-click attribution join (ADR 0219): performance-store spend/revenue x analytics conversions matched on the C8 utm_campaign key, plus per-email-campaign engagement \u2014 every number with lineage. Inputs: { orgId }."
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.pacing-check",
+      "version": "1.0.0",
+      "role": "action",
+      "label": "Budget Pacing Check",
+      "description": "Compares actual spend vs each campaign's budget plan (ADR 0220) and raises band-escalation notifications (80% warning / 100% over \u2014 once per escalation, durable memo dedup). Inputs: { orgId }. Output: { report, alerted[] }."
+    },
+    {
+      "typeId": "feature.campaign-intel.nodes.plan-budget",
+      "version": "1.0.0",
+      "label": "Intel: Plan Budget from a Goal",
+      "description": "Deterministic '$X budget \u2192 N conversions' feasibility + efficiency-weighted allocation + pacing over the performance store; optional AI narration of the computed numbers (ADR 0357 P1). Inputs: { orgId, totalBudgetMinor, targetConversions, horizonDays?, platforms?, narrate? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

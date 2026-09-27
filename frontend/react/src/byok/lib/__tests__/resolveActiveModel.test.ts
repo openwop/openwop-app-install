@@ -29,7 +29,9 @@ describe('resolveActiveModel — stale-model fallback', () => {
   });
 
   it('returns null only for an unknown provider', () => {
-    // @ts-expect-error — exercising the unknown-provider guard with an off-catalog id
+    // The RUNTIME guard, not a type one: `resolveActiveModel` takes a plain
+    // `string` provider, so an off-catalog id is well-typed and the directive
+    // that used to sit here became an `Unused '@ts-expect-error'` error.
     expect(resolveActiveModel('not-a-provider', 'x')).toBeNull();
   });
 

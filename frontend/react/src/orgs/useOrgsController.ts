@@ -38,6 +38,7 @@ import {
   updateGroup,
   updateMember,
 } from '../client/accessClient.js';
+import { invalidateOrgMembers } from './orgMembers.js';
 import { assignableRoleIdsFor, assignableScopesFor, isBuiltIn, roleLabelFor } from './orgsHelpers.js';
 
 /** Built-in role code → orgs-catalog display-label key (codes stay as wire data). */
@@ -51,7 +52,11 @@ const BUILT_IN_ROLE_LABEL_KEY = {
 export function useOrgsController() {
   const { t } = useTranslation('orgs');
   const [orgs, setOrgs] = useState<Organization[]>([]);
-  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
+  // R2 IN-SP-13 — honor a `?org=` deep link (the DocumentsPage convention) so
+  // the invite-accept done state can land a new member IN the org they joined.
+  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(() => {
+    try { return new URLSearchParams(window.location.search).get('org'); } catch { return null; }
+  });
   const [teams, setTeams] = useState<Team[]>([]);
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -128,8 +133,15 @@ export function useOrgsController() {
   }, [loadOrgs]);
 
   useEffect(() => {
-    if (selectedOrgId) void loadOrgDetail(selectedOrgId);
-  }, [selectedOrgId, loadOrgDetail]);
+    // Review F9 — a deep-linked org may not exist in THIS workspace's list
+    // (bogus param, or a cross-tenant invite landing): clear it instead of
+    // firing a 404 detail read that paints an error banner.
+    if (selectedOrgId && orgs.length > 0 && !orgs.some((o) => o.orgId === selectedOrgId)) {
+      setSelectedOrgId(null);
+      return;
+    }
+    if (selectedOrgId && orgs.some((o) => o.orgId === selectedOrgId)) void loadOrgDetail(selectedOrgId);
+  }, [selectedOrgId, orgs, loadOrgDetail]);
 
   // Switching orgs resets the "view as" lens — members are org-scoped, so a
   // lens from another org would be confusing. Back to owner (full access).
@@ -156,7 +168,10 @@ export function useOrgsController() {
   };
 
   const onDeleteOrg = async (org: Organization) => {
-    if (!(await confirm({ title: t('confirmDeleteOrg', { name: org.name }), danger: true, confirmLabel: t('common:delete') }))) return;
+    // SET-R2-1 — an org delete cascades to every team + member it holds; the
+    // highest-blast-radius action in the admin cluster earns the typed gate
+    // (the Vercel delete-project convention), not just a click-confirm.
+    if (!(await confirm({ title: t('confirmDeleteOrg', { name: org.name }), danger: true, confirmLabel: t('common:delete'), typeToConfirm: org.name }))) return;
     try {
       await deleteOrg(org.orgId);
       if (selectedOrgId === org.orgId) setSelectedOrgId(null);
@@ -200,6 +215,7 @@ export function useOrgsController() {
         ...(memberEmail.trim() ? { email: memberEmail.trim() } : {}),
         roles: [...memberRoles],
       });
+      invalidateOrgMembers(selectedOrgId); // CLNP-2(d) — pickers elsewhere must not keep the old list
       setMemberName('');
       setMemberEmail('');
       setMemberRoles(new Set(['viewer']));
@@ -219,6 +235,7 @@ export function useOrgsController() {
     if (!selectedOrgId) return;
     try {
       await updateMember(selectedOrgId, m.memberId, { roles: [...draftRoles] });
+      invalidateOrgMembers(selectedOrgId); // CLNP-2(d) — pickers elsewhere must not keep the old list
       setEditingId(null);
       await loadOrgDetail(selectedOrgId);
     } catch (err) {
@@ -231,6 +248,7 @@ export function useOrgsController() {
     if (!(await confirm({ title: t('confirmRemoveMember', { name: m.displayName }), danger: true }))) return;
     try {
       await deleteMember(selectedOrgId, m.memberId);
+      invalidateOrgMembers(selectedOrgId); // CLNP-2(d) — pickers elsewhere must not keep the old list
       await loadOrgDetail(selectedOrgId);
     } catch (err) {
       fail(err);

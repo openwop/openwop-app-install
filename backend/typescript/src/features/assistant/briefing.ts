@@ -61,7 +61,13 @@ function itemOf(c: Commitment, nowMs: number, profile: PriorityProfileKey): Brie
       projectPriority: 0.5,
       priorEngagement: c.confidence,
     },
-    PRIORITY_PROFILES[profile].weights,
+    // AST2-M1 — `?? balanced`, matching the guarded sibling in `surface.ts`.
+    // An unknown key arrives here whenever a model is handed one (the tool
+    // description named two that never existed), and this dereference was the
+    // crash. Defaulting is right rather than throwing: a briefing is a READ,
+    // and refusing to render one because a weighting hint was misspelled would
+    // trade a wrong ordering for no answer at all.
+    (PRIORITY_PROFILES[profile] ?? PRIORITY_PROFILES.balanced).weights,
   );
   return {
     commitmentId: c.commitmentId,

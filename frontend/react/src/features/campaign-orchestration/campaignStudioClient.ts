@@ -1,6 +1,6 @@
 /**
  * Campaign Studio API client (ADR 0158). The MarketingCampaign container under
- * /v1/host/openwop-app/campaign-orchestration/*. Reuses the shared client config; owns
+ * /host/openwop-app/campaign-orchestration/*. Reuses the shared client config; owns
  * the small briefs read the finalize picker needs.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
@@ -11,17 +11,30 @@ export interface MessagingKernel {
   headline: string; supportingStatement: string; proofPoints: string[]; primaryCta: string; secondaryCta: string;
   tone: string; channelTones: Record<string, string>; sourceDocIds: string[]; generatedAt: string;
 }
+/** R2 CO-SP-7 — the campaign's planned spend rides every payload (carried from
+ *  the brief at finalize). `currency` is ISO-4217, display-only. */
+export interface CampaignBudget { totalMinor?: number; currency?: string; perChannel?: Record<string, number> }
 export interface MarketingCampaign {
   id: string; tenantId: string; orgId: string; briefId: string; name: string; objective: string;
   brandId?: string; personaIds: string[]; kbCollectionId?: string; channels: string[];
-  kernel?: MessagingKernel; status: CampaignStatus; createdBy: string; createdAt: string; updatedAt: string;
+  kernel?: MessagingKernel; status: CampaignStatus; version?: number; createdBy: string; createdAt: string; updatedAt: string;
+  budget?: CampaignBudget; parentCampaignId?: string;
+}
+/** One row of the adapter's fork-stable ad dispatch ledger (campaign gap plan §5B B5). */
+export interface AdDispatch {
+  platform: string; platformCampaignId: string; platformAdSetId: string; platformAdId: string;
+  campaignName?: string; dailyBudgetMinor?: number; createdAt: string;
+  /** ORCH-G2 — WHICH ad account holds this campaign. The ledger already carries
+   *  it (`DispatchLedgerRow`); without it an operator who needs to act on the
+   *  platform has an opaque campaign id and nowhere to take it. */
+  adAccountId?: string;
 }
 export interface BriefRef { id: string; name: string; status: string; kernel?: MessagingKernel }
 export interface OrgRef { orgId: string; name: string }
 
 export class FeatureDisabledError extends Error {}
 
-const base = `${config.baseUrl}/v1/host/openwop-app/campaign-orchestration`;
+const base = `${config.baseUrl}/host/openwop-app/campaign-orchestration`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -48,13 +61,17 @@ export async function deleteCampaign(id: string): Promise<void> {
   await asJson<{ deleted: boolean }>(await fetch(`${base}/campaigns/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() })), 'deleteCampaign');
 }
 export async function listBriefs(orgId?: string): Promise<BriefRef[]> {
+  // R2 CO-SP-2 — this used to `catch { return [] }`, so a failed/forbidden/
+  // feature-disabled read rendered "No briefs found" in the finalize picker.
+  // A failure must throw like every other function here; the caller renders it.
   const suffix = orgId ? `/briefs?orgId=${encodeURIComponent(orgId)}` : '/briefs';
-  try {
-    return (await asJson<{ briefs: BriefRef[] }>(await fetch(`${config.baseUrl}/v1/host/openwop-app/campaign-brief${suffix}`, fetchOpts({ headers: authedHeaders() })), 'listBriefs')).briefs;
-  } catch { return []; }
+  return (await asJson<{ briefs: BriefRef[] }>(await fetch(`${config.baseUrl}/host/openwop-app/campaign-brief${suffix}`, fetchOpts({ headers: authedHeaders() })), 'listBriefs')).briefs;
+}
+export async function listDispatches(campaignId: string): Promise<AdDispatch[]> {
+  return (await asJson<{ dispatches: AdDispatch[] }>(await fetch(`${base}/campaigns/${encodeURIComponent(campaignId)}/dispatches`, fetchOpts({ headers: authedHeaders() })), 'listDispatches')).dispatches;
 }
 export async function listOrgs(): Promise<OrgRef[]> {
-  return (await asJson<{ orgs: OrgRef[] }>(await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() })), 'listOrgs')).orgs;
+  return (await asJson<{ orgs: OrgRef[] }>(await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() })), 'listOrgs')).orgs;
 }
 
 export const CAMPAIGN_STATUSES: ReadonlyArray<CampaignStatus> = ['draft', 'active', 'paused', 'completed', 'archived'];

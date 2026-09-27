@@ -1,11 +1,21 @@
 {
   "name": "feature.campaign-intel.agents",
-  "version": "1.0.0",
-  "description": "Campaign Intelligence agent pack (ADR 0160 / ADR 0014) — the Campaign Intelligence Analyst, a manifest agent whose tools are feature.campaign-intel.nodes. It answers natural-language budget + forecast questions ('how should I allocate my budget across platforms?') over the performance store, from the one chat (ADR 0058). Tool-allowlisted to the intelligence nodes only.",
+  "version": "1.2.1",
+  "description": "Campaign Intelligence agent pack \u2014 the Campaign Intelligence Analyst, a manifest agent whose tools are the registerFeatureAgentTool reads over the intel surface (budget-optimize, forecast, plan-budget, pacing, attribution). It answers natural-language budget + forecast questions ('how should I allocate my budget across platforms?') over the performance store, from the one chat. Read-only, org-scoped; recommends, the human decides.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "campaign-intel", "agent", "analyst", "budget", "forecast", "marketing"],
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "campaign-intel",
+    "agent",
+    "analyst",
+    "budget",
+    "forecast",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
   "peerDependencies": {
     "aiProviders": "supported",
     "agents.manifestRuntime": "supported"
@@ -15,16 +25,28 @@
       "agentId": "feature.campaign-intel.agents.intelligence-analyst",
       "persona": "RESEARCH",
       "label": "Campaign Intelligence Analyst",
-      "description": "Answers data-backed budget + performance questions over your campaign data — budget reallocation toward higher ROAS, creative-fatigue detection, outcome forecasts — via feature.campaign-intel.nodes. Recommends; the human decides.",
+      "description": "Answers data-backed budget + performance questions over your campaign data \u2014 budget reallocation toward higher ROAS, creative-fatigue detection, outcome forecasts, goal-based budget planning, budget-pacing bands, and attribution \u2014 reading the performance store through org-scoped tools. Recommends; the human decides.",
       "modelClass": "research",
       "systemPromptRef": "prompts/intelligence-analyst.md",
       "toolAllowlist": [
-        "openwop:feature.campaign-intel.nodes.budget-optimize",
-        "openwop:feature.campaign-intel.nodes.forecast"
+        "openwop:campaign-intel.budget-optimize",
+        "openwop:campaign-intel.forecast",
+        "openwop:campaign-intel.plan-budget",
+        "openwop:campaign-intel.pacing",
+        "openwop:campaign-intel.attribution"
       ],
-      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
-      "confidence": { "defaultThreshold": 0.6 }
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
     }
   ],
-  "runtime": { "language": "remote", "entry": "pack.json" }
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
 }

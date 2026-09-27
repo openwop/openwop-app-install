@@ -5,6 +5,9 @@
     "decision": { "type": "string", "enum": ["accept", "edit-accept", "refine", "ask", "reject", "timeout"] },
     "approved": { "type": "boolean" },
     "feedback": { "type": "string" },
+    "artifact": {
+      "description": "The artifact this gate approved — the reviewer's edited version when they edited it, else the `artifact` input verbatim. Lets a side-effecting successor take its content from the GATE (on a `truthy approved` conditioned edge) instead of from the upstream author node, so the effect node has no unconditional incoming edge that would fire it on a rejection. Absent when no artifact was supplied."
+    },
     "editedArtifact": {},
     "decidedBy": { "type": "string" },
     "decidedAt": { "type": "string", "format": "date-time" },

@@ -1,0 +1,65 @@
+{
+  "name": "core.openwop.workflows.kicktodo-research",
+  "version": "1.0.1",
+  "kind": "workflow-chain",
+  "description": "KickTodo research spine as an RFC 0013 chain pack (migrated from the deprecated ADR 0072 builtin `openwop-app.kicktodo.research`, ADR 0472 Phase 2). Frame deterministic research questions, search the web (honestly demo or live per the host adapter), normalize to canonical source records, and build a structure-checked evidence graph. Conversion tightened the builtin's implicit ordering into EXPLICIT edge dataflow (the audit's honesty note): search's `{results,engine}` flows to normalize, normalize's sources flow to the evidence graph.",
+  "keywords": ["KickTodo", "Research"],
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "kicktodo.research",
+      "version": "1.0.0",
+      "label": "Research a challenge topic",
+      "description": "Frame → search → normalize sources → evidence graph.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["topic", "audience", "candidateId"],
+        "properties": {
+          "topic": { "type": "string", "description": "The challenge topic to research." },
+          "audience": { "type": "string", "description": "The target audience." },
+          "candidateId": { "type": "string", "description": "The challenge candidate the evidence graph binds to." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "frame",
+            "typeId": "feature.kicktodo.nodes.research-frame",
+            "name": "Frame research questions",
+            "position": { "x": 0, "y": 0 },
+            "inputs": { "topic": "{{params.topic}}", "audience": "{{params.audience}}" }
+          },
+          {
+            "id": "search",
+            "typeId": "core.web.search",
+            "name": "Web search",
+            "position": { "x": 160, "y": 0 },
+            "config": { "suitability": "durable" },
+            "inputs": { "query": "{{params.topic}}", "maxResults": 8, "suitability": "durable" }
+          },
+          {
+            "id": "normalize",
+            "typeId": "feature.kicktodo.nodes.source-normalize",
+            "name": "Normalize sources",
+            "position": { "x": 320, "y": 0 },
+            "inputs": {}
+          },
+          {
+            "id": "graph",
+            "typeId": "feature.kicktodo.nodes.evidence-graph",
+            "name": "Evidence graph",
+            "position": { "x": 480, "y": 0 },
+            "inputs": { "candidateId": "{{params.candidateId}}" }
+          }
+        ],
+        "edges": [
+          { "from": "frame", "to": "search", "triggerRule": "all_success" },
+          { "from": "search", "to": "normalize", "triggerRule": "all_success" },
+          { "from": "normalize", "to": "graph", "triggerRule": "all_success" }
+        ]
+      }
+    }
+  ]
+}

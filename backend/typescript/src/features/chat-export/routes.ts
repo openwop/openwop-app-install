@@ -1,8 +1,15 @@
 /**
- * Conversation export routes (ADR 0119 Phase 2) — host-extension, read-only.
+ * Conversation export + import routes (ADR 0119 Phase 2 / 4b) — host-extension.
  * `GET /v1/host/openwop-app/chat-export/:sessionId?format=md|json` — renders the
- * caller's OWN-or-participant conversation transcript (ADR 0119 renderer). Toggle-
- * gated; owner/participant visibility (ADR 0043) → uniform 404 (no existence leak).
+ * caller's OWN-or-participant conversation transcript (ADR 0119 renderer).
+ * `POST …/chat-export/import` — materializes a NEW owned conversation (a WRITE).
+ *
+ * CORRECTED (ADR 0698, `CXC-8`) — this header said "read-only" and "Toggle-gated".
+ * Both were false: the import route below writes, and the feature is ALWAYS-ON
+ * (`feature.ts:23` — no `toggleDefault`; the toggle was graduated away under
+ * ADR 0010/0024, and the route test asserts it serves without one).
+ *
+ * Visibility is owner/participant (ADR 0043) → uniform 404, no existence leak.
  *
  * @see docs/adr/0119-conversation-export-import.md
  */
@@ -39,13 +46,26 @@ export function registerChatExportRoutes(deps: RouteDeps): void {
   });
 
   // ADR 0119 — import. Parse a supported export (openwop-v1 round-trip, or an OpenAI
-  // export) and materialize a NEW owned conversation. Toggle-gated; imported bodies are
-  // stamped `contentTrust:'untrusted'` at the write (Phase 4b), so a hostile import is
-  // fenced, never silently trusted.
+  // export) and materialize a NEW owned conversation.
+  //
+  // CORRECTED (ADR 0698 D1) — this used to say imported bodies are "stamped
+  // `contentTrust:'untrusted'` at the write (Phase 4b), so a hostile import is
+  // fenced, never silently trusted". The stamp is written but read by NOTHING; the
+  // fencing on the model-facing path comes from the search TOOL's own
+  // `contentTrust` declaration (`conversation-search/agentTools.ts:22` ->
+  // `host/toModelToolResult.ts:101`). See `importService.ts`'s docblock.
   app.post('/v1/host/openwop-app/chat-export/import', async (req, res, next) => {
     try {
       const tenantId = req.tenantId ?? '_anon';
       const userId = req.userId ?? req.principal?.principalId;
+      // CXC-1 (ADR 0119 grade pass) — the WRITE must resolve an owning identity, in
+      // parity with the sibling `conversations.export-document` tool's
+      // `acting_user_required`. Auth middleware already 401s a principal-less request
+      // upstream, so this never rejects a legitimate caller; it makes the "owned, not
+      // tenant-visible" guarantee STRUCTURAL here instead of depending on middleware —
+      // an unowned import would be readable by every co-tenant (conversationVisibility
+      // `isVisibleTo` treats an owner-less conversation as tenant-visible).
+      if (!userId) throw new OpenwopError('unauthenticated', 'Importing a conversation requires a signed-in user or principal.', 401, {});
       const body = (req.body ?? {}) as { format?: unknown; data?: unknown };
       // CONV-4: reject a present-but-unknown format with a clear error instead of silently
       // falling back to the openwop parser (a typo like 'chatgtp' used to import as openwop).

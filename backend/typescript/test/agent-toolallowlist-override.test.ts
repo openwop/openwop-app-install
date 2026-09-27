@@ -18,6 +18,7 @@ import {
   upsertAgentToolAllowlistOverride,
   clearAgentToolAllowlistOverride,
   __resetAgentToolAllowlistOverrides,
+  DEFAULT_ON_AGENT_TOOL_IDS, effectiveToolAllowlist,
 } from '../src/host/agentToolAllowlistService.js';
 import { compileAgentTools } from '../src/host/agentDispatch.js';
 import type { ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
@@ -83,5 +84,49 @@ describe('compileAgentTools — honors the allowlist override (ADR 0104)', () =>
   it('granting a tool that is not mounted (not in available) is a no-op', () => {
     const tools = compileAgentTools(agent, available, resolveTool, ['openwop:not-mounted']);
     expect(tools).toEqual([]);
+  });
+});
+
+
+describe('effectiveToolAllowlist — the ADR 0315 default-on baseline', () => {
+  it('unions the manifest with the six baseline tools when no override exists', () => {
+    const eff = effectiveToolAllowlist(['openwop:knowledge.search'], undefined);
+    expect(eff).toContain('openwop:knowledge.search');
+    for (const id of DEFAULT_ON_AGENT_TOOL_IDS) expect(eff).toContain(id);
+  });
+
+  it('an empty manifest still yields the full baseline (no agent is pure-persona)', () => {
+    expect(effectiveToolAllowlist([], undefined)).toEqual([...DEFAULT_ON_AGENT_TOOL_IDS]);
+    expect(effectiveToolAllowlist(undefined, undefined)).toEqual([...DEFAULT_ON_AGENT_TOOL_IDS]);
+  });
+
+  it('dedupes a manifest that already lists a baseline tool', () => {
+    const eff = effectiveToolAllowlist(['openwop:kanban.add-todo'], undefined);
+    expect(eff.filter((t) => t === 'openwop:kanban.add-todo')).toHaveLength(1);
+  });
+
+  it('an ADR 0104 override FULL-REPLACES — omitting a baseline tool revokes it', () => {
+    const eff = effectiveToolAllowlist(['openwop:knowledge.search'], ['openwop:documents.draft']);
+    expect(eff).toEqual(['openwop:documents.draft']);
+    expect(eff).not.toContain('openwop:kanban.add-todo'); // revoked by full-replace
+    expect(eff).not.toContain('openwop:knowledge.search'); // manifest replaced too (ADR 0104 semantics)
+  });
+
+  it('an EMPTY override still means "no tools at all" — the baseline does not resurrect them', () => {
+    expect(effectiveToolAllowlist(['openwop:knowledge.search'], [])).toEqual([]);
+  });
+
+  it('the baseline is exactly the nine maintainer-decided platform tools (ADR 0374 P3 added tours.register-draft; chat-first-port A3 added tasks.schedule-recurring; ADR 0476 added runs.diagnose — read-only grounded failure context, acting-user-gated, tenant-strict)', () => {
+    expect([...DEFAULT_ON_AGENT_TOOL_IDS].sort()).toEqual([
+      'openwop:ai.research.web',
+      'openwop:documents.draft',
+      'openwop:email.draft',
+      'openwop:kanban.add-todo',
+      'openwop:notifications.notify-me',
+      'openwop:runs.diagnose',
+      'openwop:tasks.schedule-followup',
+      'openwop:tasks.schedule-recurring',
+      'openwop:walkthroughs.register-draft',
+    ]);
   });
 });

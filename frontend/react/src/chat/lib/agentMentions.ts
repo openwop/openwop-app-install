@@ -4,7 +4,7 @@
  * Source: the host's `GET /v1/agents` inventory (RFC 0072 §A,
  * advertised via `capabilities.agents.manifestRuntime`). Pack-installed
  * agents land here automatically; user-authored agents land here once
- * Phase E1's `POST /v1/host/openwop-app/agents` endpoint merges them into
+ * Phase E1's `POST /host/openwop-app/agents` endpoint merges them into
  * the same registry.
  *
  * Slug derivation is from `persona` (the human-named handle —
@@ -124,16 +124,19 @@ export function projectAgents(agents: readonly AgentEntry[]): AgentMentionEntry[
  *  Returns `entries: []` while loading so callers can skip the
  *  `isLoading` branch when they're fine showing an empty picker
  *  briefly — common case for `@`-typed-then-paused. */
-export function useAgentMentions(): {
+export function useAgentMentions(skip = false): {
   entries: readonly AgentMentionEntry[];
   isLoading: boolean;
   error: string | null;
 } {
   const [entries, setEntries] = useState<readonly AgentMentionEntry[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!skip);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // ADR 0192 D8 — a caller with its own entry source (a channel's roster)
+    // skips the tenant-wide fetch entirely.
+    if (skip) { setEntries([]); setIsLoading(false); setError(null); return undefined; }
     let cancelled = false;
     void (async () => {
       try {
@@ -149,7 +152,7 @@ export function useAgentMentions(): {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [skip]);
 
   return { entries, isLoading, error };
 }

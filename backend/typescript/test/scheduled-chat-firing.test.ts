@@ -46,7 +46,7 @@ async function runsForJob(jobId: string) {
 
 describe('scheduled-chat firing (ADR 0125 Phase 4)', () => {
   it('fires the turn-workflow ONCE on the due tick, then does not re-fire the same slot', async () => {
-    const chat = await createScheduledChat('t1', 'o1', 'u1', { agentId: 'iris', prompt: 'digest', conversationId: 'c1', cronExpr: '0 * * * *' });
+    const chat = await createScheduledChat('t1', { orgId: 'o1' }, 'u1', { agentId: 'iris', prompt: 'digest', conversationId: 'c1', cronExpr: '0 * * * *' });
     const jobId = `schedchat-${chat.chatId}`;
     const due = (await getJob(jobId))!.nextFireAt!;
     expect(due).toBeGreaterThan(0);

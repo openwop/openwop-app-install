@@ -1,0 +1,60 @@
+{
+  "name": "core.openwop.workflows.production-plan",
+  "version": "1.0.1",
+  "kind": "workflow-chain",
+  "description": "Migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; outputRoles restored at registration.",
+  "keywords": [
+    "production-plan"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "openwop-app.production.plan",
+      "version": "1.0.0",
+      "label": "openwop-app.production.plan",
+      "description": "openwop-app.production.plan workflow.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "orgId": {
+            "type": "string"
+          },
+          "channels": {
+            "type": "string"
+          },
+          "assets": {
+            "type": "string"
+          },
+          "briefId": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string", "default": "anthropic"
+          },
+          "model": {
+            "type": "string", "default": "claude-sonnet-4-6"
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "plan-generate",
+            "typeId": "feature.production.nodes.plan-generate",
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "channels": "{{params.channels}}",
+              "assets": "{{params.assets}}",
+              "briefId": "{{params.briefId}}",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -27,6 +27,10 @@ import type { Storage } from '../storage/storage.js';
 import type { InterruptRecord } from '../types.js';
 import { getEventLog } from './eventLog.js';
 import { createLogger } from '../observability/logger.js';
+import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
+import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
+import { recordInterruptResolved } from '../observability/metricSeams.js';
+import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
 
 const log = createLogger('approvalGateTimeout');
 
@@ -84,6 +88,10 @@ export async function timeoutApprovalGateIfDue(
   // `interrupt.resolved`/`run.failed` (ENG-6).
   const won = await storage.resolveInterrupt(interrupt.interruptId, { action: 'reject', reason: 'timeout' }, resolvedAt);
   if (!won) return false;
+  // ADR 0556 P1 — recorded only by the CAS WINNER. A losing sweep resolved
+  // nothing, and counting its attempt would inflate the age histogram with
+  // duplicate observations of one wait.
+  recordInterruptResolved(interrupt, 'timeout', resolvedAt);
   // RFC 0093 §D.1 — the standard interrupt.resolved event, outcome rejected,
   // reason timeout.
   await getEventLog().append({
@@ -93,7 +101,10 @@ export async function timeoutApprovalGateIfDue(
     payload: {
       interruptId: interrupt.interruptId,
       kind: interrupt.kind,
-      outcome: 'rejected',
+      decision: 'rejected',
+      // `reason` stays: it is the CAUSE (gate expired vs quorum rejected) and
+      // has no seat yet — raised with the steward; the hatch carries it when
+      // RFC 0185 ships. Not deleted: that would be a silent drop (§C MUST NOT).
       reason: 'timeout',
     },
   });
@@ -116,6 +127,14 @@ export async function timeoutApprovalGateIfDue(
       completedAt: resolvedAt,
       error: { code: 'approval_rejected', message: 'Approval gate timed out (auto-rejected; reason: timeout).' },
     });
+    // ADR 0480 (code-review M1) — a gate-timeout auto-reject is a genuine
+    // production OUTCOME (unlike operator cancels): score online evals here
+    // like the executor terminal sites do. ADR 0482 review H2 — and its SPEND
+    // is money: stamp + fold like every terminal seam ("all terminal spend
+    // counts" must be true).
+    void scoreOnlineEvalsOnTerminal(storage, interrupt.runId);
+    void stampRunCostOnTerminal(storage, interrupt.runId)
+      .then((usd) => foldWorkflowSpendOnTerminal(storage, interrupt.runId, usd));
   }
   log.info('approval gate auto-rejected on timeout', {
     interruptId: interrupt.interruptId,

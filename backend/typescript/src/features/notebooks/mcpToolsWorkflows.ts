@@ -26,10 +26,11 @@
  */
 
 import type { WorkflowDefinition } from '../../executor/types.js';
+import { workflowVariableTypeFor } from '../../host/mcpToolVariableTypes.js';
 
 /** workflowId prefix the MCP router + /v1/tools projection gate on (auth + the
  *  `notebooks` toggle). Exported so the gate and the tests share one constant. */
-export const NOTEBOOK_MCP_WORKFLOW_PREFIX = 'notebooks.mcp.';
+const NOTEBOOK_MCP_WORKFLOW_PREFIX = 'notebooks.mcp.';
 
 const EXPOSE_TOOL = 'core.openwop.mcp.expose-tool';
 type JsonSchema = Record<string, unknown>;
@@ -125,7 +126,11 @@ function buildToolWorkflow(spec: ToolSpec): WorkflowDefinition {
     edges: [
       { edgeId: 'e_expose_backing', sourceNodeId: 'expose', sourceOutput: 'handle', targetNodeId: 'backing', targetInput: '_order', triggerRule: 'all_success' },
     ],
-    variables: spec.variables.map((v) => ({ name: v.name, type: 'string', description: v.description, required: v.required })),
+    // ADR 0602 / `NBWF-1` — the variable's type is DERIVED from this tool's own
+    // `inputSchema`, never hard-coded. `type: 'string'` used to sit here for every
+    // variable, so `topK` (an `integer` on the wire) advertised a STRING launch
+    // contract on the from-chain / builder / `/`-picker lane.
+    variables: spec.variables.map((v) => ({ name: v.name, type: workflowVariableTypeFor(spec.inputSchema, v.name), description: v.description, required: v.required })),
     // `mcpFeatureToggle` + `mcpRequiresAuth` are read by mcpServerRegistry → the
     // router/`/v1/tools` gate (ADR 0087 P3): the tool is listed/callable ONLY for a
     // non-anonymous caller whose `notebooks` toggle is on. Generic host mechanism —
@@ -216,7 +221,9 @@ function buildWriteToolWorkflow(spec: WriteToolSpec): WorkflowDefinition {
       { edgeId: 'e_expose_approval', sourceNodeId: 'expose', sourceOutput: 'handle', targetNodeId: 'approval', targetInput: '_order', triggerRule: 'all_success' },
       { edgeId: 'e_approval_write', sourceNodeId: 'approval', sourceOutput: 'decision', targetNodeId: 'write', targetInput: 'decision', triggerRule: 'all_success' },
     ],
-    variables: spec.variables.map((v) => ({ name: v.name, type: 'string', description: v.description, required: v.required })),
+    // ADR 0602 / `NBWF-1` — derived from the tool `inputSchema` (the write-tool twin
+    // of the read-tool line above; both hard-coded `'string'`, so both drift alike).
+    variables: spec.variables.map((v) => ({ name: v.name, type: workflowVariableTypeFor(spec.inputSchema, v.name), description: v.description, required: v.required })),
     metadata: { kind: 'meta-workflow', feature: 'notebooks', mcpTool: spec.name, mcpFeatureToggle: 'notebooks', mcpRequiresAuth: true, mcpSafetyTier: 'write', mcpApproval: 'always' },
   };
 }
@@ -226,5 +233,3 @@ export const notebookMcpToolWorkflows: readonly WorkflowDefinition[] = [
   ...WRITE_TOOLS.map(buildWriteToolWorkflow),
 ];
 
-/** The tool names this feature exposes (for tests + the /v1/tools projection). */
-export const NOTEBOOK_MCP_TOOL_NAMES: readonly string[] = [...TOOLS, ...WRITE_TOOLS].map((t) => t.name);

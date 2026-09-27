@@ -6,19 +6,26 @@
 export const messages = {
   // Page chrome
   eyebrow: 'Platform',
+  orgsEmptyClause: 'Site pages and their SEO belong to an organization',
+  orgsFailedClause: 'The page list was never requested',
   title: 'Publishing & SEO',
   lede: 'Publish CMS pages to a public site with SEO metadata, sitemap, and RSS.',
+  status_draft: 'draft',
+  status_in_review: 'in review',
+  status_published: 'published',
+  status_archived: 'archived',
+  filterPlaceholder: 'Filter pages…',
+  filterAria: 'Filter pages by title or slug',
+  noMatchBody: 'No page matches your search.',
+  clearSearch: 'Clear search',
 
   // Gating / empty states
   notEnabledTitle: 'Publishing is not enabled',
   notEnabledBody: 'Ask an administrator to enable the Publishing & SEO feature for this tenant.',
-  noOrgsTitle: 'No organizations',
-  noOrgsBody: 'Create an organization first — a site belongs to an org.',
   selectPageTitle: 'Select a page',
   selectPageBody: 'Pick a page to edit its SEO metadata. Published pages get a public URL.',
 
   // aria-labels
-  orgPickerLabel: 'Organization',
 
   // Page list + site links
   pages: 'Pages',

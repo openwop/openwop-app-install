@@ -38,7 +38,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -78,6 +78,37 @@ describe('aiProviders: error codes are canonical per host-capabilities.md:141-15
         messages: [{ role: 'user', content: 'hi' }],
       }),
     ).rejects.toMatchObject({ code: 'provider_not_supported' });
+  });
+
+  /**
+   * ABSENCE IS NOT A VALUE (P1). A caller that OMITS `provider` used to reach
+   * `assertProviderSupported` with `undefined`, which the template rendered as
+   * the literal provider name "undefined" — so `provider_not_supported:
+   * Provider "undefined" is not in the host's aiProviders.supported list`.
+   * That message sent a real production diagnosis looking for a provider that
+   * never existed, when the actual fault was a workflow node shipped with
+   * `config: {}`. A missing field and a bogus field are different failures.
+   */
+  it('invalid_request (NOT provider_not_supported) when provider is ABSENT', async () => {
+    const adapter = createAiProvidersAdapter(buildScope({ secrets: {} }));
+    await expect(
+      adapter.callAI({
+        // provider deliberately omitted — the shape a node with empty config sends
+        model: 'foo',
+        messages: [{ role: 'user', content: 'hi' }],
+      } as unknown as Parameters<typeof adapter.callAI>[0]),
+    ).rejects.toMatchObject({ code: 'invalid_request' });
+  });
+
+  it('the absent-provider message names the REAL fault, not a fake provider', async () => {
+    const adapter = createAiProvidersAdapter(buildScope({ secrets: {} }));
+    await expect(
+      adapter.callAI({ model: 'foo', messages: [{ role: 'user', content: 'hi' }] } as unknown as Parameters<typeof adapter.callAI>[0]),
+    ).rejects.toThrow(/No AI provider is configured/);
+    // The old message must not come back: it named a provider called "undefined".
+    await expect(
+      adapter.callAI({ model: 'foo', messages: [{ role: 'user', content: 'hi' }] } as unknown as Parameters<typeof adapter.callAI>[0]),
+    ).rejects.not.toThrow(/Provider "undefined"/);
   });
 
   it('provider_policy_denied for disabled provider', async () => {
@@ -225,7 +256,7 @@ describe('aiProviders: cache key canonicalization', () => {
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-describe('aiProviders: ADR 0079 §Phase 4 — plain callAI streams ai.message.chunk', () => {
+describe('aiProviders: ADR 0079 §Phase 4 — plain callAI streams output.chunk', () => {
   afterEach(() => resetMockPrograms());
 
   it('streams chunked deltas via scope.emit for a plain reply WHEN stream:true is opted in', async () => {
@@ -238,7 +269,7 @@ describe('aiProviders: ADR 0079 §Phase 4 — plain callAI streams ai.message.ch
     };
     const res = await createAiProvidersAdapter(scope).callAI({ provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'hi' }], stream: true });
     expect(res.content).toBe('Hello stream world');
-    const chunks = emitted.filter((e) => e.type === 'ai.message.chunk');
+    const chunks = emitted.filter((e) => e.type === 'output.chunk');
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.map((e) => (e.payload as { chunk?: string }).chunk).join('')).toBe('Hello stream world');
   });
@@ -253,7 +284,7 @@ describe('aiProviders: ADR 0079 §Phase 4 — plain callAI streams ai.message.ch
     };
     const res = await createAiProvidersAdapter(scope).callAI({ provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'hi' }] });
     expect(res.content).toBe('no deltas please');
-    expect(emitted.filter((t) => t === 'ai.message.chunk')).toHaveLength(0);
+    expect(emitted.filter((t) => t === 'output.chunk')).toHaveLength(0);
   });
 
   it('does NOT stream a structured (responseSchema) call even with stream:true — JSON mid-parse is noise', async () => {
@@ -268,7 +299,7 @@ describe('aiProviders: ADR 0079 §Phase 4 — plain callAI streams ai.message.ch
       provider: 'mock', model: 'mock-1', messages: [{ role: 'user', content: 'hi' }], stream: true,
       responseSchema: { type: 'object', properties: { ok: { type: 'boolean' } } },
     });
-    expect(emitted.filter((t) => t === 'ai.message.chunk')).toHaveLength(0);
+    expect(emitted.filter((t) => t === 'output.chunk')).toHaveLength(0);
   });
 
   it('a scope WITHOUT emit dispatches normally (no streaming, no throw)', async () => {

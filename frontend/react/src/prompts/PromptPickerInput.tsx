@@ -19,6 +19,8 @@ import { Notice } from '../ui/Notice.js';
 import { Skeleton } from '../ui/Skeleton.js';
 
 export interface PromptPickerInputProps {
+  /** Associates the control with ConfigInput's <label htmlFor> (A11Y-3). */
+  id?: string | undefined;
   value: string | undefined;
   onChange: (next: string | undefined) => void;
   /** When set, the picker only shows templates of this kind. */
@@ -29,7 +31,7 @@ export interface PromptPickerInputProps {
   required?: boolean | undefined;
 }
 
-export function PromptPickerInput({ value, onChange, promptKind, required }: PromptPickerInputProps) {
+export function PromptPickerInput({ value, onChange, promptKind, required, id, label }: PromptPickerInputProps) {
   const { t } = useTranslation('prompts');
   const [prompts, setPrompts] = useState<PromptTemplate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -58,6 +60,8 @@ export function PromptPickerInput({ value, onChange, promptKind, required }: Pro
   return (
     <>
       <select
+      {...(id ? { id } : {})}
+      {...(!id && label ? { 'aria-label': label } : {})}
         value={value ?? ''}
         required={required}
         onChange={(e) => onChange(e.target.value === '' ? undefined : e.target.value)}

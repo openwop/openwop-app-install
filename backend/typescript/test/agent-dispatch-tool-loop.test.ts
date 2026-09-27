@@ -112,7 +112,14 @@ describe('runAgentDispatchLive — tool loop (A1)', () => {
     );
 
     expect(executedCount).toBe(0);
-    expect(res.events.find((e) => e.type === 'agent.toolReturned')?.status).toBe('invalid_args');
+    // RFC 0064 §E — a validation failure is `status:'error'` + `error.code:'invalid_args'`
+    // (the old `status:'invalid_args'` was never a valid wire enum member), and NO
+    // `durationMs` (the tool never ran).
+    const returned = res.events.find((e) => e.type === 'agent.toolReturned') as { status?: string; error?: { code?: string }; durationMs?: number; outcome?: unknown } | undefined;
+    expect(returned?.status).toBe('error');
+    expect(returned?.error?.code).toBe('invalid_args');
+    expect(returned?.durationMs).toBeUndefined();
+    expect(returned?.outcome).toBeUndefined();
     // A rejected call emits no paired agent.toolCalled.
     expect(res.events.some((e) => e.type === 'agent.toolCalled')).toBe(false);
   });

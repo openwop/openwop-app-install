@@ -5,9 +5,10 @@
  * run creation, freezes the result into `run.metadata.compaction`, and is read
  * back verbatim on `:fork` — never re-resolved (replay-deterministic).
  *
- * Phase 1: structure-preserving only — `lossless` when the tenant's toggle is
- * enabled, else no stamp (identity). The per-agent `lossy` opt-in
- * (`agentProfile.compaction`) lands in Phase 2.
+ * Phase 1: `lossless` (minify-only, information-preserving — ADR 0604) when the
+ * tenant's toggle is enabled, else no stamp (identity). The per-agent `lossy`
+ * opt-in (`agentProfile.compaction`) lands in Phase 2 and is where the field
+ * dropping + array elision live.
  */
 
 import { resolveOne } from '../../host/featureToggles/service.js';
@@ -15,6 +16,9 @@ import { getAgentProfile } from '../../host/agentProfileService.js';
 import type { RunStartContext } from '../../host/runStartContext.js';
 import type { CompactionDecision } from '../../executor/types.js';
 import { COMPACTION_METADATA_KEY } from '../../executor/compaction.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('feature.tool-output-compaction');
 
 export const TOGGLE_ID = 'tool-output-compaction';
 
@@ -52,15 +56,28 @@ function readAgentCompactionConfig(configParameters: unknown): AgentCompactionCo
 /**
  * The run-start contributor. Resolves the tenant toggle and, when enabled,
  * returns `{ compaction: { mode: 'lossless' } }` to be frozen into run.metadata.
+ * On a DERIVED run (`:fork`/replay) it resolves NOTHING — see the guard below.
  * When disabled, returns `{}` (no stamp ⇒ the run replays uncompacted, as born).
  * Fail-soft: any resolution error contributes nothing (host/runStartContext
  * swallows + logs), so a toggle outage never blocks run creation.
  */
 export async function resolveCompactionDecision(ctx: RunStartContext): Promise<Record<string, unknown>> {
+  // ADR 0604 (TOCWF-1) — a DERIVED run (`:fork`/replay) carries a VERBATIM COPY
+  // of the source's metadata, so the source's decision is already in `base` and
+  // the no-overwrite merge preserves it. The case that merge cannot express is
+  // the source that had NO key: there, absence is inherited state, not a hole.
+  // Contributing anything here would hand the fork a decision the source was
+  // never born with — the run-to-run non-determinism this freeze exists to
+  // prevent. Resolve NOTHING and let the copy stand, in both directions.
+  //
+  // This is checked BEFORE the toggle read on purpose: the toggle's CURRENT
+  // state is exactly the input a fork must not be sensitive to.
+  if (ctx.derivedFromRun) return {};
+
   const assignment = await resolveOne(TOGGLE_ID, { tenantId: ctx.tenantId });
   if (!assignment?.enabled) return {};
 
-  // Base: structure-preserving lossless (Phase 1). `minChars` defaults to 0 —
+  // Base: `lossless` = minify only (Phase 1; ADR 0604 — NOT drop-empty). `minChars` defaults to 0 —
   // compaction's own never-regress guard already prevents bloat on tiny payloads,
   // so a global floor would only forgo small-but-real savings (ADR 0099 §minChars,
   // resolved). A per-agent `minChars` override remains available below.
@@ -85,8 +102,18 @@ export async function resolveCompactionDecision(ctx: RunStartContext): Promise<R
         if (cfg.minChars !== undefined) decision.minChars = cfg.minChars;
         if (cfg.exemptTools) decision.exemptTools = cfg.exemptTools;
       }
-    } catch {
-      // fail-open: any profile-read error leaves the safe lossless default.
+    } catch (err) {
+      // ADR 0680 D2 — fail-SAFE (not "fail-open"): `lossless` is minify-only
+      // (`compact.ts` copies every non-whitespace byte in order), so degrading to it
+      // cannot leak or corrupt — it only forgoes a saving. What was wrong here was the
+      // SILENCE, not the direction: an agent configured for `lossy` whose profile read
+      // keeps failing ran `lossless` forever and nothing said so. Mirrors the
+      // contributor-level `run_start_contributor_failed` warn in `runStartContext.ts`.
+      log.warn('compaction_agent_profile_read_failed', {
+        tenantId: ctx.tenantId,
+        agentId: ctx.agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

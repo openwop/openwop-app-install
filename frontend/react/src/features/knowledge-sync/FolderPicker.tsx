@@ -4,6 +4,7 @@
  * pasting a raw id. Breadcrumb to navigate up; "Use this folder" selects the current
  * one. SharePoint isn't browsable yet (the panel keeps a raw-id input for it).
  */
+import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Skeleton } from '../../ui/Skeleton.js';
@@ -34,7 +35,7 @@ export function FolderPicker({ orgId, connectionId, onSelect }: { orgId: string;
         {trail.map((c, i) => (
           <span key={c.id} className="u-flex u-gap-1 u-items-center">
             {i > 0 ? <ChevronRightIcon size={12} aria-hidden="true" /> : null}
-            <button type="button" className="btn-ghost u-p-0" disabled={i === trail.length - 1} onClick={() => setTrail((tr) => tr.slice(0, i + 1))}>{c.name}</button>
+            <Button variant="quiet" className="u-p-0" disabled={i === trail.length - 1} onClick={() => setTrail((tr) => tr.slice(0, i + 1))}>{c.name}</Button>
           </span>
         ))}
       </div>
@@ -45,15 +46,15 @@ export function FolderPicker({ orgId, connectionId, onSelect }: { orgId: string;
         : (
           <div className="u-grid u-gap-1">
             {folders.map((f) => (
-              <button key={f.id} type="button" className="btn-ghost u-justify-start" onClick={() => setTrail((tr) => [...tr, f])}>
+              <Button key={f.id} variant="quiet" className="u-justify-start" onClick={() => setTrail((tr) => [...tr, f])}>
                 <FolderIcon size={14} /> {f.name}
-              </button>
+              </Button>
             ))}
           </div>
         )}
 
       <div className="action-bar">
-        <button type="button" className="btn-primary" onClick={() => onSelect(current.id)}>{t('useThisFolder', { name: current.name })}</button>
+        <Button variant="primary" onClick={() => onSelect(current.id)}>{t('useThisFolder', { name: current.name })}</Button>
       </div>
     </div>
   );

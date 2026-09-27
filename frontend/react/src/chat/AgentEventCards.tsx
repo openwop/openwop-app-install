@@ -36,6 +36,34 @@ function jsonPreview(value: unknown, max = 200): string {
   return s.length > max ? `${s.slice(0, max)}…` : s;
 }
 
+/**
+ * TOCU-6 (ADR 0604) + review M9 — the tool-error sentence, resolved through
+ * LITERAL `t()` calls.
+ *
+ * The first cure built the key dynamically:
+ *
+ *     t([`toolErr_${call.error.code}`, 'toolErrGeneric'] as unknown as string)
+ *
+ * which worked at runtime and was INVISIBLE to `check-i18n`, so
+ * `chat:toolErr_forbidden` and `chat:toolErr_invalid_args` were reported as
+ * ORPHANED CATALOG KEYS — and `/cleanup` hunts orphans by name. The batch
+ * traded a hardcoded-English defect for a gate-invisible one, and the cast was
+ * the only `as unknown as string` in the entire frontend `src/`.
+ *
+ * A switch over literal keys is what the key-parity gate can actually see. An
+ * unknown code still falls through to `toolErrGeneric`, so a new transport
+ * status can never render as a bare machine token — the property TOCU-6 exists
+ * for. Adding a code means adding a case AND four catalog entries, which is the
+ * work the gate is supposed to force.
+ */
+export function toolErrorMessage(t: (k: string) => string, code: string | undefined): string {
+  switch (code) {
+    case 'forbidden': return t('toolErr_forbidden');
+    case 'invalid_args': return t('toolErr_invalid_args');
+    default: return t('toolErrGeneric');
+  }
+}
+
 // ── Tool call card ─────────────────────────────────────────────────
 
 export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
@@ -46,7 +74,7 @@ export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
     ? Date.parse(call.finishedAt) - Date.parse(call.startedAt)
     : 0;
   const isError = !!call.error;
-  const accent = isError ? 'var(--color-danger)' : 'var(--color-accent)';
+  const accent = isError ? 'var(--color-danger)' : 'var(--clay-text)';
 
   return (
     <div
@@ -92,25 +120,28 @@ export function ToolCallCard({ call }: { call: AgentToolCall }): JSX.Element {
       </button>
       {open && (
         <div className="u-mt-1-5 u-flex u-flex-col u-gap-1-5">
-          {call.inputs !== undefined && (
-            <details>
-              <summary className="muted u-cursor-pointer u-fs-11">{t('inputs')}</summary>
-              <pre className="agentevt-pre">
-                {jsonPreview(call.inputs, 2000)}
-              </pre>
-            </details>
-          )}
-          {call.outcome !== undefined && !isError && (
-            <details>
-              <summary className="muted u-cursor-pointer u-fs-11">{t('result')}</summary>
-              <pre className="agentevt-pre">
-                {jsonPreview(call.outcome, 2000)}
-              </pre>
-            </details>
-          )}
+          {/* TOCU-7 (ADR 0604) — the `Inputs` and `Result` disclosures that used
+              to sit here were UNREACHABLE CODE, and that is worse than absent:
+              they look like a tool-transparency affordance while showing nothing.
+              `AgentToolCall.inputs` / `.outcome` had readers and NO writer
+              anywhere in the SPA — the sole construction site
+              (`hooks/chatSession/lib.ts`) sets only callId/toolName/agentId/
+              startedAt, and the settle branch only finishedAt/error. The backend
+              makes it structural, not accidental: `agent.toolCalled` carries an
+              `argsHash`, never the args, and `agent.toolReturned` carries no
+              result payload at all (RFC 0064 — see
+              `features/workflow-author/agentTools.ts`). Restoring these needs a
+              WIRE change, i.e. an RFC in `../openwop`, so they are deleted here
+              rather than left as dead honesty. Tracked with TOCU-4/WFAU-4. */}
           {isError && call.error && (
             <div className="agentevt-error">
-              <strong>{call.error.code}:</strong> {call.error.message}
+              <strong>{call.error.code}:</strong>{' '}
+              {/* TOCU-6 (ADR 0604) — resolve the sentence HERE, where `t` exists.
+                  `message` is only rendered when a transport actually supplies
+                  one; the three English literals that used to arrive in it are
+                  gone. See `toolErrorMessage` above for why the key lookup is a
+                  switch over literals rather than a template (review M9). */}
+              {call.error.message ?? toolErrorMessage(t, call.error.code)}
             </div>
           )}
         </div>
@@ -146,7 +177,7 @@ export function DecisionBadge({ decision }: { decision: AgentDecision }): JSX.El
   const [open, setOpen] = useState(false);
   const conf = decision.confidence;
   const confColor =
-    conf == null ? 'var(--color-text-muted)' :
+    conf == null ? 'var(--ink-3)' :
     conf >= 0.7 ? 'var(--color-success)' :
     conf >= 0.5 ? 'var(--color-warning)' :
                   'var(--color-danger)';

@@ -54,7 +54,7 @@ describe('curated notes are durable', () => {
 
     // Simulate a process restart: the in-memory recall index is gone, but the
     // DurableCollection (source of truth) persists.
-    clearMemoryScope(T, subjectMemoryScope(u));
+    await clearMemoryScope(T, subjectMemoryScope(u));
 
     const notes = await listSubjectNotes(T, u);
     expect(notes.length).toBe(2);
@@ -71,14 +71,20 @@ describe('isolation + delete', () => {
     expect(await listSubjectNotes('tenant-other', a)).toEqual([]); // CTI-1
 
     const id = (await listSubjectNotes(T, a))[0].id;
+    // ADR 0666 D2 follow-up — `removeSubjectNote` now reports an OUTCOME rather than a bare
+    // boolean, so the caller can tell "deleted, and the recall index was cleared too" from
+    // "deleted, but it may still be recalled". The isolation and fail-closed properties this
+    // test owns are unchanged; only the shape of the answer is.
     // Wrong subject id → no-op, fail-closed.
-    expect(await removeSubjectNote(T, b, id)).toBe(false);
+    expect(await removeSubjectNote(T, b, id)).toEqual({ removed: false, recallCleared: true });
     expect((await listSubjectNotes(T, a)).length).toBe(1);
-    // Correct subject → removed.
-    expect(await removeSubjectNote(T, a, id)).toBe(true);
+    // Correct subject → removed, and the recall index went with it (the in-memory vector
+    // surface cannot fail here, so a `recallCleared:false` in this suite would be a real
+    // regression rather than an environment quirk).
+    expect(await removeSubjectNote(T, a, id)).toEqual({ removed: true, recallCleared: true });
     expect(await listSubjectNotes(T, a)).toEqual([]);
-    // Deleting again → false (already gone).
-    expect(await removeSubjectNote(T, a, id)).toBe(false);
+    // Deleting again → not removed (already gone).
+    expect(await removeSubjectNote(T, a, id)).toEqual({ removed: false, recallCleared: true });
   });
 });
 

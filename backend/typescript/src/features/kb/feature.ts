@@ -31,7 +31,7 @@ export const kbFeature: BackendFeature = {
   // pack tool-allowlisted to those nodes. Declared here, so featurePackRefs()
   // installs them at boot (Phase 0); the eager agent loader registers the agent.
   requiredPacks: [
-    { name: 'feature.kb.nodes', version: '1.1.0' },
-    { name: 'feature.kb.agents', version: '1.0.0' },
+    { name: 'feature.kb.nodes', version: '1.2.0' },
+    { name: 'feature.kb.agents', version: '1.0.1' },
   ],
 };

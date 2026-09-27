@@ -3,21 +3,23 @@
  * (approval, clarification, refinement, cancellation) and the shared renderer.
  */
 export const messages = {
-  // RenderInterrupt fallback
-  unknownKindPrefix: 'Unknown interrupt kind',
-  unknownKindMid: '— extend',
-  unknownKindTail: 'in',
+  // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
+  noRespondPermission: 'You can see this step, but you don\'t have permission to respond to it.',
+  // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
+  unknownKindBody: 'This step can\'t be shown here ({{kind}}). Ask your administrator to update the app.',
 
   // Approval card
   approvalRequired: 'Approval required',
   approvalDefaultPrompt: 'Please approve to continue.',
   commentLabel: 'Comment (optional)',
   commentPlaceholder: 'Visible in the audit trail',
-  actionApprove: 'approve',
-  actionReject: 'reject',
-  actionRequestChanges: 'request-changes',
-  actionDefer: 'defer',
-  actionEscalate: 'escalate',
+  actionApprove: 'Approve',
+  actionReject: 'Reject',
+  rejectConfirmTitle: 'Reject this and fail the run?',
+  rejectConfirmBody: 'Rejecting ends the run here. Anything it already spent — a query, a model call, your review — is not recovered, and it cannot be un-rejected.',
+  actionRequestChanges: 'Request changes',
+  actionDefer: 'Defer',
+  actionEscalate: 'Escalate',
   resolvedElsewhere: 'This review was just resolved elsewhere.',
 
   // Clarification dialog

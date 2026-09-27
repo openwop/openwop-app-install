@@ -26,6 +26,7 @@
 import { createLogger } from '../../observability/logger.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import { createCollection, deleteDocument, getCollection, getDocument, upsertDocument } from '../kb/kbService.js';
+import { kbMutated, type KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3 — silent per-row sweep + ONE batch event
 import { type ShareableKbProvider } from '../../host/shareableKb.js';
 import { listCards } from '../../host/kanbanService.js';
 import { listLists, listRankedIdeas, type RankedIdea } from './priorityMatrixService.js';
@@ -55,7 +56,7 @@ async function getOrCreateCollection(tenantId: string, orgId: string, actor: str
   const id = collectionIdFor(orgId);
   const existing = await getCollection(tenantId, orgId, id);
   if (existing) return existing;
-  const col = await createCollection(tenantId, orgId, actor, { name: COLLECTION_NAME, collectionId: id, managed: MANAGED });
+  const col = await createCollection(tenantId, orgId, actor, { name: COLLECTION_NAME }, { collectionId: id, managed: MANAGED });
   // First creation ⇒ backfill the org's PRE-EXISTING lists + ideas (see the strategy
   // counterpart). Re-entrant-safe (collection now exists) + idempotent + hash-guarded.
   // BEST-EFFORT so a backfill hiccup never breaks the caller (indexer or board-share ensure).
@@ -70,7 +71,15 @@ async function getOrCreateCollection(tenantId: string, orgId: string, actor: str
  */
 export const priorityMatrixShareableKbProvider: ShareableKbProvider = {
   kind: 'priority-matrix',
-  resolveCollectionIds: async (tenantId, orgId) => ((await getCollection(tenantId, orgId, collectionIdFor(orgId))) ? [collectionIdFor(orgId)] : []),
+  // ADR 0667 D6 (PMXWF-13 / the GEN-RCL-1 arity class) — takes the 3-ary contract's
+  // `opts` even though it does not branch on it. This kind's shareable set is a
+  // SINGLETON whose only predicate is existence, and its visibility carve-out is
+  // applied at the DOC layer during indexing, which cannot change WHICH collection id
+  // resolves — so the `forUnshare` superset is provably identical to the normal set
+  // for every input, today. The parameter is accepted anyway because a provider that
+  // does not ACCEPT it cannot be proved inert BY ITS SIGNATURE: the next carve-out
+  // added here would silently skip unshare, with nothing in the type to catch it.
+  resolveCollectionIds: async (tenantId, orgId, _opts) => ((await getCollection(tenantId, orgId, collectionIdFor(orgId))) ? [collectionIdFor(orgId)] : []),
   ensureCollectionIds: async (tenantId, orgId, actor) => [(await getOrCreateCollection(tenantId, orgId, actor)).collectionId],
 };
 
@@ -99,11 +108,11 @@ function formatIdeaForKb(list: PriorityList, idea: RankedIdea): string {
 }
 
 /** Reconcile a list's KB presence: shared ⇒ upsert its doc; project-scoped ⇒ remove. */
-export async function indexList(tenantId: string, list: PriorityList, actor: string): Promise<void> {
+export async function indexList(tenantId: string, list: PriorityList, actor: string, emit: KbEmitOptions = {}): Promise<void> {
   try {
     if (!(await gatesOpen(tenantId, actor))) return;
     if (!isShared(list)) {
-      await removeDoc(tenantId, list.orgId, listDocId(list.id));
+      await removeDoc(tenantId, list.orgId, listDocId(list.id), emit);
       return;
     }
     const col = await getOrCreateCollection(tenantId, list.orgId, actor);
@@ -111,6 +120,7 @@ export async function indexList(tenantId: string, list: PriorityList, actor: str
       title: list.name,
       text: formatListForKb(list),
       contentTrust: 'trusted',
+      ...emit, // ADR 0643 D3 — the backfill sweep passes `{ silent: true }`
     });
   } catch (err) {
     log.warn('pm_kb_index_list_failed', { listId: list.id, err: String(err) });
@@ -150,21 +160,24 @@ export async function indexIdea(tenantId: string, list: PriorityList, cardId: st
  * don't go stale) — O(ideas), one `listRankedIdeas` call, not O(ideas²).
  * Best-effort; skipped for a project-scoped list.
  */
-export async function reindexListIdeas(tenantId: string, list: PriorityList, actor: string): Promise<void> {
+export async function reindexListIdeas(tenantId: string, list: PriorityList, actor: string, emit: KbEmitOptions = {}): Promise<number> {
   try {
-    if (!isShared(list) || !(await gatesOpen(tenantId, actor))) return;
+    if (!isShared(list) || !(await gatesOpen(tenantId, actor))) return 0;
     const ranked = await listRankedIdeas(tenantId, list.id);
-    if (ranked.length === 0) return;
+    if (ranked.length === 0) return 0;
     const col = await getOrCreateCollection(tenantId, list.orgId, actor);
     for (const idea of ranked) {
       await upsertDocument(tenantId, list.orgId, col.collectionId, ideaDocId(idea.card.id), actor, {
         title: idea.card.title,
         text: formatIdeaForKb(list, idea),
         contentTrust: 'trusted',
+        ...emit, // ADR 0643 D3 — the backfill sweep passes `{ silent: true }`
       });
     }
+    return ranked.length;
   } catch (err) {
     log.warn('pm_kb_reindex_ideas_failed', { listId: list.id, err: String(err) });
+    return 0;
   }
 }
 
@@ -192,10 +205,15 @@ export async function removeList(tenantId: string, orgId: string, listId: string
  */
 export async function backfillPriorityMatrixKb(tenantId: string, orgId: string): Promise<number> {
   const lists = (await listLists(tenantId)).filter((l) => l.orgId === orgId);
+  // ADR 0643 D3 — a BULK lane: silent per row, ONE `document.ingested { count }` over
+  // the list docs + idea docs the sweep reconciled.
+  let count = 0;
   for (const list of lists) {
-    await indexList(tenantId, list, list.createdBy);
-    await reindexListIdeas(tenantId, list, list.createdBy); // one ranking pass; skips project-scoped
+    await indexList(tenantId, list, list.createdBy, { silent: true });
+    if (isShared(list)) count += 1;
+    count += await reindexListIdeas(tenantId, list, list.createdBy, { silent: true }); // one ranking pass; skips project-scoped
   }
+  if (count > 0) await kbMutated({ entity: 'document', verb: 'ingested', tenantId, orgId, collectionId: collectionIdFor(orgId), count });
   return lists.length;
 }
 
@@ -209,11 +227,11 @@ export async function ideaCardIds(boardId: string): Promise<string[]> {
 }
 
 /** Idempotent single-doc remove (no-op when the collection/doc never existed). */
-async function removeDoc(tenantId: string, orgId: string, documentId: string): Promise<void> {
+async function removeDoc(tenantId: string, orgId: string, documentId: string, emit: KbEmitOptions = {}): Promise<void> {
   const collectionId = collectionIdFor(orgId);
   const col = await getCollection(tenantId, orgId, collectionId);
   if (!col) return;
   const doc = await getDocument(tenantId, orgId, collectionId, documentId);
   if (!doc) return;
-  await deleteDocument(tenantId, orgId, collectionId, documentId);
+  await deleteDocument(tenantId, orgId, collectionId, documentId, undefined, emit);
 }

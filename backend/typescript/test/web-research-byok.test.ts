@@ -27,7 +27,7 @@ beforeAll(async () => {
   // for the test — same flag the webhook-egress tests use.
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   const a = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { app = a.listen(0, res); });
+  await new Promise<void>((res) => { app = a.listen(0, '127.0.0.1', res); });
   provider = http.createServer((req, res) => {
     lastAuthHeader = (req.headers['x-subscription-token'] as string) ?? null;
     if (providerStatus !== 200) { res.writeHead(providerStatus).end('err'); return; }
@@ -37,7 +37,7 @@ beforeAll(async () => {
       { url: 'https://example.com/b', title: 'Result B', description: 'snippet B' },
     ] } }));
   });
-  await new Promise<void>((res) => provider.listen(0, res));
+  await new Promise<void>((res) => provider.listen(0, '127.0.0.1', res));
   providerUrl = `http://127.0.0.1:${(provider.address() as AddressInfo).port}/search`;
 });
 

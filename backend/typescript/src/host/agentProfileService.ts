@@ -21,14 +21,42 @@
  * @see src/host/rosterService.ts — the patterns this mirrors
  */
 
-import type { AgentProfile } from '../types.js';
+import type { AgentProfile, AgentCapabilityId } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
+import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
+import { registerSubjectEraser } from './subjectErasure.js';
+import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 
-const profiles = new DurableCollection<AgentProfile>('agent-profile', (p) => p.profileId);
+// ADR 0379 P2 — TENANT-QUALIFIED key: profileId equals the rosterId for
+// standing agents, and deterministic rosterIds (`host:<slug>`) repeat across
+// tenants, so a bare-profileId key would let one tenant's upsert OVERWRITE
+// another's row. Every public accessor already takes (tenantId, profileId)
+// fail-closed, so the key scheme is internal. App-migration v7 rekeys
+// existing rows.
+const profileKey = (tenantId: string, profileId: string): string => `${tenantId}:${profileId}`;
+const profiles = new DurableCollection<AgentProfile>('agent-profile', (p) => profileKey(p.tenantId, p.profileId));
 
 function nowIso(): string {
   return new Date().toISOString();
 }
+
+// ADR 0499 — a per-agent voice may pin its own BYOK key at
+// `configParameters.voice.credentialRef` (see `features/voice/voiceSession.ts`).
+// Deleting that secret silently drops the agent back to the host default voice,
+// which reads as a cosmetic regression rather than a broken binding. Keys are
+// `${tenantId}:${profileId}`, so the prefix scan stays bounded to the tenant.
+registerCredentialRefConsumer({
+  id: 'agent-profile:voice',
+  async describe(tenantId, ref) {
+    const rows = await profiles.listByPrefix(`${tenantId}:`);
+    return rows
+      .filter((p) => {
+        const voice = (p.configParameters as { voice?: { credentialRef?: unknown } } | undefined)?.voice;
+        return voice?.credentialRef === ref;
+      })
+      .map((p) => `agent "${p.profileId}" voice key`);
+  },
+});
 
 type SpecLevel = AgentProfile['autonomy']['specLevel'];
 type RosterLevel = AgentProfile['autonomy']['level'];
@@ -58,7 +86,7 @@ export function levelForSpecLevel(specLevel: SpecLevel): RosterLevel {
 }
 
 /**
- * Inverse of {@link levelForSpecLevel} (ADR 0101). `roster.autonomyLevel` is the
+ * Inverse of {@link levelForSpecLevel} (ADR 0493). `roster.autonomyLevel` is the
  * single autonomy source of truth (owned by the Edit-details modal, read by the
  * heartbeat); the profile's `specLevel` is derived from it so the two can never
  * disagree. `review` has two spec levels (`draft-only`, `recommend`); we keep an
@@ -88,14 +116,18 @@ export async function syncAgentProfileAutonomy(
   profileId: string,
   level: RosterLevel,
 ): Promise<void> {
-  const existing = await getAgentProfile(tenantId, profileId);
-  if (!existing || existing.autonomy.level === level) return;
-  const specLevel = specLevelForLevel(level, existing.autonomy.specLevel);
-  await profiles.put({
-    ...existing,
-    autonomy: { ...existing.autonomy, level, specLevel },
-    updatedAt: nowIso(),
-  });
+  // Grade-pass F-4 — CAS + re-read-merge (the heal-family discipline).
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await getAgentProfile(tenantId, profileId);
+    if (!existing || existing.autonomy.level === level) return;
+    const specLevel = specLevelForLevel(level, existing.autonomy.specLevel);
+    if (await profiles.compareAndSwap(existing, {
+      ...existing,
+      autonomy: { ...existing.autonomy, level, specLevel },
+      updatedAt: nowIso(),
+    })) return;
+  }
+  throw new Error(`agent-profile autonomy sync contention: ${profileId}`);
 }
 
 /** Input to {@link upsertAgentProfile}. `autonomy.level` is optional — when
@@ -105,6 +137,9 @@ export interface AgentProfileInput {
   /** Core capabilities to ACTIVATE on this agent (e.g. `['assistant']`). The
    *  runtime gates capability behavior on this, never on `roleKey`. */
   capabilities?: AgentProfile['capabilities'];
+  /** ADR 0442 P3 — memory-scope mode (`'agent'` shared vs `'per-user'`). Owned
+   *  by provisioning, not the governance editor; preserved on an omitting upsert. */
+  memoryScope?: AgentProfile['memoryScope'];
   department?: AgentProfile['department'];
   configParameters?: Record<string, unknown>;
   permissions?: AgentProfile['permissions'];
@@ -127,7 +162,7 @@ export interface AgentProfileInput {
 /** Read one profile, scoped to `tenantId`. Returns `null` when the profile is
  *  absent OR owned by a different tenant (fail-closed cross-tenant read). */
 export async function getAgentProfile(tenantId: string, profileId: string): Promise<AgentProfile | null> {
-  const profile = await profiles.get(profileId);
+  const profile = await profiles.get(profileKey(tenantId, profileId));
   if (!profile || profile.tenantId !== tenantId) return null;
   return profile;
 }
@@ -157,9 +192,23 @@ export async function upsertAgentProfile(
   profileId: string,
   input: AgentProfileInput,
 ): Promise<AgentProfile> {
-  const existing = await profiles.get(profileId);
+  const existing = await profiles.get(profileKey(tenantId, profileId));
   // Defensive: never let an upsert silently re-own another tenant's profile.
   const prior = existing && existing.tenantId === tenantId ? existing : undefined;
+  const profile = buildAgentProfile(tenantId, profileId, input, prior);
+  await profiles.put(profile);
+  return profile;
+}
+
+/** The ONE profile builder (residue-batch F-8: extracted so the capability
+ *  create path can CAS-insert the SAME shape upsert writes — no second
+ *  builder to drift). Preserves subsystem-owned fields from `prior`. */
+export function buildAgentProfile(
+  tenantId: string,
+  profileId: string,
+  input: AgentProfileInput,
+  prior: AgentProfile | undefined,
+): AgentProfile {
   const now = nowIso();
   const level = input.autonomy.level ?? levelForSpecLevel(input.autonomy.specLevel);
   // `capabilities`, `knowledge`, and `twin` are owned by OTHER subsystems
@@ -175,6 +224,13 @@ export async function upsertAgentProfile(
     ...(input.capabilities !== undefined
       ? { capabilities: input.capabilities }
       : prior?.capabilities !== undefined ? { capabilities: prior.capabilities } : {}),
+    // ADR 0442 P3 — `memoryScope` is provisioning-owned (like capabilities); a
+    // governance full-replace edit doesn't resend it, so PRESERVE the prior value
+    // on an omitting upsert, else a profile edit would silently drop `per-user`
+    // and re-open the F1 shared-scope leak.
+    ...(input.memoryScope !== undefined
+      ? { memoryScope: input.memoryScope }
+      : prior?.memoryScope !== undefined ? { memoryScope: prior.memoryScope } : {}),
     ...(input.department !== undefined ? { department: input.department } : {}),
     ...(input.configParameters !== undefined ? { configParameters: input.configParameters } : {}),
     ...(input.permissions !== undefined ? { permissions: input.permissions } : {}),
@@ -185,8 +241,12 @@ export async function upsertAgentProfile(
     ...(input.riskCompliance !== undefined ? { riskCompliance: input.riskCompliance } : {}),
     ...(input.requiredConnections !== undefined ? { requiredConnections: input.requiredConnections } : {}),
     ...(input.metrics !== undefined ? { metrics: input.metrics } : {}),
+    // ADR 0643 R4 (Blocker 1 corollary) — `collectionIds` is the curator's field
+    // (`agent-knowledge/service.ts`). A profile write that carries `knowledge` WITHOUT
+    // it (the route now refuses it; seeds/import never send it) must not wipe the
+    // bindings the curator made — that was a silent lost-update on every profile save.
     ...(input.knowledge !== undefined
-      ? { knowledge: input.knowledge }
+      ? { knowledge: { ...input.knowledge, ...(input.knowledge.collectionIds === undefined && prior?.knowledge?.collectionIds !== undefined ? { collectionIds: prior.knowledge.collectionIds } : {}) } }
       : prior?.knowledge !== undefined ? { knowledge: prior.knowledge } : {}),
     ...(prior?.twin !== undefined ? { twin: prior.twin } : {}),
     autonomy: {
@@ -199,7 +259,6 @@ export async function upsertAgentProfile(
     createdAt: prior?.createdAt ?? now,
     updatedAt: now,
   };
-  await profiles.put(profile);
   return profile;
 }
 
@@ -216,18 +275,105 @@ export async function activateAgentCapability(
   capability: NonNullable<AgentProfile['capabilities']>[number],
   init: { roleKey: string; autonomy: AgentProfileInput['autonomy'] },
 ): Promise<AgentProfile> {
-  const existing = await getAgentProfile(tenantId, profileId);
-  if (existing) {
+  // Grade-pass DATA-2: the heal path was read-modify-`put` — a concurrent USER
+  // governance edit racing a heal was last-writer-wins (a bounded clobber
+  // window on first provision, now that provisioning sagas run two racers per
+  // fresh Studio load across Cloud Run instances). CAS + re-read-merge: a lost
+  // swap re-reads the winner's row and re-merges ONLY the capability, so a
+  // user's autonomy/HITL edits are never overwritten. `expected` is the exact
+  // object `get()` returned (the ADR 0447 byte-match rule).
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await getAgentProfile(tenantId, profileId);
+    if (!existing) {
+      // Absent → INSERT-ONLY-IF-ABSENT (residue-batch F-8): CAS(null, built)
+      // closes the different-capability lost-write (the loser re-reads and
+      // MERGES via the heal path — test-proven). HONEST LIMIT (RES-2): a
+      // delete racing an activation can still end with a recreated profile —
+      // this only narrows WHAT gets written (a fresh minimal init, never a
+      // stale full row); the delete-vs-activate window itself is pre-existing
+      // and unchanged.
+      const built = buildAgentProfile(tenantId, profileId, { ...init, capabilities: [capability] }, undefined);
+      if (await profiles.compareAndSwap(null, built)) return built;
+      continue; // lost the insert — re-read and merge
+    }
     if ((existing.capabilities ?? []).includes(capability)) return existing;
     const updated: AgentProfile = {
       ...existing,
       capabilities: [...(existing.capabilities ?? []), capability],
       updatedAt: nowIso(),
     };
-    await profiles.put(updated);
-    return updated;
+    if (await profiles.compareAndSwap(existing, updated)) return updated;
+    // Lost the swap — loop re-reads the current row and re-merges.
   }
-  return upsertAgentProfile(tenantId, profileId, { ...init, capabilities: [capability] });
+  // Three straight losses is pathological contention; one final read decides
+  // honestly (someone else may have activated it meanwhile) — never a blind put.
+  const final = await getAgentProfile(tenantId, profileId);
+  if (final && (final.capabilities ?? []).includes(capability)) return final;
+  throw new Error(`agent-profile capability activation contention: ${profileId}`);
+}
+
+/**
+ * ADR 0442 P3 — set an agent's memory-scope mode (idempotent, merge-only). The
+ * David's-law-clean way to turn on `per-user` memory for a standing agent
+ * WITHOUT re-sending its whole profile (which would risk clobbering a governance
+ * edit) and WITHOUT any agent-id special-case in the memory path — the runtime
+ * keys off this field. Preserves every other field; a matching mode is a no-op.
+ * Creates a minimal profile from `init` when none exists. Tenant-scoped.
+ */
+export async function setAgentMemoryScope(
+  tenantId: string,
+  profileId: string,
+  memoryScope: NonNullable<AgentProfile['memoryScope']>,
+  init: { roleKey: string; autonomy: AgentProfileInput['autonomy'] },
+): Promise<AgentProfile> {
+  const existing = await getAgentProfile(tenantId, profileId);
+  if (!existing) return upsertAgentProfile(tenantId, profileId, { ...init, memoryScope });
+  if (existing.memoryScope === memoryScope) return existing;
+  const updated: AgentProfile = { ...existing, memoryScope, updatedAt: nowIso() };
+  await profiles.put(updated);
+  return updated;
+}
+
+/** ADR 0373 — capabilities a TENANT may elect on their OWN agent.
+ *
+ *  Everything else in `AgentCapabilityId` is FEATURE-OWNED and deliberately NOT
+ *  here: `'assistant'` is bootstrapped onto the SEEDED holder by
+ *  `ensureAssistantAgent`, which resolves the assistant BY capability — so a
+ *  hand-activated second holder would make `findAssistantAgent` ambiguous and
+ *  break that invariant from a plain tenant request. Closed-world by design:
+ *  adding a member is a deliberate product decision, never a default.
+ *
+ *  @see src/routes/agentProfile.ts — the tenant-facing election surface */
+export const TENANT_ELECTABLE_CAPABILITIES: readonly AgentCapabilityId[] = ['deep-investigation'];
+
+/** ADR 0373 — REVOKE a capability from an agent's profile (idempotent, and the
+ *  mirror of `activateAgentCapability`). A grant that cannot be revoked is a
+ *  governance defect — the same reasoning ADR 0104 used to choose full-replace
+ *  over additive ("additive could not revoke"). Preserves every other field; a
+ *  missing profile or an already-absent capability is a no-op (returns the
+ *  profile or null), never an error. */
+export async function deactivateAgentCapability(
+  tenantId: string,
+  profileId: string,
+  capability: NonNullable<AgentProfile['capabilities']>[number],
+): Promise<AgentProfile | null> {
+  // Grade-pass F-4 — same CAS discipline as activateAgentCapability: a lost
+  // swap re-reads and re-applies ONLY the capability removal, never clobbering
+  // a concurrent governance edit.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const existing = await getAgentProfile(tenantId, profileId);
+    if (!existing) return null;
+    if (!(existing.capabilities ?? []).includes(capability)) return existing;
+    const updated: AgentProfile = {
+      ...existing,
+      capabilities: (existing.capabilities ?? []).filter((c) => c !== capability),
+      updatedAt: nowIso(),
+    };
+    if (await profiles.compareAndSwap(existing, updated)) return updated;
+  }
+  const final = await getAgentProfile(tenantId, profileId);
+  if (!final || !(final.capabilities ?? []).includes(capability)) return final;
+  throw new Error(`agent-profile capability deactivation contention: ${profileId}`);
 }
 
 /**
@@ -243,14 +389,34 @@ export async function activateAgentCapability(
  * `undefined` field in `patch` is ignored (use the dedicated array operations in
  * the feature service to remove a collection id).
  */
+/**
+ * ADR 0664 D4 — `activateCapability` is a decision the CALL SITE makes, never inferred
+ * from the shape of `patch`.
+ *
+ * This function used to union `knowledge` onto the profile on EVERY write, so ADR 0373's
+ * `DELETE …/capabilities/knowledge` was undone by the next unbind, the next
+ * `setMemoryWritable(false)` — a privacy action re-granting the very capability it was
+ * exercised to remove — and even by a plain `GET …/knowledge`, because the dangling-binding
+ * self-heal (`agent-knowledge/service.ts:160`) is a durable write on a read path. Merely
+ * OPENING the panel re-granted it.
+ *
+ * Inferring the answer from the patch (e.g. "union only when `collectionIds` grows") was
+ * the first draft and is wrong: `kickbotService.ts:323` seeds with `{retrieval:…}` and NO
+ * `collectionIds` when KB is unavailable, and under that rule KickBot would silently lose
+ * memory recall — `resolveAgentKnowledgeRetrieve` fails closed without the capability.
+ * A seed is a grant; an unbind is not. Only the caller knows which it is.
+ */
 export async function setAgentKnowledge(
   tenantId: string,
   profileId: string,
   patch: NonNullable<AgentProfile['knowledge']>,
   init: { roleKey: string; autonomy: AgentProfileInput['autonomy'] },
+  opts: { activateCapability: boolean } = { activateCapability: true },
 ): Promise<AgentProfile> {
   const existing = await getAgentProfile(tenantId, profileId);
   if (!existing) {
+    // A first write on a profile-less agent is a grant by construction: without the
+    // capability the binding it is creating would retrieve nothing.
     return upsertAgentProfile(tenantId, profileId, {
       ...init,
       capabilities: ['knowledge'],
@@ -258,7 +424,7 @@ export async function setAgentKnowledge(
     });
   }
   const merged: NonNullable<AgentProfile['knowledge']> = { ...(existing.knowledge ?? {}), ...patch };
-  const capabilities = (existing.capabilities ?? []).includes('knowledge')
+  const capabilities = !opts.activateCapability || (existing.capabilities ?? []).includes('knowledge')
     ? existing.capabilities
     : [...(existing.capabilities ?? []), 'knowledge' as const];
   const updated: AgentProfile = {
@@ -294,9 +460,9 @@ export async function setAgentTwin(
  *  a cross-tenant profile is not deleted). Used by the roster cascade so a
  *  removed agent's profile + bindings don't orphan. Returns true when removed. */
 export async function deleteAgentProfile(tenantId: string, profileId: string): Promise<boolean> {
-  const existing = await profiles.get(profileId);
-  if (!existing || existing.tenantId !== tenantId) return false;
-  return profiles.delete(profileId);
+  const existing = await profiles.get(profileKey(tenantId, profileId));
+  if (!existing) return false;
+  return profiles.delete(profileKey(tenantId, profileId));
 }
 
 /**
@@ -324,6 +490,44 @@ export async function backfillProfileReadPermissions(readTokens: readonly string
     updated += 1;
   }
   return updated;
+}
+
+// ── ADR 0464 P2 — DSAR subject erasure ───────────────────────────────────────
+// The agent profile is an AGENT-structural row (never deleted), but its ADR 0044
+// twin LINK carries two human references: `twin.userId` (the person this agent is
+// a twin OF) and `twin.linkedBy` (the admin who set the link). A DSAR ANONYMIZES
+// whichever of those references the erased subject — the link's SHAPE survives so
+// the agent's structure is unchanged, but the person's id is overwritten with the
+// sentinel. (The user-issued authorization `TwinGrant` is a separate store,
+// erased by `twinService`.) Every other profile is untouched. Written via a
+// direct `profiles.put` (no autonomy/knowledge upsert side effects). Idempotent;
+// tenant-scoped; fail-closed on falsy input.
+
+/** DSAR eraser — anonymize the subject's references on any agent twin LINK. */
+export async function eraseSubjectAgentTwinLinks(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return;
+  const { forms } = subjectKeyForms(subjectKey);
+  for (const p of (await profiles.list()).filter((p) => p.tenantId === tenantId)) {
+    if (!p.twin) continue;
+    const userHit = forms.has(p.twin.userId);
+    const byHit = forms.has(p.twin.linkedBy);
+    if (!userHit && !byHit) continue;
+    await profiles.put({
+      ...p,
+      twin: {
+        ...p.twin,
+        ...(userHit ? { userId: ERASED } : {}),
+        ...(byHit ? { linkedBy: ERASED } : {}),
+      },
+      updatedAt: nowIso(),
+    });
+  }
+}
+
+/** Register the agent-profile twin-link DSAR eraser (idempotent — the seam
+ *  dedupes by reference). Called from the host-erasers boot step. */
+export function registerAgentProfileTwinErasure(): void {
+  registerSubjectEraser(eraseSubjectAgentTwinLinks);
 }
 
 /** Test-only: drop all profiles. */

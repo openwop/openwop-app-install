@@ -19,7 +19,7 @@ export interface WorkflowSuggestion {
 export interface DraftSeed { name: string; toolSequence: string[]; sampleGoal?: string }
 export interface Org { orgId: string; name: string }
 
-const base = (orgId: string): string => `${config.baseUrl}/v1/host/openwop-app/work-graph/orgs/${encodeURIComponent(orgId)}/suggestions`;
+const base = (orgId: string): string => `${config.baseUrl}/host/openwop-app/work-graph/orgs/${encodeURIComponent(orgId)}/suggestions`;
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
   if (!res.ok) {
@@ -31,7 +31,7 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 }
 
 export async function listOrgs(): Promise<Org[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ orgs: Org[] }>(res, 'listOrgs')).orgs;
 }
 export async function listSuggestions(orgId: string): Promise<WorkflowSuggestion[]> {

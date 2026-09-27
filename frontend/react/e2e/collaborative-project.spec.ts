@@ -62,7 +62,6 @@ test.describe('Collaborative project (ADR 0054) — end-to-end', () => {
   let owner: Page;
   let mate: Page;
   let orgId = '';
-  let agentRosterId = '';
   let outsiderRosterId = '';
   let mateId = '';
   let projectId = '';
@@ -79,7 +78,17 @@ test.describe('Collaborative project (ADR 0054) — end-to-end', () => {
     // Collaborative projects are always-on (graduated off the `project-collab`
     // toggle 2026-06-16) — no enable step; the surfaces serve unconditionally.
     orgId = (await (await o.post(`${api}/orgs`, { data: { name: 'E2E Org' } })).json()).orgId;
-    agentRosterId = (await (await o.post(`${api}/roster`, { data: { persona: 'E2E Agent', agentRef: { agentId: AGENT_ID } } })).json()).rosterId;
+    // Created for its SIDE EFFECT: the cadence test selects this agent by its
+    // visible label ('E2E Agent'), not by id, so the returned rosterId is never read.
+    //
+    // The status IS asserted, and that is not ceremony. The previous form
+    // (`(await res.json()).rosterId`) threw on a non-JSON error body — an
+    // ACCIDENTAL smoke check. Dropping to a bare `await` removed it, so a 500 here
+    // would pass silently and surface ~100 lines later as "option not found" at
+    // `selectOption({ label: 'E2E Agent' })` — a diagnosis pointing at the UI when
+    // the cause was a failed create. Matches the sibling below.
+    const agent = await o.post(`${api}/roster`, { data: { persona: 'E2E Agent', agentRef: { agentId: AGENT_ID } } });
+    expect(agent.ok(), `create 'E2E Agent' roster: ${await agent.text()}`).toBeTruthy();
     outsiderRosterId = (await (await o.post(`${api}/roster`, { data: { persona: 'Outsider Agent', agentRef: { agentId: AGENT_ID } } })).json()).rosterId;
 
     // ── Mate: a co-tenant org VIEWER (workspace:read), NOT yet a project member ──

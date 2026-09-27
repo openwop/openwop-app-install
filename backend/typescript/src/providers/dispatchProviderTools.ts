@@ -147,7 +147,15 @@ async function openAICompatibleToolsRound(
   }
   const data = (await res.json()) as {
     choices?: Array<{ message?: { content?: string | null; tool_calls?: OpenAIToolCall[] }; finish_reason?: string }>;
-    usage?: { prompt_tokens?: number; completion_tokens?: number };
+    // ADR 0148 A2 (OQ#3) — OpenAI-compatible providers (MiniMax, OpenAI) report
+    // AUTOMATIC prefix-cache hits in `prompt_tokens_details.cached_tokens` (no
+    // request markers needed; caching fires on ≥512-token stable prefixes). The
+    // loop keeps `systemPrompt`+`tools` byte-stable across rounds, so rounds 2..N
+    // hit the cache; surface it as `cachedReadTokens` for the same observability
+    // the Anthropic split feeds. On the BYOK path this reaches the RFC 0026/0116
+    // `provider.usage` event at the emit site (honest, RFC-accepted fields); the
+    // MANAGED path never emits provider.usage, so there it stays internal.
+    usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
   };
   const choice = data.choices?.[0];
   let toolUses = (choice?.message?.tool_calls ?? [])
@@ -177,6 +185,7 @@ async function openAICompatibleToolsRound(
     ...(choice?.finish_reason ? { finishReason: choice.finish_reason } : {}),
     ...(data.usage?.prompt_tokens != null ? { inputTokens: data.usage.prompt_tokens } : {}),
     ...(data.usage?.completion_tokens != null ? { outputTokens: data.usage.completion_tokens } : {}),
+    ...(data.usage?.prompt_tokens_details?.cached_tokens != null ? { cachedReadTokens: data.usage.prompt_tokens_details.cached_tokens } : {}),
   };
 }
 

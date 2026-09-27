@@ -38,7 +38,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['notebooks', 'kb', 'users']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -103,6 +103,31 @@ describe('notebooks — grounded chat ensure (ADR 0084 Phase 2)', () => {
     const stranger = await ownerWithOrg('nbchat-stranger');
     expect((await stranger.c.post(`${NB}/${id}/chat`)).status).toBe(404);
   });
+
+  it('DELETE /notebooks/:id cascades the group conversation like the projects door (WF-PRJ-1)', async () => {
+    // A notebook IS a project (`facet:'notebook'`) with a group conversation at
+    // the SAME deterministic id. `DELETE /projects/:id` cascades that conversation
+    // via `deleteConversationCompletely`; this door used to skip it, orphaning the
+    // session + messages + meta under a deleted project — retained, unreachable
+    // chat data with no delete path short of tenant teardown.
+    const CHAT = '/v1/host/openwop-app/chat/sessions';
+    const { c, orgId, tenantId } = await ownerWithOrg('nbdel-owner');
+    const id = (await c.post(NB, { orgId, name: 'Doomed notebook' })).body.notebook.id as string;
+    const conversationId = (await c.post(`${NB}/${id}/chat`)).body.conversationId as string;
+    expect(conversationId).toBeTruthy();
+    const msg = await c.post(`${CHAT}/${conversationId}/messages`, { messageId: `m-nbdel-${n++}`, role: 'user', content: 'to be destroyed with the notebook' });
+    expect(msg.status, JSON.stringify(msg.body)).toBe(201);
+
+    const del = await c.del(`${NB}/${id}`);
+    expect(del.status, JSON.stringify(del.body)).toBe(200);
+    expect(del.body.deleted).toBe(true);
+    expect(del.body.conversationsDeleted).toBe(1);
+
+    // The conversation row, its messages, AND the meta are gone — not orphaned.
+    expect((await c.get(`${CHAT}/${conversationId}`)).status).toBe(404);
+    expect((await c.get(`${CHAT}/${conversationId}/messages`)).status).toBe(404);
+    expect(await getConversationMeta(tenantId, conversationId)).toBeNull();
+  });
 });
 
 describe('feature.notebooks.agents.researcher — Research Analyst pack (ADR 0084 Phase 4)', () => {
@@ -116,17 +141,18 @@ describe('feature.notebooks.agents.researcher — Research Analyst pack (ADR 008
     expect(agent!.systemPrompt).toContain('notebook');
   });
 
-  it('is tool-allowlisted to the notebooks feature nodes only (NOT the kb nodes)', async () => {
+  it('is tool-allowlisted to the notebooks feature chat tools only (CFP-1 — registered, resolvable ids)', async () => {
     const agent = await getAgentRegistry().resolve('feature.notebooks.agents.researcher');
     const allow = (agent!.toolAllowlist ?? []) as string[];
-    expect(allow).toContain('openwop:feature.notebooks.nodes.ask');
-    expect(allow).toContain('openwop:feature.notebooks.nodes.search');
-    // Phase 5 / Transformations T3 — chat can author + persist a transformation
-    // Document (the agent+nodes realization of "AI-chat envelopes"; no bespoke kind).
-    expect(allow).toContain('openwop:feature.notebooks.nodes.write-transformation');
+    // CFP-1: the allowlist now names the feature's REGISTERED chat tools
+    // (registerFeatureAgentTool), not the raw node typeIds that resolved to nothing
+    // at dispatch. ask/search ground; write-transformation authors + persists a Document.
+    expect(allow).toContain('openwop:notebooks.ask');
+    expect(allow).toContain('openwop:notebooks.search');
+    expect(allow).toContain('openwop:notebooks.write-transformation');
     // No tool outside the notebooks feature surface — in particular, no kb nodes, and
-    // NOT the internal summarize-workflow nodes (read-source / store-summary).
-    expect(allow.every((t) => t.startsWith('openwop:feature.notebooks.nodes.'))).toBe(true);
+    // NOT the raw node typeIds (which no conversational-tool provider resolves).
+    expect(allow.every((t) => t.startsWith('openwop:notebooks.'))).toBe(true);
     expect(allow).not.toContain('openwop:feature.notebooks.nodes.read-source');
     expect(allow).not.toContain('openwop:feature.notebooks.nodes.store-summary');
   });
@@ -144,7 +170,7 @@ describe('composeKnowledgeForSubject — shared composition (ADR 0084 Phase 2)',
     // Bind a KB collection with an UNTRUSTED source (notebook sources are fenced).
     const col = await createCollection(tenantId, orgId, 'tester', { name: 'Sources' });
     const NEEDLE = 'Photosynthesis converts sunlight into chemical energy in chloroplasts.';
-    await ingestDocument(tenantId, orgId, 'tester', col.collectionId, { title: 'Bio', text: NEEDLE, contentTrust: 'untrusted' });
+    await ingestDocument(tenantId, orgId, 'tester', col.collectionId, { title: 'Bio', text: NEEDLE }, { contentTrust: 'untrusted' });
     await setSubjectKnowledge(tenantId, subject, { collectionIds: [col.collectionId] });
 
     const block = await composeKnowledgeForSubject(tenantId, subject, 'how does photosynthesis work', { topK: 6 });

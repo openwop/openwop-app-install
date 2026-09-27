@@ -145,3 +145,26 @@ methods for the org-scoped surface. The canonical `npm run build` gate must pass
   tier; a large import would want a background run + progress (defer).
 - [ ] **Custom-field type expansion** (date, enum, reference) — start with
   string/number/boolean; widen when a consumer pulls.
+
+## Amendment — 2026-07-03 (CRM gap-remediation Phase B, gap-analysis §5 B3a/B5)
+
+Additive entity-contract extensions; no route, RBAC, or toggle change. Recorded
+here (not a new ADR) because they extend this ADR's entity contracts in place:
+
+- **`Deal.owner?` / `Deal.closeDate?` / `Deal.status?: 'open'|'won'|'lost'`.**
+  `owner` is an opaque subject reference (RFC 0048) — deliberately NOT added to
+  `declarePiiFields`. `closeDate` is strict `YYYY-MM-DD` (400 otherwise).
+  `status` is stored-explicit and derived at **write** time when a stage move
+  doesn't set it (English `\bwon\b`/`\blost\b` stage-name heuristic — explicit
+  always wins; the heuristic is best-effort for user-authored stage names, and
+  the read path projects `?? 'open'` for pre-amendment rows). Derivation lives
+  in ONE place (`crmEntitiesService`), so agents and humans get identical
+  semantics when the write verbs land (gap-analysis C2).
+- **`Contact.owner?`** — same opaque-subject semantics.
+- **`Contact.lastTriage? { variant, runId, at }`** — a denormalized stamp the
+  triage route writes at dispatch so lists can sort/link provenance;
+  `run.metadata` remains the SSoT (this changes nothing about replay/fork).
+  Score/priority deliberately NOT stamped yet: the default triage run executes a
+  placeholder workflow, so a score does not exist server-side — it arrives with
+  the real triage chain + governed write verbs (gap-analysis C2), keeping the
+  pack the single owner of scoring rules.

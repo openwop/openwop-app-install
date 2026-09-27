@@ -32,6 +32,15 @@ export interface AgentView {
   /** First enabled schedule (the "next run" hint; cron is not parsed to a
    *  wall-clock time in the sample). */
   nextSchedule: ScheduledJob | null;
+  /**
+   * True when the recent-failures read did NOT land, so `status` could not
+   * account for failures. The read is best-effort by design — a failure there
+   * must not blank the dashboard — but falling back to "no failures" silently
+   * converts UNKNOWN into HEALTHY, and spotting failures is the main reason to
+   * scan this dashboard at all. Surfaced so the UI can say "not checked"
+   * instead of showing an all-clear it did not verify.
+   */
+  failureCheckUnavailable: boolean;
 }
 
 // Status → label + a token-driven `.chip--*` modifier (no hardcoded hex; the
@@ -100,7 +109,7 @@ function deriveStatus(entry: RosterEntry, board: KanbanBoard | null, counts: Lan
   return 'active';
 }
 
-function buildView(entry: RosterEntry, board: KanbanBoard | null, cards: KanbanCard[], jobs: ScheduledJob[], hasRecentFailure = false): AgentView {
+function buildView(entry: RosterEntry, board: KanbanBoard | null, cards: KanbanCard[], jobs: ScheduledJob[], hasRecentFailure = false, failureCheckUnavailable = false): AgentView {
   const laneCounts: LaneCounts = { todo: 0, working: 0, waiting: 0, done: 0 };
   for (const card of cards) {
     const lane = laneOf(card, board);
@@ -115,6 +124,7 @@ function buildView(entry: RosterEntry, board: KanbanBoard | null, cards: KanbanC
     status: deriveStatus(entry, board, laneCounts, hasRecentFailure),
     jobs: myJobs,
     nextSchedule: myJobs.find((j) => j.enabled) ?? null,
+    failureCheckUnavailable,
   };
 }
 
@@ -129,12 +139,12 @@ export async function loadAgentViews(): Promise<AgentView[]> {
     listJobs(),
     // Recent failed runs across the fleet → which agents need an "error" badge.
     // Best-effort: a failure here must not blank the dashboard.
-    getFleetActivity({ status: 'failed', limit: 100 }).catch(() => ({ items: [], truncated: false })),
+    getFleetActivity({ status: 'failed', limit: 100 }).catch(() => null),
   ]);
-  const failedRosterIds = new Set(failures.items.map((i) => i.rosterId).filter((id): id is string => !!id));
+  const failedRosterIds = new Set((failures?.items ?? []).map((i) => i.rosterId).filter((id): id is string => !!id));
   return roster.map((entry) => {
     const board = boards.find((b) => b.rosterId === entry.rosterId) ?? null;
-    return buildView(entry, board, board?.cards ?? [], jobs, failedRosterIds.has(entry.rosterId));
+    return buildView(entry, board, board?.cards ?? [], jobs, failedRosterIds.has(entry.rosterId), failures === null);
   });
 }
 
@@ -149,7 +159,7 @@ export async function loadAgentView(rosterId: string): Promise<AgentView | null>
   const [boards, jobs, failures] = await Promise.all([
     listBoards(),
     listJobs(rosterId),
-    getFleetActivity({ status: 'failed', rosterId, limit: 1 }).catch(() => ({ items: [], truncated: false })),
+    getFleetActivity({ status: 'failed', rosterId, limit: 1 }).catch(() => null),
   ]);
   const board = boards.find((b) => b.rosterId === entry.rosterId) ?? null;
   let cards: KanbanCard[] = [];
@@ -160,5 +170,5 @@ export async function loadAgentView(rosterId: string): Promise<AgentView | null>
       /* ignore */
     }
   }
-  return buildView(entry, board, cards, jobs, failures.items.length > 0);
+  return buildView(entry, board, cards, jobs, (failures?.items.length ?? 0) > 0, failures === null);
 }

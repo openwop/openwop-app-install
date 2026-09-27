@@ -41,6 +41,47 @@ describe('csvImport — pure parse + validate + compute', () => {
     expect(issues.some((i) => i.severity === 'error' && /negative/i.test(i.message))).toBe(true);
     expect(issues.some((i) => i.severity === 'warning' && /exceed impressions/i.test(i.message))).toBe(true);
   });
+
+  it('R2 CC-SP-8: garbage metrics are ISSUE rows, and decimal-comma locales parse correctly', () => {
+    const headers = ['Day', 'Cost', 'Impr.', 'Clicks'];
+    const rows = [
+      ['2026-01-01', 'abc', '100', '5'],        // garbage -> issue, never a silent 0
+      ['2026-01-02', '1.234,56', '100', '5'],   // EU thousands+decimal: 1234.56
+      ['2026-01-03', '1,234.56', '100', '5'],   // US thousands+decimal: 1234.56
+      ['2026-01-04', '12,5', '100', '5'],       // lone decimal comma: 12.5
+      ['2026-01-05', '1,234', '100', '5'],      // lone grouping comma: 1234
+    ];
+    const { records, issues } = mapAndValidate(headers, rows, autodetectMapping(headers), 'google', '2026-06-27');
+    expect(issues.some((i) => i.severity === 'error' && /Unparseable spend/.test(i.message))).toBe(true);
+    expect(records).toHaveLength(4);
+    // The old parser stripped the comma AFTER the dot survived: "1.234,56" -> 1.234
+    // — a ~1000x silent understatement of spend.
+    expect(records.map((r) => r.spend)).toEqual([1234.56, 1234.56, 12.5, 1234]);
+  });
+
+  it('R2 CC-SP-9: DD/MM over-12 dates auto-swap with a disclosure; ambiguous MM/DD assumption disclosed ONCE', () => {
+    const headers = ['Day', 'Cost'];
+    const rows = [
+      ['25/12/2025', '10'], // unambiguously DD/MM -> 2025-12-25 (old code: "Date is in the future")
+      ['03/04/2026', '10'], // ambiguous -> MM/DD assumed (2026-03-04), flagged
+      ['04/03/2026', '10'], // ambiguous too
+    ];
+    const { records, issues } = mapAndValidate(headers, rows, autodetectMapping(headers), 'google', '2026-06-27');
+    expect(records).toHaveLength(3);
+    expect(records[0]!.date).toBe('2025-12-25');
+    expect(records[1]!.date).toBe('2026-03-04');
+    expect(issues.filter((i) => /MM\/DD/.test(i.message))).toHaveLength(1); // one summary, not per row
+    expect(issues.some((i) => /first component over 12/.test(i.message))).toBe(true);
+  });
+
+  it('R2 CC-SP-7: an ISO currency column is captured; junk is dropped, never guessed', () => {
+    const headers = ['Day', 'Cost', 'Currency'];
+    const rows = [['2026-01-01', '10', 'eur'], ['2026-01-02', '10', 'DOLLARS'], ['2026-01-03', '10', '']];
+    const { records } = mapAndValidate(headers, rows, autodetectMapping(headers), 'google', '2026-06-27');
+    expect(records[0]!.currency).toBe('EUR');
+    expect(records[1]!.currency).toBeUndefined();
+    expect(records[2]!.currency).toBeUndefined();
+  });
 });
 
 describe('performanceService — dedup + KPI', () => {
@@ -59,6 +100,23 @@ describe('performanceService — dedup + KPI', () => {
     expect(kpi.totals.roas).toBe(4);
     expect(kpi.byPlatform[0].platform).toBe('google');
   });
+
+  it('R2 CC-SP-2/7: record currencies drive the KPI currency; NO evidence anywhere = currencyKnown false', async () => {
+    // Currency evidence from the RECORDS' own captured field.
+    const withCur = 'Platform,Campaign,Ad Set,Day,Cost,Currency\nGoogle,Q4,Set A,2026-01-05,100,EUR';
+    await importCsv('t2', 'o2', withCur);
+    const kpiEur = await kpiSummary('t2', 'o2');
+    expect(kpiEur.currency).toBe('EUR');
+    expect(kpiEur.currencyKnown).toBe(true);
+    expect(kpiEur.currencyMixed).not.toBe(true);
+
+    // Records but zero currency evidence: the old code returned USD/not-mixed —
+    // an unknown labelled `$` with confidence.
+    const noCur = 'Platform,Campaign,Ad Set,Day,Cost\nGoogle,Q4,Set A,2026-01-05,100';
+    await importCsv('t3', 'o3', noCur);
+    const kpiUnknown = await kpiSummary('t3', 'o3');
+    expect(kpiUnknown.currencyKnown).toBe(false);
+  });
 });
 
 let BASE: string; let server: http.Server; let n = 0;
@@ -68,7 +126,7 @@ describe('campaign-connectors — routes + sync node', () => {
     process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
     process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
     const d = getToggleDefault('campaign-connectors'); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -97,9 +155,43 @@ describe('campaign-connectors — routes + sync node', () => {
     expect(kpi.body.byPlatform[0].platform).toBe('meta');
   });
 
-  it('sync node is honest-off (connector_not_configured)', async () => {
-    const out = await nodePack['feature.campaign-connectors.nodes.sync']({ features: { 'campaign-connectors': { importCsv: async () => ({}) } }, inputs: { orgId: 'o1', platform: 'google' } });
-    expect(out.status).toBe('failed');
-    expect(out.error?.code).toBe('connector_not_configured');
+  // ADR 0215 (C2): the sync node is honest-ON for the platforms with a live
+  // metrics reader (meta/google via ctx.ads) and stays structured-honest for the
+  // rest. Without ctx.ads the node fails host_capability_missing, never fakes.
+  it('sync node: live path for meta/google, connector_not_configured for the rest', async () => {
+    // SYNC-1: the node claims the cooldown ATOMICALLY via claimSync (was the
+    // non-atomic checkSyncCooldown read).
+    const features = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => ({ blocked: false }), checkSyncCooldown: async () => ({ blocked: false }), recordSyncedMetrics: async () => ({ imported: 1, deduped: 0 }) } };
+    // CSV-only platform → structured honest-off, unchanged.
+    const off = await nodePack['feature.campaign-connectors.nodes.sync']({ features, inputs: { orgId: 'o1', platform: 'linkedin' } });
+    expect(off.status).toBe('failed');
+    expect(off.error?.code).toBe('connector_not_configured');
+    // Live platform without ctx.ads → capability-missing (no faking).
+    const noCtx = await nodePack['feature.campaign-connectors.nodes.sync']({ features, inputs: { orgId: 'o1', platform: 'google' } });
+    expect(noCtx.status).toBe('failed');
+    expect(noCtx.error?.code).toBe('host_capability_missing');
+    // Live platform with ctx.ads → pulls window:'yesterday' per dispatch and persists.
+    const asked: Array<Record<string, unknown>> = [];
+    const ads = {
+      listDispatches: async () => [{ platform: 'google', platformCampaignId: 'pc-1', platformAdSetId: 'ag', platformAdId: 'ad', campaignName: 'Promo', adAccountId: '123', createdAt: '2026-07-01T00:00:00Z' }],
+      getMetrics: async (a: Record<string, unknown>) => { asked.push(a); return { outcome: 'ok', platform: 'google', metrics: { impressions: 10, clicks: 2, spend: 3, ctr: 0.2, cpc: 1.5 } }; },
+    };
+    const ok = await nodePack['feature.campaign-connectors.nodes.sync']({ features, ads, inputs: { orgId: 'o1', platform: 'google' } });
+    expect(ok.status, JSON.stringify(ok)).toBe('success');
+    const outputs = (ok.outputs ?? {}) as Record<string, unknown>;
+    expect(outputs.outcome).toBe('synced');
+    expect(outputs.imported).toBe(1);
+    expect(asked[0]?.window).toBe('yesterday');
+  });
+
+  // SYNC-1: a lost atomic claim short-circuits to cooldown before any platform read.
+  it('sync node: a blocked atomic claim returns cooldown and never hits the platform', async () => {
+    const asked: Array<Record<string, unknown>> = [];
+    const features = { 'campaign-connectors': { importCsv: async () => ({}), claimSync: async () => ({ blocked: true, retryAtIso: '2026-07-02T00:00:00Z' }), recordSyncedMetrics: async () => ({ imported: 0, deduped: 0 }) } };
+    const ads = { listDispatches: async () => { asked.push({ called: true }); return []; }, getMetrics: async () => ({ outcome: 'ok', platform: 'google', metrics: {} }) };
+    const out = await nodePack['feature.campaign-connectors.nodes.sync']({ features, ads, inputs: { orgId: 'o1', platform: 'google' } });
+    expect(out.status).toBe('success');
+    expect((out.outputs as Record<string, unknown>).outcome).toBe('cooldown');
+    expect(asked.length).toBe(0); // claim lost → no listDispatches, no getMetrics
   });
 });

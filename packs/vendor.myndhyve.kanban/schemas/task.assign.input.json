@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.0/task.assign.input.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.1/task.assign.input.json",
   "title": "TaskAssignInput",
   "type": "object",
   "required": ["taskId", "assigneeId"],

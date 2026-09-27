@@ -1,0 +1,50 @@
+/**
+ * `ui-plugins` — español (ADR 0300, RFC 0117/0119).
+ */
+export const messages = {
+  eyebrow: 'Desarrollador',
+  title: 'Complementos de UI',
+  lede: 'Carga paquetes de complementos de front-end firmados y aislados (RFC 0117/0119).',
+
+  notEnabledTitle: 'Complementos de UI no está habilitado',
+  notEnabledBody: 'Pide a un administrador que habilite Complementos de UI para este inquilino.',
+
+  isolationLabel: 'Aislamiento',
+  boundaryExplainer: 'Un complemento descargado se ejecuta en un iframe aislado de origen cruzado y habla con el host solo por ui-plugin/1. Cuatro garantías:',
+  legIsolation: 'Aislado — origen opaco (sin allow-same-origin).',
+  legEgress: 'Egreso denegado — default-src \'none\', sin peticiones de red.',
+  legAllowlist: 'Limitado por lista — método no declarado → method_not_allowed.',
+  legNoByok: 'Sin BYOK — no existe método con credenciales.',
+
+  selfTestTitle: 'Autocomprobación del límite',
+  selfTestBlurb: 'Las cuatro garantías de arriba son afirmaciones. Esto comprueba las tres verificables mecánicamente, usando el mismo sandbox y CSP con que se monta un complemento real.',
+  selfTestRun: 'Ejecutar la autocomprobación',
+  selfTestRerun: 'Ejecutar de nuevo',
+  selfTestFrameTitle: 'Sonda de aislamiento (oculta)',
+  selfTestNoByokNote: 'No-BYOK se AFIRMA, no se sondea: es la ausencia de un método portador de credenciales en una lista cerrada, algo que una sonda no puede demostrar. Se muestra sin marca de aprobado en lugar de darle una que no ha ganado.',
+  outcome_pass: 'CORRECTO',
+  outcome_fail: 'FALLO',
+  outcome_running: 'comprobando…',
+  outcome_asserted: 'afirmado',
+  outcome_inconclusive: 'sin respuesta',
+  legForwarded: 'reenviado al host — NO rechazado',
+  legNoResponse: 'sin respuesta',
+  installedLabel: 'Complementos instalados',
+  noneTitle: 'Sin complementos instalados',
+  noneBody: 'Este host no sirve paquetes de complemento front-end.',
+
+  liveLabel: 'Complemento en vivo',
+  liveExplainer: 'El visor de referencia lee un artefacto de demostración por ui-plugin/1 y verifica las cuatro garantías.',
+  pluginLoading: 'Cargando complemento…',
+  pluginLoadFailed: 'No se pudo cargar el complemento',
+  listFailedLead: 'No se pudo cargar la lista de complementos:',
+  listFailedTitle: 'No se pudo cargar la lista de complementos',
+  isolationUnknown: 'Desconocido: no informado',
+  witnessUnavailableTitle: 'El testigo en vivo no se está mostrando',
+  witnessListFailedBody: 'La lista de complementos no se cargó, así que no hay nada que montar aquí. Esto NO es prueba de que el aislamiento falló, ni de que se mantuvo.',
+  witnessNoViewerBody: 'Este host no sirve ningún complemento visor de artefactos, así que no hay nada que montar. Las cuatro garantías de arriba quedan sin testigo en esta página.',
+  witnessArtifactFailedBody: 'No se pudo preparar el artefacto de demostración que lee el visor de referencia, así que el visor no se montó:',
+  tierTrusted: 'De confianza (firmado)',
+  tierCommunity: 'Comunidad (en sandbox)',
+  trustedLiveExplainer: 'Este plugin está firmado con una clave fijada por el operador y se ejecuta en el marco principal con integración completa. La firma y la revocación se verifican en cada carga.',
+} as const;

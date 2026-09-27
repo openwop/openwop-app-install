@@ -32,7 +32,7 @@ describe('Assistant feature (sqlite memory app)', () => {
     await __clearToggleStore();
     await __resetAssistantStore();
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
   afterAll(async () => {
@@ -74,7 +74,11 @@ describe('Assistant feature (sqlite memory app)', () => {
     };
     expect(enq.pendingAction.status).toBe('pending');
 
-    const approved = await jf<{ status: string }>(`/v1/host/openwop-app/assistant/pending-actions/${enq.pendingAction.actionId}/approve`, { method: 'POST' });
+    // ADR 0662 D2 — approve-what-you-see: the approver returns the hash of what they read.
+    const { getPendingAction } = await import('../src/features/assistant/assistantService.js');
+    const { contentHashOf } = await import('../src/features/assistant/actionApproval.js');
+    const row = await getPendingAction('default', enq.pendingAction.actionId);
+    const approved = await jf<{ status: string }>(`/v1/host/openwop-app/assistant/pending-actions/${enq.pendingAction.actionId}/approve`, { method: 'POST', body: JSON.stringify({ expectedContentHash: contentHashOf(row!) }) });
     expect(approved.status).toBe(200);
     expect(approved.body.status).toBe('approved');
   });

@@ -7,6 +7,7 @@
  * existing primitives — no bespoke CSS.
  */
 
+import { Button } from '../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { IconButton } from '../ui/IconButton.js';
@@ -115,9 +116,8 @@ export function PromptCard({ prompt: p, tierOneActive, onSelect, onEdit, onDelet
   const isUser = isUserPromptId(p.templateId);
   return (
     <div className="surface-card surface-card--interactive u-grid u-gap-2">
-      <button
-        type="button"
-        className="u-button-bare u-grid u-gap-2 u-w-full u-text-left"
+      <Button
+        variant="primary" fullWidth className="u-button-bare u-grid u-gap-2 u-text-left"
         onClick={() => onSelect(p)}
       >
         <div className="action-bar u-justify-between u-items-baseline u-gap-2">
@@ -138,7 +138,7 @@ export function PromptCard({ prompt: p, tierOneActive, onSelect, onEdit, onDelet
             <TierOneChips p={p} t={t} active={tierOneActive} />
           </div>
         )}
-      </button>
+      </Button>
       {isUser && (
         <div className="action-bar u-gap-2 u-justify-end">
           <PromptActions p={p} t={t} onEdit={onEdit} onDelete={onDelete} />
@@ -173,9 +173,9 @@ export function PromptRow({ prompt: p, tierOneActive, onSelect, onEdit, onDelete
         {p.tags && p.tags.length > 0 ? <code className="prompt-list-item-id">{refToString(p)}</code> : null}
       </div>
       <div className="list-row-actions action-bar u-gap-2">
-        <button type="button" className="secondary btn-sm" onClick={() => onSelect(p)}>
+        <Button variant="secondary" size="sm" onClick={() => onSelect(p)}>
           {t('usePromptAction')}
-        </button>
+        </Button>
         {isUser && <PromptActions p={p} t={t} onEdit={onEdit} onDelete={onDelete} />}
       </div>
     </div>

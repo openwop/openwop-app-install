@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest';
 import { composeAgentSystemPrompt } from '../src/host/agentPromptScaffold.js';
+import { promptDateStamp } from '../src/host/chatContext.js';
 
 const IRIS = 'You are Iris, the Chief of Staff. You hold a structured memory graph…';
 
@@ -20,6 +21,36 @@ describe('composeAgentSystemPrompt', () => {
     // Narrative-casting + handle framing present.
     expect(out).toContain('[Name]:');
     expect(out).toContain('"@name" is');
+  });
+
+  it('injects a temporal-grounding date line when `today` is passed, omits it otherwise', () => {
+    const withDate = composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David', today: 'Wednesday, 2026-07-15 (UTC)' });
+    expect(withDate).toContain("- Today's date is Wednesday, 2026-07-15 (UTC).");
+    // Grounding sits inside CONVERSATION CONTEXT, ahead of the user line.
+    expect(withDate.indexOf("Today's date")).toBeLessThan(withDate.indexOf('human user named David'));
+    // Pure/deterministic: no date unless the caller supplies one (keeps the
+    // workflow-node path's replay-anchor hash date-stable).
+    const without = composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David' });
+    expect(without).not.toContain("Today's date is");
+  });
+
+  it('promptDateStamp formats weekday + ISO date + zone deterministically (injected clock)', () => {
+    expect(promptDateStamp(new Date('2026-07-15T09:30:00.000Z'))).toBe('Wednesday, 2026-07-15 (UTC)');
+    // A late-UTC instant keeps the UTC calendar date (never drifts to local).
+    expect(promptDateStamp(new Date('2026-12-31T23:59:59.000Z'))).toBe('Thursday, 2026-12-31 (UTC)');
+  });
+
+  it('addresses a multi-word display name by its first token by default (ADR 0320)', () => {
+    const out = composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David Tufts' });
+    expect(out).toContain('human user named David Tufts'); // full name for reference
+    expect(out).toContain('Address them as David.');       // first name for address
+    expect(out).not.toContain('Address them as David Tufts');
+  });
+
+  it('honors an explicit preferred address name over the first-name default (ADR 0320)', () => {
+    const out = composeAgentSystemPrompt({ persona: 'Iris', systemPrompt: IRIS, userName: 'David Tufts', addressName: 'DT' });
+    expect(out).toContain('human user named David Tufts');
+    expect(out).toContain('Address them as DT.');
   });
 
   it('falls back to neutral second-person address for an anonymous user (no name invented)', () => {

@@ -17,9 +17,15 @@
 
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { appendStrategyRevision, deleteStrategyRevisions } from './revisions.js';
+import { computeStrategyProgress, listCheckInsByStrategy, deleteCheckInsFor } from './checkIns.js';
 import { OpenwopError } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { declarePiiFields } from '../../host/dataClassification.js';
+import { subjectKeyForms, ERASED_USER_REF } from '../../host/subjectErasureRedaction.js';
+import { eraseCheckInSubject } from './checkIns.js';
+import { eraseRevisionSubject } from './revisions.js';
+import { eraseCadenceSubject } from './cadence.js';
 import { cleanString, optionalCleanString } from '../../host/boundedStrings.js';
 import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import { getProject, resolveProjectAccess } from '../projects/projectsService.js';
@@ -29,11 +35,12 @@ import { indexStrategy, removeStrategy } from './strategyKnowledgeService.js';
 import {
   STRATEGY_LIMITS, STRATEGY_SCOPES, PLANNING_HORIZONS, STRATEGY_STATUSES,
   STRATEGY_CONFIDENCES, STRATEGY_RISKS, STRATEGY_LINK_KINDS, STRATEGY_HEALTH_STATES,
+  KR_MEASURE_KINDS, KR_DIRECTIONS, METRIC_SOURCE_KINDS,
   type Strategy, type StrategyScope, type PlanningHorizon, type StrategyStatus,
-  type StrategyHealthState,
+  type StrategyHealthState, type KrMeasure, type InitiativePlan,
   type StrategyObjective, type StrategyKeyResult,
   type StrategyInitiative, type StrategyLink, type StrategyPeriod,
-  type StrategyContextEntry, type StrategyRef, type StrategyHealthRow,
+  type StrategyContextEntry, type StrategyHealthRow,
 } from './types.js';
 
 const log = createLogger('features.strategy');
@@ -41,11 +48,21 @@ const log = createLogger('features.strategy');
 // STRAT-6 (ADR 0077) — a strategy's `summary` + `rationale` are free-text that can carry
 // personal data (named people, performance commentary); declare them so they're masked in
 // any log that emits a strategy row (defence-in-depth, like crm/profiles). `ownerUserId`/
-// `createdBy` are OPAQUE principals (RFC 0048), not PII. Deliberately NO retention purger:
+// `createdBy` are OPAQUE principals (RFC 0048), not PII — which is an argument about
+// MASKING, and was silently reused as an argument against a SUBJECT ERASER. It is not one:
+// anonymising opaque principal refs on a DSAR is exactly what `registerSubjectEraser` does
+// (see `projectsService.ts`, this file's closest sibling, which does it verbatim). ~30
+// features register one; strategy registered none, so a departed person stayed named on
+// every strategy, initiative, check-in, revision and cadence row they had touched. Neither
+// ratchet could see it: both bind on a `userId: string` field NAME. See
+// `eraseSubjectStrategy` below. Deliberately NO retention purger, though:
 // a strategy is intentional, long-lived org planning data (DELETE = soft archive), NOT the
 // incidental/abandoned PII the crm/comments/profiles purgers target — auto-deleting it on a
 // retention timer would be wrong.
-declarePiiFields('strategy.record', ['summary', 'rationale']);
+// R2 STR2-M7 — `accountableExecutive` is a human NAME by definition (the field's own
+// docs call it that) and was not declared, so it went unmasked into any log emitting a
+// strategy row — beside `summary`/`rationale`, which are declared for exactly that reason.
+declarePiiFields('strategy.record', ['summary', 'rationale', 'accountableExecutive']);
 
 const strategies = new DurableCollection<Strategy>('strategy:record', (s) => `${s.tenantId}::${s.id}`);
 
@@ -100,6 +117,48 @@ function parsePeriod(raw: unknown): StrategyPeriod {
   return period;
 }
 
+/** ADR 0231 — a 1–10 contribution weight (undefined ⇒ default 1 at read). */
+function optWeight(raw: unknown, field: string): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 1 || n > 10) {
+    throw new OpenwopError('validation_error', `Field \`${field}\` must be a number 1–10.`, 400, { field });
+  }
+  return Math.round(n);
+}
+
+function optNumber(raw: unknown, field: string): number | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  if (!Number.isFinite(n)) throw new OpenwopError('validation_error', `Field \`${field}\` must be a finite number.`, 400, { field });
+  return n;
+}
+
+/** ADR 0231 §C1/§C3 — the typed-measure block (additive; absent ⇒ unmeasured). */
+function parseMeasure(raw: unknown): KrMeasure | undefined {
+  if (raw === undefined || raw === null) return undefined;
+  const o = (typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const kind = oneOf(o.kind, KR_MEASURE_KINDS, 'measure.kind');
+  const m: KrMeasure = { kind };
+  const baseline = optNumber(o.baseline, 'measure.baseline');
+  const target = optNumber(o.target, 'measure.target');
+  const direction = optOneOf(o.direction, KR_DIRECTIONS, 'measure.direction');
+  const unit = optionalCleanString(o.unit, STRATEGY_LIMITS.label);
+  if (baseline !== undefined) m.baseline = baseline;
+  if (target !== undefined) m.target = target;
+  if (direction) m.direction = direction;
+  if (unit) m.unit = unit;
+  if (o.source !== undefined && o.source !== null) {
+    const s = (typeof o.source === 'object' ? o.source : {}) as Record<string, unknown>;
+    m.source = {
+      kind: oneOf(s.kind, METRIC_SOURCE_KINDS, 'measure.source.kind'),
+      orgId: reqId(s.orgId, 'measure.source.orgId'),
+      ...(optionalCleanString(s.query, STRATEGY_LIMITS.summary) ? { query: optionalCleanString(s.query, STRATEGY_LIMITS.summary) } : {}),
+    };
+  }
+  return m;
+}
+
 function parseKeyResult(raw: unknown): StrategyKeyResult {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const kr: StrategyKeyResult = { id: optId(o.id, 64) ?? randomUUID(), title: reqTitle(o.title, 'keyResult.title', STRATEGY_LIMITS.title) };
@@ -107,21 +166,36 @@ function parseKeyResult(raw: unknown): StrategyKeyResult {
   const current = optionalCleanString(o.current, STRATEGY_LIMITS.shortField);
   const unit = optionalCleanString(o.unit, STRATEGY_LIMITS.label);
   const status = optOneOf(o.status, STRATEGY_STATUSES, 'keyResult.status');
+  const measure = parseMeasure(o.measure);
+  const weight = optWeight(o.weight, 'keyResult.weight');
   if (target) kr.target = target;
   if (current) kr.current = current;
   if (unit) kr.unit = unit;
   if (status) kr.status = status;
+  if (measure) kr.measure = measure;
+  if (weight !== undefined) kr.weight = weight;
   return kr;
 }
 
 function parseObjective(raw: unknown): StrategyObjective {
   const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
   const krs = Array.isArray(o.keyResults) ? o.keyResults.slice(0, STRATEGY_LIMITS.maxKeyResults) : [];
+  const weight = optWeight(o.weight, 'objective.weight');
   return {
     id: optId(o.id, 64) ?? randomUUID(),
     title: reqTitle(o.title, 'objective.title', STRATEGY_LIMITS.title),
     keyResults: krs.map(parseKeyResult),
+    ...(weight !== undefined ? { weight } : {}),
   };
+}
+
+/** Strict `YYYY-MM-DD` (ADR 0234 — the idea-schedule date discipline). */
+function optIsoDate(raw: unknown, field: string): string | undefined {
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  if (typeof raw !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw) || Number.isNaN(Date.parse(raw))) {
+    throw new OpenwopError('validation_error', `Field \`${field}\` must be a YYYY-MM-DD date.`, 400, { field });
+  }
+  return raw;
 }
 
 function parseInitiative(raw: unknown): StrategyInitiative {
@@ -138,7 +212,58 @@ function parseInitiative(raw: unknown): StrategyInitiative {
     const ids = o.linkedProjectIds.map((p) => optId(p, 128)).filter((p): p is string => !!p).slice(0, STRATEGY_LIMITS.maxLinkedProjectIds);
     if (ids.length) init.linkedProjectIds = ids;
   }
+  // ADR 0234 §C6 — timeline fields. dependsOn membership (same-strategy ids)
+  // is validated by parseInitiatives once the whole set is known.
+  const startDate = optIsoDate(o.startDate, 'initiative.startDate');
+  const endDate = optIsoDate(o.endDate, 'initiative.endDate');
+  if (startDate) init.startDate = startDate;
+  if (endDate) init.endDate = endDate;
+  if (startDate && endDate && endDate < startDate) {
+    throw new OpenwopError('validation_error', 'initiative.endDate must not precede startDate.', 400, {});
+  }
+  if (Array.isArray(o.dependsOn)) {
+    const ids = o.dependsOn.map((d) => optId(d, 64)).filter((d): d is string => !!d).slice(0, 20);
+    if (ids.length) init.dependsOn = ids;
+  }
+  // ADR 0235 §D2 — the plan floor (finite non-negative numbers; currency label).
+  if (o.plan !== undefined && o.plan !== null) {
+    const p = (typeof o.plan === 'object' ? o.plan : {}) as Record<string, unknown>;
+    const plan: InitiativePlan = {};
+    const num = (raw: unknown, field: string): number | undefined => {
+      if (raw === undefined || raw === null) return undefined;
+      const n = typeof raw === 'number' ? raw : Number(raw);
+      if (!Number.isFinite(n) || n < 0) throw new OpenwopError('validation_error', `Field \`${field}\` must be a non-negative number.`, 400, { field });
+      return n;
+    };
+    const budgetAmount = num(p.budgetAmount, 'plan.budgetAmount');
+    const capacityPoints = num(p.capacityPoints, 'plan.capacityPoints');
+    const actualAmount = num(p.actualAmount, 'plan.actualAmount');
+    const actualPoints = num(p.actualPoints, 'plan.actualPoints');
+    const currency = optionalCleanString(p.budgetCurrency, 8);
+    if (budgetAmount !== undefined) plan.budgetAmount = budgetAmount;
+    if (capacityPoints !== undefined) plan.capacityPoints = capacityPoints;
+    if (actualAmount !== undefined) plan.actualAmount = actualAmount;
+    if (actualPoints !== undefined) plan.actualPoints = actualPoints;
+    if (currency) plan.budgetCurrency = currency;
+    if (Object.keys(plan).length) init.plan = plan;
+  }
   return init;
+}
+
+/** ADR 0235 §D3 — validate a one-level parent lens (architect Q2: strict at
+ *  write; grouping degrades silently at read). */
+async function validateParentStrategy(tenantId: string, orgId: string, parentId: string, selfId?: string): Promise<void> {
+  if (selfId !== undefined && parentId === selfId) {
+    throw new OpenwopError('validation_error', 'A strategy cannot be its own parent.', 400, {});
+  }
+  const parent = await getStrategy(tenantId, parentId);
+  if (!parent) throw new OpenwopError('not_found', 'Parent strategy not found.', 404, { parentStrategyId: parentId });
+  if (parent.orgId !== orgId) {
+    throw new OpenwopError('validation_error', 'A parent strategy must belong to the same organization.', 400, { parentStrategyId: parentId });
+  }
+  if (parent.parentStrategyId) {
+    throw new OpenwopError('validation_error', 'The hierarchy lens is one level: the chosen parent already has a parent.', 400, { parentStrategyId: parentId });
+  }
 }
 
 /** Validate one alignment link's discriminated shape (ADR 0079). */
@@ -164,7 +289,17 @@ function parseObjectives(raw: unknown): StrategyObjective[] {
 }
 
 function parseInitiatives(raw: unknown): StrategyInitiative[] {
-  return Array.isArray(raw) ? raw.slice(0, STRATEGY_LIMITS.maxInitiatives).map(parseInitiative) : [];
+  const parsed = Array.isArray(raw) ? raw.slice(0, STRATEGY_LIMITS.maxInitiatives).map(parseInitiative) : [];
+  // ADR 0234 — dependsOn must reference SAME-strategy initiatives (no dangling
+  // edges, no cross-strategy deps, no self-dependency).
+  const ids = new Set(parsed.map((i) => i.id));
+  for (const i of parsed) {
+    for (const dep of i.dependsOn ?? []) {
+      if (dep === i.id) throw new OpenwopError('validation_error', 'An initiative cannot depend on itself.', 400, { id: i.id });
+      if (!ids.has(dep)) throw new OpenwopError('validation_error', `initiative.dependsOn references an unknown initiative id: ${dep}.`, 400, { id: i.id, dep });
+    }
+  }
+  return parsed;
 }
 
 // ── filters ──────────────────────────────────────────────────────────────────
@@ -194,6 +329,44 @@ export async function subjectHasTenantScope(tenantId: string, subject: string | 
   return access.scopes.includes(scope);
 }
 
+/**
+ * The ONE `workspace:read` org predicate every projection hands to
+ * `resolveStrategyContext` / `resolveStrategyHealth` / `resolveStrategyTimeline`.
+ *
+ * ADR 0597 §Correction 1 — it lives here because there were THREE hand-written
+ * copies of this one-liner (`routes.canReadOrgPredicate`, `agentTools.orgReadPredicate`,
+ * and `surface.ts`'s `async () => true`, which is the copy that got the rule
+ * WRONG). A rule with N copies drifts at the copy nobody audited; that is
+ * SPC-2's shape, and it had already recurred inside the same feature.
+ *
+ * MEMOIZED PER CONSTRUCTION (ADR 0597 §Correction 5 / SPC-PERF): each call goes
+ * `subjectHasOrgScope → resolveEffectiveAccess → members.list()`, an UNCACHED
+ * full member-table scan. `GET /strategy/timeline` fans the projection across
+ * the whole readable portfolio, one call per (strategy × priority link) over an
+ * org id set that repeats almost entirely — 30 strategies × 5 links = 150 scans
+ * on a route the deploy notes already flag for read-budget fan-out. Construct
+ * ONE predicate per request and the scans collapse to O(distinct orgs).
+ *
+ * The cached value is the PROMISE, so concurrent callers (the portfolio route
+ * fans with `Promise.all`) share one scan rather than racing N. A rejection is
+ * evicted so a transient store error cannot poison the rest of the request.
+ * Authority cannot change mid-request, so there is nothing to re-evaluate —
+ * `resolveStrategyContext` has memoized the same boolean per resolve since
+ * ADR 0080 and this only widens that window to the request.
+ */
+export function orgReadPredicate(tenantId: string, subject: string | undefined): (orgId: string) => Promise<boolean> {
+  const cache = new Map<string, Promise<boolean>>();
+  return (orgId: string): Promise<boolean> => {
+    let p = cache.get(orgId);
+    if (!p) {
+      p = subjectHasOrgScope(tenantId, subject, orgId, 'workspace:read')
+        .catch((err: unknown) => { cache.delete(orgId); throw err; });
+      cache.set(orgId, p);
+    }
+    return p;
+  };
+}
+
 /** Can `subject` READ this strategy? (scope-aware — ADR 0079 §Correction.) */
 export async function canSubjectReadStrategy(tenantId: string, subject: string | undefined, s: Strategy): Promise<boolean> {
   if (s.scope === 'user') return subject === s.createdBy;
@@ -218,6 +391,8 @@ export interface CreateStrategyInput {
   objectives?: unknown;
   initiatives?: unknown;
   links?: unknown;
+  /** ADR 0235 §D3 — one-level parent lens (null clears on PATCH). */
+  parentStrategyId?: unknown;
 }
 
 /** Create a strategy in `orgId`. The caller's authority over `orgId` is gated at
@@ -252,10 +427,18 @@ export async function createStrategy(tenantId: string, orgId: string, createdBy:
   if (exec) strategy.accountableExecutive = exec;
   if (confidence) strategy.confidence = confidence;
   if (risk) strategy.risk = risk;
+  // ADR 0235 §D3 — one-level parent lens (validated strictly at write).
+  const parentId = optId(input.parentStrategyId, 64);
+  if (parentId) {
+    await validateParentStrategy(tenantId, orgId, parentId);
+    strategy.parentStrategyId = parentId;
+  }
   await strategies.put(strategy);
   // ADR 0100: keep the managed 'Strategy KB' fresh. Best-effort — never throws
   // into the CRUD; reconciles scope/status (shared+live ⇒ index, else remove).
   await indexStrategy(tenantId, strategy, createdBy);
+  // ADR 0230 §B4 — revision 1 (the pre-first-PATCH state must be restorable).
+  void appendStrategyRevision(strategy, createdBy).catch(() => {});
   return strategy;
 }
 
@@ -286,8 +469,9 @@ export interface UpdateStrategyPatch extends CreateStrategyInput {
 
 /** Patch a strategy (full-replace of any provided field). The route enforces
  *  config-authority for `scope`/`ownerUserId`/`orgId`/`status:archived`. `links`
- *  is NOT patched here — use `replaceLinks` (its own read-gate). */
-export async function updateStrategy(tenantId: string, id: string, patch: UpdateStrategyPatch): Promise<Strategy> {
+ *  is NOT patched here — use `replaceLinks` (its own read-gate). `actor` (ADR
+ *  0226 §B4) attributes the revision row; absent ⇒ the strategy's creator. */
+export async function updateStrategy(tenantId: string, id: string, patch: UpdateStrategyPatch, actor?: string): Promise<Strategy> {
   const existing = await getStrategy(tenantId, id);
   if (!existing) throw new OpenwopError('not_found', 'Strategy not found.', 404, { id });
   const next: Strategy = { ...existing, updatedAt: new Date().toISOString() };
@@ -307,10 +491,63 @@ export async function updateStrategy(tenantId: string, id: string, patch: Update
   applyOptional(next, 'confidence', patch.confidence, (v) => optOneOf(v, STRATEGY_CONFIDENCES, 'confidence'));
   applyOptional(next, 'risk', patch.risk, (v) => optOneOf(v, STRATEGY_RISKS, 'risk'));
   applyOptional(next, 'healthOverride', patch.healthOverride, (v) => optOneOf(v, STRATEGY_HEALTH_STATES, 'healthOverride'));
+  // ADR 0235 §D3 — parent lens: null clears; a value validates strictly.
+  if (patch.parentStrategyId !== undefined) {
+    if (patch.parentStrategyId === null) delete next.parentStrategyId;
+    else {
+      const parentId = optId(patch.parentStrategyId, 64);
+      if (!parentId) throw new OpenwopError('validation_error', 'parentStrategyId must be an id or null.', 400, {});
+      await validateParentStrategy(tenantId, next.orgId, parentId, next.id);
+      next.parentStrategyId = parentId;
+    }
+  }
   await strategies.put(next);
+  // ADR 0597 §4 (SPC-4B) — an ORG MOVE must evict the old org's KB doc.
+  // `indexStrategy` reconciles presence for the strategy's CURRENT org only, so
+  // a relocation left a frozen, still-`contentTrust:'trusted'` copy in the
+  // PREVIOUS org's Strategy KB that no later edit updated and no archive
+  // removed. Worse in the privatizing variant: `PATCH {orgId, scope:'user'}`
+  // made `shouldIndex` false, so `indexStrategy` removed from the NEW org (where
+  // nothing was ever written) and the now-private strategy stayed fully
+  // readable in the old org's shared KB — the exact inverse of the ADR 0100
+  // §CRITICAL carve-out.
+  //
+  // CORRECTED 2026-08-22 (ADR 0597 §Correction 6). This comment used to say
+  // "removal runs FIRST and unconditionally … so remove-then-index fails CLOSED
+  // … index-then-remove would fail OPEN." THAT REASONING IS FALSE, and it is
+  // what a future editor would have trusted while reordering these two lines:
+  //
+  //   1. BOTH `removeStrategy` and `indexStrategy` wrap everything in
+  //      `try/catch { log.warn }`. Neither can throw, so neither can abort the
+  //      other, so neither ordering can "fail closed" relative to the other.
+  //   2. They touch DISJOINT collections on a move — `collectionIdFor(existing.orgId)`
+  //      vs `collectionIdFor(next.orgId)`. Swapping the order changes nothing.
+  //      The asymmetry the old comment described does not exist.
+  //   3. The claimed recovery is unreachable in the direction that matters. If
+  //      the REMOVAL fails, `reindex-kb` on the old org runs
+  //      `backfillStrategyKb(tenantId, oldOrgId)` → `listStrategies(tenantId,
+  //      {orgId: oldOrgId})`, which filters `s.orgId === orgId`; the relocated
+  //      strategy's orgId is now the NEW org, so that sweep never visits it. No
+  //      sweep anywhere enumerates KB docs with no backing strategy. A failed
+  //      eviction is PERMANENT.
+  //
+  // The order is kept (evict the org you are leaving before you write the org
+  // you are joining reads naturally), but the SAFETY does not come from it — it
+  // comes from the eviction being OBSERVED. `removeStrategy` now reports its
+  // outcome, and a failure here is an ERROR, not a warn buried in the KB
+  // module: unlike an archive, a failed eviction on a MOVE leaves a
+  // `contentTrust:'trusted'` copy readable by an org the strategy has left, and
+  // nothing will ever clean it up.
+  if (next.orgId !== existing.orgId && !(await removeStrategy(tenantId, existing.orgId, next.id))) {
+    log.error('strategy_kb_relocation_eviction_failed', {
+      tenantId, strategyId: next.id, fromOrgId: existing.orgId, toOrgId: next.orgId,
+    });
+  }
   // ADR 0100: one hook covers update AND archive (archiveStrategy delegates
   // here) AND scope/status changes — indexStrategy reconciles presence.
   await indexStrategy(tenantId, next, next.createdBy);
+  // ADR 0230 §B4 — snapshot what PERSISTED (after the put), dedupe inside.
+  void appendStrategyRevision(next, actor ?? next.createdBy).catch(() => {});
   return next;
 }
 
@@ -322,26 +559,60 @@ function applyOptional<K extends keyof Strategy>(target: Strategy, key: K, raw: 
 }
 
 /** Soft-archive (shared strategies keep their history — ADR 0079 story #10). */
-export async function archiveStrategy(tenantId: string, id: string): Promise<Strategy> {
-  return updateStrategy(tenantId, id, { status: 'archived' });
+export async function archiveStrategy(tenantId: string, id: string, actor?: string): Promise<Strategy> {
+  return updateStrategy(tenantId, id, { status: 'archived' }, actor);
 }
 
 /** Hard-delete (permitted only for user-scoped drafts by their creator — route-gated). */
+/**
+ * R2 STR2-M7 — GDPR subject erasure across every subject-keyed field this feature owns:
+ * `Strategy.createdBy` / `.ownerUserId`, each `initiative.ownerUserId`, and (via their own
+ * modules) check-in `actor`/`decidedBy`, revision `actor` and cadence `ownerUserId`.
+ * ADR 0464's taxonomy: a strategy is a long-lived BUSINESS record, so every row survives
+ * and only the person-link is severed — the `projectsService` pattern.
+ */
+export async function eraseSubjectStrategy(tenantId: string, subjectKey: string): Promise<void> {
+  const forms = subjectKeyForms(subjectKey).forms;
+  for (const s of await strategies.list()) {
+    if (s.tenantId !== tenantId) continue;
+    const next = { ...s };
+    let touched = false;
+    if (forms.has(s.createdBy)) { next.createdBy = ERASED_USER_REF; touched = true; }
+    if (s.ownerUserId !== undefined && forms.has(s.ownerUserId)) { next.ownerUserId = ERASED_USER_REF; touched = true; }
+    const initiatives = s.initiatives.map((i) => {
+      if (i.ownerUserId === undefined || !forms.has(i.ownerUserId)) return i;
+      touched = true;
+      return { ...i, ownerUserId: ERASED_USER_REF };
+    });
+    if (!touched) continue;
+    await strategies.put({ ...next, initiatives });
+  }
+  await eraseCheckInSubject(tenantId, forms);
+  await eraseRevisionSubject(tenantId, forms);
+  await eraseCadenceSubject(tenantId, forms);
+}
+
 export async function hardDeleteStrategy(tenantId: string, id: string): Promise<boolean> {
   // Load FIRST for the orgId (the managed-collection id is org-qualified), so a
   // hard-delete also evicts the strategy from its 'Strategy KB' (ADR 0100).
   const existing = await getStrategy(tenantId, id);
   const deleted = await strategies.delete(`${tenantId}::${id}`);
   if (existing) await removeStrategy(tenantId, existing.orgId, id);
+  // ADR 0230 §B4 — revisions cascade with the record (no orphaned snapshots).
+  await deleteStrategyRevisions(tenantId, id).catch(() => {});
+  // ADR 0231 — check-ins cascade too.
+  await deleteCheckInsFor(tenantId, id).catch(() => {});
   return deleted;
 }
 
 /** Replace a strategy's links wholesale (the route validates target readability first). */
-export async function replaceLinks(tenantId: string, id: string, links: StrategyLink[]): Promise<Strategy> {
+export async function replaceLinks(tenantId: string, id: string, links: StrategyLink[], actor?: string): Promise<Strategy> {
   const existing = await getStrategy(tenantId, id);
   if (!existing) throw new OpenwopError('not_found', 'Strategy not found.', 404, { id });
   const next: Strategy = { ...existing, links: links.slice(0, STRATEGY_LIMITS.maxLinks), updatedAt: new Date().toISOString() };
   await strategies.put(next);
+  // ADR 0230 §B4 — link changes are content-bearing (alignment history matters).
+  void appendStrategyRevision(next, actor ?? next.createdBy).catch(() => {});
   return next;
 }
 
@@ -370,9 +641,37 @@ export async function strategiesLinkingBoard(tenantId: string, boardId: string):
   return strategiesLinking(tenantId, (l) => l.kind === 'advisory-board' && l.boardId === boardId);
 }
 
-/** A compact reference for chip projection into a consumer surface. */
-export function toStrategyRef(s: Strategy): StrategyRef {
-  return { id: s.id, title: s.title, scope: s.scope, status: s.status, horizon: s.planningHorizon };
+
+// ── the ONE per-link read gate over priority-matrix targets ───────────────────
+
+/**
+ * SPC-2 / ADR 0597 §2 — THE readability rule for a `priority-list` /
+ * `priority-idea` strategy link. Both projections that walk `strategy.links`
+ * call this: `resolveStrategyContext` below and `resolveStrategyTimeline`
+ * (`timeline.ts`).
+ *
+ * It exists because they DISAGREED. The context resolve required
+ * `canReadOrg(list.orgId)`; the timeline checked only that the list EXISTED,
+ * and `getScheduleStatus` performs no authorization of its own — so
+ * `GET /strategy/:id/timeline` returned idea titles, target dates and schedule
+ * states from orgs the caller cannot read, while `GET /:id/context` correctly
+ * withheld the same links. Two hand-written copies of one rule is what let one
+ * of them rot; there is now one copy, and a second projection that forgets to
+ * call it has to hand-roll `getList` to do so.
+ *
+ * The caller gets both facts because they mean different things: `list === null`
+ * is a MISSING target (the row was deleted), `readable === false` is an RBAC
+ * drop. `resolveStrategyContext` counts those separately (STRAT-2), the
+ * timeline silently omits either.
+ */
+export async function resolvePriorityLinkTarget(
+  listId: string,
+  loadList: (id: string) => Promise<Awaited<ReturnType<typeof getList>>>,
+  canReadOrg: (orgId: string) => Promise<boolean>,
+): Promise<{ list: Awaited<ReturnType<typeof getList>>; readable: boolean }> {
+  const list = await loadList(listId);
+  if (!list) return { list: null, readable: false };
+  return { list, readable: await canReadOrg(list.orgId) };
 }
 
 // ── context packet (cross-entity enrichment, RBAC-filtered via injected predicate) ──
@@ -480,16 +779,16 @@ export async function resolveStrategyContext(
             } else { droppedMissing += 1; }
           } else { droppedUnreadable += 1; }
         } else if (l.kind === 'priority-idea') {
-          const list = await cachedGetList(l.listId);
-          if (list && await readable(list.orgId)) {
+          const { list, readable: ok } = await resolvePriorityLinkTarget(l.listId, cachedGetList, readable);
+          if (list && ok) {
             const ideas = await cachedRankedIdeas(l.listId);
             const idea = ideas.find((i) => i.card.id === l.cardId);
             if (idea) entry.linkedPriorities.push({ listId: l.listId, cardId: l.cardId, title: idea.card.title, computedPriority: idea.computedPriority, rank: idea.rank });
             else droppedMissing += 1;
           } else if (!list) { droppedMissing += 1; } else { droppedUnreadable += 1; }
         } else if (l.kind === 'priority-list') {
-          const list = await cachedGetList(l.listId);
-          if (list && await readable(list.orgId)) {
+          const { list, readable: ok } = await resolvePriorityLinkTarget(l.listId, cachedGetList, readable);
+          if (list && ok) {
             entry.linkedPriorities.push({ listId: l.listId, title: list.name });
           } else if (!list) { droppedMissing += 1; } else { droppedUnreadable += 1; }
         }
@@ -521,7 +820,7 @@ export async function resolveStrategyContext(
 
 /** Project a resolved context entry to its compact health row (ADR 0080). One
  *  source for the REST `/health` route + the `getHealth` surface method. */
-export function toHealthRow(e: StrategyContextEntry): StrategyHealthRow {
+function toHealthRow(e: StrategyContextEntry): StrategyHealthRow {
   return { id: e.id, title: e.title, health: e.health?.health ?? 'on-track', ...(e.health?.signals ? { signals: e.health.signals } : {}) };
 }
 
@@ -542,14 +841,78 @@ export async function resolveStrategyHealth(
   canReadOrg: (orgId: string) => Promise<boolean>,
 ): Promise<StrategyHealthRow[]> {
   const entries = await resolveStrategyContext(tenantId, readableStrategies, callerSubject, canReadOrg);
-  return entries.map(toHealthRow);
+  const rows = entries.map(toHealthRow);
+  // ADR 0231 §C1 — merge read-time measurement signals (progress, staleness,
+  // pending proposals) into each row. Best-effort per strategy: a check-in
+  // read failure degrades to the link-derived signals, never a 500.
+  const byId = new Map(readableStrategies.map((s) => [s.id, s]));
+  // STRAT-PERF-1 (grade-code): ONE tenant-indexed check-in read for the whole
+  // portfolio; per-strategy reads re-scanned the same slice K times.
+  const checkInsByStrategy = await listCheckInsByStrategy(tenantId).catch(() => new Map<string, never[]>());
+  for (const row of rows) {
+    const s = byId.get(row.id);
+    if (!s || !row.signals) continue;
+    // ADR 0235 §D3 — carried verbatim; the FE groups (ungrouped on unreadable parent).
+    if (s.parentStrategyId) row.parentStrategyId = s.parentStrategyId;
+    // ADR 0235 §D2 — plan-vs-actual sums over initiatives carrying a plan block.
+    let bp = 0, ba = 0, cp = 0, ca = 0, hasPlan = false;
+    // R2 STR2-M1 — the old picker was `if (!currency && …) currency = …`: FIRST WINS. So
+    // initiatives of {100000 USD} and {50000 JPY} produced `budgetPlanned: 150000,
+    // budgetCurrency: "USD"` — a number that is not a quantity of anything, wearing a
+    // currency it did not earn. That row is returned by `GET /strategy/health` AND by the
+    // `openwop:strategy.get-health` agent tool, and the analyst prompt tells the model to
+    // report the signals verbatim, so it reaches a board memo as "$150,000 planned".
+    // Currencies are normalised (the field is free text, so `usd` and `USD` were two).
+    const currencies = new Set(
+      s.initiatives.map((i) => i.plan?.budgetCurrency?.trim().toUpperCase()).filter((c): c is string => !!c),
+    );
+    for (const i of s.initiatives) {
+      if (!i.plan) continue;
+      hasPlan = true;
+      bp += i.plan.budgetAmount ?? 0;
+      ba += i.plan.actualAmount ?? 0;
+      cp += i.plan.capacityPoints ?? 0;
+      ca += i.plan.actualPoints ?? 0;
+    }
+    if (hasPlan) {
+      // Capacity is POINTS — dimensionless, and additive whatever the money does.
+      row.signals.capacityPlanned = cp;
+      row.signals.capacityActual = ca;
+      if (currencies.size > 1) {
+        // Withhold the sums rather than label them with one of the currencies they are
+        // not in; say WHICH so a reader (or a model) can ask the right question.
+        row.signals.budgetMixedCurrency = true;
+        row.signals.budgetCurrencies = [...currencies].sort();
+      } else {
+        row.signals.budgetPlanned = bp;
+        row.signals.budgetActual = ba;
+        const only = [...currencies][0];
+        if (only) row.signals.budgetCurrency = only;
+      }
+    }
+    try {
+      const p = computeStrategyProgress(s, checkInsByStrategy.get(s.id) ?? []);
+      if (p.measuredKrCount > 0) {
+        if (p.progress !== undefined) row.signals.progress = p.progress;
+        row.signals.staleKrCount = p.staleKrCount;
+        row.signals.measuredKrCount = p.measuredKrCount;
+        row.signals.proposedCheckInCount = p.proposedCount;
+        // Verdict adjustment (conservative — ADR 0080 Open Q1 discipline): every
+        // measured KR stale ⇒ at-risk, unless already off-track.
+        if (p.staleKrCount === p.measuredKrCount && row.health === 'on-track' && !s.healthOverride) {
+          row.health = 'at-risk';
+        }
+      }
+    } catch { /* fail-soft */ }
+  }
+  return rows;
 }
 
 // ── advisor context block (ADR 0079 Phase 5) ──────────────────────────────────
 
 /** Format a resolved context packet as a compact, bounded PLAIN-TEXT block for an
  *  advisor system prompt. Pure (no I/O) — the caller resolves + RBAC-filters. */
-export function formatStrategyContextBlock(entries: StrategyContextEntry[]): string | null {
+function formatStrategyContextBlock(entries: StrategyContextEntry[]): string | null {
   if (entries.length === 0) return null;
   const lines: string[] = ['STRATEGIC CONTEXT (company planning the user has shared — you MAY reference or challenge it, but MUST NOT invent strategy facts not stated here):'];
   for (const e of entries) {
@@ -569,13 +932,29 @@ export function formatStrategyContextBlock(entries: StrategyContextEntry[]): str
   return lines.join('\n');
 }
 
+/** The outcome of resolving a set of context refs: the readable entries, plus how
+ *  many refs were dropped for a reason that is NOT authorization (M4). */
+export interface StrategyContextResolution {
+  entries: StrategyContextEntry[];
+  /** Archived + missing refs. **Unreadable refs are deliberately EXCLUDED** — the
+   *  count travels to a caller-neutral degradation ledger, and an authz-derived
+   *  number there would leak "someone else sees more than you" (ADVB-1's shape). */
+  droppedNonAuthz: number;
+}
+
 /**
  * Resolve a set of strategy ids into RBAC-filtered context entries for `subject`.
  * Unreadable / archived strategies and their unreadable linked entities are
- * silently omitted. Shared by the advisory-board context PREVIEW (returns the
- * entries) and the prompt block builder (formats them).
+ * omitted. Shared by the advisory-board context PREVIEW (returns the entries) and
+ * the prompt block builder (formats them).
  */
 export async function resolveStrategyEntriesByIds(tenantId: string, strategyIds: string[], subject: string | undefined): Promise<StrategyContextEntry[]> {
+  return (await resolveStrategyContextRefs(tenantId, strategyIds, subject)).entries;
+}
+
+/** As `resolveStrategyEntriesByIds`, but ALSO reports the non-authz shortfall so a
+ *  silently truncated grounding is reportable rather than served as complete. */
+export async function resolveStrategyContextRefs(tenantId: string, strategyIds: string[], subject: string | undefined): Promise<StrategyContextResolution> {
   const seen = new Set<string>();
   const readable: Strategy[] = [];
   // STRAT-5: a board's `contextRefs` can outlive the strategy it points at (archive is a
@@ -604,15 +983,22 @@ export async function resolveStrategyEntriesByIds(tenantId: string, strategyIds:
       droppedArchived, droppedUnreadable, droppedMissing,
     });
   }
-  if (readable.length === 0) return [];
-  return resolveStrategyContext(tenantId, readable, subject, (orgId) => subjectHasOrgScope(tenantId, subject, orgId, 'workspace:read'));
+  const droppedNonAuthz = droppedArchived + droppedMissing;
+  if (readable.length === 0) return { entries: [], droppedNonAuthz };
+  return {
+    entries: await resolveStrategyContext(tenantId, readable, subject, (orgId) => subjectHasOrgScope(tenantId, subject, orgId, 'workspace:read')),
+    droppedNonAuthz,
+  };
 }
 
 /**
  * Build the advisor strategy context block from a set of strategy ids (resolved +
- * RBAC-filtered for the convener). Returns null when nothing is readable. Used by
- * the advisory-board board-context resolver (ADR 0079 §Correction).
+ * RBAC-filtered for the convener). `block` is null when nothing is readable.
+ * `droppedNonAuthz` is the M4 shortfall — the refs that vanished (archived /
+ * deleted) rather than being withheld from this caller. Used by the
+ * advisory-board board-context resolver (ADR 0079 §Correction).
  */
-export async function buildStrategyContextBlock(tenantId: string, strategyIds: string[], subject: string | undefined): Promise<string | null> {
-  return formatStrategyContextBlock(await resolveStrategyEntriesByIds(tenantId, strategyIds, subject));
+export async function buildStrategyContextBlock(tenantId: string, strategyIds: string[], subject: string | undefined): Promise<{ block: string | null; droppedNonAuthz: number }> {
+  const { entries, droppedNonAuthz } = await resolveStrategyContextRefs(tenantId, strategyIds, subject);
+  return { block: formatStrategyContextBlock(entries), droppedNonAuthz };
 }

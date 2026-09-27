@@ -7,6 +7,7 @@
  * @see docs/adr/0137-ambient-work-graph.md
  */
 import type { Storage } from '../../storage/storage.js';
+import { runUnderWorkerContract } from '../../storage/eventEraAdapter.js';
 import { createLogger } from '../../observability/logger.js';
 import { clusterAndDetect } from './runSignature.js';
 import { upsertSuggestion } from './suggestionStore.js';
@@ -57,7 +58,7 @@ export async function processDueSweeps(deps: { storage: Storage }, listTenants: 
   const daySlot = new Date(now).toISOString().slice(0, 13); // hour slot
   for (const tenantId of await listTenants()) {
     try {
-      if (!(await deps.storage.claimIdempotency(`work-graph-sweep:${tenantId}:${daySlot}`, new Date(now).toISOString())).claimed) continue;
+      if (!(await deps.storage.claimOnce(`work-graph-sweep:${tenantId}:${daySlot}`, new Date(now).toISOString())).claimed) continue;
       await sweepTenant(deps, tenantId);
       swept++;
     } catch (err) {
@@ -78,7 +79,7 @@ export function startWorkGraphDaemon(deps: { storage: Storage }, listTenants: ()
     catch (err) { log.warn('work_graph_daemon_tick_error', { error: err instanceof Error ? err.message : String(err) }); }
     finally { running = false; }
   };
-  const timer = setInterval(() => void tick(), POLL_INTERVAL_MS);
+  const timer = setInterval(() => void runUnderWorkerContract(tick), POLL_INTERVAL_MS);
   if (typeof timer.unref === 'function') timer.unref();
   log.info('work_graph_daemon_started', { pollIntervalMs: POLL_INTERVAL_MS });
   return { stop: () => clearInterval(timer) };

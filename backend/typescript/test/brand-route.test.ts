@@ -24,7 +24,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -149,5 +149,106 @@ describe('brand — isolation + governance', () => {
     const stranger = client();
     await signup(stranger);
     expect((await stranger.del(`${B}/${id}`)).status).toBe(404);
+  });
+});
+
+describe('R2 BR-SP-4 — governance-field changes carry their own bar', () => {
+  it('the creator may set the INITIAL lock; preserving governance on a content edit needs no admin', async () => {
+    const { owner, orgId } = await ownerWithOrg();
+    const created = await owner.post(B, { orgId, name: 'SelfGov' });
+    const id = created.body.brand.id;
+    // Creator sets the initial lock (round-1 self-governance flow).
+    const locked = await owner.patch(`${B}/${id}`, { governance: { lockLevel: 'partial' } });
+    expect(locked.status, JSON.stringify(locked.body)).toBe(200);
+    // A content edit that ECHOES the current governance unchanged (what the
+    // R2 merge-preserving editor sends) does not trip the governance gate.
+    const echo = await owner.patch(`${B}/${id}`, { description: 'new copy', governance: { ...locked.body.brand.governance } });
+    expect(echo.status, JSON.stringify(echo.body)).toBe(200);
+  });
+
+  it('governanceChanged discriminates: echoes are NOT changes; lock/editors/approval/compliance edits ARE', async () => {
+    const { governanceChanged } = await import('../src/features/brand/routes.js');
+    const base = {
+      governance: { lockLevel: 'partial' as const, allowedEditors: ['u1', 'u2'], requireApproval: true, compliance: { blockPublish: 'critical' as const } },
+    } as never;
+    // Echo (what the merge-preserving editor sends) — order-insensitive.
+    expect(governanceChanged(base, { governance: { lockLevel: 'partial', allowedEditors: ['u2', 'u1'], requireApproval: true, compliance: { blockPublish: 'critical' as const } } })).toBe(false);
+    expect(governanceChanged(base, {})).toBe(false);
+    // Each governed field flips the gate on.
+    expect(governanceChanged(base, { governance: { lockLevel: 'none', allowedEditors: ['u1', 'u2'], requireApproval: true, compliance: { blockPublish: 'critical' } } })).toBe(true);
+    expect(governanceChanged(base, { governance: { lockLevel: 'partial', allowedEditors: ['u1'], requireApproval: true, compliance: { blockPublish: 'critical' } } })).toBe(true);
+    // The REVIEW-CAUGHT BYPASS: absent fields sanitize to DEFAULTS (editors
+    // stripped, approval off, compliance dropped, lock 'none') — the old raw
+    // field-presence diff called these "unchanged". They are wipes; they trip.
+    expect(governanceChanged(base, { governance: { lockLevel: 'partial' } })).toBe(true);
+    expect(governanceChanged(base, { governance: {} })).toBe(true);
+    expect(governanceChanged(base, { governance: null })).toBe(true); // garbage sanitizes to defaults — a change, not a 500
+  });
+});
+
+describe('R2 BR-SP-5 — optimistic concurrency', () => {
+  it('a stale expectedUpdatedAt is a 409, never a silent clobber; a fresh one saves', async () => {
+    const { owner, orgId } = await ownerWithOrg();
+    const created = await owner.post(B, { orgId, name: 'CasBrand' });
+    const id = created.body.brand.id;
+    const v1 = created.body.brand.updatedAt as string;
+    // A concurrent edit moves updatedAt.
+    const second = await owner.patch(`${B}/${id}`, { description: 'edit B' });
+    expect(second.status).toBe(200);
+    // The stale editor (still holding v1) must get a conflict.
+    const stale = await owner.patch(`${B}/${id}`, { description: 'edit A', expectedUpdatedAt: v1 });
+    expect(stale.status, JSON.stringify(stale.body)).toBe(409);
+    // And the fresh token saves.
+    const fresh = await owner.patch(`${B}/${id}`, { description: 'edit A2', expectedUpdatedAt: second.body.brand.updatedAt });
+    expect(fresh.status, JSON.stringify(fresh.body)).toBe(200);
+  });
+
+  it('R2 BR-SP-1 — a rename-only save PRESERVES governance + agent-authored voice fields (route-level)', async () => {
+    const { owner, orgId } = await ownerWithOrg();
+    const created = await owner.post(B, {
+      orgId, name: 'MergeBrand',
+      voiceProfile: { voice: 'warm', samplePhrases: ['hello there'] },
+      governance: { lockLevel: 'partial', allowedEditors: ['user:listed'], requireApproval: true },
+    });
+    const id = created.body.brand.id;
+    // What the R2 merge-preserving editor sends for a rename: full facets
+    // spread from the loaded brand with only edited keys overridden.
+    const b = created.body.brand;
+    const renamed = await owner.patch(`${B}/${id}`, {
+      name: 'MergeBrand v2',
+      voiceProfile: { ...b.voiceProfile, voice: 'warm' },
+      governance: { ...b.governance },
+      expectedUpdatedAt: b.updatedAt,
+    });
+    expect(renamed.status, JSON.stringify(renamed.body)).toBe(200);
+    expect(renamed.body.brand.voiceProfile.samplePhrases).toEqual(['hello there']);
+    expect(renamed.body.brand.governance.allowedEditors).toEqual(['user:listed']);
+    expect(renamed.body.brand.governance.requireApproval).toBe(true);
+  });
+});
+
+describe('brand — guardrail audit trail (ADR 0354 P5 / BRAND-CODE-3)', () => {
+  it('a PATCH through the route audits the SIGNED-IN user as actor, never the "editor" default', async () => {
+    const { owner, userId, orgId } = await ownerWithOrg();
+    const created = await owner.post(B, { orgId, name: 'Audited Brand' });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const id = created.body.brand.id;
+
+    // Edit a guardrail-relevant field over HTTP (keyPhrases is an AUDIT_FIELD).
+    const patched = await owner.patch(`${B}/${id}`, { keyPhrases: { bannedPhrases: ['synergy'] } });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+
+    const audit = await owner.get(`${B}/${id}/audit`);
+    expect(audit.status, JSON.stringify(audit.body)).toBe(200);
+    const rows = audit.body.audit as Array<{ actor: string; changes: Array<{ field: string }> }>;
+    expect(rows.length).toBeGreaterThan(0);
+    // Newest-first: the newest row records the signed-in user as actor.
+    expect(rows[0].actor).toBe(userId);
+    // …and the PATCH's guardrail diff row (keyPhrases) carries that user too.
+    const patchRow = rows.find((r) => r.changes.some((c) => c.field === 'keyPhrases'));
+    expect(patchRow, JSON.stringify(rows)).toBeTruthy();
+    expect(patchRow!.actor).toBe(userId);
+    // BRAND-CODE-3 regression pin: no route-driven row falls back to 'editor'.
+    for (const r of rows) expect(r.actor).not.toBe('editor');
   });
 });

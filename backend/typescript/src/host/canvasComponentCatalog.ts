@@ -22,7 +22,11 @@ const log = createLogger('host.canvasCatalog');
  *  widget; the same field shape constrains what the model may set. */
 export interface ComponentPropDef {
   name: string;
-  type: 'string' | 'number' | 'boolean' | 'enum' | 'color' | 'longtext';
+  /** `screen` (ADR 0305 Phase C) is a string screen-id reference — the editor
+   *  renders a screen picker; cross-screen existence is soft-validated at the
+   *  document level (feature `validateAppDoc`), not here (a node-level check
+   *  can't see the screens facet). */
+  type: 'string' | 'number' | 'boolean' | 'enum' | 'color' | 'longtext' | 'screen' | 'dataSource' | 'mediaRef' | 'stringlist';
   label?: string;
   /** Allowed values when `type:'enum'`. */
   options?: readonly string[];
@@ -35,9 +39,17 @@ export interface ComponentDef {
   type: string;
   label: string;
   description?: string;
-  category: 'layout' | 'input' | 'display' | 'media' | 'navigation' | 'data';
+  category: 'layout' | 'input' | 'display' | 'media' | 'navigation' | 'data' | 'text' | 'outline';
   /** Whether this component may contain child components (a container). */
   acceptsChildren?: boolean;
+  /** ADR 0344 2c (all optional; only meaningful on containers): a closed list
+   *  of child types this container accepts, and count bounds. allowedChildTypes
+   *  + maxChildren are enforced HARD here (never a legitimate state);
+   *  minChildren is advisory — document validators surface it as a SOFT
+   *  warning (a container being assembled legitimately has too few mid-edit). */
+  allowedChildTypes?: readonly string[];
+  minChildren?: number;
+  maxChildren?: number;
   props?: readonly ComponentPropDef[];
 }
 
@@ -107,7 +119,24 @@ export function validateComponentTree(canvasTypeId: string, nodes: unknown, base
     }
     if (node.children !== undefined && Array.isArray(node.children) && node.children.length > 0) {
       if (!def.acceptsChildren) errors.push({ path: `${path}.children`, code: 'illegal_children', message: `'${type}' is not a container` });
-      else errors.push(...validateComponentTree(canvasTypeId, node.children, `${path}.children`));
+      else {
+        // ADR 0344 2c — HARD child constraints (allowed types + max count).
+        // minChildren stays a document-level SOFT warning (mid-edit rule).
+        const allowedKids = def.allowedChildTypes;
+        if (allowedKids) {
+          node.children.forEach((c, ci) => {
+            const ctRaw = (c as { type?: unknown } | null)?.type;
+            const ct = typeof ctRaw === 'string' ? ctRaw : '';
+            if (!allowedKids.includes(ct)) {
+              errors.push({ path: `${path}.children[${ci}]`, code: 'illegal_children', message: `'${type}' only accepts children of: ${allowedKids.join(', ')}` });
+            }
+          });
+        }
+        if (typeof def.maxChildren === 'number' && node.children.length > def.maxChildren) {
+          errors.push({ path: `${path}.children`, code: 'illegal_children', message: `'${type}' accepts at most ${def.maxChildren} children` });
+        }
+        errors.push(...validateComponentTree(canvasTypeId, node.children, `${path}.children`));
+      }
     }
   });
   return errors;
@@ -115,7 +144,9 @@ export function validateComponentTree(canvasTypeId: string, nodes: unknown, base
 
 function propValueOk(pd: ComponentPropDef, val: unknown): boolean {
   switch (pd.type) {
-    case 'string': case 'longtext': case 'color': return typeof val === 'string';
+    case 'string': case 'longtext': case 'color': case 'screen': case 'dataSource':
+    case 'mediaRef': return typeof val === 'string';
+    case 'stringlist': return Array.isArray(val) && val.length <= 40 && val.every((x) => typeof x === 'string' && x.length <= 400);
     case 'number': return typeof val === 'number' && Number.isFinite(val);
     case 'boolean': return typeof val === 'boolean';
     case 'enum': return typeof val === 'string' && (pd.options ?? []).includes(val);

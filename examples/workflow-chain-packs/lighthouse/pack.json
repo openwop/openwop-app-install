@@ -1,37 +1,53 @@
 {
   "name": "core.openwop.workflows.lighthouse",
-  "version": "1.0.0",
+  "version": "1.1.9",
   "kind": "workflow-chain",
   "description": "Real-work workflow pack (RFC 0013, ADR 0149 / ADR 0155 follow-on). The five zero-config 'lighthouse' workflows from the ADR 0149 catalog — Lead Triage, Account Brief, Renewal & Churn-Risk Digest, RFP Response, and Post-Meeting Follow-up — authored entirely over node typeIds shipped with this host (feature.crm/kb/analytics + core.ai.chatCompletion + core.chat.approvalGate + core.openwop.integration.*). Each rides real tenant data through the feature node packs, reasons with the LLM node, gates every external send behind a human approval, and delivers a usable artifact. Tenant-specific values are RUN PARAMETERS (never hardcoded) so the expansion stays replay-deterministic. Picking one in the builder instantiates a fully-editable, runnable, assignable workflow.",
   "author": "openwop",
   "license": "Apache-2.0",
-  "engines": { "openwop": ">=1.0.0" },
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": ["Sales"],
   "chains": [
     {
       "chainId": "lighthouse.lead-triage",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Inbound Lead Triage & Routing",
-      "description": "Enrich and score an inbound lead, draft a first-touch reply, gate it for review, then send and log it. Real CRM data via feature.crm; every send behind a human approval.",
+      "description": "Enrich and score an inbound lead, draft a first-touch reply, gate it for review, then send and log it. Real CRM data via feature.crm; every send behind a human approval. ADR 0582 §11 — the send hangs off a `truthy approved` conditioned edge AND the drafted text is routed THROUGH the gate (`draft.content → approve.artifact → send.text`), so a REJECTED review sends nothing. Both halves are load-bearing: `core.chat.approvalGate` returns status:'success' on reject too, and a conditioned edge ALONE is not enough — an unconditional sibling data edge into the send node satisfies `all_success` by itself and would mail the draft anyway.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": [],
+        "required": ["recipientEmail", "senderEmail"],
         "properties": {
-          "firstTouchTone": { "type": "string", "default": "friendly, concise, and helpful", "description": "Tone for the drafted first-touch reply." }
+          "firstTouchTone": { "type": "string", "default": "friendly, concise, and helpful", "description": "Tone for the drafted first-touch reply." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "Following up on your enquiry", "description": "Subject line for the sent email." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
           { "id": "triage", "typeId": "feature.crm.nodes.triage-enriched", "name": "Enrich & score lead", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft first-touch reply", "position": { "x": 260, "y": 0 }, "config": { "systemPrompt": "You are a sales development rep. Using the enriched, scored lead, draft a {{params.firstTouchTone}} first-touch reply tailored to the lead's context and likely intent. Keep it short and specific." }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Approve before send", "position": { "x": 520, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "send", "typeId": "core.openwop.integration.email-send", "name": "Send first-touch email", "position": { "x": 780, "y": 0 }, "config": {}, "inputs": {} }
+          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft first-touch reply", "position": { "x": 260, "y": 0 }, "config": { "systemPrompt": "You are a sales development rep. Using the enriched, scored lead, draft a {{params.firstTouchTone}} first-touch reply tailored to the lead's context and likely intent. Keep it short and specific.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Approve before send", "position": { "x": 520, "y": 0 }, "config": { "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — the email is not sent", "position": { "x": 780, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "send", "typeId": "core.openwop.integration.email-send", "name": "Send first-touch email", "position": { "x": 780, "y": 0 }, "config": {
+            "from": "{{params.senderEmail}}"
+          }, "inputs": {
+            "to": "{{params.recipientEmail}}",
+            "subject": "{{params.emailSubject}}"
+          } }
         ],
         "edges": [
           { "from": "triage", "to": "draft" },
-          { "from": "draft", "to": "approve" },
-          { "from": "approve", "to": "send" }
+          { "from": "draft.content", "to": "approve.artifact" },
+          { "from": "approve.artifact", "to": "send.text", "condition": { "type": "truthy", "left": "approved" } },
+          { "from": "approve", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } }
         ]
       },
       "outputs": {
@@ -42,29 +58,35 @@
       "chainId": "lighthouse.account-brief",
       "version": "1.0.0",
       "label": "Account Brief & Next-Step Draft",
-      "description": "Pull a company profile and its deals, synthesize an account brief with recommended next steps and a draft outreach, gate it, then notify the owner. Real CRM data; advisory send behind approval.",
+      "description": "Pull a company profile and its deals, synthesize an account brief with recommended next steps and a draft outreach, gate it, then notify the owner. Real CRM data; advisory send behind approval. ADR 0582 §11 — the notification hangs off a `truthy approved` conditioned edge and the brief is routed THROUGH the gate (`brief.content → approve.artifact → notify.message`), so a REJECTED review notifies no one.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["companyId"],
+        "required": ["orgId", "companyId"],
         "properties": {
-          "companyId": { "type": "string", "description": "The CRM company id to brief." }
+          "orgId": { "type": "string", "description": "The org the CRM company/deals belong to." },
+          "companyId": { "type": "string", "description": "The CRM company id to brief." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "company", "typeId": "feature.crm.nodes.get-company", "name": "Get company", "position": { "x": 0, "y": 0 }, "config": { "companyId": "{{params.companyId}}" }, "inputs": {} },
-          { "id": "deals", "typeId": "feature.crm.nodes.list-deals", "name": "List deals", "position": { "x": 0, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "brief", "typeId": "core.ai.chatCompletion", "name": "Write brief + next steps", "position": { "x": 300, "y": 80 }, "config": { "systemPrompt": "You are a sales strategist. Using the company profile and its deals, write a concise account brief for company {{params.companyId}}: current state, risks, and 3 recommended next steps, plus a short draft outreach the owner can send." }, "inputs": {} },
+          { "id": "company", "typeId": "feature.crm.nodes.get-company", "name": "Get company", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "companyId": "{{params.companyId}}" }, "inputs": {} },
+          { "id": "deals", "typeId": "feature.crm.nodes.list-deals", "name": "List deals", "position": { "x": 0, "y": 160 }, "config": { "orgId": "{{params.orgId}}", "companyId": "{{params.companyId}}" }, "inputs": {} },
+          { "id": "brief", "typeId": "core.ai.chatCompletion", "name": "Write brief + next steps", "position": { "x": 300, "y": 80 }, "config": { "systemPrompt": "You are a sales strategist. Using the company profile and its deals, write a concise account brief for company {{params.companyId}}: current state, risks, and 3 recommended next steps, plus a short draft outreach the owner can send.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
           { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Review brief", "position": { "x": 560, "y": 80 }, "config": {}, "inputs": {} },
-          { "id": "notify", "typeId": "core.openwop.integration.notification-push", "name": "Notify owner", "position": { "x": 820, "y": 80 }, "config": {}, "inputs": {} }
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Notify owner", "position": { "x": 820, "y": 80 }, "config": { "audience": "tenant" }, "inputs": { "title": "Account Brief & Next-Step Draft" } }
         ],
         "edges": [
-          { "from": "company", "to": "brief" },
-          { "from": "deals", "to": "brief" },
-          { "from": "brief", "to": "approve" },
-          { "from": "approve", "to": "notify" }
+          { "from": "company", "to": "brief.company" },
+          { "from": "deals", "to": "brief.deals" },
+          { "from": "brief.content", "to": "approve.artifact" },
+          { "from": "approve.artifact", "to": "notify.message", "condition": { "type": "truthy", "left": "approved" } }
         ]
       },
       "outputs": {
@@ -73,29 +95,35 @@
     },
     {
       "chainId": "lighthouse.renewal-risk",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Renewal & Churn-Risk Digest",
       "description": "Combine open deals with usage analytics to score renewal/churn risk, then push an at-risk list with save plays to the CSM. Real CRM + analytics data; advisory, no external send.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": [],
+        "required": ["orgId"],
         "properties": {
-          "segment": { "type": "string", "default": "all active accounts", "description": "Account segment to assess." }
+          "orgId": { "type": "string", "description": "The org whose open deals + usage analytics to assess." },
+          "segment": { "type": "string", "default": "all active accounts", "description": "Account segment to assess." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "deals", "typeId": "feature.crm.nodes.list-deals", "name": "List open deals", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "usage", "typeId": "feature.analytics.nodes.query", "name": "Query usage analytics", "position": { "x": 0, "y": 160 }, "config": {}, "inputs": {} },
-          { "id": "score", "typeId": "core.ai.chatCompletion", "name": "Score risk + save plays", "position": { "x": 300, "y": 80 }, "config": { "systemPrompt": "You are a customer-success analyst. For {{params.segment}}, combine the open deals with the usage analytics to score renewal/churn risk. Produce a ranked at-risk list with the driver of risk and a concrete save play for each." }, "inputs": {} },
-          { "id": "notify", "typeId": "core.openwop.integration.notification-push", "name": "Push digest to CSM", "position": { "x": 560, "y": 80 }, "config": {}, "inputs": {} }
+          { "id": "deals", "typeId": "feature.crm.nodes.list-deals", "name": "List open deals", "position": { "x": 0, "y": 0 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "usage", "typeId": "feature.analytics.nodes.query", "name": "Query usage analytics", "position": { "x": 0, "y": 160 }, "config": { "orgId": "{{params.orgId}}" }, "inputs": {} },
+          { "id": "score", "typeId": "core.ai.chatCompletion", "name": "Score risk + save plays", "position": { "x": 300, "y": 80 }, "config": { "systemPrompt": "You are a customer-success analyst. For {{params.segment}}, combine the open deals with the usage analytics to score renewal/churn risk. Produce a ranked at-risk list with the driver of risk and a concrete save play for each.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Push digest to CSM", "position": { "x": 560, "y": 80 }, "config": { "audience": "tenant" }, "inputs": { "title": "Renewal & Churn-Risk Digest" } }
         ],
         "edges": [
-          { "from": "deals", "to": "score" },
-          { "from": "usage", "to": "score" },
-          { "from": "score", "to": "notify" }
+          { "from": "deals", "to": "score.deals" },
+          { "from": "usage", "to": "score.usage" },
+          { "from": "score.content", "to": "notify.message" }
         ]
       },
       "outputs": {
@@ -104,22 +132,33 @@
     },
     {
       "chainId": "lighthouse.rfp-response",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "RFP / Proposal Response Assembly",
       "description": "Retrieve answers and past proposals from the knowledge base, draft an RFP response grounded in them, and gate it for SME review. Real KB data via feature.kb RAG.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["rfpText"],
+        "required": ["rfpText", "orgId", "collectionId"],
         "properties": {
-          "rfpText": { "type": "string", "description": "The RFP requirements text to respond to." }
+          "rfpText": { "type": "string", "description": "The RFP requirements text to respond to." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "orgId": { "type": "string", "description": "The org whose knowledge base is searched. Must be the same org the collection belongs to, or nothing is found." },
+          "collectionId": { "type": "string", "description": "The KB collection id to search (create via the Knowledge feature or knowledge-sync)." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "retrieve", "typeId": "feature.kb.nodes.rag", "name": "Retrieve KB answers", "position": { "x": 0, "y": 0 }, "config": { "query": "{{params.rfpText}}" }, "inputs": {} },
-          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft RFP response", "position": { "x": 300, "y": 0 }, "config": { "systemPrompt": "You are a proposals writer. Draft a structured RFP response to the requirements below, grounded ONLY in the retrieved knowledge-base answers and past proposals — flag any requirement the KB does not cover. Requirements: {{params.rfpText}}" }, "inputs": {} },
+          { "id": "retrieve", "typeId": "feature.kb.nodes.rag", "name": "Retrieve KB answers", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {
+              "query": "{{params.rfpText}}",
+              "orgId": "{{params.orgId}}",
+              "collectionId": "{{params.collectionId}}"
+            } },
+          { "id": "draft", "typeId": "core.ai.chatCompletion", "name": "Draft RFP response", "position": { "x": 300, "y": 0 }, "config": { "systemPrompt": "You are a proposals writer. Draft a structured RFP response to the requirements below, grounded ONLY in the retrieved knowledge-base answers and past proposals — flag any requirement the KB does not cover. Requirements: {{params.rfpText}}",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
           { "id": "approve", "typeId": "core.chat.approvalGate", "name": "SME review", "position": { "x": 560, "y": 0 }, "config": {}, "inputs": {} }
         ],
         "edges": [
@@ -133,27 +172,42 @@
     },
     {
       "chainId": "lighthouse.post-meeting",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Post-Meeting Follow-up",
-      "description": "Extract decisions, action items, and owners from a meeting transcript, draft a follow-up email, gate it, then send. Transcript supplied as a run parameter; every send behind a human approval.",
+      "description": "Extract decisions, action items, and owners from a meeting transcript, draft a follow-up email, gate it, then send. Transcript supplied as a run parameter; every send behind a human approval. ADR 0582 §11 — the send hangs off a `truthy approved` conditioned edge and the drafted text is routed THROUGH the gate (`extract.content → approve.artifact → send.text`), so a REJECTED review sends nothing.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["transcript"],
+        "required": ["recipientEmail", "senderEmail", "transcript"],
         "properties": {
-          "transcript": { "type": "string", "description": "The meeting transcript to summarize." }
+          "transcript": { "type": "string", "description": "The meeting transcript to summarize." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "Recap and next steps", "description": "Subject line for the sent email." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "extract", "typeId": "core.ai.chatCompletion", "name": "Extract actions + draft follow-up", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "You are an executive assistant. From the meeting transcript below, extract the decisions, action items, and their owners, then draft a clear follow-up email summarizing them with due dates where stated. Transcript: {{params.transcript}}" }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Approve follow-up", "position": { "x": 300, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "send", "typeId": "core.openwop.integration.email-send", "name": "Send follow-up", "position": { "x": 560, "y": 0 }, "config": {}, "inputs": {} }
+          { "id": "extract", "typeId": "core.ai.chatCompletion", "name": "Extract actions + draft follow-up", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "You are an executive assistant. From the meeting transcript below, extract the decisions, action items, and their owners, then draft a clear follow-up email summarizing them with due dates where stated. Transcript: {{params.transcript}}",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Approve follow-up", "position": { "x": 300, "y": 0 }, "config": { "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — the email is not sent", "position": { "x": 780, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "send", "typeId": "core.openwop.integration.email-send", "name": "Send follow-up", "position": { "x": 560, "y": 0 }, "config": {
+            "from": "{{params.senderEmail}}"
+          }, "inputs": {
+            "to": "{{params.recipientEmail}}",
+            "subject": "{{params.emailSubject}}"
+          } }
         ],
         "edges": [
-          { "from": "extract", "to": "approve" },
-          { "from": "approve", "to": "send" }
+          { "from": "extract.content", "to": "approve.artifact" },
+          { "from": "approve.artifact", "to": "send.text", "condition": { "type": "truthy", "left": "approved" } },
+          { "from": "approve", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } }
         ]
       },
       "outputs": {

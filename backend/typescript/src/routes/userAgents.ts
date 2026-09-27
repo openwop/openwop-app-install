@@ -19,12 +19,19 @@
  */
 
 import type { Express } from 'express';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type { Storage } from '../storage/storage.js';
 import type { UserAgentRecord } from '../types.js';
 import { OpenwopError } from '../types.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
 import { createLogger } from '../observability/logger.js';
+import {
+  canonicalRequestDigest,
+  idempotencyLeaseMs,
+  redactKey,
+  type IdempotentEndpoint,
+} from '../host/idempotentResponse.js';
+import { idempotencyOutcomeOf, recordIdempotencyClaim } from '../observability/metricSeams.js';
 
 const log = createLogger('routes.userAgents');
 
@@ -59,68 +66,75 @@ interface Deps {
   storage: Storage;
 }
 
-/** Per `idempotency.md §Layer 1`: same Idempotency-Key + different
- *  request body MUST return 409. Mirrors the in-memory body-hash
- *  table from `routes/runs.ts` — survives same-process replays;
- *  resets on restart (acceptable: persisted-record path serves the
- *  cached response from disk; body-mismatch detection is a bonus).
- *  Kept local to this module rather than shared so each route's
- *  idempotency surface evolves independently. */
-const idempotencyBodyHashes = new Map<string, string>();
+/** ADR 0549 P0 — this route's entry in the ledger's closed endpoint union. */
+const AGENTS_ENDPOINT: IdempotentEndpoint = 'POST:/v1/host/openwop-app/agents';
 
-function hashRequestBody(body: unknown): string {
-  // Sort object keys at every level before serializing so two
-  // equivalent requests whose clients varied key order between
-  // retries hash identically. Matches the `routes/runs.ts` recipe.
-  function sortDeep(v: unknown): unknown {
-    if (v === null || typeof v !== 'object') return v;
-    if (Array.isArray(v)) return v.map(sortDeep);
-    const out: Record<string, unknown> = {};
-    for (const k of Object.keys(v as Record<string, unknown>).sort()) {
-      out[k] = sortDeep((v as Record<string, unknown>)[k]);
-    }
-    return out;
-  }
-  return createHash('sha256').update(JSON.stringify(sortDeep(body))).digest('hex');
-}
+/* ADR 0549 P0 — the local `idempotencyBodyHashes` Map and `hashRequestBody`
+ * are gone, and so is the reasoning that kept them here: "Kept local to this
+ * module rather than shared so each route's idempotency surface evolves
+ * independently." Independent evolution of one contract across two copies IS
+ * the drift, not a defence against it — and while the copies sat here they
+ * shared a single raw-key storage row, so the two endpoints could serve each
+ * other's cached bodies. One owner now: `host/idempotentResponse.ts`. */
 
 export function registerUserAgentRoutes(app: Express, deps: Deps): void {
   const { storage } = deps;
 
   app.post('/v1/host/openwop-app/agents', async (req, res, next) => {
+    // ADR 0549 P1 — hoisted above the try so the `finally` can release a claim
+    // this handler won but never committed.
+    let heldClaimToken: string | undefined;
+    let heldKey: string | undefined;
+    let heldTenantId: string | undefined;
     try {
       const tenantId = readTenantId(req);
       // Idempotency-Key handling per spec/v1/idempotency.md Layer 1.
       // The flow matches `routes/runs.ts` POST /v1/runs:
       //   1. claim atomically — first caller proceeds, concurrent
       //      callers either get the cached response or 409.
-      //   2. same key + different body → 409 idempotency_key_replay_mismatch.
+      //   2. same key + different body → 409 idempotency_key_mismatch.
       //   3. cache the response after persisting so a same-key replay
       //      returns the identical 201 body + the
       //      `openwop-Idempotent-Replay: true` marker header.
+      //
+      // ADR 0549 P0 — keyed (tenantId, endpoint, key). `readTenantId` returns
+      // the middleware-bound tenant, never a body value. Note that wildcard
+      // bearer callers all resolve to `default` and therefore share one
+      // keyspace — that is the pre-existing shared-demo-tenant posture this
+      // route already documents, not a new collision introduced here.
       const idempotencyKey = req.header('idempotency-key') ?? undefined;
-      const bodyHash = idempotencyKey ? hashRequestBody(req.body) : '';
       if (idempotencyKey) {
-        const claim = await storage.claimIdempotency(idempotencyKey, new Date().toISOString());
-        if (!claim.claimed) {
-          const priorHash = idempotencyBodyHashes.get(idempotencyKey);
-          if (priorHash !== undefined && priorHash !== bodyHash) {
-            throw new OpenwopError(
-              'idempotency_key_replay_mismatch',
-              'Idempotency-Key was previously used with a different request body.',
-              409,
-              { idempotencyKey },
-            );
-          }
-          const existing = claim.existing;
-          if (existing && existing.responseBody !== '__pending__') {
-            res
-              .status(existing.responseStatus)
-              .set('openwop-Idempotent-Replay', 'true')
-              .type('application/json')
-              .send(existing.responseBody);
-            return;
-          }
+        heldKey = idempotencyKey;
+        heldTenantId = tenantId;
+        const claim = await storage.claimIdempotentResponse({
+          tenantId,
+          endpoint: AGENTS_ENDPOINT,
+          key: idempotencyKey,
+          requestDigest: canonicalRequestDigest(req.body, AGENTS_ENDPOINT),
+          createdAt: new Date().toISOString(),
+          leaseMs: idempotencyLeaseMs(),
+        });
+        // ADR 0556 P1 — same ledger counter as POST /v1/runs, same helper, so
+        // the two participating endpoints cannot classify an outcome differently.
+        recordIdempotencyClaim(AGENTS_ENDPOINT, idempotencyOutcomeOf(claim));
+        if (claim.outcome === 'claimed') heldClaimToken = claim.claimToken;
+        if (claim.outcome === 'mismatch') {
+          throw new OpenwopError(
+            'idempotency_key_mismatch',
+            'Idempotency-Key was previously used with a different request body.',
+            409,
+            { idempotencyKey },
+          );
+        }
+        if (claim.outcome === 'replay') {
+          res
+            .status(claim.responseStatus)
+            .set('openwop-Idempotent-Replay', 'true')
+            .type('application/json')
+            .send(claim.responseBody);
+          return;
+        }
+        if (claim.outcome === 'in-flight') {
           throw new OpenwopError(
             'idempotency_key_conflict',
             'A request with this Idempotency-Key is currently in flight; retry after it completes.',
@@ -128,7 +142,6 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
             { idempotencyKey },
           );
         }
-        idempotencyBodyHashes.set(idempotencyKey, bodyHash);
       }
 
       const parsed = validateCreate(req.body as CreateBody);
@@ -137,11 +150,15 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       // `user.acme.code-reviewer` / `user.beta.code-reviewer` without
       // collision. Pack-installed ids never start with `user.`, so
       // the prefix is sufficient discrimination.
-      const agentId = `user.${tenantId}.${personaSlug}`;
+      // ADR 0379 P2 — persona-scoped: the tenant lives in the ROW (and the
+      // composite PK), never the id string, so an adopt fold collides instead
+      // of duplicating. Uniqueness is per-tenant via the (tenant_id, agent_id)
+      // PK; the dup-check below reads with the caller's tenant.
+      const agentId = `user.${personaSlug}`;
       // 409 on duplicate persona — the user's first attempt creates,
       // a retry with the same persona name gets a clear error rather
       // than silently overwriting their previous work.
-      const existing = await storage.getUserAgent(agentId);
+      const existing = await storage.getUserAgent(tenantId, agentId);
       if (existing) {
         throw new OpenwopError(
           'idempotency_key_conflict',
@@ -186,17 +203,43 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       };
       // Persist the cached response under the idempotency key so a
       // same-key retry post-restart still returns the identical body.
-      if (idempotencyKey) {
-        await storage.putIdempotency({
+      if (idempotencyKey && heldClaimToken) {
+        // Guarded rather than asserted (`heldClaimToken!`): reaching here with
+        // a key but no token would mean the claim returned something other
+        // than `claimed`, and every such outcome above either returns or
+        // throws. An explicit guard states that instead of asserting it, and
+        // matches how `routes/runs.ts` writes the same block.
+        await storage.completeIdempotentResponse({
+          tenantId,
+          endpoint: AGENTS_ENDPOINT,
           key: idempotencyKey,
-          responseBody: JSON.stringify(responseBody),
           responseStatus: 201,
-          createdAt: record.createdAt,
+          responseBody: JSON.stringify(responseBody),
+          updatedAt: record.createdAt,
+          claimToken: heldClaimToken,
         });
+        heldClaimToken = undefined; // committed — the finally must not release
       }
       res.status(201).json(responseBody);
     } catch (err) {
       next(err);
+    } finally {
+      if (heldKey && heldClaimToken && heldTenantId) {
+        const key = heldKey;
+        await storage
+          .releaseIdempotentResponse({
+            tenantId: heldTenantId,
+            endpoint: AGENTS_ENDPOINT,
+            key,
+            claimToken: heldClaimToken,
+          })
+          .catch((e: unknown) =>
+            log.warn('idempotency_release_failed', {
+              key: redactKey(key),
+              error: e instanceof Error ? e.message : String(e),
+            }),
+          );
+      }
     }
   });
 
@@ -208,16 +251,16 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
     try {
       const tenantId = readTenantId(req);
       const { agentId } = req.params;
-      const record = await storage.getUserAgent(agentId);
+      // ADR 0379 P1 — tenant is in the storage predicate: a cross-tenant id is
+      // null here, so the old 403 forbidden_tenant branch is unreachable and
+      // the uniform 404 (no existence oracle) is the only denial.
+      const record = await storage.getUserAgent(tenantId, agentId);
       if (!record) {
         throw new OpenwopError(
           'not_found',
           `User-authored agent ${agentId} not found. Pack-installed agents are not editable through this route.`,
           404,
         );
-      }
-      if (record.tenantId !== tenantId) {
-        throw new OpenwopError('forbidden_tenant', `Agent ${agentId} is not in your workspace.`, 403);
       }
       const patch = validatePatch(req.body as CreateBody);
       const updated: UserAgentRecord = {
@@ -232,7 +275,7 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
           ? { confidenceThreshold: patch.confidenceThreshold }
           : {}),
       };
-      await storage.updateUserAgent(updated);
+      await storage.updateUserAgent(tenantId, updated);
       // Re-register so the in-process registry (GET /v1/agents, the chat `@`
       // picker, the chat-responder system prompt) reflects the edit at once.
       registerUserAgent(updated);
@@ -259,7 +302,10 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
     try {
       const tenantId = readTenantId(req);
       const { agentId } = req.params;
-      const record = await storage.getUserAgent(agentId);
+      // ADR 0379 P1 — tenant is in the storage predicate: a cross-tenant id is
+      // null (uniform 404, no existence leak — this route previously answered
+      // 403 for other tenants' ids, which WAS an existence oracle).
+      const record = await storage.getUserAgent(tenantId, agentId);
       if (!record) {
         throw new OpenwopError(
           'not_found',
@@ -267,19 +313,7 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
           404,
         );
       }
-      if (record.tenantId !== tenantId) {
-        // Workspace scoping — refuse cross-workspace deletes even
-        // when the caller can read the agentId via tenant=* wildcard,
-        // to make the cascade audit story unambiguous. We return a
-        // generic "not found" error message to avoid leaking that
-        // an agent with this id exists in another workspace.
-        throw new OpenwopError(
-          'forbidden_tenant',
-          `Agent ${agentId} is not in your workspace.`,
-          403,
-        );
-      }
-      const removed = await storage.deleteUserAgent(agentId);
+      const removed = await storage.deleteUserAgent(tenantId, agentId);
       // Drop from the in-process registry too so subsequent
       // `GET /v1/agents` lists, the `@`-mention picker, and the
       // chat-responder lookup all stop seeing it immediately rather
@@ -287,7 +321,7 @@ export function registerUserAgentRoutes(app: Express, deps: Deps): void {
       // idempotent (returns false when the agent isn't in the
       // registry — possible if the storage row outlived an earlier
       // partial-load), so calling it on a missing entry is safe.
-      getAgentRegistry().remove(agentId);
+      getAgentRegistry().remove(agentId, tenantId);
       res.status(removed ? 204 : 404).end();
     } catch (err) {
       next(err);
@@ -320,7 +354,9 @@ export async function loadUserAgentsIntoRegistry(storage: Storage): Promise<numb
     if (record.tenantId === '_anon') {
       effective = { ...record, tenantId: 'default' };
       try {
-        if (await storage.updateUserAgent(effective)) migrated += 1;
+        // ADR 0379 P1 — the ONE legitimate tenant move: expected tenant '_anon'
+        // is passed explicitly; any other cross-tenant write no-ops at the predicate.
+        if (await storage.updateUserAgent('_anon', effective)) migrated += 1;
       } catch (err) {
         // Keep boot resilient: register under the new tenant either way; the
         // durable rewrite retries on the next boot.
@@ -358,7 +394,7 @@ export async function ensureUserAgentRegistered(
   storage: Storage,
   record: UserAgentRecord,
 ): Promise<void> {
-  const existing = await storage.getUserAgent(record.agentId);
+  const existing = await storage.getUserAgent(record.tenantId, record.agentId);
   if (!existing) {
     await storage.insertUserAgent(record);
   }
@@ -374,8 +410,15 @@ export async function ensureUserAgentRegistered(
  *  caller (the chat-responder dispatch, the by-id inventory routes) read through
  *  to storage on a miss, closing the multi-instance eventual-consistency gap for
  *  chat-callable seeded personas. Idempotent: register is last-write-wins. */
-export async function hydrateUserAgentIntoRegistry(storage: Storage, agentId: string): Promise<boolean> {
-  const record = await storage.getUserAgent(agentId);
+export async function hydrateUserAgentIntoRegistry(storage: Storage, agentId: string, tenant?: string): Promise<boolean> {
+  // ADR 0379 P2 — tenant-scoped whenever the resolve carried a tenant (all
+  // user-agent paths do, post-Phase-1). The any-tenant read remains ONLY for
+  // tenant-less resolves (pack-agent misses probing storage; a2a existence
+  // checks) — still the ONE tripwire-pinned escape hatch, retired with the
+  // old-scheme rows in Phase 3.
+  const record = tenant !== undefined
+    ? await storage.getUserAgent(tenant, agentId)
+    : await storage.getUserAgentAnyTenant(agentId);
   if (!record) return false;
   registerUserAgent(record);
   return true;

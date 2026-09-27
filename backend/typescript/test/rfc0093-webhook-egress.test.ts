@@ -77,6 +77,11 @@ function makeDelivery(url: string, deliveryId: string): WebhookDeliveryRecord {
   };
 }
 
+// ADR 0747 — the worker signs with the SUBSCRIPTION's secret at send time.
+async function subscribe(storage: Storage): Promise<void> {
+  await storage.insertWebhook({ subscriptionId: 'sub-egress', tenantId: 'default', url: 'https://example.test/hook', events: ['*'], secret: 'shh', createdAt: new Date(T0).toISOString() });
+}
+
 /** Read back the (single) queue row via an expired-lease re-claim so the
  *  test can assert `attempts` / `lastError` without a storage debug API. */
 async function reclaimRow(storage: Storage): Promise<WebhookDeliveryRecord | undefined> {
@@ -88,6 +93,7 @@ describe('rfc0093 webhook delivery-time egress hardening', () => {
   it('does NOT follow a 302 — the redirect is a delivery failure that retries', async () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true'; // loopback receiver is the point here
     const storage = await openStorage('memory://');
+    await subscribe(storage);
     await storage.enqueueWebhookDelivery(makeDelivery(`http://localhost:${port}/redirect`, 'd-redirect'));
 
     expect(await processDueWebhookDeliveries(storage, 'worker-a', T0)).toBe(1);
@@ -107,8 +113,19 @@ describe('rfc0093 webhook delivery-time egress hardening', () => {
   it('refuses delivery when the hostname resolves into a denied range (pinned-resolution guard)', async () => {
     // No OPENWOP_WEBHOOK_ALLOW_PRIVATE: `localhost` resolves to loopback,
     // which the connect-time lookup guard rejects before any bytes leave.
+    //
+    // ADR 0606 — this url was `http://` until the delivery-time SCHEME arm
+    // landed. With the flag off that arm now short-circuits BEFORE the fetch,
+    // so an http url would never reach the dispatcher and this test would stop
+    // exercising the lookup guard while still passing on a different error.
+    // `https://` is what keeps the assertion pointed at RFC 0093 §A.1 — and it
+    // is the more faithful scenario anyway: the production shape of this attack
+    // is an https url whose hostname RESOLVES privately. The connection still
+    // dies in `lookup`, before any TLS handshake, so the plain-http receiver
+    // behind `port` is never contacted (asserted by `hits` below).
     const storage = await openStorage('memory://');
-    await storage.enqueueWebhookDelivery(makeDelivery(`http://localhost:${port}/ok`, 'd-denied'));
+    await subscribe(storage);
+    await storage.enqueueWebhookDelivery(makeDelivery(`https://localhost:${port}/ok`, 'd-denied'));
 
     expect(await processDueWebhookDeliveries(storage, 'worker-a', T0)).toBe(1);
 
@@ -125,6 +142,7 @@ describe('rfc0093 webhook delivery-time egress hardening', () => {
   it('delivers to a loopback receiver when OPENWOP_WEBHOOK_ALLOW_PRIVATE=true (dev override)', async () => {
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
     const storage = await openStorage('memory://');
+    await subscribe(storage);
     await storage.enqueueWebhookDelivery(makeDelivery(`http://localhost:${port}/ok`, 'd-ok'));
 
     expect(await processDueWebhookDeliveries(storage, 'worker-a', T0)).toBe(1);

@@ -25,6 +25,7 @@ export function Modal({
   scrimClassName = 'hire-scrim',
   loading = false,
   error,
+  errorAnnounce,
   showClose = false,
 }: {
   onClose: () => void;
@@ -42,6 +43,13 @@ export function Modal({
   /** Inline error region rendered above the dialog body via the shared
    *  <Notice> primitive. Falsy renders nothing (the dialog stays clean). */
   error?: ReactNode;
+  /** ADV-UX-3 — the TEXT to speak when `error` appears. Opt-in per dialog, not
+   *  automatic: a `Notice` conditionally mounted WITH its content announces
+   *  nothing (see Notice.tsx), so the fix has to be an explicit string, and
+   *  `announce()` has ONE polite slot — making this default-on would let a
+   *  dialog error silently displace a page-level announcement in ~18 consumers
+   *  that were never audited for it. Ignored when `error` is falsy. */
+  errorAnnounce?: string | undefined;
   /** OPT-IN labeled close (×) control in the top corner. Default false so the ~18
    *  existing consumers are unchanged (they dismiss via scrim/Escape). */
   showClose?: boolean;
@@ -75,7 +83,7 @@ export function Modal({
           ) : null}
           {error ? (
             <div className="u-mb-2">
-              <Notice variant="error">{error}</Notice>
+              <Notice variant="error" {...(errorAnnounce ? { announce: errorAnnounce } : {})}>{error}</Notice>
             </div>
           ) : null}
           {loading ? (

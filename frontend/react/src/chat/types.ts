@@ -129,7 +129,10 @@ export interface WorkflowRunState {
   nodeNames: Record<string, string>;
   startedAt: string;
   outputs?: Record<string, unknown>;
-  error?: { code: string; message: string };
+  /** `reason` (ADR 0482) carries the machine-readable envelope reason
+   *  (e.g. `workflow_budget_exhausted`) so classifiers key on data, not
+   *  message text. */
+  error?: { code: string; message: string; reason?: string };
 }
 
 /** A tool the assistant agent invoked during this turn — built from a
@@ -141,7 +144,15 @@ export interface AgentToolCall {
   agentId: string;
   inputs?: unknown;
   outcome?: unknown;
-  error?: { code: string; message: string };
+  /** TOCU-6 (ADR 0604) — `message` is OPTIONAL and is NOT set by the host-side
+   *  builder. It used to carry one of three hardcoded ENGLISH sentences chosen
+   *  in `hooks/chatSession/lib.ts`, which has no `t()` in scope, and
+   *  `AgentEventCards` rendered them verbatim on a LIVE path in every locale.
+   *  The `code` is the machine fact and the only thing worth storing; the
+   *  human sentence is a RENDER concern and is now looked up per-locale at the
+   *  card. Kept optional so a future transport that carries a real provider
+   *  message can still surface it. */
+  error?: { code: string; message?: string };
   startedAt: string;
   /** When set, the toolReturned event has arrived. Card collapses from
    *  "Running…" to a duration badge. */
@@ -278,6 +289,14 @@ export interface ChatMessage {
    *  ("@slug — running step N of M"); the structured state lives
    *  in `workflowRun` below. */
   content: string | readonly ContentPart[];
+  /** Server-stamped author subjectRef (`user:<id>` / `agent:<id>`, ADR
+   *  0102/0192) — present on rows loaded from the backend. Multi-party
+   *  surfaces (channels/groups) use it for attribution + own-message
+   *  alignment; 1:1 surfaces ignore it. */
+  authorSubject?: string;
+  /** ADR 0195 D3 — the message's public reaction aggregate (multi-party
+   *  surfaces only; absent elsewhere). */
+  reactions?: ReadonlyArray<{ emoji: string; count: number; mine: boolean }>;
   /** When true, the bubble is receiving streaming deltas. */
   isStreaming?: boolean;
   /** Optional reasoning trace from `agent.reasoned` / Phase 2
@@ -326,8 +345,17 @@ export interface ChatMessage {
     runId?: string | undefined;
     provider?: string | undefined;
     model?: string | undefined;
+    /** System-notice discriminator (backend-stamped). `'voice-degraded'`
+     *  upgrades the system banner to the warning treatment + role=alert. */
+    kind?: string | undefined;
     inputTokens?: number | undefined;
     outputTokens?: number | undefined;
+    /** ADR 0195 D1 — server-stamped when a human edit changed the content. */
+    editedAt?: string | undefined;
+    /** ADR 0195 D2 — tombstone markers; the FE detects deletion by
+     *  `deletedAt`, never by parsing the content sentinel. */
+    deletedAt?: string | undefined;
+    deletedBy?: string | undefined;
     /** Error envelope. The required `code` + `message` pair matches
      *  the BE's serialized error shape; the optional `category` /
      *  `action` / `userMessage` fields mirror the BE's
@@ -357,6 +385,32 @@ export interface ChatMessage {
       alt?: string;
       title?: string;
     };
+    /** A7 (ADR 0467 follow-on) — `kind: 'voice-approval-request'` payload: the
+     *  held sideband tool call this system notice asks the human to resolve. */
+    toolName?: string | undefined;
+    callId?: string | undefined;
+    fcId?: string | undefined;
+    /** Origin marker for turns that didn't come from the text composer.
+     *  `voice-realtime` = a spoken turn from an ADR 0141 realtime session
+     *  (mirrors the backend sideband's `meta.source`, so a reloaded turn
+     *  keeps the same marker). */
+    source?: 'voice-realtime';
+    /** RCL-UX-1 — this assistant turn drew on the acting caller's own shared
+     *  memories (twin borrowed recall; the `openwop-app.conversation.recall-used`
+     *  run event). Stamped at merge time and persisted with the message meta,
+     *  so a reopened thread keeps the marker. */
+    twinRecalled?: boolean;
+    /** RCL-UX-2 / RCL-7 — the composition's degradation ledger for the turn
+     *  (`openwop-app.conversation.context-degraded` block names). Rendered as
+     *  an in-bubble reduced-context notice via `voiceCtxBlockLabels`; stamped
+     *  at merge time and persisted with the message meta. */
+    degradedBlocks?: string[];
+    /** ADR 0665 D4 — this agent turn carried NO output. Set from the backend's
+     *  typed non-contribution turn content, so it survives a reopen the same way
+     *  the two markers above do. The bubble renders a muted "did not respond"
+     *  line: in a council, a silent advisor read as an agreeing one is the
+     *  failure this exists to prevent. */
+    noContribution?: true;
   };
   /** Structured state for `role: 'workflow_run'` messages. */
   workflowRun?: WorkflowRunState;
@@ -377,6 +431,25 @@ export interface ChatMessage {
    *  time. Drives the in-bubble attribution header (avatar + name) so a council
    *  reply isn't an unattributed blob. Humanized for the display name. */
   agentSlug?: string;
+  /** ADV-UX-5 / WF-BOA-8 — this `role:'user'` turn was authored by the boardroom
+   *  ORCHESTRATOR, not typed by the human. The cadence's hand-off prompts
+   *  ("<Persona>, your perspective?", "As chair, synthesize…") go through the
+   *  ordinary `send()` path and are DURABLY PERSISTED, so without this flag the
+   *  transcript records the user saying words they never said — and RFC 0101's
+   *  `speakerId` is explicitly meaningless for `role:'user'`, so nothing else
+   *  can carry the attribution. Non-content (the model still sees a normal
+   *  trailing user turn); persisted with the message, so **a reopen of this chat
+   *  session** sees it (`hooks/chatSession/lib.ts` restores it from the stored
+   *  message row).
+   *
+   *  CORRECTED 2026-08-20 (M6). This used to claim "a reopen, an audit, and a
+   *  `:fork` all see it", which the SAME ADR's D4 contradicts. The marker rides
+   *  `useTurnTransport.persistTurns` into the chat-session message rows; it never
+   *  touches the RFC 0005 `ConversationTurn` (`host/conversation.ts`), which is
+   *  what `:fork` replays and what a server-side auditor reads. Only the reopen
+   *  half was ever true. Putting it on the durable turn is the recorded residual
+   *  beside D4's. */
+  orchestrated?: boolean;
   createdAt: string;
 }
 
@@ -465,4 +538,17 @@ export interface SendOptions {
    *  original question so each advisor retrieves against the real topic, not the
    *  "<persona>, your perspective?" hand-off prompt. Absent ⇒ latest user turn. */
   knowledgeQuery?: string | undefined;
+  /** ADV-UX-5 / WF-BOA-8 — this send is an ORCHESTRATOR-authored hand-off, not
+   *  something the human typed. Marks the resulting user turn `orchestrated`.
+   *
+   *  ADR 0608 D7 (`CPWF-2`) — CORRECTED 2026-08-24. This used to end "so the
+   *  durable transcript stops attributing it to them", which is the claim the
+   *  `ChatMessage.orchestrated` doc twenty lines up had ALREADY been corrected for
+   *  — the correction was made at one site and not at its twin, so the false
+   *  sentence survived where a reader of the OPTION (rather than of the field)
+   *  would meet it. The marker reaches the chat-session message row's opaque
+   *  content blob, never the RFC 0005 `ConversationTurn` that `:fork` replays;
+   *  `grep -rn 'orchestrated' backend/typescript/src` → 0 hits. Fixing that is an
+   *  `../openwop` RFC 0005 change, not a host change. */
+  orchestrated?: boolean | undefined;
 }

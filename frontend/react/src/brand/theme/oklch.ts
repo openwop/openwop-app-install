@@ -99,8 +99,3 @@ export function formatOklch({ L, C, H }: Oklch, alpha?: number): string {
   return alpha != null && alpha < 1 ? `oklch(${l} ${c} ${h} / ${alpha})` : `oklch(${l} ${c} ${h})`;
 }
 
-/** Is an OKLCH color inside the sRGB gamut (round-trips without clamping)? */
-export function inSrgbGamut({ L, C, H }: Oklch, eps = 0.002): boolean {
-  const back = srgbToOklch(oklchToRgb({ L, C, H }));
-  return Math.abs(back.L - L) < eps && Math.abs(back.C - C) < eps + 0.01;
-}

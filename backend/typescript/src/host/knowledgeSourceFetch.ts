@@ -28,7 +28,14 @@ import { OpenwopError } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import { brokeredFetch } from './brokeredEgress.js';
 import { fetch as undiciFetch } from 'undici';
-import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
+import {
+  assertEgressSchemeAllowed,
+  EgressUrlRejectedError,
+  isDeniedWebhookHost,
+  webhookEgressDispatcher,
+  webhookPrivateEgressAllowed,
+} from './webhookEgressGuard.js';
+import { assertEgressAllowed } from './egressPolicy.js';
 
 /** A fetched source ready for `kbService.ingestDocument({ title, text })`. */
 export interface FetchedSource {
@@ -188,10 +195,15 @@ async function fetchGoogleDriveDoc(deps: KnowledgeFetchDeps, ref: string): Promi
  * tokenization. NOT for Google-native docs (Docs/Sheets/Slides have no media bytes —
  * the caller routes those to `fetchKnowledgeSource` for text export). SSRF-guarded
  * via `brokeredFetch` (no-redirect): Google `?alt=media` returns the bytes directly
- * from `googleapis.com`. OneDrive byte download is a follow-on — Graph `/content`
- * 302s to a separate download host, which the no-follow-redirect broker can't fetch
- * (it would need the `@microsoft.graph.downloadUrl` + a Microsoft-download-host SSRF
- * guard).
+ * from `googleapis.com`.
+ *
+ * ADR 0605 Tier 7 (`KSC-13`) — this used to say *"OneDrive byte download is a
+ * follow-on … it would need the `@microsoft.graph.downloadUrl` + a
+ * Microsoft-download-host SSRF guard"*, 53 lines above `fetchOneDriveBytes`, which
+ * does exactly that and has since 2026-06-23. The reason this survived is worth
+ * naming: the sentence described the correct DESIGN, so it reads as current even
+ * once it is describing the implementation instead of the plan. All five providers
+ * ship byte download — see the provider dispatch in the body below.
  */
 export async function fetchKnowledgeSourceBytes(deps: KnowledgeFetchDeps, input: { provider: string; ref: string; mimeType?: string }): Promise<FetchedBytes> {
   const provider = String(input.provider ?? '').trim().toLowerCase();
@@ -239,7 +251,27 @@ async function fetchGoogleDriveBytes(deps: KnowledgeFetchDeps, ref: string, maxB
  * PRE-AUTHENTICATED URL (no token) — and fetch THAT through the host's SSRF egress guard
  * (`webhookEgressGuard`: private-IP block + a pinned dispatcher that re-validates each
  * redirect hop's resolved address). No credential rides the download (so there's no
- * token-leak-on-redirect risk), https-only, 32MB cap.
+ * token-leak-on-redirect risk), ~~https-only~~, 32MB cap.
+ *
+ * ADR 0605 Tier 7 (`KSC-8`) — "https-only" was IMPRECISE, and imprecise in the
+ * direction that flatters the code. Stated exactly: `fetchGuardedBytes` checks
+ * `url.protocol !== 'https:'` on the URL IT IS GIVEN — redirect hop 1 — and then
+ * hands the request to `undiciFetch` with `redirect` unset, i.e. the fetch default
+ * `'follow'`, up to 20 hops. What the pinned dispatcher re-validates PER HOP is the
+ * resolved ADDRESS (the private-range guard), not the scheme and not the host
+ * denylist. So a `302` from a provider download host to `http://` is followed, and
+ * the un-credentialed body then arrives over cleartext, attacker-modifiable in
+ * transit, on its way into the customer's knowledge base. Note the sibling
+ * `guardedEgressFetch` in the same guard module defaults to `redirect:'error'`
+ * precisely to close this; this call site hand-rolled a weaker subset of it and so
+ * does not inherit the default.
+ *
+ * NOT FIXED HERE, deliberately: adding a per-hop scheme check (or routing through
+ * `guardedEgressFetch` with a manual redirect loop) changes what this function
+ * accepts from a live provider, which is a behaviour change and needs its own
+ * witness against a real redirect chain — a records tier must not smuggle one in.
+ * Filed OPEN as `KSC-8`, which also carries this call site's missing timeout,
+ * missing `maxResponseSize`, and skipped ADR 0187 tenant egress firewall.
  */
 async function fetchOneDriveBytes(deps: KnowledgeFetchDeps, syncProvider: string, ref: string, maxBytes: number): Promise<FetchedBytes> {
   const base = graphItemsBase(syncProvider, ref); // validates the Graph item id
@@ -262,24 +294,172 @@ async function fetchOneDriveBytes(deps: KnowledgeFetchDeps, syncProvider: string
     throw new OpenwopError('validation_error', 'OneDrive item has no download URL (a folder, or access was denied).', 422, { ref });
   }
   // 2) fetch the pre-authenticated URL UN-credentialed, SSRF-guarded.
-  const bytes = await fetchGuardedBytes(downloadUrl, 'OneDrive', maxBytes);
+  const bytes = await fetchGuardedBytes(downloadUrl, 'OneDrive', maxBytes, { tenantId: deps.tenantId });
   return { title: name, contentBase64: bytes.toString('base64'), contentType, sourceUrl: `${base}/content` };
 }
 
 /** Fetch a PRE-AUTHENTICATED download URL (no credential) through the host SSRF egress
- *  guard — https-only, private-IP-blocked, the pinned dispatcher re-validates each
- *  redirect hop, 32MB cap. Shared by every "temp/pre-auth download URL" provider
- *  (OneDrive/SharePoint `@microsoft.graph.downloadUrl`, Dropbox `get_temporary_link`). */
-async function fetchGuardedBytes(downloadUrl: string, label: string, maxBytes = MAX_BINARY_FETCH_BYTES): Promise<Buffer> {
-  let url: URL;
-  try { url = new URL(downloadUrl); } catch { throw new OpenwopError('validation_error', `Malformed ${label} download URL.`, 502, {}); }
-  if (url.protocol !== 'https:') throw new OpenwopError('validation_error', `${label} download URL must be https.`, 502, {});
-  if (!webhookPrivateEgressAllowed() && isDeniedWebhookHost(url.hostname)) {
-    throw new OpenwopError('validation_error', `${label} download host is not permitted.`, 502, { host: url.hostname });
+ *  guard, 32MB cap. Shared by every "temp/pre-auth download URL" provider
+ *  (OneDrive/SharePoint `@microsoft.graph.downloadUrl`, Dropbox `get_temporary_link`).
+ *
+ *  ADR 0605 Tier 7 (`KSC-8`) — this used to read "https-only, private-IP-blocked,
+ *  the pinned dispatcher re-validates each redirect hop", which reads as three
+ *  per-hop guarantees and is one. Precisely, per hop:
+ *    - resolved address vs the private ranges — YES, every hop (`guardedLookup` runs
+ *      at connect time for each new socket, so a DNS rebind is refused at dial).
+ *    - scheme is https — NO. Checked once, below, on the URL passed in. `undiciFetch`
+ *      is called with no `redirect`, so the default `'follow'` applies and a hop to
+ *      `http://` is taken.
+ *    - `isDeniedWebhookHost` string precheck — NO, also once, below. In practice a
+ *      denied host resolves into a private range and the lookup catches it anyway,
+ *      which is why this half has never mattered; the SCHEME half has. */
+export async function fetchGuardedBytes(
+  downloadUrl: string,
+  label: string,
+  maxBytes = MAX_BINARY_FETCH_BYTES,
+  opts: { tenantId?: string; timeoutMs?: number } = {},
+): Promise<Buffer> {
+  let current = downloadUrl;
+  for (let hop = 0; ; hop++) {
+    if (hop > MAX_DOWNLOAD_REDIRECTS) {
+      throw new OpenwopError(
+        'validation_error',
+        `${label} download exceeded ${MAX_DOWNLOAD_REDIRECTS} redirects.`,
+        502,
+        { hops: hop },
+      );
+    }
+    let url: URL;
+    try {
+      url = new URL(current);
+    } catch {
+      throw new OpenwopError('validation_error', `Malformed ${label} download URL.`, 502, {});
+    }
+
+    // ADR 0609 / KSC-8 — the SCHEME arm, now per hop, via the ADR 0607 shared
+    // predicate rather than a hand-rolled copy. `honorDevFlag: true` matches the
+    // rest of this file's egress posture (and makes a loopback redirect chain
+    // testable); in production the flag is off and every hop must be https.
+    try {
+      assertEgressSchemeAllowed(current, { honorDevFlag: true });
+    } catch (e) {
+      if (!(e instanceof EgressUrlRejectedError)) throw e;
+      throw new OpenwopError(
+        'validation_error',
+        hop === 0
+          ? `${label} download URL must be https.`
+          : `${label} download redirected to a non-https URL (hop ${hop}) — refused.`,
+        502,
+        { reason: e.reason, hop },
+      );
+    }
+
+    // The denied-host string precheck, also per hop. The pinned-resolution
+    // lookup already refuses a private ADDRESS at dial on every hop; this is the
+    // cheap literal check in front of it, and it was previously hop-1 only.
+    if (!webhookPrivateEgressAllowed() && isDeniedWebhookHost(url.hostname)) {
+      throw new OpenwopError('validation_error', `${label} download host is not permitted.`, 502, {
+        host: url.hostname,
+        hop,
+      });
+    }
+
+    // ADR 0187 tenant egress firewall — this call site skipped it entirely, so a
+    // tenant policy that blocks a host was not enforced on the download leg even
+    // though the credentialed metadata leg (`brokeredFetch`) honours it. Applied
+    // per hop, because a redirect target is a different host than the one the
+    // policy was evaluated against.
+    if (opts.tenantId) await assertEgressAllowed(opts.tenantId, current);
+
+    const res = await undiciFetch(current, {
+      // `redirect: 'manual'` is what makes the arms above per-hop. The default
+      // 'follow' hands the whole chain to undici, where nothing re-checks the
+      // scheme, the host literal, or the tenant policy.
+      redirect: 'manual',
+      dispatcher: webhookEgressDispatcher(),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? DOWNLOAD_TIMEOUT_MS),
+    });
+
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get('location');
+      await res.body?.cancel().catch(() => undefined);
+      if (!location) {
+        throw new OpenwopError('internal_error', `${label} download redirect had no location.`, 502, {
+          status: res.status,
+          hop,
+        });
+      }
+      current = new URL(location, url).toString();
+      continue;
+    }
+
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new OpenwopError('internal_error', `${label} download failed (HTTP ${res.status}).`, 502, {
+        status: res.status,
+      });
+    }
+    return await readBytesStreamed(res, maxBytes, label);
   }
-  const res = await undiciFetch(downloadUrl, { dispatcher: webhookEgressDispatcher() });
-  if (!res.ok) throw new OpenwopError('internal_error', `${label} download failed (HTTP ${res.status}).`, 502, { status: res.status });
-  return readBytes(res, maxBytes);
+}
+
+/**
+ * Read a response body with the cap applied DURING the read.
+ *
+ * KSC-8: `readBytes` does `Buffer.from(await res.arrayBuffer())` and checks the
+ * length afterwards — so a body larger than the cap is fully materialised in
+ * memory BEFORE being rejected. On a memory-bounded Cloud Run instance a
+ * multi-GB response from a redirect target OOM-kills the container, and the
+ * 32 MiB "cap" never runs. Streaming makes the cap a bound on what is read
+ * rather than a verdict on what was already read.
+ */
+async function readBytesStreamed(
+  res: { body?: unknown; arrayBuffer?: () => Promise<ArrayBuffer> },
+  maxBytes: number,
+  label: string,
+): Promise<Buffer> {
+  const tooBig = (): never => {
+    throw new OpenwopError(
+      'validation_error',
+      `${label} file exceeds the ${Math.round(maxBytes / (1024 * 1024))} MiB sync cap.`,
+      413,
+      { maxBytes },
+    );
+  };
+
+  const body = res.body as AsyncIterable<Uint8Array> | null | undefined;
+  const streamable =
+    body != null && typeof (body as { [Symbol.asyncIterator]?: unknown })[Symbol.asyncIterator] === 'function';
+
+  if (streamable) {
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for await (const chunk of body) {
+      const buf = Buffer.from(chunk);
+      total += buf.length;
+      if (total > maxBytes) tooBig();
+      chunks.push(buf);
+    }
+    return Buffer.concat(chunks);
+  }
+
+  // A response that exposes no async-iterable body — a zero-length 200, or a
+  // caller-supplied stub. Fall back to the buffered read rather than returning
+  // an EMPTY buffer: `Buffer.alloc(0)` here would be a success-with-empty, and
+  // on this path an empty document is silently ingested as the file's contents.
+  // That is the exact failure ADR 0605 Tier 1 removed from `readJson`, where
+  // "returned nothing" became an empty folder listing and then a mass delete.
+  //
+  // The memory bound therefore holds on the STREAMING path, which is the one
+  // real undici responses take — witnessed by the sabotage in
+  // `ksc8-download-redirect-guard.test.ts`, which drives a real socket and goes
+  // red when the streaming reader is swapped for the buffered one.
+  if (typeof res.arrayBuffer !== 'function') {
+    throw new OpenwopError('internal_error', `${label} download returned no readable body.`, 502, {});
+  }
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > maxBytes) tooBig();
+  return buf;
 }
 
 // ── Dropbox ──────────────────────────────────────────────────────────────────
@@ -302,7 +482,7 @@ function mimeFromName(name: string): string {
   return DROPBOX_EXT_MIME[ext] ?? 'application/octet-stream';
 }
 
-async function listDropboxFolder(deps: KnowledgeFetchDeps, folderId: string): Promise<SyncFolderFile[]> {
+async function listDropboxFolder(deps: KnowledgeFetchDeps, folderId: string): Promise<SyncFolderListing> {
   const egressDeps = {
     storage: deps.storage,
     tenantId: deps.tenantId,
@@ -320,7 +500,8 @@ async function listDropboxFolder(deps: KnowledgeFetchDeps, folderId: string): Pr
     const r = await brokeredFetch(egressDeps, { provider: 'dropbox', url, method: 'POST', body });
     failClosed(r, 'dropbox');
     const json = (await readJson(r)) as { entries?: unknown; cursor?: unknown; has_more?: unknown } | undefined;
-    const entries = Array.isArray(json?.entries) ? json.entries : [];
+    // ADR 0605 R1 — a `2xx` with no `entries` array is not an empty folder.
+    const entries = listingArray(json, 'entries', 'Dropbox');
     for (const e of entries) {
       const rec = e as Record<string, unknown>;
       if (rec['.tag'] !== 'file') continue; // files only (skip folders — no recursion)
@@ -328,13 +509,16 @@ async function listDropboxFolder(deps: KnowledgeFetchDeps, folderId: string): Pr
       const name = typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : 'Untitled';
       if (!id) continue;
       out.push({ fileId: id, name, mimeType: mimeFromName(name), revision: typeof rec.rev === 'string' ? rec.rev : (typeof rec.content_hash === 'string' ? rec.content_hash : '') });
-      if (out.length >= MAX_LIST_FILES) return out;
+      if (out.length >= MAX_LIST_FILES) return partialListing(out, 'file_cap');
     }
-    if (json?.has_more !== true || typeof json.cursor !== 'string') break;
+    if (json?.has_more !== true) return completeListing(out); // drained
+    // `has_more` says there ARE more entries; without a usable cursor we cannot
+    // reach them, so the listing is short — never "the folder ends here".
+    if (typeof json.cursor !== 'string' || !json.cursor) return partialListing(out, 'bad_page_token');
     url = 'https://api.dropboxapi.com/2/files/list_folder/continue';
     body = JSON.stringify({ cursor: json.cursor });
   }
-  return out;
+  return partialListing(out, 'page_budget');
 }
 
 async function fetchDropboxBytes(deps: KnowledgeFetchDeps, ref: string, maxBytes: number): Promise<FetchedBytes> {
@@ -352,7 +536,7 @@ async function fetchDropboxBytes(deps: KnowledgeFetchDeps, ref: string, maxBytes
   const link = json?.link;
   const name = typeof json?.metadata?.name === 'string' && json.metadata.name.trim() ? json.metadata.name.trim() : 'Dropbox file';
   if (typeof link !== 'string' || !link) throw new OpenwopError('validation_error', 'Dropbox returned no download link.', 422, { ref });
-  const bytes = await fetchGuardedBytes(link, 'Dropbox', maxBytes);
+  const bytes = await fetchGuardedBytes(link, 'Dropbox', maxBytes, { tenantId: deps.tenantId });
   return { title: name, contentBase64: bytes.toString('base64'), contentType: mimeFromName(name), sourceUrl: link };
 }
 
@@ -367,7 +551,7 @@ function safeBoxId(id: string, label: string): string {
   return t;
 }
 
-async function listBoxFolder(deps: KnowledgeFetchDeps, folderId: string): Promise<SyncFolderFile[]> {
+async function listBoxFolder(deps: KnowledgeFetchDeps, folderId: string): Promise<SyncFolderListing> {
   const egressDeps = {
     storage: deps.storage,
     tenantId: deps.tenantId,
@@ -384,7 +568,8 @@ async function listBoxFolder(deps: KnowledgeFetchDeps, folderId: string): Promis
     const r = await brokeredFetch(egressDeps, { provider: 'box', url });
     failClosed(r, 'box');
     const json = (await readJson(r)) as { entries?: unknown; total_count?: unknown } | undefined;
-    const entries = Array.isArray(json?.entries) ? json.entries : [];
+    // ADR 0605 R1 — a `2xx` with no `entries` array is not an empty folder.
+    const entries = listingArray(json, 'entries', 'Box');
     for (const e of entries) {
       const rec = e as Record<string, unknown>;
       if (rec.type !== 'file') continue; // files only (skip folders — no recursion)
@@ -392,13 +577,37 @@ async function listBoxFolder(deps: KnowledgeFetchDeps, folderId: string): Promis
       if (!fid) continue;
       const name = typeof rec.name === 'string' && rec.name.trim() ? rec.name.trim() : 'Untitled';
       out.push({ fileId: fid, name, mimeType: mimeFromName(name), revision: typeof rec.etag === 'string' ? rec.etag : (typeof rec.modified_at === 'string' ? rec.modified_at : '') });
-      if (out.length >= MAX_LIST_FILES) return out;
+      if (out.length >= MAX_LIST_FILES) return partialListing(out, 'file_cap');
     }
-    const total = typeof json?.total_count === 'number' ? json.total_count : entries.length;
     offset += limit;
-    if (entries.length === 0 || offset >= total) break;
+    if (boxDrained(entries.length, limit, offset, json?.total_count)) return completeListing(out);
   }
-  return out;
+  return partialListing(out, 'page_budget');
+}
+
+/**
+ * Has the Box `/items` cursor reached the end of the folder? PURE, so the rule
+ * is testable on its own rather than inferred from a listing.
+ *
+ * ADR 0605 R1 (review MEDIUM 5) — this used to be
+ * `const total = typeof total_count === 'number' ? total_count : entries.length`
+ * followed by `offset >= total`. The FALLBACK is the defect: substituting the
+ * page size for the folder size makes `offset >= total` trivially true on ANY
+ * full page, so one full page of 1000 entries with no `total_count` reported
+ * `complete: true` over a folder that may hold ten thousand. Pre-Tier-1 that was
+ * a silent `break`; Tier 1 turned the same unknown into an AFFIRMATIVE claim of
+ * completeness, which `diffFolderListing` then acts on by deleting — strictly
+ * worse than the bug it replaced.
+ *
+ * The drain signal Box actually gives is a SHORT PAGE, and it was available and
+ * unused. `total_count` is now consulted ONLY when Box sent one; when it did
+ * not, an unknown stays unknown and the loop asks for another page (running out
+ * of pages yields `page_budget`, i.e. `complete: false`).
+ */
+export function boxDrained(pageEntries: number, limit: number, nextOffset: number, totalCount: unknown): boolean {
+  if (pageEntries === 0) return true;          // the page was empty — nothing after it
+  if (pageEntries < limit) return true;        // a short page IS the end of the folder
+  return typeof totalCount === 'number' && nextOffset >= totalCount;
 }
 
 async function fetchBoxBytes(deps: KnowledgeFetchDeps, ref: string, maxBytes: number): Promise<FetchedBytes> {
@@ -425,7 +634,7 @@ async function fetchBoxBytes(deps: KnowledgeFetchDeps, ref: string, maxBytes: nu
   if (dl.outcome === 'request_failed') throw new OpenwopError('internal_error', 'Could not reach Box.', 502, { provider: 'box' });
   const location = dl.res.headers.get('location');
   if (!location) throw new OpenwopError('internal_error', `Box content did not return a download location (HTTP ${dl.res.status}).`, 502, { ref });
-  const bytes = await fetchGuardedBytes(location, 'Box', maxBytes);
+  const bytes = await fetchGuardedBytes(location, 'Box', maxBytes, { tenantId: deps.tenantId });
   return { title: name, contentBase64: bytes.toString('base64'), contentType: mimeFromName(name), sourceUrl: location };
 }
 
@@ -442,15 +651,144 @@ export interface SyncFolderFile {
 
 /** Hard caps so a huge folder can't run unbounded (ADR 0107 OQ-3). v1 reads up to
  *  these per call; incremental cross-run pagination is a later optimization. */
-const MAX_LIST_FILES = 1000;
+/** EXPORTED because it is USER-FACING: when the cap truncates a listing the
+ *  runner tells the user "this folder has more than N files". That sentence must
+ *  be GENERATED from the cap, never hand-copied beside it — a copied number is
+ *  the drift class CLAUDE.md § "AI↔app information exchange" names, and it reads
+ *  as authoritative long after the cap moves. */
+export const MAX_LIST_FILES = 1000;
 const MAX_LIST_PAGES = 20;
+
+/** Why a listing could not be proved COMPLETE (ADR 0605). Each value is a real
+ *  early exit in the loops below, not a hypothetical. */
+export type ListingIncompleteReason =
+  /** `MAX_LIST_FILES` truncated the listing mid-folder. */
+  | 'file_cap'
+  /** `MAX_LIST_PAGES` ran out while the provider still had pages to give. */
+  | 'page_budget'
+  /** The provider advertised more pages but its continuation token was unusable. */
+  | 'bad_page_token';
+
+/**
+ * A folder listing PLUS whether it is the WHOLE folder (ADR 0605 Tier 1 —
+ * `KSC-1`/`KSC-3`/`KSC-5`/`KSWF-3`).
+ *
+ * The destructive half of a diff-sync — "a prior state exists but the file is
+ * gone from the folder, so delete its KB document" — is only sound if the
+ * listing is known to be the complete folder. Before this type, `listFolder`
+ * returned a bare array and there was NO WAY for the caller to distinguish
+ * "the folder is empty" from "I could not see all of it": the `MAX_LIST_FILES`
+ * cap truncated silently (measured: 1200 known files → 200 live KB documents
+ * deleted), a broken page-token chain broke the loop silently, and an
+ * unparseable body degraded to `[]` (now a throw — see `readJson`).
+ *
+ * `complete` is a CLAIM the lister must earn. Consumers MUST fail closed on
+ * anything that is not literally `true` — see `diffFolderListing`, which is the
+ * one composition owner that enforces it.
+ */
+export interface SyncFolderListing {
+  files: SyncFolderFile[];
+  /** True ONLY when the loop drained the folder. Never assume; see above. */
+  complete: boolean;
+  incompleteReason?: ListingIncompleteReason;
+}
+
+/** The body as a plain JSON OBJECT, or undefined. An array, a string, a number
+ *  and `null` are all things a proxy or an error page can produce, and none of
+ *  them is a folder listing. */
+function plainObject(body: unknown): Record<string, unknown> | undefined {
+  return body !== null && typeof body === 'object' && !Array.isArray(body) ? (body as Record<string, unknown>) : undefined;
+}
+
+/**
+ * The array a folder LISTING must have carried, or a typed 502.
+ *
+ * ADR 0605 R1 (review HIGH 2) — **the cure's own family, one layer up.** Tier 1
+ * made `readJson` throw on an unparseable `2xx`; one line later every lister did
+ * `Array.isArray(body?.files) ? body.files : []` and then declared the folder
+ * DRAINED. So the exact substitution Tier 1 exists to eliminate — *the layer
+ * returned `[]` for two different facts* — survived intact one layer up, for
+ * every provider. MEASURED by the review: `{}` and
+ * `{"error":{"code":403,"message":"insufficient scope"}}` each produced
+ * `{ files: [], complete: true }`, and `diffFolderListing` then prunes every
+ * known file, because the listing SAYS it is the whole folder.
+ *
+ * ADR 0605's own motivating scenarios land HERE, not in `readJson`: an
+ * interposing proxy answering `200 {"status":"ok"}`, a captive portal, an OAuth
+ * interstitial. All are valid JSON, so `readJson` passes them through.
+ *
+ * ONE helper for every lister rather than four hand-written copies — a fix for
+ * one lister is not a fix for the class, and the copies are what drift.
+ */
+function listingArray(body: unknown, field: string, provider: string): unknown[] {
+  const v = plainObject(body)?.[field];
+  if (Array.isArray(v)) return v;
+  throw new OpenwopError(
+    'internal_error',
+    `The ${provider} folder listing returned a success status with no \`${field}\` array. Refusing to treat it as an empty folder.`,
+    502,
+    { provider, field },
+  );
+}
+
+/** The `kind` every Drive `files.list` response carries. Requested explicitly in
+ *  the `fields` mask below — see `driveListingFiles`. */
+const DRIVE_FILE_LIST_KIND = 'drive#fileList';
+
+/**
+ * Google Drive is the ONE provider where "no `files` key" can be a legitimate
+ * empty result, so it does not use `listingArray`.
+ *
+ * A Drive partial response (`fields=…`) OMITS a field whose value is empty, so
+ * an empty folder can come back as `{"kind":"drive#fileList"}` with no `files`
+ * at all. Requiring the array unconditionally would have turned the CORRECT
+ * empty-folder prune — the product guarantee `knowledge-sync.test.ts:46-51`
+ * pins and ADR 0605 § "Why the fetch boundary" defends — into a permanent 502,
+ * i.e. traded a data-loss bug for a sync that never converges.
+ *
+ * So discriminate on `kind`, which the mask now requests and which is never a
+ * default/empty value: a body that IS a Drive file list may omit `files`; a body
+ * that is not one (`{}`, a proxy's `{"status":"ok"}`, an `{"error":…}` envelope)
+ * is refused. **This is correct under either reading of the Drive contract** — if
+ * Drive in fact always sends `files: []`, the `kind` branch simply never fires,
+ * and the first branch below has already accepted the response. The design does
+ * not depend on resolving that uncertainty, which is why it was chosen over
+ * "treat a missing array as incomplete" (that one is wrong in exactly one of the
+ * two worlds, and silently).
+ */
+function driveListingFiles(body: unknown): unknown[] {
+  const rec = plainObject(body);
+  const v = rec?.files;
+  if (Array.isArray(v)) return v;
+  if (v === undefined && rec?.kind === DRIVE_FILE_LIST_KIND) return [];
+  throw new OpenwopError(
+    'internal_error',
+    'The Google Drive folder listing returned a success status with no file list. Refusing to treat it as an empty folder.',
+    502,
+    { provider: 'google' },
+  );
+}
+
+/** A listing the lister drained to the end. */
+function completeListing(files: SyncFolderFile[]): SyncFolderListing {
+  return { files, complete: true };
+}
+
+/** A listing that stopped early — the caller must not prune from it. */
+function partialListing(files: SyncFolderFile[], incompleteReason: ListingIncompleteReason): SyncFolderListing {
+  return { files, complete: false, incompleteReason };
+}
 
 /** List the non-trashed files DIRECTLY under a connected drive folder, via the
  *  SSRF-guarded Connections broker (no token handling here — same egress path as
  *  `fetchKnowledgeSource`). Top-level only (no recursion — ADR 0107 OQ-2 default).
- *  v1 supports Google Drive; OneDrive (`microsoft365`) is a later phase. The
- *  result feeds the `knowledge-sync.run` diff (NEW/CHANGED/DELETED) in Phase 3. */
-export async function listFolder(deps: KnowledgeFetchDeps, provider: string, folderId: string): Promise<SyncFolderFile[]> {
+ *  All five wired providers list here (Google Drive, OneDrive, SharePoint,
+ *  Dropbox, Box). The result feeds the knowledge-sync diff (NEW/CHANGED/DELETED).
+ *
+ *  Returns a `SyncFolderListing`, NOT a bare array: the caller needs to know
+ *  whether the listing is the whole folder before it may treat an absent file as
+ *  a deleted one (ADR 0605). */
+export async function listFolder(deps: KnowledgeFetchDeps, provider: string, folderId: string): Promise<SyncFolderListing> {
   if (provider === 'google') return listGoogleDriveFolder(deps, folderId);
   if (provider === 'microsoft-graph' || provider === 'microsoft-sharepoint') return listOneDriveFolder(deps, provider, folderId);
   if (provider === 'dropbox') return listDropboxFolder(deps, folderId);
@@ -537,9 +875,10 @@ export async function browseFolders(deps: KnowledgeFetchDeps, provider: string, 
       const json = (await readJson(r)) as { entries?: unknown; total_count?: unknown } | undefined;
       const entries = Array.isArray(json?.entries) ? json.entries : [];
       for (const e of entries) { const rec = e as Record<string, unknown>; if (rec.type !== 'folder') continue; pushName(out, typeof rec.id === 'string' ? rec.id : '', rec.name); if (out.length >= MAX_LIST_FILES) return out; }
-      const total = typeof json?.total_count === 'number' ? json.total_count : entries.length;
       offset += limit;
-      if (entries.length === 0 || offset >= total) break;
+      // Same drain rule as the sync lister (ADR 0605 R1) — the `total_count ??
+      // entries.length` fallback ended the walk on any full page.
+      if (boxDrained(entries.length, limit, offset, json?.total_count)) break;
     }
     return out;
   }
@@ -583,7 +922,7 @@ function graphItemsBase(syncProvider: string, ref: string): string {
   return `https://graph.microsoft.com/v1.0/me/drive/items/${safeGraphId(id, 'OneDrive folder id', { folderId: ref })}`;
 }
 
-async function listOneDriveFolder(deps: KnowledgeFetchDeps, syncProvider: string, folderId: string): Promise<SyncFolderFile[]> {
+async function listOneDriveFolder(deps: KnowledgeFetchDeps, syncProvider: string, folderId: string): Promise<SyncFolderListing> {
   const egressDeps = {
     storage: deps.storage,
     tenantId: deps.tenantId,
@@ -598,7 +937,9 @@ async function listOneDriveFolder(deps: KnowledgeFetchDeps, syncProvider: string
     const r = await brokeredFetch(egressDeps, { provider: 'microsoft-graph', url });
     failClosed(r, 'microsoft-graph');
     const body = (await readJson(r)) as { value?: unknown; ['@odata.nextLink']?: unknown } | undefined;
-    const items = Array.isArray(body?.value) ? body.value : [];
+    // ADR 0605 R1 — an OData collection always carries `value`, even when empty;
+    // a `2xx` without it is a response we could not read, not an empty folder.
+    const items = listingArray(body, 'value', 'Microsoft Graph');
     for (const it of items) {
       const rec = it as Record<string, unknown>;
       const fileId = typeof rec.id === 'string' ? rec.id : '';
@@ -611,12 +952,19 @@ async function listOneDriveFolder(deps: KnowledgeFetchDeps, syncProvider: string
         mimeType: typeof file.mimeType === 'string' ? file.mimeType : '',
         revision: typeof rec.lastModifiedDateTime === 'string' ? rec.lastModifiedDateTime : '',
       });
-      if (out.length >= MAX_LIST_FILES) return out; // hard cap (OQ-3)
+      if (out.length >= MAX_LIST_FILES) return partialListing(out, 'file_cap'); // hard cap (OQ-3)
     }
     const next = body?.['@odata.nextLink'];
-    url = typeof next === 'string' && next.startsWith('https://graph.microsoft.com/') ? next : undefined;
+    if (next === undefined || next === null) return completeListing(out); // no more pages — drained
+    // A nextLink that is present but NOT a graph.microsoft.com URL is refused (an
+    // open-redirect guard). Refusing it is right; treating the listing as COMPLETE
+    // afterwards was not — the folder demonstrably has more files.
+    if (typeof next !== 'string' || !next.startsWith('https://graph.microsoft.com/')) {
+      return partialListing(out, 'bad_page_token');
+    }
+    url = next;
   }
-  return out;
+  return partialListing(out, 'page_budget');
 }
 
 /** Drive file/folder ids are URL-safe base64-ish (`[A-Za-z0-9_-]`). Validate the
@@ -624,7 +972,7 @@ async function listOneDriveFolder(deps: KnowledgeFetchDeps, syncProvider: string
  *  (a `'` would otherwise let a crafted id list a different folder). */
 const DRIVE_ID_RE = /^[A-Za-z0-9_-]+$/;
 
-async function listGoogleDriveFolder(deps: KnowledgeFetchDeps, folderId: string): Promise<SyncFolderFile[]> {
+async function listGoogleDriveFolder(deps: KnowledgeFetchDeps, folderId: string): Promise<SyncFolderListing> {
   const id = folderId.trim();
   if (!id) {
     throw new OpenwopError('validation_error', 'A Drive folder id is required.', 400, {});
@@ -641,7 +989,10 @@ async function listGoogleDriveFolder(deps: KnowledgeFetchDeps, folderId: string)
   };
   // Files only — exclude subfolders (no recursion, OQ-2); mirrors the OneDrive list's folder skip.
   const q = encodeURIComponent(`'${id}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`);
-  const fields = encodeURIComponent('nextPageToken,files(id,name,mimeType,modifiedTime)');
+  // `kind` is requested DELIBERATELY (ADR 0605 R1): it is what lets an empty
+  // Drive folder be told apart from a body that is not a Drive listing at all.
+  // See `driveListingFiles`.
+  const fields = encodeURIComponent(`kind,nextPageToken,files(id,name,mimeType,modifiedTime)`);
   const out: SyncFolderFile[] = [];
   let pageToken: string | undefined;
   for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
@@ -652,7 +1003,8 @@ async function listGoogleDriveFolder(deps: KnowledgeFetchDeps, folderId: string)
     const r = await brokeredFetch(egressDeps, { provider: 'google', url });
     failClosed(r, 'google');
     const body = (await readJson(r)) as { files?: unknown; nextPageToken?: unknown } | undefined;
-    const files = Array.isArray(body?.files) ? body.files : [];
+    // ADR 0605 R1 — a `2xx` that is not a Drive file list is not an empty folder.
+    const files = driveListingFiles(body);
     for (const f of files) {
       const rec = f as Record<string, unknown>;
       const fileId = typeof rec.id === 'string' ? rec.id : '';
@@ -663,16 +1015,25 @@ async function listGoogleDriveFolder(deps: KnowledgeFetchDeps, folderId: string)
         mimeType: typeof rec.mimeType === 'string' ? rec.mimeType : '',
         revision: typeof rec.modifiedTime === 'string' ? rec.modifiedTime : '',
       });
-      if (out.length >= MAX_LIST_FILES) return out; // hard cap (OQ-3) — bound a huge folder
+      // Hard cap (OQ-3) — bound a huge folder. INCOMPLETE: files past the cap
+      // still exist remotely, so the caller must not read their absence as a
+      // deletion (`KSC-3`).
+      if (out.length >= MAX_LIST_FILES) return partialListing(out, 'file_cap');
     }
     pageToken = typeof body?.nextPageToken === 'string' && body.nextPageToken ? body.nextPageToken : undefined;
-    if (!pageToken) break;
+    if (!pageToken) return completeListing(out);
   }
-  return out;
+  // Fell out of the page loop with a token still pending ⇒ more files exist.
+  return partialListing(out, 'page_budget');
 }
 
-/** Text-extractable mime types we read directly (mirrors the Drive text-only
- *  support; Office/PDF binary extraction via the KB extractor is a follow-on). */
+/** Text-extractable mime types we read directly as text, rather than downloading
+ *  bytes for `kbService.extractTextFromBytes`.
+ *
+ *  ADR 0605 Tier 7 (`KSC-13`) — this used to add *"Office/PDF binary extraction via
+ *  the KB extractor is a follow-on"*. It shipped 2026-06-23: everything NOT matched
+ *  here routes to `fetchKnowledgeSourceBytes` → the extractor, which is the whole
+ *  point of the split. The stale clause made the false half look like the design. */
 function isTextMime(m: string): boolean {
   return m.startsWith('text/') || m === 'application/json' || m === 'application/xml' || m === 'application/markdown';
 }
@@ -748,6 +1109,12 @@ async function readText(r: Sent): Promise<string> {
 /** Decoded-byte cap on a downloaded binary — matches kbService's MAX_UPLOAD_DECODED_BYTES
  *  so a fetched file that ingests at all also fits the ingest cap. */
 const MAX_BINARY_FETCH_BYTES = 32 * 1024 * 1024;
+/** KSC-8 — this call site had no timeout at all; a provider that accepts the
+ *  connection and never finishes the body hung the sync tick indefinitely. */
+const DOWNLOAD_TIMEOUT_MS = 60_000;
+/** Bounded because the arms are now per hop: an unbounded chain is a way to
+ *  spend the timeout budget without ever downloading anything. */
+const MAX_DOWNLOAD_REDIRECTS = 5;
 /** Audio gets the larger sync cap (ADR 0111) — long recordings transcribe via the File API,
  *  mirroring kbService's MAX_AUDIO_DECODED_BYTES so a synced long audio also fits ingest. */
 const MAX_AUDIO_FETCH_BYTES = 200 * 1024 * 1024;
@@ -770,10 +1137,55 @@ async function readBytes(res: { arrayBuffer(): Promise<ArrayBuffer> }, maxBytes 
   return buf;
 }
 
+/**
+ * Parse a transport-SUCCESS body as JSON — THROWS a typed error when it is not
+ * parseable (ADR 0605 Tier 1 / `KSC-1`, `KSC-5`).
+ *
+ * THE BUG THIS EXISTS TO MAKE UNREPRESENTABLE. This used to `return undefined`
+ * on a parse failure. Every caller then read `json?.field`, so an unparseable
+ * `200` — an interposing proxy, a captive portal, a provider HTML error page —
+ * degraded to "the provider returned nothing". On the four FOLDER-LISTING
+ * callers that became an EMPTY listing, which `diffFolder` correctly classifies
+ * as *every previously-synced file was deleted*, which the runner executes as
+ * `deleteDocument` per row. Measured by the feature-31 assessment: `[]` against
+ * 500 prior file-states emits 500 prunes.
+ *
+ * Every HARD failure on this path was already fail-closed (`failClosed`), which
+ * is exactly why the soft one was dangerous: the loud failures were designed and
+ * this quiet one read as success.
+ *
+ * Callers affected — the FULL population, enumerated by call graph (this
+ * function is module-private; `grep readJson` over `src/` + `test/` finds no
+ * importer, and the three same-named functions elsewhere in the repo are
+ * unrelated locals):
+ *   - 4 folder listers (`listGoogleDriveFolder`, `listOneDriveFolder`,
+ *     `listDropboxFolder`, `listBoxFolder`) — the destructive lane. Now the
+ *     whole listing throws, `syncNow` records `error`, and NOTHING is pruned.
+ *   - 4 `browseFolders` branches — the picker now surfaces a 502 instead of
+ *     painting an empty folder tree (a lie, though not a destructive one).
+ *   - 6 single-file meta/link reads. FOUR of those already threw one step later
+ *     on the `undefined`-derived value (`fetchGoogleDriveDoc` via an unsupported
+ *     empty mimeType, `fetchOneDriveItem` likewise, `fetchOneDriveBytes` and
+ *     `fetchDropboxBytes` on a missing download URL) — for those this only
+ *     improves the message. The other TWO silently degraded and now fail closed:
+ *     `fetchGoogleDriveBytes` ingested the file as `application/octet-stream`
+ *     under the title "Drive file", and `fetchBoxBytes` ingested it titled
+ *     "Box file". Both were garbage-in-the-KB paths.
+ * Cross-feature blast radius: `features/agent-knowledge/service.ts:292` calls
+ * `fetchKnowledgeSource` (the text lane). It previously surfaced a misleading
+ * "no extractable text" 400 in this case and now surfaces this 502 — the same
+ * failure outcome, an accurate reason.
+ */
 async function readJson(r: Sent): Promise<unknown> {
+  const body = await readText(r);
   try {
-    return JSON.parse(await readText(r));
+    return JSON.parse(body);
   } catch {
-    return undefined;
+    throw new OpenwopError(
+      'internal_error',
+      'The provider returned a success status with a body that is not JSON. Refusing to treat it as an empty result.',
+      502,
+      { status: r.res.status },
+    );
   }
 }

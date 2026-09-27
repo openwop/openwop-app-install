@@ -164,3 +164,39 @@ The Status line frames this as "default OFF / `bucketUnit` user," but the featur
 no toggle ships and the gates are open. Recording the as-built posture per the ADR
 "correct, don't rewrite" rule. The search input is live in the chat conversations rail
 (`ConversationsRail.tsx`) — **fully usable, no follow-up needed.**
+
+## Correction — freshness watermark (CSC-1, 2026-08-30)
+
+The Phase-1 engine keyed `ensureConversationIndexed`'s freshness watermark on the
+conversation's **`messageCount` alone**, and the docblock claimed a
+"missed/edited/deleted message self-heals on the next query." That was **false for
+the two content-mutations that preserve the count**: an in-place edit
+(`PUT …/messages/:id`) and a tombstone-delete (`DELETE …/messages/:id`, content →
+`{"deleted":true}`, row kept) both leave `messageCount` untouched, so a count-only
+watermark early-returned "fresh" and never re-indexed — old text kept matching with
+a stale snippet, and deleted content stayed searchable to conversation participants
+(a participant-scoped privacy gap).
+
+**Fix:** the watermark is now `${messageCount}:${updatedAt}` (`searchEngine.ts`), and
+the edit + tombstone routes bump the session's `updatedAt` (consistent with title
+edits, which already did — `chatSessions.ts:421`). So append (count moves), edit, and
+delete (updatedAt moves) all invalidate the watermark; the existing rebuild already
+re-indexes changed text and drops stale docs. Still one cheap `getChatSession` row
+read per conversation — the per-query fast path (no full-message scan) is preserved,
+which matters because `searchConversations` calls `ensureConversationIndexed` for
+every visible conversation. Witness: `test/conversation-search-freshness.test.ts`
+(born-red over the real edit/delete routes; sabotage-verified). Host-only, no wire.
+
+**Adversarial-review fold-in + accepted residuals (CSC-1):** the review confirmed the
+privacy goal is met (real content no longer matches after edit/delete) and surfaced
+three residuals. **Fixed:** a tombstoned message was being indexed as the literal
+`{"deleted":true}` sentinel (so "deleted"/"true" matched every tombstone tenant-wide)
+— the index loop now skips the sentinel so the row is dropped, witnessed by a
+`search('deleted')→0` assertion. **Accepted, bounded (not fixed here):** (1) the
+`updateChatMessageContent` write and the `updateChatSession({updatedAt})` bump are two
+awaited calls, not one transaction — a crash strictly between them leaves the content
+mutated but the watermark unmoved (stale until the next op on that conversation, which
+is the feature's own baseline self-healing behavior, not data loss); folding the bump
+into the storage layer atomically (esp. the Postgres two-table transaction) is a
+follow-up. (2) A no-op edit (unchanged content) now bumps `updatedAt` and re-floats the
+conversation — consistent with title edits, negligible.

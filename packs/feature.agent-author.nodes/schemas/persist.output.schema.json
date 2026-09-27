@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.0/persist.output.schema.json",
+  "title": "Agent Author Persist Output",
+  "type": "object",
+  "required": ["rosterId", "persona", "enabled"],
+  "properties": {
+    "rosterId": { "type": "string" },
+    "persona": { "type": "string" },
+    "enabled": { "const": false, "description": "Created agents ALWAYS land disabled for human review (ADR 0514)." }
+  },
+  "additionalProperties": false
+}

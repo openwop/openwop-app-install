@@ -1,0 +1,50 @@
+/**
+ * `ui-plugins` — français (ADR 0300, RFC 0117/0119).
+ */
+export const messages = {
+  eyebrow: 'Développeur',
+  title: 'Extensions d’interface',
+  lede: 'Chargez des packs d’extensions front-end signés et isolés (RFC 0117/0119).',
+
+  notEnabledTitle: 'Les extensions d’interface ne sont pas activées',
+  notEnabledBody: 'Demandez à un administrateur d’activer les Extensions d’interface pour ce locataire.',
+
+  isolationLabel: 'Isolation',
+  boundaryExplainer: 'Une extension téléchargée s’exécute dans une iframe isolée d’origine croisée et ne parle à l’hôte que via ui-plugin/1. Quatre garanties :',
+  legIsolation: 'Isolé — une origine opaque (pas d’allow-same-origin).',
+  legEgress: 'Sortie refusée — default-src ’none’, aucune requête réseau.',
+  legAllowlist: 'Limité par liste — méthode non déclarée → method_not_allowed.',
+  legNoByok: 'Pas de BYOK — aucune méthode porteuse d’identifiants.',
+
+  selfTestTitle: 'Autotest de la frontière',
+  selfTestBlurb: 'Les quatre garanties ci-dessus sont des affirmations. Ceci vérifie les trois qui sont mécaniquement vérifiables, avec le même bac à sable et la même CSP qu’une extension réelle.',
+  selfTestRun: 'Lancer l’autotest',
+  selfTestRerun: 'Relancer',
+  selfTestFrameTitle: 'Sonde d’isolation (masquée)',
+  selfTestNoByokNote: 'Le no-BYOK est AFFIRMÉ, non sondé : c’est l’absence d’une méthode porteuse d’identifiants dans une liste fermée, ce qu’une sonde ne peut pas démontrer. Il s’affiche sans coche plutôt que d’en recevoir une non méritée.',
+  outcome_pass: 'RÉUSSI',
+  outcome_fail: 'ÉCHEC',
+  outcome_running: 'vérification…',
+  outcome_asserted: 'affirmé',
+  outcome_inconclusive: 'sans réponse',
+  legForwarded: 'transmis à l’hôte — PAS refusé',
+  legNoResponse: 'aucune réponse',
+  installedLabel: 'Extensions installées',
+  noneTitle: 'Aucune extension installée',
+  noneBody: 'Cet hôte ne sert aucun pack d’extension front-end.',
+
+  liveLabel: 'Extension en direct',
+  liveExplainer: 'La visionneuse de référence lit un artefact de démonstration via ui-plugin/1 et atteste les quatre garanties.',
+  pluginLoading: 'Chargement de l’extension…',
+  pluginLoadFailed: 'Échec du chargement de l’extension',
+  listFailedLead: 'Impossible de charger la liste des extensions :',
+  listFailedTitle: 'Impossible de charger la liste des extensions',
+  isolationUnknown: 'Inconnu — non communiqué',
+  witnessUnavailableTitle: 'Le témoin en direct ne s’affiche pas',
+  witnessListFailedBody: 'La liste des extensions n’a pas été chargée : il n’y a donc rien à monter ici. Ce n’est PAS une preuve que l’isolation a échoué — ni qu’elle a tenu.',
+  witnessNoViewerBody: 'Cet hôte ne sert aucune extension de type visionneuse d’artefacts : il n’y a rien à monter. Les quatre garanties ci-dessus restent sans témoin sur cette page.',
+  witnessArtifactFailedBody: 'L’artefact de démonstration que lit la visionneuse de référence n’a pas pu être préparé, la visionneuse n’a donc pas été montée :',
+  tierTrusted: 'De confiance (signé)',
+  tierCommunity: 'Communauté (bac à sable)',
+  trustedLiveExplainer: "Ce plugin est signé par une clé épinglée par l'opérateur et s'exécute dans le cadre principal avec une intégration complète. La signature et la révocation sont revérifiées à chaque chargement.",
+} as const;

@@ -53,3 +53,28 @@ export function getEnvelopeReasoningConfig(): EnvelopeReasoningConfig {
     promptDirective: parseStrengthEnv(process.env.OPENWOP_ENVELOPE_REASONING_DIRECTIVE),
   };
 }
+
+/**
+ * ADR 0396 P4 — the per-USER directive override, injected by the settings
+ * feature at registration (DI inversion — this host module never imports a
+ * feature). The wire advertisement stays HOST-level (discovery keeps reading
+ * `getEnvelopeReasoningConfig()`); the per-user threading is host-internal.
+ */
+export type UserReasoningOverrideResolver = (tenantId: string, userId: string) => Promise<ReasoningDirectiveStrength | null>;
+let userOverrideResolver: UserReasoningOverrideResolver | null = null;
+export function configureUserReasoningOverride(fn: UserReasoningOverrideResolver | null): void {
+  userOverrideResolver = fn;
+}
+
+/** The effective posture for one dispatch: the user's override when set, else
+ *  the host-wide posture. Fail-soft — a resolver error falls back to host-wide
+ *  (a prefs outage must not change dispatch behavior). */
+export async function resolveEnvelopeReasoning(tenantId?: string, userId?: string): Promise<EnvelopeReasoningConfig> {
+  const base = getEnvelopeReasoningConfig();
+  if (!userOverrideResolver || !tenantId || !userId) return base;
+  try {
+    const override = await userOverrideResolver(tenantId, userId);
+    if (override && VALID_STRENGTHS.has(override)) return { supported: base.supported, promptDirective: override };
+  } catch { /* fail-soft to the host posture */ }
+  return base;
+}

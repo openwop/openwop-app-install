@@ -1,0 +1,303 @@
+{
+  "name": "core.openwop.workflows.notebooks",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Notebooks workflows (summarize, transform, ingest-audio, ingest-youtube), migrated from the deprecated builtins (ADR 0472 P4). chainIds keep the original ids so ignition + replay resolve unchanged; node outputRoles restored at registration.",
+  "keywords": [
+    "Notebooks"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "notebooks.summarize",
+      "version": "1.0.0",
+      "label": "notebooks.summarize",
+      "description": "Notebooks notebooks.summarize workflow.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "sourceId"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook whose source is summarized."
+          },
+          "sourceId": {
+            "type": "string",
+            "description": "The source document to summarize."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "read",
+            "typeId": "feature.notebooks.nodes.read-source",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "sourceId": "{{params.sourceId}}"
+            }
+          },
+          {
+            "id": "generate",
+            "typeId": "core.ai.chatCompletion",
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "systemPrompt": "Summarize the following source for a research notebook in 3-5 sentences; plain text; no preamble."
+            }
+          },
+          {
+            "id": "store",
+            "typeId": "feature.notebooks.nodes.store-summary",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "sourceId": "{{params.sourceId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "read.messages",
+            "to": "generate.messages",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "generate.content",
+            "to": "store.summary",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.transform",
+      "version": "1.0.0",
+      "label": "notebooks.transform",
+      "description": "Notebooks notebooks.transform workflow.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "sourceId",
+          "systemPrompt",
+          "orgId",
+          "title",
+          "kind",
+          "ownerSubject"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook whose source is transformed (read-source fetches its text in-run)."
+          },
+          "sourceId": {
+            "type": "string",
+            "description": "The source the transformation is applied to (read + idempotency key)."
+          },
+          "systemPrompt": {
+            "type": "string",
+            "description": "The transformation template’s system prompt (read-source prepends it)."
+          },
+          "orgId": {
+            "type": "string",
+            "description": "The org the output Document is created in."
+          },
+          "title": {
+            "type": "string",
+            "description": "The output Document title."
+          },
+          "kind": {
+            "type": "string",
+            "description": "The output Document kind (the transformation’s docKind)."
+          },
+          "ownerSubject": {
+            "type": "object",
+            "description": "The owning subject (project:<notebookId>) of the output Document."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "read",
+            "typeId": "feature.notebooks.nodes.read-source",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "sourceId": "{{params.sourceId}}",
+              "systemPrompt": "{{params.systemPrompt}}"
+            }
+          },
+          {
+            "id": "generate",
+            "typeId": "core.ai.chatCompletion",
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6"
+            }
+          },
+          {
+            "id": "write",
+            "typeId": "feature.notebooks.nodes.write-transformation",
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "title": "{{params.title}}",
+              "kind": "{{params.kind}}",
+              "ownerSubject": "{{params.ownerSubject}}",
+              "sourceId": "{{params.sourceId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "read.messages",
+            "to": "generate.messages",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "generate.content",
+            "to": "write.content",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.ingest-audio",
+      "version": "1.0.0",
+      "label": "notebooks.ingest-audio",
+      "description": "Notebooks notebooks.ingest-audio workflow.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "title",
+          "audioBase64",
+          "mimeType"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook the transcribed source is added to."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title for the new source."
+          },
+          "sourceType": {
+            "type": "string",
+            "description": "Provenance label woven into the title (audio|video)."
+          },
+          "audioBase64": {
+            "type": "string",
+            "description": "Base64-encoded audio/video bytes to transcribe."
+          },
+          "mimeType": {
+            "type": "string",
+            "description": "MIME type of the audio/video bytes."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional spoken-language hint (BCP-47 or name)."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "transcribe",
+            "typeId": "feature.notebooks.nodes.transcribe-source",
+            "inputs": {
+              "audioBase64": "{{params.audioBase64}}",
+              "mimeType": "{{params.mimeType}}",
+              "language": "{{params.language}}"
+            }
+          },
+          {
+            "id": "ingest",
+            "typeId": "feature.notebooks.nodes.ingest-source",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "title": "{{params.title}}",
+              "sourceType": "{{params.sourceType}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "transcribe.transcript",
+            "to": "ingest.text",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.ingest-youtube",
+      "version": "1.0.0",
+      "label": "notebooks.ingest-youtube",
+      "description": "Notebooks notebooks.ingest-youtube workflow.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "title",
+          "url"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook the transcribed source is added to."
+          },
+          "title": {
+            "type": "string",
+            "description": "Title for the new source."
+          },
+          "sourceType": {
+            "type": "string",
+            "description": "Provenance label woven into the title (youtube)."
+          },
+          "url": {
+            "type": "string",
+            "description": "The YouTube watch/share URL to fetch captions from."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "fetch",
+            "typeId": "feature.notebooks.nodes.fetch-youtube-source",
+            "inputs": {
+              "url": "{{params.url}}"
+            }
+          },
+          {
+            "id": "ingest",
+            "typeId": "feature.notebooks.nodes.ingest-source",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "title": "{{params.title}}",
+              "sourceType": "{{params.sourceType}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "fetch.transcript",
+            "to": "ingest.text",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -13,15 +13,18 @@ const routes: FeatureRoute[] = [
   {
     path: '/campaigns',
     element: <CampaignStudioPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Campaigns',
+      label: 'Campaigns', labelKey: 'campaignOrchestrationLabel',
       icon: MegaphoneIcon,
-      hint: 'Run & manage marketing campaigns',
+      hint: 'Run & manage marketing campaigns', hintKey: 'campaignOrchestrationHint',
       order: 30,
       featureId: 'campaign-orchestration',
+      // ADR 0200 Phase 2 — collapse into the Campaign Studio console when `campaigns` is on.
+      hiddenWhenFeature: 'campaigns',
     },
+    hubTab: { hub: 'campaigns', order: 2, featureId: 'campaign-orchestration' },
   },
 ];
 

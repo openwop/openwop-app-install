@@ -24,7 +24,7 @@ describe('Connector invoker (ADR 0037)', () => {
   let api: http.Server;
   let storage: Storage;
   let apiPort: number;
-  let received: { method?: string; auth?: string; url?: string; body?: string };
+  let received: { method?: string; auth?: string; url?: string; body?: string; prefer?: string; contentType?: string };
   let nextStatus = 200;
   let nextBody = '{"result":[{"sys_id":"abc"}]}';
 
@@ -39,12 +39,16 @@ describe('Connector invoker (ADR 0037)', () => {
       let raw = '';
       req.on('data', (c) => (raw += c));
       req.on('end', () => {
-        received = { method: req.method, auth: req.headers.authorization, url: req.url, body: raw || undefined };
+        received = {
+          method: req.method, auth: req.headers.authorization, url: req.url, body: raw || undefined,
+          ...(req.headers['prefer'] ? { prefer: String(req.headers['prefer']) } : {}),
+          ...(req.headers['content-type'] ? { contentType: String(req.headers['content-type']) } : {}),
+        };
         res.writeHead(nextStatus, { 'content-type': 'application/json' });
         res.end(nextBody);
       });
     });
-    await new Promise<void>((r) => api.listen(0, r));
+    await new Promise<void>((r) => api.listen(0, '127.0.0.1', r));
     apiPort = (api.address() as AddressInfo).port;
 
     // Register a test provider whose apiHosts pin to the loopback test server.
@@ -104,6 +108,24 @@ describe('Connector invoker (ADR 0037)', () => {
     expect(out.status).toBe(201);
     expect(received.method).toBe('POST');
     expect(received.body).toBe('{"short_description":"x"}');
+  });
+
+  it('ADR 0186 slice-B: forwards a static extraHeader (Prefer) but STRIPS a caller-forged authorization/content-type', async () => {
+    const out = (await invoker().invoke('testconn', {
+      context: ctx('u1'),
+      request: {
+        url: `http://127.0.0.1:${apiPort}/services/rest/query/v1/suiteql`,
+        method: 'POST',
+        body: '{"q":"SELECT 1"}',
+        contentType: 'application/json',
+        // a caller trying to smuggle a second auth header + override content-type:
+        extraHeaders: { Prefer: 'transient', authorization: 'Bearer FORGED', 'Content-Type': 'text/evil' },
+      },
+    })) as ConnectorInvokeResult;
+    expect(out.ok).toBe(true);
+    expect(received.prefer).toBe('transient');            // the legit protocol header passes through
+    expect(received.auth).toBe('Bearer SECRET-KEY');      // broker's token wins — the forged one was stripped
+    expect(received.contentType).toBe('application/json'); // broker's content-type wins — the override was stripped
   });
 
   it('FAILS CLOSED (no throw) when the acting user has no Connection', async () => {

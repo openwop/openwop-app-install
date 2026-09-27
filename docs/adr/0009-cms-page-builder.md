@@ -110,6 +110,13 @@ On **publish**, snapshot the page into `cms:pageversion` (capped history);
 records a `cms:redirect` (`fromSlug → toSlug`); the by-slug read **follows one
 redirect hop** (308-style) so old links survive. Tests.
 
+> **Correction (2026-07-03, ADR 0206 D1):** snapshots are now captured on
+> **submit** as well as publish, with distinct-content dedupe (skip when the
+> newest snapshot already captures the page's `version`) — so a snapshot is a
+> *content capture keyed by version*, not a publish event. The
+> `publishedBy`/`publishedAt` field names are kept for stored-row + editor-API
+> compatibility but read as *capturedBy/capturedAt*.
+
 ### Phase 4 — Page Builder frontend
 
 `/cms` (lazy, nav-gated on `cms`): an org picker, a page list with status, a

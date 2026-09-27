@@ -1,11 +1,26 @@
 /**
  * feature.code-exec.nodes — sandboxed code execution (ADR 0114 Phase 1).
  *
- * The `run` node delegates to the host `ctx.runSandboxedCode` adapter. CAPABILITY-
- * HONEST: when no sandbox adapter is wired (the DEFAULT — there is no in-process
- * runtime by design), it throws `capability_not_provided` rather than pretending to
- * execute. Action node — its output is recorded in the event log, so replay/fork
- * read the recorded result and NEVER re-execute (no nondeterministic re-run).
+ * The `run` node delegates to the host `ctx.runSandboxedCode` adapter. CAPABILITY-HONEST: when
+ * no sandbox executor resolves, it throws `capability_not_provided` rather than pretending to
+ * execute.
+ *
+ * CORRECTED (ADR 0686 D2) — this used to say "the DEFAULT — there is no in-process runtime by
+ * design". Phase 8 added a THIRD rung: `host/sandboxAdapter.ts` resolves first-party E2B, then
+ * the external Code-API endpoint, then an OPT-IN **in-process** CPython-WASI runtime (`:222`,
+ * no host FFI). Honest-off is intact — the resolver still returns `undefined` when none is
+ * configured — but "there is no in-process runtime" is false as written.
+ *
+ * REPLAY CLASSIFICATION (ADR 0686 D1) — this header used to claim: "Action node — its output is
+ * recorded in the event log, so replay/fork read the recorded result and NEVER re-execute."
+ * **That was FALSE, and on the one node where it matters most.** `role:"action"` confers
+ * nothing: `gen-side-effect-floor.mjs:139` binds `role === 'side-effect'` OR the
+ * `side-effectful` capability, and nothing under `src/executor/` compares `role` to "action".
+ * This node carried NEITHER, so it sat in `MANIFEST_DECLARED_TYPE_IDS` alone and
+ * `isSideEffectingNode` returned false — meaning a `mode:'replay'` fork **re-ran arbitrary user
+ * code in a paid sandbox**. Nor is that masked by a backstop: `sandboxAdapter.ts` makes no
+ * `assertEffectAllowed` call, so the replay did not throw, it executed. The node now declares
+ * `capabilities: ["side-effectful"]`, which the guarantee above actually depends on.
  *
  * Pure-JS, Node-20 stdlib only. The sandbox endpoint + credential are brokered
  * host-side (ADR 0024 / RFC 0076); they never reach this node.
@@ -69,3 +84,12 @@ export async function run(ctx) {
     },
   };
 }
+
+// Parity tripwire fix (NODE-PACK-AUDIT 2026-07-17): the loader reads the
+// NAMED `nodes` export (tarballLoader.ts) — without this map every declared
+// node was invisible at load time (the skills-bridge bug class).
+export const nodes = {
+  'feature.code-exec.nodes.run': run,
+};
+
+export default nodes;

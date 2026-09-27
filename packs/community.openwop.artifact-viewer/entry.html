@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Artifact Viewer plugin</title>
+  <style>
+    /* Inline only — the deny-egress CSP forbids remote stylesheets/fonts. */
+    :root { color-scheme: light dark; }
+    body { margin: 0; font: 13px/1.5 system-ui, sans-serif; padding: 16px; }
+    h1 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; margin: 0 0 12px; opacity: .7; }
+    .row { display: flex; gap: 8px; align-items: baseline; margin-bottom: 6px; }
+    .k { min-width: 92px; opacity: .6; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 999px; font-weight: 600; font-size: 11px; }
+    .ok { background: #0a7d3320; color: #0a7d33; }
+    .blocked { background: #b4232320; color: #b42323; }
+    pre { margin: 8px 0 0; padding: 12px; border-radius: 8px; background: #8881; overflow: auto; max-height: 40vh; }
+    .muted { opacity: .55; font-size: 12px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>community.openwop.artifact-viewer</h1>
+  <div class="row"><span class="k">Isolation</span><span id="origin"></span></div>
+  <div class="row"><span class="k">Egress</span><span id="egress" class="badge">testing…</span></div>
+  <div class="row"><span class="k">Artifact</span><span id="artifact-status">requesting…</span></div>
+  <div class="row"><span class="k">Allowlist</span><span id="allowlist" class="badge">probing…</span></div>
+  <pre id="payload" hidden></pre>
+  <p class="muted">
+    This is a downloaded, signed <code>kind:"frontend-plugin"</code> pack running in a
+    cross-origin sandboxed iframe. It talks to the host ONLY over <code>ui-plugin/1</code>
+    postMessage RPC, using its declared <code>hostApi:["artifact.read"]</code>. It holds no
+    credentials and can make no network requests (deny-egress CSP).
+  </p>
+
+  <script>
+    // --- Isolation self-witness: a null (opaque) origin proves no allow-same-origin. ---
+    var originEl = document.getElementById('origin');
+    var isOpaque = (window.origin === 'null' || window.origin === undefined || location.origin === 'null');
+    originEl.textContent = isOpaque ? 'opaque origin ✓ (cross-origin sandbox)' : 'origin: ' + location.origin;
+
+    // --- Egress self-witness: the deny-egress CSP must block any network request. ---
+    (function () {
+      var el = document.getElementById('egress');
+      try {
+        fetch('https://example.com/exfil', { mode: 'no-cors' })
+          .then(function () { el.textContent = 'REACHABLE ✗'; el.className = 'badge blocked'; })
+          .catch(function () { el.textContent = 'BLOCKED ✓'; el.className = 'badge ok'; });
+      } catch (e) {
+        el.textContent = 'BLOCKED ✓'; el.className = 'badge ok';
+      }
+    })();
+
+    // --- ui-plugin/1 client: request the artifact once the host sends host.init. ---
+    var PROTO = 'ui-plugin/1';
+    var nextId = 1;
+    var pending = {};
+
+    function callHost(method, params) {
+      return new Promise(function (resolve) {
+        var id = nextId++;
+        pending[id] = resolve;
+        parent.postMessage({ openwop: PROTO, id: id, type: 'request', method: method, params: params }, '*');
+      });
+    }
+
+    window.addEventListener('message', function (ev) {
+      var msg = ev.data;
+      if (!msg || msg.openwop !== PROTO) return;
+      if (msg.type === 'event' && msg.event === 'host.init') {
+        var artifactId = (msg.data && msg.data.artifactId) || '';
+        callHost('artifact.read', { artifactId: artifactId }).then(renderArtifact);
+        // Allowlist self-witness: artifact.write is NOT in this plugin's declared
+        // hostApi (["artifact.read"]) — the loader MUST answer method_not_allowed.
+        callHost('artifact.write', { artifactId: artifactId, payload: {}, version: '1' }).then(renderAllowlist);
+      } else if (msg.type === 'response' && pending[msg.id]) {
+        var resolve = pending[msg.id];
+        delete pending[msg.id];
+        resolve(msg);
+      }
+    });
+
+    function renderArtifact(res) {
+      var statusEl = document.getElementById('artifact-status');
+      var payloadEl = document.getElementById('payload');
+      if (res && res.ok) {
+        statusEl.textContent = 'read ✓ (version ' + (res.result && res.result.version) + ')';
+        payloadEl.hidden = false;
+        payloadEl.textContent = JSON.stringify(res.result && res.result.payload, null, 2);
+      } else {
+        statusEl.textContent = 'error: ' + (res && res.error && res.error.code);
+      }
+    }
+
+    function renderAllowlist(res) {
+      var el = document.getElementById('allowlist');
+      var denied = res && !res.ok && res.error && res.error.code === 'method_not_allowed';
+      if (denied) { el.textContent = 'artifact.write → method_not_allowed ✓'; el.className = 'badge ok'; }
+      else { el.textContent = 'artifact.write ALLOWED ✗'; el.className = 'badge blocked'; }
+    }
+
+    // Announce readiness so the host knows when to send host.init.
+    parent.postMessage({ openwop: PROTO, type: 'event', event: 'plugin.ready' }, '*');
+  </script>
+</body>
+</html>

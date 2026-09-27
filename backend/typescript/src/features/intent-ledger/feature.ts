@@ -13,11 +13,27 @@
  */
 import type { BackendFeature } from '../types.js';
 import { registerIntentLedgerRoutes } from './routes.js';
+import { registerIntentLedgerAgentTools } from './agentTools.js';
+import { onConversationDeleted } from '../../host/conversationLifecycle.js';
+import { deleteLedgerForConversation, registerIntentLedgerErasure } from './ledgerStore.js';
 
 // ALWAYS-ON (toggle removed — graduation 2026-06-24). A no-op until a user drafts +
 // approves a mission contract for a conversation; the chat-header "Mission" button +
 // the on-demand "Draft from conversation" action are always available.
 export const intentLedgerFeature: BackendFeature = {
   id: 'intent-ledger',
-  registerRoutes: (deps) => { registerIntentLedgerRoutes(deps); },
+  registerRoutes: (deps) => {
+    registerIntentLedgerRoutes(deps);
+    registerIntentLedgerAgentTools(); // XCH-HOLE-7 (round 3) — openwop:intent-ledger.get (ADR 0308 seam)
+    // ADR 0288 P2 — a mission ledger for a deleted conversation is meaningless;
+    // point-delete it (the run-stamped copy in run.metadata stays, replay-honest).
+    onConversationDeleted('intent-ledger', async ({ tenantId, conversationId }) => {
+      await deleteLedgerForConversation(tenantId, conversationId);
+    });
+    // CONS-16 — the DSAR eraser. `IntentLedger.approvedBy` is a `User.userId`,
+    // so the row IS addressable by a principal-keyed DSAR; the old exemption
+    // claimed otherwise. Registered unconditionally (this feature is always-on
+    // anyway) — an erasure obligation is never toggle-gated.
+    registerIntentLedgerErasure();
+  },
 };

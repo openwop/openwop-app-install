@@ -211,6 +211,19 @@ feature-pack RFCs behind ADR 0008/0009/0011/0014/0018.
 (`marketing`/`finance` category + `oauth2` + `reach.openapi` + `instanceUrlTemplate` are
 all already in `connection-pack-manifest.schema.json`) — **no amendment**, pure host packs.
 
+> **§Correction (ADR 0599 §5 / §Correction 8, 2026-08-23) — `instanceUrlTemplate` is
+> DECLARED but READ BY NOTHING.** The sentence above is true about the *schema* and
+> false about the *behaviour*, and it is the last place in the corpus that still cites
+> the field as live. Nothing substitutes `{instance}`/`{tenant}` from a stored
+> connection and nothing hands the result to a node, so a pack declaring it gets no
+> base URL from it. ADR 0599 **retired the claim rather than implementing the
+> mechanism** (implementing it means per-connection instance storage + a template
+> resolver + a node-side lookup — its own ADR). The declarations remain in
+> `schemas/connection-pack-manifest.schema.json`, `examples/connection-packs/workday/
+> pack.json` and `features/connections/connectionPackLoader.ts`: an optional property
+> cannot be removed from a vendored schema inside a feature PR, so they are recorded
+> as a residual, not silently deleted. **Read this note before citing the field.**
+
 **Workflow packs (the deferred home — §Correction):** the workflow *definitions* belong in a
 **workflow(-chain) pack**. The protocol artifact already exists
 (`schemas/workflow-chain-pack-manifest.schema.json`, RFC 0013); what's missing is a **host

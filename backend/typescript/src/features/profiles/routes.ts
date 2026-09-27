@@ -23,6 +23,8 @@ import { resolveCallerUser } from '../users/usersGuards.js';
 import { callerSubject, personalTenantOf, isDurableCaller } from '../../host/requestSubject.js';
 import { projectAgentActivity } from '../../host/agentActivity.js';
 import { getUser, listUsers, type User } from '../users/usersService.js';
+import { indexProfile, teamPortfolioShareableKbProvider } from './profilesKnowledgeService.js';
+import { registerShareableKb } from '../../host/shareableKb.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 import { resolveMediaAsset } from '../../host/inMemorySurfaces.js';
 import {
@@ -38,6 +40,7 @@ import {
   setOwnWorkflows,
   setAgentPinned,
   updateOwnProfile,
+  viewOwnProfile,
   viewProfile,
   type AvailabilityStatus,
   type ProfileAvailability,
@@ -137,6 +140,9 @@ function resolveEmailVerified(user: User): boolean | undefined {
 
 export function registerProfilesRoutes(deps: RouteDeps): void {
   const { app } = deps;
+  // ADR 0100 D2 — the Team Portfolio KB is a bindable Board-of-Advisors source
+  // (GRADE DATA-4: makes the indexed team-capability docs retrievable).
+  registerShareableKb(teamPortfolioShareableKbProvider);
 
   // GET /me/activity — the caller's own run-activity feed (ADR 0025), the
   // user-side mirror of the agent `/roster/:id/activity` feed. Surfaces runs the
@@ -168,7 +174,8 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     try {
       const user = await resolveCallerUser(req);
       const profile = await getOrCreateProfile(user.tenantId, user.userId);
-      res.json(viewProfile(profile, { emailVerified: await resolveEmailVerified(user), ...(user.displayName ? { displayName: user.displayName } : {}) }));
+      // ADR 0624 D4 — the OWN lane carries `completenessMissing` (self-only guidance).
+      res.json(viewOwnProfile(profile, { emailVerified: await resolveEmailVerified(user), ...(user.displayName ? { displayName: user.displayName } : {}) }));
     } catch (err) {
       next(err);
     }
@@ -181,6 +188,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       const user = await resolveCallerUser(req);
       const body = (req.body ?? {}) as Record<string, unknown>;
       const patch: ProfilePatch = {
+        preferredName: patchText(body, 'preferredName'),
         jobTitle: patchText(body, 'jobTitle'),
         department: patchText(body, 'department'),
         bio: patchText(body, 'bio'),
@@ -191,9 +199,21 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       if (equipment !== undefined) patch.equipment = equipment;
       const interests = parseStringArray(body, 'interests');
       if (interests !== undefined) patch.interests = interests;
+      const growthInterests = parseStringArray(body, 'growthInterests');
+      if (growthInterests !== undefined) patch.growthInterests = growthInterests; // ADR 0356 P6
 
       const updated = await updateOwnProfile(user.tenantId, user.userId, patch);
-      res.json(viewProfile(updated));
+      // ADR 0643 D6 — AWAITED, not `void`ed. This host suspends detached
+      // continuations under Cloud Run `cpu-throttling=true` (`CLAUDE.md:503`,
+      // ADR 0556 `:577`, ADR 0585 `:88`), so a fire-and-forget derived-index
+      // write on a mutation path may simply never run while the 200 says the
+      // profile is indexed. `indexProfile` try/catches + `log.warn`s internally
+      // (`profilesKnowledgeService.ts`), so awaiting cannot fail the mutation —
+      // including on the `assertNoLiveReindex` 409 — and in provider embed mode
+      // `ingestDocument` defers vectorization to the next hydrate, so the cost
+      // is a durable put, not a provider round-trip. ADR 0172 P4 team-portfolio KB.
+      await indexProfile(user.tenantId, user.userId, updated);
+      res.json(viewOwnProfile(updated));
     } catch (err) {
       next(err);
     }
@@ -213,7 +233,8 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
           .filter((p) => names.has(p.userId))
           .map((p) => {
             const dn = names.get(p.userId);
-            return viewProfile(p, dn ? { displayName: dn } : {});
+            // Team view: `endorsedByMe` for the caller; NO `completenessMissing` (D4 self-only).
+            return viewProfile(p, { viewerUserId: user.userId, ...(dn ? { displayName: dn } : {}) });
           }),
       });
     } catch (err) {
@@ -224,7 +245,11 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   // ── Phase 2: avatar + portfolio (media-asset references) ──
   // Validate a candidate token resolves IN THE CALLER'S TENANT and is an image
   // before persisting the reference (the media-asset-url-tenant-scoped
-  // invariant — a foreign-tenant or non-image token fails closed).
+  // invariant — a foreign-tenant or non-image token fails closed). VALIDATION
+  // ONLY — the PROF-1 durable-lane promotion happens in the SERVICE, after the
+  // row write commits (review F2: promoting here ran before the portfolio
+  // capacity check, so every full-portfolio 409 stranded durable bytes). The
+  // service also releases the byte ref on every reference-OUT path (review F1).
   const requireImageToken = async (tenantId: string, token: unknown): Promise<string> => {
     if (typeof token !== 'string' || token.trim().length === 0) {
       throw new OpenwopError('validation_error', 'Field `token` is required (a media-asset token).', 400, { field: 'token' });
@@ -243,7 +268,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     try {
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
-      res.json(viewProfile(await setAvatarToken(user.tenantId, user.userId, token)));
+      res.json(viewOwnProfile(await setAvatarToken(user.tenantId, user.userId, token)));
     } catch (err) {
       next(err);
     }
@@ -252,7 +277,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
   app.delete('/v1/host/openwop-app/profiles/me/avatar', async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
-      res.json(viewProfile(await clearAvatar(user.tenantId, user.userId)));
+      res.json(viewOwnProfile(await clearAvatar(user.tenantId, user.userId)));
     } catch (err) {
       next(err);
     }
@@ -262,7 +287,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     try {
       const user = await resolveCallerUser(req);
       const token = await requireImageToken(user.tenantId, (req.body as { token?: unknown })?.token);
-      res.status(201).json(viewProfile(await addPortfolioToken(user.tenantId, user.userId, token)));
+      res.status(201).json(viewOwnProfile(await addPortfolioToken(user.tenantId, user.userId, token)));
     } catch (err) {
       next(err);
     }
@@ -273,7 +298,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       const user = await resolveCallerUser(req);
       const updated = await removePortfolioToken(user.tenantId, user.userId, req.params.token);
       if (!updated) throw new OpenwopError('not_found', 'Portfolio asset not found.', 404, { token: req.params.token });
-      res.json(viewProfile(updated));
+      res.json(viewOwnProfile(updated));
     } catch (err) {
       next(err);
     }
@@ -302,7 +327,9 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
         }
         return { name: o.name, proficiency: o.proficiency };
       });
-      res.json(viewProfile(await setOwnSkills(user.tenantId, user.userId, skills)));
+      const skilled = await setOwnSkills(user.tenantId, user.userId, skills);
+      await indexProfile(user.tenantId, user.userId, skilled); // ADR 0643 D6 — awaited (see the PATCH /me site); fail-open INSIDE
+      res.json(viewOwnProfile(skilled));
     } catch (err) {
       next(err);
     }
@@ -317,7 +344,7 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       if (!Array.isArray(raw) || raw.some((w) => typeof w !== 'string')) {
         throw new OpenwopError('validation_error', 'Field `workflows` must be an array of workflow ids (strings).', 400, { field: 'workflows' });
       }
-      res.json(viewProfile(await setOwnWorkflows(user.tenantId, user.userId, raw as string[])));
+      res.json(viewOwnProfile(await setOwnWorkflows(user.tenantId, user.userId, raw as string[])));
     } catch (err) {
       next(err);
     }
@@ -336,12 +363,13 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       // id from your OWN list is always safe, and is exactly how the surface
       // self-heals a stale pin after its agent was deleted.
       if (pinned) {
-        const entry = await getRosterEntry(rosterId);
-        if (!entry || entry.tenantId !== user.tenantId) {
+        const entry = await getRosterEntry(user.tenantId, rosterId);
+        if (!entry) {
           throw new OpenwopError('not_found', 'Agent not found.', 404, { rosterId });
         }
       }
-      res.json(viewProfile(await setAgentPinned(user.tenantId, user.userId, rosterId, pinned, target)));
+      // The 13th pin is an honest 409 from the service (`validation_error`, `details.maxPinned` — PROF-10).
+      res.json(viewOwnProfile(await setAgentPinned(user.tenantId, user.userId, rosterId, pinned, target)));
     } catch (err) {
       next(err);
     }
@@ -358,16 +386,35 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
     try {
       const user = await resolveCallerUser(req);
       const targetUserId = req.params.userId;
-      const skillName = decodeURIComponent(req.params.skill ?? '');
+      // PROF-9 (ADR 0624 D6): Express already decodes route params — a second
+      // `decodeURIComponent` threw `URIError` (→ 500) on a legal skill name
+      // containing `%` (`50% off`). A RAW `%` in the path is Express's own 400.
+      const skillName = req.params.skill ?? '';
       if (user.userId === targetUserId) {
         throw new OpenwopError('forbidden', 'You cannot endorse your own skill.', 403, {});
       }
       // Single read: setEndorsement loads + validates the target profile/skill in
       // the caller's tenant and returns null for a missing profile OR skill (no
       // existence leak — both map to 404).
-      const updated = await setEndorsement(user.tenantId, targetUserId, skillName, user.userId, add);
-      if (!updated) throw new OpenwopError('not_found', 'Profile or skill not found.', 404, { userId: targetUserId, skill: skillName });
-      res.json(viewProfile(updated));
+      const result = await setEndorsement(user.tenantId, targetUserId, skillName, user.userId, add);
+      if (!result) throw new OpenwopError('not_found', 'Profile or skill not found.', 404, { userId: targetUserId, skill: skillName });
+      // PROF-12 (ADR 0624 D7) — the ONE cross-principal write on this surface is
+      // audited, IDS ONLY (the `users/routes.ts` appendAudit shape): target,
+      // endorser/actor, tenant, the verb. Never the skill name or a value.
+      // Audited on the CAS-WON transition ONLY — an idempotent re-add/re-remove
+      // is a no-op and writes no row (an audit row that says `removed` for
+      // nothing removed is a lie in the chain). Same gate as the host event.
+      // Best-effort — the audit trail never blocks the endorsement itself.
+      if (result.changed) {
+        const { appendAudit } = await import('../../host/auditChainService.js');
+        await appendAudit(user.tenantId, `profiles.endorsement.${add ? 'given' : 'removed'}`, {
+          tenantId: user.tenantId,
+          userId: targetUserId,
+          endorserUserId: user.userId,
+          actor: req.userId ?? user.userId,
+        }).catch(() => { /* audit is best-effort */ });
+      }
+      res.json(viewProfile(result.profile, { viewerUserId: user.userId }));
     } catch (err) {
       next(err);
     }
@@ -383,7 +430,8 @@ export function registerProfilesRoutes(deps: RouteDeps): void {
       if (!profile) throw new OpenwopError('not_found', 'Profile not found.', 404, { userId: req.params.userId });
       const owner = await getUser(profile.userId);
       const emailVerified = owner ? await resolveEmailVerified(owner) : undefined;
-      res.json(viewProfile(profile, { emailVerified, ...(owner?.displayName ? { displayName: owner.displayName } : {}) }));
+      // Team-visible view: `endorsedByMe` for the caller; NO `completenessMissing` (D4 self-only).
+      res.json(viewProfile(profile, { viewerUserId: caller.userId, emailVerified, ...(owner?.displayName ? { displayName: owner.displayName } : {}) }));
     } catch (err) {
       next(err);
     }

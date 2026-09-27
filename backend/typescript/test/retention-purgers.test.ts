@@ -5,8 +5,19 @@
  * `updatedAt` (abandoned records, not merely old ones) and deletes only this tenant's
  * rows past the cutoff. Verifies per-feature: an aged row is purged, a fresh row is
  * retained, the classification + tenant guards (no internal purge, no cross-tenant,
- * fail-closed blank tenant). kb is deliberately NOT in scope (it holds tenant knowledge
- * content + a vector mirror, not data-subject PII — architect P5 correction).
+ * fail-closed blank tenant).
+ *
+ * CORRECTION (KB-3, 2026-08-17). This header used to read "kb is deliberately NOT in
+ * scope (it holds tenant knowledge content + a vector mirror, not data-subject PII —
+ * architect P5 correction)". The ingest surface outgrew that: KB now ingests uploaded
+ * PDF/DOCX/Office, image OCR and audio transcripts through a live provider, fetched
+ * URLs, whole media collections, and scheduled Drive/OneDrive folders — and the claim
+ * was already falsified in-tree by `profilesKnowledgeService.ts`, a registered subject
+ * eraser whose entire job is deleting a KB document. `features/kb/kbService.ts` now
+ * registers a subject eraser AND a retention purger; the purger's scope is narrower
+ * than the others by design (it reclaims the DERIVED residue of deleted documents,
+ * never live tenant knowledge, which has no age semantics) and that boundary is
+ * asserted in `kb-erasure-retention.test.ts` rather than implied here.
  *
  * Importing each service module triggers its module-load purger registration; the test
  * seeds backdated rows through a DurableCollection over the SAME backend the purger reads,

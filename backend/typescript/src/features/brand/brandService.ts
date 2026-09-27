@@ -12,11 +12,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { getGovernancePolicy } from '../../host/governanceService.js';
+import { createLogger } from '../../observability/logger.js';
 import { OpenwopError } from '../../types.js';
 import { cleanString, optionalCleanString, safeUrl } from '../../host/boundedStrings.js';
 import {
   BRAND_CHANNELS,
   BRAND_COLOR_KEYS,
+  GENERATOR_OWNED_TOKENS,
   THEMEABLE_TOKENS,
   DEFAULT_GOVERNANCE,
   EMPTY_KEY_PHRASES,
@@ -35,7 +38,11 @@ import {
   type ToneRegister,
 } from './types.js';
 
+import { purgeBrandFonts } from './brandFonts.js';
+
 const brands = new DurableCollection<Brand>('brand:brand', (b) => `${b.tenantId}::${b.id}`);
+
+const log = createLogger('brand.service');
 
 const NAME_MAX = 160;
 const TEXT_MAX = 4000;
@@ -44,6 +51,9 @@ const LIST_MAX = 100; // max items in any string-list field
 
 /** Caller-supplied brand shape (everything optional except name/orgId on create). */
 export interface BrandInput {
+  /** R2 BR-SP-5 — optimistic-concurrency guard: reject (409) if the brand's
+   *  updatedAt no longer matches. Absent = legacy unconditional write. */
+  expectedUpdatedAt?: string;
   name?: unknown;
   description?: unknown;
   parentBrandId?: unknown;
@@ -132,14 +142,19 @@ function sanitizeChannelRules(raw: unknown): ChannelVoiceRule[] {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
   const out: ChannelVoiceRule[] = [];
-  for (const item of raw.slice(0, BRAND_CHANNELS.length)) {
+  // ADR 0354 P4 — a channel may now carry PERSONA-bound variants beside its
+  // generic rule, so dedupe on (channel, personaId) and size the cap for them.
+  for (const item of raw.slice(0, BRAND_CHANNELS.length * 4)) {
     if (!item || typeof item !== 'object') continue;
     const r = item as Record<string, unknown>;
     const channel = cleanString(r.channel, 40);
-    if (!CHANNEL_SET.has(channel) || seen.has(channel)) continue;
-    seen.add(channel);
+    const personaId = typeof r.personaId === 'string' && r.personaId.trim() ? cleanString(r.personaId, 120) : undefined;
+    const dedupeKey = `${channel}::${personaId ?? ''}`;
+    if (!CHANNEL_SET.has(channel) || seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
     const maxLengthN = Number(r.maxLength);
     out.push({
+      ...(personaId ? { personaId } : {}),
       channel: channel as BrandChannel,
       tone: cleanString(r.tone, NAME_MAX),
       formalityOverride: optFormality(r.formalityOverride),
@@ -151,14 +166,19 @@ function sanitizeChannelRules(raw: unknown): ChannelVoiceRule[] {
   return out;
 }
 
-function sanitizeGovernance(raw: unknown): BrandGovernance {
+export function sanitizeGovernance(raw: unknown): BrandGovernance {
   if (!raw || typeof raw !== 'object') return { ...DEFAULT_GOVERNANCE };
   const g = raw as Record<string, unknown>;
   const lockLevel = g.lockLevel === 'partial' || g.lockLevel === 'full' ? g.lockLevel : 'none';
+  const bp = (g.compliance as Record<string, unknown> | undefined)?.blockPublish;
+  const bt = (g.compliance as Record<string, unknown> | undefined)?.blockThreshold;
   return {
     lockLevel,
     allowedEditors: strList(g.allowedEditors, NAME_MAX),
     requireApproval: g.requireApproval === true,
+    ...(bp === 'critical' || bp === 'threshold'
+      ? { compliance: { blockPublish: bp, ...(typeof bt === 'number' && Number.isFinite(bt) ? { blockThreshold: Math.max(0, Math.min(100, Math.floor(bt))) } : {}) } }
+      : {}),
   };
 }
 
@@ -212,6 +232,8 @@ function compact<T extends Record<string, unknown>>(obj: T): Partial<T> | undefi
 /** Sanitize the visual-identity facet (ADR 0170). Returns `undefined` when absent
  *  so the facet is omitted entirely rather than stored as an empty husk. */
 const THEMEABLE = new Set<string>(THEMEABLE_TOKENS);
+/** Contrast-bearing tokens are generator-owned (ADR 0510 §5 — see types.ts). */
+const CONTRAST_CRITICAL = new Set<string>(GENERATOR_OWNED_TOKENS);
 const enumOr = <T extends string>(v: unknown, allowed: readonly T[]): T | undefined =>
   typeof v === 'string' && (allowed as readonly string[]).includes(v) ? (v as T) : undefined;
 
@@ -221,7 +243,7 @@ function sanitizeOverrideMap(raw: unknown): Record<string, string> | undefined {
   if (!raw || typeof raw !== 'object') return undefined;
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
-    if (!THEMEABLE.has(k)) continue; // closed allowlist — no arbitrary CSS properties
+    if (!THEMEABLE.has(k) || CONTRAST_CRITICAL.has(k)) continue; // closed allowlist; contrast roles remain generator-owned
     const c = safeColor(v);
     if (c) out[k] = c;
   }
@@ -263,6 +285,8 @@ function sanitizeIdentity(raw: unknown): BrandIdentity | undefined {
     markSrc: safeBrandAsset(logoRaw.markSrc),
     lockupSrc: safeBrandAsset(logoRaw.lockupSrc),
     faviconSrc: safeBrandAsset(logoRaw.faviconSrc),
+    markSrcDark: safeBrandAsset(logoRaw.markSrcDark),
+    lockupSrcDark: safeBrandAsset(logoRaw.lockupSrcDark),
   });
 
   const colorsRaw = (r.colors && typeof r.colors === 'object' ? r.colors : {}) as Record<string, unknown>;
@@ -359,6 +383,11 @@ export async function createBrand(
     updatedAt: now,
   };
   await brands.put(brand);
+  // BRAND-CODE-7 — the audit trail is best-effort: an audit-write failure must
+  // never 500 a mutation that already applied. Still awaited (happy path stays
+  // ordered before the response); a failure logs at warn.
+  try { await recordBrandAudit(tenantId, brand.id, createdBy, null, brand); }
+  catch (e) { log.warn('brand audit write failed (create) — mutation applied, trail incomplete', { brandId: brand.id, error: e instanceof Error ? e.message : String(e) }); }
   return brand;
 }
 
@@ -404,9 +433,17 @@ export async function updateBrand(
   tenantId: string,
   brandId: string,
   input: BrandInput,
+  actor = 'editor',
 ): Promise<Brand | null> {
   const existing = await getBrand(tenantId, brandId);
   if (!existing) return null;
+  // R2 BR-SP-5 — optimistic-concurrency precondition: the editor seeds from
+  // its list-fetch-time row and each facet replaces wholesale, so a stale
+  // save silently clobbered a concurrent edit (including its invisible
+  // fields). An `expectedUpdatedAt` mismatch is a 409, never a clobber.
+  if (input.expectedUpdatedAt !== undefined && input.expectedUpdatedAt !== existing.updatedAt) {
+    throw new OpenwopError('conflict', 'This brand changed since you opened it — reload and reapply your edits.', 409, { brandId, expected: input.expectedUpdatedAt, actual: existing.updatedAt });
+  }
   const next: Brand = {
     ...existing,
     name: input.name !== undefined ? cleanString(input.name, NAME_MAX) || existing.name : existing.name,
@@ -430,6 +467,9 @@ export async function updateBrand(
     else delete next.identity;
   }
   await brands.put(next);
+  // BRAND-CODE-7 — best-effort audit (see createBrand).
+  try { await recordBrandAudit(tenantId, next.id, actor, existing, next); }
+  catch (e) { log.warn('brand audit write failed (update) — mutation applied, trail incomplete', { brandId: next.id, error: e instanceof Error ? e.message : String(e) }); }
   return next;
 }
 
@@ -437,10 +477,191 @@ export async function updateBrand(
 export async function deleteBrand(tenantId: string, brandId: string): Promise<boolean> {
   const existing = await getBrand(tenantId, brandId);
   if (!existing) return false;
-  return brands.delete(tenantKey(tenantId, brandId));
+  const deleted = await brands.delete(tenantKey(tenantId, brandId));
+  // CS-DATA-7 — purge the brand's audit trail with it (tenant-erasure-friendly:
+  // no orphaned `brand:audit` rows outliving the entity they describe). Best-effort.
+  try {
+    for (const row of await brandAudit.listByPrefix(`${tenantId}:${brandId}:`)) {
+      await brandAudit.delete(`${row.tenantId}:${row.brandId}:${row.auditId}`);
+    }
+  } catch (e) {
+    log.warn('brand audit purge on delete failed — orphaned audit rows may remain', { brandId, error: e instanceof Error ? e.message : String(e) });
+  }
+  // ADR 0399 OQ-1 (C1) — the brand's custom fonts die with it (no orphan rows).
+  try { await purgeBrandFonts(tenantId, brandId); }
+  catch (e) { log.warn('brand font purge on delete failed — orphaned font rows may remain', { brandId, error: e instanceof Error ? e.message : String(e) }); }
+  return deleted;
 }
 
 /** Test-only: drop every brand (mirrors strategy's `__clearStrategies`). */
 export async function __clearBrands(): Promise<void> {
   await brands.__clear();
+}
+
+// ── ADR 0354 P3 — parent-brand cascade ───────────────────────────────────────
+
+/** Effective guardrail rules for a brand: banned phrases and avoid-lists are
+ *  ADDITIVE down the parentBrandId chain (a child extends, never removes);
+ *  voice/tone stay nearest-wins (the child brand object itself). Cycle-guarded,
+ *  depth ≤ 5. Pure aggregation over stored rows. */
+export async function resolveEffectiveBrandRules(tenantId: string, brandId: string): Promise<{ bannedPhrases: string[]; avoidPhrases: string[] } | null> {
+  const seen = new Set<string>();
+  const banned = new Set<string>();
+  const avoid = new Set<string>();
+  let cur: string | undefined = brandId;
+  let depth = 0;
+  let found = false;
+  while (cur && depth < 5 && !seen.has(cur)) {
+    seen.add(cur);
+    const b = await getBrand(tenantId, cur);
+    if (!b) break;
+    found = true;
+    for (const ph of b.keyPhrases.bannedPhrases) banned.add(ph);
+    for (const rule of b.channelVoiceRules) for (const ph of rule.avoidPhrases ?? []) avoid.add(ph);
+    cur = b.parentBrandId;
+    depth += 1;
+  }
+  return found ? { bannedPhrases: [...banned], avoidPhrases: [...avoid] } : null;
+}
+
+// ── ADR 0354 P5 — append-only rule-change audit ─────────────────────────────
+
+export interface BrandAuditRow {
+  auditId: string;
+  tenantId: string;
+  brandId: string;
+  actor: string;
+  changedAt: string;
+  /** Field-level before → after for guardrail-relevant fields only. */
+  changes: Array<{ field: string; from: unknown; to: unknown }>;
+}
+const brandAudit = new DurableCollection<BrandAuditRow>('brand:audit', (r) => `${r.tenantId}:${r.brandId}:${r.auditId}`);
+const AUDIT_CAP = 500;
+const AUDIT_FIELDS = ['keyPhrases', 'channelVoiceRules', 'governance', 'positioning', 'voiceProfile'] as const;
+
+/** Record a guardrail-relevant diff (no-op when nothing relevant changed). */
+export async function recordBrandAudit(tenantId: string, brandId: string, actor: string, before: Partial<Brand> | null, after: Partial<Brand>): Promise<void> {
+  const changes: BrandAuditRow['changes'] = [];
+  for (const f of AUDIT_FIELDS) {
+    const b = before ? (before as Record<string, unknown>)[f] : undefined;
+    const a = (after as Record<string, unknown>)[f];
+    if (JSON.stringify(b) !== JSON.stringify(a)) changes.push({ field: f, from: b, to: a });
+  }
+  if (changes.length === 0) return;
+  await brandAudit.put({ auditId: `ba:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`, tenantId, brandId, actor, changedAt: new Date().toISOString(), changes });
+  // BRAND-CODE-7 — the cap trim is best-effort: a trim failure must not lose
+  // the audit row that just landed (cap enforcement simply defers to the next write).
+  try {
+    const rows = (await brandAudit.listByPrefix(`${tenantId}:${brandId}:`)).sort((x, y) => x.changedAt.localeCompare(y.changedAt));
+    for (const stale of rows.slice(0, Math.max(0, rows.length - AUDIT_CAP))) await brandAudit.delete(`${stale.tenantId}:${stale.brandId}:${stale.auditId}`);
+  } catch (e) {
+    log.warn('brand audit trim failed — cap enforcement deferred', { brandId, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+export async function listBrandAudit(tenantId: string, brandId: string): Promise<BrandAuditRow[]> {
+  return (await brandAudit.listByPrefix(`${tenantId}:${brandId}:`)).sort((x, y) => y.changedAt.localeCompare(x.changedAt) || y.auditId.localeCompare(x.auditId));
+}
+
+// ── ADR 0354 P1 — the ads-dispatch compliance checker ────────────────────────
+
+/**
+ * Build the checker the brand feature registers on the adsAdapter seam. Policy
+ * lives on the BRAND the campaign brief binds; content is scored with the
+ * deterministic scorer over EFFECTIVE (cascaded) rules. FAIL-CLOSED: under a
+ * non-off policy, a policy/scoring failure returns requires-approval — a
+ * governance error must never open the dispatch edge.
+ */
+type ComplianceVerdict = { verdict: 'allow' | 'requires-approval'; reason?: string; score?: number };
+
+/** The compliance ENFORCEMENT policy shape shared by a brand's own
+ *  `governance.compliance` (briefed path) and the tenant-default
+ *  `GovernancePolicy.brandCompliance` (BRAND-CODE-6 unbriefed path). */
+type CompliancePolicy = { blockPublish: 'off' | 'critical' | 'threshold'; blockThreshold?: number };
+
+/**
+ * The ONE deterministic scorer both dispatch legs share (BRAND-CODE-6): score
+ * `content` against `brand`'s EFFECTIVE (parent-cascaded) rules under
+ * `compliancePolicy`. Caller guarantees `blockPublish !== 'off'`. FAIL-CLOSED:
+ * any brand-load/scoring crash returns requires-approval — a policy MAY exist we
+ * could not evaluate, so we never silently open the dispatch edge.
+ */
+async function scoreBrandCompliance(
+  tenantId: string,
+  brand: Brand,
+  compliancePolicy: CompliancePolicy,
+  content: string,
+): Promise<ComplianceVerdict> {
+  try {
+    const effective = await resolveEffectiveBrandRules(tenantId, brand.id);
+    const { scoreComplianceDeterministic } = await import('./scoring.js');
+    const report = scoreComplianceDeterministic(content, brand, {
+      ...(effective ? { extraBannedPhrases: effective.bannedPhrases.filter((p) => !brand.keyPhrases.bannedPhrases.includes(p)) } : {}),
+    });
+    const banned = report.issues.some((i) => i.category === 'banned-phrase');
+    if (compliancePolicy.blockPublish === 'critical' && banned) {
+      return { verdict: 'requires-approval', reason: 'banned phrase in ad content', score: report.deterministicScore };
+    }
+    if (compliancePolicy.blockPublish === 'threshold' && report.deterministicScore < (compliancePolicy.blockThreshold ?? 60)) {
+      return { verdict: 'requires-approval', reason: `compliance score below threshold (${compliancePolicy.blockThreshold ?? 60})`, score: report.deterministicScore };
+    }
+    return { verdict: 'allow', score: report.deterministicScore };
+  } catch (e) {
+    return { verdict: 'requires-approval', reason: `compliance evaluation failed (${e instanceof Error ? e.message : 'error'}) — failing closed` };
+  }
+}
+
+export function buildAdsComplianceChecker(
+  resolveBrandIdForBrief: (tenantId: string, briefId: string) => Promise<string | undefined>,
+): (tenantId: string, args: { briefId?: string; platform: string; content: string }) => Promise<ComplianceVerdict> {
+  return async (tenantId, args) => {
+    // Resolver leg — fails OPEN: a missing/unresolvable brand BINDING must not
+    // block unbranded dispatch (the pre-0354 behavior).
+    let brandId: string | undefined;
+    try {
+      brandId = args.briefId ? await resolveBrandIdForBrief(tenantId, args.briefId) : undefined;
+    } catch {
+      return { verdict: 'allow' };
+    }
+    if (!brandId) {
+      // BRAND-CODE-6 — unbriefed dispatch (no brand bound). Instead of an
+      // unconditional allow, consult the tenant-DEFAULT brand compliance policy:
+      // when one names a `defaultBrandId` under a non-off posture, score against
+      // that brand's rules through the SAME scorer the briefed path uses. Fail
+      // OPEN (allow) when no policy / off / no default / the default brand row is
+      // gone — matching the resolver-leg posture.
+      let policy: CompliancePolicy;
+      let defaultBrandId: string;
+      try {
+        const gov = (await getGovernancePolicy(tenantId))?.brandCompliance;
+        if (!gov || gov.blockPublish === 'off' || !gov.defaultBrandId) return { verdict: 'allow' };
+        policy = { blockPublish: gov.blockPublish, ...(gov.blockThreshold !== undefined ? { blockThreshold: gov.blockThreshold } : {}) };
+        defaultBrandId = gov.defaultBrandId;
+      } catch {
+        // A governance-store read failure on the UNBRIEFED path leaves us unable
+        // to know a default even exists — preserve the pre-0354 open posture.
+        return { verdict: 'allow' };
+      }
+      const defaultBrand = await getBrand(tenantId, defaultBrandId).catch(() => null);
+      if (!defaultBrand) {
+        // A configured default that doesn't resolve is a real misconfig signal —
+        // log it, but fail OPEN (an unbriefed dispatch was ungoverned before).
+        log.warn('brand compliance: tenant defaultBrandId does not resolve — allowing (fail-open)', { tenantId, defaultBrandId });
+        return { verdict: 'allow' };
+      }
+      return scoreBrandCompliance(tenantId, defaultBrand, policy, args.content);
+    }
+    // Policy leg — fails CLOSED (BRAND-CODE-2 grade fix): once a brandId IS
+    // known, a brand-load/scoring crash means a policy MAY exist that we could
+    // not evaluate — requires-approval, never a silent allow.
+    let brand: Brand | null;
+    try {
+      brand = await getBrand(tenantId, brandId);
+    } catch (e) {
+      return { verdict: 'requires-approval', reason: `compliance evaluation failed (${e instanceof Error ? e.message : 'error'}) — failing closed` };
+    }
+    const policy = brand?.governance?.compliance;
+    if (!brand || !policy || policy.blockPublish === 'off') return { verdict: 'allow' };
+    return scoreBrandCompliance(tenantId, brand, policy, args.content);
+  };
 }

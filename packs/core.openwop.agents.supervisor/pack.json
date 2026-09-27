@@ -1,7 +1,7 @@
 {
   "name": "core.openwop.agents.supervisor",
-  "version": "1.0.1",
-  "description": "Multi-agent supervisor. Routes user tasks to specialized subagents via RFC 0007 dispatch + RFC 0006 orchestrator semantics. Mirrors LangGraph Supervisor and CrewAI's hierarchical-process pattern. Pure-agent pack.",
+  "version": "1.0.3",
+  "description": "Multi-agent supervisor. Routes user tasks to specialized subagents via dispatch + orchestrator semantics. Mirrors LangGraph Supervisor and CrewAI's hierarchical-process pattern. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.agents.supervisor",
@@ -32,7 +32,7 @@
       "toolAllowlist": [],
       "memoryShape": {
         "scratchpad": true,
-        "conversation": true,
+        "conversation": false,
         "longTerm": false
       },
       "handoff": {

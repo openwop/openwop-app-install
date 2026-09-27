@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.0/timeline.plan.output.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.1/timeline.plan.output.json",
   "title": "TimelinePlanOutput",
   "type": "object",
   "required": ["boardId", "schedule", "criticalPath"],

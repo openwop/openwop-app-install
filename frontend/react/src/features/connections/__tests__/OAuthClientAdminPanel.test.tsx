@@ -83,6 +83,10 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
   });
 
   it('removes a configured client', async () => {
+    // The destructive action is confirm()-gated (XC-1); without a mounted
+    // <ConfirmRoot> it falls back to window.confirm — accept it.
+    const origConfirm = window.confirm;
+    window.confirm = () => true;
     mProviders.mockResolvedValue([google()]);
     mList.mockResolvedValue([cfg({ configured: true })]);
     mDelete.mockResolvedValue(undefined);
@@ -90,5 +94,6 @@ describe('OAuthClientAdminPanel (FP-2)', () => {
     await waitFor(() => expect(screen.getByText('Google')).toBeTruthy());
     fireEvent.click(screen.getByRole('button', { name: /remove/i }));
     await waitFor(() => expect(mDelete).toHaveBeenCalledWith('google'));
+    window.confirm = origConfirm;
   });
 });

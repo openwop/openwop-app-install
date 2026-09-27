@@ -24,9 +24,18 @@ export default defineConfig({
   test: {
     environment: 'jsdom',
     globals: true,
-    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    // `scripts/**/__tests__` is included so the BUILD GATES can have tests. They are part of
+    // the build contract — a gate that silently stops enforcing is worse than no
+    // gate — and until now nothing covered them.
+    include: ['src/**/*.{test,spec}.{ts,tsx}', 'scripts/**/__tests__/*.{test,spec}.ts'],
     // Bootstrap i18n (ADR 0065) so component tests render real English copy
     // instead of raw translation keys — see src/test/i18n-setup.ts.
-    setupFiles: ['src/test/i18n-setup.ts'],
+    // The clock-shift lane is OPT-IN (OPENWOP_CI_CLOCKSHIFT=1) and mirrors the
+    // backend's. See src/test/clock-shift.ts — the sweep was backend-only, so a
+    // date bomb in this workspace could not be found by the gate written to
+    // find date bombs.
+    setupFiles: process.env.OPENWOP_CI_CLOCKSHIFT === '1'
+      ? ['src/test/i18n-setup.ts', 'src/test/shared-read-seams.ts', 'src/test/no-live-fetch.ts', 'src/test/clock-shift.ts']
+      : ['src/test/i18n-setup.ts', 'src/test/shared-read-seams.ts', 'src/test/no-live-fetch.ts'],
   },
 });

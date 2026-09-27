@@ -13,6 +13,7 @@
  * "Fork to customize" CTA.
  */
 
+import { Button } from '../ui/Button.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -79,7 +80,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
   return (
     <div className="agentinstr-root">
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
       <div className="u-block u-fw-600 u-mb-1">{t('instrWhatThisDoes')}</div>
       <p className="muted u-fs-13 u-mt-0">
@@ -95,7 +96,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
         ariaLabel={t('instrRoleDescriptionAria', { persona: entry.persona })}
       />
       <div className="agentinstr-save-row">
-        <button type="button" className="primary" onClick={() => void onSaveDescription()} disabled={saving}>{t('instrSaveDescription')}</button>
+        <Button variant="primary" onClick={() => void onSaveDescription()} disabled={saving}>{t('instrSaveDescription')}</Button>
       </div>
 
       <div className="u-block u-fw-600 u-mb-1">{t('instrInstructions')}</div>
@@ -114,7 +115,7 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
             autosaveKey={`owp.draft.prompt.${agentId}`}
           />
           <div className="u-mt-1-5">
-            <button type="button" className="primary" onClick={() => void onSavePrompt()} disabled={saving || !systemPrompt.trim()}>{t('instrSaveInstructions')}</button>
+            <Button variant="primary" onClick={() => void onSavePrompt()} disabled={saving || !systemPrompt.trim()}>{t('instrSaveInstructions')}</Button>
           </div>
           {savedPrompt ? (
             <div className="agentinstr-saved">
@@ -132,24 +133,24 @@ export function AgentInstructionsPanel({ entry, onChanged }: { entry: RosterEntr
               <p className="u-mt-0 u-fs-14">
                 {t('instrReadonlyForkable', { persona: entry.persona, agentId })}
               </p>
-              <button type="button" className="secondary" onClick={() => navigate(`/agents/fork?fork=${encodeURIComponent(agentId)}`)}>
+              <Button variant="secondary" onClick={() => navigate(`/agents/fork?fork=${encodeURIComponent(agentId)}`)}>
                 {t('instrForkToCustomize')}
-              </button>
+              </Button>
             </>
           ) : (
             <>
               <p className="u-mt-0 u-fs-14">
                 {t('instrReadonlyBuiltIn', { persona: entry.persona })}
               </p>
-              <button type="button" className="secondary" onClick={() => navigate('/agents/new')}>
+              <Button variant="secondary" onClick={() => navigate('/agents/new')}>
                 {t('instrCreateYourOwn')}
-              </button>
+              </Button>
             </>
           )}
         </div>
       )}
 
-      {/* Guardrails (ADR 0101) — the enforced governance fields, folded in from
+      {/* Guardrails (ADR 0493) — the enforced governance fields, folded in from
           the former Profile tab. Autonomy itself is owned by the Edit-details
           modal (roster.autonomyLevel); this only surfaces the policy guardrails. */}
       <div className="agentinstr-guardrails">

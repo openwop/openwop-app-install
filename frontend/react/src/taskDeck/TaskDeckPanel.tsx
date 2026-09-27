@@ -7,6 +7,7 @@
  *
  * @see docs/adr/0133-run-task-deck.md
  */
+import { Button } from '../ui/Button.js';
 import { lazy, Suspense, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ColumnsIcon } from '../ui/icons/index.js';
@@ -19,9 +20,9 @@ export function TaskDeckButton({ conversationRunId }: { conversationRunId?: stri
   const [open, setOpen] = useState(false);
   return (
     <>
-      <button type="button" className="secondary u-fs-11" onClick={() => setOpen(true)} aria-label={t('openTitle')} title={t('openTitle')}>
+      <Button variant="secondary" className="u-fs-11" onClick={() => setOpen(true)} aria-label={t('openTitle')} title={t('openTitle')}>
         <ColumnsIcon size={14} /> {t('button')}
-      </button>
+      </Button>
       {open && (
         <Suspense fallback={null}>
           <TaskDeckModal {...(conversationRunId ? { conversationRunId } : {})} onClose={() => setOpen(false)} />

@@ -1,0 +1,30 @@
+{
+  "name": "feature.discovery.agents",
+  "version": "1.0.2",
+  "description": "Discovery feature agent pack — a Discovery Curator persona whose tools are registered chat tools over the discovery service (the same fns the REST routes call). Runs faceted search, reviews existing collections + merchandising rules, and authors collections + pin/boost/bury rules directly (no money). Tool-allowlisted to the discovery surface only. Driven through the ONE chat.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "discovery", "agent", "search", "collections", "merchandising"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": { "aiProviders": "supported", "agents.manifestRuntime": "supported" },
+  "agents": [
+    {
+      "agentId": "feature.discovery.agents.curator",
+      "persona": "RESEARCH",
+      "label": "Discovery Curator",
+      "description": "Runs faceted product search and curates the storefront — authors collections (manual/dynamic) and pin/boost/bury merchandising rules — via feature.discovery.nodes over ctx.features.discovery.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/curator.md",
+      "toolAllowlist": [
+        "openwop:discovery.search",
+        "openwop:discovery.list-collections",
+        "openwop:discovery.list-rules",
+        "openwop:discovery.create-collection",
+        "openwop:discovery.create-rule"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

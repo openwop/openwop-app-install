@@ -11,8 +11,12 @@ const FEATURE = { toggleId: 'usage-analytics', label: 'Usage analytics' };
 export function registerUsageAnalyticsRoutes(deps: RouteDeps): void {
   deps.app.get('/v1/host/openwop-app/usage/orgs/:orgId/rollup', async (req, res, next) => {
     try {
-      const { user } = await authorizeOrgScope(req, FEATURE, 'workspace:read');
-      res.json({ rollup: await getUsageRollupWithCost(user.tenantId) });
+      // UAC-1 — this rollup is ADMIN-tier (FE `tier:'admin'`, `<AdminLayout>`). `workspace:read`
+      // is a VIEWER scope, so a read-only member could read tenant-wide AI spend. Gate on
+      // `host:members:manage` — the admin/owner-only management scope the FE's `isAdminCaller`
+      // keys on and that `docs/routes.ts` reuses as the generic workspace-admin gate.
+      const { tenantId } = await authorizeOrgScope(req, FEATURE, 'host:members:manage');
+      res.json({ rollup: await getUsageRollupWithCost(tenantId) });
     } catch (err) { next(err); }
   });
 }

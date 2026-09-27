@@ -26,7 +26,7 @@ async function startApp(): Promise<void> {
   app.use(express.json());
   registerAdminRoutes(app);
   return new Promise((resolve) => {
-    server = app.listen(0, () => {
+    server = app.listen(0, '127.0.0.1', () => {
       port = (server.address() as { port: number }).port;
       resolve();
     });

@@ -9,12 +9,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/consent',
     element: <ConsentPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'Workspace',
-      label: 'Consent',
+      group: 'Customer Data Platform',
+      label: 'Consent', labelKey: 'consentLabel',
       icon: ShieldIcon,
-      hint: 'Region-aware consent + data-subject (GDPR)',
+      hint: 'Region-aware consent + data-subject (GDPR)', hintKey: 'consentHint',
       featureId: 'consent',
     },
   },

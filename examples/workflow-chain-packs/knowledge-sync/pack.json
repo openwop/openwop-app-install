@@ -1,0 +1,58 @@
+{
+  "name": "core.openwop.workflows.knowledge-sync",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "The workflow a knowledge-sync source (ADR 0107 / ADR 0605) fires on cadence (WF-KB-3 / KSWF-1). A single node runs one pass — list → diff → fetch+ingest → prune — over the configured Drive/OneDrive folder into the source's bound KB collection, with all the ADR 0605 hardening (pre-run lease, destructive-diff refusal, Tier-2 erasure, subject-scoped prune) behind the WF-KB-4 spend gate. `sourceId` identifies which SyncSource to sync; the per-source scheduler job registered at source creation supplies it automatically — do not bind this chain by hand. This lane replaces the retired knowledgeSyncDaemon, folding the recurring sync onto the ONE host scheduler. Resolves on hosts that ship the knowledge-sync feature + node pack (the OpenWOP reference app).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": ["Knowledge"],
+  "chains": [
+    {
+      "chainId": "knowledge-sync.run",
+      "version": "1.0.0",
+      "label": "Knowledge Sync",
+      "description": "Run one scheduled sync pass for a knowledge-sync source — list → diff → fetch+ingest → prune — into its bound KB collection. `sourceId` is the SyncSource this run syncs; supplied by the per-source scheduler job (or \"sync now\") registered at source creation — never set this by hand.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceId"],
+        "properties": {
+          "sourceId": {
+            "type": "string",
+            "description": "The knowledge-sync SyncSource this run syncs. Supplied by the per-source scheduler job (or \"sync now\") registered at source creation — never set this by hand."
+          }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          {
+            "id": "run",
+            "typeId": "feature.knowledge-sync.nodes.run",
+            "name": "Run knowledge sync",
+            "position": { "x": 0, "y": 0 },
+            "config": { "sourceId": "{{params.sourceId}}" },
+            "inputs": {}
+          }
+        ]
+      },
+      "outputs": {
+        "status": {
+          "type": "string",
+          "description": "`success` on a completed pass, or `skipped` (feature disabled / not entitled / backoff / in flight)."
+        },
+        "ingested": {
+          "type": "number",
+          "description": "Documents ingested/updated in this pass."
+        },
+        "pruned": {
+          "type": "number",
+          "description": "Documents pruned (gone from the folder) in this pass."
+        }
+      }
+    }
+  ]
+}

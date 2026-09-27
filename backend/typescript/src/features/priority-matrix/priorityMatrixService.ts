@@ -18,17 +18,25 @@ import { cleanString } from '../../host/boundedStrings.js';
 import { resolveOne } from '../../host/featureToggles/service.js';
 import {
   createBoard, deleteBoard, getBoard, listCards, getCard, createCard, moveCard,
-  isTerminalColumn, type KanbanBoard, type KanbanCard,
+  updateCardFields, deleteCard, registerCardDeleteHook, registerBoardDeleteGuard,
+  isTerminalColumn, type KanbanBoard, type KanbanCard, type KanbanCardSource,
 } from '../../host/kanbanService.js';
 import { getProject } from '../projects/projectsService.js';
 import { createDocument, addVersion, deleteDocument } from '../documents/documentsService.js';
-import { computePriority, rankByPriority } from './scoring.js';
+import { computePriority, rankByPriority, scoreCompleteness } from './scoring.js';
+import type { ScoreCompleteness } from './scoring.js';
 import { deriveScheduleStatus, rollupSchedule, type ScheduleRollup, type ScheduleState, type ScheduleStatus } from './schedule.js';
 import { indexList, indexIdea, removeList, ideaCardIds, reindexListIdeas } from './priorityMatrixKnowledgeService.js';
+import { priorityMutated } from './emit.js';
+import { deleteIntakeRowsForList } from './intake.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('features.priority-matrix');
+import { deleteScoreChangesForList, appendIdeaScoreChange } from './scoreHistory.js';
 import {
   CRITERIA_PRESETS, DEFAULT_STATUS_COLUMNS, PRESET_IDS,
   type Aggregation, type AgendaSort, type Criterion, type CriteriaSet, type IdeaSchedule, type IdeaScore, type IdeaVote,
-  type PlanningSession, type PresetId, type PriorityList, type SessionSelection,
+  type PlanningSession, type PresetId, type PriorityList, type ScoreSource, type SessionSelection,
   type VoteAggregation, type VotingMode,
 } from './types.js';
 
@@ -130,6 +138,13 @@ function parseVoterWeights(value: unknown): Record<string, number> {
 }
 
 const LIST_CAP = 200;
+/**
+ * ADR 0667 D3 (PMXWF-9) — sessions were the ONLY per-list collection without a cap,
+ * while lists, ideas, evidence, scenarios, peers and history all had one. They are
+ * also the collection a RUN can drive in a loop, and each one mints a Document plus a
+ * version alongside the row.
+ */
+const SESSIONS_CAP_PER_LIST = 200;
 const IDEAS_CAP = 1_000;
 const nowIso = (): string => new Date().toISOString();
 
@@ -147,7 +162,16 @@ function asWeight(value: unknown, field: string): number {
 
 function validateCriteriaSet(value: unknown): CriteriaSet {
   const raw = (value ?? {}) as Record<string, unknown>;
-  const aggregation = raw.aggregation === 'ratio' ? 'ratio' : 'weighted-sum';
+  // ADR 0667 D2 — this was a BINARY coercion (`=== 'ratio' ? 'ratio' : 'weighted-sum'`),
+  // and `updateList` runs it whenever `criteriaSet` or `presetId` is present — which the
+  // settings form does on any rename or weight tweak. Without widening it here, a
+  // migrated RICE list would have been silently flipped to `weighted-sum` (not even back
+  // to `ratio`, but to a DIFFERENT family) on the next edit, and `recomputeListScores`
+  // would then rewrite every cached priority under the wrong model with no signal.
+  const aggregation: Aggregation =
+    raw.aggregation === 'ratio' ? 'ratio'
+    : raw.aggregation === 'product-ratio' ? 'product-ratio'
+    : 'weighted-sum';
   if (!Array.isArray(raw.criteria) || raw.criteria.length === 0) {
     throw new OpenwopError('validation_error', 'A criteria set MUST have at least one criterion.', 400, { field: 'criteria' });
   }
@@ -202,9 +226,29 @@ export async function listLists(tenantId: string): Promise<PriorityList[]> {
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
+/**
+ * ADR 0667 D2 — RICE lists created before `product-ratio` existed are normalised HERE,
+ * at the one choke every read passes through, rather than by a boot sweep.
+ *
+ * The predicate is total and detectable: `presetId === 'rice'` AND `aggregation ===
+ * 'ratio'`. An earlier draft tried to migrate only "untuned" lists, which is
+ * unimplementable — `validateCriteriaSet` preserves `presetId` verbatim through
+ * arbitrary edits, so it is a LABEL, not a fidelity marker. Tuned lists migrate too, and
+ * should: a tuned RICE list computes RICE just as wrongly, and weights stay meaningful as
+ * exponents.
+ *
+ * Lazy is sufficient because ranking never reads the cached `computedPriority` —
+ * `listRankedIdeas` re-ranks live off `criteriaSet` — so a stale cache cannot mis-order a
+ * list; the next score write or criteria edit refreshes it.
+ */
+function migrateRicePreset(l: PriorityList): PriorityList {
+  if (l.criteriaSet?.presetId !== 'rice' || l.criteriaSet.aggregation !== 'ratio') return l;
+  return { ...l, criteriaSet: { ...l.criteriaSet, aggregation: 'product-ratio' } };
+}
+
 export async function getList(tenantId: string, id: string): Promise<PriorityList | null> {
   const l = await lists.get(`${tenantId}::${id}`);
-  return l && l.tenantId === tenantId ? l : null;
+  return l && l.tenantId === tenantId ? migrateRicePreset(l) : null;
 }
 
 export async function createList(
@@ -255,7 +299,16 @@ export async function createList(
     updatedAt: ts,
   };
   await lists.put(list);
+  // PMX-D3 (ADR 0590) — post-write cap re-check, fail-closed self-compensation
+  // (see addPeer for the mechanism + the tie-order caveat); the loser
+  // compensates its board too.
+  if ((await listLists(tenantId)).length > LIST_CAP) {
+    await lists.delete(`${tenantId}::${list.id}`);
+    await deleteBoard(board.id);
+    throw new OpenwopError('validation_error', `This workspace already has the maximum ${LIST_CAP} priority lists.`, 400, { cap: LIST_CAP });
+  }
   await indexList(tenantId, list, createdBy); // ADR 0100 — best-effort, gated, skips project-scoped
+  priorityMutated({ entity: 'list', verb: 'created', tenantId, actor: createdBy, listId: list.id, orgId });
   return list;
 }
 
@@ -265,6 +318,7 @@ export async function updateList(
   tenantId: string,
   id: string,
   body: Record<string, unknown>,
+  actor?: string,
 ): Promise<PriorityList> {
   const current = await getList(tenantId, id);
   if (!current) throw new OpenwopError('not_found', 'Priority list not found.', 404, { id });
@@ -297,6 +351,7 @@ export async function updateList(
   // idea's existing shared `IdeaScore` so the scores don't vanish from the ranking
   // (the limitation the ADR flagged). Idempotent: skip a card that already has a vote.
   if (seedSingleToMulti) await seedVotesFromScores(next);
+  priorityMutated({ entity: 'list', verb: 'updated', tenantId, actor: actor ?? next.createdBy, listId: next.id, orgId: next.orgId });
   return next;
 }
 
@@ -309,13 +364,17 @@ async function seedVotesFromScores(list: PriorityList): Promise<void> {
     if (Object.keys(s.scores).length === 0) continue;
     const existing = await votes.get(`${list.id}::${s.cardId}::${list.createdBy}`);
     if (existing) continue;
-    await votes.put({ listId: list.id, cardId: s.cardId, voterId: list.createdBy, scores: { ...s.scores }, updatedAt: nowIso() });
+    // F4 (ADR 0590 correction) — carry the PMXU-1 `source` stamp VERBATIM: this
+    // migration writer bypasses `setIdeaScore`, and dropping the stamp laundered
+    // agent provenance to "pre-stamp row" on the single→multi switch.
+    await votes.put({ listId: list.id, cardId: s.cardId, voterId: list.createdBy, scores: { ...s.scores }, updatedAt: nowIso(), ...(s.source ? { source: s.source } : {}) });
   }
 }
 
-export async function deleteList(tenantId: string, id: string): Promise<boolean> {
+export async function deleteList(tenantId: string, id: string, actor?: string): Promise<boolean> {
   const current = await getList(tenantId, id);
   if (!current) return false;
+  priorityMutated({ entity: 'list', verb: 'deleted', tenantId, actor: actor ?? current.createdBy, listId: id, orgId: current.orgId });
   // ADR 0100 — capture the idea card ids BEFORE the board is deleted; ideas have
   // no standalone delete path, so this is the only chance to evict their KB docs.
   const cardIds = await ideaCardIds(current.boardId);
@@ -327,6 +386,29 @@ export async function deleteList(tenantId: string, id: string): Promise<boolean>
   for (const v of await votes.listByPrefix(`${id}::`)) await votes.delete(`${v.listId}::${v.cardId}::${v.voterId}`);
   for (const s of (await sessions.listByPrefix(`${tenantId}::`)).filter((x) => x.listId === id)) {
     await sessions.delete(`${tenantId}::${s.id}`);
+  }
+  // R2 PM review — intake, evidence and the score-change trail were NOT cascaded (the
+  // `deleteIdea` docstring called them "harmless orphans"). They are not harmless: they
+  // carry `requester` (operator-typed names and email addresses), `updatedBy`, `addedBy`
+  // and `actor`/`voterId`, and once the list row is gone NOTHING can resolve their tenant
+  // — so the new tenant-scoped eraser can never reach them, and a later DSAR silently
+  // misses them. An over-reach fixed into an under-reach unless the cascade closes here.
+  await deleteIntakeRowsForList(id);
+  await deleteScoreChangesForList(id, tenantId);
+  // CMNT-2 — cascade the comment threads on every idea in this list. A
+  // `priority_idea` thread's resourceId is `${listId}#${cardId}` (the ADR 0021
+  // composite-id contract), and the cardIds die with the board, so the
+  // exact-or-`#`-prefix sweep over the LIST id is the only shape that reaches
+  // them. Same reasoning as the intake/score-change cascade above: once the list
+  // row is gone nothing resolves their tenant, so a later DSAR misses them —
+  // except a comment `body` is DECLARED PII and stays API-readable meanwhile.
+  // Dynamic import (comments imports THIS module for its resolver → cycle).
+  // Best-effort, never silent.
+  try {
+    const { pruneThreadsForResourceAndComposites } = await import('../comments/commentsService.js');
+    await pruneThreadsForResourceAndComposites(tenantId, 'priority_idea', id);
+  } catch (err) {
+    log.warn('comment_thread_cascade_failed', { resourceType: 'priority_idea', listId: id, error: err instanceof Error ? err.message : String(err) });
   }
   return lists.delete(`${tenantId}::${id}`);
 }
@@ -349,6 +431,13 @@ export interface RankedIdea {
   scores: Record<string, number>;
   computedPriority: number;
   rank: number;
+  /**
+   * ADR 0667 D1c — how completely this idea is scored. Carried on the wire because
+   * `rank` is consumed as fact by the portfolio, the federated portfolio, the KB doc
+   * text and the planning agenda, and `computedPriority === 0` cannot distinguish
+   * "never touched" from "3 of 4 scored" (both return exactly 0 in ratio mode).
+   */
+  completeness: ScoreCompleteness;
   voterCount?: number;
   myScores?: Record<string, number>;
 }
@@ -368,7 +457,7 @@ export async function listRankedIdeas(tenantId: string, listId: string, voterId?
     for (const v of voteRows) { const a = byCard.get(v.cardId) ?? []; a.push(v); byCard.set(v.cardId, a); }
     const aggByCard = new Map<string, Record<string, number>>();
     for (const [cid, rows] of byCard) aggByCard.set(cid, aggregateVotes(rows, list.voteAggregation, list.voterWeights));
-    const ranked = rankByPriority(list.criteriaSet, cards, (c) => aggByCard.get(c.id) ?? {});
+    const ranked = rankByPriority(list.criteriaSet, cards, (c) => aggByCard.get(c.id) ?? {}, { completenessMajor: true });
     return ranked.map((r) => {
       const rows = byCard.get(r.item.id) ?? [];
       const mine = voterId ? rows.find((v) => v.voterId === voterId) : undefined;
@@ -378,6 +467,7 @@ export async function listRankedIdeas(tenantId: string, listId: string, voterId?
         scores: aggByCard.get(r.item.id) ?? {},
         computedPriority: r.priority,
         rank: r.rank,
+        completeness: scoreCompleteness(list.criteriaSet, aggByCard.get(r.item.id) ?? {}),
         voterCount: rows.length,
         myScores: mine?.scores ?? {},
       };
@@ -387,13 +477,14 @@ export async function listRankedIdeas(tenantId: string, listId: string, voterId?
   // single mode (default) — the one shared IdeaScore per idea.
   const scoreRows = await scores.listByPrefix(`${listId}::`);
   const scoreByCard = new Map(scoreRows.map((s) => [s.cardId, s.scores]));
-  const ranked = rankByPriority(list.criteriaSet, cards, (c) => scoreByCard.get(c.id) ?? {});
+  const ranked = rankByPriority(list.criteriaSet, cards, (c) => scoreByCard.get(c.id) ?? {}, { completenessMajor: true });
   return ranked.map((r) => ({
     card: r.item,
     status: statusOf(r.item.columnId),
     scores: scoreByCard.get(r.item.id) ?? {},
     computedPriority: r.priority,
     rank: r.rank,
+    completeness: scoreCompleteness(list.criteriaSet, scoreByCard.get(r.item.id) ?? {}),
     myScores: scoreByCard.get(r.item.id) ?? {},
   }));
 }
@@ -495,9 +586,22 @@ export async function submitIdea(
   listId: string,
   createdBy: string,
   body: Record<string, unknown>,
+  /** ADR 0246 — when a cross-feature caller (e.g. the forms→intake bridge chain)
+   *  supplies the source org, the target list MUST belong to it. This is the
+   *  write-boundary org-ownership guard that lets `forms` store the `listId`
+   *  opaquely without importing priority-matrix. */
+  expectedOrgId?: string,
+  /** PMXU-1 (ADR 0590) — the ACTOR CLASS of the writer, stamped truthfully on
+   *  the card (`KanbanCardSource` has always supported workflow/agent; this
+   *  writer hard-coded 'human' for every caller). Chat tools pass 'agent',
+   *  the run surface passes 'workflow', routes take the default. */
+  source: KanbanCardSource = 'human',
 ): Promise<KanbanCard> {
   const list = await getList(tenantId, listId);
   if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
+  if (expectedOrgId !== undefined && list.orgId !== expectedOrgId) {
+    throw new OpenwopError('forbidden_scope', 'Priority list is not in the expected org.', 403, { listId });
+  }
   const title = cleanString(body.title, 200);
   if (!title) throw new OpenwopError('validation_error', 'Field `title` is required.', 400, { field: 'title' });
   if ((await listCards(list.boardId)).length >= IDEAS_CAP) {
@@ -510,23 +614,202 @@ export async function submitIdea(
     columnId: 'new',
     title,
     ...(cleanString(body.description, 4000) ? { description: cleanString(body.description, 4000) } : {}),
-    source: 'human',
+    source,
     createdBy,
   });
+  // PMX-D3 (ADR 0590) — post-write cap re-check, fail-closed self-compensation
+  // (see addPeer for the mechanism + the tie-order caveat).
+  if ((await listCards(list.boardId)).length > IDEAS_CAP) {
+    await deleteCard(card.id);
+    throw new OpenwopError('validation_error', `This list already has the maximum ${IDEAS_CAP} ideas.`, 400, { cap: IDEAS_CAP });
+  }
   await indexIdea(tenantId, list, card.id, createdBy); // ADR 0100
+  priorityMutated({ entity: 'idea', verb: 'submitted', tenantId, actor: createdBy, listId, entityId: card.id, orgId: list.orgId });
   return card;
 }
 
 /** Move an idea to a different status (column). No workflow fires (priority boards
  *  carry no column triggers). Returns the moved card, or null if unknown. */
-export async function moveIdeaStatus(tenantId: string, listId: string, cardId: string, toColumnId: string): Promise<KanbanCard | null> {
+export async function moveIdeaStatus(tenantId: string, listId: string, cardId: string, toColumnId: string, actor?: string): Promise<KanbanCard | null> {
   const list = await getList(tenantId, listId);
   if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
   const card = await getCard(cardId);
   if (!card || card.boardId !== list.boardId) return null;
   const moved = await moveCard(cardId, toColumnId);
-  if (moved) await indexIdea(tenantId, list, cardId, card.createdBy ?? list.createdBy); // ADR 0100 — status changed
+  if (moved) {
+    await indexIdea(tenantId, list, cardId, card.createdBy ?? list.createdBy); // ADR 0100 — status changed
+    priorityMutated({ entity: 'idea', verb: 'status-moved', tenantId, actor: actor ?? card.createdBy ?? list.createdBy, listId, entityId: cardId, orgId: list.orgId });
+  }
   return moved ? moved.card : null;
+}
+
+/**
+ * Edit an idea's title/description (ADR 0259). Scores, status, schedule, votes and
+ * intake are untouched — only the card's own text fields. Re-indexes the KB doc so
+ * a retitled idea stays searchable under its new title.
+ */
+export async function editIdea(
+  tenantId: string,
+  listId: string,
+  cardId: string,
+  updatedBy: string,
+  body: Record<string, unknown>,
+): Promise<KanbanCard> {
+  const list = await getList(tenantId, listId);
+  if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
+  const card = await getCard(cardId);
+  if (!card || card.boardId !== list.boardId) throw new OpenwopError('not_found', 'Idea not found in this list.', 404, { cardId });
+  const patch: { title?: string; description?: string } = {};
+  if (body.title !== undefined) {
+    const title = cleanString(body.title, 200);
+    if (!title) throw new OpenwopError('validation_error', 'Field `title` cannot be empty.', 400, { field: 'title' });
+    patch.title = title;
+  }
+  // An explicit empty/whitespace description clears it; omitting the field leaves it.
+  if (body.description !== undefined) patch.description = cleanString(body.description, 4000);
+  const updated = await updateCardFields(cardId, patch);
+  if (!updated) throw new OpenwopError('not_found', 'Idea not found in this list.', 404, { cardId });
+  await indexIdea(tenantId, list, cardId, updatedBy); // ADR 0100 — title/description changed
+  priorityMutated({ entity: 'idea', verb: 'updated', tenantId, actor: updatedBy, listId, entityId: cardId, orgId: list.orgId });
+  return updated;
+}
+
+/**
+ * Delete an idea (ADR 0259). Removes the card and the overlays this feature owns +
+ * keys by `${listId}::${cardId}` (score, votes, schedule) and drops its KB doc (via
+ * `indexIdea`, which removes the doc once the card is gone). Intake/evidence/
+ * score-history rows are keyed by cardId and inert without a card — left as harmless
+ * orphans rather than reaching across module boundaries. Strategy links (owned by the
+ * strategy feature, ADR 0079 import direction) resolve to nothing and are hidden by
+ * that feature's own missing-ref handling. Idempotent: returns false if already gone.
+ */
+
+/**
+ * ADR 0667 D5 (PMXWF-10) — overlay cleanup for a card deleted through KANBAN's door.
+ *
+ * An idea IS a card, and PM keeps seven things keyed by the card id plus a KB doc
+ * projecting it. `DELETE …/kanban/cards/:cardId` ran none of that, so the overlays
+ * orphaned and — the part that reaches people — the deleted idea kept being RETRIEVED
+ * from the org's managed PM collection, which is shareable to advisory boards.
+ *
+ * **Overlay-only and idempotent, by construction.** `deleteCard` has five callers and
+ * three are PM's own (`deleteIdea`, `deleteList`, the clone-merge path), so this hook
+ * runs again on PM's own deletes. It therefore must never call `deleteIdea` (which would
+ * recurse through `deleteCard`) and never delete the card itself. Every operation below
+ * is a delete-by-key or an index rebuild, all safe to repeat.
+ *
+ * It resolves the owning list from the card's board, so a card belonging to no PM list is
+ * a no-op.
+ */
+async function cleanupOverlaysForDeletedCard(cardId: string, card: KanbanCard): Promise<void> {
+  const owning = (await lists.list()).filter((l) => l.boardId === card.boardId);
+  for (const list of owning) {
+    const listId = list.id;
+    await scores.delete(`${listId}::${cardId}`);
+    for (const v of await votes.listByPrefix(`${listId}::${cardId}::`)) await votes.delete(`${listId}::${cardId}::${v.voterId}`);
+    await schedules.delete(`${listId}::${cardId}`);
+    // The KB doc — `indexIdea` evicts it because the card is already gone from the live
+    // ranking by the time this hook runs. This is the eviction that had NO caller outside
+    // PM, and therefore the reason a kanban-side delete left a deleted idea retrievable.
+    await indexIdea(list.tenantId, list, cardId, card.createdBy ?? list.createdBy);
+    try {
+      const { pruneThreadsForDeletedResources } = await import('../comments/commentsService.js');
+      await pruneThreadsForDeletedResources(list.tenantId, 'priority_idea', [`${listId}#${cardId}`]);
+    } catch (err) {
+      log.warn('comment_thread_cascade_failed', { resourceType: 'priority_idea', listId, cardId, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+}
+
+/**
+ * ADR 0667 D5(b) — claim a board that backs a priority list, so kanban's delete ROUTE can
+ * refuse and name PM's own door instead of silently emptying the list.
+ *
+ * `DELETE …/kanban/boards/:boardId` needs only `workspace:write`, while `deleteList`
+ * needs creator-or-org-admin authority. Without this an editor who cannot delete the list
+ * could delete the board under it, after which `listRankedIdeas` returns `[]` and the list
+ * renders empty with every score, vote, intake and evidence row intact and no signal.
+ */
+async function claimBoardForPriorityList(boardId: string): Promise<{ feature: string; ownerLabel: string } | null> {
+  const owning = (await lists.list()).find((l) => l.boardId === boardId);
+  return owning ? { feature: 'priority-matrix', ownerLabel: owning.name } : null;
+}
+
+export function registerPriorityMatrixKanbanHooks(): void {
+  registerCardDeleteHook('priority-matrix', cleanupOverlaysForDeletedCard);
+  registerBoardDeleteGuard('priority-matrix', claimBoardForPriorityList);
+}
+
+export async function deleteIdea(tenantId: string, listId: string, cardId: string, actor: string): Promise<boolean> {
+  const list = await getList(tenantId, listId);
+  if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
+  const card = await getCard(cardId);
+  if (!card || card.boardId !== list.boardId) return false;
+  await deleteCard(cardId);
+  await scores.delete(`${listId}::${cardId}`);
+  for (const v of await votes.listByPrefix(`${listId}::${cardId}::`)) await votes.delete(`${listId}::${cardId}::${v.voterId}`);
+  await schedules.delete(`${listId}::${cardId}`);
+  await indexIdea(tenantId, list, cardId, actor); // card gone ⇒ removes the KB doc
+  // CMNT-2 — cascade this idea's comment threads (resourceId `${listId}#${cardId}`).
+  // Best-effort, never silent; see the note in `deleteList`.
+  try {
+    const { pruneThreadsForDeletedResources } = await import('../comments/commentsService.js');
+    await pruneThreadsForDeletedResources(tenantId, 'priority_idea', [`${listId}#${cardId}`]);
+  } catch (err) {
+    log.warn('comment_thread_cascade_failed', { resourceType: 'priority_idea', listId, cardId, error: err instanceof Error ? err.message : String(err) });
+  }
+  priorityMutated({ entity: 'idea', verb: 'deleted', tenantId, actor, listId, entityId: cardId, orgId: list.orgId });
+  return true;
+}
+
+/**
+ * Clone an idea (ADR 0259) — a fresh idea in the `New` column seeded with the
+ * source's title (suffixed by the caller, or "… (copy)") + description. In single
+ * mode the source's scores are copied so the clone lands pre-scored; in multi-voter
+ * mode per-voter votes are NOT copied (the clone starts unscored, to be re-voted).
+ */
+export async function cloneIdea(
+  tenantId: string,
+  listId: string,
+  cardId: string,
+  actor: string,
+  body?: Record<string, unknown>,
+): Promise<KanbanCard> {
+  const list = await getList(tenantId, listId);
+  if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
+  const orig = await getCard(cardId);
+  if (!orig || orig.boardId !== list.boardId) throw new OpenwopError('not_found', 'Idea not found in this list.', 404, { cardId });
+  if ((await listCards(list.boardId)).length >= IDEAS_CAP) {
+    throw new OpenwopError('validation_error', `This list already has the maximum ${IDEAS_CAP} ideas.`, 400, { cap: IDEAS_CAP });
+  }
+  const title = cleanString(body?.title, 200) || cleanString(`${orig.title} (copy)`, 200);
+  const card = await createCard({
+    boardId: list.boardId,
+    columnId: 'new',
+    title,
+    ...(orig.description ? { description: orig.description } : {}),
+    source: 'human',
+    createdBy: actor,
+  });
+  // F3 / PMX-D3 (ADR 0590 correction) — the FOURTH pre-check-then-create cap
+  // instance (the review's probe produced 1001 cards): same fail-closed
+  // post-write re-check as submitIdea.
+  if ((await listCards(list.boardId)).length > IDEAS_CAP) {
+    await deleteCard(card.id);
+    throw new OpenwopError('validation_error', `This list already has the maximum ${IDEAS_CAP} ideas.`, 400, { cap: IDEAS_CAP });
+  }
+  if (list.votingMode !== 'multi-voter') {
+    const src = await scores.get(`${listId}::${cardId}`);
+    if (src) {
+      // F4 (ADR 0590 correction) — the copied score carries the source stamp
+      // VERBATIM: a cloned agent-scored row is still agent-derived data (the
+      // human clicked Clone; the scores themselves were model-cast).
+      await scores.put({ listId, cardId: card.id, scores: src.scores, computedPriority: src.computedPriority, updatedBy: actor, updatedAt: nowIso(), ...(src.source ? { source: src.source } : {}) });
+    }
+  }
+  await indexIdea(tenantId, list, card.id, actor); // ADR 0100 — a clone is a new indexable idea
+  priorityMutated({ entity: 'idea', verb: 'cloned', tenantId, actor, listId, entityId: card.id, orgId: list.orgId });
+  return card;
 }
 
 /** The result of scoring an idea — unified across single + multi-voter modes. */
@@ -551,6 +834,27 @@ export async function setIdeaScore(
   cardId: string,
   updatedBy: string,
   rawScores: unknown,
+  /** PMXU-1 (ADR 0590) — actor class of the writer, stamped on the score/vote
+   *  row and the score-change trail (absent on pre-stamp rows; never backfilled). */
+  source: ScoreSource = 'human',
+  /**
+   * ADR 0667 D4 (PMXWF-11) — how the supplied map meets the stored one.
+   *
+   * `'replace'` (default, the HTTP route + the seeds): the map IS the new score set,
+   * so an omitted criterion is CLEARED. That is what a form submit means, and the FE
+   * always sends a complete map (`PriorityListPage.tsx` rebuilds it for exactly this
+   * reason).
+   *
+   * `'merge'` (the agent tool + the run surface): the map asserts the criteria it
+   * NAMES and says nothing about the rest. A model scoring 2 of 5 criteria previously
+   * DELETED the other three and was told "Score recorded."
+   *
+   * Merge deliberately removes an untrusted lane's ability to CLEAR a score: the
+   * validator admits only 1..10, so clearing is expressed by omission, which merge
+   * reinterprets. Silent deletion from a model lane is the defect being closed; if an
+   * explicit clear is ever needed it lands as its own parameter, never as omission.
+   */
+  mode: 'replace' | 'merge' = 'replace',
 ): Promise<ScoreResult> {
   const list = await getList(tenantId, listId);
   if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
@@ -558,36 +862,91 @@ export async function setIdeaScore(
   if (!card || card.boardId !== list.boardId) throw new OpenwopError('not_found', 'Idea not found in this list.', 404, { cardId });
   const map = (rawScores ?? {}) as Record<string, unknown>;
   const validIds = new Set(list.criteriaSet.criteria.map((c) => c.id));
+  // R2 PM2-B2 (review) — this is the SHARED choke: the route, the workflow surface, the
+  // demo seed AND the agent tool all pass through it, and it silently dropped anything it
+  // could not match, with no count and no rejected list. Hardening only the tool wrapper
+  // left the defect live everywhere else — and the app's own demo seed PROVED it: it
+  // creates `weighted` lists (ids strategic-alignment/roi/urgency/compliance-risk/cost)
+  // and scores every idea with `{impact, effort, confidence}`, so every key was dropped
+  // and all twelve seeded ideas came out at priority 0. Success-with-empty, on the
+  // shipped demo. Refuse instead, and name what was wrong.
   const clean: Record<string, number> = {};
+  const unknown: string[] = [];
+  const outOfRange: string[] = [];
   for (const [k, v] of Object.entries(map)) {
-    if (!validIds.has(k)) continue; // ignore scores for criteria not in the set
+    if (!validIds.has(k)) { unknown.push(k); continue; }
     const n = typeof v === 'number' ? v : Number(v);
     if (Number.isFinite(n) && n >= 1 && n <= 10) clean[k] = Math.round(n);
+    else outOfRange.push(k);
+  }
+  if (unknown.length > 0 || outOfRange.length > 0) {
+    throw new OpenwopError('validation_error', [
+      unknown.length > 0 ? `Unknown criterion id(s): ${unknown.join(', ')}.` : '',
+      outOfRange.length > 0 ? `Scores must be a number from 1 to 10; out of range: ${outOfRange.join(', ')}.` : '',
+      `This list's criteria are: ${[...validIds].join(', ')}.`,
+    ].filter(Boolean).join(' '), 400, { field: 'scores', unknown, outOfRange, criteria: [...validIds] });
   }
 
   if (list.votingMode === 'multi-voter') {
-    await votes.put({ listId, cardId, voterId: updatedBy, scores: clean, updatedAt: nowIso() });
+    // ADR 0230 §B4 — the prior AGGREGATE priority, computed before this vote lands.
+    const before = (await votes.listByPrefix(`${listId}::${cardId}::`)).filter((v) => v.cardId === cardId);
+    const priorPriority = before.length > 0 ? computePriority(list.criteriaSet, aggregateVotes(before, list.voteAggregation, list.voterWeights)) : undefined;
+    // ADR 0667 D4 — merge against THIS VOTER'S own prior row, never against the
+    // aggregate: merging onto the aggregate would attribute to this voter scores
+    // that other members cast, and `getVoteBreakdown` shows that row to users as
+    // "who scored it and how".
+    const myPrior = before.find((v) => v.voterId === updatedBy);
+    const merged = mode === 'merge' ? { ...(myPrior?.scores ?? {}), ...clean } : clean;
+    await votes.put({ listId, cardId, voterId: updatedBy, scores: merged, updatedAt: nowIso(), source });
     const all = (await votes.listByPrefix(`${listId}::${cardId}::`)).filter((v) => v.cardId === cardId);
     const aggregate = aggregateVotes(all, list.voteAggregation, list.voterWeights);
     await indexIdea(tenantId, list, cardId, updatedBy); // ADR 0100 — aggregate priority changed
-    return { cardId, scores: clean, computedPriority: computePriority(list.criteriaSet, aggregate), voterCount: all.length };
+    const newPriority = computePriority(list.criteriaSet, aggregate);
+    void appendIdeaScoreChange({
+      tenantId, listId, cardId, voterId: updatedBy, scores: merged, actor: updatedBy, source,
+      ...(priorPriority !== undefined ? { priorPriority } : {}), newPriority,
+    }).catch((err: unknown) => {
+      // PMX-10 (ADR 0590) — the trail is PRODUCT data (ADR 0230 §B4 "why did
+      // this rank change"); a broken trail must be visible, per this feature's
+      // own best-effort-never-silent convention.
+      log.warn('score_change_trail_append_failed', { listId, cardId, error: err instanceof Error ? err.message : String(err) });
+    });
+    priorityMutated({ entity: 'idea', verb: 'scored', tenantId, actor: updatedBy, listId, entityId: cardId, orgId: list.orgId });
+    return { cardId, scores: merged, computedPriority: newPriority, voterCount: all.length };
   }
 
+  // ADR 0230 §B4 — prior/new priority for the score-change trail (single mode).
+  const prior = await scores.get(`${listId}::${cardId}`);
+  const nextScores = mode === 'merge' ? { ...(prior?.scores ?? {}), ...clean } : clean;
   const row: IdeaScore = {
     listId,
     cardId,
-    scores: clean,
-    computedPriority: computePriority(list.criteriaSet, clean),
+    scores: nextScores,
+    computedPriority: computePriority(list.criteriaSet, nextScores),
     updatedBy,
     updatedAt: nowIso(),
+    // ADR 0667 D4 — on a MERGE that leaves pre-existing scores standing, keep the
+    // prior actor class: re-stamping would attribute a human's surviving scores to
+    // the agent that touched two of them, falsifying the PMXU-1 provenance. (Per-
+    // criterion provenance is out of scope and recorded as a known imprecision.)
+    source: mode === 'merge' && prior && Object.keys(prior.scores ?? {}).some((k) => !(k in clean)) ? (prior.source ?? source) : source,
   };
   await scores.put(row);
   await indexIdea(tenantId, list, cardId, updatedBy); // ADR 0100 — score/priority changed
-  return { cardId, scores: clean, computedPriority: row.computedPriority };
+  void appendIdeaScoreChange({
+    tenantId, listId, cardId, scores: nextScores, actor: updatedBy, source,
+    ...(prior ? { priorPriority: prior.computedPriority } : {}), newPriority: row.computedPriority,
+  }).catch((err: unknown) => {
+    // PMX-10 (ADR 0590) — see the multi-voter branch above.
+    log.warn('score_change_trail_append_failed', { listId, cardId, error: err instanceof Error ? err.message : String(err) });
+  });
+  priorityMutated({ entity: 'idea', verb: 'scored', tenantId, actor: updatedBy, listId, entityId: cardId, orgId: list.orgId });
+  return { cardId, scores: nextScores, computedPriority: row.computedPriority };
 }
 
-/** One voter's entry in an idea's vote breakdown (ADR 0059). */
-export interface VoteBreakdownEntry { voterId: string; scores: Record<string, number>; updatedAt: string }
+/** One voter's entry in an idea's vote breakdown (ADR 0059). `source` is the
+ *  PMXU-1 actor-class stamp (absent = pre-stamp row). */
+export interface VoteBreakdownEntry { voterId: string; scores: Record<string, number>; updatedAt: string; source?: ScoreSource }
 
 /**
  * The per-voter breakdown for one idea (ADR 0059) — who scored it and how. Only
@@ -602,7 +961,7 @@ export async function getVoteBreakdown(tenantId: string, listId: string, cardId:
   if (list.votingMode !== 'multi-voter') return [];
   const rows = (await votes.listByPrefix(`${listId}::${cardId}::`)).filter((v) => v.cardId === cardId);
   return rows
-    .map((v) => ({ voterId: v.voterId, scores: v.scores, updatedAt: v.updatedAt }))
+    .map((v) => ({ voterId: v.voterId, scores: v.scores, updatedAt: v.updatedAt, ...(v.source ? { source: v.source } : {}) }))
     .sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
 }
 
@@ -631,6 +990,56 @@ const BLOCKED_RE = /block/i;
  *  (`wont-do`/`blocked`), then a best-effort name regex.
  *  KNOWN LIMITATION (ADR 0103): only a legacy board whose terminal lane was renamed
  *  AND carries no `terminalKind` still relies on the regex; new/default boards are exact. */
+/**
+ * R2 PM2-M3 — the lane a merged DUPLICATE is moved into, resolved from the board's own
+ * columns rather than assumed to be the literal id `wont-do`. Boards keep whatever columns
+ * they were created with, so on a renamed board the assumption made `moveCard` return null
+ * AFTER the merge had already committed. Returns null when the board has no cancellation
+ * lane at all, so the caller can refuse BEFORE writing.
+ */
+export async function resolveIdeaCancellationLane(tenantId: string, listId: string): Promise<string | null> {
+  const list = await getList(tenantId, listId);
+  if (!list) return null;
+  const board = await getBoard(list.boardId);
+  if (!board) return null;
+  const exact = board.columns.find((c) => c.id === 'wont-do');
+  if (exact) return exact.id;
+  return board.columns.find((c) => classifyColumn(board, c.id).isCancelled)?.id ?? null;
+}
+
+/**
+ * PMX-2 (ADR 0590) — the COMPLETION-lane mirror of the cancellation resolver
+ * above: the stable seeded `done` id first, else the first terminal column
+ * that is NOT a cancellation (`classifyColumn` discriminates
+ * `terminalKind === 'completion'`). Pure over the board so the renamed-board
+ * cases are unit-testable; null when the board has no completion lane at all,
+ * so the promote route can refuse BEFORE minting anything (the exact
+ * renamed-board class the merge route was fixed for, R2 PM2-M3).
+ */
+export function completionColumnOf(board: KanbanBoard): string | null {
+  const exact = board.columns.find((c) => c.id === 'done');
+  if (exact) return exact.id;
+  return board.columns.find((c) => {
+    const k = classifyColumn(board, c.id);
+    return k.isTerminal && !k.isCancelled;
+  })?.id ?? null;
+}
+
+/** PMX-2 — resolve a list's completion lane from its board (null = none). */
+export async function resolveIdeaCompletionLane(tenantId: string, listId: string): Promise<string | null> {
+  const list = await getList(tenantId, listId);
+  if (!list) return null;
+  const board = await getBoard(list.boardId);
+  if (!board) return null;
+  return completionColumnOf(board);
+}
+
+/** R2 PM2-M5 — the erasure seam's accessors. Kept here so the collections stay module-
+ *  private, and named `__…ForErasure` so a reader can see the one legitimate consumer. */
+export function __pmStoresForErasure(): { lists: typeof lists; scores: typeof scores; votes: typeof votes; schedules: typeof schedules; sessions: typeof sessions } {
+  return { lists, scores, votes, schedules, sessions };
+}
+
 export function classifyColumn(board: KanbanBoard, columnId: string): { isTerminal: boolean; isCancelled: boolean; isBlocked: boolean } {
   const col = board.columns.find((c) => c.id === columnId);
   const isTerminal = isTerminalColumn(board, columnId);
@@ -672,15 +1081,17 @@ export async function setIdeaSchedule(
   const startDate = body.startDate !== undefined && body.startDate !== null && body.startDate !== '' ? asIsoDate(body.startDate, 'startDate') : undefined;
   const row: IdeaSchedule = { listId, cardId, targetDate, ...(startDate ? { startDate } : {}), setBy, updatedAt: nowIso() };
   await schedules.put(row);
+  priorityMutated({ entity: 'idea', verb: 'scheduled', tenantId, actor: setBy, listId, entityId: cardId, orgId: list.orgId });
   return row;
 }
 
 /** Clear an idea's schedule overlay (revert it to `unscheduled`). */
-export async function clearIdeaSchedule(tenantId: string, listId: string, cardId: string): Promise<boolean> {
+export async function clearIdeaSchedule(tenantId: string, listId: string, cardId: string, actor?: string): Promise<boolean> {
   const list = await getList(tenantId, listId);
   if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
   if (!(await schedules.get(`${listId}::${cardId}`))) return false;
   await schedules.delete(`${listId}::${cardId}`);
+  priorityMutated({ entity: 'idea', verb: 'schedule-cleared', tenantId, actor: actor ?? list.createdBy, listId, entityId: cardId, orgId: list.orgId });
   return true;
 }
 
@@ -817,6 +1228,12 @@ export async function createPlanningSession(
 ): Promise<PlanningSession> {
   const list = await getList(tenantId, listId);
   if (!list) throw new OpenwopError('not_found', 'Priority list not found.', 404, { listId });
+  // ADR 0667 D3 — refuse before doing any of the work (the agenda build, the Document
+  // compose and the version add all happen below).
+  const existingSessions = (await sessions.listByPrefix(`${tenantId}::`)).filter((x) => x.listId === listId);
+  if (existingSessions.length >= SESSIONS_CAP_PER_LIST) {
+    throw new OpenwopError('validation_error', `This list already has the maximum ${SESSIONS_CAP_PER_LIST} planning sessions.`, 400, { cap: SESSIONS_CAP_PER_LIST });
+  }
   const name = cleanString(body.name, 160) || `${list.name} planning session`;
   const selection = parseSelection(body);
   const ranked = await listRankedIdeas(tenantId, listId);
@@ -865,10 +1282,13 @@ export async function createPlanningSession(
     criteriaSnapshot: { ...list.criteriaSet, criteria: list.criteriaSet.criteria.map((c) => ({ ...c })) },
     ...(agendaDocumentId ? { agendaDocumentId } : {}),
     agendaMarkdown,
+    // ADR 0234 §C7 — the "why we picked these" note (cited by decision records).
+    ...(cleanString(body.rationale, 2000) ? { rationale: cleanString(body.rationale, 2000) } : {}),
     createdBy,
     createdAt: nowIso(),
   };
   await sessions.put(session);
+  priorityMutated({ entity: 'session', verb: 'created', tenantId, actor: createdBy, listId, entityId: session.id, orgId: list.orgId });
   return session;
 }
 
@@ -899,15 +1319,56 @@ export async function updatePlanningSession(
   }
   const agendaMarkdown = buildAgendaMarkdown(list, existing.name, selected);
 
-  // Keep the bound board-agenda document in sync (best-effort; inline markdown is the floor).
+  // ADR 0234 §C7 — the rationale note is PATCHable ('' clears it). PM2: apply
+  // the derived selection/agenda/rationale onto the FRESH row (preserving
+  // `scenarios[]` a concurrent add may have set) via the one guarded writer.
+  const clearRationale = body.rationale !== undefined && !cleanString(body.rationale, 2000);
+  const nextRationale = body.rationale !== undefined ? cleanString(body.rationale, 2000) : undefined;
+  const next = await mutateSessionRow(tenantId, listId, sessionId, (current) => {
+    const out: PlanningSession = { ...current, selection, agendaMarkdown };
+    if (clearRationale) delete out.rationale;
+    else if (nextRationale) out.rationale = nextRationale;
+    return out;
+  });
+
+  // Keep the bound board-agenda document in sync — AFTER the CAS commits (best-
+  // effort; inline markdown is the floor). Before PM2 this ran ahead of the
+  // write, so a 409 left the doc ahead of the row and each retry piled another
+  // version (grade-code F2).
   if (existing.agendaDocumentId) {
     try { await addVersion(tenantId, list.orgId, existing.agendaDocumentId, { content: agendaMarkdown, producedBy: { kind: 'user', id: updatedBy } }); }
     catch { /* best-effort */ }
   }
-
-  const next: PlanningSession = { ...existing, selection, agendaMarkdown };
-  await sessions.put(next);
+  priorityMutated({ entity: 'session', verb: 'updated', tenantId, actor: updatedBy, listId, entityId: next.id, orgId: list.orgId });
   return next;
+}
+
+/** ADR 0235 §D1 — session-row access for the same-feature scenarios module. */
+export async function getSessionRow(tenantId: string, sessionId: string): Promise<PlanningSession | null> {
+  return (await sessions.get(`${tenantId}::${sessionId}`)) ?? null;
+}
+
+/**
+ * PM2 (grade-code) — the SINGLE guarded writer for a planning-session row.
+ * `mutate` is a PURE function applied to the FRESHLY-READ row and CAS-committed;
+ * a lost race re-reads + re-applies once, then 409s. Every concurrent-sensitive
+ * session write (scenario add/select, rationale/sort patch) routes through here
+ * so read-modify-write windows (`scenarios[]`, `planOfRecord`) can't clobber —
+ * no second writer touches `sessions.put` for these fields.
+ */
+export async function mutateSessionRow(
+  tenantId: string,
+  listId: string,
+  sessionId: string,
+  mutate: (current: PlanningSession) => PlanningSession,
+): Promise<PlanningSession> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const current = await sessions.get(`${tenantId}::${sessionId}`);
+    if (!current || current.listId !== listId) throw new OpenwopError('not_found', 'Planning session not found.', 404, { sessionId });
+    const next = mutate(current);
+    if (await sessions.compareAndSwap(current, next)) return next;
+  }
+  throw new OpenwopError('conflict', 'The planning session was modified concurrently; retry.', 409, { sessionId });
 }
 
 export async function listSessions(tenantId: string, listId: string): Promise<PlanningSession[]> {
@@ -916,11 +1377,34 @@ export async function listSessions(tenantId: string, listId: string): Promise<Pl
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-/** Test-only: drop all priority-matrix stores. */
-export async function __resetPriorityMatrixStore(): Promise<void> {
-  await lists.__clear();
-  await scores.__clear();
-  await schedules.__clear();
-  await votes.__clear();
-  await sessions.__clear();
+/**
+ * PMXWF-1 (ADR 0590) — the tenant-TEARDOWN purge, registered as a
+ * `purgeTenantHostExt` pre-hook (feature.ts). Five collections carry rows
+ * keyed `listId::cardId[::voterId]` / `ev:…` with NO tenant marker; they are
+ * tenant-resolvable ONLY through the `priority-matrix:list` rows the generic
+ * walk deletes — so this must run FIRST, while the lists still resolve.
+ *
+ * Deliberately a QUIET direct sweep, NOT a loop over `deleteList`: teardown is
+ * not a product mutation, so it must not emit `host.priority.*` webhooks or
+ * append audit rows for a tenant whose SQL rows are already gone (the account
+ * lane wipes SQL before the host-ext walk), and it must not fan out KB/comment
+ * work the sibling purges already own. Boards ride `deleteBoard` so the anon
+ * lane (which never calls `purgeTenantKanban`) does not orphan the PM cards;
+ * idempotent when the account lane's kanban pre-step already removed them.
+ * Strictly tenant-scoped through the tenant's OWN list ids (the discriminator
+ * test pins a second tenant's rows surviving).
+ */
+export async function purgeTenantPriorityMatrix(tenantId: string): Promise<number> {
+  if (!tenantId) return 0;
+  let removed = 0;
+  for (const list of await listLists(tenantId)) {
+    await deleteBoard(list.boardId);
+    for (const s of await scores.listByPrefix(`${list.id}::`)) { await scores.delete(`${s.listId}::${s.cardId}`); removed += 1; }
+    for (const sc of await schedules.listByPrefix(`${list.id}::`)) { await schedules.delete(`${sc.listId}::${sc.cardId}`); removed += 1; }
+    for (const v of await votes.listByPrefix(`${list.id}::`)) { await votes.delete(`${v.listId}::${v.cardId}::${v.voterId}`); removed += 1; }
+    removed += await deleteIntakeRowsForList(list.id);
+    removed += await deleteScoreChangesForList(list.id, tenantId);
+  }
+  return removed;
 }
+

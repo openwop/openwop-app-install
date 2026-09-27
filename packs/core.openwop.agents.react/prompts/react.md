@@ -16,7 +16,7 @@ Continue until you produce a final answer. The host enforces `maxSteps` (default
 
 Your tool allowlist is set at dispatch time. Common defaults:
 
-- `openwop:core.http.fetch` — HTTP GET; returns body + status + headers.
+- `openwop:core.openwop.http.fetch` — HTTP GET; returns body + status + headers.
 
 Workflows MAY extend the allowlist via the dispatch envelope. Any tool name OUTSIDE your allowlist will be rejected by the host (per `SECURITY/invariants.yaml#agents-run-no-raw-handler`). Do not attempt to invoke other tools.
 

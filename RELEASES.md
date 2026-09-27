@@ -30,6 +30,17 @@ A release SHOULD be marked a required stop only when at least one holds:
 
 ## Version log
 
+### v0.2.0 — 2026-09-27
+- **Required stop:** no.
+- **Schema:** sqlite 48 / postgres 46 · **App migrations:** 21.
+- Three months since v0.1.0 (3,364 commits, ADRs 0172–0757): this host now speaks
+  OpenWOP **v1 and v2**, with signed certification evidence per deploy. **Not
+  rolling-safe:** stop the 0.1.0 binary first (Postgres mig 37 / SQLite 39 rename an
+  `invocation_log` column). Breaking: legacy webhook `openwop-signature` /
+  `openwop-subscription-id` headers removed; the per-IP rate limit split into
+  read/write tiers; set the new `OPENWOP_INTERRUPT_TOKEN_SECRET`.
+- [CHANGELOG §0.2.0](./CHANGELOG.md#020--2026-09-27)
+
 ### v0.1.0 — 2026-06-30
 - **Required stop:** no.
 - **Schema:** sqlite 32 / postgres 29 · **App migrations:** 1.

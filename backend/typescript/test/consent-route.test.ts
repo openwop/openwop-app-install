@@ -26,7 +26,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'consent']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -68,30 +68,47 @@ describe('Consent: registration + public + authed', () => {
     expect(disco.body.hostExtensions?.featureSurfaces).toContain('host.sample.consent');
   });
 
-  it('public record + read (no auth)', async () => {
+  // CONS-2 — the public lane now mints its own `visitor:` identity and requires
+  // the minted token on every write and read. The old contract (an arbitrary
+  // `subjectKey` from an unauthenticated body, into the keyspace shared with
+  // contactIds / userIds / emails / E.164) is what this test used to pin.
+  it('public record + read: mint-then-reuse a subjectToken (no auth)', async () => {
     const { orgId } = await ownerWithOrg();
-    const rec = await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { subjectKey: 'visitor-1', categories: { analytics: true, marketing: false } });
+    // 1. No token ⇒ the host MINTS one and hands it back. Capture still works
+    //    with no prior state — the exit the refusal below prescribes.
+    const rec = await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { categories: { analytics: true, marketing: false } });
     expect(rec.status, JSON.stringify(rec.body)).toBe(201);
     expect(rec.body.categories).toMatchObject({ necessary: true, analytics: true, marketing: false });
-    const read = await pub.get(`/v1/host/openwop-app/public-consent/${orgId}/visitor-1`);
+    expect(typeof rec.body.subjectToken).toBe('string');
+    const token = rec.body.subjectToken as string;
+
+    // 2. The read requires the token; it returns the record it addresses.
+    const read = await pub.get(`/v1/host/openwop-app/public-consent/${orgId}/${encodeURIComponent(token)}`);
     expect(read.body.recorded).toBe(true);
     expect(read.body.categories.analytics).toBe(true);
-    // an unrecorded subject → defaults (not recorded)
-    const none = await pub.get(`/v1/host/openwop-app/public-consent/${orgId}/nobody`);
-    expect(none.body.recorded).toBe(false);
+
+    // 3. Re-posting WITH the token updates the same record, and merges rather
+    //    than replacing (CONS-3): `analytics` survives a marketing-only write.
+    const upd = await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { subjectToken: token, categories: { marketing: true } });
+    expect(upd.status, JSON.stringify(upd.body)).toBe(201);
+    expect(upd.body.categories).toMatchObject({ necessary: true, analytics: true, marketing: true });
+    expect(upd.body.subjectToken).toBe(token);
   });
 
   it('authed policy + records + data-subject delete (RBAC)', async () => {
     const { owner, orgId } = await ownerWithOrg();
-    await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { subjectKey: 'v2', categories: { marketing: true } });
+    await pub.post(`/v1/host/openwop-app/public-consent/${orgId}`, { categories: { marketing: true } });
     const setPol = await owner.put(`/v1/host/openwop-app/consent/orgs/${orgId}/policy`, { defaultMode: 'opt-out', regulatedRegions: ['EU'] });
     expect(setPol.body.policy.defaultMode).toBe('opt-out');
     const recs = await owner.get(`/v1/host/openwop-app/consent/orgs/${orgId}/records`);
-    expect(recs.body.records.some((r: any) => r.subjectKey === 'v2')).toBe(true);
-    const del = await owner.del(`/v1/host/openwop-app/consent/orgs/${orgId}/subjects/v2`);
+    // The operator console sees the minted `visitor:` key — a namespace no
+    // authed identity space can collide with (CONS-2).
+    const row = recs.body.records.find((r: any) => String(r.subjectKey).startsWith('visitor:') && r.categories.marketing === true);
+    expect(row, JSON.stringify(recs.body.records)).toBeTruthy();
+    const del = await owner.del(`/v1/host/openwop-app/consent/orgs/${orgId}/subjects/${encodeURIComponent(row.subjectKey)}`);
     expect(del.status).toBe(200); // GDPR erasure is idempotent (no 404)
     expect(del.body.ok).toBe(true);
-    const after = await owner.get(`/v1/host/openwop-app/consent/orgs/${orgId}/subjects/v2`);
+    const after = await owner.get(`/v1/host/openwop-app/consent/orgs/${orgId}/subjects/${encodeURIComponent(row.subjectKey)}`);
     expect(after.body.record).toBeNull();
   });
 });

@@ -1,0 +1,35 @@
+{
+  "name": "feature.territories.agents",
+  "version": "1.0.2",
+  "description": "Sales Territory Management agent pack — an advisory Territory Planner whose tools are the feature.territories.nodes READ nodes over ctx.features.territories. It answers questions about territory coverage, quota attainment, and re-org scenarios (via the dry-run preview), and PROPOSES rule/quota changes — a human disposes. Tool-allowlisted to reads ONLY: activating a model or setting a quota are governed admin ops behind the host:territories:manage HTTP routes, never a direct agent tool call (the CRM stance — risky/high-blast-radius writes stay human-gated). Driven through the ONE existing chat, scoped to this agent — no second chat panel.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "territories", "sales", "quota", "planning", "agent"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.territories.agents.territory-planner",
+      "persona": "Territory Planner",
+      "label": "Territory Planner Agent",
+      "description": "Reads an org's territory models, hierarchy, assignment rules, quotas and attainment (via feature.territories.nodes over ctx.features.territories) to answer coverage/quota questions and evaluate re-org scenarios with the dry-run preview. Proposes rule and quota changes; it never activates a model or writes a quota — those are human-gated admin ops.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/territory-planner.md",
+      "toolAllowlist": [
+        "openwop:territories.list-models",
+        "openwop:territories.active-model",
+        "openwop:territories.list-territories",
+        "openwop:territories.list-rules",
+        "openwop:territories.list-quotas",
+        "openwop:territories.preview",
+        "openwop:territories.attainment"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

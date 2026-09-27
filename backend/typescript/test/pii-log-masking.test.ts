@@ -96,10 +96,16 @@ describe('ADR 0077 §2 — logger integration', () => {
     expect(out).toMatch(/pii_/); // then PII-masked (email key)
   });
 
-  it('does NOT mask PII in the msg string (fields-only boundary)', () => {
+  it('masks an email in the msg string too — the same address cannot be masked in fields and verbatim in msg (CLNP-4)', () => {
+    // This test used to PIN the leak ("fields-only boundary"). There is no key on a bare
+    // string, but the ADR 0733 value-shaped pass needs none, and `msg` carries tenant- and
+    // AI-authored text through the `core.openwop.obs` log node.
     const log = createLogger('test.pii');
-    const out = capture('stdout', () => log.info('emailing jane@acme.com now'));
-    // The message is secret-scrubbed but NOT PII-masked (no key on a bare string).
-    expect(out).toContain('jane@acme.com');
+    const out = capture('stdout', () => log.info('emailing jane@acme.com now', { email: 'jane@acme.com' }));
+    expect(out).not.toContain('jane@acme.com');
+    const line = JSON.parse(out.trim().split('\n').pop()!) as { msg: string; email: string };
+    expect(line.msg).toMatch(/^emailing pii_\S+ now$/);
+    // One address, one pseudonym: the msg and field masks correlate.
+    expect(line.msg).toContain(line.email);
   });
 });

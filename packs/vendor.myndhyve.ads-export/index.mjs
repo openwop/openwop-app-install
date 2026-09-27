@@ -190,7 +190,7 @@ export async function exportPack(ctx) {
   return { status: 'success', outputs };
 }
 
-const nodes = {
+export const nodes = {
   'ads.export.pack': exportPack,
 };
 

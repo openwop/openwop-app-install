@@ -1,0 +1,34 @@
+{
+  "name": "core.openwop.connections.google-imagen",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Google Imagen connection pack (RFC 0095) — api_key provider for the host image-generation seam's `google` provider (Imagen via the Gemini API, ADR 0115 Phase 6 / ADR 0229 / ADR 0244): the API host, auth kind, and the consumer nodes. **ADR 0244:** the image seam now RESOLVES THE API KEY THROUGH THE CONNECTIONS BROKER — installing this pack + connecting a Google key provides the per-tenant, KMS-enveloped, rotatable credential (a workspace-scoped Connection wins over the host-wide `OPENWOP_IMAGE_PROVIDER_KEY[_GOOGLE]` env fallback). The host operator STILL configures the ENDPOINT (`OPENWOP_IMAGE_PROVIDER_ENDPOINT[_GOOGLE]`, honest-off until set) — the endpoint is non-secret host infra, not a credential. Carries NO secret (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "google-imagen",
+    "displayName": "Google Imagen",
+    "category": "other",
+    "auth": {
+      "kind": "api_key",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://ai.google.dev/gemini-api/docs/imagen"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.ai.image-generate",
+      "feature.campaign-channels.nodes.render-concepts"
+    ],
+    "docsUrl": "https://ai.google.dev/gemini-api/docs/imagen",
+    "apiHosts": [
+      "generativelanguage.googleapis.com",
+      "aiplatform.googleapis.com"
+    ]
+  }
+}

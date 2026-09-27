@@ -25,7 +25,7 @@ import { listLists, listRankedIdeas } from '../src/features/priority-matrix/prio
 import { listStrategies } from '../src/features/strategy/strategyService.js';
 import { buildStrategySurface } from '../src/features/strategy/surface.js';
 import { listBoards } from '../src/features/advisory-board/service.js';
-import { resolveBoardContext } from '../src/host/boardContextResolver.js';
+import { resolveBoardContextResult } from '../src/host/boardContextResolver.js';
 
 let server: http.Server;
 const TENANT = 'user:strategy-showcase-test';
@@ -36,7 +36,7 @@ beforeAll(async () => {
   process.env.OPENWOP_DEMO_MODE = 'true';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => res()); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => res()); });
   for (const id of ['strategy', 'priority-matrix', 'advisory-board', 'kb', 'users']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -95,7 +95,8 @@ describe('strategy showcase seeder', () => {
 
     // ── ACCESS: what advisors receive at @@ summon contains strategy AND the
     //    linked priorities (the board reaches both features through one block) ──
-    const block = await resolveBoardContext(TENANT, board.boardId, CONVENER);
+    const { block, failed } = await resolveBoardContextResult(TENANT, board.boardId, CONVENER);
+    expect(failed).toBe(false);
     expect(block).toBeTruthy();
     expect(block).toContain('FY26 — Scale to $50M ARR');          // strategy narrative
     expect(block).toContain('Become the category leader by FY28');

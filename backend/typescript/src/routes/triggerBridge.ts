@@ -22,23 +22,32 @@
  * @see src/host/triggerIngestionService.ts — RFC 0099 §F external-event leg
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { v1 } from '../middleware/protocolVersion.js';
 import type { Express, Request } from 'express';
-import { OpenwopError } from '../types.js';
+import { OpenwopError, type RunRecord } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
+import { getEventLog } from '../executor/eventLog.js';
+import { executeRun } from '../executor/executor.js';
+import { insertRunWithStartContext } from '../host/runInsert.js';
+import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
+import { requireProtocolScope } from '../host/protocolAuthorization.js';
 import {
+  deliver,
   getSubscription,
   listDeliveries,
   listSubscriptions,
   registerSubscription,
   setSubscriptionState,
   type RetryPolicy,
+  type SubscriptionSource,
   type VerificationMode,
 } from '../host/triggerBridgeService.js';
 import {
   ingestExternalEvent,
   isExternalIngestionSource,
+  isAcceptedIngestionSource,
   storeIngestSecret,
   triggerIngestionEnabled,
   type IngressInput,
@@ -59,16 +68,18 @@ interface Deps {
 }
 
 export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
-  app.get('/v1/trigger-subscriptions', async (req, res, next) => {
+  app.get(v1('/trigger-subscriptions'), async (req, res, next) => {
     try {
+      await requireProtocolScope(req, 'webhooks:manage'); // ADR 0755 D1 — rest-endpoints.md names webhooks:manage for this surface
       res.json({ subscriptions: await listSubscriptions(tenantOf(req)) });
     } catch (err) {
       next(err);
     }
   });
 
-  app.get('/v1/trigger-subscriptions/:subscriptionId', async (req, res, next) => {
+  app.get(v1('/trigger-subscriptions/:subscriptionId'), async (req, res, next) => {
     try {
+      await requireProtocolScope(req, 'webhooks:manage');
       const sub = await getSubscription(req.params.subscriptionId);
       if (!sub || sub.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Trigger subscription not found.', 404, { subscriptionId: req.params.subscriptionId });
@@ -81,8 +92,9 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
 
   // RFC 0099 §F.2 — register an external-event subscription bound to a workflow.
   // Gated on the ingestion capability being wired (fail-closed); requires deps.
-  app.post('/v1/trigger-subscriptions', async (req, res, next) => {
+  app.post(v1('/trigger-subscriptions'), async (req, res, next) => {
     try {
+      await requireProtocolScope(req, 'webhooks:manage');
       if (!triggerIngestionEnabled() || !deps) {
         throw new OpenwopError('host_capability_missing', 'External-event trigger ingestion is not enabled on this host.', 501);
       }
@@ -135,8 +147,9 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
   });
 
   // Operator pause/resume (§B). { state: 'paused' | 'active' }.
-  app.patch('/v1/trigger-subscriptions/:subscriptionId', async (req, res, next) => {
+  app.patch(v1('/trigger-subscriptions/:subscriptionId'), async (req, res, next) => {
     try {
+      await requireProtocolScope(req, 'webhooks:manage');
       const sub = await getSubscription(req.params.subscriptionId);
       if (!sub || sub.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Trigger subscription not found.', 404, { subscriptionId: req.params.subscriptionId });
@@ -157,8 +170,9 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
   // normalized per-source ingress (the host's parser produces it). Content-free
   // on the wire OUT (the inbound content is redacted into ctx.triggerData; only
   // the runId / outcome are returned).
-  app.post('/v1/trigger-subscriptions/:subscriptionId/ingest', async (req, res, next) => {
+  app.post(v1('/trigger-subscriptions/:subscriptionId/ingest'), async (req, res, next) => {
     try {
+      await requireProtocolScope(req, 'runs:create'); // ADR 0755 D1 — an ingest STARTS a run
       if (!triggerIngestionEnabled() || !deps) {
         throw new OpenwopError('host_capability_missing', 'External-event trigger ingestion is not enabled on this host.', 501);
       }
@@ -189,15 +203,20 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
   // ingestion code, not a reimplementation. `verification:none` so the
   // signature-free sample event is delivered, not rejected. 404 when ingestion
   // is unwired (the conformance behavioral leg soft-skips on 404/403).
-  app.post('/v1/host/openwop-app/trigger-bridge/ingest', async (req, res, next) => {
+  // Registered on BOTH the reference-host route AND the `sample` conformance-seam path so
+  // the suite hits it whichever it targets (RFC 0127 CDP-1b). `sample` is a thin alias.
+  app.post(['/v1/host/openwop-app/trigger-bridge/ingest', '/v1/host/sample/trigger-bridge/ingest'], async (req, res, next) => {
     try {
+      await requireProtocolScope(req, 'runs:create'); // ADR 0755 D1 — the seam registers + starts a run
       if (!triggerIngestionEnabled() || !deps) {
         throw new OpenwopError('host_capability_missing', 'External-event trigger ingestion is not enabled on this host.', 404);
       }
       const body = (req.body ?? {}) as Record<string, unknown>;
       const source = body.source;
-      if (typeof source !== 'string' || !isExternalIngestionSource(source)) {
-        throw new OpenwopError('validation_error', 'Field `source` MUST be one of webhook | email | form.', 400, { field: 'source' });
+      // RFC 0127: accept stream/change too, but ONLY when the flag is on (isAcceptedIngestionSource);
+      // a stream/change POST to a flag-off host falls through to a 400 → the scenario soft-skips.
+      if (typeof source !== 'string' || !isAcceptedIngestionSource(source)) {
+        throw new OpenwopError('validation_error', 'Field `source` MUST be one of webhook | email | form' + (isExternalIngestionSource('stream') ? '' : ' (stream | change require the RFC 0127 flag)') + '.', 400, { field: 'source' });
       }
       const tenantId = tenantOf(req);
       // Unique per probe → a fresh dedup key, so each call delivers its own run.
@@ -234,6 +253,161 @@ export function registerTriggerBridgeRoutes(app: Express, deps?: Deps): void {
       next(err);
     }
   });
+
+  // RFC 0083 §C — host-sample DELIVERY seam (`host-sample-test-seams.md`
+  // §"Trigger-bridge delivery seam"). Distinct from the `/ingest` seam above:
+  // that one drives RFC 0099 §F external-event INGESTION (does a webhook body
+  // normalize into a TriggerEvent), this one drives the §C durable BRIDGE —
+  // dedup, retry exhaustion to dead-letter, and the delivery→run causation
+  // edge. The host implemented §C all along (`triggerBridgeService.deliver`)
+  // and advertised `triggerBridge` accordingly, but exposed only `/ingest`, so
+  // the behavioural leg had nothing to drive and soft-skipped for as long as
+  // the suite allowed it to.
+  //
+  // Drives the REAL engine — the same `deliver()` the production ingestion,
+  // inbound-webhook and kanban paths call. The seam controls only what a real
+  // caller controls: the dedup key and whether the fire succeeds. It does NOT
+  // reimplement dedup, retry, backoff or the state machine.
+  app.post(['/v1/host/openwop-app/trigger-bridge/deliver', '/v1/host/sample/trigger-bridge/deliver'], async (req, res, next) => {
+    try {
+      await requireProtocolScope(req, 'runs:create');
+      if (!deps) throw new OpenwopError('host_capability_missing', 'Trigger-bridge delivery is not wired on this host.', 404);
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      const scenario = body.scenario;
+      if (scenario !== 'dedup' && scenario !== 'exhaust' && scenario !== 'deliver') {
+        throw new OpenwopError('validation_error', 'Field `scenario` MUST be one of dedup | exhaust | deliver.', 400, { field: 'scenario' });
+      }
+      const source = (typeof body.source === 'string' ? body.source : 'queue') as SubscriptionSource;
+      const tenantId = tenantOf(req);
+      // Fresh subscription per probe so scenarios cannot contaminate each
+      // other's dedup window or state machine.
+      const subscriptionId = `tgsub-deliver-${randomBytes(8).toString('hex')}`;
+      await registerSubscription({
+        subscriptionId,
+        tenantId,
+        source,
+        dedupEnabled: true,
+        workflowId: INGEST_WORKFLOW_ID,
+        verificationMode: 'none',
+        // Keep the exhaust leg short: the point is that the policy is honoured
+        // to exhaustion, not how long it takes.
+        ...(scenario === 'exhaust' ? { retryPolicy: { maxAttempts: 2, backoff: 'fixed' as const } } : {}),
+      });
+      // The suite passes a literal dedupKey and asserts it back on the event
+      // payload, so it is used VERBATIM — deriving one here would echo a hash.
+      const dedupKey = typeof body.dedupKey === 'string' && body.dedupKey.length > 0
+        ? body.dedupKey
+        : `conf-${randomBytes(8).toString('hex')}`;
+
+      if (scenario === 'exhaust') {
+        const result = await deliver({
+          subscriptionId,
+          dedupKey,
+          fire: async () => { throw new Error('conformance: forced delivery failure'); },
+        });
+        // §C-2 — a dead-lettered delivery starts NO run, so there is no run id
+        // to hang its terminal record on. The events are recorded under a
+        // carrier id derived from the delivery, which is what the seam returns
+        // as `runId` so the driver can read them back through the event-log
+        // seam. It is an addressable handle for a delivery that produced no
+        // run, NOT a fabricated run: no run row is created.
+        const carrierId = `dlv-run-${result.deliveryId || randomBytes(8).toString('hex')}`;
+        await getEventLog().append({
+          runId: carrierId,
+          type: 'trigger.delivery.attempted',
+          payload: { subscriptionId, dedupKey, attempt: result.attempts, outcome: 'dead-lettered' },
+        });
+        await getEventLog().append({
+          runId: carrierId,
+          type: 'trigger.subscription.state.changed',
+          payload: {
+            subscriptionId,
+            fromState: result.stateChange?.from ?? 'active',
+            toState: result.stateChange?.to ?? 'dead-lettered',
+            reason: result.stateChange?.reason ?? 'retry-exhausted',
+          },
+        });
+        res.status(200).json({ runId: carrierId, subscriptionId, outcome: result.outcome, deliveredCount: 0 });
+        return;
+      }
+
+      // `dedup` and `deliver` share one successful delivery; `dedup` then
+      // repeats the SAME key, which §C-1 requires to be effectively-once.
+      const first = await deliverSeamRun(deps, subscriptionId, dedupKey, source);
+      let outcome = first.outcome;
+      let deliveredCount = first.outcome === 'delivered' ? 1 : 0;
+      if (scenario === 'dedup') {
+        const second = await deliverSeamRun(deps, subscriptionId, dedupKey, source);
+        outcome = second.outcome;
+        // The repeat MUST NOT deliver again; counting here makes a regression
+        // visible in the seam's own response, not only in the suite.
+        if (second.outcome === 'delivered') deliveredCount += 1;
+      }
+      res.status(200).json({ runId: first.runId, subscriptionId, outcome, deliveredCount });
+    } catch (err) {
+      next(err);
+    }
+  });
+}
+
+/**
+ * One successful-path delivery through the REAL §C engine.
+ *
+ * Mirrors `triggerIngestionService`'s `fire` exactly, including the §C-3
+ * ordering: the content-free `trigger.delivery.attempted` event is appended
+ * BEFORE the run so the run can carry that event's id as `causationId`. The
+ * two paths must not drift — a seam that recorded causation differently from
+ * production would prove a property production does not have.
+ */
+async function deliverSeamRun(
+  deps: { storage: Storage; hostSuite: HostAdapterSuite },
+  subscriptionId: string,
+  dedupKey: string,
+  source: SubscriptionSource,
+): Promise<{ outcome: string; runId?: string }> {
+  const sub = await getSubscription(subscriptionId);
+  const wf = sub?.workflowId
+    ? await resolveLaunchWorkflow(deps.hostSuite.workflowCatalog, sub.tenantId, sub.workflowId)
+    : null;
+  if (!sub || !wf) return { outcome: 'skipped' };
+
+  const result = await deliver({
+    subscriptionId,
+    dedupKey,
+    fire: async (deliveryId) => {
+      const runId = randomUUID();
+      const now = new Date().toISOString();
+      const deliveryEvent = await getEventLog().append({
+        runId,
+        type: 'trigger.delivery.attempted',
+        payload: { subscriptionId, dedupKey, attempt: 1, outcome: 'delivered', runId },
+      });
+      const run: RunRecord = {
+        runId,
+        workflowId: sub.workflowId!,
+        tenantId: sub.tenantId,
+        status: 'pending',
+        inputs: null,
+        metadata: {
+          launchResolved: wf.launchResolved,
+          triggerData: { source, subscriptionId, deliveryId, dedupKey, receivedAt: now, verified: false, contentTrust: 'untrusted' },
+          trustBoundary: 'untrusted',
+        },
+        causationId: deliveryEvent.eventId,
+        configurable: {},
+        createdAt: now,
+        updatedAt: now,
+      };
+      await insertRunWithStartContext(deps.storage, run, { definition: wf.definition });
+      // Awaited, not fire-and-forget: the driver reads `run.started` back
+      // immediately, and a detached execution would race it.
+      await executeRun(deps.storage, run, wf.definition, {
+        policyResolver: deps.hostSuite.providerPolicyResolver,
+      });
+      return runId;
+    },
+  });
+  return { outcome: result.outcome, ...(result.runId ? { runId: result.runId } : {}) };
 }
 
 /** Map the host-sample seam body (top-level `attachmentUrl`, nested `webhook`)
@@ -257,10 +431,35 @@ function coerceSeamIngress(source: string, body: Record<string, unknown>): Ingre
       attachmentUrls: sampleAttachmentUrls(body),
     };
   }
+  if (source === 'form') {
+    return {
+      source: 'form',
+      ...(body.fields && typeof body.fields === 'object' ? { fields: body.fields as Record<string, unknown> } : {}),
+      fileUrls: sampleAttachmentUrls(body),
+    };
+  }
+  if (source === 'stream') {
+    // RFC 0127 CDP-1b seam: nested `stream:{ topic, partition, offset, key?, message }`.
+    const s = (body.stream ?? {}) as Record<string, unknown>;
+    return {
+      source: 'stream',
+      ...(typeof s.topic === 'string' ? { topic: s.topic } : {}),
+      ...(typeof s.partition === 'number' ? { partition: s.partition } : {}),
+      ...(typeof s.offset === 'string' ? { offset: s.offset } : {}),
+      ...(typeof s.key === 'string' ? { key: s.key } : {}),
+      ...(s.message !== undefined ? { message: s.message } : {}),
+    };
+  }
+  // change — nested `change:{ op, table, changelogId, before?, after? }` (op REQUIRED).
+  const c = (body.change ?? {}) as Record<string, unknown>;
+  const op = c.op === 'insert' || c.op === 'update' || c.op === 'delete' ? c.op : 'insert';
   return {
-    source: 'form',
-    ...(body.fields && typeof body.fields === 'object' ? { fields: body.fields as Record<string, unknown> } : {}),
-    fileUrls: sampleAttachmentUrls(body),
+    source: 'change',
+    op,
+    ...(typeof c.table === 'string' ? { table: c.table } : {}),
+    ...(typeof c.changelogId === 'string' ? { changelogId: c.changelogId } : {}),
+    ...(c.before !== undefined ? { before: c.before } : {}),
+    ...(c.after !== undefined ? { after: c.after } : {}),
   };
 }
 

@@ -13,6 +13,7 @@
  * assignment mutation (the emitter may be uninstalled in tests).
  */
 
+import { createHash } from 'node:crypto';
 import { getNotificationEmitter } from '../notifications/emitter.js';
 import { __hostExtStorage } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
@@ -36,9 +37,18 @@ export async function emitAssignmentNotification(args: {
   assigneeId: string;
   comment?: string;
   boardName?: string;
+  /** A workflow-supplied key produces a stable notification primary key, so a
+   * reclaimed durable operation cannot double-notify the same assignee. */
+  idempotencyKey?: string;
 }): Promise<void> {
   try {
+    const notificationId = args.idempotencyKey
+      ? `kanban-assignment-${createHash('sha256')
+        .update([args.tenantId, args.card.id, args.assigneeId, args.idempotencyKey].join('\u0000'))
+        .digest('hex').slice(0, 32)}`
+      : undefined;
     await getNotificationEmitter().emit({
+      ...(notificationId ? { notificationId } : {}),
       tenantId: args.tenantId,
       recipientUserId: args.assigneeId,
       type: ASSIGNED_TYPE,

@@ -13,6 +13,10 @@
  * flags installed typeIds rather than mutating the host.
  */
 
+import { Button } from '../ui/Button.js';
+import { Modal } from '../ui/Modal.js';
+import { Notice } from '../ui/Notice.js';
+import { Skeleton } from '../ui/Skeleton.js';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -73,12 +77,17 @@ export function PackBrowser({ installedTypeIds, onClose, onUseNode }: Props) {
   }, [packs, query]);
 
   return (
-    <div className="pack-browser-overlay" role="dialog" aria-modal="true" aria-label={t('dialogLabel')}>
-      <div className="pack-browser">
+    <Modal
+      onClose={onClose}
+      label={t('dialogLabel')}
+      scrimClassName="pack-browser-overlay"
+      className="pack-browser"
+    >
+      <>
         <header className="pack-browser-header">
           <strong className="u-flex-1">{t('title')}</strong>
           {packs && <span className="muted u-fs-12">{t('publishedCount', { count: packs.length })}</span>}
-          <button type="button" className="secondary" onClick={onClose} aria-label={t('common:close')}><XIcon size={14} /></button>
+          <Button variant="secondary" onClick={onClose} aria-label={t('common:close')}><XIcon size={14} /></Button>
         </header>
         <div className="pack-browser-search">
           <input
@@ -90,8 +99,14 @@ export function PackBrowser({ installedTypeIds, onClose, onUseNode }: Props) {
             autoComplete="off"
           />
         </div>
-        {error && <div className="alert error packbrowser-alert">{t('registryUnreachable', { error })}</div>}
-        {!packs && !error && <div className="muted u-p-4">{t('loadingRegistry')}</div>}
+        {error && <div className="packbrowser-alert"><Notice variant="error">{t('registryUnreachable', { error })}</Notice></div>}
+        {!packs && !error && (
+          <div className="u-p-4" role="status" aria-label={t('loadingRegistry')}>
+            <Skeleton width="55%" />
+            <Skeleton width="90%" />
+            <Skeleton width="75%" />
+          </div>
+        )}
         <div className="pack-browser-body">
           <ul className="pack-browser-list">
             {filtered.map((p) => {
@@ -104,7 +119,9 @@ export function PackBrowser({ installedTypeIds, onClose, onUseNode }: Props) {
                     className={`pack-browser-row${selected === p.name ? ' pack-browser-row-selected' : ''}`}
                     onClick={() => setSelected(p.name)}
                   >
+                    {/* WCAG 1.4.1: tier is dot COLOR + this text label, never color alone. */}
                     <span className="pack-tier-dot" style={{ background: TIER_COLOR[tier] }} aria-hidden />
+                    <span className="muted u-fs-11">{trustTierLabel(tier)}</span>
                     <span className="pack-browser-row-name">{p.name}</span>
                     {p.yanked && <span className="pack-flag pack-flag-danger">{t('flagYanked')}</span>}
                     {p.deprecated && !p.yanked && <span className="pack-flag">{t('flagDeprecated')}</span>}
@@ -132,8 +149,8 @@ export function PackBrowser({ installedTypeIds, onClose, onUseNode }: Props) {
             )}
           </div>
         </div>
-      </div>
-    </div>
+      </>
+    </Modal>
   );
 }
 
@@ -161,7 +178,7 @@ function PackDetailView({
     return () => { cancelled = true; };
   }, [name]);
 
-  if (error) return <div className="alert error packbrowser-alert">{error}</div>;
+  if (error) return <Notice variant="error">{error}</Notice>;
   if (!detail) return <div className="muted u-p-4">{t('loadingPack', { name })}</div>;
 
   const tier = trustTierFor(detail.name);
@@ -216,14 +233,13 @@ function PackDetailView({
                 ? <span className="pack-flag pack-flag-ok">{t('flagInstalled')}</span>
                 : <span className="muted pack-flag">{t('flagNotInstalled')}</span>}
               {installed && onUseNode && (
-                <button
-                  type="button"
-                  className="secondary pack-use-node packbrowser-use-node-btn"
+                <Button
+                  variant="secondary" className="pack-use-node packbrowser-use-node-btn"
                   onClick={() => onUseNode(typeId)}
                   title={t('addToCanvasTitle')}
                 >
                   {t('addToCanvas')}
-                </button>
+                </Button>
               )}
             </li>
           );
@@ -303,9 +319,9 @@ function InstallGuidance({
       </p>
       <div className="pack-install-cmd">
         <code>{installLine}</code>
-        <button type="button" className="secondary" onClick={copy} title={t('copyInstallLineTitle')}>
+        <Button variant="secondary" onClick={copy} title={t('copyInstallLineTitle')}>
           {copied ? t('copied') : t('copy')}
-        </button>
+        </Button>
       </div>
       <p className="muted u-fs-11 u-mt-1">
         {t('installDeferred')}

@@ -1,6 +1,6 @@
 /**
  * Brand API client (ADR 0155). The Brand & Guardrails surface under
- * /v1/host/openwop-app/brand/*. Reuses the shared client config
+ * /host/openwop-app/brand/*. Reuses the shared client config
  * (`authedHeaders`/`fetchOpts`) — no bespoke fetch. Owns the small `orgs` read
  * the create form needs (per-feature, not a cross-feature import — the
  * priorityMatrixClient precedent).
@@ -24,8 +24,12 @@ export interface BrandVoiceProfile {
 }
 export interface BrandPositioning { tagline: string; elevatorPitch: string; differentiators: string[]; competitiveFrame: string }
 export interface BrandKeyPhrases { approvedTaglines: string[]; valuePropositions: string[]; productDescriptors: string[]; bannedPhrases: string[] }
-export interface ChannelVoiceRule { channel: BrandChannel; tone: string; formalityOverride?: number; maxLength?: number; samplePhrases: string[]; avoidPhrases: string[] }
-export interface BrandGovernance { lockLevel: BrandLockLevel; allowedEditors: string[]; requireApproval: boolean }
+export interface ChannelVoiceRule { channel: BrandChannel; tone: string; formalityOverride?: number; maxLength?: number; samplePhrases: string[]; avoidPhrases: string[]   /** R2 review F6 — persona-scoped rule variants (survive edits via spread). */
+  personaId?: string;
+}
+export interface BrandGovernance { lockLevel: BrandLockLevel; allowedEditors: string[]; requireApproval: boolean   /** R2 review F6 — typed so a future payload refactor can't silently drop it. */
+  compliance?: { blockPublish: 'off' | 'critical' | 'threshold'; blockThreshold?: number };
+}
 
 export interface Brand {
   id: string;
@@ -49,6 +53,8 @@ export interface OrgRef { orgId: string; name: string }
 
 /** The editable shape the create/update form posts (server fills the rest). */
 export interface BrandInput {
+  /** R2 BR-SP-5 — optimistic-concurrency guard (409 on mismatch). */
+  expectedUpdatedAt?: string;
   orgId?: string;
   name?: string;
   description?: string;
@@ -63,7 +69,7 @@ export interface BrandInput {
 /** Thrown when the `brand` toggle is OFF (the route 404s with "not enabled"). */
 export class FeatureDisabledError extends Error {}
 
-const base = `${config.baseUrl}/v1/host/openwop-app/brand`;
+const base = `${config.baseUrl}/host/openwop-app/brand`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -71,9 +77,23 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
     let detail = '';
     try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }
     if (res.status === 404 && /not enabled/i.test(detail)) throw new FeatureDisabledError(detail);
-    throw new Error(detail || `${ctx} returned ${res.status}`);
+    const err = new Error(detail || `${ctx} returned ${res.status}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
   }
   return (await res.json()) as T;
+}
+
+/** R3 BR-SP-7 — the guardrail-change audit trail finally gets a UI reader. */
+export interface BrandAuditRow {
+  auditId: string;
+  actor: string;
+  changedAt: string;
+  changes: Array<{ field: string; from: unknown; to: unknown }>;
+}
+export async function getBrandAudit(brandId: string): Promise<BrandAuditRow[]> {
+  const res = await fetch(`${base}/brands/${encodeURIComponent(brandId)}/audit`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ audit: BrandAuditRow[] }>(res, 'getBrandAudit')).audit;
 }
 
 export async function listBrands(orgId?: string): Promise<Brand[]> {
@@ -103,6 +123,26 @@ export async function deleteBrand(id: string): Promise<void> {
 }
 
 export async function listOrgs(): Promise<OrgRef[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ orgs: OrgRef[] }>(res, 'listOrgs')).orgs;
+}
+
+// ── ADR 0399 OQ-1 — brand custom fonts (ad renderer) ─────────────────────────
+
+export type BrandFontRole = 'sans' | 'serif';
+export interface BrandFontMeta { role: BrandFontRole; family: string; sizeBytes: number; licenseAttested: boolean; attestedBy: string; createdAt: string }
+
+export async function listBrandFonts(brandId: string): Promise<BrandFontMeta[]> {
+  const res = await fetch(`${base}/brands/${encodeURIComponent(brandId)}/fonts`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ fonts: BrandFontMeta[] }>(res, 'listBrandFonts')).fonts;
+}
+
+export async function uploadBrandFont(brandId: string, role: BrandFontRole, contentBase64: string, licenseAttested: boolean): Promise<BrandFontMeta> {
+  const res = await fetch(`${base}/brands/${encodeURIComponent(brandId)}/fonts/${role}`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify({ contentBase64, licenseAttested }) }));
+  return (await asJson<{ font: BrandFontMeta }>(res, 'uploadBrandFont')).font;
+}
+
+export async function deleteBrandFont(brandId: string, role: BrandFontRole): Promise<void> {
+  const res = await fetch(`${base}/brands/${encodeURIComponent(brandId)}/fonts/${role}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
+  if (!res.ok && res.status !== 204) await asJson(res, 'deleteBrandFont');
 }

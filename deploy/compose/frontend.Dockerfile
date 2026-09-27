@@ -15,8 +15,14 @@ ARG VITE_OPENWOP_SSE_BASE_URL=
 ARG VITE_OPENWOP_AUTH_MODE=cookie
 ARG VITE_BRAND_PRODUCT_NAME=
 
+# `npm ci`, NOT `npm install` — npm >= 11.5 prunes the transitive deps of an
+# optionalDependency during `npm install`, and `npm ci` installs exactly the
+# lockfile instead. The root Dockerfile carries the measured A/B; this image was
+# left behind when that one was fixed, and nothing was watching until
+# scripts/check-build-installs.mjs. The lockfile is REQUIRED (npm ci errors
+# without one) — that is the intended loud failure.
 COPY frontend/react/package.json frontend/react/package-lock.json* ./
-RUN npm install --include=dev
+RUN npm ci --include=dev
 
 COPY frontend/react/ ./
 

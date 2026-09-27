@@ -6,19 +6,26 @@
 export const messages = {
   // Page chrome
   eyebrow: 'Plataforma',
+  orgsEmptyClause: 'Las páginas del sitio y su SEO pertenecen a una organización',
+  orgsFailedClause: 'La lista de páginas nunca llegó a solicitarse',
   title: 'Publicación y SEO',
   lede: 'Publique páginas del CMS en un sitio público con metadatos SEO, mapa del sitio y RSS.',
+  status_draft: 'borrador',
+  status_in_review: 'en revisión',
+  status_published: 'publicada',
+  status_archived: 'archivada',
+  filterPlaceholder: 'Filtrar páginas…',
+  filterAria: 'Filtrar páginas por título o slug',
+  noMatchBody: 'Ninguna página coincide con su búsqueda.',
+  clearSearch: 'Borrar búsqueda',
 
   // Gating / empty states
   notEnabledTitle: 'La publicación no está habilitada',
   notEnabledBody: 'Pida a un administrador que habilite la función Publicación y SEO para este inquilino.',
-  noOrgsTitle: 'Sin organizaciones',
-  noOrgsBody: 'Cree primero una organización: un sitio pertenece a una organización.',
   selectPageTitle: 'Seleccione una página',
   selectPageBody: 'Elija una página para editar sus metadatos SEO. Las páginas publicadas obtienen una URL pública.',
 
   // aria-labels
-  orgPickerLabel: 'Organización',
 
   // Page list + site links
   pages: 'Páginas',

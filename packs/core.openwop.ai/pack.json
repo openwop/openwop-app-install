@@ -1,7 +1,7 @@
 {
   "name": "core.openwop.ai",
-  "version": "1.1.2",
-  "description": "Spec-canonical AI-call pack. v1.0 (chatCompletion, structuredOutput, toolCalling, embeddings) plus v1.1 multi-modal + LLM helpers — image generate/edit/upscale, audio transcribe/synthesize, video generate, rerank, classify, extract, guardrails, transform. Routes through host BYOK aiProviders.",
+  "version": "1.4.1",
+  "description": "Spec-canonical AI-call pack. v1.0 (chatCompletion, structuredOutput, toolCalling, embeddings) plus v1.1 multi-modal + LLM helpers \u2014 image generate/edit/upscale, audio transcribe/synthesize, video generate, rerank, classify, extract, guardrails, transform. Routes through host BYOK aiProviders. v1.3.1: image-generate output schema now declares the real runtime shape (images[].url + mimeType, never contentBase64) \u2014 the host persists each image as a Media asset and returns a serve URL, never raw bytes.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.ai",
@@ -15,7 +15,7 @@
     "byok"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "peerDependencies": {
     "aiProviders": "supported"
@@ -25,7 +25,7 @@
       "typeId": "core.ai.chatCompletion",
       "version": "1.0.0",
       "label": "Chat Completion",
-      "description": "Free-form LLM chat. Returns the model's text response + token usage. Side-effectful + cacheable — replays return the cached node.completed payload via the host's Layer-2 invocation log keyed on (runId, nodeId, request-hash).",
+      "description": "Free-form LLM chat. Returns the model's text response + token usage. Side-effectful + cacheable \u2014 replays return the cached node.completed payload via the host's Layer-2 invocation log keyed on (runId, nodeId, request-hash).",
       "category": "data",
       "role": "side-effect",
       "capabilities": [
@@ -47,7 +47,9 @@
         "cacheable",
         "side-effectful"
       ],
-      "requiredModelCapabilities": ["structured-output"],
+      "requiredModelCapabilities": [
+        "structured-output"
+      ],
       "configSchemaRef": "schemas/structured-output.config.json",
       "inputSchemaRef": "schemas/structured-output.input.json",
       "outputSchemaRef": "schemas/structured-output.output.json"
@@ -56,14 +58,16 @@
       "typeId": "core.ai.toolCalling",
       "version": "1.0.0",
       "label": "Tool Calling",
-      "description": "LLM call with declared tools — model may emit tool_call entries the workflow handles in downstream nodes. Requires the host to advertise `aiProviders.toolCalling` (ctx.callAIWithTools); refuses to register otherwise.",
+      "description": "LLM call with declared tools \u2014 model may emit tool_call entries the workflow handles in downstream nodes. Requires the host to advertise `aiProviders.toolCalling` (ctx.callAIWithTools); refuses to register otherwise.",
       "category": "data",
       "role": "side-effect",
       "capabilities": [
         "cacheable",
         "side-effectful"
       ],
-      "requiredModelCapabilities": ["function-calling"],
+      "requiredModelCapabilities": [
+        "function-calling"
+      ],
       "configSchemaRef": "schemas/tool-calling.config.json",
       "inputSchemaRef": "schemas/tool-calling.input.json",
       "outputSchemaRef": "schemas/tool-calling.output.json"
@@ -87,7 +91,7 @@
       "typeId": "core.openwop.ai.image-generate",
       "version": "1.0.0",
       "label": "AI Image Generate",
-      "description": "Image generation via host.aiProviders.imageGeneration (e.g., DALL·E / Imagen / SD).",
+      "description": "Image generation via host.aiProviders.imageGeneration (e.g., DALL\u00b7E / Imagen / SD).",
       "category": "data",
       "role": "side-effect",
       "capabilities": [
@@ -102,7 +106,7 @@
       "typeId": "core.openwop.ai.image-edit",
       "version": "1.0.0",
       "label": "AI Image Edit",
-      "description": "Inpaint / mask-based edit.",
+      "description": "Edits an image via the host callImageEditor capability (ADR 0401): op=edit (whole-image, prompt), op=inpaint (prompt + maskBase64, white = repaint), op=background-remove (no prompt, transparent PNG). Provider capability matrix is HONEST \u2014 openai: edit/inpaint; replicate (default): edit/inpaint/background-remove/upscale; google: none \u2014 an unsupported (provider, op) fails typed host_capability_missing, never a silent fallback. Results persist as host Media assets; the node returns asset URLs, never raw bytes.",
       "category": "data",
       "role": "side-effect",
       "capabilities": [
@@ -117,7 +121,7 @@
       "typeId": "core.openwop.ai.image-upscale",
       "version": "1.0.0",
       "label": "AI Image Upscale",
-      "description": "2x/4x upscale.",
+      "description": "Upscales an image 2x/4x via the host callImageUpscaler capability (ADR 0401; replicate Real-ESRGAN-class by default). Result persists as a host Media asset (URL on the result, never raw bytes). Unsupported providers fail typed host_capability_missing.",
       "category": "data",
       "role": "side-effect",
       "capabilities": [
@@ -162,7 +166,7 @@
       "typeId": "core.openwop.ai.video-generate",
       "version": "1.0.0",
       "label": "AI Video Generate",
-      "description": "Video generation via host.aiProviders.videoGeneration.",
+      "description": "Video generation via host.aiProviders.videoGeneration. Returns a host-served video URL (ADR 0411 — never inline base64; the host hides async polling). Provider replicate (hosts Veo 3 + Kling/Luma/etc) via BYOK.",
       "category": "data",
       "role": "side-effect",
       "capabilities": [
@@ -222,7 +226,7 @@
       "typeId": "core.openwop.ai.guardrails",
       "version": "1.0.0",
       "label": "AI Guardrails",
-      "description": "PII / toxicity / topic filter. Pure-ish (uses optional ctx.guardrails or returns pass-through).",
+      "description": "PII / toxicity / topic filter. Uses optional ctx.guardrails; without it returns an UNENFORCED pass-through marked enforced:false (set config.requireEnforcement to fail instead).",
       "category": "data",
       "role": "side-effect",
       "capabilities": [
@@ -254,5 +258,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

@@ -2,8 +2,18 @@
  * Agent profile — host-extension routes (non-normative).
  *
  * The reference implementation of ADR 0031 §2:
- *   GET /v1/host/openwop-app/agents/:id/profile   read the rich profile
- *   PUT /v1/host/openwop-app/agents/:id/profile   create-or-replace it
+ *   GET    /v1/host/openwop-app/agents/:id/profile   read the rich profile
+ *   PUT    /v1/host/openwop-app/agents/:id/profile   create-or-replace it
+ *   PUT    /v1/host/openwop-app/agents/:id/capabilities/:capabilityId   elect one (ADR 0373)
+ *   DELETE /v1/host/openwop-app/agents/:id/capabilities/:capabilityId   revoke it (ADR 0373)
+ *
+ * The capability routes are a SEPARATE surface from the profile PUT on purpose:
+ * `capabilities` is owned by capability ACTIVATION, not the governance/profile
+ * editor (see `upsertAgentProfile`'s preserve list) — so the editor keeps not
+ * owning them, and this surface keeps not owning governance. Only
+ * `TENANT_ELECTABLE_CAPABILITIES` may be elected here; the rest are
+ * feature-owned (activating `'assistant'` by hand would break
+ * `ensureAssistantAgent`'s single-holder invariant).
  *
  * `:id` is the owning agent id — a standing-agent `rosterId` (`host:<slug>`).
  * Both routes are gated by the SAME tenant rule the roster routes enforce
@@ -19,12 +29,15 @@
  */
 
 import type { Express, Request } from 'express';
-import { OpenwopError } from '../types.js';
+import { OpenwopError, type AgentCapabilityId } from '../types.js';
 import { getRosterEntry, autonomyOf, type RosterEntry } from '../host/rosterService.js';
 import {
   getAgentProfile,
   upsertAgentProfile,
   specLevelForLevel,
+  activateAgentCapability,
+  deactivateAgentCapability,
+  TENANT_ELECTABLE_CAPABILITIES,
   type AgentProfileInput,
 } from '../host/agentProfileService.js';
 import { resolveConnectionReadiness, gateAutonomyByReadiness } from '../host/connectionReadiness.js';
@@ -46,11 +59,11 @@ const ROSTER_LEVELS = new Set<RosterLevel>(['auto', 'guided', 'review']);
 
 /** Resolve the owning agent, fail-closed: a missing OR cross-tenant agent
  *  yields a generic 404 (never leaks that the id exists in another tenant).
- *  Returns the entry so callers can read `autonomyLevel` (ADR 0101 SSoT). */
+ *  Returns the entry so callers can read `autonomyLevel` (ADR 0493 SSoT). */
 async function requireOwnedAgent(req: Request): Promise<RosterEntry> {
   const id = req.params.id;
-  const entry = await getRosterEntry(id);
-  if (!entry || entry.tenantId !== tenantOf(req)) {
+  const entry = await getRosterEntry(tenantOf(req), id);
+  if (!entry) {
     throw new OpenwopError('not_found', 'Agent not found.', 404, { id });
   }
   return entry;
@@ -182,15 +195,28 @@ function parseProfileBody(raw: unknown): AgentProfileInput {
     }
   }
 
-  // ADR 0038 — optional per-agent knowledge bindings (additive). Validates the
-  // shape; the curation feature is the primary writer, but the PUT also accepts it.
+  // ADR 0038 — optional per-agent knowledge knobs (`memoryWritable`, `retrieval`).
+  //
+  // ADR 0643 R4 review (Blocker 1) — `knowledge.collectionIds` is NOT settable here.
+  // This PUT used to accept it as a plain string array and persist it through
+  // `upsertAgentProfile`, gated only by `requireOwnedAgent` ("a roster row exists in
+  // this tenant" — no org scope at all). That made it a SEVENTH bind door: any tenant
+  // member could write `['<private-project-corpus>']`, bypassing `bindCollection`'s
+  // principal check AND `BINDING_CAP`, and the run/chat use lane (pre-authorized BY
+  // the binding) then served the corpus. The grant is the FIELD, not the function:
+  // every writer of `profile.knowledge.collectionIds` is enumerated in
+  // `agent-knowledge/service.ts` (`bindCollection`'s docblock); the curator owns it,
+  // and this route refuses it with a pointer rather than stripping it silently.
   let knowledge: AgentProfileInput['knowledge'];
   if (body.knowledge !== undefined) {
     const k = body.knowledge as Record<string, unknown>;
     if (!k || typeof k !== 'object' || Array.isArray(k)) {
       throw new OpenwopError('validation_error', 'Field `knowledge` MUST be an object.', 400, { field: 'knowledge' });
     }
-    const collectionIds = optStringArray(k.collectionIds, 'knowledge.collectionIds');
+    if (k.collectionIds !== undefined) {
+      throw new OpenwopError('validation_error', '`knowledge.collectionIds` is not settable here; bind collections through POST /agents/:id/knowledge/bindings (the agent-knowledge curator), which authorizes each collection for the caller.', 400, { field: 'knowledge.collectionIds' });
+    }
+    const collectionIds: string[] | undefined = undefined;
     if (k.memoryWritable !== undefined && typeof k.memoryWritable !== 'boolean') {
       throw new OpenwopError('validation_error', 'Field `knowledge.memoryWritable` MUST be a boolean.', 400, { field: 'knowledge.memoryWritable' });
     }
@@ -252,6 +278,48 @@ function parseProfileBody(raw: unknown): AgentProfileInput {
 }
 
 export function registerAgentProfileRoutes(app: Express): void {
+  // ── ADR 0373 — tenant election of a capability on their OWN agent. ──
+  // Closed-world: only TENANT_ELECTABLE_CAPABILITIES are electable here. An
+  // unknown OR feature-owned capability yields the same 404 as an unknown agent
+  // — never a 403, which would confirm the name exists.
+  const requireElectableCapability = (req: Request): AgentCapabilityId => {
+    const raw = req.params.capabilityId;
+    const found = TENANT_ELECTABLE_CAPABILITIES.find((c) => c === raw);
+    if (!found) throw new OpenwopError('not_found', 'Capability not found.', 404, { capabilityId: raw });
+    return found;
+  };
+
+  app.put('/v1/host/openwop-app/agents/:id/capabilities/:capabilityId', async (req, res, next) => {
+    try {
+      const entry = await requireOwnedAgent(req);
+      const capability = requireElectableCapability(req);
+      // `activateAgentCapability` creates a minimal profile when none exists, so
+      // seed it from the roster entry's OWN role/autonomy — ADR 0493 keeps
+      // `roster.autonomyLevel` the single autonomy source of truth, so derive it
+      // exactly as the profile PUT does rather than inventing a level.
+      const level = autonomyOf(entry);
+      const profile = await activateAgentCapability(tenantOf(req), entry.rosterId, capability, {
+        roleKey: entry.roleKey ?? 'agent',
+        autonomy: { level, specLevel: specLevelForLevel(level) },
+      });
+      res.json({ capabilities: profile.capabilities ?? [] });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.delete('/v1/host/openwop-app/agents/:id/capabilities/:capabilityId', async (req, res, next) => {
+    try {
+      const entry = await requireOwnedAgent(req);
+      const capability = requireElectableCapability(req);
+      const profile = await deactivateAgentCapability(tenantOf(req), entry.rosterId, capability);
+      // No profile ⇒ nothing was ever activated ⇒ the revoke is already true.
+      res.json({ capabilities: profile?.capabilities ?? [] });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get('/v1/host/openwop-app/agents/:id/profile', async (req, res, next) => {
     try {
       const entry = await requireOwnedAgent(req);
@@ -269,7 +337,7 @@ export function registerAgentProfileRoutes(app: Express): void {
     try {
       const entry = await requireOwnedAgent(req);
       const input = parseProfileBody(req.body);
-      // ADR 0101 — `roster.autonomyLevel` is the single autonomy source of truth
+      // ADR 0493 — `roster.autonomyLevel` is the single autonomy source of truth
       // (owned by the Edit-details modal). Derive the profile's enforced `level`
       // + provenance `specLevel` from it, never from the request body, so the two
       // can't disagree. `withinPolicyActions` (the auto allowlist) is preserved.

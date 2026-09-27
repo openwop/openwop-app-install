@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/core.openwop.kanban-work-items/1.1.0/materialize.config.json",
+  "title": "KanbanWorkItemsMaterializeConfig",
+  "type": "object",
+  "properties": {
+    "dryRun": {
+      "type": "boolean",
+      "default": false,
+      "description": "Validate and project the WorkItems and cards without persisting them."
+    },
+    "requireApproval": {
+      "type": "boolean",
+      "default": false,
+      "description": "Require an approved canonical upstream review-gate result before writing."
+    },
+    "executionMode": {
+      "enum": ["manual", "auto"],
+      "default": "manual",
+      "description": "Default work-item execution mode when a producer did not specify one. Auto dispatch uses the shared durable workflow-delivery path; manual remains user-initiated."
+    },
+    "maxAttempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10,
+      "default": 3,
+      "description": "Default bounded automatic-delivery attempts when the producer did not specify one."
+    }
+  },
+  "additionalProperties": false
+}

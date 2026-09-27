@@ -6,12 +6,16 @@
  * (with a linked run), or unassign. Warns when a workflow is local-only.
  */
 
+import type { RunConfigurable } from '@openwop/openwop';
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { updateRosterEntry, type RosterEntry } from './rosterClient.js';
 import { createRun } from '../client/runsClient.js';
-import { listWorkflowSummaries } from '../workflows/workflowsClient.js';
+import { classifyHttpError } from '../client/classifyHttpError.js';
+import { listWorkflowSummaries, getWorkflowRunInputs, type RunVariable } from '../workflows/workflowsClient.js';
+import { RunInputsDialog } from '../ui/RunInputsForm.js';
 import { ALL_WORKFLOW_OPTIONS, isKnownWorkflow, workflowName, workflowPurpose } from './roleTemplates.js';
 import { Notice } from '../ui/Notice.js';
 import { AlertIcon, PlayIcon } from '../ui/icons/index.js';
@@ -32,6 +36,7 @@ export function AgentWorkflowPortfolioPanel({
   const { t } = useTranslation('agents');
   const [error, setError] = useState<string | null>(null);
   const [running, setRunning] = useState<string | null>(null);
+  const [runPrompt, setRunPrompt] = useState<{ workflowId: string; name: string; variables: RunVariable[] } | null>(null);
   const [lastRun, setLastRun] = useState<{ workflowId: string; runId: string } | null>(null);
   const [assignId, setAssignId] = useState('');
   // ADR 0163 Phase 6 — the caller's REAL backend workflows (incl. ones created
@@ -55,18 +60,54 @@ export function AgentWorkflowPortfolioPanel({
     }
   };
 
-  const onRunNow = async (workflowId: string) => {
+  // ADR 0507 follow-up (CHAIN-PROMPT-1) — collect the workflow's declared run
+  // inputs BEFORE launching. This panel used to `createRun` with no inputs at
+  // all, so a workflow declaring required `variables[]` started anyway and died
+  // mid-run naming an internal node. Deferred-mode seeding (ADR 0507) makes
+  // `variables[]` populated for the chains that need values, which is exactly
+  // what `RunInputsDialog` renders from — so the contract now exists and this is
+  // the surface that was ignoring it.
+  //
+  // Mirrors `features/projects/ProjectWorkflowsTab.tsx:80-100` deliberately
+  // rather than inventing a second pattern: read the contract, prompt when it is
+  // non-empty, and degrade to a plain run when the read fails (a built-in role
+  // template has no stored definition, and blocking those would be a regression).
+  const doRun = async (workflowId: string, inputs: Record<string, unknown>, configurable?: RunConfigurable) => {
     setRunning(workflowId);
     setError(null);
     setLastRun(null);
     try {
-      const res = await createRun({ workflowId, metadata: { manual: { rosterId: entry.rosterId, persona: entry.persona } } });
+      const res = await createRun({ workflowId, inputs, metadata: { manual: { rosterId: entry.rosterId, persona: entry.persona } }, ...(configurable ? { configurable } : {}) });
       setLastRun({ workflowId, runId: res.runId });
+      setRunPrompt(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // ADR 0482 (ux-1) — a budget-exhausted 429 gets the honest localized
+      // budget sentence instead of the raw SDK message.
+      setError(classifyHttpError(err).kind === 'budget-exhausted'
+        ? t('common:errorBudgetExhausted')
+        : err instanceof Error ? err.message : String(err));
     } finally {
       setRunning(null);
     }
+  };
+
+  const onRunNow = async (workflowId: string) => {
+    setError(null);
+    setLastRun(null);
+    let variables: RunVariable[] = [];
+    setRunning(workflowId);
+    try {
+      variables = await getWorkflowRunInputs(workflowId);
+    } catch {
+      variables = [];
+    } finally {
+      setRunning(null);
+    }
+    if (variables.length > 0) {
+      setRunPrompt({ workflowId, name: workflowName(workflowId), variables });
+      return;
+    }
+    await doRun(workflowId, {});
   };
 
   // Merge role-template options + the caller's real workflows, deduped by id,
@@ -82,7 +123,7 @@ export function AgentWorkflowPortfolioPanel({
     <div>
       {error ? <Notice variant="error">{error}</Notice> : null}
       {lastRun ? (
-        <Notice variant="success">
+        <Notice variant="success" announce={t('portfolioStarted', { workflow: workflowName(lastRun.workflowId) })}>
           {t('portfolioStarted', { workflow: workflowName(lastRun.workflowId) })}
           <Link to={`/runs/${lastRun.runId}`} className="u-iflex u-items-center u-gap-1">
             <PlayIcon size={12} /> {t('portfolioViewRun')}
@@ -118,12 +159,12 @@ export function AgentWorkflowPortfolioPanel({
                   ))}
                 </div>
                 <div className="action-bar">
-                  <button type="button" className="primary btn-sm" disabled={!known || running === wfId} onClick={() => void onRunNow(wfId)}>
+                  <Button variant="primary" size="sm" disabled={!known || running === wfId} onClick={() => void onRunNow(wfId)}>
                     {running === wfId ? t('portfolioRunning') : t('portfolioRunNow')}
-                  </button>
-                  <button type="button" className="secondary btn-sm" onClick={() => void setWorkflows(entry.workflows.filter((w) => w !== wfId))}>
+                  </Button>
+                  <Button variant="secondary" size="sm" onClick={() => void setWorkflows(entry.workflows.filter((w) => w !== wfId))}>
                     {t('portfolioUnassign')}
-                  </button>
+                  </Button>
                 </div>
               </div>
             );
@@ -139,12 +180,23 @@ export function AgentWorkflowPortfolioPanel({
             <option value="">{t('portfolioChooseWorkflow')}</option>
             {assignable.map((w) => <option key={w.workflowId} value={w.workflowId}>{w.name}</option>)}
           </select>
-          <button type="button" className="primary" disabled={!assignId} onClick={() => { void setWorkflows([...entry.workflows, assignId]); setAssignId(''); }}>
+          <Button variant="primary" disabled={!assignId} onClick={() => { void setWorkflows([...entry.workflows, assignId]); setAssignId(''); }}>
             {t('portfolioAssignWorkflow')}
-          </button>
+          </Button>
           <Link to="/builder" className="agentportfolio-create-link">{t('portfolioCreateFromTemplate')}</Link>
         </div>
       </div>
+
+      {runPrompt ? (
+        <RunInputsDialog
+          workflowName={runPrompt.name}
+          variables={runPrompt.variables}
+          busy={running === runPrompt.workflowId}
+          error={error}
+          onRun={(inputs, configurable) => void doRun(runPrompt.workflowId, inputs, configurable)}
+          onCancel={() => { setError(null); setRunPrompt(null); }}
+        />
+      ) : null}
     </div>
   );
 }

@@ -4,7 +4,11 @@
  * `artifactClient` is mocked so this is a pure component test.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { render as rtlRender, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
+
+// LibraryPage binds its tab filter to ?tab= (useUrlTab) — needs a Router.
+const render = (ui: React.ReactElement) => rtlRender(<MemoryRouter>{ui}</MemoryRouter>);
 
 vi.mock('../artifactClient.js', () => ({ listArtifacts: vi.fn() }));
 import { listArtifacts, type ArtifactProjection, type ArtifactPage } from '../artifactClient.js';
@@ -61,7 +65,12 @@ describe('LibraryPage (ART-2)', () => {
   it('shows a warning when the Library fails to load', async () => {
     mockList.mockRejectedValueOnce(new Error('boom'));
     render(<LibraryPage />);
-    expect(await screen.findByText(/couldn|could not|failed|error/i)).toBeTruthy();
+    // Tightened from a loose /couldn|failed|error/i regex (UX-LIB-1): a failed
+    // read now ALSO replaces the "No assets yet" card with an honest one, so the
+    // old matcher hit two elements and threw. Asserting the banner's exact copy
+    // keeps this test's original intent — "the warning is shown" — unambiguous.
+    // The empty-card half is covered by libraryReadHonesty.test.tsx.
+    expect(await screen.findByText('Could not load the library. Please try again.')).toBeTruthy();
   });
 
   it('does not render a "Load more" button when the first page is already complete', async () => {

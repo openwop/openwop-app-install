@@ -14,16 +14,19 @@ import { useTranslation } from 'react-i18next';
 import { PROVIDERS } from '../../byok/lib/providers.js';
 
 interface Props {
+  /** Associates the control with ConfigInput's <label htmlFor> (A11Y-3). */
+  id?: string | undefined;
   value: string | undefined;
   onChange(next: string | undefined): void;
   required?: boolean | undefined;
 }
 
-export function ProviderPickerInput({ value, onChange, required }: Props): JSX.Element {
+export function ProviderPickerInput({ value, onChange, required, id }: Props): JSX.Element {
   const { t } = useTranslation('builder');
   const visible = PROVIDERS.filter((p) => !p.managed && !p.hidden);
   return (
     <select
+      {...(id ? { id } : {})}
       value={value ?? ''}
       required={required}
       onChange={(e) => onChange(e.target.value || undefined)}

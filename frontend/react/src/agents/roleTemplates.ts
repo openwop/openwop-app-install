@@ -9,20 +9,12 @@
  * Keep in sync with apps/.../backend/typescript/src/host/exampleWorkflows.ts.
  */
 
-import type { CSSProperties } from 'react';
-import {
-  ActivityIcon,
-  BotIcon,
-  BriefcaseIcon,
-  BuildingIcon,
-  FileTextIcon,
-  LifeBuoyIcon,
-  SparklesIcon,
-  MegaphoneIcon,
-  ScaleIcon,
-  UserIcon,
-  WrenchIcon,
-} from '../ui/icons/index.js';
+import { roleThemeForKey, ROLE_THEMES, type RoleTheme } from './roleTheme.js';
+
+// The theme map + portfolio-free resolver live in the entry-light leaf
+// `roleTheme.ts` (chat imports THAT, not this catalog). Re-exported here so
+// every existing feature-page import keeps working unchanged.
+export { roleThemeForKey, ROLE_THEMES, CUSTOM_THEME, roleThemeForAgentId, type RoleTheme } from './roleTheme.js';
 
 export interface WorkflowOption {
   workflowId: string;
@@ -193,43 +185,6 @@ export const ALL_WORKFLOW_OPTIONS: ReadonlyArray<WorkflowOption> = ROLE_TEMPLATE
 // state, so a role accent would fight the editorial discipline. The clay
 // avatar stays uniform; the glyph inside it carries the role.
 // ---------------------------------------------------------------------------
-
-type IconComponent = (props: { size?: number; strokeWidth?: number; style?: CSSProperties }) => JSX.Element;
-
-export interface RoleTheme {
-  key: string;
-  /** Human label for the role family (e.g. "Sales", "Support"). */
-  label: string;
-  Icon: IconComponent;
-}
-
-const ROLE_THEMES: Record<string, RoleTheme> = {
-  // ADR 0023 (corrected) — the Chief of Staff is a real roster agent; its
-  // theme glyph is the sparkles mark the assistant has always carried.
-  'chief-of-staff': { key: 'chief-of-staff', label: 'Chief of Staff', Icon: SparklesIcon },
-  // ADR 0032 — the ten canonical Enterprise Digital Work Twins. Each new roleKey
-  // gets a distinct glyph so a seeded roster reads at a glance (the seeder stamps
-  // RosterEntry.roleKey → roleThemeForKey resolves the glyph). Icon-only
-  // differentiation per DESIGN.md §3 (no per-role colour). Chief of Staff (=Iris)
-  // is above; Executive Operations rides the same assistant surface (ADR 0032
-  // §Exec-vs-Iris) but is a distinct roster instance, so it carries its own glyph.
-  'sales-execution': { key: 'sales-execution', label: 'Sales Execution', Icon: BriefcaseIcon },
-  'customer-success': { key: 'customer-success', label: 'Customer Success', Icon: LifeBuoyIcon },
-  'finance-close': { key: 'finance-close', label: 'Finance Close', Icon: ScaleIcon },
-  'it-service-desk': { key: 'it-service-desk', label: 'IT Service Desk', Icon: WrenchIcon },
-  'internal-comms': { key: 'internal-comms', label: 'Internal Comms', Icon: MegaphoneIcon },
-  'recruiting-coordinator': { key: 'recruiting-coordinator', label: 'Recruiting', Icon: UserIcon },
-  'people-ops': { key: 'people-ops', label: 'People Ops', Icon: BuildingIcon },
-  'contract-procurement': { key: 'contract-procurement', label: 'Contract & Procurement', Icon: FileTextIcon },
-  'executive-ops': { key: 'executive-ops', label: 'Executive Ops', Icon: ActivityIcon },
-};
-
-const CUSTOM_THEME: RoleTheme = { key: 'custom', label: 'Custom', Icon: BotIcon };
-
-/** Map a role-template key (or anything) to its theme; unknown → the custom (Bot) theme. */
-export function roleThemeForKey(key: string | undefined): RoleTheme {
-  return (key && ROLE_THEMES[key]) || CUSTOM_THEME;
-}
 
 /** Derive the role-template key for a roster member: prefer the seeded
  *  `host:<example|demo>-<key>` agentRef, else infer from the workflow portfolio,

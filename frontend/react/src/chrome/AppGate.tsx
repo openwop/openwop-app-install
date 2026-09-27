@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { FormEvent, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { brand } from '../brand/brand.js';
@@ -87,9 +88,9 @@ function PasswordGate({ children }: { children: React.ReactNode }): JSX.Element 
             value={value}
           />
         </label>
-        <button className="primary" disabled={disabled || value.length === 0} type="submit">
+        <Button variant="primary" disabled={disabled || value.length === 0} type="submit">
           {t('continue')}
-        </button>
+        </Button>
       </form>
     </GateShell>
   );

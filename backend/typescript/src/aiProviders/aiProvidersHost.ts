@@ -43,16 +43,28 @@ import type {
   TranscriptResult,
   ImageGenerationRequest,
   ImageGenerationResult,
+  ImageEditRequest,
+  ImageUpscaleRequest,
+  VideoGenerationRequest,
+  VideoGenerationResult,
 } from '../executor/types.js';
 import { dispatchImageGeneration, imageProviderConfigured } from '../host/imageProviderAdapter.js';
-import { checkImageBudget, recordImages } from '../host/imageGenBudget.js';
+import { dispatchImagesNative, isNativeImageProvider, dispatchImageEditOpenAI, dispatchImageEditReplicate, dispatchImageUpscaleReplicate, IMAGE_OP_SUPPORT } from '../providers/dispatchImages.js';
+import { dispatchVideoReplicate } from '../providers/dispatchVideo.js';
+import { createSemaphore } from '../util/asyncSemaphore.js';
+import { withLlmSpan, PROVIDER_DISPATCH_SPAN } from '../observability/llmSpans.js';
+import { enterprisePosture } from '../host/deployPosture.js';
+import { subscriptionLoginDetected, subscriptionRequireDetectedLogin } from './subscriptionCliDetect.js';
 import type { AiProviderPolicy, ProviderPolicyResolver } from '../host/index.js';
 import { dispatchChat, type ChatMessage, type ProviderId } from '../providers/dispatch.js';
+import { hasPendingMockProgram } from '../providers/dispatchMock.js';
+import { explicitRefNamesOtherProvider, pickCredentialRef } from './credentialRefLadder.js';
 import { dispatchAnthropicToolsRound, type ToolsRoundRequest, type ToolsRoundResult } from '../providers/dispatchAnthropicTools.js';
 import { dispatchOpenAIToolsRound, dispatchGoogleToolsRound, dispatchMiniMaxToolsRound } from '../providers/dispatchProviderTools.js';
 import { embedText, DEFAULT_EMBEDDING_DIMS, LOCAL_EMBEDDING_MODEL } from './localEmbedding.js';
 import {
   dispatchManagedChat,
+  dispatchManagedToolsRound,
   isManagedCredentialRef,
   managedProviderIdFromRef,
   resolveManagedSpeechKey,
@@ -62,12 +74,57 @@ import { dispatchSpeechMiniMax, dispatchSpeechOpenAI, dispatchSpeechGoogle, disp
 import { storeMediaAsset, resolveMediaAsset } from '../host/inMemorySurfaces.js';
 import { AUDIO_TRANSCRIPTION_SYSTEM_PROMPT, AUDIO_TRANSCRIPTION_USER_PROMPT } from './mediaTranscriptionPrompts.js';
 import { emitCost } from '../observability/costEmitter.js';
+import { classifyProviderOutcome, recordProviderCall } from '../observability/metricSeams.js';
 import { checkMediaBudget, recordMediaUsage } from './mediaBudget.js';
 import { getStreamAudioResolver } from './streamAudio.js';
 import { buildProviderUsagePayloadFromTokens } from '../providers/usageEmitter.js';
 import { compactToolSchema } from '../providers/toolSchemaCompaction.js';
 import { contextEconomy } from '../host/contextEconomy.js';
-import { getInvocationLog } from '../executor/invocationLog.js';
+import { getInvocationLog, type InvocationRecordKey } from '../executor/invocationLog.js';
+import { stripSecretsFromPersisted } from '../byok/ephemeralRunSecrets.js';
+import { isSubscriptionProhibitedProvider, CLEARED_SUBSCRIPTION_PROVIDERS } from '../byok/subscriptionCredentialScope.js';
+import { copilotSubscriptionConfigured, COPILOT_PROVIDER_ID } from './copilotSubscription.js';
+import { semanticRequestDigestV2 } from '../providers/llmCacheKey.js';
+import { logicalInvocationId, nextLogicalInvocationOrdinal } from '../host/effectIdentity.js';
+
+/** ADR 0326 P3a — the tagged discriminator marking a recorded FAILED provider
+ *  invocation in the Layer-2 log (attempt-fidelity on replay). Chosen so no
+ *  legitimate AiCallResult can collide. */
+const INVOCATION_FAILURE_TAG = '__openwopInvocationOutcome';
+
+/** GC-CHAT-3/4 (grade pass 2026-07-10) — the typed invocation-log value. A
+ *  recorded failure carries its CLASS FAMILY (`kind`), because two downstream
+ *  discriminators key on the error class, not just the code: the executor's
+ *  code derivation (`instanceof AiProviderError → err.code`, else
+ *  `internal_error`) and `classifyDispatchError`'s recovery-hint branch. A
+ *  replay must re-throw the same family or the node-failure event's payload
+ *  diverges from live. `kind` ABSENT = `'provider'` — every envelope recorded
+ *  before this field existed was provider-classified, and old runs must keep
+ *  replaying as they did. */
+type InvocationFailureEnvelope = { [K in typeof INVOCATION_FAILURE_TAG]: 'failure' } & {
+  kind?: 'provider' | 'generic';
+  code?: string;
+  message?: string;
+  /** The live throw's `error.name` (generic kind) — restored on replay so
+   *  classifyDispatchError's native-error branch sees the same input. */
+  name?: string;
+};
+type InvocationRecord = AiCallResult | InvocationFailureEnvelope;
+
+function isFailureEnvelope(v: InvocationRecord): v is InvocationFailureEnvelope {
+  return (v as Record<string, unknown>)[INVOCATION_FAILURE_TAG] === 'failure';
+}
+
+/** Test-only (GC-CHAT-3) — the most recent callAI invocation-log cache key,
+ *  so replay-fidelity tests can seed/read the log at the exact key without
+ *  duplicating the identity computation (which would drift). ADR 0549 P3 adds
+ *  the two RFC 0150 inputs the identity is composed from, so a test can assert
+ *  retry stability of the identity AND of the ordinal that feeds it. */
+type LastCacheKey = InvocationRecordKey & { providerKey: string; logicalInvocationOrdinal: number };
+let lastCacheKeyForTests: LastCacheKey | null = null;
+export function __lastInvocationCacheKeyForTests(): LastCacheKey | null {
+  return lastCacheKeyForTests;
+}
 import { createLogger } from '../observability/logger.js';
 // RFC 0030 §A reasoning-directive synthesis lifted to @openwop/openwop@^1.1.3.
 // The byte-identical helper at host/envelopeDirective.ts is now a type-only
@@ -75,7 +132,7 @@ import { createLogger } from '../observability/logger.js';
 // still imports `ReasoningDirectiveStrength` from it; lifting that is a
 // follow-up commit).
 import { buildReasoningDirective } from '@openwop/openwop';
-import { getEnvelopeReasoningConfig } from '../host/envelopeReasoningConfig.js';
+import { resolveEnvelopeReasoning } from '../host/envelopeReasoningConfig.js';
 import { getEnvelopeReliabilityConfig } from '../host/envelopeReliabilityConfig.js';
 import {
   buildRetryAttemptedPayload,
@@ -88,6 +145,30 @@ import {
   tryLenientParse,
   type RetryReason,
 } from '../host/envelopeReliabilityEmit.js';
+
+/**
+ * Is the deterministic `mock` provider routable?
+ *
+ * A SEPARATE switch from `OPENWOP_TEST_SEAM_ENABLED` on purpose.
+ * `host-sample-test-seams.md` §"Production safety": a host MUST NOT count two
+ * controls that read the same switch as two layers.
+ *
+ * These five call sites used to read `OPENWOP_TEST_SEAM_ENABLED` and were
+ * commented "gated (defense-in-depth) so a prod `provider:'mock'` cannot fake
+ * the capability". They were the SAME layer wearing two names: one env setting
+ * opened the staging seam and the provider that consumes what it stages, so the
+ * second control could never catch a failure of the first.
+ *
+ * Defaults to the seam flag ONLY when unset, so an existing conformance posture
+ * keeps working; setting it explicitly is what makes the two independent. Set
+ * it to `false` alongside an enabled seam to keep the staging route reachable
+ * for the harness while refusing to route real dispatches to the mock.
+ */
+export function mockProviderEnabled(): boolean {
+  const explicit = process.env.OPENWOP_MOCK_PROVIDER_ENABLED;
+  if (explicit !== undefined) return explicit === 'true';
+  return process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
+}
 
 const log = createLogger('aiProviders.host');
 
@@ -143,8 +224,20 @@ export interface AdapterScope {
   nodeId: string;
   tenantId: string;
   scopeId?: string;
+  /** ADR 0396 P4 — the run's acting human (run.metadata.actingUserId), when
+   *  one exists. Backs the per-user reasoning-directive override; absent ⇒
+   *  the host-wide posture (system runs, pre-0396 callers). */
+  actingUserId?: string;
   attempt: number;
+  /** ADR 0326 P3b — replay-mode fork: on an invocation-log miss for THIS
+   *  run, also read the SOURCE run's recorded invocation at the same
+   *  (nodeId, attempt, providerKey). Reads only — writes stay on this
+   *  run's own key so nested forks compose. */
+  replayInvocationsFromRunId?: string;
   secrets: Record<string, string>;
+  /** ADR 0712 — the run's `configurable.ai.credentialRef` (a NAME), the ladder's
+   *  run rung for a node that passes no ref of its own. */
+  runCredentialRef?: string;
   policyResolver: ProviderPolicyResolver;
   /** Optional per-call timeout override. Defaults to 120s. */
   timeoutMs?: number;
@@ -269,6 +362,9 @@ export function createAiProvidersAdapter(scope: AdapterScope): {
   callSpeechSynthesizer(req: SpeechSynthesisRequest): Promise<SpeechSynthesisResult>;
   callTranscriber(req: TranscribeRequest): Promise<TranscriptResult>;
   callImageGenerator(req: ImageGenerationRequest): Promise<ImageGenerationResult>;
+  callImageEditor(req: ImageEditRequest): Promise<ImageGenerationResult>;
+  callImageUpscaler(req: ImageUpscaleRequest): Promise<ImageGenerationResult>;
+  callVideoGenerator(req: VideoGenerationRequest): Promise<VideoGenerationResult>;
 } {
   return {
     callAI: (req) => callAI(scope, req),
@@ -276,6 +372,9 @@ export function createAiProvidersAdapter(scope: AdapterScope): {
     callSpeechSynthesizer: (req) => callSpeechSynthesizer(scope, req),
     callTranscriber: (req) => callTranscriber(scope, req),
     callImageGenerator: (req) => callImageGenerator(scope, req),
+    callImageEditor: (req) => callImageEditor(scope, req),
+    callImageUpscaler: (req) => callImageUpscaler(scope, req),
+    callVideoGenerator: (req) => callVideoGenerator(scope, req),
   };
 }
 
@@ -382,7 +481,7 @@ async function callTranscriber(scope: AdapterScope, req: TranscribeRequest): Pro
 
   // P1 deterministic stub — gated (defense-in-depth) so a prod `provider:'mock'`
   // cannot fake the capability.
-  if (provider === 'mock' && process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+  if (provider === 'mock' && mockProviderEnabled()) {
     return emitVoiceTurn(scope, 'book a table for two', language);
   }
 
@@ -447,10 +546,12 @@ async function transcribeManaged(
   contentBase64: string,
   contentType: string,
 ): Promise<string> {
-  // Deterministic transcript under the test seam — exercises the resolver / buffer /
-  // tenant-bind path (and the finite-asset path) with no provider key, gated so a prod
-  // build can never fake it. Encodes the byte count so a test can prove the audio flowed.
-  if (process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+  // Deterministic transcript under OPENWOP_VOICE_MOCK — exercises the resolver / buffer /
+  // tenant-bind path (and the finite-asset path) with no provider key. Encodes the byte
+  // count so a test can prove the audio flowed. Deliberately NOT the conformance-seam flag:
+  // prod keeps OPENWOP_TEST_SEAM_ENABLED on for the seam ROUTES, and keying this stub on it
+  // returned "live transcript (N bytes)" as real users' spoken words (ADR 0141 correction).
+  if (process.env.OPENWOP_VOICE_MOCK === 'true') {
     return `live transcript (${Buffer.from(contentBase64, 'base64').length} bytes)`;
   }
   const aiResult = await callAI(scope, {
@@ -500,6 +601,16 @@ export function assertModalitiesAdvertised(req: AiCallRequest | AiToolCallReques
   }
 }
 
+// DEBT-3 (decided won't-fix, ADR-0355-thread architect review 2026-07-12): do NOT
+// fill a catalog default model here when `req.model` is empty. The invocation-log
+// cache key embeds `req.model` (see computeProviderKey below) and LLM nodes
+// re-execute LIVE on replay (they are not side-effecting), so a request-time
+// `getDefaultModel(provider)` would re-resolve against a possibly-changed
+// providers.json (exactly what /refresh-model-catalog rewrites) → a different
+// providerKey → cache miss → silent model substitution on replay/fork. The
+// replay-stable SSoT is the caller's explicit model (packs pin one annotated
+// constant per pack). Only introduce a host default via a model-independent
+// cache-key sentinel that records the resolved model in the cached value.
 async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallResult> {
   assertModalitiesAdvertised(req);
   if (req.embeddingMode) {
@@ -526,31 +637,157 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   const { cleartext: credentialCleartext, refUsed } = resolveCredential(scope, req.provider, req.credentialRef);
   const credentialRefHashed = sha256Hex(refUsed);
 
-  // Replay determinism: deterministic cache key. Defaults filled in
-  // BEFORE hashing so `maxTokens: undefined` (caller omits) collapses
-  // into the same key as `maxTokens: 4096` (dispatcher default) —
-  // otherwise identical-effective requests double-spend the cache.
-  // Note we hash the credentialRef alongside the request shape — the
-  // cache value itself never contains the cleartext key.
-  const providerKey = computeProviderKey({
+  // ADR 0549 P3 / RFC 0150 §C — the SEMANTIC REQUEST DIGEST v2. Defaults are
+  // filled in BEFORE hashing so `maxTokens: undefined` (caller omits) collapses
+  // into the same digest as `maxTokens: 4096` (dispatcher default) — the digest
+  // is over the EFFECTIVE request, otherwise identical-effective requests
+  // double-spend the cache.
+  //
+  // `credentialRefHashed` is NOT in the digest any more, and its removal is
+  // required rather than incidental: §C excludes credential handles as
+  // transport-only, and §C's layering note is explicit that the digest "MUST
+  // NOT be used as a security boundary" because two tenants computing the same
+  // request compute the same digest. Isolation moved to where the spec puts it
+  // — `tenantId` is in the Layer-2 IDENTITY preimage below.
+  const providerKey = semanticRequestDigestV2({
     provider: req.provider,
     model: req.model,
-    messages: req.messages,
-    systemPrompt: req.systemPrompt ?? null,
-    temperature: req.temperature ?? null,
-    maxTokens: req.maxTokens ?? 4096,
-    stopSequences: req.stopSequences ?? null,
-    responseSchema: req.responseSchema ?? null,
-    credentialRefHashed,
+    messages: toChatMessages(req),
+    ...(typeof req.temperature === 'number' ? { temperature: req.temperature } : {}),
+    maxOutputTokens: req.maxTokens ?? 4096,
+    ...(req.stopSequences ? { stop: [...req.stopSequences] } : {}),
+    ...(req.responseSchema ? { responseFormat: { type: 'json', schema: req.responseSchema } } : {}),
+  });
+
+  // RFC 0150 §B — the LOGICAL EFFECT IDENTITY. The ordinal is allocated once
+  // per logical activity and rewinds at each node attempt, so attempt 2's first
+  // AI call is the SAME logical effect as attempt 1's and resolves to the same
+  // identity. `attempt` itself never enters the preimage.
+  const logicalInvocationOrdinal = nextLogicalInvocationOrdinal(scope.runId, scope.nodeId, scope.attempt);
+  const invocationId = logicalInvocationId({
+    tenantId: scope.tenantId,
+    runId: scope.runId,
+    nodeId: scope.nodeId,
+    logicalInvocationOrdinal,
+    providerKey,
   });
   const cacheKey = {
     runId: scope.runId,
     nodeId: scope.nodeId,
     attempt: scope.attempt,
-    providerKey,
+    invocationId,
   };
+  lastCacheKeyForTests = { ...cacheKey, providerKey, logicalInvocationOrdinal };
   const invocationLog = getInvocationLog();
-  const cached = (await invocationLog.get(cacheKey)) as AiCallResult | null;
+
+  // Read order, and why it is this order:
+  //
+  //  1. EXACT `(identity, attempt)` — the record this attempt already produced.
+  //  2. `spec/v1/replay.md` §E DUAL-READ — a record written before P3 lives
+  //     under the retired v1 provider key, which was the raw column value. Read
+  //     only; nothing writes v1 again, so this ages out with the TTL.
+  //  3. RETRY-STABLE — a SUCCESS recorded at this identity by an EARLIER
+  //     attempt. This is the read RFC 0150 §B exists for: the second attempt at
+  //     a logical effect that already succeeded must not re-fire it.
+  //
+  // A recorded FAILURE deliberately does NOT short-circuit a live retry. The
+  // executor only re-queues classes it has already judged retryable
+  // (`NON_RETRYABLE_NODE_ERRORS`), so a terminal failure is never retried in
+  // the first place and needs no cache to stop it; short-circuiting the
+  // retryable case instead would make `config.retry` structurally impossible
+  // for every AI-calling node. Duplicate-effect safety for that case rides the
+  // identity being STABLE, which is the spec's own second branch: the retry
+  // "either short-circuits (cache hit) or hits [the provider's] own idempotency
+  // cache via the injected header".
+  let cached = (await invocationLog.get(cacheKey)) as InvocationRecord | null;
+  if (!cached) {
+    const legacyProviderKey = legacyProviderKeyV1({
+      provider: req.provider,
+      model: req.model,
+      messages: req.messages,
+      systemPrompt: req.systemPrompt ?? null,
+      temperature: req.temperature ?? null,
+      maxTokens: req.maxTokens ?? 4096,
+      stopSequences: req.stopSequences ?? null,
+      responseSchema: req.responseSchema ?? null,
+      credentialRefHashed,
+    });
+    cached = (await invocationLog.get({ ...cacheKey, invocationId: legacyProviderKey })) as InvocationRecord | null;
+  }
+  if (!cached) {
+    const prior = (await invocationLog.latest({
+      runId: scope.runId,
+      nodeId: scope.nodeId,
+      invocationId,
+    })) as InvocationRecord | null;
+    if (prior && !isFailureEnvelope(prior)) cached = prior;
+  }
+  // ADR 0326 P3b — replay-mode fork fallback: the fork's fresh runId has no
+  // recorded invocations, so a deterministic replay reads the SOURCE run's
+  // record for the same (nodeId, attempt, providerKey). Failure envelopes
+  // replay identically through the re-throw below.
+  // RFC 0041 §B / host-sample-test-seams.md §5 — a PENDING mock program for
+  // this node is a deliberate divergence injection: the replay's dispatch MUST
+  // reach the mock (its next entry is the staged refusal/valid the divergence
+  // detector compares against), so the source-run invocation fallback is
+  // skipped. Only the `mock` provider and only while an entry remains — every
+  // other provider, and mock without a staged entry, replays deterministically.
+  const mockProgramPending = req.provider === 'mock' && hasPendingMockProgram(scope.nodeId);
+  if (!cached && scope.replayInvocationsFromRunId && !mockProgramPending) {
+    // ADR 0549 P3 — `runId` is IN the §B preimage, so the source run's record
+    // sits under a DIFFERENT identity. Recompute it rather than swapping the
+    // `runId` field and leaving a stale identity that could never match. (This
+    // fallback is the host's deliberate RFC 0140 replay extension: a replay
+    // reads the recorded outcome instead of re-firing the effect. It is not
+    // Layer-2 dedup surviving a fork, which `idempotency.md` says it must not.)
+    const sourceInvocationId = logicalInvocationId({
+      tenantId: scope.tenantId,
+      runId: scope.replayInvocationsFromRunId,
+      nodeId: scope.nodeId,
+      logicalInvocationOrdinal,
+      providerKey,
+    });
+    cached = (await invocationLog.get({
+      ...cacheKey,
+      runId: scope.replayInvocationsFromRunId,
+      invocationId: sourceInvocationId,
+    })) as InvocationRecord | null;
+    // Copy-on-read: land the parent's record under THIS run's key so the
+    // fork's log is self-contained — a fork-of-a-fork replays from its
+    // immediate parent instead of live-dispatching (the fallback only ever
+    // reaches ONE level up). Best-effort like the failure-record write.
+    if (cached) await invocationLog.put(cacheKey, cached).catch(() => undefined);
+    // RFC 0041 §C — the replay's OBSERVABLE sequence must be byte-equivalent
+    // to the source's (modulo per-event volatiles). A live dispatch emits
+    // `provider.usage`; a cache-hit replay must too, and regenerating it
+    // would mint a fresh traceId that breaks equivalence — so re-emit the
+    // SOURCE run's payload verbatim (the RFC 0140 shape: replay the record,
+    // never re-fire the work). Best-effort like the live emit.
+    if (cached && !isFailureEnvelope(cached) && scope.emit) {
+      try {
+        const { getEventLog } = await import('../executor/eventLog.js');
+        const sourceEvents = await getEventLog().list(scope.replayInvocationsFromRunId);
+        const usage = sourceEvents.find((e) => e.type === 'provider.usage' && e.nodeId === scope.nodeId);
+        if (usage) await scope.emit('provider.usage', usage.payload);
+      } catch (err) {
+        log.warn('replay provider.usage re-emit failed', { err: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  }
+  // ADR 0326 P3a — a recorded FAILED attempt replays as the SAME failure, in
+  // the SAME class family (GC-CHAT-3): a provider failure re-throws the
+  // identical AiProviderError (code+message); a generic node/dispatch throw
+  // re-throws a plain Error with its live `name` restored — so the executor's
+  // code derivation AND classifyDispatchError's class branch take the same
+  // path live and on replay, keeping the node-failure event byte-identical.
+  if (cached && isFailureEnvelope(cached)) {
+    if ((cached.kind ?? 'provider') === 'provider') {
+      throw new AiProviderError((cached.code ?? 'provider_unavailable') as AiProviderErrorCode, cached.message ?? 'replayed provider failure');
+    }
+    const replayed = new Error(cached.message ?? 'replayed node failure');
+    if (cached.name) replayed.name = cached.name;
+    throw replayed;
+  }
   if (cached) {
     log.debug('callAI: invocation-log cache hit', {
       runId: scope.runId,
@@ -562,7 +799,7 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   }
 
   // ADR 0079 §Phase 4 — stream the plain reply's token deltas onto the run event
-  // log as canonical `ai.message.chunk` events, so a surface tailing this run's
+  // log as canonical `output.chunk` events, so a surface tailing this run's
   // SSE renders progressively (the same event the chat consumer already reads).
   // Transient (stream-only, no channel reducer folds it); the node's structured
   // result remains authoritative. OPT-IN per call (`req.stream`) so non-interactive
@@ -571,15 +808,37 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
   const emit = scope.emit;
   const streamDelta = req.stream && emit
     ? async (delta: string): Promise<void> => {
-        try { await emit('ai.message.chunk', { chunk: delta, isLast: false }); } catch { /* best-effort delta */ }
+        try { await emit('output.chunk', { chunk: delta, isLast: false }); } catch { /* best-effort delta */ }
       }
     : undefined;
-  const result = await wrapInSpan(scope, req.provider, req.model, async () => {
-    if (req.responseSchema) {
-      return dispatchStructured(scope, req, credentialCleartext);
+  let result: Awaited<ReturnType<typeof dispatchPlain>>;
+  try {
+    result = await wrapInSpan(scope, req.provider, req.model, async () => {
+      if (req.responseSchema) {
+        return dispatchStructured(scope, req, credentialCleartext);
+      }
+      return dispatchPlain(scope, req, credentialCleartext, streamDelta);
+    });
+  } catch (err) {
+    // ADR 0326 P3a + GC-CHAT-3 — record the FAILED invocation at this
+    // attempt's cache key so a replay/:fork reproduces the failure (attempt
+    // fidelity). Provider failures record their code; GENERIC throws (schema
+    // parse, dispatcher TypeError — previously unrecorded, so replays
+    // compressed the attempt sequence at that node) record kind+name+message.
+    // Control-flow signals are NEVER attempt outcomes: SuspendSignal (node
+    // suspension) and raw AbortError (a timeout that escaped dispatch's
+    // provider_timed_out wrapping) are excluded. Secrets are scrubbed
+    // (provider messages can echo key material — SR-1); the write is
+    // best-effort and never masks the original throw.
+    if (err instanceof AiProviderError) {
+      const envelope = stripSecretsFromPersisted({ [INVOCATION_FAILURE_TAG]: 'failure', kind: 'provider', code: err.code, message: err.message });
+      await invocationLog.put(cacheKey, envelope).catch(() => undefined);
+    } else if (err instanceof Error && err.name !== 'SuspendSignal' && err.name !== 'AbortError') {
+      const envelope = stripSecretsFromPersisted({ [INVOCATION_FAILURE_TAG]: 'failure', kind: 'generic', name: err.name, message: err.message });
+      await invocationLog.put(cacheKey, envelope).catch(() => undefined);
     }
-    return dispatchPlain(scope, req, credentialCleartext, streamDelta);
-  });
+    throw err;
+  }
 
   // Emit cost AFTER dispatch returns (real usage figures only).
   if (result.usage?.inputTokens != null || result.usage?.outputTokens != null) {
@@ -618,6 +877,17 @@ async function callAI(scope: AdapterScope, req: AiCallRequest): Promise<AiCallRe
  * not this single round.
  */
 async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Promise<AiToolCallResult> {
+  // Managed-provider short-circuit, the tools-round twin of callAI's. Without it a
+  // workflow run on a `managed:*` credential that offers tools reached
+  // assertProviderSupported with the managed tile id (`openwop-free`) and failed
+  // `provider_not_supported` before dispatch. The chat conversation loop already
+  // routed managed tool rounds through dispatchManagedToolsRound; the workflow
+  // adapter did not. Measured on kicktodo.com 2026-09-16 21:00Z: every KickBot
+  // reminder coach turn (agent-runner, tools offered, managed:openwop-free)
+  // failed this way and pushed "Workflow failed" to the participant.
+  if (isManagedCredentialRef(req.credentialRef)) {
+    return callAIWithToolsManaged(scope, req);
+  }
   assertProviderSupported(req.provider);
   if (!TOOL_CALLING_PROVIDERS.includes(req.provider)) {
     throw new AiProviderError(
@@ -649,6 +919,11 @@ async function callAIWithTools(scope: AdapterScope, req: AiToolCallRequest): Pro
             inputSchema: compactToolSchema(t.inputSchema, toolDietOn),
           })),
           ...(req.webSearch ? { webSearch: true } : {}),
+          // CEC-2 / RFC 0116 §43 — namespace the Anthropic prompt cache by
+          // (tenant, cachePrefixId) so a shared-key deployment can't serve one
+          // tenant's cached prefix to another (the dispatcher applies the marker
+          // only when caching is on; harmless otherwise).
+          cachePrefixScope: { tenant: scope.tenantId, cachePrefixId: derivePrefixCacheId(req) },
           signal,
         }),
       ),
@@ -698,6 +973,10 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
     const managed = await dispatchManagedChat({
       userFacingProvider,
       tenantId: scope.tenantId,
+      // ADR 0721 — the managed TOOLS round below already does exactly this; the
+      // plain-completion round did not, so every workflow LLM node on managed
+      // charged the pooled tenant bucket.
+      ...(scope.actingUserId ? { actingSubject: scope.actingUserId } : {}),
       messages: toChatMessages(req),
       ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
     });
@@ -725,6 +1004,48 @@ async function callAIManaged(scope: AdapterScope, req: AiCallRequest): Promise<A
     if (err instanceof ManagedProviderError) {
       // Map managed-pipeline errors to canonical aiProviders codes so
       // existing callers don't need to learn a new vocabulary.
+      const code: AiProviderErrorCode =
+        err.code === 'sign_in_required' ? 'byok_required'
+          : err.code === 'daily_limit_reached' ? 'provider_rate_limited'
+          : 'provider_unavailable';
+      throw new AiProviderError(code, err.message, { managedCode: err.code });
+    }
+    throw err;
+  }
+}
+
+/** One managed (free-tier) tool-calling round for workflow runs: the same daily
+ *  caps, server-held key and provider hiding as the chat loop's managed rounds
+ *  (`dispatchManagedToolsRound`). The acting participant rides through so a shared
+ *  workspace meters per subject (ADR 0693). Errors map to the canonical codes the
+ *  managed chat path uses. */
+async function callAIWithToolsManaged(scope: AdapterScope, req: AiToolCallRequest): Promise<AiToolCallResult> {
+  const userFacingProvider = managedProviderIdFromRef(req.credentialRef!);
+  const credentialRefHashed = sha256Hex(req.credentialRef!);
+  const toolDietOn = contextEconomy().toolDiet; // ADR 0148 A3, same diet as the BYOK round
+  try {
+    const round = await dispatchManagedToolsRound({
+      userFacingProvider,
+      tenantId: scope.tenantId,
+      ...(scope.actingUserId ? { actingSubject: scope.actingUserId } : {}),
+      messages: toChatMessages(req),
+      tools: req.tools.map((t) => ({
+        name: t.name,
+        description: t.description,
+        inputSchema: compactToolSchema(t.inputSchema, toolDietOn),
+      })),
+      ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
+    });
+    await emitProviderUsage(scope, userFacingProvider, userFacingProvider, round.inputTokens, round.outputTokens, (round.cachedReadTokens ?? 0) > 0, round.cachedReadTokens);
+    return {
+      content: round.text,
+      toolCalls: round.toolUses.map((t) => ({ id: t.id, name: t.name, input: t.input })),
+      usage: { inputTokens: round.inputTokens, outputTokens: round.outputTokens },
+      model: userFacingProvider,
+      credentialRefHashed,
+    };
+  } catch (err) {
+    if (err instanceof ManagedProviderError) {
       const code: AiProviderErrorCode =
         err.code === 'sign_in_required' ? 'byok_required'
           : err.code === 'daily_limit_reached' ? 'provider_rate_limited'
@@ -769,7 +1090,7 @@ const MOCK_SPEECH_AUDIO_B64 = 'SUQzBAAAAAAAF1RTU0UAAAANAAADTGF2ZjU4Ljc2LjEwMA=='
  * `audio.url` result. The cleartext key never crosses the return boundary.
  */
 // ── ADR 0115 — text-to-image generation ─────────────────────────────────────
-const IMAGE_PROVIDERS = ['openai', 'google', 'mock'] as const;
+const IMAGE_PROVIDERS = ['openai', 'google', 'replicate', 'mock'] as const; // ADR 0401 P2
 const MANAGED_IMAGE_PROVIDERS: string[] = []; // no managed image key on this host (BYOK-only) until a provider is configured
 const MAX_IMAGE_PROMPT_CHARS = 4_000;
 const MAX_IMAGES_PER_CALL = 4;
@@ -779,6 +1100,126 @@ const MAX_IMAGES_PER_CALL = 4;
  *  provider's `OPENWOP_COMPAT_PROVIDER_ENABLED` honest-flip. */
 export function imageGenerationAdvertised(): boolean {
   return process.env.OPENWOP_IMAGE_PROVIDER_ENABLED === 'true';
+}
+
+// ── ADR 0411 — text-to-video generation ─────────────────────────────────────
+const VIDEO_PROVIDERS = ['replicate', 'mock'] as const; // P1: Replicate (hosts Veo 3 + many); native Veo = P2
+const MAX_VIDEO_PROMPT_CHARS = 4_000;
+/** ADR 0411 §P3 (grade-code VID-2) — bound concurrent video dispatches per instance
+ *  so their in-memory buffers (binary + base64 + the store copy) can't OOM a small
+ *  Cloud Run instance: peak RSS ≈ `slots × per-job`, PREDICTABLE instead of
+ *  unbounded-by-traffic. `OPENWOP_VIDEO_MAX_CONCURRENT` tunes it to the instance
+ *  size; `0` opts a large host out (unbounded). Video is slow + budget-capped, so
+ *  a small default that queues excess is the right pre-deploy posture. */
+const VIDEO_MAX_CONCURRENT = ((): number => {
+  const v = Number(process.env.OPENWOP_VIDEO_MAX_CONCURRENT ?? '3');
+  return Number.isFinite(v) ? v : 3;
+})();
+const videoDispatchSlots = createSemaphore(VIDEO_MAX_CONCURRENT);
+/** A 1-frame black mp4 (ftyp+moov+mdat), ~ minimal valid — the deterministic
+ *  test seam (no network/credential). Base64 of a tiny valid mp4. */
+const MOCK_MP4_B64 = 'AAAAHGZ0eXBpc29tAAACAGlzb21pc28ybXA0MQAAAAhmcmVlAAAAKW1kYXQAAAAAAAAAIQ==';
+
+/** ADR 0411 §honesty — advertise `videoGeneration:{supported:true}` ONLY when
+ *  the operator opted in (a provider is wired). Default false = production-honest
+ *  (the mock is test-seam-only). Mirrors imageGenerationAdvertised. */
+export function videoGenerationAdvertised(): boolean {
+  return process.env.OPENWOP_VIDEO_PROVIDER_ENABLED === 'true';
+}
+
+/** RFC 0121 §B.9 / §C — whether the operator has explicitly accepted the
+ *  AT-OWN-RISK subscription un-park (ADR 0180). The steward issued an
+ *  AT-OWN-RISK WAIVER (a RISK waiver, NOT a ToS clearance): a host MAY advertise
+ *  the acquisition-bearing surface at the operator's/end-user's own risk. This
+ *  off-by-default flag ENCODES the operator's explicit risk acceptance —
+ *  `OPENWOP_SUBSCRIPTION_AT_OWN_RISK=true`. The PUBLIC DEMO leaves it UNSET, so
+ *  discovery stays DARK (no `subscription` advertised). It is the second gate
+ *  alongside `OPENWOP_SUBSCRIPTION_PROVIDERS`: a provider is subscription-enabled
+ *  only when BOTH the at-own-risk flag is on AND it is in that list. The host
+ *  ships NO provider-private-API integration — the operator supplies the dispatch
+ *  endpoint (mechanism-only; see byok/subscriptionCredential.ts). */
+function subscriptionAcquisitionConfigured(): boolean {
+  return process.env.OPENWOP_SUBSCRIPTION_AT_OWN_RISK === 'true';
+}
+
+/** RFC 0121 §B.9 / §C — the providers with a CONFIGURED subscription mechanism.
+ *  DARK (`[]`) by default (honest-off, the ADR 0121/selfHosted precedent): the
+ *  advertisement requires BOTH an operator opt-in list
+ *  (`OPENWOP_SUBSCRIPTION_PROVIDERS`, unset by default) AND the operator's
+ *  explicit at-own-risk acceptance (`subscriptionAcquisitionConfigured()`, off by
+ *  default per ADR 0180). Lit up ONLY when the operator sets both — the public
+ *  demo sets neither, so `subscription` stays DARK there. */
+export function subscriptionEnabledProviders(): string[] {
+  const list = (process.env.OPENWOP_SUBSCRIPTION_PROVIDERS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    // ADR 0756 — a provider whose current terms PROHIBIT third-party routing
+    // through its consumer plans can never ride the at-own-risk path, whatever
+    // the operator lists. And a CLEARED provider (ADR 0757) has its own path and
+    // must never fall back to paste-and-consent.
+    .filter((s) => !isSubscriptionProhibitedProvider(s) && !CLEARED_SUBSCRIPTION_PROVIDERS.has(s));
+  if (list.length === 0) return [];
+  if (!subscriptionAcquisitionConfigured()) return []; // no lawful mechanism → dark
+  return list;
+}
+
+
+/** ADR 0182 Phase 1 — the providers actually ADVERTISED with `subscription`.
+ *  Starts from the ADR 0180 operator-gated `subscriptionEnabledProviders()` and,
+ *  ONLY when the operator opts in via `OPENWOP_SUBSCRIPTION_REQUIRE_LOGIN`,
+ *  additionally narrows it to providers with a detected local vendor-CLI login
+ *  (read-only detection; no spawn). Default (flag off) ⇒ identical to
+ *  `subscriptionEnabledProviders()`, so the ADR 0180 advertisement contract and
+ *  its deterministic discovery tests are unchanged. Discovery emits from THIS,
+ *  never the bind/rail path (which keeps the full operator-gated set). */
+export function subscriptionAdvertisedProviders(): string[] {
+  const enabled = subscriptionEnabledProviders();
+  const atOwnRisk = enabled.length === 0 || !subscriptionRequireDetectedLogin()
+    ? enabled
+    : enabled.filter((p) => subscriptionLoginDetected(p));
+  // ADR 0757 — the CLEARED provider joins the advertised set on its OWN gate
+  // (OAuth client + loopback sidecar configured), independent of ADR 0180's flags.
+  return copilotSubscriptionConfigured() ? [...atOwnRisk, COPILOT_PROVIDER_ID] : atOwnRisk;
+}
+
+/** ADR 0757 — subscription-only providers this host advertises in
+ *  `aiProviders.supported` (RFC 0067: `authModes` keys and `byok` MUST appear in
+ *  `supported`). Empty unless Copilot is configured. */
+export function advertisedSubscriptionOnlyProviders(): string[] {
+  return copilotSubscriptionConfigured() ? [COPILOT_PROVIDER_ID] : [];
+}
+
+/** RFC 0121 §B.7 — build `aiProviders.authModes` + the (force-included) `byok`
+ *  list. Every BYOK provider advertises its real `apiKey` mode; a provider in
+ *  `subscriptionProviders` ALSO advertises `subscription` AND is force-included in
+ *  `byok` (the §B.7 invariant: a subscription provider is a BYOK path). By default
+ *  `subscriptionProviders` is `[]` (honest-off), so no provider ever advertises
+ *  `subscription`. Pure — the discovery emission and its unit test share it. */
+/** ADR 0712 — the providers this host advertises as `aiProviders.byok`. The
+ *  discovery document and the run-create `ai.credentialRef` check both read
+ *  this, so the refusal can never disagree with the advertisement. */
+export function advertisedByokProviders(): string[] {
+  return buildProviderAuthModes(['anthropic', 'openai', 'google'], subscriptionAdvertisedProviders()).byok;
+}
+
+export function buildProviderAuthModes(
+  byok: readonly string[],
+  subscriptionProviders: readonly string[],
+): { byok: string[]; authModes: Record<string, string[]> } {
+  const subs = new Set(subscriptionProviders);
+  const byokSet = new Set(byok);
+  // §B.7 force-include: a subscription provider MUST also appear in byok.
+  for (const p of subs) byokSet.add(p);
+  const authModes: Record<string, string[]> = {};
+  for (const p of byokSet) {
+    // ADR 0757 — a CLEARED provider is subscription-ONLY: its credential comes
+    // from the OAuth connect flow, never a pasted key (least scope).
+    authModes[p] = CLEARED_SUBSCRIPTION_PROVIDERS.has(p)
+      ? ['subscription']
+      : subs.has(p) ? ['apiKey', 'subscription'] : ['apiKey'];
+  }
+  return { byok: [...byokSet], authModes };
 }
 
 // 1×1 transparent PNG — the deterministic test-seam asset (no network/credential).
@@ -804,7 +1245,7 @@ async function callImageGenerator(
   // Deterministic mock (test seam only — DEFENSE-IN-DEPTH: a node forwarding
   // provider:'mock' in prod must not fake an advertised capability; in prod it
   // falls through to managed resolution → honest image_generation_unsupported).
-  if (provider === 'mock' && process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+  if (provider === 'mock' && mockProviderEnabled()) {
     const images: ImageGenerationResult['images'] = [];
     for (let i = 0; i < n; i++) {
       const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_IMAGE_PNG_B64, contentType: 'image/png' });
@@ -816,12 +1257,13 @@ async function callImageGenerator(
   // Credential resolution. An explicit non-managed credentialRef routes through
   // policy + BYOK (mirroring callAI/TTS). No managed image key exists on this host
   // yet, so a managed request fails honestly rather than mis-routing another key.
+  let byokKey: string | null = null;
   if (req.credentialRef && !isManagedCredentialRef(req.credentialRef)) {
     await enforcePolicy(scope, provider, req.model ?? '', req.credentialRef);
-    // The concrete provider HTTP dispatch (OpenAI gpt-image / Google Imagen) lands
-    // with the first wired provider; the BYOK credential is resolved host-side and
-    // never crosses back into the node (Phase 1 establishes the seam + mock).
-    resolveCredential(scope, provider, req.credentialRef);
+    // § Correction (2026-07-17): the BYOK credential now FEEDS the native vendor
+    // dispatch below (dispatchImages.ts — the dispatchSpeech sibling). It is
+    // resolved host-side and never crosses back into the node.
+    byokKey = resolveCredential(scope, provider, req.credentialRef).cleartext;
   } else if (!MANAGED_IMAGE_PROVIDERS.includes(provider)) {
     throw new AiProviderError(
       'host_capability_missing',
@@ -836,32 +1278,306 @@ async function callImageGenerator(
   if (imageProviderConfigured(provider)) {
     // ADR 0115 Phase 5 — per-tenant daily image budget, checked BEFORE the metered
     // provider call (over ⇒ no dispatch, no charge), recorded by images returned.
-    const day = new Date().toISOString().slice(0, 10);
-    const budget = await checkImageBudget(scope.tenantId, day);
-    if (!budget.allowed) {
-      throw new AiProviderError('provider_rate_limited', `Daily image-generation budget reached (${budget.used}/${budget.max}).`, { used: budget.used, max: budget.max });
+    const budget = await checkMediaBudget(scope.tenantId, 'images', 1);
+    if (budget.exceeded) {
+      throw new AiProviderError('provider_rate_limited', `Daily image-generation budget reached (${budget.used}/${budget.cap}).`, { used: budget.used, max: budget.cap });
     }
     // ADR 0115 Phase 6 — the adapter resolves the per-PROVIDER endpoint + key from
     // `provider`, so `openai` and `google` (Imagen) route to their own configured
     // endpoints (or the shared generic one). Inert until the operator configures it.
-    const raws = await dispatchImageGeneration({
+    // grade-code VID-1 (image sibling): the same ADR 0118 provider-dispatch span.
+    const raws = await withLlmSpan(PROVIDER_DISPATCH_SPAN, { provider, model: req.model ?? 'default' }, () => dispatchImageGeneration({
       prompt: req.prompt,
       provider,
+      // ADR 0244 — the tenant so the adapter can broker-resolve the api_key from a
+      // per-tenant Connection (workspace-scoped, KMS), env key as the fallback.
+      tenantId: scope.tenantId,
+      // ADR 0253 — the run so a broker-resolved call stamps its connection use.
+      runId: scope.runId,
       ...(req.model ? { model: req.model } : {}),
       ...(req.size ? { size: req.size } : {}),
-      n: Math.min(n, budget.remaining), // never exceed the remaining budget
-    });
+      n: Math.min(n, Number.isFinite(budget.remaining) ? budget.remaining : n), // never exceed the remaining budget
+    }), 'LLM');
     const images: ImageGenerationResult['images'] = [];
     for (const raw of raws) {
       const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
       images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(req.model ? { model: req.model } : {}), ...(req.seed != null ? { seed: req.seed } : {}) } });
     }
-    await recordImages(scope.tenantId, day, images.length);
+    await recordMediaUsage(scope.tenantId, 'images', images.length);
+    return { images, totalTimeMs: Date.now() - startedAt, usage: { images: images.length } };
+  }
+
+  // ADR 0115 § Correction (2026-07-17) — NATIVE vendor dispatch with the caller's
+  // BYOK key (OpenAI Images / Google Imagen), the dispatchSpeech sibling. The
+  // operator gateway above keeps precedence when configured (back-compat + the
+  // bespoke-shaping escape hatch); this path makes a plain BYOK key work
+  // out-of-box, like chat/TTS. Fixed vendor hosts (no operator URL ⇒ no SSRF
+  // surface); the same daily budget applies; discovery advertising is UNCHANGED
+  // (`imageGenerationAdvertised()` still gates the cross-host wire claim).
+  if (byokKey !== null && isNativeImageProvider(provider)) {
+    const budget = await checkMediaBudget(scope.tenantId, 'images', 1);
+    if (budget.exceeded) {
+      throw new AiProviderError('provider_rate_limited', `Daily image-generation budget reached (${budget.used}/${budget.cap}).`, { used: budget.used, max: budget.cap });
+    }
+    const key = byokKey;
+    let raws;
+    try {
+      // grade-code VID-1 (image sibling): the same ADR 0118 provider-dispatch span.
+      raws = await withLlmSpan(PROVIDER_DISPATCH_SPAN, { provider, model: req.model ?? 'default' }, () => runWithTimeout(scope, (signal) => dispatchImagesNative(provider, {
+        apiKey: key,
+        prompt: req.prompt,
+        n: Math.min(n, Number.isFinite(budget.remaining) ? budget.remaining : n),
+        ...(req.model ? { model: req.model } : {}),
+        ...(req.size ? { size: req.size } : {}),
+        signal,
+      })), 'LLM');
+    } catch (err) {
+      // grade-code VID-1: log the failure (bounded, no secrets) — parity with video.
+      log.warn('image generation failed', { provider, ...(req.model ? { model: req.model } : {}), elapsedMs: Date.now() - startedAt, err: err instanceof Error ? err.message : String(err) });
+      if (err instanceof Error && err.name === 'AbortError') {
+        throw new AiProviderError('provider_timed_out', 'Image provider call exceeded the configured timeout.', { provider });
+      }
+      // Map the plain dispatch Error onto the taxonomy WITHOUT echoing the key
+      // (the dispatcher never includes it) — status-bearing message retained.
+      throw new AiProviderError('provider_unavailable', err instanceof Error ? err.message : 'image dispatch failed', { provider });
+    }
+    const images: ImageGenerationResult['images'] = [];
+    for (const raw of raws) {
+      const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+      images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(req.model ? { model: req.model } : {}), ...(req.seed != null ? { seed: req.seed } : {}) } });
+    }
+    await recordMediaUsage(scope.tenantId, 'images', images.length);
     return { images, totalTimeMs: Date.now() - startedAt, usage: { images: images.length } };
   }
 
   // Honest-off: no provider wired on this host.
   throw new AiProviderError('host_capability_missing', `Image generation provider "${provider}" is not yet wired on this host.`, { provider });
+}
+
+// ── ADR 0401 P3 — the callImageGenerator siblings ───────────────────────────
+
+/** ~34 MB of base64 ≈ 25 MiB of bytes — matches the dispatcher output cap. */
+const MAX_IMAGE_INPUT_B64_CHARS = 34_000_000;
+
+/** Shared edit/upscale plumbing: capability matrix → mock seam → BYOK key →
+ *  budget → timed native dispatch → Media mint. `op` names the matrix row. */
+async function dispatchImageOp(
+  scope: AdapterScope,
+  args: {
+    op: 'edit' | 'inpaint' | 'background-remove' | 'upscale';
+    provider: string;
+    credentialRef?: string | undefined;
+    model?: string | undefined;
+    run: (apiKey: string, signal: AbortSignal | undefined) => Promise<Array<{ base64: string; mimeType: string }>>;
+  },
+): Promise<ImageGenerationResult> {
+  const startedAt = Date.now();
+  const { op, provider } = args;
+  if (!IMAGE_PROVIDERS.includes(provider as (typeof IMAGE_PROVIDERS)[number])) {
+    throw new AiProviderError('host_capability_missing', `Image ${op} not supported for provider "${provider}".`, { provider, op, capability: 'aiProviders.imageEdit' });
+  }
+  // The honest capability matrix — an unsupported (provider, op) is a TYPED
+  // failure, never a silent fallback to another provider (ADR 0401 §b).
+  if (provider !== 'mock' && !IMAGE_OP_SUPPORT[provider]?.has(op)) {
+    throw new AiProviderError('host_capability_missing', `Provider "${provider}" does not support image ${op}.`, { provider, op, capability: 'aiProviders.imageEdit' });
+  }
+  if (provider === 'mock' && mockProviderEnabled()) {
+    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_IMAGE_PNG_B64, contentType: 'image/png' });
+    return { images: [{ url: stored.url, mimeType: 'image/png', metadata: { model: 'mock-image-1', provider } }], totalTimeMs: Date.now() - startedAt, usage: { images: 1 } };
+  }
+  let byokKey: string | null = null;
+  if (args.credentialRef && !isManagedCredentialRef(args.credentialRef)) {
+    await enforcePolicy(scope, provider, args.model ?? '', args.credentialRef);
+    byokKey = resolveCredential(scope, provider, args.credentialRef).cleartext;
+  }
+  if (byokKey === null) {
+    throw new AiProviderError('host_capability_missing', `Image ${op} for provider "${provider}" requires a BYOK credential on this host.`, { provider, op, capability: 'aiProviders.imageEdit' });
+  }
+  const budget = await checkMediaBudget(scope.tenantId, 'images', 1);
+  if (budget.exceeded) {
+    throw new AiProviderError('provider_rate_limited', `Daily image-generation budget reached (${budget.used}/${budget.cap}).`, { used: budget.used, max: budget.cap });
+  }
+  const key = byokKey;
+  let raws;
+  try {
+    raws = await runWithTimeout(scope, (signal) => args.run(key, signal));
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AiProviderError('provider_timed_out', `Image ${op} call exceeded the configured timeout.`, { provider, op });
+    }
+    throw new AiProviderError('provider_unavailable', err instanceof Error ? err.message : `image ${op} dispatch failed`, { provider, op });
+  }
+  const images: ImageGenerationResult['images'] = [];
+  for (const raw of raws) {
+    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+    images.push({ url: stored.url, mimeType: raw.mimeType, metadata: { provider, ...(args.model ? { model: args.model } : {}) } });
+  }
+  await recordMediaUsage(scope.tenantId, 'images', images.length);
+  return { images, totalTimeMs: Date.now() - startedAt, usage: { images: images.length } };
+}
+
+async function callImageEditor(scope: AdapterScope, req: ImageEditRequest): Promise<ImageGenerationResult> {
+  if (typeof req.imageBase64 !== 'string' || req.imageBase64.length === 0) {
+    throw new AiProviderError('invalid_request', 'Image editing requires `imageBase64`.', { field: 'imageBase64' });
+  }
+  if (req.imageBase64.length > MAX_IMAGE_INPUT_B64_CHARS) {
+    throw new AiProviderError('content_too_long', 'Input image exceeds the 25 MiB cap.', { field: 'imageBase64' });
+  }
+  const op = req.op;
+  if (op !== 'edit' && op !== 'inpaint' && op !== 'background-remove') {
+    throw new AiProviderError('invalid_request', '`op` must be edit | inpaint | background-remove.', { field: 'op' });
+  }
+  if (op !== 'background-remove' && (typeof req.prompt !== 'string' || req.prompt.trim().length === 0)) {
+    throw new AiProviderError('invalid_request', `Image ${op} requires a non-empty \`prompt\`.`, { field: 'prompt' });
+  }
+  if (op === 'inpaint' && (typeof req.maskBase64 !== 'string' || req.maskBase64.length === 0)) {
+    throw new AiProviderError('invalid_request', 'Inpainting requires `maskBase64` (white = repaint).', { field: 'maskBase64' });
+  }
+  const provider = req.provider ?? 'replicate';
+  const mimeType = req.mimeType ?? 'image/png';
+  return dispatchImageOp(scope, {
+    op, provider,
+    ...(req.credentialRef ? { credentialRef: req.credentialRef } : {}),
+    ...(req.model ? { model: req.model } : {}),
+    run: (apiKey, signal) => {
+      const common = { apiKey, imageBase64: req.imageBase64, mimeType, op, prompt: req.prompt, maskBase64: req.maskBase64, model: req.model, signal };
+      return provider === 'openai' ? dispatchImageEditOpenAI(common) : dispatchImageEditReplicate(common);
+    },
+  });
+}
+
+async function callImageUpscaler(scope: AdapterScope, req: ImageUpscaleRequest): Promise<ImageGenerationResult> {
+  if (typeof req.imageBase64 !== 'string' || req.imageBase64.length === 0) {
+    throw new AiProviderError('invalid_request', 'Upscaling requires `imageBase64`.', { field: 'imageBase64' });
+  }
+  if (req.imageBase64.length > MAX_IMAGE_INPUT_B64_CHARS) {
+    throw new AiProviderError('content_too_long', 'Input image exceeds the 25 MiB cap.', { field: 'imageBase64' });
+  }
+  if (req.scale !== 2 && req.scale !== 4) {
+    throw new AiProviderError('invalid_request', '`scale` must be 2 or 4.', { field: 'scale' });
+  }
+  const provider = req.provider ?? 'replicate';
+  const mimeType = req.mimeType ?? 'image/png';
+  return dispatchImageOp(scope, {
+    op: 'upscale', provider,
+    ...(req.credentialRef ? { credentialRef: req.credentialRef } : {}),
+    ...(req.model ? { model: req.model } : {}),
+    run: (apiKey, signal) => dispatchImageUpscaleReplicate({ apiKey, imageBase64: req.imageBase64, mimeType, scale: req.scale, model: req.model, signal }),
+  });
+}
+
+// ── ADR 0411 — the callImageGenerator sibling for VIDEO ─────────────────────
+
+async function callVideoGenerator(
+  scope: AdapterScope,
+  req: VideoGenerationRequest,
+): Promise<VideoGenerationResult> {
+  const startedAt = Date.now();
+  if (typeof req.prompt !== 'string' || req.prompt.trim().length === 0) {
+    throw new AiProviderError('invalid_request', 'Video generation requires a non-empty `prompt`.', { field: 'prompt' });
+  }
+  if (req.prompt.length > MAX_VIDEO_PROMPT_CHARS) {
+    throw new AiProviderError('content_too_long', `Video prompt exceeds the host cap of ${MAX_VIDEO_PROMPT_CHARS} characters.`, { max: MAX_VIDEO_PROMPT_CHARS });
+  }
+  const provider = req.provider ?? 'replicate';
+  if (!VIDEO_PROVIDERS.includes(provider as (typeof VIDEO_PROVIDERS)[number])) {
+    throw new AiProviderError('host_capability_missing', `Video generation not supported for provider "${provider}".`, { provider, capability: 'aiProviders.videoGeneration' });
+  }
+  const width = Math.max(1, Math.min(2160, typeof req.width === 'number' ? Math.floor(req.width) : 1080));
+  const height = Math.max(1, Math.min(2160, typeof req.height === 'number' ? Math.floor(req.height) : 1920));
+  const durationSeconds = Math.max(1, Math.min(30, typeof req.durationSeconds === 'number' ? Math.floor(req.durationSeconds) : 5));
+
+  // Deterministic mock (test seam only — DEFENSE-IN-DEPTH like image-gen).
+  if (provider === 'mock' && mockProviderEnabled()) {
+    const stored = await storeMediaAsset(scope.tenantId, { contentBase64: MOCK_MP4_B64, contentType: 'video/mp4' });
+    return { video: { url: stored.url, durationSeconds, width, height, mimeType: 'video/mp4', safetyFiltered: false, metadata: { provider, ...(req.model ? { model: req.model } : {}) } }, totalTimeMs: Date.now() - startedAt, usage: { videos: 1 } };
+  }
+
+  // Only 'replicate' has a real dispatch on this host (P1). A non-'replicate'
+  // provider that reached here is 'mock' with the test seam OFF (the only other
+  // member of VIDEO_PROVIDERS) — reject honestly rather than dispatch nonsense.
+  if (provider !== 'replicate') {
+    throw new AiProviderError('host_capability_missing', `Video generation for provider "${provider}" is not wired on this host.`, { provider, capability: 'aiProviders.videoGeneration' });
+  }
+
+  // BYOK — an explicit non-managed ref feeds the native dispatch (no managed
+  // video key on this host). Missing ⇒ honest capability-missing.
+  let byokKey: string | null = null;
+  if (req.credentialRef && !isManagedCredentialRef(req.credentialRef)) {
+    await enforcePolicy(scope, provider, req.model ?? '', req.credentialRef);
+    byokKey = resolveCredential(scope, provider, req.credentialRef).cleartext;
+  }
+  if (byokKey === null) {
+    throw new AiProviderError('host_capability_missing', `Video generation for provider "${provider}" requires a BYOK credential on this host.`, { provider, capability: 'aiProviders.videoGeneration' });
+  }
+
+  // Budget pre-flight — video is EXPENSIVE; guard before any provider call.
+  const budget = await checkMediaBudget(scope.tenantId, 'video', 1);
+  if (budget.exceeded) {
+    throw new AiProviderError('provider_rate_limited', `Daily video-generation budget reached (${budget.used}/${budget.cap}).`, { used: budget.used, max: budget.cap });
+  }
+
+  const key = byokKey;
+  const aspectRatio = width >= height ? (width === height ? '1:1' : '16:9') : '9:16';
+  // Forwards prompt/negativePrompt/duration/aspectRatio/seed + (ADR 0411 P2)
+  // `includeAudio` → Veo `generate_audio`, gated to the audio-capable model
+  // family in dispatchVideo (Replicate 422s unknown inputs; BYOK models vary).
+  // `brandColors` is a PROMPT-level concern owned by the calling pack (it bakes
+  // colors into the prompt text) — there is no Replicate structured input for
+  // it, so the host correctly does not forward a separate param.
+  // Bound concurrent video buffers per instance (grade-code VID-2) — the dispatch
+  // AND the store copy run inside the slot so peak RSS ≈ slots × per-job.
+  return await videoDispatchSlots.run(async () => {
+  let raw;
+  try {
+    // Host-hidden async polling under the run timeout (the spec model). Video is
+    // slow — the operator's runWithTimeout budget must accommodate 30–120 s.
+    // grade-code VID-1: an OTel provider-dispatch span (the ADR 0118 primitive, which
+    // drops prompt/credential attrs) — the expensive video call is now visible in
+    // traces (provider/model + duration + OK/ERROR). Dollar-cost `emitCost` stays
+    // deferred: media providers return no inline cost + there is no per-model media
+    // pricing SSoT on this host.
+    raw = await withLlmSpan(PROVIDER_DISPATCH_SPAN, { provider, model: req.model ?? 'default' }, () => runWithTimeout(scope, (signal) => dispatchVideoReplicate({
+      apiKey: key,
+      prompt: req.prompt,
+      ...(req.model ? { model: req.model } : {}),
+      ...(req.negativePrompt ? { negativePrompt: req.negativePrompt } : {}),
+      durationSeconds,
+      aspectRatio,
+      ...(req.seed != null ? { seed: req.seed } : {}),
+      ...(req.includeAudio != null ? { generateAudio: req.includeAudio } : {}),
+      signal,
+    })), 'LLM');
+  } catch (err) {
+    // grade-code VID-1: a failure previously left ONLY a run-level error — log it
+    // (bounded, no secrets: provider/model/elapsed + the provider's own message,
+    // the same text already surfaced to the caller) so a provider outage is greppable.
+    log.warn('video generation failed', { provider, ...(req.model ? { model: req.model } : {}), elapsedMs: Date.now() - startedAt, err: err instanceof Error ? err.message : String(err) });
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new AiProviderError('provider_timed_out', 'Video generation exceeded the configured timeout.', { provider });
+    }
+    throw new AiProviderError('provider_unavailable', err instanceof Error ? err.message : 'video dispatch failed', { provider });
+  }
+  const stored = await storeMediaAsset(scope.tenantId, { contentBase64: raw.base64, contentType: raw.mimeType });
+  await recordMediaUsage(scope.tenantId, 'video', 1);
+  return {
+    video: {
+      url: stored.url,
+      // Requested (clamped) geometry/duration — the model may round these; P1
+      // does not demux the mp4 to report the exact rendered values.
+      durationSeconds,
+      width,
+      height,
+      mimeType: raw.mimeType,
+      fileSizeBytes: raw.sizeBytes,
+      ...(req.seed != null ? { seed: req.seed } : {}),
+      safetyFiltered: false,
+      metadata: { provider, ...(req.model ? { model: req.model } : {}), generationTimeMs: Date.now() - startedAt },
+    },
+    totalTimeMs: Date.now() - startedAt,
+    usage: { videos: 1 },
+  };
+  });
 }
 
 async function callSpeechSynthesizer(
@@ -886,7 +1602,10 @@ async function callSpeechSynthesizer(
   // ADR 0106 — per-org daily TTS budget (the AGGREGATE ceiling above the per-call
   // MAX_SPEECH_CHARS cap). No-op when the budget is unset (default). Check before
   // the paid dispatch; record actual chars after success.
-  const ttsBudget = await checkMediaBudget(scope.tenantId, 'tts', req.text.length);
+  // ADR 0693 phase 3 — charge the acting participant, not the whole workspace.
+  // `scope.actingUserId` is the run's acting human (ADR 0396 P4) and is already
+  // optional here; absent falls back to the tenant, which is today's behaviour.
+  const ttsBudget = await checkMediaBudget(scope.tenantId, 'tts', req.text.length, scope.actingUserId);
   if (ttsBudget.exceeded) {
     throw new AiProviderError(
       'media_budget_exceeded',
@@ -913,7 +1632,7 @@ async function callSpeechSynthesizer(
   // node forwarding `provider:'mock'` could fake an advertised capability in
   // prod. With the gate, a prod `provider:'mock'` falls through to managed
   // resolution → honest `speech_synthesis_unsupported`. Real MiniMax unchanged.
-  if (provider === 'mock' && process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+  if (provider === 'mock' && mockProviderEnabled()) {
     const storedMock = await storeMediaAsset(scope.tenantId, {
       contentBase64: MOCK_SPEECH_AUDIO_B64,
       contentType: 'audio/mpeg',
@@ -979,8 +1698,13 @@ async function callSpeechSynthesizer(
 
   let dispatched;
   try {
-    dispatched = await runWithTimeout(scope, (signal) => dispatchFor({ ...dispatchArgs, signal }));
+    // ENG-5 (grade-code VID-1 parity): the ADR 0118 provider-dispatch span — TTS was
+    // the last unwrapped media cap (transcription already rides callAI's span). The
+    // span inherits the no-prompt/no-credential allowlist; dollar cost stays deferred.
+    dispatched = await withLlmSpan(PROVIDER_DISPATCH_SPAN, { provider, model: req.model ?? 'default' }, () => runWithTimeout(scope, (signal) => dispatchFor({ ...dispatchArgs, signal })), 'LLM');
   } catch (err) {
+    // Parity failure log (bounded, no secrets) so a provider outage is greppable.
+    log.warn('speech synthesis failed', { provider, ...(req.model ? { model: req.model } : {}), elapsedMs: Date.now() - startedAt, err: err instanceof Error ? err.message : String(err) });
     if (err instanceof Error && err.name === 'AbortError') {
       throw new AiProviderError('provider_timed_out', 'Speech provider call exceeded the configured timeout.', { provider });
     }
@@ -997,7 +1721,7 @@ async function callSpeechSynthesizer(
 
   // ADR 0106 — record the actual TTS chars against the per-org daily budget
   // (best-effort, no-op when the budget is unset).
-  await recordMediaUsage(scope.tenantId, 'tts', req.text.length);
+  await recordMediaUsage(scope.tenantId, 'tts', req.text.length, scope.actingUserId);
 
   const result: SpeechSynthesisResult = {
     audio: {
@@ -1021,11 +1745,39 @@ async function callSpeechSynthesizer(
 // ── Pipeline stages ───────────────────────────────────────────────
 
 function assertProviderSupported(provider: string): asserts provider is ProviderId {
+  // ABSENCE IS NOT A VALUE. A caller that omits `provider` entirely used to
+  // reach the check below with `undefined`, which the template rendered as the
+  // literal provider name "undefined" — so a MISSING config read as a BOGUS
+  // config, and the operator was told to check a supported-providers list for a
+  // provider that never existed. That message cost a real production diagnosis
+  // (a chain-pack AI node shipped with `config: {}`); the two failures are
+  // different and now say so.
+  if (provider === undefined || provider === null || provider === '') {
+    throw new AiProviderError(
+      'invalid_request',
+      'No AI provider is configured for this call. A workflow node must set `provider` (and `model`) in its config — '
+      + 'chain packs supply these as chain parameters frozen at instantiation.',
+      { field: 'provider', supported: SUPPORTED_PROVIDERS },
+    );
+  }
   if (!SUPPORTED_PROVIDERS.includes(provider as ProviderId)) {
     throw new AiProviderError(
       'provider_not_supported',
       `Provider "${provider}" is not in the host's aiProviders.supported list.`,
       { provider, supported: SUPPORTED_PROVIDERS },
+    );
+  }
+  // LEAK-4: the deterministic conformance mock must not serve real chat traffic
+  // in the enterprise (auth) posture. Speech/image/TTS already gate mock on
+  // OPENWOP_TEST_SEAM_ENABLED; the chat path (dispatchChat) previously did not,
+  // so a prod `provider:'mock'` returned an empty completion with fabricated
+  // token usage. Reject it here — fail-closed in the real-tenant posture only
+  // (demo/dev/test are unaffected).
+  if (provider === 'mock' && enterprisePosture()) {
+    throw new AiProviderError(
+      'provider_not_supported',
+      'The mock provider is disabled in the enterprise (auth) deploy posture.',
+      { provider, supported: SUPPORTED_PROVIDERS.filter((p) => p !== 'mock') },
     );
   }
 }
@@ -1114,6 +1866,12 @@ async function enforcePolicy(
  * If nothing matches, throw `byok_required` with the list of refs the
  * caller actually has (just the refs — NEVER the values).
  */
+/** ADR 0712 OQ4 — every provider a credential can be named for: chat, image, video
+ *  and speech dispatch. Derived from the lists above, never re-typed. */
+const CREDENTIAL_PROVIDERS: readonly string[] = [...new Set<string>([
+  ...SUPPORTED_PROVIDERS, ...IMAGE_PROVIDERS, ...VIDEO_PROVIDERS, ...SPEECH_PROVIDERS,
+])].filter((p) => p !== 'mock');
+
 function resolveCredential(
   scope: AdapterScope,
   provider: string,
@@ -1126,27 +1884,50 @@ function resolveCredential(
   if (provider === 'mock') {
     return { cleartext: 'mock-no-credential', refUsed: 'mock' };
   }
-  if (credentialRef) {
-    const direct = scope.secrets[credentialRef];
-    if (!direct) {
-      throw new AiProviderError(
-        'byok_required_but_unresolved',
-        `BYOK credentialRef "${credentialRef}" did not resolve to a value.`,
-        { reason: 'byok_required_but_unresolved' },
-      );
-    }
-    return { cleartext: direct, refUsed: credentialRef };
+  // ADR 0706 §3.1 item 4 — the ladder itself lives in `credentialRefLadder.ts`
+  // and is SHARED with the Challenge Factory's ignition pre-flight, which runs
+  // it over `listSecretRefs(tenantId)` before any run exists. Only ref NAMES go
+  // in; the value is read back from `scope.secrets` here, never passed around.
+  // ADR 0712 OQ4 — refuse an explicit ref named for ANOTHER vendor before anything
+  // is read, so a mis-paired key never leaves the process. Names only in the error.
+  const otherProvider = explicitRefNamesOtherProvider(provider, credentialRef, CREDENTIAL_PROVIDERS);
+  if (otherProvider !== null) {
+    throw new AiProviderError(
+      'byok_required_but_unresolved',
+      `The key "${credentialRef}" is a ${otherProvider} key, but this step calls ${provider}, so it was not sent. `
+      + `Choose a ${provider} key for this step, or change the step's provider.`,
+      { reason: 'explicit_ref_wrong_provider', provider, refProvider: otherProvider },
+    );
   }
-  const exact = scope.secrets[provider];
-  if (exact) return { cleartext: exact, refUsed: provider };
-  for (const [ref, value] of Object.entries(scope.secrets)) {
-    if (ref.startsWith(`${provider}-`) || ref.startsWith(`${provider}:`)) {
-      return { cleartext: value, refUsed: ref };
-    }
+  const pick = pickCredentialRef(provider, credentialRef, Object.keys(scope.secrets), scope.runCredentialRef);
+  if (pick.ref !== null) {
+    return { cleartext: scope.secrets[pick.ref]!, refUsed: pick.ref };
   }
+  if (pick.reason === 'explicit_ref_unresolved') {
+    throw new AiProviderError(
+      'byok_required_but_unresolved',
+      `BYOK credentialRef "${credentialRef}" did not resolve to a value.`,
+      { reason: 'byok_required_but_unresolved' },
+    );
+  }
+  // ADR 0505 — say what to DO, not how the lookup works. This message reaches a
+  // person watching a run fail, and the old text ("the host looks up
+  // secrets[provider] then any secret prefixed with…") described the resolver's
+  // internals to someone who cannot act on them. Verified live 2026-07-29: a
+  // Challenge Factory run died here with `Available refs: (none)` and nothing
+  // naming the two actual exits.
+  //
+  // The provider is FROZEN into the node at expansion (ADR 0498 — a concrete
+  // provider is what keeps `providerKey` replay-stable), so "add a key" and
+  // "re-create the workflow on a provider you have" really are the only two
+  // exits; there is deliberately no silent fallback to another provider.
+  // `availableRefs` stays in `details` for operators — ref NAMES only, never
+  // values, and the names are already non-secret identifiers.
   throw new AiProviderError(
     'byok_required',
-    `No credential available for provider "${provider}". The host looks up secrets[provider] then any secret prefixed with "${provider}-" or "${provider}:". Available refs: ${Object.keys(scope.secrets).join(', ') || '(none)'}.`,
+    `This step needs a ${provider} API key and this workspace has none. `
+    + `Add one in Settings → Secrets Vault, or re-create the workflow choosing a provider you already have a key for. `
+    + `The provider is fixed when the workflow is created, so it will not fall back to a different one on its own.`,
     {
       provider,
       reason: 'no_default_credential',
@@ -1176,6 +1957,9 @@ async function dispatchPlain(
         ...(req.maxTokens != null ? { maxTokens: req.maxTokens } : {}),
         signal,
         ...(onDelta ? { onDelta } : {}),
+        // CEC-2 / RFC 0116 §43 — per-tenant prompt-cache namespacing (same as the
+        // tools path; applied by the dispatcher only when caching is on).
+        cachePrefixScope: { tenant: scope.tenantId, cachePrefixId: derivePrefixCacheId(req) },
         // RFC 0032/0033 — the conformance-only `mock` provider reads
         // its pre-programmed response queue keyed by `nodeId`. Real
         // providers ignore this extension field. See `dispatchMock.ts`.
@@ -1224,7 +2008,9 @@ async function dispatchStructured(
   // the staged composition pattern in spec/v1/ai-envelope.md §"Reasoning
   // field (normative)". Hosts MUST NOT reject envelopes where `reasoning`
   // is absent regardless of directive strength (RFC 0030 §A).
-  const reasoningConfig = getEnvelopeReasoningConfig();
+  // ADR 0396 P4 — per-user override when the run has an acting human; the
+  // host-wide posture (and the discovery advertisement) otherwise.
+  const reasoningConfig = await resolveEnvelopeReasoning(scope.tenantId, scope.actingUserId);
   const reasoningDirective = reasoningConfig.supported
     ? buildReasoningDirective(req.responseSchema, reasoningConfig.promptDirective)
     : null;
@@ -1539,8 +2325,15 @@ async function dispatchStructuredLegacy(
 }
 
 /** Shallow JSON Schema check: every key in `required[]` is present on
- *  the data object. Real production hosts run full Ajv2020 validation. */
-function validateAgainstSchema(data: unknown, schema: unknown): boolean {
+ *  the data object. Real production hosts run full Ajv2020 validation.
+ *
+ *  EXPORTED for `DOCWF-1`. The documents chat-tool lane needs the SAME check the node lane
+ *  gets through `dispatchStructured`, and a second copy is how two lanes start disagreeing
+ *  about what "valid" means — the drift a shared owner exists to prevent. Its limitation is
+ *  real and matters most exactly where it is now reused: documents is the one feature whose
+ *  `outputSchema` is ORG-AUTHORABLE, so a template can require keys whose TYPES this cannot
+ *  check. That is a stated bound, not a silent one. */
+export function validateAgainstSchema(data: unknown, schema: unknown): boolean {
   if (!data || typeof data !== 'object') return false;
   if (!schema || typeof schema !== 'object') return true;
   const s = schema as Record<string, unknown>;
@@ -1588,7 +2381,17 @@ function normalizeFinishReason(raw: string | undefined): AiCallResult['finishRea
   return 'other';
 }
 
-function computeProviderKey(input: Record<string, unknown>): string {
+/**
+ * RETIRED (ADR 0549 P3). The pre-P3 provider key: a sorted-key JSON hash that
+ * also folded in `credentialRefHashed`, which RFC 0150 §C excludes as a
+ * transport-only field.
+ *
+ * Read-only, and reached only on a v2 miss, so `spec/v1/replay.md` §E dual-read
+ * can still resolve an invocation-log record written before P3 instead of
+ * re-firing its provider call. Nothing writes this shape any more; the records
+ * age out under the Layer-2 TTL.
+ */
+function legacyProviderKeyV1(input: Record<string, unknown>): string {
   // Stable canonical JSON: walk keys in sorted order.
   const sorted = canonicalize(input);
   return createHash('sha256').update(JSON.stringify(sorted)).digest('hex');
@@ -1609,6 +2412,25 @@ function sha256Hex(input: string): string {
   return createHash('sha256').update(input).digest('hex');
 }
 
+/**
+ * CEC-2 / RFC 0116 §43 — the per-dispatch `cachePrefixId` for the
+ * `(tenant, cachePrefixId)` prompt-cache marker. Derived ONLY from the STABLE
+ * cacheable prefix — model + author system prompt + tool surface
+ * (names/descriptions/schemas) — and NEVER from secret material (§42: no API
+ * key / BYOK credential / token) nor from the volatile `messages`. Excluding the
+ * messages is load-bearing: the id (hence the marker bytes) must stay CONSTANT
+ * across turns for the same prefix, or the cache would never hit. The `tenant`
+ * field closes cross-tenant isolation; this id closes within-tenant
+ * prefix-distinctness.
+ */
+function derivePrefixCacheId(req: AiCallRequest | AiToolCallRequest): string {
+  const systemText = req.systemPrompt ?? '';
+  const tools = 'tools' in req && Array.isArray(req.tools)
+    ? req.tools.map((t) => `${t.name} ${t.description ?? ''} ${JSON.stringify(t.inputSchema ?? {})}`).join('')
+    : '';
+  return sha256Hex([req.model, systemText, tools].join('\u241f')); // U+241F = visible SYMBOL FOR UNIT SEPARATOR
+}
+
 function modelMatchesAllowlist(model: string, allowed: readonly string[]): boolean {
   for (const pattern of allowed) {
     if (pattern === model) return true;
@@ -1618,14 +2440,25 @@ function modelMatchesAllowlist(model: string, allowed: readonly string[]): boole
 }
 
 async function mapDispatchErrors<T>(provider: string, fn: () => Promise<T>): Promise<T> {
+  // ADR 0556 P1 — every upstream provider call funnels through this mapper, so
+  // it is the one place `openwop.provider.call` can be complete. The outcome
+  // label is the CANONICAL error code this function produces, not the upstream
+  // message: `details.upstreamMessage` is a provider-controlled string that has
+  // been observed echoing credentials, and it is unbounded besides.
   try {
-    return await fn();
+    const result = await fn();
+    recordProviderCall(provider, 'ok');
+    return result;
   } catch (err) {
     // Preserve AbortError → provider_timed_out before string-matching.
     if (err instanceof Error && err.name === 'AbortError') {
+      recordProviderCall(provider, 'provider_timed_out');
       throw new AiProviderError('provider_timed_out', 'Provider call exceeded the configured timeout.', { provider });
     }
-    if (err instanceof AiProviderError) throw err;
+    if (err instanceof AiProviderError) {
+      recordProviderCall(provider, classifyProviderOutcome(err));
+      throw err;
+    }
     const msg = err instanceof Error ? err.message : String(err);
     // Provider error shapes (e.g., "anthropic_429: ...", "openai_404: ...")
     // get mapped to canonical aiProviders error codes per
@@ -1638,23 +2471,31 @@ async function mapDispatchErrors<T>(provider: string, fn: () => Promise<T>): Pro
     // event log's `node.failure.error.message` field.
     const upstreamMessage = msg.slice(0, 200);
     const match = msg.match(/^[a-z]+_(\d{3}):/i);
-    if (match) {
+    // ADR 0556 P1 — built, counted, then thrown ONCE. The ladder below had six
+    // throw sites; a counter at each is six chances for a new status band to
+    // ship uncounted, and an outcome counter missing a band is indistinguishable
+    // from that band never happening.
+    const mapped = ((): AiProviderError => {
+      if (!match) {
+        return new AiProviderError('internal_error', 'Provider call failed — see span attributes for trace details.', { provider, upstreamMessage });
+      }
       const status = Number(match[1]);
       if (status === 401 || status === 403) {
-        throw new AiProviderError('byok_required_but_unresolved', 'Provider rejected credential.', { provider, status, upstreamMessage });
+        return new AiProviderError('byok_required_but_unresolved', 'Provider rejected credential.', { provider, status, upstreamMessage });
       }
       if (status === 404) {
-        throw new AiProviderError('model_not_supported', 'Provider rejected model.', { provider, status, upstreamMessage });
+        return new AiProviderError('model_not_supported', 'Provider rejected model.', { provider, status, upstreamMessage });
       }
       if (status === 429) {
-        throw new AiProviderError('provider_rate_limited', 'Provider rate-limited.', { provider, status, upstreamMessage });
+        return new AiProviderError('provider_rate_limited', 'Provider rate-limited.', { provider, status, upstreamMessage });
       }
       if (status >= 500) {
-        throw new AiProviderError('provider_unavailable', 'Provider 5xx.', { provider, status, upstreamMessage });
+        return new AiProviderError('provider_unavailable', 'Provider 5xx.', { provider, status, upstreamMessage });
       }
-      throw new AiProviderError('invalid_request', 'Provider rejected request.', { provider, status, upstreamMessage });
-    }
-    throw new AiProviderError('internal_error', 'Provider call failed — see span attributes for trace details.', { provider, upstreamMessage });
+      return new AiProviderError('invalid_request', 'Provider rejected request.', { provider, status, upstreamMessage });
+    })();
+    recordProviderCall(provider, classifyProviderOutcome(mapped));
+    throw mapped;
   }
 }
 

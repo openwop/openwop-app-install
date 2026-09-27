@@ -4,14 +4,17 @@
  * human (or their assistant) runs: assign from the library, run now (with a
  * linked run), unassign. Persisted on the profile via `setMyWorkflows`.
  */
+import { Button } from '../../ui/Button.js';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Trans, useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
+import { toast } from '../../ui/toast.js';
 import { AlertIcon, PlayIcon, WorkflowIcon } from '../../ui/icons/index.js';
 import { ALL_WORKFLOW_OPTIONS, isKnownWorkflow, workflowName, workflowPurpose } from '../../agents/roleTemplates.js';
 import { createRun } from '../../client/runsClient.js';
+import { classifyHttpError } from '../../client/classifyHttpError.js';
 import { setMyWorkflows, type Profile } from './profilesClient.js';
 
 export function ProfileWorkflowsTab({ workflows, onSaved }: { workflows: string[]; onSaved: (p: Profile) => void }): JSX.Element {
@@ -22,13 +25,17 @@ export function ProfileWorkflowsTab({ workflows, onSaved }: { workflows: string[
   const [assignId, setAssignId] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const save = async (next: string[]) => {
+  // PROF-UX-15(a) — assign/unassign had NO success feedback: the card list
+  // changed and nothing was said. `toast.success` speaks explicitly (the
+  // profile-save precedent); the failure Notice below announces too.
+  const save = async (next: string[], outcome: 'assigned' | 'unassigned') => {
     setBusy(true);
     setError(null);
     try {
       onSaved(await setMyWorkflows(next));
+      toast.success(t(outcome === 'assigned' ? 'workflowAssigned' : 'workflowUnassigned'));
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(err instanceof Error ? err.message : t('actionFailed'));
     } finally {
       setBusy(false);
     }
@@ -42,7 +49,11 @@ export function ProfileWorkflowsTab({ workflows, onSaved }: { workflows: string[
       const res = await createRun({ workflowId, metadata: { manual: { source: 'profile' } } });
       setLastRun({ workflowId, runId: res.runId });
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // ADR 0482 (ux-1) — a budget-exhausted 429 gets the honest localized
+      // budget sentence instead of the raw SDK message.
+      setError(classifyHttpError(err).kind === 'budget-exhausted'
+        ? t('common:errorBudgetExhausted')
+        : err instanceof Error ? err.message : t('actionFailed'));
     } finally {
       setRunning(null);
     }
@@ -52,9 +63,11 @@ export function ProfileWorkflowsTab({ workflows, onSaved }: { workflows: string[
 
   return (
     <div>
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {/* PROF-UX-15(a) — conditionally mounted, so it enters the DOM already
+          holding its text and is not announced by insertion; spoken explicitly. */}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
       {lastRun ? (
-        <Notice variant="success">
+        <Notice variant="success" announce={t('workflowStarted', { name: workflowName(lastRun.workflowId) })}>
           {t('workflowStarted', { name: workflowName(lastRun.workflowId) })}
           <Link to={`/runs/${lastRun.runId}`} className="u-iflex u-items-center u-gap-1">
             <PlayIcon size={12} /> {t('viewRunAction')}
@@ -82,12 +95,12 @@ export function ProfileWorkflowsTab({ workflows, onSaved }: { workflows: string[
                     </div>
                   ) : null}
                   <div className="action-bar">
-                    <button type="button" className="primary btn-sm" disabled={!known || running === wfId} onClick={() => void onRunNow(wfId)}>
+                    <Button variant="primary" size="sm" disabled={!known || running === wfId} onClick={() => void onRunNow(wfId)}>
                       {running === wfId ? t('running') : t('runNow')}
-                    </button>
-                    <button type="button" className="secondary btn-sm" disabled={busy} onClick={() => void save(workflows.filter((w) => w !== wfId))}>
+                    </Button>
+                    <Button variant="secondary" size="sm" disabled={busy} onClick={() => void save(workflows.filter((w) => w !== wfId), 'unassigned')}>
                       {t('unassign')}
-                    </button>
+                    </Button>
                   </div>
                 </div>
               );
@@ -103,9 +116,9 @@ export function ProfileWorkflowsTab({ workflows, onSaved }: { workflows: string[
             <option value="">{t('chooseWorkflow')}</option>
             {assignable.map((w) => <option key={w.workflowId} value={w.workflowId}>{w.name}</option>)}
           </select>
-          <button type="button" className="primary" disabled={!assignId || busy} onClick={() => { void save([...workflows, assignId]); setAssignId(''); }}>
+          <Button variant="primary" disabled={!assignId || busy} onClick={() => { void save([...workflows, assignId], 'assigned'); setAssignId(''); }}>
             {t('assignWorkflow')}
-          </button>
+          </Button>
           <Link to="/builder" className="agentportfolio-create-link">{t('createFromTemplate')}</Link>
         </div>
       </div>

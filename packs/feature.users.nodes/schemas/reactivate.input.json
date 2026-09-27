@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.users.nodes/1.0.1/reactivate.input.json",
+  "title": "UsersReactivateInput",
+  "description": "Runtime target. `userId` is the durable account id (`user:<id>`) in the RUN's tenant — a foreign or unknown id is a uniform not_found. When absent, the node reads the run's host-event trigger payload (`ctx.triggerData.payload.userId`) ONLY when the run was started by a `host.users.user.*` event (`triggerData.eventName`); a manual run's `inputs.payload` is never honoured (the executor mirrors `run.inputs` into `triggerData` on the manual lane, and this input schema does not declare it). Then the config fallback. Never an email or userName: the target is addressed by its opaque id only.",
+  "type": "object",
+  "properties": {
+    "userId": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Target account id (`user:<id>`)."
+    }
+  },
+  "additionalProperties": true
+}

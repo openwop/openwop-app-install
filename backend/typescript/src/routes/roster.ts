@@ -25,12 +25,20 @@ import {
   getRosterEntry,
   listRoster,
   updateRosterEntry,
+  PersonaCollisionError,
   type RosterAgentRef,
 } from '../host/rosterService.js';
 import { deleteRosterMemberCascade } from '../host/rosterCascade.js';
 import { syncAgentProfileAutonomy } from '../host/agentProfileService.js';
 import { hostExtStorage } from '../host/hostExtPersistence.js';
 import { tenantOf } from '../host/tenantGuard.js';
+import {
+  agentTurnFallback,
+  effectiveHeartbeatIntervalMs,
+  resolveHeartbeatAdminConfig,
+  type ResolvedHeartbeatConfig,
+} from '../host/heartbeatService.js';
+import type { RosterEntry } from '../host/rosterService.js';
 
 function parseAgentRef(value: unknown): RosterAgentRef {
   if (!value || typeof value !== 'object') {
@@ -97,12 +105,13 @@ function parseAvatarUrl(value: unknown): string | null | undefined {
 }
 
 /** Validate the optional `heartbeatIntervalMs` field (PATCH). `undefined`
- *  leaves it unchanged; `0` disables the autonomous heartbeat; any other value
- *  MUST be a positive, finite number of milliseconds. */
+ *  leaves it unchanged; `0` (or absent) means "not configured" — the ADR 0313
+ *  host default cadence applies; `-1` is the explicit OFF sentinel; any other
+ *  value MUST be a positive, finite number of milliseconds. */
 function parseHeartbeatIntervalMs(value: unknown): number | undefined {
   if (value === undefined) return undefined;
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    throw new OpenwopError('validation_error', 'Field `heartbeatIntervalMs` MUST be a non-negative number of milliseconds (0 disables).', 400, {
+  if (typeof value !== 'number' || !Number.isFinite(value) || (value < 0 && value !== -1)) {
+    throw new OpenwopError('validation_error', 'Field `heartbeatIntervalMs` MUST be a non-negative number of milliseconds (0 = host default), or -1 to disable autonomous checks.', 400, {
       field: 'heartbeatIntervalMs',
     });
   }
@@ -120,6 +129,26 @@ function parseAutonomyLevel(value: unknown): 'auto' | 'guided' | 'review' | unde
   });
 }
 
+/** ADR 0313 D3 — read-time heartbeat decoration (never stored; the ONE resolver
+ *  `effectiveHeartbeatIntervalMs` computes the cadence, so the UI can say
+ *  "checks every N min" / "autonomous checks off" without guessing the host
+ *  default; `agentTurnFallback` reports whether bare todo cards have a
+ *  registered agent-turn fallback — honest about the feature being present). */
+function withHeartbeat(
+  entry: RosterEntry,
+  admin?: ResolvedHeartbeatConfig | null,
+): RosterEntry & { heartbeat: { effectiveIntervalMs: number; agentTurnFallback: boolean } } {
+  return {
+    ...entry,
+    heartbeat: {
+      // ADR 0318 — honor the host-wide admin override so the chip is honest
+      // (a global OFF or a cadence override changes the effective interval).
+      effectiveIntervalMs: effectiveHeartbeatIntervalMs(entry, admin),
+      agentTurnFallback: agentTurnFallback() !== null,
+    },
+  };
+}
+
 export function registerRosterRoutes(app: Express): void {
   app.get('/v1/host/openwop-app/roster', async (req, res, next) => {
     try {
@@ -130,7 +159,8 @@ export function registerRosterRoutes(app: Express): void {
       // owner-picker, project members, pinned nav, twin grants, …). The advisory-board
       // picker + the `@@`-convene opt back in with `?includeAdvisors=true`.
       const roster = req.query.includeAdvisors === 'true' ? all : all.filter((r) => r.roleKey !== 'advisor');
-      res.json({ roster });
+      const admin = await resolveHeartbeatAdminConfig();
+      res.json({ roster: roster.map((e) => withHeartbeat(e, admin)) });
     } catch (err) {
       next(err);
     }
@@ -181,11 +211,11 @@ export function registerRosterRoutes(app: Express): void {
 
   app.get('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
-      const entry = await getRosterEntry(req.params.rosterId);
+      const entry = await getRosterEntry(tenantOf(req), req.params.rosterId);
       if (!entry || entry.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
       }
-      res.json(entry);
+      res.json(withHeartbeat(entry, await resolveHeartbeatAdminConfig()));
     } catch (err) {
       next(err);
     }
@@ -193,7 +223,7 @@ export function registerRosterRoutes(app: Express): void {
 
   app.patch('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
-      const existing = await getRosterEntry(req.params.rosterId);
+      const existing = await getRosterEntry(tenantOf(req), req.params.rosterId);
       if (!existing || existing.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
       }
@@ -213,7 +243,7 @@ export function registerRosterRoutes(app: Express): void {
         });
       }
       const autonomyLevel = parseAutonomyLevel(body.autonomyLevel);
-      const updated = await updateRosterEntry(req.params.rosterId, {
+      const updated = await updateRosterEntry(tenantOf(req), req.params.rosterId, {
         persona: typeof body.persona === 'string' ? body.persona : undefined,
         workflows: Array.isArray(body.workflows) ? body.workflows.filter((w): w is string => typeof w === 'string') : undefined,
         enabled: typeof body.enabled === 'boolean' ? body.enabled : undefined,
@@ -223,7 +253,7 @@ export function registerRosterRoutes(app: Express): void {
         heartbeatIntervalMs: parseHeartbeatIntervalMs(body.heartbeatIntervalMs),
         autonomyLevel,
       });
-      // ADR 0101 — `roster.autonomyLevel` is the single autonomy source of truth.
+      // ADR 0493 — `roster.autonomyLevel` is the single autonomy source of truth.
       // When the PATCH sets it, keep the agent's profile autonomy (read by the
       // assistant + knowledge enforcement seams) in lockstep so no seam reads a
       // stale level. Only sync when the field was actually provided; an omitted
@@ -231,15 +261,23 @@ export function registerRosterRoutes(app: Express): void {
       if (autonomyLevel !== undefined) {
         await syncAgentProfileAutonomy(existing.tenantId, req.params.rosterId, autonomyLevel);
       }
-      res.json(updated);
+      if (!updated) {
+        throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
+      }
+      res.json(withHeartbeat(updated, await resolveHeartbeatAdminConfig()));
     } catch (err) {
+      // ADR 0414 M3-2 — ambiguous/impersonating mention handle → 409.
+      if (err instanceof PersonaCollisionError) {
+        next(new OpenwopError('conflict', err.message, 409, { persona: err.persona }));
+        return;
+      }
       next(err);
     }
   });
 
   app.delete('/v1/host/openwop-app/roster/:rosterId', async (req, res, next) => {
     try {
-      const entry = await getRosterEntry(req.params.rosterId);
+      const entry = await getRosterEntry(tenantOf(req), req.params.rosterId);
       if (!entry || entry.tenantId !== tenantOf(req)) {
         throw new OpenwopError('not_found', 'Roster entry not found.', 404, { rosterId: req.params.rosterId });
       }

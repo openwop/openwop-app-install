@@ -15,9 +15,12 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { DurableCollection, hostExtStorage } from '../../host/hostExtPersistence.js';
 import { createCard, getCard, getPersonalBoard, type KanbanCard } from '../../host/kanbanService.js';
 import { deadlineProximityOf, priorityScore, scoreToCardPriority, PRIORITY_PROFILES } from './prioritization.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('features.assistant');
 
 // ─── value objects (embedded, never stored standalone) ──────────────────────
 
@@ -125,8 +128,31 @@ export interface StakeholderProfile {
   updatedAt: string;
 }
 
-export type PendingActionKind = 'email.send' | 'calendar.invite' | 'calendar.reschedule' | 'nudge';
-export type PendingActionStatus = 'pending' | 'approved' | 'rejected' | 'sent' | 'failed';
+export type PendingActionKind = 'email.send' | 'calendar.invite' | 'calendar.reschedule' | 'nudge' | 'servicedesk.reply';
+
+/**
+ * The outbound action kinds the ASSISTANT surface + chat tools may enqueue — the
+ * ONE SSoT for that allowlist (COS-9). `servicedesk.reply` is deliberately absent:
+ * it is the service-desk feature's kind, enqueued on its own path, never through
+ * `ctx.features.assistant.enqueueAction`. Both the agent-tool lane
+ * (`agentTools.ts`) and the surface lane (`surface.ts`) validate node/model-supplied
+ * `kind` against this list before storing a row, so an unknown kind is a typed
+ * rejection at the surface owner rather than a bare cast that fails closed later.
+ */
+export const ENQUEUEABLE_ACTION_KINDS = ['email.send', 'calendar.invite', 'calendar.reschedule', 'nudge'] as const;
+export type EnqueueableActionKind = (typeof ENQUEUEABLE_ACTION_KINDS)[number];
+
+/**
+ * COS-8 — `suppressed` is the honest terminal state for an action that reached
+ * a decision under a NON-`approval-required` policy (`draft-only`, or the
+ * fail-closed `disabled` residual). The human decision is recorded, but the
+ * policy blocked egress — nothing was sent. It is deliberately NOT `approved`:
+ * `approved` means "a human approved a send that is now en route / done", which
+ * `health.ts` counts as accepted and the model's `list-pending-actions` reads as
+ * en-route. A policy-suppressed action is neither, so it carries its own status
+ * and is excluded from the human-oversight metrics (`buildAssistantHealth`).
+ */
+export type PendingActionStatus = 'pending' | 'approved' | 'rejected' | 'sent' | 'failed' | 'suppressed';
 
 export type ActionRiskLevel = 'low' | 'medium' | 'high';
 
@@ -174,27 +200,108 @@ export interface PendingAction {
    *  internal kinds like `nudge` and for never-approved actions). The run is
    *  the single execution; `status` projects its terminal state. */
   executionRunId?: string;
+  /**
+   * COS-1 — stamped by `features/assistant/erasure.ts` when a data-subject
+   * erasure redacted this row. The row SURVIVES (its existence is the audit
+   * record that an action was drafted and how it was decided — see
+   * `decidePendingAction`'s "rejected, not deleted" note); its payload, draft,
+   * recipient diff and decider ids do not.
+   *
+   * It is a GUARD, not a label. The mirrored host approval row is deliberately
+   * left alone (`approvalService` made its own argued call for
+   * `assistant-action`), so a human can still approve an approval whose action
+   * has been erased — and `decideActionViaApproval` would flip the row back to
+   * `approved` and dispatch. `executeApprovedAction` refuses on this stamp, so
+   * the erasure's cancel cannot be undone by a later click. Erase and send are
+   * a symmetric pair; fixing only the erase half would have inverted it.
+   */
+  erasedAt?: string;
 }
 
 // ─── stores ─────────────────────────────────────────────────────────────────
 
-const projects = new DurableCollection<Project>('assistant:project', (p) => p.projectId);
-const commitments = new DurableCollection<Commitment>('assistant:commitment', (c) => c.commitmentId);
-const decisions = new DurableCollection<Decision>('assistant:decision', (d) => d.decisionId);
-const meetings = new DurableCollection<Meeting>('assistant:meeting', (m) => m.meetingId);
-const stakeholders = new DurableCollection<StakeholderProfile>('assistant:stakeholder', (s) => s.stakeholderId);
-const pendingActions = new DurableCollection<PendingAction>('assistant:pending-action', (a) => a.actionId);
+/**
+ * COS-1 (found while adding `tenantOf`) — a NAMESPACE-PREFIX COLLISION that has
+ * been live since the ADR 0029 indexes were added.
+ *
+ * `DurableCollection` keys rows `hostext:<namespace>:<id>` and `list()` is a
+ * prefix scan. `assistant:commitment` is a STRICT PREFIX of
+ * `assistant:commitment:by-tenant` and `assistant:commitment:by-status`, so
+ * `commitments.list()` has always returned the two INDEX collections' rows as
+ * well — `{ixId, commitmentId}` objects with no `tenantId`, no `status`, no
+ * `source`. Every read path hid it behind `.filter(c => c.tenantId === tenantId)`,
+ * which drops them silently. `backfillCommitmentIndexes()` does NOT filter, and
+ * it runs unconditionally at every boot: it has been writing index rows keyed
+ * `undefined:cmt:…` for each of them. Harmless (no prefix scan ever matches
+ * `undefined:`) but real garbage, and it would have become a hard failure the
+ * moment `tenantOf` landed — `idxKey` throws on an empty tenant, by design, so
+ * "a defective write fails loud at the source".
+ *
+ * The cure is a row VALIDATOR rather than a rename: renaming the index
+ * namespaces would be a data migration, and the validator is what the
+ * collection's third parameter exists for. A row that does not carry a string
+ * `tenantId` is not a Commitment, so `list()` skips it — which fixes the
+ * backfill too.
+ */
+export function isCommitmentRow(parsed: unknown): Commitment | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const row = parsed as Partial<Commitment>;
+  return typeof row.tenantId === 'string' && row.tenantId.length > 0 && typeof row.commitmentId === 'string'
+    ? (parsed as Commitment)
+    : null;
+}
+
+// COS-7 / COS-1 — every entity store declares its TENANT EXTRACTOR (the optional
+// 4th argument). Two things follow, and the second is why this landed with the
+// eraser rather than as a performance tidy-up:
+//
+//  1. ADR 0284 tenant teardown stops falling back to the raw-JSON probe, and the
+//     index-slice sweep at `purgeTenantRows` actually runs for these namespaces.
+//  2. `listForTenantIndexed(tenantId)` becomes available — a BOUNDED, and more
+//     importantly COMPLETE, enumeration of a tenant's rows. `features/assistant/
+//     erasure.ts` needs completeness above all, and `listCommitments` USED to
+//     read the ADR 0029 secondary index EXCLUSIVELY — so a row missing from that
+//     hand-maintained index was invisible to it (COS-4), and an eraser that
+//     walked it would have reported success over rows it never saw.
+//     `ensureTenantIndex()` back-fills the tenant marker for every pre-existing
+//     row on first use (guarded by a DURABLE sentinel, so once fleet-wide, never
+//     per boot), so the walk is complete on a store that predates this line.
+//     COS-4 (below) closed the gap for the read path too: `listCommitments` now
+//     reads THROUGH `listForTenantIndexed`, so the completeness guarantee the
+//     eraser relies on is the same one every task-list / briefing / health /
+//     board read now enjoys.
+//
+// `features/assistant/erasure.ts` re-declares handles over the SAME six
+// namespaces with the SAME key + tenant functions (the `features/crm/erasure.ts`
+// precedent — the erasure seam must not widen six public surfaces). Those two
+// declarations MUST stay identical; `test/assistant-erasure.test.ts` asserts it.
+const projects = new DurableCollection<Project>('assistant:project', (p) => p.projectId, undefined, (p) => p.tenantId);
+const commitments = new DurableCollection<Commitment>('assistant:commitment', (c) => c.commitmentId, isCommitmentRow, (c) => c.tenantId);
+const decisions = new DurableCollection<Decision>('assistant:decision', (d) => d.decisionId, undefined, (d) => d.tenantId);
+const meetings = new DurableCollection<Meeting>('assistant:meeting', (m) => m.meetingId, undefined, (m) => m.tenantId);
+const stakeholders = new DurableCollection<StakeholderProfile>('assistant:stakeholder', (s) => s.stakeholderId, undefined, (s) => s.tenantId);
+const pendingActions = new DurableCollection<PendingAction>('assistant:pending-action', (a) => a.actionId, undefined, (a) => a.tenantId);
 
 // ─── commitment secondary indexes (ADR 0029, pulled forward with T2) ────────
 //
 // Commitment ids are content-hash digests (NOT tenant-prefixed), so the list
 // hot paths — the board projection, the briefing, the ingestion dedup sweep —
 // were full cross-tenant scans filtered in memory. These write-through index
-// collections embed the query dimensions in their row ids, turning both list
-// paths into bounded `listByPrefix` scans. Maintained by every commitment
-// write below; `backfillCommitmentIndexes()` (called at feature boot) indexes
-// rows that predate this change. The by-source dedup path needs no index: the
-// commitmentId is already DERIVED from (tenant, source hash, description).
+// collections embed the query dimensions in their row ids. Maintained by every
+// commitment write below.
+//
+// COS-4 — these hand-maintained indexes are NO LONGER the read authority.
+// `listCommitments` reads through the base collection's built-in `tenantOf`
+// secondary index (`listForTenantIndexed`), which is COMPLETE by construction
+// (marker written before the row on every `put()`, back-filled once via a
+// DURABLE sentinel, self-healing on stale markers). A row could go missing from
+// these ADR 0029 rows (a legacy pre-index row, a lost index write, the old
+// per-boot backfill-race window) and be silently invisible; the built-in index
+// cannot lose a row that way. They remain maintained-on-write purely so their
+// tenant-teardown purge (`purgeTenantAssistantIndexes`, PMXWF-1 / ADR 0590) and
+// the drift telemetry in `listCommitments` (`assistant_index_miss`) stay honest.
+// The by-source dedup path needs no index: the commitmentId is already DERIVED
+// from (tenant, source hash, description).
 
 interface CommitmentIndexRow {
   ixId: string;
@@ -221,12 +328,54 @@ async function unindexCommitment(c: Commitment): Promise<void> {
   await commitmentsByStatus.delete(statusIxIdOf(c.tenantId, c.status, c.commitmentId));
 }
 
-/** One-time boot sweep: index commitment rows written before the indexes
- *  existed. Idempotent (puts are upserts); cheap relative to the per-request
- *  scans it retires. */
+/**
+ * PMXWF-1 (ADR 0590) — tenant-teardown purge for the commitment SECONDARY
+ * INDEXES. Their `ixId` embeds the tenant with a `:` separator
+ * (`${tenantId}:…`), so they carry no top-level `tenantId` field and no single
+ * `tenantOf` can parse the tenant out unambiguously (tenant ids themselves
+ * contain `:`, e.g. `org:foo`). A `listByPrefix(`${tenantId}:`)` sweep IS exact —
+ * the trailing colon prevents a prefix collision between `org:foo` and
+ * `org:foobar`. The primary `assistant:commitment` rows are teardown-reachable
+ * via their own `tenantOf`; this reaches the index rows the generic walk would
+ * otherwise orphan on account deletion. Registered as a `purgeTenantHostExt`
+ * pre-hook in `feature.ts`.
+ */
+export async function purgeTenantAssistantIndexes(tenantId: string): Promise<number> {
+  let removed = 0;
+  for (const row of await commitmentsByTenant.listByPrefix(`${tenantId}:`)) {
+    if (await commitmentsByTenant.delete(row.ixId)) removed++;
+  }
+  for (const row of await commitmentsByStatus.listByPrefix(`${tenantId}:`)) {
+    if (await commitmentsByStatus.delete(row.ixId)) removed++;
+  }
+  return removed;
+}
+
+/** DURABLE completion marker for the ADR 0029 legacy backfill (COS-4). Lives in
+ *  the `hostextidxmeta:` keyspace — the same family the built-in tenant index
+ *  uses for its own sentinel — so it is invisible to `kvList('hostext:')`
+ *  content scans + tenant purges, and survives cold starts. */
+const LEGACY_BACKFILL_MARKER = 'hostextidxmeta:assistant:commitment:legacy-backfilled';
+
+/**
+ * One-time sweep that indexes commitment rows written before the ADR 0029
+ * indexes existed. Idempotent (puts are upserts) and — COS-4 — GATED on a
+ * DURABLE marker so it runs at most once fleet-wide, NOT on every Cloud Run cold
+ * start. Before this gate the sweep re-scanned the entire CROSS-TENANT commitment
+ * collection unconditionally at every boot, fired fire-and-forget concurrently
+ * with serving; a boot that lost that race served an under-populated graph. The
+ * read path no longer depends on this backfill at all (see `listCommitments`),
+ * so even a skipped/failed run cannot make a row invisible — this sweep now only
+ * keeps the ADR 0029 rows coherent for their teardown purge + drift telemetry.
+ * Concurrent boots are safe: the marker write is idempotent and the puts are
+ * upserts. Returns the number of rows indexed (0 when already complete).
+ */
 export async function backfillCommitmentIndexes(): Promise<number> {
+  const storage = hostExtStorage();
+  if ((await storage.kvGet(LEGACY_BACKFILL_MARKER)) !== null) return 0; // durably complete — skip the cross-tenant scan
   const all = await commitments.list();
   for (const c of all) await indexCommitment(c);
+  await storage.kvSet(LEGACY_BACKFILL_MARKER, '1');
   return all.length;
 }
 
@@ -255,8 +404,12 @@ function commitmentDedupKey(tenantId: string, source: SourceRef, description: st
 // ─── Projects ───────────────────────────────────────────────────────────────
 
 export async function listProjects(tenantId: string): Promise<Project[]> {
-  return (await projects.list())
-    .filter((p) => p.tenantId === tenantId)
+  // COS-7 — bounded per-tenant read via the built-in `tenantOf` index, NOT a
+  // cross-tenant `.list()` filtered in memory. `listForTenantIndexed` reads only
+  // this tenant's index slice (an empty tenant reads an empty slice — never a
+  // cross-tenant fallback), so this is behavior-preserving. Same transform as
+  // `listCommitments` (COS-4).
+  return (await projects.listForTenantIndexed(tenantId))
     .sort((a, b) => b.priority - a.priority);
 }
 
@@ -306,10 +459,33 @@ export async function updateProject(
   return next;
 }
 
-export async function deleteProject(tenantId: string, projectId: string): Promise<boolean> {
+/**
+ * Delete an assistant project + SCRUB its soft references (grade-data PLAN-1 /
+ * DG-INT-3). Renamed from `deleteProject` — it shared a name with the STRONG
+ * cascade in `projects/projectsService.ts` while silently orphaning every
+ * commitment/decision that pointed at it. Scrub, never delete, the children:
+ * a commitment/decision has standalone value (the task-deck and meeting minutes
+ * read them) and `projectId` is optional on both — clearing the field is the
+ * type-correct SET-NULL. Parent-first ordering: the project row goes first, so
+ * a mid-scrub failure leaves re-scrubbable soft refs, never a resurrected
+ * project. Bounded reads: commitments via the ADR 0029 tenant index; decisions
+ * are the same per-tenant scan `listDecisions` already does.
+ */
+export async function deleteAssistantProject(tenantId: string, projectId: string): Promise<boolean> {
   const existing = await getProject(tenantId, projectId);
   if (!existing) return false;
-  return projects.delete(projectId);
+  const removed = await projects.delete(projectId);
+  for (const c of await listCommitments(tenantId, { projectId })) {
+    const next = { ...c };
+    delete next.projectId;
+    await commitments.put(next);
+  }
+  for (const d of await listDecisions(tenantId, projectId)) {
+    const next = { ...d };
+    delete next.projectId;
+    await decisions.put(next);
+  }
+  return removed;
 }
 
 // ─── Commitments (the PM core) ──────────────────────────────────────────────
@@ -318,16 +494,30 @@ export async function listCommitments(
   tenantId: string,
   filter?: { status?: CommitmentStatus; projectId?: string },
 ): Promise<Commitment[]> {
-  // Indexed read (ADR 0029): a bounded prefix scan of the matching index
-  // slice → point gets, instead of a full cross-tenant collection scan.
-  const ixRows = filter?.status
-    ? await commitmentsByStatus.listByPrefix(`${tenantId}:${filter.status}:`)
-    : await commitmentsByTenant.listByPrefix(`${tenantId}:`);
-  const fetched = await Promise.all(ixRows.map((r) => commitments.get(r.commitmentId)));
-  return fetched
-    // Tolerate stale index rows (e.g. a delete raced) — the row read is the
-    // source of truth; tenant + status re-checked, never trusted from the index.
-    .filter((c): c is Commitment => c !== null && c.tenantId === tenantId)
+  // COS-4 — read through the COMPLETE tenant index the base collection maintains
+  // via its `tenantOf` (`listForTenantIndexed`), NOT the ADR 0029 hand-maintained
+  // secondary indexes. The built-in index writes its marker BEFORE the row on
+  // every `put()` and back-fills legacy rows once via a durable sentinel, so a
+  // row can never be silently invisible — the exact completeness guarantee
+  // `erasure.ts` already depends on. This closes the invisibility defect for
+  // EVERY read shape (task list / briefing / health / board projection).
+  //
+  // It also has NO empty-tenant footgun: `listForTenantIndexed` scans only this
+  // tenant's index slice, so a genuinely-empty tenant reads an empty slice — it
+  // never falls back to a cross-tenant `.list()` scan (the trap the tracker's
+  // "empty slice ⇒ scan the collection" prescription would have set).
+  const rows = await commitments.listForTenantIndexed(tenantId);
+
+  // COS-4 drift telemetry — the ADR 0029 secondary index is still maintained on
+  // write (its teardown purge + tests depend on it) but is no longer the read
+  // authority. If it is missing a row the authoritative index surfaced, that IS
+  // the drift this Blocker was about; surface it (never silent). Bounded, per-
+  // tenant scan — no cross-tenant cost.
+  const indexedIds = new Set((await commitmentsByTenant.listByPrefix(`${tenantId}:`)).map((r) => r.commitmentId));
+  const missed = rows.filter((c) => !indexedIds.has(c.commitmentId)).length;
+  if (missed > 0) log.warn('assistant_index_miss', { tenantId, missing: missed, total: rows.length });
+
+  return rows
     .filter((c) => (filter?.status ? c.status === filter.status : true))
     .filter((c) => (filter?.projectId ? c.projectId === filter.projectId : true))
     .sort((a, b) => (a.dueAt ?? '~').localeCompare(b.dueAt ?? '~'));
@@ -505,8 +695,9 @@ export async function projectCommitmentToBoard(
 // ─── Decisions ──────────────────────────────────────────────────────────────
 
 export async function listDecisions(tenantId: string, projectId?: string): Promise<Decision[]> {
-  return (await decisions.list())
-    .filter((d) => d.tenantId === tenantId)
+  // COS-7 — bounded per-tenant read (see `listProjects`). Residual `projectId`
+  // filter + sort preserved.
+  return (await decisions.listForTenantIndexed(tenantId))
     .filter((d) => (projectId ? d.projectId === projectId : true))
     .sort((a, b) => b.decidedAt.localeCompare(a.decidedAt));
 }
@@ -559,8 +750,8 @@ export async function logDecision(
 // ─── Meetings ───────────────────────────────────────────────────────────────
 
 export async function listMeetings(tenantId: string): Promise<Meeting[]> {
-  return (await meetings.list())
-    .filter((m) => m.tenantId === tenantId)
+  // COS-7 — bounded per-tenant read (see `listProjects`).
+  return (await meetings.listForTenantIndexed(tenantId))
     .sort((a, b) => b.startAt.localeCompare(a.startAt));
 }
 
@@ -610,8 +801,8 @@ export async function recordMeeting(
 // ─── Stakeholders (overlay on a CRM contact) ────────────────────────────────
 
 export async function listStakeholders(tenantId: string): Promise<StakeholderProfile[]> {
-  return (await stakeholders.list())
-    .filter((s) => s.tenantId === tenantId)
+  // COS-7 — bounded per-tenant read (see `listProjects`).
+  return (await stakeholders.listForTenantIndexed(tenantId))
     .sort((a, b) => b.importance - a.importance);
 }
 
@@ -652,8 +843,9 @@ export async function upsertStakeholder(
 // ─── Pending actions (drafts on the existing approval loop) ─────────────────
 
 export async function listPendingActions(tenantId: string, status?: PendingActionStatus): Promise<PendingAction[]> {
-  return (await pendingActions.list())
-    .filter((a) => a.tenantId === tenantId)
+  // COS-7 — bounded per-tenant read (see `listProjects`). Residual `status`
+  // filter + sort preserved.
+  return (await pendingActions.listForTenantIndexed(tenantId))
     .filter((a) => (status ? a.status === status : true))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
@@ -735,6 +927,28 @@ export async function editPendingAction(
 }
 
 /**
+ * ADR 0662 D2 — the ACTION-row half of the two-sided compensation.
+ *
+ * `approvalService.reopenApproval` restores the approval row; this restores the action
+ * row. Both are needed: ADR 0473 §(d) puts the definitive integrity check AFTER the CAS,
+ * so by the time a content-hash mismatch is detected the approval is consumed AND
+ * `decidePendingAction(...,'approved')` has already been written. Reopening only one side
+ * leaves the other lying — an action marked `approved` that never executed and never
+ * reported failure, which is precisely the state this decision exists to prevent.
+ *
+ * `'pending'` is deliberately absent from `decidePendingAction`'s union (that verb is for
+ * DECISIONS), so this is a separate, narrowly-scoped verb rather than a widened one.
+ */
+export async function reopenPendingAction(tenantId: string, actionId: string): Promise<PendingAction | null> {
+  const existing = await getPendingAction(tenantId, actionId);
+  if (!existing) return null;
+  const { approvedByUserId: _dropped, ...rest } = existing;
+  const next: PendingAction = { ...rest, status: 'pending', updatedAt: now() };
+  await pendingActions.put(next);
+  return next;
+}
+
+/**
  * ADR 0027 §4 — the ONE auto-allow eligibility predicate. When autonomy
  * expands (T6 execution policy, T7 "always allow under policy"), this is the
  * gate every caller consults: an action derived from untrusted connected
@@ -767,7 +981,7 @@ export async function setPendingActionExecution(tenantId: string, actionId: stri
 export async function decidePendingAction(
   tenantId: string,
   actionId: string,
-  decision: { status: Extract<PendingActionStatus, 'approved' | 'rejected' | 'sent' | 'failed'>; approvedByUserId?: string },
+  decision: { status: Extract<PendingActionStatus, 'approved' | 'rejected' | 'sent' | 'failed' | 'suppressed'>; approvedByUserId?: string },
 ): Promise<PendingAction | null> {
   const existing = await getPendingAction(tenantId, actionId);
   if (!existing) return null;
@@ -794,4 +1008,8 @@ export async function __resetAssistantStore(): Promise<void> {
     stakeholders.__clear(),
     pendingActions.__clear(),
   ]);
+  // COS-4 — the durable legacy-backfill marker lives in the meta keyspace no
+  // collection `__clear()` touches; drop it too so a reset fully re-arms the
+  // backfill (parallel to `__clear` dropping the built-in index sentinel).
+  await hostExtStorage().kvDelete(LEGACY_BACKFILL_MARKER);
 }

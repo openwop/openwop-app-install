@@ -3,9 +3,11 @@
  * (ADR 0043, the persistent-conversation list that folds in the open chat's
  * participants) and the Workflow Progress panel.
  *
- * Layout:
- *   - Open  → rail is 320px wide at the left of the chat. Tabs across its top,
- *             active panel content below.
+ * Layout (two-pane, mirrors Slack/Teams — a mode rail + a list column):
+ *   - Open  → 320px at the left of the chat, split into a skinny VERTICAL mode
+ *             rail (icon + micro-label per mode: Conversations · Workflow ·
+ *             Reviews, active mode marked by a clay left-edge tick) and the
+ *             active panel filling the rest.
  *   - Closed → rail is hidden entirely. ChatHeader's rail-toggle button reopens
  *             to the last-active tab.
  *   - Mobile (viewport < 720) → when open, the rail covers the chat as a
@@ -17,11 +19,15 @@
  * inline participants).
  */
 
+import { lazy, Suspense } from 'react';
 import type { ComponentProps, KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { WorkflowProgressPanel } from '../workflowProgress/WorkflowProgressPanel.js';
 import { ConversationsRail } from '../conversations/ConversationsRail.js';
-import { ReviewInboxPanel } from '../reviews/ReviewInboxPanel.js';
+// Entry-weight: the inbox panel is the heaviest reviews surface (cards +
+// decisions, grown by ADR 0478 HITL) and renders only when the rail panel
+// opens — lazy keeps it out of the entry chunk.
+const ReviewInboxPanel = lazy(() => import('../reviews/ReviewInboxPanel.js').then((m) => ({ default: m.ReviewInboxPanel })));
 import { MessageSquareIcon, WorkflowIcon, InboxIcon } from '../../ui/icons/index.js';
 
 export type LeftRailTab = 'conversations' | 'progress' | 'reviews';
@@ -52,7 +58,7 @@ interface Props {
    *  only — ADR 0140). The standalone ChatSidebar always supplies it. */
   conversationsProps?: Omit<ComponentProps<typeof ConversationsRail>, 'onClose'>;
   progressProps: Omit<ComponentProps<typeof WorkflowProgressPanel>, 'onClose'>;
-  reviewsProps: ComponentProps<typeof ReviewInboxPanel>;
+  reviewsProps: Omit<ComponentProps<typeof ReviewInboxPanel>, 'onClose'>;
 
   progressBadgeCount: number;
   /** Pending human-review count (ADR 0068/0070) — drives the Reviews tab badge. */
@@ -74,9 +80,9 @@ export function LeftRail({
 
   const tabs: TabDescriptor[] = [
     // The Conversations panel is optional — the multi-tab deck omits it (ADR 0140).
-    ...(conversationsProps ? [{ id: 'conversations' as const, labelKey: 'tabConversations', icon: <MessageSquareIcon size={13} /> }] : []),
-    { id: 'progress', labelKey: 'tabWorkflow', icon: <WorkflowIcon size={13} />, badge: progressBadgeCount },
-    { id: 'reviews', labelKey: 'tabReviews', icon: <InboxIcon size={13} />, badge: reviewsBadgeCount, badgeLabel: t('reviewsBadgeA11y', { count: reviewsBadgeCount }) },
+    ...(conversationsProps ? [{ id: 'conversations' as const, labelKey: 'tabConversations', icon: <MessageSquareIcon size={16} /> }] : []),
+    { id: 'progress', labelKey: 'tabWorkflow', icon: <WorkflowIcon size={16} />, badge: progressBadgeCount },
+    { id: 'reviews', labelKey: 'tabReviews', icon: <InboxIcon size={16} />, badge: reviewsBadgeCount, badgeLabel: t('reviewsBadgeA11y', { count: reviewsBadgeCount }) },
   ];
 
   const close = () => onSelectTab(null);
@@ -101,7 +107,7 @@ export function LeftRail({
         id={`left-rail-panel-${activeTab}`}
         role="tabpanel"
         aria-labelledby={`left-rail-tab-${activeTab}`}
-        className="u-flex-1 u-minh-0 u-flex u-flex-col"
+        className="u-flex-1 u-minh-0 u-minw-0 u-flex u-flex-col"
       >
         {activeTab === 'conversations' && conversationsProps && (
           <ConversationsRail {...conversationsProps} onClose={close} />
@@ -110,7 +116,9 @@ export function LeftRail({
           <WorkflowProgressPanel {...progressProps} onClose={close} />
         )}
         {activeTab === 'reviews' && (
-          <ReviewInboxPanel {...reviewsProps} />
+          <Suspense fallback={null}>
+            <ReviewInboxPanel {...reviewsProps} onClose={close} />
+          </Suspense>
         )}
       </div>
     </aside>
@@ -147,6 +155,7 @@ function TabStrip({
     <div
       role="tablist"
       aria-label={t('chatToolTabs')}
+      aria-orientation="vertical"
       className="leftrail-tabstrip"
       onKeyDown={onTabKeyDown}
     >
@@ -170,9 +179,13 @@ function TabStrip({
               aria-hidden
               className="leftrail-tab-icon"
             >{tab.icon}</span>
-            <span>{label}</span>
+            {/* Icon-only rail: the label is the accessible name (sr-only) while the
+                button `title` supplies the hover tooltip — matches the collapsed
+                app-sidebar pattern, and never overflows a skinny rail. */}
+            <span className="leftrail-tab-label sr-only">{label}</span>
             {tab.badge !== undefined && tab.badge > 0 && (
               <span
+                role="img"
                 aria-label={tab.badgeLabel ?? `${tab.badge}`}
                 className="leftrail-tab-badge"
               >

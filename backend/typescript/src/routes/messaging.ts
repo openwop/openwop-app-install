@@ -1140,10 +1140,10 @@ function mergePeers(
   existing: MessagingIdentityRecord['peers'],
   incoming: MessagingIdentityRecord['peers'],
 ): MessagingIdentityRecord['peers'] {
-  const seen = new Set(existing.map((p) => `${p.channel} ${p.peerId}`));
+  const seen = new Set(existing.map((p) => `${p.channel}\u0000${p.peerId}`));
   const merged = [...existing];
   for (const p of incoming) {
-    const key = `${p.channel} ${p.peerId}`;
+    const key = `${p.channel}\u0000${p.peerId}`;
     if (!seen.has(key)) { seen.add(key); merged.push(p); }
   }
   return merged;

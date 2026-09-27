@@ -1,0 +1,41 @@
+# ADR 0181 Phase D — xcodegen project for the iOS shell.
+#   xcodegen generate && xcodebuild -project OpenWOP.xcodeproj -scheme OpenWOP \
+#     -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build
+name: OpenWOP
+options:
+  bundleIdPrefix: dev.openwop
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  OpenWOP:
+    type: application
+    platform: iOS
+    sources: [Sources]
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: OpenWOP
+        UILaunchScreen: {}
+        # ADR 0291 — white-label branding knobs, read by Branding.swift.
+        # A white-label build edits these (plus CFBundleDisplayName and
+        # PRODUCT_BUNDLE_IDENTIFIER below); missing/blank values fall back to
+        # the stock OpenWOP identity. OWPMode: demo | enterprise. Set
+        # OWPLockedHost to pin an enterprise build to one origin (the setup
+        # screen never shows).
+        OWPProductName: OpenWOP
+        OWPMode: demo
+        OWPDefaultHost: http://localhost:8000
+        OWPDemoHost: https://app.openwop.dev
+        OWPLockedHost: ""
+        OWPAccentColor: "#b95c3a"
+        # v1 keeps ATS defaults for remote hosts (https only) but allows
+        # LOCAL networking so the self-hosted http://localhost story works
+        # (the README's debug-http-for-local rule).
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.openwop.ios
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SWIFT_VERSION: "5.9"
+        CODE_SIGN_STYLE: Automatic

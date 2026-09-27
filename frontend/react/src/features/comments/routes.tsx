@@ -9,12 +9,13 @@ const routes: FeatureRoute[] = [
   {
     path: '/comments',
     element: <CommentsPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Workspace',
-      label: 'Comments',
+      label: 'Comments', labelKey: 'commentsLabel',
       icon: MessageSquareIcon,
-      hint: 'Threaded comments on pages + collections',
+      order: 40,
+      hint: 'Threaded comments on pages + collections', hintKey: 'commentsHint',
       featureId: 'comments',
     },
   },

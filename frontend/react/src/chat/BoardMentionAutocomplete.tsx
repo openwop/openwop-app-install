@@ -213,8 +213,8 @@ function EmptyPanel({
       ref={listRef}
       className="mentionac-empty"
       style={{
-        border: `1px solid ${tone === 'error' ? 'var(--color-danger)' : 'var(--color-border)'}`,
-        color: tone === 'error' ? 'var(--color-danger)' : 'var(--color-text-muted)',
+        border: `1px solid ${tone === 'error' ? 'var(--color-danger)' : 'var(--rule)'}`,
+        color: tone === 'error' ? 'var(--color-danger)' : 'var(--ink-3)',
       }}
     >
       {children}
@@ -242,7 +242,7 @@ function BoardRow({
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="mentionac-row"
-      style={{ background: selected ? 'var(--color-surface-2)' : 'transparent' }}
+      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
       <div className="u-flex u-items-center u-gap-2 u-wrap">
         <code className="u-fw-600 u-fs-12">@@{board.handle}</code>

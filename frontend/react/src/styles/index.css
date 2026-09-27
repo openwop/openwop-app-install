@@ -1,0 +1,13 @@
+/* The ONE stylesheet entry (ADR 0510 §3, DSA-010): explicit, deterministic
+ * layer order. Vite inlines these @imports sequentially into a single bundle.
+ * brand.css (the white-label override seam) stays a SEPARATE, later <link>
+ * in index.html — operators replace that file, never these.
+ *
+ *   1. foundations — tokens, theme modes            (styles/foundations/)
+ *   2. the legacy monolith — shrinking tranche by tranche
+ *   3. ADR 0510 primitives — post-monolith additions (styles/primitives/)
+ */
+@import './foundations/tokens.css';
+@import './global.css';
+@import './chrome/admin.css';
+@import './primitives/adr0510.css';

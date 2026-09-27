@@ -7,6 +7,7 @@ export const messages = {
   lede: 'Escolha qual modelo responde cada turno do chat e veja quais o seu time prefere.',
 
   tablistLabel: 'Seções de modelos',
+  panelRegion: 'Painel de modelos {{panel}}',
 
   'tab_model-router': 'Roteamento',
   tab_leaderboard: 'Ranking',

@@ -24,13 +24,33 @@ import { OpenwopError } from '../types.js';
 import type { Storage } from '../storage/storage.js';
 import { getAgentProfile, setAgentTwin } from './agentProfileService.js';
 import { getRosterEntry } from './rosterService.js';
+import { registerSubjectEraser } from './subjectErasure.js';
+import { subjectKeyForms } from './subjectErasureRedaction.js';
 
 export type TwinScope = 'memory' | 'knowledge';
 const ALL_SCOPES: TwinScope[] = ['memory', 'knowledge'];
 
+/** The ONE membership test for a scope string (TWIN-20). Exported so the route
+ *  layer VALIDATES instead of casting — a `as TwinScope[]` over unvalidated JSON
+ *  was safe only by accident, because `grantTwin` re-filters below. */
+export function isTwinScope(v: unknown): v is TwinScope {
+  return typeof v === 'string' && (ALL_SCOPES as string[]).includes(v);
+}
+
 /** A user-issued consent grant: agent `agentId` may recall the granting user's
  *  corpus for `scopes` while `status === 'active'`. `version` bumps on each
- *  (re)issue — Phase 2 stamps it on a run for replay (ADR 0044 §4). */
+ *  (re)issue.
+ *
+ *  CORRECTED (ADR 0666 D6 / `PKWF-6`) — this line used to end "Phase 2 stamps it on a run for
+ *  replay (ADR 0044 §4)". That design was superseded and is now explicitly FORBIDDEN: the
+ *  grant is re-read LIVE per dispatch and per retrieval, with NO run stamp anywhere, and that
+ *  is precisely why revocation survives a `:fork` (`host/agentRunnerNode.ts` — "do NOT
+ *  'optimize' in a grant/run stamp: either would freeze borrowed content past revocation";
+ *  pinned behaviourally by `test/twin-fork-revoke.test.ts` and structurally by
+ *  `test/twin-replay-classification.test.ts`). `version` is audit attribution only — it appears
+ *  on the consent-ledger payload and nowhere on `run.metadata`. Left as a correction rather
+ *  than a silent edit because this is the docblock a maintainer reads before "restoring" the
+ *  optimization. */
 export interface TwinGrant {
   /** Collection key `${tenantId}:${agentId}:${userId}` — one grant per pair. */
   key: string;
@@ -44,7 +64,14 @@ export interface TwinGrant {
   version: number;
 }
 
-const grants = new DurableCollection<TwinGrant>('twin-grant', (g) => g.key);
+// WF-TWIN-8 / GEN-TWIN-1 — `tenantOf` ARMS the tenant secondary index. Without
+// it `indexed:false` (`hostExtPersistence.ts:288`), `listForTenantIndexed` throws
+// (`:538`), and that enumeration is the one every `registerRetentionPurger` uses
+// — so NO reclaim path existed at all. That is what makes a mis-partitioned row
+// unrecoverable rather than merely wrong, and it is why ADR 0508's migration 19
+// had to be written by hand. Armed in the same change as the tenancy fix, per the
+// GEN-TWIN-1 ordering constraint.
+const grants = new DurableCollection<TwinGrant>('twin-grant', (g) => g.key, undefined, (g) => g.tenantId);
 const grantKey = (tenantId: string, agentId: string, userId: string): string => `${tenantId}:${agentId}:${userId}`;
 
 function nowIso(): string { return new Date().toISOString(); }
@@ -62,7 +89,7 @@ async function audit(storage: Storage, action: string, principalId: string, reso
 /** The twin link on an agent, or null. Tenant fail-closed (a cross-tenant agent
  *  reads as no link). */
 export async function getTwinLink(tenantId: string, agentId: string): Promise<AgentTwin | null> {
-  const entry = await getRosterEntry(agentId);
+  const entry = await getRosterEntry(tenantId, agentId);
   if (!entry || entry.tenantId !== tenantId) return null;
   const profile = await getAgentProfile(tenantId, agentId);
   return profile?.twin ?? null;
@@ -73,7 +100,7 @@ export type AgentTwin = NonNullable<Awaited<ReturnType<typeof getAgentProfile>>>
  *  Setting a NEW link auto-revokes any prior user's active grant on this agent
  *  (the old twin's authorization must not carry to a re-linked agent). */
 export async function linkTwin(storage: Storage, tenantId: string, agentId: string, userId: string, linkedBy: string): Promise<void> {
-  const entry = await getRosterEntry(agentId);
+  const entry = await getRosterEntry(tenantId, agentId);
   if (!entry || entry.tenantId !== tenantId) {
     throw new OpenwopError('not_found', 'Agent not found.', 404, { agentId });
   }
@@ -87,16 +114,24 @@ export async function linkTwin(storage: Storage, tenantId: string, agentId: stri
 }
 
 /** Remove the twin link (admin/owner) AND revoke the linked user's grant — the
- *  link is gone, so its authorization must be too. */
-export async function unlinkTwin(storage: Storage, tenantId: string, agentId: string, actor: string): Promise<void> {
+ *  link is gone, so its authorization must be too.
+ *
+ *  TWIN-UX-3 (unlink lane) — returns whether a link EXISTED, mirroring
+ *  `revokeTwin`. This used to be `void` with an unconditional `twin.unlink`
+ *  audit row, so a stale second tab that unlinked nothing recorded the same
+ *  consent-destroying act as a real unlink — a fabricated row in the one log
+ *  consent is reviewed from. A no-op now writes nothing and audits nothing. */
+export async function unlinkTwin(storage: Storage, tenantId: string, agentId: string, actor: string): Promise<boolean> {
   const profile = await getAgentProfile(tenantId, agentId);
-  const entry = await getRosterEntry(agentId);
+  const entry = await getRosterEntry(tenantId, agentId);
   if (!entry || entry.tenantId !== tenantId) {
     throw new OpenwopError('not_found', 'Agent not found.', 404, { agentId });
   }
-  if (profile?.twin) await revokeByOwner(storage, tenantId, agentId, profile.twin.userId, 'unlink');
+  if (!profile?.twin) return false;
+  await revokeByOwner(storage, tenantId, agentId, profile.twin.userId, 'unlink');
   await setAgentTwin(tenantId, agentId, null, { roleKey: entry.roleKey ?? 'unknown', autonomy: { specLevel: 'draft-only' } });
-  await audit(storage, 'twin.unlink', actor, `agent:${agentId}`, {});
+  await audit(storage, 'twin.unlink', actor, `agent:${agentId}`, { userId: profile.twin.userId });
+  return true;
 }
 
 // ── the GRANT (the linked user only) ────────────────────────────────────────
@@ -162,9 +197,45 @@ export async function clearTwinGrantsForAgent(tenantId: string, agentId: string)
   return all.length;
 }
 
+// ── ADR 0464 P2 — DSAR subject erasure ───────────────────────────────────────
+// A twin GRANT is the granting user's OWN consent record — issued and revocable
+// ONLY by that user (`grantedByUserId`). It carries no one else's personal data
+// (the agent it grants to is a roster agent, not a person), so a DSAR DELETES
+// every grant the subject issued, tenant-wide (the `agentProfile.twin` LINK is a
+// separate store, owned by agentProfileService — reported for coverage, not
+// touched here). Tenant-scoped prefix scan; idempotent.
+
+/** DSAR eraser — delete every twin grant the subject issued, tenant-wide.
+ *  Reports `rowsTouched` (WF-TWIN-3): a fan-out that reached nothing anywhere must
+ *  not be recorded as `erasure_complete`. */
+export async function eraseSubjectTwinGrants(tenantId: string, subjectKey: string): Promise<{ rowsTouched: number }> {
+  if (!tenantId || !subjectKey) return { rowsTouched: 0 };
+  const { forms } = subjectKeyForms(subjectKey);
+  let rowsTouched = 0;
+  for (const g of await grants.listByPrefix(`${tenantId}:`)) {
+    if (forms.has(g.grantedByUserId)) { await grants.delete(g.key); rowsTouched += 1; }
+  }
+  return { rowsTouched };
+}
+
+/** Register the twin-grant DSAR eraser (idempotent — the seam dedupes by
+ *  reference). Called from the host-erasers boot step (host/hostSubjectErasers.ts). */
+export function registerTwinErasure(): void {
+  registerSubjectEraser(eraseSubjectTwinGrants);
+}
+
 /** The ACTIVE grant for (agent, user), or null. The fail-closed gate Phase-2
- *  dispatch reads before any cross-subject recall (re-checked live per ADR 0044
- *  §4, so a revocation takes effect immediately — even on a fork). */
+ *  dispatch reads before any cross-subject recall.
+ *
+ *  TWIN-3 / TWIN-DEBT-2 correction (2026-08-20). This used to claim a revocation
+ *  "takes effect immediately — even on a fork", full stop. Two-thirds true, and
+ *  the third was the one the consent screen promised in four locales. What is
+ *  actually guaranteed, now that `borrowedRecall` re-reads this per RETRIEVAL:
+ *    - the next dispatch, the next turn, and any `:fork`  → no recall  (yes)
+ *    - a retrieval inside a turn ALREADY in flight        → no recall  (yes, new)
+ *    - content already borrowed into a COMPLETED turn's transcript, and any
+ *      summary persisted from it                          → NOT retracted
+ *  Revocation is PROSPECTIVE. The locale copy now says so. */
 export async function getActiveGrant(tenantId: string, agentId: string, userId: string): Promise<TwinGrant | null> {
   const g = await grants.get(grantKey(tenantId, agentId, userId));
   if (!g || g.tenantId !== tenantId || g.status !== 'active') return null;

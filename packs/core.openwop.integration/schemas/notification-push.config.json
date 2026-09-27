@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.integration/1.1.0/notification-push.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.integration/1.2.1/notification-push.config.json",
   "title": "NotificationPushConfig",
   "type": "object",
   "properties": {

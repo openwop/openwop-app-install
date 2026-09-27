@@ -1,6 +1,6 @@
 /**
- * SEC-2 (CODEBASE-ASSESSMENT.md): the built-in `dev-token` is withdrawn in
- * production by readValidKeys (the security control). apiKeyConfigError() only
+ * SEC-2 (docs/steward/CODEBASE-ASSESSMENT.md): the built-in `dev-token` is withdrawn in
+ * production by readKeyTenants (the security control). apiKeyConfigError() only
  * flags a deploy that EXPLICITLY enforces bearer auth yet configured no bearer
  * credential at all (no API key + no OIDC) — it must NOT fire for a plain
  * NODE_ENV=production cookie-per-visitor deploy, which legitimately has no API

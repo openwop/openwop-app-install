@@ -14,6 +14,7 @@
  * mechanism, identical to OPENWOP_INSTALL_PACKS at boot.
  */
 
+import { Button } from '../ui/Button.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
@@ -74,12 +75,12 @@ export function InstallPackModal({ installedPackNames, onInstalled, onClose }: P
           <p className="muted u-fs-12">{t('installPackInstalled', { packs: installedPackNames.join(', ') })}</p>
         )}
         <div className="u-flex u-gap-2 u-justify-end u-mt-2">
-          <button type="button" className="btn-secondary" onClick={onClose} disabled={submitting}>
+          <Button variant="secondary" onClick={onClose} disabled={submitting}>
             {t('common:cancel')}
-          </button>
-          <button type="submit" className="btn-accent-solid" disabled={submitting || !name.trim() || !version.trim()}>
+          </Button>
+          <Button type="submit" variant="accent-solid" disabled={submitting || !name.trim() || !version.trim()}>
             {t('installPackButton')}
-          </button>
+          </Button>
         </div>
       </form>
     </Modal>

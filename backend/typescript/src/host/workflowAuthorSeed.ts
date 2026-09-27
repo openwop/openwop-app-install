@@ -11,20 +11,52 @@
  * the UI can badge it illustrative (never passes synthetic output off as a real
  * authoring run).
  *
- * Workflows are host-global (keyed by workflowId, not per-tenant), so — like the
- * CMS-homepage seeder — count/seed/clear operate on the global registry and the
- * `tenantId` argument is accepted for the seeder interface but not used to scope.
+ * WFAWF-6 (ADR 0596 R2) — these used to be registered HOST-GLOBAL by id with no
+ * ownership: the retired ADR 0472 hard-coded-workflow anti-pattern (invisible to
+ * `/builder` + the `/` picker, which list only the tenant OWNERSHIP index, and
+ * uneditable). They are now ordinary DEMO DATA seeded PER TENANT — the same
+ * owned-in-tree-definition lane `demoWalkthroughsSeed.ts` uses (ADR 0435): the
+ * shared def is registered in the global by-id registry (so the id resolves for
+ * run / `:fork` / replay) and recorded in the per-tenant ownership index, which
+ * is what makes each showcase appear in that tenant's builder gallery, open in
+ * the builder, and delete like anything the tenant authored itself.
+ *
+ * The workflow IDs are UNCHANGED (`openwop-app.authored.lead-triage`,
+ * `openwop-app.authored.doc-summary`) — a per-tenant deterministic id was
+ * deliberately NOT used, because these ids carry no PII and keeping them stable
+ * means a run stamped before this migration still re-resolves on replay/`:fork`.
+ * (A chain-pack + per-tenant-minted-id migration was the route the WFAWF-6 row
+ * originally sketched; the owned-in-tree-def lane is simpler, replay-safe, and
+ * equally sanctioned — see ADR 0596 R2 for the reversal reasoning.)
+ *
+ * IDEMPOTENT + non-destructive, like every seeder here: deterministic ids mean a
+ * re-seed upserts the same ownership rows (never a "-2" duplicate), and `clear`
+ * removes ONLY this tenant's ownership of the canonical ids — a workflow the
+ * tenant authored itself is never touched, and the shared def survives while any
+ * OTHER tenant still owns it (so their historical runs keep replaying).
+ *
+ * TRADEOFF (inherited from the ADR 0435 owned-seed model, accepted): the DEFINITION
+ * is one GLOBAL by-id row shared by every tenant that seeds it — only OWNERSHIP is
+ * per-tenant. Keeping the id stable is what makes replay work, but it also means an
+ * edit one tenant makes to a showcase in the builder rewrites the shared def the
+ * others opened. That is acceptable for illustrative demo content built from
+ * deterministic mock-ai nodes (no PII, no production semantics); the only way to
+ * isolate per-tenant edits would be per-tenant minted ids, which is exactly the
+ * from-chain route that strands pre-migration replay stamps (see ADR 0596 R2).
  *
  * @see docs/adr/0072-ai-workflow-authoring.md
+ * @see docs/adr/0596-workflow-author-honesty-and-durable-writes.md (§ R2 — WFAWF-6)
+ * @see src/host/demoWalkthroughsSeed.ts — the owned-in-tree-def seed pattern this mirrors
  * @see src/host/exampleWorkflows.ts — the deterministic-node posture this mirrors
  */
 
 import type { WorkflowDefinition } from '../executor/types.js';
-import {
-  registerWorkflow,
-  getRegisteredWorkflow,
-  deleteRegisteredWorkflow,
-} from './workflowsRegistry.js';
+import { registerWorkflow, getRegisteredWorkflow, deleteRegisteredWorkflow } from './workflowsRegistry.js';
+import { recordOwnership, getOwned, removeOwnership, isAuthoredByAnyTenant } from './workflowOwnership.js';
+import { lifecycleOf, withLifecycle } from './workflowLifecycle.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('host.workflowAuthorSeed');
 
 /** A showcase workflow + the natural-language intent it illustrates. */
 interface ShowcaseSpec {
@@ -81,33 +113,64 @@ export const WORKFLOW_AUTHOR_SHOWCASE: ReadonlyArray<ShowcaseSpec> = [
   ),
 ];
 
-/** How many showcase workflows are currently registered (host-global). */
-export function countWorkflowAuthorShowcase(): number {
-  return WORKFLOW_AUTHOR_SHOWCASE.filter((s) => getRegisteredWorkflow(s.definition.workflowId)).length;
+const nameOf = (def: WorkflowDefinition): string =>
+  typeof def.metadata?.name === 'string' && def.metadata.name ? def.metadata.name : def.workflowId;
+
+/**
+ * How many of the canonical showcase workflows this tenant currently has LIVE.
+ * Archived rows do not count (a re-seed brings an archived showcase back), so the
+ * count matches what the builder gallery shows — the same rule as
+ * `countDemoWalkthroughs`.
+ */
+export async function countWorkflowAuthorShowcase(tenantId: string): Promise<number> {
+  const owned = await Promise.all(WORKFLOW_AUTHOR_SHOWCASE.map((s) => getOwned(tenantId, s.definition.workflowId)));
+  return owned.filter((r) => r && !r.archivedAt).length;
 }
 
-/** Register the showcase workflows that are missing (idempotent, non-destructive). */
-export function seedWorkflowAuthorShowcase(): { created: number; details: Record<string, unknown> } {
+/**
+ * Seed the showcase workflows for `tenantId` — register the shared global def if
+ * missing (or un-archive it), then record per-tenant ownership so it lists in the
+ * builder gallery. Idempotent: a showcase the tenant already has LIVE is
+ * re-upserted (same key) and NOT counted as created. A previously REMOVED
+ * (archived) showcase re-seeds as a fresh create. Non-destructive: the global def
+ * is only re-registered when ABSENT or archived, so a tenant that edited its copy
+ * keeps the edited graph (the registry is by-id; a re-seed must never clobber
+ * authored content). `registerWorkflow` is paired with `recordOwnership` in this
+ * function — the sanctioned owned-seed lane, not the retired unowned pin site.
+ */
+export async function seedWorkflowAuthorShowcase(tenantId: string): Promise<{ created: number; details: Record<string, unknown> }> {
   let created = 0;
-  const ids: string[] = [];
+  const seeded: string[] = [];
   for (const s of WORKFLOW_AUTHOR_SHOWCASE) {
-    if (getRegisteredWorkflow(s.definition.workflowId)) continue;
-    registerWorkflow(s.definition);
-    created++;
-    ids.push(s.definition.workflowId);
-  }
-  return { created, details: { workflows: ids } };
-}
-
-/** Remove the canonical showcase workflows (only the seeded ids, never user work). */
-export function clearWorkflowAuthorShowcase(): { cleared: number; details: Record<string, unknown> } {
-  let cleared = 0;
-  const ids: string[] = [];
-  for (const s of WORKFLOW_AUTHOR_SHOWCASE) {
-    if (deleteRegisteredWorkflow(s.definition.workflowId)) {
-      cleared++;
-      ids.push(s.definition.workflowId);
+    try {
+      const id = s.definition.workflowId;
+      const registered = getRegisteredWorkflow(id);
+      if (!registered) registerWorkflow(s.definition);
+      else if (lifecycleOf(registered).archivedAt) registerWorkflow(withLifecycle(registered, { archivedAt: undefined }));
+      const live = getRegisteredWorkflow(id) ?? s.definition;
+      const prior = await getOwned(tenantId, id);
+      const wasLive = Boolean(prior) && !prior?.archivedAt;
+      await recordOwnership(tenantId, id, { name: nameOf(live), nodeCount: live.nodes.length });
+      if (!wasLive) { created += 1; seeded.push(id); }
+    } catch (err) {
+      log.warn('seed_showcase_skipped', { tenantId, workflowId: s.definition.workflowId, error: String(err) });
     }
   }
-  return { cleared, details: { workflows: ids } };
+  return { created, details: { seeded } };
+}
+
+/**
+ * Drop THIS tenant's ownership of the canonical showcase workflows. The global
+ * registry def is removed only once NO tenant owns it any more — another tenant's
+ * seeded copy (and the replay of its historical runs) must survive this tenant's
+ * clear. Never touches a workflow the tenant authored itself.
+ */
+export async function clearWorkflowAuthorShowcase(tenantId: string): Promise<{ cleared: number; details: Record<string, unknown> }> {
+  let cleared = 0;
+  for (const s of WORKFLOW_AUTHOR_SHOWCASE) {
+    const id = s.definition.workflowId;
+    if (await removeOwnership(tenantId, id)) cleared += 1;
+    if (!(await isAuthoredByAnyTenant(id))) deleteRegisteredWorkflow(id);
+  }
+  return { cleared, details: { workflows: WORKFLOW_AUTHOR_SHOWCASE.map((s) => s.definition.workflowId) } };
 }

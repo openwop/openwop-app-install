@@ -1,6 +1,6 @@
 /**
  * Strategy API client (ADR 0079). The executive strategy portfolio surface under
- * /v1/host/openwop-app/strategy/*. Strategies link existing host entities
+ * /host/openwop-app/strategy/*. Strategies link existing host entities
  * (projects, priority lists/ideas, advisory boards) and project a compact
  * context packet into those surfaces.
  *
@@ -17,9 +17,15 @@ export type StrategyStatus = 'draft' | 'active' | 'paused' | 'completed' | 'arch
 export type StrategyConfidence = 'high' | 'medium' | 'low';
 export type StrategyRisk = 'low' | 'medium' | 'high';
 
-export interface StrategyKeyResult { id: string; title: string; target?: string; current?: string; unit?: string; status?: StrategyStatus }
-export interface StrategyObjective { id: string; title: string; keyResults: StrategyKeyResult[] }
-export interface StrategyInitiative { id: string; title: string; ownerUserId?: string; status?: StrategyStatus; linkedProjectIds?: string[] }
+/** ADR 0231 — a standing, human-configured metric source (authorizes sync writes). */
+export type MetricSourceKind = 'crm-deal-total' | 'analytics-conversions' | 'commerce-revenue' | 'bigquery';
+export interface MetricSource { kind: MetricSourceKind; orgId: string; query?: string }
+export type KrMeasureKind = 'numeric' | 'percent' | 'currency' | 'boolean';
+export interface KrMeasure { kind: KrMeasureKind; baseline?: number; target?: number; direction?: 'increase' | 'decrease'; unit?: string; source?: MetricSource }
+export interface StrategyKeyResult { id: string; title: string; target?: string; current?: string; unit?: string; status?: StrategyStatus; measure?: KrMeasure; weight?: number }
+export interface StrategyObjective { id: string; title: string; keyResults: StrategyKeyResult[]; weight?: number }
+export interface InitiativePlan { budgetAmount?: number; budgetCurrency?: string; capacityPoints?: number; actualAmount?: number; actualPoints?: number }
+export interface StrategyInitiative { id: string; title: string; ownerUserId?: string; status?: StrategyStatus; linkedProjectIds?: string[]; startDate?: string; endDate?: string; dependsOn?: string[]; plan?: InitiativePlan }
 export interface StrategyPeriod { label: string; startDate?: string; endDate?: string }
 
 export type StrategyLink =
@@ -52,6 +58,23 @@ export interface Strategy {
   createdBy: string;
   createdAt: string;
   updatedAt: string;
+  /** ADR 0230 §B3 — PROJECTED (never stored): true when the activation gate is
+   *  ON and a strategy-activation approval is pending. Rides GET /:id + PATCH. */
+  activationPending?: boolean;
+  /** R2 STR2-M5 — this save DEACTIVATED the strategy: editing a protected field on an
+   *  active strategy reverts it to draft and it must be re-approved. The marker rode the
+   *  event and the audit and never reached the client, so the status chip just changed
+   *  and nothing said why. `autoRevertedFields` names which edit did it. */
+  autoRevertedToDraft?: boolean;
+  autoRevertedFields?: string[];
+  /** ADR 0597 §Correction 4 — this edit touched a PROTECTED field while an
+   *  activation review was pending, so the submission was WITHDRAWN (an approver
+   *  must not approve content that moved under them). PR-A shipped the field with
+   *  no SPA reader and filed it; ADR 0598 reads it. The owner's own edit closed
+   *  their own submission — a silent version of that is the STR2-M5 lesson again. */
+  activationReviewClosed?: boolean;
+  /** ADR 0235 §D3 — the one-level grouping lens. */
+  parentStrategyId?: string;
 }
 
 export interface StrategyContextEntry {
@@ -80,7 +103,7 @@ export interface ProjectRef { id: string; name: string; orgId: string; status?: 
  *  a clean "not enabled" state instead of a raw error. */
 export class FeatureDisabledError extends Error {}
 
-const base = `${config.baseUrl}/v1/host/openwop-app/strategy`;
+const base = `${config.baseUrl}/host/openwop-app/strategy`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -152,6 +175,14 @@ export interface UpdateStrategyPatch {
   confidence?: StrategyConfidence | null;
   risk?: StrategyRisk | null;
   healthOverride?: StrategyHealthState | null;
+  /** ADR 0235 §D3 — set a parent (validated server-side) or null to clear. */
+  parentStrategyId?: string | null;
+}
+
+/** ADR 0235 §D3 — CSV objective import (`objective,keyResult,target,unit`). */
+export async function importObjectives(id: string, csv: string): Promise<{ imported: number; skipped: Array<{ line: number; reason: string }>; strategy: Strategy }> {
+  const res = await fetch(`${base}/${encodeURIComponent(id)}/import-objectives`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify({ csv }) }));
+  return asJson(res, 'importObjectives');
 }
 
 export async function updateStrategy(id: string, patch: UpdateStrategyPatch): Promise<Strategy> {
@@ -183,6 +214,33 @@ export type StrategyHealthState = 'on-track' | 'at-risk' | 'off-track';
 export interface StrategyHealthSignals {
   linkedProjectCount: number; projectsOnTrack: number; projectsAtRisk: number; projectsOffTrack: number;
   milestonesDone: number; milestonesTotal: number; linkedPriorityCount: number; objectiveCount: number; hasExecution: boolean;
+  /** ADR 0231 — read-time measurement signals (absent when nothing is measured). */
+  progress?: number; staleKrCount?: number; measuredKrCount?: number; proposedCheckInCount?: number;
+}
+
+// ── check-ins (ADR 0231 §C1) ──────────────────────────────────────────────────
+export type CheckInStatus = 'confirmed' | 'proposed' | 'dismissed';
+export interface StrategyCheckIn {
+  checkInId: string; strategyId: string; krId: string;
+  value?: number; note?: string; confidence?: StrategyConfidence;
+  status: CheckInStatus; origin: 'human' | 'agent' | 'sync'; actor: string;
+  createdAt: string; decidedBy?: string; decidedAt?: string;
+}
+
+export async function listStrategyCheckIns(id: string, krId?: string): Promise<StrategyCheckIn[]> {
+  const qs = krId ? `?krId=${encodeURIComponent(krId)}` : '';
+  const res = await fetch(`${base}/${encodeURIComponent(id)}/check-ins${qs}`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ checkIns: StrategyCheckIn[] }>(res, 'listStrategyCheckIns')).checkIns;
+}
+
+export async function createCheckIn(id: string, krId: string, input: { value?: number; note?: string; confidence?: StrategyConfidence }): Promise<StrategyCheckIn> {
+  const res = await fetch(`${base}/${encodeURIComponent(id)}/key-results/${encodeURIComponent(krId)}/check-ins`, fetchOpts({ method: 'POST', headers: jsonHeaders(), body: JSON.stringify(input) }));
+  return asJson<StrategyCheckIn>(res, 'createCheckIn');
+}
+
+export async function decideCheckIn(id: string, checkInId: string, decision: 'confirm' | 'dismiss'): Promise<StrategyCheckIn> {
+  const res = await fetch(`${base}/${encodeURIComponent(id)}/check-ins/${encodeURIComponent(checkInId)}/${decision}`, fetchOpts({ method: 'POST', headers: jsonHeaders() }));
+  return asJson<StrategyCheckIn>(res, 'decideCheckIn');
 }
 export interface StrategyHealthRow { id: string; title: string; health: StrategyHealthState; signals?: StrategyHealthSignals }
 
@@ -203,14 +261,40 @@ export async function getStrategyContext(q: ContextQuery): Promise<StrategyConte
   return (await asJson<{ strategies: StrategyContextEntry[] }>(res, 'getStrategyContext')).strategies;
 }
 
+/** The resolved context packet for ONE strategy (strategy-gap A3): linked idea
+ *  scores/ranks + project health in one fetch — the detail page must never fan
+ *  out per-list reads (the rate-limit gotcha). Null when nothing resolved. */
+export async function getStrategyDetailContext(id: string): Promise<StrategyContextEntry | null> {
+  const res = await fetch(`${base}/${encodeURIComponent(id)}/context`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ strategy: StrategyContextEntry | null }>(res, 'getStrategyDetailContext')).strategy;
+}
+
+// ── timeline (ADR 0234 §C6 — a read projection; slip flags computed server-side) ──
+export interface TimelineItem {
+  kind: 'initiative' | 'milestone' | 'idea-schedule';
+  id: string;
+  title: string;
+  startDate?: string;
+  dueDate?: string;
+  status?: string;
+  done?: boolean;
+  source: { strategyId: string; kind: string; projectId?: string; listId?: string; cardId?: string };
+  overdue?: boolean;
+  dependencyLate?: string[];
+}
+export async function getStrategyTimeline(id: string): Promise<TimelineItem[]> {
+  const res = await fetch(`${base}/${encodeURIComponent(id)}/timeline`, fetchOpts({ headers: authedHeaders() }));
+  return (await asJson<{ items: TimelineItem[] }>(res, 'getStrategyTimeline')).items;
+}
+
 // ── composed reads from sibling surfaces (for the create form + link picker) ──
 export async function listOrgs(): Promise<OrgRef[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ orgs: OrgRef[] }>(res, 'listOrgs')).orgs;
 }
 interface ProjectListRow { id: string; name: string; orgId: string; charter?: { status?: string; health?: string } }
 export async function listProjects(): Promise<ProjectRef[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/projects`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/projects`, fetchOpts({ headers: authedHeaders() }));
   const rows = (await asJson<{ projects: ProjectListRow[] }>(res, 'listProjects')).projects;
   return rows.map((p) => ({ id: p.id, name: p.name, orgId: p.orgId, ...(p.charter?.status ? { status: p.charter.status } : {}), ...(p.charter?.health ? { health: p.charter.health } : {}) }));
 }

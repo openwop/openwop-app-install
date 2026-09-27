@@ -10,7 +10,8 @@
  * at dispatch time or returned from `:render` at preview time).
  */
 
-import type { Express, Request } from 'express';
+import type { Express, Request, Response } from 'express';
+import { v1 } from '../middleware/protocolVersion.js';
 import {
   createUserTemplate,
   deleteUserTemplate,
@@ -24,15 +25,18 @@ import {
 import { composePromptTemplate } from '../host/promptCompose.js';
 import { callerSubject } from '../host/requestSubject.js';
 import { isWorkspaceMember } from '../host/accessControlService.js';
+// H27 — this file used to define its OWN `sendError`, same name and same
+// signature as the shared one, emitting the correct FLAT envelope but bypassing
+// BOTH behaviours the middleware guarantees everywhere else: the credential
+// scrub (`sanitizeForErrorMessage`/`sanitizeDetails`) and ADR 0143 locale
+// negotiation. 24 emits, including `workspace_membership_required`, which
+// interpolates a caller-supplied `workspaceId` straight into the message — the
+// exact echo-user-input-back path the scrub exists for. Two functions with one
+// name is also how a reader concludes the host has one emitter when it has two.
+import { sendError } from '../middleware/errorEnvelope.js';
+import { requireKeyLaneScope, type KeyLaneExtensionScope } from '../host/protocolAuthorization.js';
+import { OpenwopError } from '../types.js';
 
-function sendError(res: import('express').Response, status: number, code: string, message: string): void {
-  // Canonical ErrorEnvelope shape per schemas/error-envelope.schema.json:
-  // FLAT `{ error: <code-string>, message: <human-readable>, details?: object }`.
-  // (NOT nested `{ error: { code, message } }` — that's a common
-  // off-the-shelf REST mistake the openwop spec specifically rules out
-  // via `additionalProperties: false` on the envelope.)
-  res.status(status).json({ error: code, message });
-}
 
 /** Parse a stringy PromptRef `prompt:templateId[@version]` into its
  *  components. Returns null on malformed input. */
@@ -55,6 +59,23 @@ function isPromptKind(s: unknown): s is PromptKind {
 interface PromptsCapabilityFlags {
   endpointsSupported: boolean;
   mutableLibrary: boolean;
+}
+
+/**
+ * Wire projection of a stored template. The host-internal `sensitive`
+ * variable marking (RFC 0124 SR-1 — drives `[REDACTED:<id>]` in
+ * `prompt.composed`) is NOT part of the wire PromptVariable shape
+ * (`schemas/prompt-template.schema.json` is `additionalProperties: false`
+ * with no extension hatch), so it must be stripped before any
+ * `/v1/prompts*` response. Redaction behavior is unaffected — compose
+ * reads the stored template, not the wire projection.
+ */
+function toWireTemplate(t: PromptTemplate): PromptTemplate {
+  if (!t.variables?.some((v) => v.sensitive !== undefined)) return t;
+  return {
+    ...t,
+    variables: t.variables.map(({ sensitive: _sensitive, ...rest }) => rest),
+  };
 }
 
 /**
@@ -98,11 +119,30 @@ async function refusedNonMemberWorkspace(req: Request, res: import('express').Re
   return true;
 }
 
+/**
+ * ADR 0755 D1 — `prompts:read` / `prompts:write` (auth.md §"Documented extension
+ * scopes") on the key lane: an `owk_` key that declared other scopes is refused
+ * with the RFC 0200 `insufficient_scope` challenge. These handlers answer through
+ * `sendError` rather than `next(err)`, so the throw is caught and rendered here.
+ * Returns true when the response has been sent.
+ */
+function refusedKeyScope(req: Request, res: Response, scope: KeyLaneExtensionScope): boolean {
+  try {
+    requireKeyLaneScope(req, scope);
+    return false;
+  } catch (err) {
+    if (!(err instanceof OpenwopError)) throw err;
+    sendError(res, err.httpStatus, err.code, err.message, err.details);
+    return true;
+  }
+}
+
 export function registerPromptRoutes(app: Express, deps: { capability: PromptsCapabilityFlags }): void {
   const { capability } = deps;
 
   // ── GET /v1/prompts ───────────────────────────────────────────
-  app.get('/v1/prompts', async (req, res) => {
+  app.get(v1('/prompts'), async (req, res) => {
+    if (refusedKeyScope(req, res, 'prompts:read')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -124,11 +164,12 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     const cursorOffset = typeof q.cursor === 'string' ? Math.max(0, Number(q.cursor) || 0) : 0;
     const slice = items.slice(cursorOffset, cursorOffset + limit);
     const nextCursor = cursorOffset + limit < items.length ? String(cursorOffset + limit) : undefined;
-    res.status(200).json({ items: slice, ...(nextCursor !== undefined ? { nextCursor } : {}) });
+    res.status(200).json({ items: slice.map(toWireTemplate), ...(nextCursor !== undefined ? { nextCursor } : {}) });
   });
 
   // ── POST /v1/prompts ──────────────────────────────────────────
-  app.post('/v1/prompts', async (req, res) => {
+  app.post(v1('/prompts'), async (req, res) => {
+    if (refusedKeyScope(req, res, 'prompts:write')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -155,7 +196,8 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── GET /v1/prompts/{templateId} ──────────────────────────────
-  app.get('/v1/prompts/:templateId', async (req, res) => {
+  app.get(v1('/prompts/:templateId'), async (req, res) => {
+    if (refusedKeyScope(req, res, 'prompts:read')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -190,11 +232,12 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
     } else {
       res.setHeader('Cache-Control', 'public, max-age=60');
     }
-    res.status(200).json(found.template);
+    res.status(200).json(toWireTemplate(found.template));
   });
 
   // ── PUT /v1/prompts/{templateId} ──────────────────────────────
-  app.put('/v1/prompts/:templateId', async (req, res) => {
+  app.put(v1('/prompts/:templateId'), async (req, res) => {
+    if (refusedKeyScope(req, res, 'prompts:write')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -216,7 +259,8 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   });
 
   // ── DELETE /v1/prompts/{templateId} ───────────────────────────
-  app.delete('/v1/prompts/:templateId', async (req, res) => {
+  app.delete(v1('/prompts/:templateId'), async (req, res) => {
+    if (refusedKeyScope(req, res, 'prompts:write')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -238,7 +282,8 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
   // ── POST /v1/prompts:render ───────────────────────────────────
   // Note: Express collapses `:` into a path parameter in some
   // configurations; we register the literal path explicitly.
-  app.post('/v1/prompts:render', async (req, res) => {
+  app.post(v1('/prompts:render'), async (req, res) => {
+    if (refusedKeyScope(req, res, 'prompts:read')) return; // scope above capability, as every other gate (ADR 0755)
     if (!capability.endpointsSupported) {
       sendError(res, 501, 'capability_not_provided', 'capabilities.prompts.endpointsSupported is false');
       return;
@@ -298,7 +343,10 @@ export function registerPromptRoutes(app: Express, deps: { capability: PromptsCa
       const composed = await composePromptTemplate({
         templateId,
         bindings: body.variables,
-        bindingTrust: undefined,
+        // No explicit trust map: compose derives per-binding trust from each
+        // variable's declared `source` (RFC 0143 — `variable`/`context` fail
+        // CLOSED to untrusted). Previously `undefined` meant all-trusted, so
+        // a run-produced value rendered unfenced through this route.
         observability: 'full',
       });
       // Read the generic `composed` body field — populated for all

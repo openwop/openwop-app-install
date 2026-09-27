@@ -13,6 +13,7 @@
  * stacked full-width (list) or in a `.card-grid` (grid); no per-item layout
  * branch, and no new CSS.
  */
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -20,19 +21,27 @@ import { Notice } from '../ui/Notice.js';
 import { toast } from '../ui/toast.js';
 import { AgentAvatar } from '../agents/AgentAvatar.js';
 import { roleThemeForAgent, workflowName } from '../agents/roleTemplates.js';
-import { loadAgentViews, relativeTime, statusRingColor, type AgentView } from '../agents/agentViewModel.js';
+import { loadAgentViews, statusRingColor, type AgentView } from '../agents/agentViewModel.js';
+import { relativeLabel } from './relativeLabel.js';
 import {
-  listApprovals, claimApproval, rejectApproval, editAssistantAction,
+  listApprovals, claimApproval, rejectApproval, editAssistantAction, approvalErrorInfo,
   type PendingApproval, type AssistantActionView,
 } from '../agents/approvalsClient.js';
+import { ContentReviewContext, ApprovalDecideBar } from './ContentReviewContext.js';
 import { ScaleIcon, CheckIcon, XIcon, ClockIcon, ColumnsIcon, BoxesIcon, ListIcon } from '../ui/icons/index.js';
 import { subscribeReviewSignal } from './signalBus.js';
 
 type ViewMode = 'list' | 'grid';
 const isAssistantAction = (a: PendingApproval): boolean => a.kind === 'assistant-action' || !!a.actionId;
-/** Strip the " ago" suffix from a relativeTime() string; `nowLabel` covers the
- *  null/"now" case (passed in so the caller's `t('relativeNow')` localizes it). */
-const compact = (rel: string | null, nowLabel: string): string => (rel ? rel.replace(' ago', '') : nowLabel);
+/** R2 IB-SP-4 — only a RUN proposal may be rendered with run-proposal copy.
+ *  Everything else used to fall into that branch: 'Approve & run' on a
+ *  campaign-spend or content-publish approval that would actually apply
+ *  spend / publish a page. Unknown kinds get the honest generic card. */
+const isRunProposal = (a: PendingApproval): boolean => !isAssistantAction(a) && (!a.kind || a.kind === 'run-proposal');
+const isContentPublish = (a: PendingApproval): boolean => a.kind === 'content-publish';
+const isStrategyActivation = (a: PendingApproval): boolean => a.kind === 'strategy-activation';
+// R2 IB-SP-7 — the English `.replace(' ago','')` surgery is gone: ages now
+// come from the shared localized `relativeLabel` (already compact).
 
 /** http(s)-only guard for provider-derived (untrusted) source URLs. */
 const safeHref = (u?: string): string | undefined => (u && /^https?:\/\//i.test(u) ? u : undefined);
@@ -46,13 +55,12 @@ function destinationOf(action: AssistantActionView): string | null {
 function ItemHead({ persona, role, ringColor, avatarUrl, theme, age }: {
   persona: string; role?: string | undefined; ringColor: string; avatarUrl?: string | undefined; theme: ReturnType<typeof roleThemeForAgent>; age: string | null;
 }): JSX.Element {
-  const { t } = useTranslation('notifications');
   return (
     <div className="u-flex u-items-center u-gap-2 u-wrap">
       <AgentAvatar persona={persona} avatarUrl={avatarUrl} roleTheme={theme} size={36} showBadge={false} ring={ringColor} />
       <span className="roster-name">{persona}</span>
       {role ? <span className="muted u-fs-12">{role}</span> : null}
-      {age ? <span className="chip chip--warning"><ClockIcon size={11} aria-hidden /> {compact(age, t('relativeNow'))}</span> : null}
+      {age ? <span className="chip chip--warning"><ClockIcon size={11} aria-hidden /> {age}</span> : null}
     </div>
   );
 }
@@ -72,10 +80,10 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
     try {
       const [ap, vs] = await Promise.all([listApprovals('pending'), loadAgentViews().catch(() => [] as AgentView[])]);
       setApprovals(ap); setViews(vs); setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+    } catch {
+      setError(t('needsYouLoadFailed')); // R2 IB-SP-8 — no raw API strings
     }
-  }, []);
+  }, [t]);
   useEffect(() => { void refresh(); }, [refresh]);
   // ADR 0074 — when a review is decided on ANY surface/client, the broadcast
   // signal lands here; re-pull the pending list so a resolved approval drops out
@@ -84,24 +92,55 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
 
   const after = useCallback(async () => { await refresh(); onResolved?.(); }, [refresh, onResolved]);
 
+  // ADR 0593 D3 (CMSAU-2) — the shared decide-failure mapper (see ApprovalsInbox).
+  const decideError = useCallback((err: unknown, fallbackKey: string): string => {
+    const info = approvalErrorInfo(err);
+    if (info) return t(info.key, info.options ?? {});
+    return err instanceof Error && err.message ? err.message : t(fallbackKey);
+  }, [t]);
+
   const approve = useCallback(async (a: PendingApproval) => {
     setBusy(a.approvalId);
     try {
       const { runId } = await claimApproval(a.approvalId);
-      toast.success(isAssistantAction(a) ? t('toastApprovedCarry', { persona: a.persona }) : t('toastApprovedRunning', { persona: a.persona }));
+      // R2 IB-SP-4 — the toast must describe what APPROVING DID, per kind
+      // (the ApprovalsInbox ladder): published / activated / carried / ran.
+      toast.success(
+        isContentPublish(a) ? t('toastApprovedPublished')
+          : isStrategyActivation(a) ? t('toastApprovedActivated')
+          : isAssistantAction(a) ? t('toastApprovedCarry', { persona: a.persona })
+          : isRunProposal(a) ? t('toastApprovedRunning', { persona: a.persona })
+          : t('toastApprovedGeneric'),
+      );
       await after();
       if (runId) nav(`/runs/${encodeURIComponent(runId)}`);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('toastCouldNotApprove'));
+      toast.error(decideError(err, 'toastCouldNotApprove'));
     } finally { setBusy(null); }
-  }, [after, nav, t]);
+  }, [after, nav, t, decideError]);
 
-  const reject = useCallback(async (a: PendingApproval) => {
+  // ADR 0593 D4 (CMSAU-5 / CMSAU-13) — a content-publish reject carries the
+  // reviewer's REASON and says what it did ("back in draft"), instead of the
+  // kind-blind "Dismissed." the approve ladder was given honesty and reject
+  // never was.
+  const reject = useCallback(async (a: PendingApproval, note?: string): Promise<boolean> => {
     setBusy(a.approvalId);
-    try { await rejectApproval(a.approvalId); toast.info(t('toastDismissed')); await after(); }
-    catch (err) { toast.error(err instanceof Error ? err.message : t('toastCouldNotRejectShort')); }
+    try {
+      await rejectApproval(a.approvalId, note);
+      // SGU-3 — a rejected activation returns the strategy to draft (resubmittable),
+      // which "Dismissed." did not say.
+      toast.info(
+        isContentPublish(a) ? t('toastRejectedToDraft')
+          : isStrategyActivation(a) ? t('toastStrategyRejectedToDraft')
+            : t('toastDismissed'),
+      );
+      await after();
+      return true;
+    }
+    // F7(5) — a failed reject must not unmount the reason step.
+    catch (err) { toast.error(decideError(err, 'toastCouldNotRejectShort')); return false; }
     finally { setBusy(null); }
-  }, [after, t]);
+  }, [after, t, decideError]);
 
   const saveEdit = useCallback(async (a: PendingApproval) => {
     if (!a.actionId) return;
@@ -137,7 +176,7 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
     const isEditing = editing === a.approvalId;
     return (
       <article className="surface-card u-gap-2" key={a.approvalId}>
-        <ItemHead persona={a.persona} role={view?.entry.label} ringColor="var(--color-warning)" avatarUrl={view?.entry.avatarUrl} theme={theme} age={relativeTime(a.createdAt)} />
+        <ItemHead persona={a.persona} role={view?.entry.label} ringColor="var(--color-warning)" avatarUrl={view?.entry.avatarUrl} theme={theme} age={relativeLabel(a.createdAt, t)} />
         {isAssistantAction(a) && action ? (
           <>
             <div className="u-flex u-items-center u-gap-2 u-wrap">
@@ -162,25 +201,57 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
             <div className="action-bar u-justify-end">
               {isEditing ? (
                 <>
-                  <button type="button" className="primary btn-sm" disabled={busy === a.approvalId} onClick={() => void saveEdit(a)}>{t('saveEdit')}</button>
-                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => setEditing(null)}>{t('common:cancel')}</button>
+                  <Button variant="primary" size="sm" disabled={busy === a.approvalId} onClick={() => void saveEdit(a)}>{t('saveEdit')}</Button>
+                  <Button variant="secondary" size="sm" disabled={busy === a.approvalId} onClick={() => setEditing(null)}>{t('common:cancel')}</Button>
                 </>
               ) : (
                 <>
-                  <button type="button" className="btn-accent-solid btn-sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveLabel')}</button>
-                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</button>
-                  <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => { setEditing(a.approvalId); setDraft(action.draft); }}>{t('common:edit')}</button>
+                  <Button variant="accent-solid" size="sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveLabel')}</Button>
+                  <Button variant="secondary" size="sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</Button>
+                  <Button variant="secondary" size="sm" disabled={busy === a.approvalId} onClick={() => { setEditing(a.approvalId); setDraft(action.draft); }}>{t('common:edit')}</Button>
                 </>
               )}
             </div>
           </>
-        ) : (
-          // Run-proposal: a compact row.
+        ) : isRunProposal(a) ? (
+          // Run-proposal: a compact row. ONLY this kind earns "Approve & run".
           <>
             <p className="u-m-0"><Trans t={t} i18nKey="approvalsRunWorkflow" values={{ name: workflowName(a.workflowId) }} components={{ 1: <strong /> }} />{a.cardTitle ? <span className="muted"> {t('approvalsOnCard', { title: a.cardTitle })}</span> : null}</p>
             <div className="action-bar u-justify-end">
-              <button type="button" className="btn-accent-solid btn-sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveAndRun')}</button>
-              <button type="button" className="secondary btn-sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</button>
+              <Button variant="accent-solid" size="sm" disabled={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveAndRun')}</Button>
+              <Button variant="secondary" size="sm" disabled={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</Button>
+            </div>
+          </>
+        ) : (
+          // R2 IB-SP-4 — every other kind renders the server-authored
+          // proposal (already kind-correct prose) with a plain Approve: the
+          // button must not promise a run the claim will not start.
+          <>
+            <div className="u-flex u-items-center u-gap-2 u-wrap">
+              <span className="chip chip--warning">{t(
+                isContentPublish(a) ? 'approvalsContentGroup'
+                  : isStrategyActivation(a) ? 'approvalsStrategyGroup'
+                  : a.kind === 'campaign-spend' ? 'approvalsSpendGroup'
+                  : 'approvalsOtherGroup',
+              )}</span>
+            </div>
+            <p className="u-m-0">{a.proposal}</p>
+            {/* ADR 0593 D4 (CMSAU-1) — BOTH deciding surfaces get the same
+                context and the same affordances; they used to disagree. */}
+            {isContentPublish(a) && <ContentReviewContext a={a} />}
+            <div className={isContentPublish(a) ? '' : 'action-bar u-justify-end'}>
+              {isContentPublish(a) ? (
+                <ApprovalDecideBar
+                  busy={busy === a.approvalId}
+                  onApprove={() => void approve(a)}
+                  onReject={(note) => reject(a, note)}
+                />
+              ) : (
+                <>
+                  <Button variant="accent-solid" size="sm" disabled={busy === a.approvalId} aria-busy={busy === a.approvalId} onClick={() => void approve(a)}><CheckIcon size={13} /> {t('approveLabel')}</Button>
+                  <Button variant="secondary" size="sm" disabled={busy === a.approvalId} aria-busy={busy === a.approvalId} onClick={() => void reject(a)}><XIcon size={13} /> {t('rejectLabel')}</Button>
+                </>
+              )}
             </div>
           </>
         )}
@@ -194,7 +265,7 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
     const theme = roleThemeForAgent(v.entry.agentRef?.agentId, v.entry.workflows, v.entry.roleKey);
     return (
       <article className="surface-card u-gap-2" key={v.entry.rosterId}>
-        <ItemHead persona={v.entry.persona} role={v.entry.label} ringColor={statusRingColor('waiting')} avatarUrl={v.entry.avatarUrl} theme={theme} age={card?.updatedAt ? relativeTime(card.updatedAt) : null} />
+        <ItemHead persona={v.entry.persona} role={v.entry.label} ringColor={statusRingColor('waiting')} avatarUrl={v.entry.avatarUrl} theme={theme} age={card?.updatedAt ? relativeLabel(card.updatedAt, t) : null} />
         <p className="u-m-0">{card?.title ?? t('blockerDefaultTitle')}</p>
         <p className="muted u-m-0 u-fs-13">
           {card?.blockerNote
@@ -203,7 +274,7 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
                 : t('blockerDefaultNote'))}
         </p>
         <div className="action-bar u-justify-end">
-          <button type="button" className="btn-accent-solid btn-sm" onClick={() => nav(`/agents/${encodeURIComponent(v.entry.rosterId)}?tab=board`)}><ColumnsIcon size={13} /> {t('openBoard')}</button>
+          <Button variant="accent-solid" size="sm" onClick={() => nav(`/agents/${encodeURIComponent(v.entry.rosterId)}?tab=board`)}><ColumnsIcon size={13} /> {t('openBoard')}</Button>
         </div>
       </article>
     );
@@ -216,8 +287,8 @@ export function NeedsYouInbox({ onResolved }: { onResolved?: () => void }): JSX.
         <h2 className="u-flex-1 u-m-0">{t('needsYouTitle')}</h2>
         {total > 0 && <span className="chip chip--warning">{total}</span>}
         <div className="action-bar" role="group" aria-label={t('viewModeLabel')}>
-          <button type="button" className={mode === 'list' ? 'primary btn-sm' : 'secondary btn-sm'} aria-pressed={mode === 'list'} title={t('viewModeList')} onClick={() => setMode('list')}><ListIcon size={14} aria-hidden /> {t('viewModeList')}</button>
-          <button type="button" className={mode === 'grid' ? 'primary btn-sm' : 'secondary btn-sm'} aria-pressed={mode === 'grid'} title={t('viewModeGrid')} onClick={() => setMode('grid')}><BoxesIcon size={14} aria-hidden /> {t('viewModeGrid')}</button>
+          <Button variant={mode === 'list' ? 'primary' : 'secondary'} size="sm" aria-pressed={mode === 'list'} title={t('viewModeList')} onClick={() => setMode('list')}><ListIcon size={14} aria-hidden /> {t('viewModeList')}</Button>
+          <Button variant={mode === 'grid' ? 'primary' : 'secondary'} size="sm" aria-pressed={mode === 'grid'} title={t('viewModeGrid')} onClick={() => setMode('grid')}><BoxesIcon size={14} aria-hidden /> {t('viewModeGrid')}</Button>
         </div>
       </div>
       <p className="muted approvals-lede">

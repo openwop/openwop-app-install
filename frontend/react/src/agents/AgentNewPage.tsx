@@ -1,7 +1,7 @@
 /**
  * Create-agent form — `/agents/new` (phase E2).
  *
- * Posts to `POST /v1/host/openwop-app/agents` (phase E1 endpoint) and
+ * Posts to `POST /host/openwop-app/agents` (phase E1 endpoint) and
  * navigates to the new agent's detail view on success.
  *
  * Form fields mirror the BE validator in `routes/userAgents.ts`:
@@ -20,6 +20,7 @@
  * round-trip.
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -76,7 +77,7 @@ export function AgentNewPage(): JSX.Element {
   // (RFC 0072 §A SR-1), so a fork of a pack-installed agent starts
   // with an empty system prompt — the user has to write their own.
   // A fork of a user-authored agent COULD prefill systemPrompt if we
-  // exposed a separate `GET /v1/host/openwop-app/agents/:id?include=systemPrompt`
+  // exposed a separate `GET /host/openwop-app/agents/:id?include=systemPrompt`
   // surface; for now the limitation is consistent across both sources.
   useEffect(() => {
     if (!forkSource) return;
@@ -255,13 +256,12 @@ export function AgentNewPage(): JSX.Element {
         )}
 
         <div className="u-flex u-gap-2 u-mt-2">
-          <button
+          <Button variant="primary"
             type="submit"
-            className="primary"
             disabled={!validation.ok || isSubmitting}
           >
             {isSubmitting ? t('newSaving') : forkSource ? t('newSaveFork') : t('newCreateAgent')}
-          </button>
+          </Button>
           <Link
             to="/agents"
             className="agentnew-cancel"

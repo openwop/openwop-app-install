@@ -5,9 +5,9 @@
 export const messages = {
   title: 'Ferramentas MCP',
   probing: 'Sondando a costura MCP do host…',
-  disabledPrefix: 'Este host não expõe um ponto de montagem de servidor MCP (',
+  disabledPrefix: 'O servidor MCP está desativado nesta implantação. Um operador pode ativá-lo com a configuração ',
   disabledSuffix:
-    ' está desligado). Quando ativado, o host anuncia aqui seus workflows registrados como ferramentas MCP.',
+    '. Uma vez ativado, os fluxos de trabalho registrados são anunciados aqui como ferramentas MCP.',
   noToolsAdvertised: 'A montagem MCP está ativada, mas nenhuma ferramenta é anunciada.',
   inputSchema: 'esquema de entrada',
   endpointReturned: 'O endpoint MCP retornou {{status}}',

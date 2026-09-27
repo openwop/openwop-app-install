@@ -10,6 +10,7 @@
  * `chat/ArtifactPreviewModal.tsx` so a11y stays consistent across the app.
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
@@ -129,9 +130,9 @@ export function AvatarEditor({
         <div className="avatared-panel">
           <header className="u-flex u-items-center u-gap-2 u-pad-3-4 u-border-b">
             <h2 id="avatar-editor-heading" className="u-m-0 u-fs-16">{t('avatarPhotoHeading', { persona: personaName })}</h2>
-            <button type="button" className="secondary u-ml-auto u-iflex u-items-center" onClick={onCancel} aria-label={t('avatarCloseEditor')}>
+            <Button variant="secondary" className="u-ml-auto u-iflex u-items-center" onClick={onCancel} aria-label={t('avatarCloseEditor')}>
               <XIcon size={14} />
-            </button>
+            </Button>
           </header>
 
           <div className="u-p-4 u-flex u-flex-col u-gap-3">
@@ -180,8 +181,8 @@ export function AvatarEditor({
                 onDrop={(e) => { e.preventDefault(); setDragOver(false); acceptFile(e.dataTransfer.files?.[0]); }}
                 className="avatared-dropzone"
                 style={{
-                  border: `2px dashed ${dragOver ? 'var(--color-accent)' : 'var(--color-border)'}`,
-                  background: dragOver ? 'var(--color-surface-2)' : 'transparent',
+                  border: `2px dashed ${dragOver ? 'var(--clay-text)' : 'var(--rule)'}`,
+                  background: dragOver ? 'var(--paper-2)' : 'transparent',
                 }}
               >
                 {currentAvatarUrl ? (
@@ -207,25 +208,24 @@ export function AvatarEditor({
             {/* Footer actions */}
             <div className="u-flex u-items-center u-gap-2 u-wrap">
               {currentAvatarUrl ? (
-                <button
-                  type="button"
-                  className="secondary u-iflex u-items-center u-gap-1-5 u-text-danger"
+                <Button
+                  variant="danger" className="u-iflex u-items-center u-gap-1-5"
                   onClick={() => void onSave(null)}
                   disabled={saving}
                 >
                   <TrashIcon size={13} /> {t('avatarRemovePhoto')}
-                </button>
+                </Button>
               ) : null}
               <div className="u-ml-auto u-flex u-gap-2">
                 {imageSrc ? (
-                  <button type="button" className="secondary" onClick={() => { setImageSrc(null); setCroppedAreaPixels(null); }} disabled={saving}>
+                  <Button variant="secondary" onClick={() => { setImageSrc(null); setCroppedAreaPixels(null); }} disabled={saving}>
                     {t('avatarChooseAnother')}
-                  </button>
+                  </Button>
                 ) : null}
-                <button type="button" className="secondary" onClick={onCancel} disabled={saving}>{t('newCancel')}</button>
-                <button type="button" className="primary" onClick={() => void onSaveClick()} disabled={saving || !imageSrc || !croppedAreaPixels}>
+                <Button variant="secondary" onClick={onCancel} disabled={saving}>{t('newCancel')}</Button>
+                <Button variant="primary" onClick={() => void onSaveClick()} disabled={saving || !imageSrc || !croppedAreaPixels}>
                   {saving ? t('avatarSaving') : t('avatarSavePhoto')}
-                </button>
+                </Button>
               </div>
             </div>
           </div>

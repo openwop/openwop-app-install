@@ -61,4 +61,52 @@ describe('Menu', () => {
     expect(onC).toHaveBeenCalledOnce();
     expect(screen.queryByRole('menu')).toBeNull();
   });
+
+  // Portal mode (M4) — the dropdown renders at document.body so it escapes an
+  // ancestor scroll container's clipping, WITHOUT losing the keyboard/focus contract.
+  describe('portal mode', () => {
+    function setupPortal(onA = vi.fn()) {
+      const items: MenuEntry[] = [
+        { id: 'a', label: 'Alpha', onSelect: onA },
+        { id: 'c', label: 'Gamma', onSelect: vi.fn() },
+      ];
+      render(<Menu label="Row actions" triggerContent="⋯" triggerClassName="t" items={items} portal />);
+      return { onA };
+    }
+
+    it('renders the dropdown in a portal at document.body, escaping the trigger root', () => {
+      setupPortal();
+      fireEvent.click(screen.getByRole('button', { name: 'Row actions' }));
+      const menu = screen.getByRole('menu');
+      expect(menu.classList.contains('tb-menu-list--portal')).toBe(true);
+      expect(menu.closest('.tb-menu')).toBeNull(); // NOT nested under the trigger
+      expect(menu.parentElement).toBe(document.body);
+    });
+
+    it('preserves the keyboard contract (focus in, Escape closes + returns focus)', () => {
+      setupPortal();
+      const trigger = screen.getByRole('button', { name: 'Row actions' });
+      fireEvent.click(trigger);
+      expect(document.activeElement).toBe(screen.getByRole('menuitem', { name: 'Alpha' }));
+      fireEvent.keyDown(document, { key: 'Escape' });
+      expect(screen.queryByRole('menu')).toBeNull();
+      expect(document.activeElement).toBe(trigger);
+    });
+
+    it('outside-click on the body closes the portaled dropdown', () => {
+      setupPortal();
+      fireEvent.click(screen.getByRole('button', { name: 'Row actions' }));
+      expect(screen.getByRole('menu')).toBeTruthy();
+      fireEvent.mouseDown(document.body);
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+
+    it('selecting a portaled item runs its handler and closes', () => {
+      const { onA } = setupPortal();
+      fireEvent.click(screen.getByRole('button', { name: 'Row actions' }));
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Alpha' }));
+      expect(onA).toHaveBeenCalledOnce();
+      expect(screen.queryByRole('menu')).toBeNull();
+    });
+  });
 });

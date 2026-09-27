@@ -8,11 +8,13 @@
  */
 
 export type NotificationType =
-  | 'workflow.approval_needed'
+  | 'openwop-app.workflow.approval-needed'
   | 'workflow.input_needed'
   | 'workflow.failed'
   | 'workflow.completed'
   | 'system.alert'
+  // ADR 0214 / NOTIF-1 — an agent posted to a channel the user is a member of.
+  | 'chat.channel_post'
   // ADR 0074 — a transient review-status cache hint (NOT an inbox row).
   // Delivered over the same SSE stream via the emitter's non-persisted
   // `signal()` path; the notification store routes it to the review-status
@@ -49,7 +51,7 @@ export interface Notification {
 /** Types that mean "the user needs to act before the workflow advances."
  *  The /inbox page filters to this set; the bell panel shows everything. */
 export const ACTION_NEEDED_TYPES = new Set<NotificationType>([
-  'workflow.approval_needed',
+  'openwop-app.workflow.approval-needed',
   'workflow.input_needed',
 ]);
 
@@ -66,11 +68,12 @@ export function isActionNeeded(n: Notification): boolean {
  *  and the canonical `NotificationType` union in the backend `types.ts` — keep
  *  the three in sync when adding a type. */
 export const KNOWN_TYPES: readonly NotificationType[] = [
-  'workflow.approval_needed',
+  'openwop-app.workflow.approval-needed',
   'workflow.input_needed',
   'workflow.failed',
   'workflow.completed',
   'system.alert',
+  'chat.channel_post',
 ] as const;
 
 /** i18n key for each well-known type's human label, surfaced in the prefs UI.
@@ -78,11 +81,12 @@ export const KNOWN_TYPES: readonly NotificationType[] = [
  *  (open-wire) type falls through to the raw type string (i18next echoes a
  *  missing key), preserving forward-compat. */
 export const TYPE_LABEL_KEYS: Record<string, string> = {
-  'workflow.approval_needed': 'notifications:typeApprovalNeeded',
+  'openwop-app.workflow.approval-needed': 'notifications:typeApprovalNeeded',
   'workflow.input_needed':    'notifications:typeInputNeeded',
   'workflow.failed':          'notifications:typeWorkflowFailed',
   'workflow.completed':       'notifications:typeWorkflowCompleted',
   'system.alert':             'notifications:typeSystemAlert',
+  'chat.channel_post':        'notifications:typeChannelActivity',
   // Comments feature (ADR 0021) — additive, fallback-protected; no core-union edit.
   'comment.added':            'notifications:typeCommentAdded',
   'comment.reply':            'notifications:typeCommentReply',
@@ -115,6 +119,9 @@ export interface QuietHoursConfig {
    *  toasts during quiet hours. Defaults to true so genuine emergencies
    *  cut through. */
   allowUrgent: boolean;
+  /** NOTIF-2 — the IANA zone the window is evaluated in server-side (set from the
+   *  browser). Without it, server-side producers can't honor quiet-hours. */
+  timezone?: string;
 }
 
 /** Full preferences blob. Persisted to localStorage under the key
@@ -127,6 +134,10 @@ export interface NotificationPreferences {
   /** Per-type rows. Unlisted types fall back to defaults. */
   types: NotificationTypePreference[];
   quietHours: QuietHoursConfig;
+  /** ADR 0192 D7 — conversation ids (channels/groups) the user muted: the rail
+   *  dims them + suppresses counters. ABSENT (not `[]`) when never set — the
+   *  backend PUT is merge-on-absent, so older blobs can't wipe mutes. */
+  mutedConversations?: string[];
   /** Schema version for future migration. */
   version: 1;
 }

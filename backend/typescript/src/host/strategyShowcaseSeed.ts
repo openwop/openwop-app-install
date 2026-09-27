@@ -137,7 +137,11 @@ export async function seedStrategyShowcase(tenantId: string, _storage: Storage):
     .map((k) => strategyIdByKey.get(k))
     .filter((id): id is string => typeof id === 'string')
     .map((strategyId) => ({ kind: 'strategy' as const, strategyId }));
-  if (advisors.length > 0) {
+  // Idempotent by handle: `createBoard` auto-uniquifies the handle, so an
+  // unguarded re-seed mints a duplicate board every run (board-of-directors-2/…).
+  // Match the working advisors seeder (advisoryBoardSeed.ts) and skip if present.
+  const boardExists = (await listBoards(tenantId, undefined)).some((b) => b.handle === SHOWCASE.board.handle);
+  if (advisors.length > 0 && !boardExists) {
     try {
       await createBoard(tenantId, orgId, SHOWCASE_SEED_ACTOR, {
         name: SHOWCASE.board.name,
@@ -155,7 +159,7 @@ export async function seedStrategyShowcase(tenantId: string, _storage: Storage):
       // core of the showcase; the context-bearing board needs demo mode.
       log.warn('strategy_showcase_board_skipped', { tenantId, error: err instanceof Error ? err.message : String(err) });
     }
-  } else {
+  } else if (advisors.length === 0) {
     log.warn('strategy_showcase_board_skipped_no_advisors', { tenantId });
   }
 

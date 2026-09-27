@@ -19,6 +19,12 @@ const toRow = (s: ProjectSchedule): SubjectScheduleRow => ({
   ...(s.workflowId !== undefined ? { workflowId: s.workflowId } : {}),
   ...(s.timezone !== undefined ? { timezone: s.timezone } : {}),
   ...(s.lastRunAt !== undefined ? { lastRunAt: s.lastRunAt } : {}),
+  // WF-PRJ-2 — the daemon's outcome record (run link + skip reason) reaches the
+  // panel; dropping these made a typo'd schedule look healthy forever.
+  ...(s.lastRunId !== undefined ? { lastRunId: s.lastRunId } : {}),
+  ...(s.lastSkippedAt !== undefined ? { lastSkippedAt: s.lastSkippedAt } : {}),
+  ...(s.lastSkipReason !== undefined ? { lastSkipReason: s.lastSkipReason } : {}),
+  ...(s.nextFireAt !== undefined ? { nextFireAt: s.nextFireAt } : {}),
 });
 
 export function ProjectSchedulesTab({ projectId, workflows, canWrite }: { projectId: string; workflows: string[]; canWrite: boolean }): JSX.Element {

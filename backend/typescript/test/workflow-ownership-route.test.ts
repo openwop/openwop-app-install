@@ -19,7 +19,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = ''; // cookie mode ON → anon sessions minted
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+  server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
   PORT = (server.address() as AddressInfo).port;
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

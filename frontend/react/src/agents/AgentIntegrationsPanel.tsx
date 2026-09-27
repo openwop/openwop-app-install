@@ -5,11 +5,13 @@
  * without a real integration. Future sources are clearly labeled.
  */
 
-import { useState, type ComponentType, type CSSProperties } from 'react';
+import { Button } from '../ui/Button.js';
+import { useEffect, useState, type ComponentType, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { createCard } from '../kanban/kanbanClient.js';
 import { Notice } from '../ui/Notice.js';
 import { BotIcon, MessageCircleIcon, PlugIcon, SendIcon } from '../ui/icons/index.js';
+import { demoModeCached, loadDemoMode } from '../client/demoMode.js';
 
 type IconCmp = ComponentType<{ size?: number; strokeWidth?: number; style?: CSSProperties }>;
 
@@ -33,6 +35,12 @@ export function AgentIntegrationsPanel({ boardId, persona, onChanged }: { boardI
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [discordTask, setDiscordTask] = useState('');
+  // LEAK-6: the "Planned" rows (Slack/Email/Webhook) advertise unbuilt features.
+  // Only surface them on the public demo; a real deploy shows just the working
+  // (preview) sources so the panel never markets roadmap stubs as product.
+  const [demo, setDemo] = useState(demoModeCached());
+  useEffect(() => { void loadDemoMode().then(setDemo); }, []);
+  const visibleSources = SOURCES.filter((s) => demo || s.status !== 'planned');
 
   const handle = persona.toLowerCase();
 
@@ -57,7 +65,7 @@ export function AgentIntegrationsPanel({ boardId, persona, onChanged }: { boardI
   return (
     <div className="agentintg-root">
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
       <p className="muted u-mt-0">
         {t('intgWorkSources', { persona })}
@@ -79,16 +87,16 @@ export function AgentIntegrationsPanel({ boardId, persona, onChanged }: { boardI
             className="agentintg-discord-input"
             disabled={!boardId}
           />
-          <button type="button" className="primary" onClick={() => void onCreateDiscord()} disabled={!boardId || !discordTask.trim()}>
+          <Button variant="primary" onClick={() => void onCreateDiscord()} disabled={!boardId || !discordTask.trim()}>
             {t('intgCreateDiscordTask')}
-          </button>
+          </Button>
         </div>
         {!boardId ? <p className="muted u-fs-12">{t('intgCreateBoardFirst')}</p> : null}
       </div>
 
       <strong className="u-fs-14">{t('intgAllSources')}</strong>
       <ul className="agentintg-list">
-        {SOURCES.map((s) => (
+        {visibleSources.map((s) => (
           <li key={s.nameKey} className="agentintg-source-row">
             <span className="muted u-iflex"><s.Icon size={16} /></span>
             <span className="agentintg-source-name">{t(s.nameKey)}</span>

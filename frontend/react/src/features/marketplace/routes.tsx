@@ -8,17 +8,25 @@ import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
 const MarketplacePage = lazy(() => import('./MarketplacePage.js').then((m) => ({ default: m.MarketplacePage })));
+const BundleShopPage = lazy(() => import('./BundleShopPage.js').then((m) => ({ default: m.BundleShopPage })));
 
 const routes: FeatureRoute[] = [
+  // ADR 0366 P3 — the bundle shop: linked from the marketplace page, no
+  // separate nav entry (one Marketplace nav item stays the wayfinding truth).
+  {
+    path: '/marketplace/bundles',
+    element: <BundleShopPage />,
+    tier: 'admin', archetype: 'admin',
+  },
   {
     path: '/marketplace',
     element: <MarketplacePage />,
-    tier: 'workspace',
+    tier: 'admin', archetype: 'admin',
     nav: {
-      group: 'Workspace',
-      label: 'Marketplace',
+      group: 'Developer',
+      label: 'Marketplace', labelKey: 'marketplaceLabel',
       icon: BoxesIcon,
-      hint: 'Browse + install signed feature packs',
+      hint: 'Browse + install signed feature packs', hintKey: 'marketplaceHint',
       featureId: 'marketplace',
     },
   },

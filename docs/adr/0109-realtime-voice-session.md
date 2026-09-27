@@ -107,7 +107,7 @@ the build honors the corrected shape:
   emits interim / `speech_start` / `endpoint_candidate` / `turn_commit` as `voice.*` run-events on
   the durable log (the **single** taxonomy — no separate iterable element, so no SSoT/replay
   ambiguity) and `callTranscriber` **resolves a `Promise` at `turn_commit`** with the committed
-  turn. This is exactly the `callAI` streaming mechanism (`ai.message.chunk` deltas to the log +
+  turn. This is exactly the `callAI` streaming mechanism (`output.chunk` deltas to the log +
   a resolved Promise, ADR 0079 §Phase 4) — the host already runs this pattern, so the corrected
   shape is *more* native than the original iterable, not less.
 - **C2 — inline-base64 synthesis chunks must stay clause-sized + bounded cumulatively.** RFC 0106

@@ -21,10 +21,24 @@
 import type { BackendFeature } from '../types.js';
 import { registerMarketplaceRoutes } from './routes.js';
 import { buildMarketplaceSurface } from './surface.js';
+import { registerMarketplaceAgentTools } from './agentTools.js';
+import { registerMarketplaceErasure } from './erasure.js';
 
 export const marketplaceFeature: BackendFeature = {
   id: 'marketplace',
-  registerRoutes: (deps) => registerMarketplaceRoutes(deps),
+  registerRoutes: (deps) => {
+    registerMarketplaceRoutes(deps);
+    // CFP-1 — the Marketplace Recommender agent's real search tool. Process-wide
+    // + inert until the pack allowlists the id; per-tenant toggle honesty lives
+    // inside the tool's run().
+    registerMarketplaceAgentTools();
+    // MPL-7 (ADR 0464) — the subject-erasure seam. `marketplace:review` sat in
+    // the ratchet's ACTOR_ATTRIBUTED_DEBT ledger as a permanent record of a gap,
+    // and `marketplace:pack-disable` was invisible to the ratchet entirely
+    // (`disabledBy` matched none of its actor signals). Both are ANONYMIZED, not
+    // deleted — the reasons are argued in `erasure.ts`.
+    registerMarketplaceErasure();
+  },
   // Face 2 (ADR 0014): `ctx.features.marketplace` — read-only listings/search over
   // the listing projection. Install is NOT surfaced (privileged, process-global).
   surface: { id: 'marketplace', build: buildMarketplaceSurface },
@@ -32,13 +46,13 @@ export const marketplaceFeature: BackendFeature = {
     id: 'marketplace',
     label: 'Marketplace',
     description: 'Browse + install signed feature packs from the registry — sample product feature.',
-    category: 'Business Tools',
+    category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'marketplace',
   },
   requiredPacks: [
     { name: 'feature.marketplace.nodes', version: '1.1.0' },
-    { name: 'feature.marketplace.agents', version: '1.0.0' },
+    { name: 'feature.marketplace.agents', version: '1.0.1' }, // CFP-1 real search tool
   ],
 };

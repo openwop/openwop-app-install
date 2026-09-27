@@ -6,6 +6,9 @@
  * the control. The page component stays under `src/notifications/`.
  */
 import { lazy } from 'react';
+
+// P4 continuation — this page's walkthrough spotlight (lazy chunk, boot-eager trigger).
+void import('../../walkthroughs/pageSpotlight.js').then((m) => m.registerPageSpotlight('inbox.page.view', '/inbox', 'inbox.page'));
 import { InboxIcon } from '../../ui/icons/index.js';
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
@@ -16,12 +19,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/inbox',
     element: <NotificationsPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'Workspace',
-      label: 'Inbox',
+      group: 'Pinned',
+      label: 'Inbox', labelKey: 'notificationsLabel',
       icon: InboxIcon,
-      hint: 'What needs you — approvals, blockers, notifications',
+      hint: 'What needs you — approvals, blockers, notifications', hintKey: 'notificationsHint',
       // IA refresh: the action portal sits just under Chat (order 15) — "what
       // needs me" is a daily return surface, ahead of Agents (management, 20).
       order: 15,

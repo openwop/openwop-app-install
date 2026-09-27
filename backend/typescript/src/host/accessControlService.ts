@@ -40,10 +40,15 @@
  */
 
 import { randomUUID, createHash } from 'node:crypto';
-import { DurableCollection } from './hostExtPersistence.js';
+import { DurableCollection, countOrgHostExtRows } from './hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
+import { clearActiveWorkspaceIfPointingAt } from './activeWorkspacePref.js';
+import { invalidateMcpCacheForPrincipal } from './mcpClientCache.js';
 import { OpenwopError } from '../types.js';
 import { demoMode } from './demoMode.js';
+import { registerSubjectEraser } from './subjectErasure.js';
+import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
+import { isPersonalTenantId } from './requestSubject.js';
 
 const accessLog = createLogger('host.accessControl');
 
@@ -59,6 +64,29 @@ const LAST_OWNER_MSG =
  * ONLY scopes that could ever be enumerated in a `capabilities.authorization`
  * advertisement (not advertised today — see file header).
  */
+/**
+ * The "act as this member" request header — ONE spelling, shared by every reader.
+ *
+ * WHY THIS IS A CONSTANT AND NOT A LITERAL. It used to be redeclared in five
+ * route files, and they DISAGREED: `routes/accessControl.ts` read
+ * `x-openwop-act-as` (the name the SPA actually sends,
+ * `client/accessClient.ts:107`) while cdp / orgs / environments / entities each
+ * declared `x-openwop-act-as-member` — a name nothing in this repo has ever
+ * sent.
+ *
+ * The consequence is a TRAP rather than a live leak (measured: no client calls
+ * those four route families with any act-as header). But the fail direction is
+ * open — `resolveEffectiveAccess(tenant, {})` with no member context returns
+ * the tenant-owner principal with OWNER_SCOPES, not zero — so a caller who
+ * reasonably guessed the name the rest of the app uses would be silently
+ * un-narrowed instead of refused.
+ *
+ * Five copies of one authorization-relevant string is the drift generator; the
+ * constant is the cure, and `access-header-parity.test.ts` keeps it the only
+ * spelling.
+ */
+export const ACT_AS_HEADER = 'x-openwop-act-as';
+
 export const PROTOCOL_SCOPES = [
   'manifest:read',
   'runs:read',
@@ -87,12 +115,84 @@ export const MANAGEMENT_SCOPES = [
   'host:org:manage',
   'host:teams:manage',
   'host:members:manage',
+  'host:kicktodo:manage',
+  // ADR 0711 — BYOK writes in a SHARED workspace. The secret store is tenant-wide:
+  // one active-config binding and one key set serve every member, so "first member
+  // to click sets it for everyone" and "any member can delete the workspace key"
+  // were both reachable by any authenticated co-tenant. Reserved to built-in
+  // admin/owner, never mintable onto a custom role (it administers shared
+  // credentials — the same reasoning as `host:connections:manage`).
+  'host:byok:manage',
   'host:groups:manage',
   'host:roles:manage',
   // ADR 0024 D2 — admin-only management of org-shared Connections (create /
   // rotate / revoke / test). Reserved to built-in admin/owner, never mintable
   // onto a custom role (it administers shared credentials).
   'host:connections:manage',
+  // ADR 0272 — Sales Territory Management. `manage` gates model activation /
+  // archival (the single-active-model transition); `view-all` is the P4 override
+  // that bypasses territory-scoped record visibility (admin sees every record).
+  // Reserved to built-in admin/owner, never mintable onto a custom role.
+  'host:territories:manage',
+  'host:territories:view-all',
+  // ADR 0280 — Sales Commissions. Gates commission-plan admin + statement
+  // approval (the payout-affecting transitions). Reserved to built-in
+  // admin/owner, never mintable onto a custom role.
+  'host:commissions:manage',
+  // ADR 0281 — Dealer Network. Gates dealer deal-registration approval.
+  // Reserved to built-in admin/owner, never mintable onto a custom role.
+  'host:dealers:manage',
+  // ADR 0393 — App-Builder two-way GitHub sync. Gates the canvas↔repo binding
+  // (wires a durable external write channel + an inbound webhook that can
+  // mutate tenant state — stronger than the workspace:write publish). Reserved
+  // to built-in admin/owner, never mintable onto a custom role.
+  'host:code-sync:manage',
+  // ADR 0394 — WhatsApp BSP channel. Gates the tenant's Meta-facing no-training
+  // attestation (+ future template/number management). Reserved to built-in
+  // admin/owner, never mintable onto a custom role.
+  'host:whatsapp:manage',
+  // ADR 0434 / KTFULL-B1..B2 — KickTodo authoring, publication, Factory
+  // operation, moderation and outcome-metric administration. Publishing a
+  // challenge is a CONTENT-SAFETY act (the factory's gates decide what real
+  // people are told to do), so it is admin-class authority, never "any
+  // authenticated co-tenant".
+  'host:kicktodo:manage',
+  // ── ADR 0554 P3 / RFC 0151 §E — compensation operator recovery ─────────────
+  //
+  // THREE scopes, and the split is the control, not the naming. Boundary row 8
+  // of ADR 0554 says "start/retry/waive are separate permissions"; three ids
+  // granted to an identical role set would be a naming convention wearing a
+  // control's clothes, so the LADDER below is what makes them distinct:
+  // `:start`/`:retry` are admin-tier, `:waive` is OWNER-ONLY (the same rung
+  // `host:org:manage` sits on).
+  //
+  // They are `host:` MANAGEMENT scopes, deliberately NOT `PROTOCOL_SCOPES`.
+  // Adding to that set would be a WIRE change — stated twice in-tree:
+  // `features/insights-suite/routes.ts` ("adding to RFC 0049 PROTOCOL_SCOPES
+  // would be a wire change", ADR 0078 §Phase-1 correction) and
+  // `host/workloadIdentity.ts`, where `PROTOCOL_SCOPES` is the closed-world
+  // validator for RFC 0154 DELEGATED workload credentials, i.e. the set crosses
+  // a hop boundary in fact and not merely by naming.
+
+  /** Start an unwind for a terminated run whose obligations never ran (the ADR
+   *  0554 P2 residue: a run reaped by the dispatch sweeper leaves rows at
+   *  `requested`). Admin-tier — it runs the AUTHORED inverse and nothing else. */
+  'host:compensation:start',
+  /** Resume a HELD plan, re-running the authored inverse. Admin-tier for the
+   *  same reason: it executes exactly what the workflow author declared. */
+  'host:compensation:retry',
+  /**
+   * The AUTHORED-CONTRACT-OVERRIDE permission. OWNER-ONLY.
+   *
+   * It is not just "waive": it gates every operator act that departs from the
+   * §B declaration — `skip` and `terminate` (decline to undo) AND `substitute`
+   * (undo by other means). `substitute` is here rather than under `:retry`
+   * because it runs an ARBITRARY registered `nodeTypeId` under the obligation's
+   * §C identity — an effect the author never declared, presenting the same
+   * downstream idempotency key. Gating that with the weaker scope would put a
+   * privilege-escalation surface on the admin rung.
+   */
+  'host:compensation:waive',
 ] as const;
 
 export type Scope = (typeof PROTOCOL_SCOPES)[number] | (typeof MANAGEMENT_SCOPES)[number];
@@ -135,8 +235,41 @@ const ADMIN_SCOPES: Scope[] = [
   // ADR 0024 D2 — admin both manages org connections and may use them.
   'host:connections:manage',
   'connections:use',
+  // ADR 0711 — admin/owner administer the workspace's BYOK secrets + active config.
+  'host:byok:manage',
+  // ADR 0272 — admin/owner administer territory models + hold the visibility override.
+  'host:territories:manage',
+  'host:territories:view-all',
+  // ADR 0280 — admin/owner administer commission plans + approve statements.
+  'host:commissions:manage',
+  // ADR 0281 — admin/owner approve dealer deal registrations.
+  'host:dealers:manage',
+  // ADR 0393 — admin/owner bind an app-builder canvas to a GitHub repo.
+  'host:code-sync:manage',
+  // ADR 0394 — admin/owner record the WhatsApp no-training attestation.
+  'host:whatsapp:manage',
+  // ADR 0434 / KTFULL-B1..B2 — KickTodo authoring, publication, Factory
+  // operation, moderation and outcome-metric administration. Publishing a
+  // challenge is a CONTENT-SAFETY act (the factory's gates decide what real
+  // people are told to do), so it is admin-class authority, never "any
+  // authenticated co-tenant".
+  'host:kicktodo:manage',
+  // ADR 0554 P3 — admin may START and RETRY an unwind: both run the inverse the
+  // workflow AUTHOR declared, and nothing else.
+  'host:compensation:start',
+  'host:compensation:retry',
 ];
-const OWNER_SCOPES: Scope[] = [...ADMIN_SCOPES, 'host:org:manage'];
+const OWNER_SCOPES: Scope[] = [
+  ...ADMIN_SCOPES,
+  'host:org:manage',
+  // ADR 0554 P3 — OWNER-ONLY, and this line is the control. Waiving (or
+  // substituting) departs from the authored §B contract: it leaves a committed
+  // real effect un-undone, or undoes it by means the author never declared.
+  // `compensation-recovery-rbac.test.ts` asserts an ADMIN principal is refused
+  // here — without that leg the three scope ids would be indistinguishable and
+  // the "separate permissions" boundary would be a label.
+  'host:compensation:waive',
+];
 
 export const BUILT_IN_ROLES: Record<BuiltInRoleId, AccessRole> = {
   viewer: { id: 'viewer', name: 'Viewer', description: 'Read-only access to runs, artifacts, audit, and workspace.', scopes: VIEWER_SCOPES, builtIn: true },
@@ -240,9 +373,100 @@ export interface CustomRole {
   updatedAt: string;
 }
 
-const orgs = new DurableCollection<Organization>('access-orgs', (o) => o.orgId);
+// `tenantOf` opts this collection into the GOV-1 tenant secondary index, so
+// `listForTenantIndexed` is a bounded scan of one tenant's slice instead of a
+// full cross-tenant `list()` + in-memory filter. It does NOT re-key the primary
+// rows, so there is no migration and no data-loss risk — `ensureTenantIndex()`
+// backfills legacy rows once behind a sentinel, stale markers self-heal, and
+// concurrent backfills are harmless because marker writes are idempotent.
+const orgs = new DurableCollection<Organization>('access-orgs', (o) => o.orgId, undefined, (o) => o.tenantId);
 const teams = new DurableCollection<Team>('access-teams', (t) => t.teamId);
-const members = new DurableCollection<OrgMember>('access-members', (m) => m.memberId);
+// ADR 0434 / IDN-7 — `tenantOf` enables the TENANT SECONDARY INDEX so
+// `isWorkspaceMember` can do a BOUNDED scan of one workspace's members instead of
+// `list()`'s full CROSS-TENANT scan on every authenticated request. The primary
+// rows are NOT re-keyed, so there is no migration and no data-loss risk; the
+// collection maintains the markers on put/delete, which is what makes this safe
+// across all eleven member-writer sites (including `rekeyMemberSubject`, which
+// mutates `.subject`) without a hand-maintained write-through index that a missed
+// site would silently corrupt into a LOCKOUT.
+const members = new DurableCollection<OrgMember>(
+  'access-members',
+  (m) => m.memberId,
+  undefined,
+  (m) => m.tenantId,
+);
+/**
+ * ADR 0684 phase 5 — a POINT-READ index for workspace membership.
+ *
+ * `isWorkspaceMember` runs on EVERY authenticated request and at session mint,
+ * and answers a point question — "is THIS subject a member of THIS workspace" —
+ * with an O(N) slice scan, falling through to a FULL CROSS-TENANT scan to
+ * confirm a denial. That was affordable while every workspace was small. ADR 0684
+ * introduces a default workspace containing every user who has ever signed in,
+ * which makes N unbounded on the hottest path in the app.
+ *
+ * WHY A SIDECAR AND NOT AN INDEX: `DurableCollection` carries exactly ONE
+ * secondary index (`tenantOf`), already spent on `tenantId`. And
+ * `indexProjection`/`listForTenantProjected` is not a substitute — it avoids
+ * decoding full rows, lowering the CONSTANT while leaving the complexity at
+ * O(N). It looks like the fix and does not move the axis that matters.
+ *
+ * WHY THIS IS SAFE: it is a pure ADDITIVE FAST PATH. A hit returns true in O(1);
+ * a miss falls through to the pre-existing logic unchanged. So a missing entry
+ * can never produce a false negative — the thing that would lock a real member
+ * out of their own workspace — and no backfill is required for CORRECTNESS.
+ * Backfill would only widen the fast path. This is the one direction an
+ * authorization check must never fail, so the fast path is allowed to say "yes"
+ * and never "no".
+ *
+ * Keyed on the same `(subject, workspaceId)` pair as the ADR 0684 §7 join ledger:
+ * one key shape doing three jobs — join idempotence, removal-wins, and this —
+ * because it is the same question asked at three moments.
+ */
+interface WorkspaceMemberIndexRow { id: string; tenantId: string; memberId: string }
+const memberIndex = new DurableCollection<WorkspaceMemberIndexRow>(
+  'access-member-index', (r) => r.id, undefined, (r) => r.tenantId,
+);
+const memberIndexKey = (workspaceId: string, subject: string): string => `${workspaceId}::${subject}`;
+
+/** The DETERMINISTIC id of a workspace-root membership, derived from the
+ *  relationship it represents — `(tenantId, subject)`.
+ *
+ *  ADR 0697 D1. This used to be `personalOwnerMemberId`, applied to personal
+ *  workspaces alone, and its comment already named the hazard: concurrent callers
+ *  computing the SAME id upsert one row, where "the random `mbr-<uuid>` path
+ *  would race to two". That was written when every SHARED workspace-root
+ *  membership came from a human action, so no concurrent writer could reach it.
+ *  ADR 0684's auto-join added one, and the race produced exactly the twins the
+ *  comment predicted — which the phase-5 index then hid, and which survived the
+ *  operator's removal to re-grant membership through `isWorkspaceMember`'s
+ *  authoritative fallback.
+ *
+ *  A personal workspace is now a SPECIAL CASE of one rule rather than the only
+ *  place the rule is applied. Sub-org memberships (`orgId !== tenantId`) keep
+ *  `mbr-<uuid>`: they are not the shape `isWorkspaceMember` reads, and giving
+ *  them a derived id would change ids that are already in use for no gain. */
+function workspaceRootMemberId(tenantId: string, subject: string): string {
+  return `mbr-${createHash('sha256').update(`${tenantId}:${subject}`).digest('hex').slice(0, 12)}`;
+}
+
+/** Workspace-ROOT membership only — the shape `isWorkspaceMember` matches. */
+function indexableWorkspaceMember(m: OrgMember): boolean {
+  return isWorkspaceRootMembership(m) && typeof m.subject === 'string' && m.subject.length > 0;
+}
+
+async function indexWorkspaceMember(m: OrgMember): Promise<void> {
+  if (!indexableWorkspaceMember(m)) return;
+  try {
+    await memberIndex.put({ id: memberIndexKey(m.tenantId, m.subject as string), tenantId: m.tenantId, memberId: m.memberId });
+  } catch { /* the index is an optimisation; never fail a membership write for it */ }
+}
+
+async function unindexWorkspaceMember(m: OrgMember): Promise<void> {
+  if (!indexableWorkspaceMember(m)) return;
+  try { await memberIndex.delete(memberIndexKey(m.tenantId, m.subject as string)); } catch { /* as above */ }
+}
+
 const groups = new DurableCollection<Group>('access-groups', (g) => g.groupId);
 const customRoles = new DurableCollection<CustomRole>('access-custom-roles', (r) => r.roleId);
 
@@ -302,8 +526,7 @@ export async function createOrg(input: {
 }
 
 export async function listOrgs(tenantId: string): Promise<Organization[]> {
-  return (await orgs.list())
-    .filter((o) => o.tenantId === tenantId)
+  return (await orgs.listForTenantIndexed(tenantId))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
@@ -311,11 +534,104 @@ export async function getOrg(orgId: string): Promise<Organization | null> {
   return orgs.get(orgId);
 }
 
+/**
+ * CMNT-4 — THE org-scope predicate, in one place, for every lane that has a
+ * subject.
+ *
+ * Two checks, in this order, and both matter:
+ *   1. the org exists IN THIS TENANT — a foreign or dangling id is a uniform
+ *      404, never a cross-tenant existence leak;
+ *   2. the subject holds `scope` in it — `resolveEffectiveAccess` is the same
+ *      resolver the HTTP routes and the chat tools already consult.
+ *
+ * WHY IT MOVED HERE. `featureRoute.requireOrgScope` (the HTTP lane) and
+ * `agentToolKit.resolveReadOrgScope` / `resolveActionOrgScope` (the chat-tool
+ * lane) both performed exactly this pair, and the WORKFLOW-SURFACE lane
+ * performed NEITHER — `features/comments/surface.ts` took `orgId` verbatim from
+ * node args, so a chain node in a multi-org tenant could read and write comment
+ * threads in an org the run had no membership in. Extracting the predicate means
+ * the surface shares the routes' gate rather than carrying a third, weaker copy
+ * that can drift.
+ *
+ * Callers that need a RESULT rather than a throw (the tools' three-way
+ * `empty`/`error`/`ok` shape) keep their own wrappers — this owns the DECISION,
+ * not the presentation.
+ */
+export async function assertOrgScope(
+  tenantId: string,
+  subject: string,
+  orgId: string,
+  scope: Scope,
+  /** ADR 0622 D2 — the caller's PERSONAL tenant, honoured with the SAME
+   *  `isPersonalTenantId` shape guard as `assertTenantScope`: the implicit
+   *  personal-owner short-circuit fires only when the org's tenant IS a
+   *  `user:`/`anon:`-shaped personal tenant of this caller (USERS-19). The
+   *  org-existence check still runs FIRST, so a foreign org stays a uniform
+   *  404 even for a personal owner. The act-as header is HTTP-only and stays
+   *  in the route (`orgs/routes.ts requireMemberManage`). */
+  ctx: { personalTenant?: string } = {},
+): Promise<void> {
+  const org = await getOrg(orgId);
+  if (!org || org.tenantId !== tenantId) {
+    throw new OpenwopError('not_found', 'Organization not found.', 404, { orgId });
+  }
+  if (ctx.personalTenant === tenantId && isPersonalTenantId(tenantId)) return; // implicit personal owner
+  const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
+  if (!access.scopes.includes(scope)) {
+    throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
+  }
+}
+
+/**
+ * Ensure `orgId` exists AS A WORKSPACE ROOT bound to `tenantId`, repairing a row
+ * left in the pre-ADR-0684-correction shape. Returns what it did, so the caller
+ * can log a repair distinctly from a routine create.
+ *
+ * WHY A REPAIR PATH IS NEEDED AT ALL. The ADR 0684 correction changed the
+ * declared tenant id (`host:kicktodo` → `host-kicktodo`) but `ensureFeature
+ * DefaultOrgs` keys idempotence on the ORG id, which did NOT change. So on every
+ * host that had already booted the old code, `getOrg` finds the stale row, the
+ * create is skipped, and the org keeps `tenantId: 'host:<f>'` forever — still not
+ * a workspace root. Worse than before the correction, because auto-join now
+ * writes workspace-root-shaped MEMBER rows, so `isWorkspaceMember` passes while
+ * `getWorkspace` still returns null: half-working rather than cleanly broken.
+ * Caught on `app.openwop.dev`, which already had `host-kicktodo` provisioned.
+ *
+ * THE ROW IS REPLACED, NOT MUTATED IN PLACE. `orgs` carries a tenant secondary
+ * index keyed on `tenantId`, so editing that field would leave a marker stranded
+ * under the old tenant pointing at a row that no longer belongs to it. `delete`
+ * clears row and marker together. It fires no cascade here — `orgs` is
+ * constructed without an `onDeleted`, so this does NOT touch members, unlike the
+ * exported `deleteOrg` below.
+ *
+ * MEMBER ROWS UNDER THE OLD TENANT ARE LEFT ALONE, deliberately. They were never
+ * functional (no predicate ever matched them), so they are inert, and deleting
+ * production rows unattended at boot is a bigger risk than leaving dead ones.
+ * They are reported in the return value so the caller can say so out loud.
+ */
+export async function ensureWorkspaceRootOrg(input: {
+  orgId: string; tenantId: string; name: string; createdBy: string;
+}): Promise<{ action: 'created' | 'repaired' | 'unchanged'; priorTenantId?: string }> {
+  if (!isWorkspaceRootPair(input.orgId, input.tenantId)) {
+    throw new Error(`ensureWorkspaceRootOrg: "${input.orgId}"/"${input.tenantId}" is not a workspace root — the ids must be EQUAL.`);
+  }
+  const existing = await getOrg(input.orgId);
+  if (existing && isWorkspaceOrg(existing)) return { action: 'unchanged' };
+  if (existing) {
+    const priorTenantId = existing.tenantId;
+    await orgs.delete(input.orgId); // row + index marker; no cascade (see above)
+    await createOrg({ tenantId: input.tenantId, orgId: input.orgId, createdBy: input.createdBy, name: input.name });
+    return { action: 'repaired', priorTenantId };
+  }
+  await createOrg({ tenantId: input.tenantId, orgId: input.orgId, createdBy: input.createdBy, name: input.name });
+  return { action: 'created' };
+}
+
 export async function updateOrg(
   orgId: string,
   patch: { name?: string; description?: string | null },
 ): Promise<Organization | null> {
-  const org = await orgs.get(orgId);
+  const org = await getOrg(orgId);
   if (!org) return null;
   if (patch.name !== undefined) {
     org.name = patch.name;
@@ -334,13 +650,26 @@ export async function updateOrg(
  *  — no orphaned tenant-scoped rows). Returns the deleted counts. */
 export async function deleteOrg(
   orgId: string,
-): Promise<{ org: boolean; teams: number; members: number; groups: number; roles: number }> {
-  const org = await orgs.get(orgId);
+): Promise<{ org: boolean; teams: number; members: number; groups: number; roles: number; blocked?: { rows: number } }> {
+  const org = await getOrg(orgId);
   if (!org) return { org: false, teams: 0, members: 0, groups: 0, roles: 0 };
-  const orgTeams = (await teams.list()).filter((t) => t.orgId === orgId);
-  const orgMembers = (await members.list()).filter((m) => m.orgId === orgId);
-  const orgGroups = (await groups.list()).filter((g) => g.orgId === orgId);
-  const orgRoles = (await customRoles.list()).filter((r) => r.orgId === orgId);
+  // Grade-data RI-7 / DG-INT-5 (architect ruling: refuse-while-populated,
+  // NON-THROWING) — an org still holding business rows (CRM, kanban, commerce,
+  // cms, …) must not be deleted out from under them: the cascade below removes
+  // only access-control scaffolding, so everything org-scoped would orphan.
+  // Count via the live-collection walk, EXCLUDING our own namespaces (which this
+  // function legitimately deletes) — the caller maps `blocked` to a 409.
+  const businessRows = await countOrgHostExtRows(org.tenantId, orgId, ['access-', 'orgs:invite']);
+  if (businessRows > 0) {
+    return { org: false, teams: 0, members: 0, groups: 0, roles: 0, blocked: { rows: businessRows } };
+  }
+  // Pre-filtered in the database (`listForOrg`), never a full cross-tenant
+  // `list()`: the guard above was fixed for the same statement timeout (#4143),
+  // and the cascade was the next full scan on the same request.
+  const orgTeams = await teams.listForOrg(orgId);
+  const orgMembers = await members.listForOrg(orgId);
+  const orgGroups = await groups.listForOrg(orgId);
+  const orgRoles = await customRoles.listForOrg(orgId);
   for (const t of orgTeams) await teams.delete(t.teamId);
   for (const m of orgMembers) await members.delete(m.memberId);
   for (const g of orgGroups) await groups.delete(g.groupId);
@@ -428,8 +757,23 @@ export async function createMember(input: {
   teamIds?: string[];
 }): Promise<OrgMember> {
   const now = nowIso();
+  // ADR 0697 D1 — a workspace-root membership is keyed by the RELATIONSHIP, not
+  // by a fresh random id. A random id is absent on every read, so two concurrent
+  // auto-joins (ADR 0684 §7) each found nothing and each wrote a row for one
+  // person. A derived id makes the second caller find the first.
+  //
+  // Returning the existing row is deliberately NOT an upsert: a role edit or
+  // display name already on it is the operator's, and a racing auto-join must
+  // not overwrite it with its own defaults.
+  const derived = input.subject && input.subject.length > 0 && input.orgId === input.tenantId
+    ? workspaceRootMemberId(input.tenantId, input.subject)
+    : null;
+  if (derived !== null) {
+    const existing = await members.get(derived);
+    if (existing) return existing;
+  }
   const member: OrgMember = {
-    memberId: `mbr-${randomUUID().slice(0, 8)}`,
+    memberId: derived ?? `mbr-${randomUUID().slice(0, 8)}`,
     orgId: input.orgId,
     tenantId: input.tenantId,
     subject: input.subject,
@@ -441,6 +785,7 @@ export async function createMember(input: {
     updatedAt: now,
   };
   await members.put(member);
+  await indexWorkspaceMember(member); // ADR 0684 phase 5 — point-read fast path
   return member;
 }
 
@@ -496,6 +841,15 @@ export async function updateMember(
     await members.put(member);
     throw new OpenwopError('conflict', LAST_OWNER_MSG, 409, { orgId: member.orgId, memberId });
   }
+  // H57 (ADR 0553 correction / RFC 0153 §D-G4) — this member's rights just
+  // changed, so anything cached for them against an outbound MCP peer was
+  // gathered under the OLD rights. Dropped here, at the mutator, because that
+  // is the one place every caller must pass through. Placed AFTER the
+  // owner-invariant restore-and-throw: a rejected demotion left the rights
+  // unchanged, so it must not read as a change. Best-effort and in-process —
+  // the cache KEY (which re-derives scopes per read) is what covers another
+  // instance; see `mcpClientCache.ts`.
+  if (member.subject) invalidateMcpCacheForPrincipal(member.tenantId, member.subject);
   return member;
 }
 
@@ -509,15 +863,62 @@ export async function deleteMember(memberId: string): Promise<boolean> {
   if (!member) return false;
   const existed = await members.delete(memberId);
   if (!existed) return false;
-  if (member.roles.includes('owner') && (await countOwners(member.tenantId, member.orgId)) === 0) {
-    await members.put(member); // compensating restore — never orphan a workspace
+  // ADR 0697 D2 — removal is about the RELATIONSHIP, not the row it happens to be
+  // stored as. D1 stops NEW twins; it cannot un-write the ones a race already
+  // committed, and those are in production today. Deleting only the row the
+  // operator could see left the twin behind, and `isWorkspaceMember`'s
+  // authoritative fallback re-granted membership from it — the removal did not
+  // hold, with nothing anywhere in an error state to say so. D1 without this
+  // closes the ban path on paper and leaves it open on the existing data.
+  //
+  // THE SWEEP MUST SEE EXACTLY WHAT THE CHECK SEES, or removal still does not
+  // hold. `isWorkspaceMember` ends on `members.list()` — it never denies on the
+  // bounded slice alone — so a twin missing from the tenant index would be
+  // invisible here and authoritative there. Hence the same full read. That is
+  // affordable precisely here: this is a cold, rare, operator-initiated path,
+  // and it already runs an unconditional `groups.list()` two statements below.
+  // ADR 0684 §6 bounds the HOT paths; this is not one.
+  const twins: OrgMember[] = [];
+  if (indexableWorkspaceMember(member)) {
+    for (const m of await members.list()) {
+      if (m.memberId === memberId) continue;
+      if (m.tenantId !== member.tenantId || m.orgId !== member.orgId) continue;
+      if (m.subject !== member.subject) continue;
+      if (await members.delete(m.memberId)) twins.push(m);
+    }
+  }
+  const removed: OrgMember[] = [member, ...twins];
+  // ADR 0684 phase 5 — drop the point-read entry. Done BEFORE the owner
+  // compensating-restore below re-adds it, so the two stay consistent either way.
+  await unindexWorkspaceMember(member);
+  // The owner invariant is counted over EVERYTHING just removed: a duplicated
+  // owner removed one row at a time would pass this check on the first delete
+  // and strand the workspace on the second.
+  if (removed.some((m) => m.roles.includes('owner')) && (await countOwners(member.tenantId, member.orgId)) === 0) {
+    for (const m of removed) await members.put(m); // compensating restore — never orphan a workspace
+    await indexWorkspaceMember(member); // ...and restore its index entry with it
     throw new OpenwopError('conflict', LAST_OWNER_MSG, 409, { orgId: member.orgId, memberId });
   }
-  for (const g of (await groups.list()).filter((g) => g.memberIds.includes(memberId))) {
-    g.memberIds = g.memberIds.filter((id) => id !== memberId);
+  const removedIds = new Set(removed.map((m) => m.memberId));
+  for (const g of (await groups.list()).filter((g) => g.memberIds.some((id) => removedIds.has(id)))) {
+    g.memberIds = g.memberIds.filter((id) => !removedIds.has(id));
     g.updatedAt = nowIso();
     await groups.put(g);
   }
+  // ADR 0434 P4 / IDN-9 — a subject who just lost membership may still hold a
+  // stored active-workspace preference pointing at this workspace. Resolution
+  // already fail-closes on the membership re-check, so leaving it is SAFE, not
+  // a bypass; clearing it is hygiene — it stops the removed member's next
+  // sign-in from silently resolving-then-discarding, and it does not leave the
+  // deleted relationship implied by a dangling row. Best-effort and scoped to
+  // the workspace they were removed from.
+  if (member.subject && member.orgId === member.tenantId) {
+    await clearActiveWorkspaceIfPointingAt(member.subject, member.tenantId);
+  }
+  // H57 — same reasoning as `updateMember`, and the stronger case: this subject
+  // holds no membership here any more, so every entry cached for them under
+  // this tenant is stale by definition.
+  if (member.subject) invalidateMcpCacheForPrincipal(member.tenantId, member.subject);
   return existed;
 }
 
@@ -542,15 +943,67 @@ export function newWorkspaceTenantId(): string {
   return `ws:${randomUUID()}`;
 }
 
+/**
+ * True iff `tenantId` is a SINGLE-PRINCIPAL tenant — one human's own sandbox, where
+ * "tenant == principal" holds and there is nobody else to isolate from:
+ *   - `anon:<sid>`  — an ephemeral anonymous demo session
+ *   - `user:<hash>` — a signed-in human's personal workspace (ADR 0015)
+ *   - `default`     — the single-principal demo / unauthenticated tenant
+ *                     (`host/requestSubject.ts:21-27`)
+ *
+ * FALSE for a shared `ws:` workspace, which ADR 0015 defines as multi-member, and
+ * false for any other shape by construction — an allowlist, so an unrecognised
+ * tenant shape fails CLOSED rather than inheriting a single-principal assumption.
+ *
+ * Exists so the demo de-facto-owner exception (GC-6 / ADR 0508) can be scoped to the
+ * tenants its rationale actually describes; keep it the ONE home for that rule so a
+ * second copy cannot drift from this one.
+ */
+export function isSinglePrincipalTenant(tenantId: string): boolean {
+  return tenantId === 'default' || tenantId.startsWith('anon:') || tenantId.startsWith('user:');
+}
+
+/**
+ * THE definition of a workspace root: an org whose id IS its tenant id.
+ *
+ * Everything below wraps this, and until the ADR 0684 correction nothing did —
+ * `isWorkspaceOrg` existed with ZERO callers while five sites open-coded
+ * `orgId === tenantId` against two different row types. That is not a style
+ * point: `featureDefaultOrgs` enforced the OPPOSITE rule for a year, and
+ * because the definition lived in five places and the assertion in a sixth,
+ * nothing could notice they disagreed. A declared default org was provisioned,
+ * joined and made active, and was still unenterable — measured in production
+ * 2026-09-15. One named predicate is what makes that contradiction a compile
+ * -time or test-time question instead of a sign-in-time one.
+ *
+ * Takes the two ids rather than a row so the ORG shape and the MEMBER shape —
+ * which carry the same field names on unrelated types — share one answer.
+ */
+export function isWorkspaceRootPair(orgId: string, tenantId: string): boolean {
+  return orgId === tenantId;
+}
+
 /** True iff `org` is a workspace root (its org id equals its tenant). */
 export function isWorkspaceOrg(org: Organization): boolean {
-  return org.orgId === org.tenantId;
+  return isWorkspaceRootPair(org.orgId, org.tenantId);
+}
+
+/** True iff `m` is a workspace-ROOT membership (the shape every workspace
+ *  predicate matches), as opposed to a membership in a sub-org of a tenant. */
+export function isWorkspaceRootMembership(m: Pick<OrgMember, 'orgId' | 'tenantId'>): boolean {
+  return isWorkspaceRootPair(m.orgId, m.tenantId);
 }
 
 /** The workspace-root org for a tenant, or null (a tenant with no recorded
  *  workspace — e.g. a personal tenant the owner has never named). */
 export async function getWorkspace(tenantId: string): Promise<Organization | null> {
-  const org = await orgs.get(tenantId);
+  // Routed through `getOrg` rather than touching the collection directly. It
+  // reads oddly — a tenantId passed to something named `orgId` — and that is
+  // the point: a workspace root is keyed `orgId === tenantId`, so this IS an
+  // org lookup wearing a confusing argument name. ADR 0513 Phase 2 adds a
+  // dual-read inside `getOrg`; before this change that dual-read would have had
+  // a hole precisely here, because this path never went through it.
+  const org = await getOrg(tenantId);
   return org && org.orgId === org.tenantId ? org : null;
 }
 
@@ -566,7 +1019,7 @@ export async function createWorkspace(input: {
   const now = nowIso();
   const tenantId = newWorkspaceTenantId();
   const org: Organization = {
-    orgId: tenantId, // workspace root: orgId === tenantId
+    orgId: tenantId, // workspace root: orgId === tenantId (isWorkspaceRootPair)
     tenantId,
     name: input.name,
     slug: slugify(input.name),
@@ -587,13 +1040,6 @@ export async function createWorkspace(input: {
   return org;
 }
 
-/** A DETERMINISTIC owner-member id for a personal workspace, derived from
- *  `(tenantId, subject)`. Concurrent first-access calls compute the SAME id, so
- *  they upsert one row instead of minting duplicate owner members (the random
- *  `mbr-<uuid>` path would race to two). */
-function personalOwnerMemberId(tenantId: string, subject: string): string {
-  return `mbr-${createHash('sha256').update(`${tenantId}:${subject}`).digest('hex').slice(0, 12)}`;
-}
 
 /** Idempotently ensure a personal workspace record exists for `tenantId`
  *  (the caller's own `user:<hash>` / `anon:<sid>` tenant), seeding `ownerSubject`
@@ -623,7 +1069,7 @@ export async function ensurePersonalWorkspace(input: {
   // Seed the owner member under a DETERMINISTIC id, so concurrent first-access
   // converges to one row (the `mbr-<uuid>` path of createMember would duplicate).
   // Skip if a member with that id already exists (preserve any later role edit).
-  const memberId = personalOwnerMemberId(input.tenantId, input.ownerSubject);
+  const memberId = workspaceRootMemberId(input.tenantId, input.ownerSubject);
   if (!(await members.get(memberId))) {
     const member: OrgMember = {
       memberId,
@@ -645,10 +1091,40 @@ export async function ensurePersonalWorkspace(input: {
 /** Is `subject` a member of the workspace identified by `workspaceId` (the
  *  workspace-root membership, `orgId === tenantId === workspaceId`)? Fail-closed. */
 export async function isWorkspaceMember(subject: string, workspaceId: string): Promise<boolean> {
-  const all = await members.list();
-  return all.some(
-    (m) => m.tenantId === workspaceId && m.orgId === workspaceId && m.subject === subject,
-  );
+  const matches = (m: OrgMember): boolean =>
+    isWorkspaceRootMembership(m) && m.tenantId === workspaceId && m.subject === subject;
+
+  // ADR 0434 / IDN-7 — this runs on EVERY authenticated request (auth.ts, both
+  // the bearer and cookie paths) and, since ADR 0434 P4, at session mint too.
+  // It used to be `members.list()` — a full CROSS-TENANT scan whose cost grew
+  // with total members across all tenants. That is the same shape as this
+  // repo's prior `host_ext_kv` prefix-scan incident, on the hottest path in the
+  // app.
+  //
+  // Fast path: a bounded scan of just this workspace's slice. `listForTenantIndexed`
+  // runs a one-time guarded backfill first, so pre-existing rows are covered.
+  // ADR 0684 phase 5 — POINT-READ fast path, O(1) and independent of workspace
+  // size. Additive only: a HIT returns true; a MISS falls through to exactly the
+  // logic that ran before, so a missing entry can never deny a real member. The
+  // fast path may say "yes" and never "no" — the one direction an authorization
+  // check must not fail.
+  try {
+    if (await memberIndex.get(memberIndexKey(workspaceId, subject))) return true;
+  } catch { /* index unavailable — the paths below are authoritative */ }
+  try {
+    if ((await members.listForTenantIndexed(workspaceId)).some(matches)) return true;
+  } catch {
+    // Index unavailable (storage shape older than the marker keyspace) — fall
+    // through to the authoritative scan rather than denying.
+  }
+
+  // A NEGATIVE from the index is not authoritative enough to deny on: the index
+  // tolerates a missing marker ("delayed, not lost" — see hostExtPersistence),
+  // and for RETENTION that is harmless, but here a missed marker would be a
+  // false negative, i.e. locking a real member out of their own workspace.
+  // Confirm every denial against the primary rows. Members — the common case on
+  // this path — never reach here, so the hot path stays bounded.
+  return (await members.list()).some(matches);
 }
 
 /** Every workspace `subject` can act in — the workspace-root orgs where the
@@ -662,7 +1138,7 @@ export async function listWorkspacesForSubject(
   const out: Array<Organization & { roles: string[] }> = [];
   for (const m of allMembers) {
     if (m.subject !== subject) continue;
-    if (m.orgId !== m.tenantId) continue; // workspace-root memberships only
+    if (!isWorkspaceRootMembership(m)) continue; // workspace-root memberships only
     const org = orgById.get(m.orgId);
     if (org) out.push({ ...org, roles: [...m.roles] });
   }
@@ -700,7 +1176,7 @@ export async function sharedWorkspaceMembershipsForSubject(
   excludePersonalTenant?: string,
 ): Promise<OrgMember[]> {
   return (await members.list()).filter(
-    (m) => m.subject === subject && m.orgId === m.tenantId && m.tenantId !== excludePersonalTenant,
+    (m) => m.subject === subject && isWorkspaceRootMembership(m) && m.tenantId !== excludePersonalTenant,
   );
 }
 
@@ -721,13 +1197,24 @@ async function repointGroupMembers(tenantId: string, oldMemberId: string, newMem
  * subject-migration primitive behind ADR 0003 Phase 4 (canonical
  * `user:<userId>` subject + account linking). Returns the count re-keyed.
  *
- * The hazard this exists to handle (architect Finding 3): a personal-workspace
- * owner member uses the DETERMINISTIC id `mbr-<hash(tenantId, subject)>`
- * (`personalOwnerMemberId`), so its key ENCODES the subject. A plain
+ * The hazard this exists to handle (architect Finding 3): a WORKSPACE-ROOT
+ * membership uses the DETERMINISTIC id `mbr-<hash(tenantId, subject)>`
+ * (`workspaceRootMemberId`), so its key ENCODES the subject. A plain
  * `updateMember(subject)` would leave the row addressable under the OLD derived
  * id, colliding with / shadowing the destination's seeded owner. Those rows are
  * therefore reinserted under the NEW derived id (PUT-before-DELETE, see below);
- * random-id members (shared workspaces, `mbr-<uuid>`) are updated in place.
+ * SUB-ORG members (`orgId !== tenantId`, still `mbr-<uuid>`) are updated in
+ * place.
+ *
+ * CORRECTED by ADR 0697 D1 — this paragraph used to say the deterministic branch
+ * was for "a personal-workspace owner member" and that "shared workspaces" took
+ * the random-id branch. Both halves are now false: every workspace-root
+ * membership is derived, so a SHARED workspace membership takes the
+ * deterministic branch too. The code needed no change — it keys off the derived
+ * id rather than off the workspace being personal — but the comment would have
+ * sent the next reader looking for a bug in the branch that is working. The
+ * merge-skip semantics noted below therefore now apply to shared workspaces as
+ * well, which is the one behavioural consequence worth knowing.
  *
  * Crash-safety: the deterministic-id move writes the NEW row BEFORE deleting the
  * OLD one, so a crash between the two KV writes leaves BOTH (≥1 owner survives —
@@ -745,10 +1232,10 @@ export async function rekeyMemberSubject(fromSubject: string, toSubject: string)
   const mine = (await members.list()).filter((m) => m.subject === fromSubject);
   let rekeyed = 0;
   for (const m of mine) {
-    if (m.memberId === personalOwnerMemberId(m.tenantId, fromSubject)) {
-      // Deterministic personal-owner member: its id encodes the subject, so the
-      // id is re-derived. PUT-before-DELETE keeps ≥1 owner across a crash.
-      const newId = personalOwnerMemberId(m.tenantId, toSubject);
+    if (m.memberId === workspaceRootMemberId(m.tenantId, fromSubject)) {
+      // Workspace-root membership: its id encodes the subject, so the id is
+      // re-derived. PUT-before-DELETE keeps ≥1 owner across a crash.
+      const newId = workspaceRootMemberId(m.tenantId, toSubject);
       if (!(await members.get(newId))) {
         await members.put({ ...m, memberId: newId, subject: toSubject, updatedAt: nowIso() });
       }
@@ -757,6 +1244,17 @@ export async function rekeyMemberSubject(fromSubject: string, toSubject: string)
     } else {
       await updateMember(m.memberId, { subject: toSubject });
     }
+    // ADR 0684 phase 5 — MOVE the point-read entry with the subject. Without
+    // this the index would keep asserting membership under the OLD subject and
+    // know nothing of the new one — lying about precisely the subject that just
+    // changed, on the path that runs at every session mint. Re-read the row
+    // rather than trusting `m`: the deterministic-owner branch above re-created
+    // it under a new memberId.
+    await unindexWorkspaceMember(m);
+    const moved = (await members.list()).find(
+      (x) => x.tenantId === m.tenantId && x.orgId === m.orgId && x.subject === toSubject,
+    );
+    if (moved) await indexWorkspaceMember(moved);
     rekeyed += 1;
   }
   return rekeyed;
@@ -957,6 +1455,15 @@ export interface EffectiveAccess {
   directRoles?: string[];
   /** Roles inherited via group membership (provenance, when basis === 'member'). */
   groupRoles?: string[];
+  /**
+   * The CALLER is a superadmin (`host/superadmin.ts` — env-bound tenant,
+   * wildcard bearer, or the explicit dev-open switch). Set by the HTTP route
+   * for the caller's own resolution only; never for a member/subject preview,
+   * and never by `resolveEffectiveAccess` itself, which knows nothing about
+   * the request. Presentation input for the SPA's admin chrome; every admin
+   * route still gates on `isSuperadmin(req)` directly.
+   */
+  superadmin?: boolean;
 }
 
 /**
@@ -995,7 +1502,31 @@ export async function resolveEffectiveAccess(
       // read surfaces (e.g. /advisors `workspace:read`) for anonymous demo users
       // who never set up RBAC members. OUTSIDE demo mode this stays FAIL-CLOSED
       // (RFC 0049): an unknown subject resolves to zero scopes.
-      if (demoMode()) return { roles: ['owner'], scopes: [...OWNER_SCOPES], basis: 'tenant-owner' };
+      //
+      // GC-6 / ADR 0508 — and ONLY for a genuinely single-principal tenant. The
+      // exception's own rationale ("the tenant is a one-principal sandbox") is
+      // false for a SHARED `ws:` workspace, which ADR 0015 defines as multi-member:
+      // there, "no member row for this org" means the caller is NOT a member, which
+      // is exactly the case that must fail closed. Unnarrowed, a workspace VIEWER
+      // querying a sub-org they do not belong to resolves to OWNER.
+      //
+      // Today `requireOrgScope`'s home-vs-active tenant bug (ADR 0508) 404s before
+      // reaching here, so the shared-workspace path is unreachable and this narrowing
+      // is a no-op in practice. That is precisely why it lands FIRST: fixing that
+      // guard (GC-5) without this would open the bypass rather than close it.
+      if (demoMode() && isSinglePrincipalTenant(tenantId)) {
+        // LEAK-9: this grants anonymous OWNER scope to any unknown subject. It is
+        // correctly gated on OPENWOP_DEMO_MODE (fail-closed below when off), but an
+        // ACCIDENTAL demo-mode enable in an enterprise deploy would silently hand
+        // out owner rights. Alarm it so the misconfiguration is visible, never
+        // silent. (Off in production; the demo deploy expects this line.)
+        accessLog.warn('demo_owner_bypass_granted', {
+          tenantId,
+          subject: opts.subject ?? opts.memberId,
+          note: 'OPENWOP_DEMO_MODE grants anonymous owner scope — MUST be off in any real deploy',
+        });
+        return { roles: ['owner'], scopes: [...OWNER_SCOPES], basis: 'tenant-owner' };
+      }
       return { roles: [], scopes: [], basis: 'none' };
     }
     // Custom roles defined in this member's org, for scope resolution.
@@ -1029,6 +1560,78 @@ export async function resolveEffectiveAccess(
  * resolver error ⇒ zero scopes (logged, never default-allow). Reads each of the
  * three stores exactly once (parallelized), independent of org count.
  */
+/**
+ * ADR 0731 — tenant-level (NON-org-scoped) authority for a SESSION caller.
+ *
+ * The union of the subject's scopes across their org memberships, PLUS the one
+ * documented exit: a **single-principal tenant is its own owner**. An ADR 0372
+ * anonymous sandbox (`anon:`), a personal tenant (`user:`) and `default` each hold
+ * exactly one principal by construction, so there is nobody to escalate over —
+ * this is the same rationale `resolveEffectiveAccess` states at its demo branch,
+ * narrowed the same way GC-6 / ADR 0508 narrowed that one: a SHARED `ws:`
+ * workspace is multi-member, so "no member row" there means NOT a member, which
+ * must fail closed.
+ *
+ * Use this for workspace-scoped host surfaces (entities, environments). Do NOT use
+ * `resolveEffectiveAccess({ subject })` for them: it is org-scoped first-match and
+ * therefore non-deterministic for a subject with memberships in several orgs.
+ */
+export async function resolveTenantLevelScopes(
+  tenantId: string,
+  subject: string,
+): Promise<{ scopes: Scope[]; basis: 'member' | 'tenant-owner' | 'none' }> {
+  const union = await resolveSubjectScopesUnion(tenantId, subject);
+  if (union.basis === 'member') return union;
+  if (isSinglePrincipalTenant(tenantId)) return { scopes: [...OWNER_SCOPES], basis: 'tenant-owner' };
+  return { scopes: [], basis: 'none' };
+}
+
+/**
+ * ADR 0732 — does ANY member of the tenant OTHER than `excludeSubject` hold
+ * `scope`? Separation of duties is only meaningful when a second eligible
+ * decider exists: `createWorkspace` mints a single `owner` member, so a
+ * one-admin workspace is the DEFAULT state and a distinct-approver rule with no
+ * exit would brick it.
+ *
+ * Reads each store once (like `resolveSubjectScopesUnion`) rather than resolving
+ * per member. FAIL-CLOSED on a resolver error means returning `true` here — "a
+ * distinct approver exists" is the answer that makes the CALLER refuse, so an
+ * unreadable store must not hand out a self-approval exemption.
+ */
+export async function hasDistinctScopeHolder(
+  tenantId: string,
+  scope: Scope,
+  excludeSubject: string,
+): Promise<boolean> {
+  try {
+    const [allMembers, allGroups, allCustom] = await Promise.all([
+      members.list(),
+      groups.list(),
+      customRoles.list(),
+    ]);
+    for (const m of allMembers) {
+      if (m.tenantId !== tenantId || m.subject === excludeSubject) continue;
+      const customById = new Map(
+        allCustom
+          .filter((r) => r.tenantId === tenantId && r.orgId === m.orgId)
+          .map((r) => [r.roleId, r] as const),
+      );
+      const groupRoles = allGroups
+        .filter((g) => g.tenantId === tenantId && g.memberIds.includes(m.memberId))
+        .flatMap((g) => g.roles);
+      const roles = [...new Set([...m.roles, ...groupRoles])];
+      if (unionScopes(roles, customById).includes(scope)) return true;
+    }
+    return false;
+  } catch (err) {
+    accessLog.error('hasDistinctScopeHolder failed — assuming a distinct approver exists', {
+      tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return true;
+  }
+}
+
 export async function resolveSubjectScopesUnion(
   tenantId: string,
   subject: string,
@@ -1067,7 +1670,98 @@ export async function resolveSubjectScopesUnion(
   }
 }
 
+/**
+ * The TENANT-LEVEL authority decision (USERS-19 / ADR 0617 D2) — the body of
+ * `featureRoute.requireTenantScope`, extracted so it is a `(tenantId, subject)`
+ * function core + the run lane can share with the HTTP lane (one predicate, two
+ * callers — the `assistant/writeAuthority.ts` discipline). Fail-closed, in order:
+ *
+ *   1. `ctx.wildcardOperator` — the env API key / admin token / conformance
+ *      harness acts across tenants (the trusted escape hatch every other gate
+ *      honours). The CALLER threads this from `req.principal.tenants` — it is
+ *      never inferred here.
+ *   2. The implicit PERSONAL OWNER: `ctx.personalTenant === tenantId` AND the
+ *      tenant has a personal SHAPE (`isPersonalTenantId`: `user:` / `anon:`). The
+ *      shape guard is the USERS-19 fix — the SAML ACS mints `personalTenant` as
+ *      the ONE host-global SAML tenant, so before it every SAML member satisfied
+ *      "personal === active" and bypassed membership on every route behind this
+ *      gate. A `user:` tenant is single-human by construction
+ *      (`usersGuards.ts` canonical-user model); an `anon:` tenant is one
+ *      session's sandbox; nothing else qualifies (not `default`, not `ws:`).
+ *   3. Otherwise the subject's TENANT-WIDE scope union across ALL org
+ *      memberships (`resolveSubjectScopesUnion`) MUST include `scope`. No
+ *      subject, or a non-member (zero scopes) ⇒ `403 forbidden_scope`.
+ *
+ * Enforced UNCONDITIONALLY (not behind OPENWOP_AUTHORIZATION_ENFORCEMENT): the
+ * callers are NON-normative `/v1/host/openwop-app/*` surfaces, never advertised
+ * as an RFC 0049 wire capability, so deferring enforcement would leave the
+ * privilege escalation open in the default posture.
+ */
+export async function assertTenantScope(
+  tenantId: string,
+  subject: string | undefined,
+  scope: Scope,
+  ctx: { personalTenant?: string; wildcardOperator?: boolean } = {},
+): Promise<void> {
+  if (ctx.wildcardOperator === true) return;
+  if (ctx.personalTenant === tenantId && isPersonalTenantId(tenantId)) return; // implicit personal owner
+  if (!subject) {
+    throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
+  }
+  const { scopes } = await resolveSubjectScopesUnion(tenantId, subject);
+  if (!scopes.includes(scope)) {
+    throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope });
+  }
+}
+
+// ── ADR 0464 P2 — DSAR subject erasure ───────────────────────────────────────
+// An ACL is structure, not a diary: silently DELETING an erased subject's
+// membership could change who can administer a workspace (worst case drop its
+// last owner) — the ACL must not shift under a DSAR. So a membership row is
+// ANONYMIZED, not removed: the person's declared PII (`displayName`, `email`) is
+// redacted to the sentinel while the OPAQUE `subject` key and the `roles[]` are
+// KEPT, so the authority graph is byte-for-byte unchanged and the subject key
+// stays available for the identity-link resolver. Org `createdBy` (the creating
+// principal) is likewise anonymized in place. Every other member/org is
+// untouched. Direct collection writes (the mutator guards — ≥1-owner, etc. —
+// don't apply to a PII redaction that changes no roles). Idempotent; tenant-
+// scoped; fail-closed on falsy input.
+
+/** DSAR eraser — redact the subject's membership PII (keep subject + roles) and
+ *  anonymize org `createdBy`, tenant-wide. */
+export async function eraseSubjectAccessControl(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return;
+  const { forms } = subjectKeyForms(subjectKey);
+  for (const m of (await members.list()).filter((m) => m.tenantId === tenantId)) {
+    if (m.subject === undefined || !forms.has(m.subject)) continue;
+    // KEEP `subject` + `roles` (ACL structure must not change); redact PII only.
+    const next: OrgMember = { ...m, displayName: ERASED, updatedAt: nowIso() };
+    if (next.email !== undefined) next.email = ERASED;
+    await members.put(next);
+  }
+  // `listOrgs(tenantId)` instead of a hand-rolled `orgs.list()` + filter. Same
+  // result today, but this is the ERASURE path: a row missed here leaves a
+  // subject's identifier behind after they asked for it to be gone. It should
+  // not be reading the collection by a second, private route.
+  for (const o of await listOrgs(tenantId)) {
+    if (!forms.has(o.createdBy)) continue;
+    await orgs.put({ ...o, createdBy: ERASED, updatedAt: nowIso() });
+  }
+}
+
+/** Register the access-control DSAR eraser (idempotent — the seam dedupes by
+ *  reference). Called from the host-erasers boot step (host/hostSubjectErasers.ts). */
+export function registerAccessControlErasure(): void {
+  registerSubjectEraser(eraseSubjectAccessControl);
+}
+
 // ── Test-only resets ───────────────────────────────────────────────────────────
+/** Test-only (ADR 0684 phase 5): drop ONE point-read entry, to prove the fast
+ *  path is additive — a membership with no entry must still resolve true. */
+export async function __dropMemberIndexForTest(workspaceId: string, subject: string): Promise<void> {
+  await memberIndex.delete(memberIndexKey(workspaceId, subject));
+}
+
 
 export async function __resetAccessStores(): Promise<void> {
   await orgs.__clear();

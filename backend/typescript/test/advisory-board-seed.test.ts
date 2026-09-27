@@ -19,7 +19,7 @@ import { seedAdvisoryBoards, countAdvisors, clearAdvisoryBoards } from '../src/h
 import { exampleDataStatus } from '../src/host/exampleDataSeeders.js';
 import { listBoards } from '../src/features/advisory-board/service.js';
 import { resolveAgentKnowledgeRetrieve } from '../src/host/agentKnowledgeComposition.js';
-import { createAgentMemoryPort, agentMemoryScope } from '../src/host/agentMemoryAdapter.js';
+import { createAgentMemoryPort } from '../src/host/agentMemoryAdapter.js';
 
 let BASE: string;
 let server: http.Server;
@@ -31,7 +31,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'kb', 'advisory-board']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -91,7 +91,9 @@ describe('advisory-board seed', () => {
     // dispatch composes (ADR 0038), so the persona recalls it in a council chat.
     const advisorRosterId = byHandle.get('timeless')!.advisors[0]!;
     const memory = createAgentMemoryPort(tenantId);
-    const retrieve = await resolveAgentKnowledgeRetrieve(tenantId, advisorRosterId, memory, agentMemoryScope(advisorRosterId));
+    // ADR 0442 P3 — a default-scope agent (no `memoryScope`) recalls
+    // `agent:<rosterId>` with no acting participant, exactly as before.
+    const retrieve = await resolveAgentKnowledgeRetrieve(tenantId, advisorRosterId, memory);
     expect(retrieve, 'advisor has the knowledge capability + a memory binding').toBeDefined();
     const chunks = await retrieve!('How should I weigh a hard decision with strong pros and cons?');
     expect(chunks.some((c) => c.kind === 'memory')).toBe(true);

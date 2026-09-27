@@ -217,10 +217,11 @@ packs published to `packs.openwop.dev` (decoupled from toggle state for replay).
 
 ## Open questions
 
-- [ ] **Gate `createToContact` on the CRM toggle?** Today the rolodex store exists
-  regardless of the `crm` toggle, so a form can capture a contact into a
-  CRM-toggled-off tenant (recoverable when CRM is enabled). Decide whether to
-  best-effort always (current plan) or skip the contact write when `crm` is off.
+- [x] **Gate `createToContact` on the CRM toggle?** — **Resolved by ADR 0330
+  (2026-07-10):** yes. The contact write moved out of `formsService` onto the
+  submission-sink seam; CRM's own `crm-contact` sink checks the tenant's `crm`
+  toggle and skips silently when off (a skip is not an error). Forms no longer
+  imports `../crm`, and the ADR 0194 `forms → crm` disable-lock is removed.
 - [ ] **Dedupe-by-email** (alt. 5) — needs a contacts email index/lookup on
   `contactsService`; until then duplicates accrue.
 - [ ] **File-upload fields** (MyndHyve "Partial") — a field whose value is a Media
@@ -247,3 +248,19 @@ packs published to `packs.openwop.dev` (decoupled from toggle state for replay).
 | Tests | `test/forms-route.test.ts` — 7/7 (RBAC CRUD, public published-only render, submit→contact `contactId`, honeypot drop + required validation, cross-tenant IDOR, toggle-off 404) |
 | Verify | `tsc --noEmit` clean; full suite green apart from the known pre-existing pack/env failures (none forms-related) |
 | Frontend (Phase 3) | `frontend/react/src/features/forms/` — `FormsPage` (org picker → field builder → publish → copyable public URL → submissions) + `formsClient.ts` + `routes.tsx`; appended to `FRONTEND_FEATURES`. `npm run build` gate green (tsc + token/CSS-integrity + vite) |
+
+> **Correction (2026-07-10, ADR 0330 — forms is now the standalone capture
+> primitive):** the §"Architectural constraints" headline ("contact creation
+> goes through `crm/contactsService.createContact`") is superseded in shape,
+> not in spirit: CRM still owns contact creation, but the CALL now runs through
+> the forms-owned submission-sink seam (`submissionSinks.ts`) that **crm
+> registers** at boot — forms imports no CRM code, `dependsOn: ['crm']` is
+> gone, and the toggle/nav re-homed to `Author`. Submission persistence,
+> ordering, and the public API are unchanged. See ADR 0330 for the seam
+> contract and ADR 0331/0332 for the composition follow-ons.
+
+> **Correction (2026-07-09, routing):** the open form was in-page `selectedId`
+> state. The selection is now mirrored to the URL (`?org=<orgId>&form=<formId>`,
+> the CRM deep-link pattern — the ADR 0079/0058 routing-correction wave):
+> shareable and reload-stable (an inbound deep-link is consumed one-shot after
+> the org's forms load). The builder layout is unchanged.

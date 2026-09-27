@@ -25,6 +25,8 @@ import express, { type Express } from 'express';
 import http from 'node:http';
 import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { authMiddleware, _resetOidcVerifier, _resetFallthroughTracker } from '../src/middleware/auth.js';
+import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { usersSessionAuthority } from '../src/features/users/feature.js';
 
 // ── tiny synthetic OIDC issuer ───────────────────────────────────
 // Mirrors the helper in auth-oidc.test.ts. Kept inline so this test
@@ -57,7 +59,7 @@ async function startSyntheticIssuer(audience: string): Promise<SyntheticIssuer> 
   const app = express();
   app.get('/.well-known/jwks.json', (_req, res) => res.json(jwks));
   const server = await new Promise<http.Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const port = (server.address() as { port: number }).port;
   const issuer = `http://127.0.0.1:${port}`;
@@ -129,6 +131,13 @@ beforeAll(async () => {
   // is supposed to engage.
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = '';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
+  // ADR 0621 rev. 2 — the unbound OIDC lane now consults the session authority
+  // (no permissive default on the seam). This harness mounts the bare
+  // middleware with NO host-ext persistence and no users store, so the honest
+  // unbound-lane answer is "no durable row was ever bound" (`null`); the
+  // `userId` read is the feature's real one (never reached — no bound cookie).
+  registerSessionAuthority(usersSessionAuthority);
+  registerPersonalTenantSessionAuthority(async () => null);
   _resetOidcVerifier();
 
   const app: Express = express();
@@ -140,7 +149,7 @@ beforeAll(async () => {
     tenantId: req.tenantId,
   }));
   appServer = await new Promise<http.Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   appPort = (appServer.address() as { port: number }).port;
 });
@@ -212,19 +221,44 @@ describe('bearer → cookie fall-through (browser-shape deploys)', () => {
     expect(body.principalId).toBe(seedBody.principalId);
   });
 
-  it('bogus non-JWT bearer + no cookie → fresh anon session minted, NOT 401', async () => {
+  // ── ADR 0434 Phase 2 — cases 2 and 3 below were DELIBERATELY OVERTURNED ──
+  // They previously asserted "fresh anon session minted, NOT 401". That was
+  // reasoned from this file's 401-storm rationale, but the storm protection is
+  // case 1 above (stale bearer + HEALTHY cookie → request survives), which is
+  // untouched. With NO cookie there is no session to preserve: minting handed
+  // the caller a BRAND-NEW `anon:<sid>` identity mid-session.
+  //
+  // In production that completed a silent data-loss chain: `/migrate-tenant`
+  // used to clear the session cookie on success, so a signed-in user was
+  // cookie-less; the next hourly token rotation raced; they were silently
+  // issued a new anonymous tenant and kept working in it, invisibly to every
+  // other device. A 401 is honest and recoverable — the SPA refreshes the token
+  // and retries — whereas a silent identity switch is neither.
+  //
+  // A visitor presenting NO bearer is unaffected: `bearerRejected` stays false
+  // and the anon mint still happens, so the public demo is unchanged.
+
+  it('bogus non-JWT bearer + no cookie → 401, NEVER a new anon identity', async () => {
     const res = await call({ authorization: 'Bearer not-a-jwt-just-junk' });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as { principalId: string };
-    expect(body.principalId).toMatch(/^session:/);
-    // Set-Cookie was issued because the cookie path minted an anon
-    // session — no pre-existing cookie was present on this request.
-    expect(res.headers.get('set-cookie')).toMatch(/^__session=/);
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { details?: { reason?: string } };
+    expect(body.details?.reason).toBe('bearer_rejected_no_session');
+    // The critical assertion: no session cookie was minted, so the caller was
+    // not silently handed a different tenant to write into.
+    expect(res.headers.get('set-cookie')).toBeNull();
   });
 
-  it('expired JWT + no cookie → fresh anon session minted', async () => {
+  it('expired JWT + no cookie → 401, NEVER a new anon identity', async () => {
     const expired = issuer.mint({ exp: Math.floor(Date.now() / 1000) - 3600 });
     const res = await call({ authorization: `Bearer ${expired}` });
+    expect(res.status).toBe(401);
+    const body = (await res.json()) as { details?: { reason?: string } };
+    expect(body.details?.reason).toBe('bearer_rejected_no_session');
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('NO bearer at all + no cookie → anon session still minted (demo unchanged)', async () => {
+    const res = await call({});
     expect(res.status).toBe(200);
     const body = (await res.json()) as { principalId: string };
     expect(body.principalId).toMatch(/^session:/);

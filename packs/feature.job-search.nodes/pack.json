@@ -1,0 +1,73 @@
+{
+  "name": "feature.job-search.nodes",
+  "version": "1.1.0",
+  "description": "Job-search node pack (ADR 0540) — score a posting's fit, check eligibility against a JD-stated bar, diff a proposed résumé rewrite for fabrication, and record an application's outcome. Deliberately has NO submit node: submitting is bounded by the ADR 0541 apply grant, and a node that could submit would route around the authority object that exists to bound it.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "job-search",
+    "crm",
+    "scoring",
+    "eligibility",
+    "agent"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.job-search.nodes.score-fit",
+      "version": "1.0.0",
+      "label": "Job Search: Score Fit",
+      "description": "Scores a job digest against an applicant profile via ctx.features['job-search'].scoreFit. Inputs: { digest, profile }. Output: { score, scores }. Pure — reads no store and writes nothing.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.job-search.nodes.check-eligibility",
+      "version": "1.0.0",
+      "label": "Job Search: Check Eligibility",
+      "description": "Decides whether to apply, via ctx.features['job-search'].checkEligibility. Only a JD-STATED bar the applicant cannot clear disqualifies; the verdict quotes the posting verbatim. Inputs: { digest, applicant }. Output: { eligible, ruleId, reason, quote }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.job-search.nodes.guard-rewrite",
+      "version": "1.0.0",
+      "label": "Job Search: Guard Rewrite",
+      "description": "Diffs a proposed résumé/cover-letter rewrite against its source and rejects fabricated numbers, employers and dates (ADR 0540 D4). Inputs: { original, reworded, allowedEmployers }. Output: { ok, violations }. Checks honesty; it cannot bless a rewrite into a document.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.job-search.nodes.record-outcome",
+      "version": "1.0.0",
+      "label": "Job Search: Record Outcome",
+      "description": "Moves an application to a named stage via ctx.features['job-search'].recordOutcome. Writes through CRM so stage history records the move. Inputs: { orgId, dealId, stage }. Output: { moved, stageId }. The ONE terminal write this pack exposes.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.job-search.nodes.run-campaign",
+      "version": "1.0.0",
+      "label": "Job Search: Run Campaign Pass",
+      "description": "Triggers the tenant's standing campaign pass via ctx.features['job-search'].runCampaignPass. Takes NO inputs by design: the pass derives targeting from the tenant's own steering, grants, listings and answer bank, and every submission inside it is bounded by the ADR 0541 apply grant (consult, pace, claim CAS, consume) plus the steering dailyCap. Output: the pass digest (per-grant applied/parked/skipped, with skip reasons). Side-effectful: a replay is served the recorded digest and never re-fires a pass (WF-JS-1).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ]
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

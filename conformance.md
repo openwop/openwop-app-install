@@ -8,6 +8,27 @@ capability this host cannot serve for real on its deployed runtime.**
 
 ---
 
+## RFC 0165 — v2 preparation wire shapes (`protocolVersions[]`, `owner.subject`, `OpenWOP-*` dual emission, discovery `ETag`)
+
+**Status** — implemented (ADR 0625, 2026-09-02).
+
+**Advertisement** — root `protocolVersions: ["1.1"]` beside `protocolVersion: "1.1"`, both derived from `PROTOCOL_VERSION` in `routes/discovery.ts` (a ROOT property, not mirrored into the deprecated `capabilities` wrapper). `GET /.well-known/openwop` sends `ETag` (== `Capabilities-Etag`) and answers `304` to a matching `If-None-Match`.
+
+**Implementing seam** — `host/runOwner.ts` (owner + Subject projection: persisted `metadata.owner` stamp at creation, §B.3 legacy synthesis on reads, `subjectId == principal` by construction), `routes/runs.ts` (snapshot `owner` for every run with a principal; `:fork` copies the stamp verbatim), `executor/executor.ts` (`run.started` echoes the block), `host/webhookDeliveryWorker.ts` (`OpenWOP-*` family value-identical to `X-openwop-*`).
+
+**Automated witness** — `@openwop/openwop-conformance@1.159.0` (vendored schemas at `openwop-conformance/v1.159.0`), run NON-VACUOUSLY under `OPENWOP_REQUIRE_BEHAVIOR=true`:
+
+```
+OPENWOP_REQUIRE_BEHAVIOR=true npm run test:conformance -- --filter owner-subject
+OPENWOP_REQUIRE_BEHAVIOR=true npm run test:conformance -- --filter protocol-versions
+# → see the run transcript recorded in the ADR 0625 PR; in-process witness:
+#   backend/typescript/test/rfc0165-owner-subject.test.ts (10 legs, all pass)
+```
+
+Lanes this host attests on a run: `oidc` (OIDC bearer/cookie subjects), `saml` with `keyClass: "opaque-idp"`, `api-key` (`owk_` keys, env keys, the test seam — kind `workload`). A durable `user:<id>` session and an anonymous session have no lane in the RFC 0165 enum and take the RFC's `api-key` floor with an issuer naming the real authority (`urn:openwop-app:session`, `urn:openwop-app:anon-surface`) — RFC 0165 G6. Not claimed: `actor` (no delegation lane at run creation); `keyClass: "configured-immutable"` (this host links on `opaque-idp` only).
+
+---
+
 ## RFC 0117 — Front-end plugin packs (ui-plugin/1 host-RPC witness)
 
 **Status:** implemented on the demo host (ADR 0153 Track 2). openwop-app is the
@@ -386,6 +407,21 @@ full:               3 entries
 scenario on their ping (and confirm the `tokenCounter` enum admits `"chars"`).
 
 ---
+
+## RFC 0209 — A2UI v0.9 surfaces at major 2
+
+**Status:** implemented (ADR 0749). Seam-gated rows witnessed on the local major-2 lane
+through `POST /conformance/seams/sample/a2ui/emit-surface` (`emitA2uiSurface`, served
+only with `OPENWOP_TEST_SEAM_ENABLED=true`), which admits through
+`host/a2uiSurfaceAdmission.ts` — the production path, not a mock.
+
+- Pass, each sabotage-proven: `0209.version-selects-branch`, `0209.fold-guarded`,
+  `0209.catalog-equality`, `v2-a2ui-v09-surface.surface-id-equality`, `0209.taint-sticky`.
+- Inapplicable: `0209.legacy-readable` (needs a v2 floor of exactly 1; ours is 2).
+- Known-red (corpus defect): `recorded-as-recorded` forks at a `fromSeq` that names no
+  event on a suspended run — `runs.md` requires `422 fork_point_invalid`.
+- Reference-impl: `0209.render-needs-root` —
+  `frontend/react/src/chat/a2ui/__tests__/a2ui-v09-render-needs-root.test.tsx`.
 
 ## RFC 0114 — A2UI surface delta transport
 

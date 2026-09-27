@@ -1,0 +1,21 @@
+{
+  "name": "feature.work-selection.nodes",
+  "version": "1.0.0",
+  "description": "Work-selection node pack (ADR 0534) — read the ranking the autonomous work loop would apply to a board's To Do lane, with the per-criterion values behind each score (due-date urgency, stated priority, age, blocked). READ-ONLY by design: selection is host policy a workflow may observe but never author, so there is no node that reorders or starts anything.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "work-selection", "kanban", "prioritization", "agent", "ranking"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.work-selection.nodes.preview",
+      "version": "1.0.0",
+      "label": "Work Selection: Preview Ranking",
+      "description": "Returns the ranking the autonomous work loop would apply to a board's To Do lane right now, via ctx.features['work-selection'].preview. Inputs: { boardId }. Output: { ranked: [{ cardId, title, rank, score, why: [{ criterionId, criterion, value }] }], count }. An unknown or cross-tenant board returns an empty list rather than an error.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

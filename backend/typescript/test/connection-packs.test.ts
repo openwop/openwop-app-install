@@ -137,7 +137,7 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const server: http.Server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+    const server: http.Server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
     const PORT = (server.address() as AddressInfo).port;
     try {
       const r = await fetch(`http://127.0.0.1:${PORT}/.well-known/openwop`);
@@ -152,7 +152,7 @@ describe('RFC 0095 connection-pack loader (T3)', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    const server: http.Server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+    const server: http.Server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
     const PORT = (server.address() as AddressInfo).port;
     const hdrs = { 'content-type': 'application/json', authorization: 'Bearer dev-token' };
     try {

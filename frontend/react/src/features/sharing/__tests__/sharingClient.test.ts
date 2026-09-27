@@ -28,8 +28,10 @@ describe('listResources — Phase 5 types', () => {
     mockFetchOnce(/\/chat\/sessions/, { sessions: [{ sessionId: 's1', title: 'Roadmap' }] });
     expect(await listResources('org1', 'conversation')).toEqual([{ id: 's1', label: 'Roadmap' }]);
   });
-  it('returns [] when the source feature is off (non-ok)', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => ({}) } as unknown as Response)));
+  it('returns [] when the source feature is off (404 — its routes do not exist)', async () => {
+    // R2 review F1 narrowed the contract: only 404 is the documented
+    // "feature off" case; any other failure THROWS (see the F1 suite below).
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)));
     expect(await listResources('org1', 'document')).toEqual([]);
   });
 });
@@ -42,11 +44,15 @@ describe('resolveSharedPublic — public viewer (ADR 0122 Phase 6)', () => {
     expect((out.resource as { markdown: string }).markdown).toBe('# hi');
   });
 
-  it('maps 404 and 410 (expired/revoked) to a not-found error', async () => {
-    for (const status of [404, 410]) {
-      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status, json: async () => ({}) } as unknown as Response)));
-      await expect(resolveSharedPublic('tok')).rejects.toThrow('not-found');
-    }
+  it('R2 SR-2/SR-10 — discriminates the failure: 404→gone, 410→expired, 5xx/network→unavailable', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)));
+    await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'gone' });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 410, json: async () => ({}) } as unknown as Response)));
+    await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'expired' });
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) } as unknown as Response)));
+    await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'unavailable' });
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('network down'); }));
+    await expect(resolveSharedPublic('tok')).rejects.toMatchObject({ kind: 'unavailable' });
   });
 
   it('sends NO auth headers (the token is the credential)', async () => {
@@ -56,5 +62,17 @@ describe('resolveSharedPublic — public viewer (ADR 0122 Phase 6)', () => {
     // plain fetch(url) — a single positional arg, no init/headers object
     expect(spy).toHaveBeenCalledTimes(1);
     expect(spy.mock.calls[0]!.length).toBe(1);
+  });
+});
+
+describe('R2 review F1 — the picker read fails HONESTLY', () => {
+  it('404 (feature off) resolves []; 500 THROWS so the page can say the read failed', async () => {
+    const { listResources } = await import('../sharingClient.js');
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 404, json: async () => ({}) } as unknown as Response)));
+    await expect(listResources('o1', 'cms_page')).resolves.toEqual([]);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) } as unknown as Response)));
+    await expect(listResources('o1', 'creative_brief')).rejects.toThrow(/500/);
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new TypeError('network down'); }));
+    await expect(listResources('o1', 'document')).rejects.toThrow();
   });
 });

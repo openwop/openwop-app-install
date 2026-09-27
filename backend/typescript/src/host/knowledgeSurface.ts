@@ -13,7 +13,9 @@
  */
 
 import { createLogger } from '../observability/logger.js';
+import type { SubjectCaller } from './subjectAccess.js';
 import type { BundleScope } from './inMemorySurfaces.js';
+import { demoMode } from './demoMode.js';
 
 const log = createLogger('host.knowledge');
 
@@ -80,7 +82,14 @@ export interface KnowledgeSurface {
  * the demo for that call.
  */
 export interface KnowledgeBackend {
-  retrieve(tenantId: string, args: KnowledgeRetrieveArgs): Promise<KnowledgeResult | null>;
+  /**
+   * KBC-1 (ADR 0643 D2 precondition) — `caller` says WHO is retrieving, so the
+   * backend can apply the ADR 0608 `boundSubject` gate that used to live on the
+   * KB HTTP door only. Omitted / `{ subject: undefined }` means there is no
+   * acting user (a system run), which is refused for a membership-scoped
+   * collection and unchanged for every other one.
+   */
+  retrieve(tenantId: string, args: KnowledgeRetrieveArgs, caller?: SubjectCaller): Promise<KnowledgeResult | null>;
 }
 
 let backend: KnowledgeBackend | null = null;
@@ -113,10 +122,18 @@ export function createKnowledgeSurface(scope: BundleScope): KnowledgeSurface {
       // Real backend first (the KB feature, tenant-scoped via the run scope); it
       // returns null when the tenant has no real knowledge → seeded demo fallback.
       if (backend) {
-        const real = await backend.retrieve(scope.tenantId, args);
+        // KBC-1 — the run's acting human, or `undefined` for a system run
+        // (schedule / inbound webhook), which is the fail-closed signal
+        // `BundleScope.actingUserId` documents. `ctx.knowledge` is the lane
+        // every workflow run and every agent chat turn retrieves through, and
+        // it carried NO caller at all before this.
+        const real = await backend.retrieve(scope.tenantId, args, { ...(scope.actingUserId ? { subject: scope.actingUserId } : {}) });
         if (real !== null) return real;
       }
-      return demoRetrieve(args);
+      // LEAK-10: the seeded demo corpus is a SHOWCASE affordance. Outside demo
+      // mode a real tenant with no knowledge must get an honest empty result, not
+      // fabricated demo chunks it never ingested.
+      return demoMode() ? demoRetrieve(args) : emptyKnowledgeResult(args);
     },
   };
 }
@@ -167,4 +184,10 @@ function demoRetrieve(args: KnowledgeRetrieveArgs): KnowledgeResult {
 
   log.info('knowledge retrieve (lexical demo)', { chunks: chunks.length, sources: sources.length });
   return { chunks, sources, latencyMs: Date.now() - started, hasResults: chunks.length > 0 };
+}
+
+/** Honest empty result (LEAK-10) — returned outside demo mode when a tenant has
+ *  no real knowledge, so `ctx.knowledge` never fabricates un-ingested chunks. */
+function emptyKnowledgeResult(_args: KnowledgeRetrieveArgs): KnowledgeResult {
+  return { chunks: [], sources: [], latencyMs: 0, hasResults: false };
 }

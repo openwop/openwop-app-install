@@ -13,12 +13,12 @@ export function registerModelRouterRoutes(deps: RouteDeps): void {
   const BASE = '/v1/host/openwop-app/model-router/orgs/:orgId/config';
 
   app.get(BASE, async (req, res, next) => {
-    try { const { user, orgId } = await requireOrgScope(req, 'workspace:read'); res.json({ config: await getRouterConfig(user.tenantId, orgId) }); } catch (err) { next(err); }
+    try { const { orgId, tenantId } = await requireOrgScope(req, 'workspace:read'); res.json({ config: await getRouterConfig(tenantId, orgId) }); } catch (err) { next(err); }
   });
   app.put(BASE, async (req, res, next) => {
-    try { const { user, orgId } = await requireOrgScope(req, 'workspace:write'); res.json({ config: await setRouterConfig(user.tenantId, orgId, user.userId, req.body) }); } catch (err) { next(err); }
+    try { const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write'); res.json({ config: await setRouterConfig(tenantId, orgId, user.userId, req.body) }); } catch (err) { next(err); }
   });
   app.post(`${BASE}/enable`, async (req, res, next) => {
-    try { const { user, orgId } = await requireOrgScope(req, 'workspace:write'); const enabled = (req.body as { enabled?: unknown })?.enabled !== false; res.json({ config: await setRouterEnabled(user.tenantId, orgId, user.userId, enabled) }); } catch (err) { next(err); }
+    try { const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write'); const enabled = (req.body as { enabled?: unknown })?.enabled !== false; res.json({ config: await setRouterEnabled(tenantId, orgId, user.userId, enabled) }); } catch (err) { next(err); }
   });
 }

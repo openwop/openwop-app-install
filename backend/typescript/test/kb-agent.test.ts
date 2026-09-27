@@ -16,7 +16,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, res); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -30,12 +30,17 @@ describe('feature.kb.agents.researcher', () => {
     expect(agent!.systemPrompt).toContain('Knowledge Base');
   });
 
-  it('is tool-allowlisted to the KB feature nodes only', async () => {
+  it('is tool-allowlisted to the KB search + core RAG retriever tools', async () => {
     const agent = await getAgentRegistry().resolve('feature.kb.agents.researcher');
     const allow = (agent!.toolAllowlist ?? []) as string[];
-    expect(allow).toContain('openwop:feature.kb.nodes.search');
-    expect(allow).toContain('openwop:feature.kb.nodes.rag');
-    // No tool outside the KB feature surface.
-    expect(allow.every((t) => t.startsWith('openwop:feature.kb.nodes.'))).toBe(true);
+    // CFP-1: the dead `feature.kb.nodes.*` node typeIds (no provider projected
+    // them) are replaced by the REAL registered agent tools — the KB
+    // knowledge-base search plus the two core RAG retrievers the researcher
+    // grounds with. All three resolve in `builtinAgentToolIds()`.
+    expect(allow).toEqual([
+      'openwop:knowledge.search',
+      'openwop:core.rag.retriever-basic',
+      'openwop:core.rag.retriever-contextual-compression',
+    ]);
   });
 });

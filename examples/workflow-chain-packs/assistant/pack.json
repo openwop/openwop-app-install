@@ -1,0 +1,306 @@
+{
+  "name": "core.openwop.workflows.assistant",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "WF-COS-1 — the ADR 0023 assistant's six boot-path workflows, migrated off the in-tree `registerWorkflow({...})` pin sites in `features/assistant/loops.ts` and `features/assistant/actionExecution.ts`. THREE PERCEPTION LOOPS (calendar ingest, drive ingest, morning briefing) fired by the RFC 0052 scheduler, and THREE APPROVED-ACTION EXECUTIONS (email send, calendar invite, calendar reschedule) dispatched by the winning approval claim. Each is registered chain-backed under its ORIGINAL workflowId, so the per-tenant scheduler job rows, the `EXEC_WORKFLOW_BY_KIND` dispatch and every existing run stamp keep resolving — and all six become gallery-visible and builder-editable like every other chain. NO credential or connection material lives in any node config: the ADR 0024 §4 Option-C opt-in is RUN-LEVEL (`configurable.connections`), set on the scheduler job / at dispatch, exactly as it was before the migration.",
+  "keywords": [
+    "Assistant",
+    "Chief of Staff",
+    "Perception loops",
+    "Approvals",
+    "Calendar",
+    "Drive"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "assistant.loop.calendar-ingest",
+      "version": "1.0.0",
+      "label": "Assistant — calendar ingestion loop",
+      "description": "Reads upcoming Google Calendar events through the Connections broker and maintains prep commitments in the memory graph (idempotent; sources stamped untrusted). The fetch node carries NO connection annotation — the host injects the enabling principal's write-scoped token when the URL matches Google's curated apiHosts, per the run-level opt-in on the scheduler job.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "fetch",
+            "typeId": "core.openwop.http.fetch",
+            "name": "Fetch calendar events",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "url": "https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&orderBy=startTime&maxResults=25"
+            }
+          },
+          {
+            "id": "ingest",
+            "typeId": "feature.assistant.nodes.ingest-commitments",
+            "name": "Ingest commitments",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {
+              "sourceKind": "calendar",
+              "maxItemsPerTick": 25
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "fetch",
+            "to": "ingest"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "assistant.loop.drive-ingest",
+      "version": "1.0.0",
+      "label": "Assistant — drive ingestion loop",
+      "description": "Reads recently-modified Google Drive files through the Connections broker and maintains review commitments in the memory graph (idempotent; sources stamped untrusted).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "fetch",
+            "typeId": "core.openwop.http.fetch",
+            "name": "Fetch recent files",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "url": "https://www.googleapis.com/drive/v3/files?orderBy=modifiedTime%20desc&pageSize=25&fields=files(id,name,modifiedTime,webViewLink)"
+            }
+          },
+          {
+            "id": "ingest",
+            "typeId": "feature.assistant.nodes.ingest-commitments",
+            "name": "Ingest commitments",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {
+              "sourceKind": "drive",
+              "maxItemsPerTick": 25
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "fetch",
+            "to": "ingest"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "assistant.loop.morning-briefing",
+      "version": "1.0.0",
+      "label": "Assistant — morning briefing",
+      "description": "Composes a source-grounded brief (top commitments with citations, what is at risk, today's meetings, what awaits approval) and drops it in the Notifications inbox. A single graph-read node with `notify:true`; no external I/O at all. The node is `role:\"side-effect\"` (WF-COS-2), so a `:fork` is served the recorded outcome rather than re-briefing.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "brief",
+            "typeId": "feature.assistant.nodes.compose-briefing",
+            "name": "Compose briefing",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "notify": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "assistant.action.email-send",
+      "version": "1.0.0",
+      "label": "Assistant — send an approved email",
+      "description": "Executes an approved `email.send` action. `prepare-action-request` is a pure transform of the run's `action` input into a Gmail base64url raw message; the fetch performs the send AS the approving human (the run's `metadata.actingUserId`), so the ADR 0024 Phase-D resolver picks THEIR write-scoped connection and fails closed when write re-consent was never granted; `confirm-action-send` is the verdict gate — an HTTP fetch completes on ANY outcome, so without it a refused send would record as `sent`.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "prepare",
+            "typeId": "feature.assistant.nodes.prepare-action-request",
+            "name": "Prepare request",
+            "position": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.http.fetch",
+            "name": "Send",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {
+              "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+              "method": "POST"
+            }
+          },
+          {
+            "id": "confirm",
+            "typeId": "feature.assistant.nodes.confirm-action-send",
+            "name": "Confirm send",
+            "position": {
+              "x": 440,
+              "y": 0
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "prepare",
+            "to": "send"
+          },
+          {
+            "from": "send",
+            "to": "confirm"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "assistant.action.calendar-invite",
+      "version": "1.0.0",
+      "label": "Assistant — send an approved calendar invite",
+      "description": "Executes an approved `calendar.invite` action. Same three-node shape as the email send, including the `confirm-action-send` verdict gate.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "prepare",
+            "typeId": "feature.assistant.nodes.prepare-action-request",
+            "name": "Prepare request",
+            "position": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.http.fetch",
+            "name": "Send",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {
+              "url": "https://www.googleapis.com/calendar/v3/calendars/primary/events",
+              "method": "POST"
+            }
+          },
+          {
+            "id": "confirm",
+            "typeId": "feature.assistant.nodes.confirm-action-send",
+            "name": "Confirm send",
+            "position": {
+              "x": 440,
+              "y": 0
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "prepare",
+            "to": "send"
+          },
+          {
+            "from": "send",
+            "to": "confirm"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "assistant.action.calendar-reschedule",
+      "version": "1.0.0",
+      "label": "Assistant — apply an approved reschedule",
+      "description": "Executes an approved `calendar.reschedule` action. The URL carries the `{{eventId}}` placeholder the prepare node's output substitutes, and the verb is PATCH; otherwise identical to the invite chain.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "prepare",
+            "typeId": "feature.assistant.nodes.prepare-action-request",
+            "name": "Prepare request",
+            "position": {
+              "x": 0,
+              "y": 0
+            }
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.http.fetch",
+            "name": "Send",
+            "position": {
+              "x": 220,
+              "y": 0
+            },
+            "config": {
+              "url": "https://www.googleapis.com/calendar/v3/calendars/primary/events/{{eventId}}",
+              "method": "PATCH"
+            }
+          },
+          {
+            "id": "confirm",
+            "typeId": "feature.assistant.nodes.confirm-action-send",
+            "name": "Confirm send",
+            "position": {
+              "x": 440,
+              "y": 0
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "prepare",
+            "to": "send"
+          },
+          {
+            "from": "send",
+            "to": "confirm"
+          }
+        ]
+      }
+    }
+  ]
+}

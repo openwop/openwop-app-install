@@ -1,5 +1,5 @@
 /**
- * `/demo-data` (Settings → Example data) — the example-data seeding dashboard.
+ * `/example-data` (Settings → Example data) — the example-data seeding dashboard.
  *
  * Renders one row per example data type the backend's seeder registry reports
  * (`GET /demo/status`), each with its live "N present" count and a checkbox.
@@ -13,6 +13,7 @@
  *
  * @see ../client/exampleDataClient.ts
  */
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
@@ -23,13 +24,32 @@ import { StateCard } from '../ui/StateCard.js';
 import { Skeleton } from '../ui/Skeleton.js';
 import { CheckIcon, RotateCwIcon, TrashIcon, DatabaseIcon } from '../ui/icons/index.js';
 import {
-  clearExampleData,
+  clearExampleDataStream,
   getExampleDataStatus,
   runExampleDataSeed,
+  runExampleDataSeedStream,
+  provisionDemoTenant,
   type ExampleDataStep,
   type RunResult,
   type StepResult,
 } from '../client/exampleDataClient.js';
+
+/** Build a RunResult from the step results streamed so far — drives the live
+ *  progress list as each seeder lands (ADR 0292). */
+function liveResult(results: StepResult[]): RunResult {
+  return {
+    success: true,
+    dryRun: false,
+    results: [...results],
+    summary: {
+      created: results.filter((r) => r.action === 'created').length,
+      skipped: results.filter((r) => r.action === 'skipped').length,
+      cleared: results.filter((r) => r.action === 'cleared').length,
+      errors: results.filter((r) => r.action === 'error').length,
+      total: results.length,
+    },
+  };
+}
 
 function actionChip(action: StepResult['action']): string {
   switch (action) {
@@ -75,17 +95,23 @@ function ResultList({ result }: { result: RunResult }): JSX.Element {
 export function ExampleDataPage(): JSX.Element {
   const { t } = useTranslation('settings');
   const [steps, setSteps] = useState<ExampleDataStep[] | null>(null);
+  // Whether seeding is available on this deployment (DUR-3/ADR 0195: opt-in
+  // under the enterprise posture). Clearing existing data is never gated.
+  const [seedEnabled, setSeedEnabled] = useState(true);
+  const [superadmin, setSuperadmin] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dryRun, setDryRun] = useState(false);
-  const [busy, setBusy] = useState<null | 'seed' | 'clear'>(null);
+  const [busy, setBusy] = useState<null | 'seed' | 'clear' | 'provision'>(null);
   const [result, setResult] = useState<RunResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       const s = await getExampleDataStatus();
-      setSteps(s);
-      setSelected((prev) => (prev.size === 0 ? new Set(s.map((x) => x.id)) : prev));
+      setSteps(s.steps);
+      setSeedEnabled(s.enabled);
+      setSuperadmin(s.superadmin);
+      setSelected((prev) => (prev.size === 0 ? new Set(s.steps.map((x) => x.id)) : prev));
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -102,13 +128,43 @@ export function ExampleDataPage(): JSX.Element {
 
   const onSeed = async (all: boolean) => {
     setBusy('seed'); setError(null); setResult(null);
+    const stepIds = all ? undefined : [...selected];
     try {
-      const stepIds = all ? undefined : [...selected];
-      const r = await runExampleDataSeed({ ...(stepIds ? { steps: stepIds } : {}), dryRun });
-      setResult(r);
-      if (!dryRun) await refresh();
+      // Dry-run previews from counts (fast) — plain JSON. A real seed STREAMS so
+      // the full reseed shows live progress and never trips the timeouts (ADR 0292).
+      if (dryRun) {
+        setResult(await runExampleDataSeed({ ...(stepIds ? { steps: stepIds } : {}), dryRun: true }));
+        return;
+      }
+      const collected: StepResult[] = [];
+      const final = await runExampleDataSeedStream({ ...(stepIds ? { steps: stepIds } : {}) }, (e) => {
+        if (e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
+      });
+      setResult({ success: final.success, dryRun: false, results: collected, summary: final.summary });
+      await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onProvision = async () => {
+    if (!(await confirm({ title: t('provisionConfirm') }))) return;
+    setBusy('provision'); setError(null); setResult(null);
+    try {
+      const collected: StepResult[] = [];
+      const final = await provisionDemoTenant((e) => {
+        if (e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
+      });
+      setResult({ success: final.success, dryRun: false, results: collected, summary: final.summary });
+      window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
+      await refresh();
+    } catch (err) {
+      // Provisioning is superadmin-only — the server enforces it; surface a 403
+      // as a helpful message (the AuditLogPage forbidden pattern).
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(/forbidden|superadmin|403/i.test(msg) ? t('provisionForbidden') : msg);
     } finally {
       setBusy(null);
     }
@@ -120,8 +176,14 @@ export function ExampleDataPage(): JSX.Element {
     if (!(await confirm({ title: t('clearConfirm', { label }), danger: true }))) return;
     setBusy('clear'); setError(null); setResult(null);
     try {
-      const r = await clearExampleData(ids.length ? { steps: ids } : {});
-      setResult(r);
+      // Stream the clear so the full cascade (roster deletes, thousands of rows)
+      // never trips the Firebase `/api` ~60s cap and shows live progress — the
+      // same path the reseed uses (ADR 0292 / ADR 0321).
+      const collected: StepResult[] = [];
+      const final = await clearExampleDataStream(ids.length ? { steps: ids } : {}, (e) => {
+        if (e.type === 'step') { collected.push(e); setResult(liveResult(collected)); }
+      });
+      setResult({ success: final.success, dryRun: false, results: collected, summary: final.summary });
       // Clearing agents deletes roster members that may be pinned — tell the
       // sidebar to re-read so a now-dead pin drops out immediately (ADR 0023).
       window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
@@ -134,7 +196,7 @@ export function ExampleDataPage(): JSX.Element {
   };
 
   return (
-    <section>
+    <section data-walkthrough="example-data.page">
       <PageHeader
         eyebrow={t('exampleDataEyebrow')}
         title={t('exampleDataTitle')}
@@ -142,6 +204,7 @@ export function ExampleDataPage(): JSX.Element {
       />
 
       {error ? <Notice variant="error">{error}</Notice> : null}
+      {!seedEnabled ? <Notice variant="info">{t('seedDisabledNotice')}</Notice> : null}
 
       <div className="surface-card u-mt-3">
         <h2 className="u-fs-16 u-mt-0">{t('typesHeading')}</h2>
@@ -182,18 +245,23 @@ export function ExampleDataPage(): JSX.Element {
           <label className="demodata-dryrun-label">
             <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="u-w-auto u-flex-auto" /> {t('dryRunLabel')}
           </label>
-          <button type="button" className="btn-accent-solid" disabled={busy !== null || (steps?.length ?? 0) === 0} onClick={() => void onSeed(true)}>
+          <Button variant="accent-solid" disabled={busy !== null || !seedEnabled || (steps?.length ?? 0) === 0} onClick={() => void onSeed(true)}>
             <DatabaseIcon size={14} /> {busy === 'seed' ? t('common:loading') : t('loadAllExampleData')}
-          </button>
-          <button type="button" className="btn" disabled={busy !== null || selected.size === 0} onClick={() => void onSeed(false)}>
+          </Button>
+          <Button variant="primary" disabled={busy !== null || !seedEnabled || selected.size === 0} onClick={() => void onSeed(false)}>
             <CheckIcon size={14} /> {t('loadSelected', { n: formatNumber(selected.size) })}
-          </button>
-          <button type="button" className="btn" disabled={busy !== null || (steps?.length ?? 0) === 0} onClick={() => void refresh()}>
+          </Button>
+          {superadmin ? (
+            <Button variant="primary" disabled={busy !== null || !seedEnabled} onClick={() => void onProvision()} title={t('provisionTitle')}>
+              <DatabaseIcon size={14} /> {busy === 'provision' ? t('provisioning') : t('provisionExampleData')}
+            </Button>
+          ) : null}
+          <Button variant="primary" disabled={busy !== null || (steps?.length ?? 0) === 0} onClick={() => void refresh()}>
             <RotateCwIcon size={14} /> {t('common:refresh')}
-          </button>
-          <button type="button" className="secondary" disabled={busy !== null} onClick={() => void onClear()} title={t('clearTitle')}>
+          </Button>
+          <Button variant="secondary" disabled={busy !== null} onClick={() => void onClear()} title={t('clearTitle')}>
             <TrashIcon size={14} /> {busy === 'clear' ? t('clearing') : t('clearExampleData')}
-          </button>
+          </Button>
         </div>
 
         {result ? <ResultList result={result} /> : null}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/persist-segment.output.json",
+  "title": "CrmPersistSegmentOutput",
+  "description": "`{ success:true, segment }` or the fail-closed `{ success:false, errors }` — never a write of an invalid draft. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
+  "type": "object",
+  "required": [
+    "success"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean"
+    },
+    "segment": {
+      "type": "object",
+      "required": [
+        "segmentId"
+      ],
+      "properties": {
+        "segmentId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "The segment row as the surface projects it (host bookkeeping columns `tenantId`/`orgId`/`createdBy`/`updatedBy` stripped)."
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      },
+      "description": "Present with `success:false` — the surface RE-VALIDATED closed-world and refused WITHOUT writing."
+    }
+  },
+  "additionalProperties": false
+}

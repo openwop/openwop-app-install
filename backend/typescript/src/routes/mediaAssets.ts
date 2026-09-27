@@ -198,17 +198,25 @@ export function registerMediaAssetRoutes(app: Express): void {
   // Namespace: host-extension under `/v1/host/openwop-app/*` — NOT part of the
   // normative OpenWOP wire contract. Tenant always from req.tenantId (never
   // the body), per CTI-1.
-  app.post('/v1/host/openwop-app/media/generate-image', async (req, res) => {
-    const tenantId = req.tenantId ?? 'default';
-    const body = (req.body ?? {}) as { prompt?: unknown };
-    const prompt = typeof body.prompt === 'string' ? body.prompt : '';
-    if (prompt.length === 0) {
-      res.status(400).json({ error: 'invalid_argument', message: 'prompt (non-empty string) required' });
-      return;
-    }
-    const stored = await storeMediaAsset(tenantId, { contentBase64: STUB_PNG_1x1_BASE64, contentType: 'image/png' });
-    res.status(201).json({ ...stored, contentType: 'image/png', prompt, stub: true });
-  });
+  // LEAK-5: this returns a hardcoded 1×1 PNG for every tenant. It is a demo/CLI
+  // affordance only — gate it behind the same OPENWOP_TEST_SEAM_ENABLED flag as
+  // `media/put` so a production tenant never receives canned fixture bytes. The
+  // honest advertisement (`aiProviders.imageGeneration.supported:false`) stands;
+  // when off the route simply isn't mounted (uniform 404).
+  if (storeEnabled) {
+    app.post('/v1/host/openwop-app/media/generate-image', async (req, res) => {
+      const tenantId = req.tenantId ?? 'default';
+      const body = (req.body ?? {}) as { prompt?: unknown };
+      const prompt = typeof body.prompt === 'string' ? body.prompt : '';
+      if (prompt.length === 0) {
+        res.status(400).json({ error: 'invalid_argument', message: 'prompt (non-empty string) required' });
+        return;
+      }
+      const stored = await storeMediaAsset(tenantId, { contentBase64: STUB_PNG_1x1_BASE64, contentType: 'image/png' });
+      res.status(201).json({ ...stored, contentType: 'image/png', prompt, stub: true });
+    });
+    log.warn('media generate-image STUB route ENABLED (POST /v1/host/openwop-app/media/generate-image) — returns a fixture PNG, test/demo only.');
+  }
 
   // MEDIA-6 (ADR 0085 OQ-5): the legacy `media/transcribe` + `media/synthesize`
   // demo routes were RETIRED — superseded by the canonical surfaces (audio/video
@@ -218,7 +226,6 @@ export function registerMediaAssetRoutes(app: Express): void {
   // no FE consumer), so removing them touches no wire and no UI.
 
   log.info('media-asset serve + upload routes registered (GET /v1/host/openwop-app/assets/:token, POST /v1/host/openwop-app/media/upload)');
-  log.info('sample media generation route registered (POST /v1/host/openwop-app/media/generate-image)');
 }
 
 // A 1×1 transparent PNG — the deterministic stub the generate-image demo

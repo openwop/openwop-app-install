@@ -22,16 +22,26 @@
  * forking this file need to thread these through.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Button } from '../ui/Button.js';
+import { lazy, Suspense, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { scrollBehavior } from '../ui/motion.js';
 import { MessageBubble } from './MessageBubble.js';
 import { WorkflowRunBubble } from './WorkflowRunBubble.js';
 import { CardHost } from './registry/CardHost.js';
+import { getCard } from './registry/CardRegistry.js';
 import { a2uiInterruptCard } from './a2ui/interruptBridge.js';
 import { HitlDecisionCard } from './HitlDecisionCard.js';
 import { WorkflowCompletionCard } from './WorkflowCompletionCard.js';
-import { ArtifactPreviewModal } from './ArtifactPreviewModal.js';
+import { MessageComments } from './MessageComments.js';
+import { SelectionRewriteOverlay } from './SelectionRewrite.js';
+
+// LAZY — the artifact preview only mounts when the user clicks "View" on a
+// completed workflow's card; keeping it out of the ENTRY chunk preserves
+// bundle-budget headroom for feed-path code.
+const ArtifactPreviewModal = lazy(() => import('./ArtifactPreviewModal.js').then((m) => ({ default: m.ArtifactPreviewModal })));
 import { ArrowDownIcon } from '../ui/icons/index.js';
+import { announce } from '../ui/announce.js';
 import type { ChatMessage } from './hooks/useChatSession.js';
 
 /** Normalize historical `@<slug>` user-message text to `/<slug>` when
@@ -146,7 +156,15 @@ function InterruptCardStack({
                 ...(nodeName ? { nodeName } : {}),
                 ...(message.workflowRun?.workflowName ? { workflowName: message.workflowRun.workflowName } : {}),
               }}
-              onAction={async (_actionId, payload) => {
+              onAction={async (actionId, payload) => {
+                // ADR 0749 (RFC 0209 §C.10) — an A2UI `exchange` action is a
+                // conversation turn, not a resolution: route it to the card's own
+                // registered `exchange` handler. Everything else resolves.
+                const exchangeHandler = actionId === 'exchange' ? getCard(a2ui ? a2ui.cardType : `interrupt.${interrupt.kind}`)?.actionHandlers?.exchange : undefined;
+                if (exchangeHandler) {
+                  await exchangeHandler(payload, { runId: runIdFor(message), nodeId: interrupt.nodeId, tenantId });
+                  return;
+                }
                 await onResolveInterrupt(message.id, payload, interrupt.nodeId);
               }}
             />
@@ -181,6 +199,31 @@ interface Props {
   isLoadingEarlier?: boolean;
   /** Fetch + prepend the next-older page. */
   onLoadEarlier?: () => void;
+  /** ADR 0021 extension — when present, each settled user/assistant message
+   *  shows an inline comment affordance scoped to this org + session. Omitted by
+   *  embeds and when the `comments` toggle is off. */
+  commentsContext?: { orgId: string; sessionId: string };
+  /** ADR 0192 D8 — channel mode: `subjectRef → display` for attribution rows.
+   *  Present ⇒ multi-party rendering (attribution + own-message alignment). */
+  authorDirectory?: ReadonlyMap<string, { displayName: string; kind: 'user' | 'agent' | 'other' }>;
+  /** The caller's own subjectRef — with `authorDirectory`, decides alignment. */
+  viewerSubjectRef?: string;
+  /** ADR 0195 D5 — multi-party message affordances (react / edit / delete).
+   *  Present only on channel/group surfaces; per-message `canModify` derives
+   *  from own-authorship here. */
+  messageActions?: {
+    onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void;
+    onEdit: (messageId: string, newText: string) => void;
+    onDelete: (messageId: string) => void;
+  };
+  /** ADR 0202 D5 — the "New messages" divider renders BEFORE the message at this
+   *  0-based index (the caller's first unread). Out-of-range ⇒ no divider. */
+  unreadFromIndex?: number;
+  /** ADR 0202 D5 — the divider's "Summarize what I missed" action (present only
+   *  when a channel agent member exists). */
+  onSummarize?: () => void;
+  /** ADR 0202 D5 — disables the summarize button while a recap is in flight. */
+  summarizeBusy?: boolean;
 }
 
 export function MessageFeed({
@@ -196,10 +239,26 @@ export function MessageFeed({
   hasOlderMessages,
   isLoadingEarlier,
   onLoadEarlier,
+  commentsContext,
+  authorDirectory,
+  viewerSubjectRef,
+  messageActions,
+  unreadFromIndex,
+  onSummarize,
+  summarizeBusy,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const endRef = useRef<HTMLDivElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
+  // CS-FE-1 (conversation-stack audit) — MessageBubble is memo()'d and the
+  // reducer preserves untouched message identity, but channel mode rebuilt a
+  // fresh `channelActions` object per ROW per RENDER, defeating the memo for
+  // the whole channel feed on every streaming delta. Two stable variants
+  // (own = can modify, other = read-only) keep the prop referentially stable.
+  const channelActionsPair = useMemo(() => messageActions ? {
+    own: { canModify: true, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete },
+    other: { canModify: false, onToggleReaction: messageActions.onToggleReaction, onEdit: messageActions.onEdit, onDelete: messageActions.onDelete },
+  } : undefined, [messageActions]);
   // "Stick to bottom" = the user is at (or within a threshold of) the bottom, so
   // new content should auto-follow. The moment they scroll up, this goes false and
   // streaming tokens stop yanking them down — a "Jump to latest" pill appears
@@ -231,7 +290,18 @@ export function MessageFeed({
   const prevFirstIdRef = useRef<string | null>(null);
   const prevLastIdRef = useRef<string | null>(null);
   const prevLastLenRef = useRef<number>(-1);
+  // The log's height as of the LAST commit — the pre-mutation baseline the
+  // prepend branch needs to compute its scroll delta (CHV-UX-2).
+  const prevScrollHeightRef = useRef(0);
+  // While a load-earlier batch lands, the live region is silenced so a screen
+  // reader doesn't read 50 historical messages as new arrivals (CHV-UX-3).
+  const [silenceLive, setSilenceLive] = useState(false);
   useEffect(() => {
+    if (isLoadingEarlier) setSilenceLive(true);
+  }, [isLoadingEarlier]);
+  // Layout effect (not passive): the prepend scroll restore must land before
+  // paint or the feed visibly jumps then snaps back.
+  useLayoutEffect(() => {
     const first = messages[0];
     const last = messages[messages.length - 1];
     const firstId = first?.id ?? null;
@@ -242,22 +312,33 @@ export function MessageFeed({
     const threadSwitched = !hadMessages
       || (firstId !== prevFirstIdRef.current && lastId !== prevLastIdRef.current);
     const bottomChanged = lastId !== prevLastIdRef.current || lastLen !== prevLastLenRef.current;
+    // Pure PREPEND (load-earlier): first id changed, last id didn't.
+    const prepended = hadMessages && !threadSwitched && firstId !== prevFirstIdRef.current && lastId === prevLastIdRef.current;
 
     prevFirstIdRef.current = firstId;
     prevLastIdRef.current = lastId;
     prevLastLenRef.current = lastLen;
 
+    const el = logRef.current;
     if (threadSwitched) {
       stickRef.current = true;
       setAtBottom(true);
       endRef.current?.scrollIntoView({ block: 'end' });
-      return;
-    }
-    // Instant (not smooth) follow: smooth scrolling fights each token's append
-    // and reads as jitter during a fast stream.
-    if (bottomChanged && stickRef.current) {
+    } else if (prepended && el) {
+      // Hold the viewport on the message the user was reading: the batch grew
+      // the scrollable height above it, so shift scrollTop by exactly that
+      // delta (native anchoring is off — see .msgfeed-log in global.css).
+      const delta = el.scrollHeight - prevScrollHeightRef.current;
+      if (delta > 0) el.scrollTop += delta;
+      // Re-arm the live region once this batch has committed (a beat later, so
+      // the mutation observers AT uses have already seen the silenced state).
+      setTimeout(() => setSilenceLive(false), 500);
+    } else if (bottomChanged && stickRef.current) {
+      // Instant (not smooth) follow: smooth scrolling fights each token's
+      // append and reads as jitter during a fast stream.
       endRef.current?.scrollIntoView({ behavior: 'auto', block: 'end' });
     }
+    prevScrollHeightRef.current = el?.scrollHeight ?? 0;
   }, [messages]);
 
   // Re-evaluate stickiness as the user scrolls. Setting state only on a boolean
@@ -274,7 +355,7 @@ export function MessageFeed({
   const jumpToBottom = (): void => {
     stickRef.current = true;
     setAtBottom(true);
-    endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    endRef.current?.scrollIntoView({ behavior: scrollBehavior(), block: 'end' });
   };
 
   // Artifact preview modal state. Single global instance so multiple
@@ -286,13 +367,26 @@ export function MessageFeed({
     output: unknown;
   } | null>(null);
 
+  // A11Y-6/A11Y-9 companion: the log announces ADDITIONS only (announcing
+  // `text` re-reads every streamed token mutation — an AT flood). Streamed
+  // replies are instead announced once, when the stream SETTLES, via the shared
+  // `announce()` primitive (ADR 0363 P4 — the reference adopter of the
+  // consolidated sr-only live region; no per-surface region here anymore).
+  const anyStreaming = messages.some((m) => m.isStreaming);
+  const prevStreamingRef = useRef(false);
+  useEffect(() => {
+    const was = prevStreamingRef.current;
+    prevStreamingRef.current = anyStreaming;
+    if (was && !anyStreaming) announce(t('assistantReplied'));
+  }, [anyStreaming, t]);
+
   return (
     <div className="msgfeed-wrap">
     <div
       ref={logRef}
       role="log"
-      aria-live="polite"
-      aria-relevant="additions text"
+      aria-live={silenceLive ? 'off' : 'polite'}
+      aria-relevant="additions"
       aria-label={t('conversationLog')}
       className="msgfeed-log"
       onScroll={onScroll}
@@ -303,25 +397,82 @@ export function MessageFeed({
           role="status"
           aria-live="polite"
         >
+          {/* The skeleton below is DECORATIVE and deliberately NOT a live region.
+              This div is already `role="status" aria-live="polite"`, inside the
+              feed's `role="log" aria-live="polite"` — a third nested live region
+              would be the competing-voices defect enforced against elsewhere.
+              Every skeleton child is `aria-hidden`, so there is nothing to name:
+              `aria-hidden` is the honest answer, not a label. (Its previous
+              `aria-label` was also PROHIBITED — on a role-less div it is ignored
+              outright, axe `aria-prohibited-attr`, which is what surfaced it.) */}
           {isLoadingEarlier ? (
-            <div className="msgfeed-skeleton" aria-label={t('common:loading')}>
+            <div className="msgfeed-skeleton" aria-hidden="true">
               <span className="skeleton msgfeed-skel-line msgfeed-skel-in" />
               <span className="skeleton msgfeed-skel-line msgfeed-skel-out" />
               <span className="skeleton msgfeed-skel-line msgfeed-skel-in" />
             </div>
           ) : (
-            <button
-              type="button"
-              className="secondary u-fs-12"
-              onClick={onLoadEarlier}
-            >
-              {t('loadEarlierMessages')}
-            </button>
+            <>
+              <Button
+                variant="secondary" className="u-fs-12"
+                onClick={onLoadEarlier}
+              >
+                {t('loadEarlierMessages')}
+              </Button>
+              {/* UX_UPGRADE-chat CH-G1 — "Branch from here" is deliberately
+                  withheld while a thread is paginated, because `branchSeq` is
+                  derived from the RENDER index and only equals the server seq
+                  once the whole conversation is loaded (see the `onBranchFrom`
+                  contract above). Forking from the wrong turn would be worse
+                  than not offering it — but the control silently VANISHING is
+                  its own failure, so say why, and point at the way out. */}
+              {onBranchFrom ? (
+                <p className="u-fs-11 muted u-m-0 u-text-center">{t('branchNeedsFullThread')}</p>
+              ) : null}
+            </>
           )}
         </div>
       )}
-      {displayMessages.map((m, i) => (
+      {displayMessages.map((m, i) => {
+        // ADR 0192 D8 — channel mode: alignment by AUTHOR (other humans also
+        // post role:'user'; without knowing "me", theirs would render as
+        // yours), attribution header on author change or a >5-minute gap
+        // (consecutive-author grouping keeps the feed calm).
+        let channelProps: { channelAuthor?: { displayName: string; kind: 'user' | 'agent' | 'other' }; isOwn?: boolean; showAttribution?: boolean; channelActions?: { canModify: boolean; onToggleReaction: (messageId: string, emoji: string, currentlyMine: boolean) => void; onEdit: (messageId: string, newText: string) => void; onDelete: (messageId: string) => void } } = {};
+        if (authorDirectory && m.role !== 'workflow_run' && m.role !== 'system') {
+          const isOwn = m.authorSubject !== undefined
+            ? m.authorSubject === viewerSubjectRef
+            : m.role === 'user'; // legacy rows without an author — old behavior
+          const author = m.authorSubject !== undefined ? authorDirectory.get(m.authorSubject) : undefined;
+          const prev = i > 0 ? displayMessages[i - 1] : undefined;
+          const gapMs = prev?.createdAt && m.createdAt ? Date.parse(m.createdAt) - Date.parse(prev.createdAt) : Number.POSITIVE_INFINITY;
+          const sameAuthor = prev !== undefined && prev.authorSubject !== undefined && prev.authorSubject === m.authorSubject;
+          channelProps = {
+            isOwn,
+            ...(author && !isOwn ? { channelAuthor: author } : {}),
+            showAttribution: !isOwn && author !== undefined && (!sameAuthor || gapMs > 5 * 60_000),
+            // ADR 0195 D5 — affordances on every settled multi-party message;
+            // edit/delete only on the viewer's OWN (server re-checks anyway).
+            // CS-FE-1 — the memo-stable pair from above, not a per-row object.
+            ...(channelActionsPair ? {
+              channelActions: isOwn && m.authorSubject !== undefined ? channelActionsPair.own : channelActionsPair.other,
+            } : {}),
+          };
+        }
+        return (
         <div key={m.id}>
+          {/* ADR 0202 D5 — the "New messages" divider + Summarize action, before
+              the caller's first unread message. */}
+          {unreadFromIndex !== undefined && i === unreadFromIndex && i > 0 && (
+            <div className="msgfeed-unread-divider" role="separator" aria-label={t('newMessagesLabel')}>
+              <span className="msgfeed-unread-label">{t('newMessagesLabel')}</span>
+              {onSummarize && (
+                <Button variant="quiet" size="sm" onClick={onSummarize} disabled={summarizeBusy}>
+                  {t('summarizeWhatIMissed')}
+                </Button>
+              )}
+            </div>
+          )}
           {m.role === 'workflow_run'
             ? <WorkflowRunBubble
                 message={m}
@@ -334,7 +485,15 @@ export function MessageFeed({
                 {...(onFeedback ? { onFeedback } : {})}
                 {...(onBranchFrom && !hasOlderMessages ? { onBranchFrom, branchSeq: i + 1 } : {})}
                 {...(onReconfigureBYOK ? { onReconfigureBYOK } : {})}
+                {...channelProps}
               />}
+          {/* Inline comments (ADR 0021 extension) — a collapsed affordance on a
+              settled user/assistant turn. Skipped while streaming (no anchor yet)
+              and for system/workflow_run bubbles. Loads its thread only on
+              expand, so the feed's initial render fires no comment fetch. */}
+          {commentsContext && !m.isStreaming && (m.role === 'user' || m.role === 'assistant') ? (
+            <MessageComments orgId={commentsContext.orgId} sessionId={commentsContext.sessionId} messageId={m.id} />
+          ) : null}
           {/* Inline interrupt card — renders below the bubble for
               every message kind (chat-turn AND workflow_run). The
               right-side WorkflowProgressPanel is for *tracking* the
@@ -376,15 +535,20 @@ export function MessageFeed({
             </div>
           )}
         </div>
-      ))}
+        );
+      })}
       <div ref={endRef} />
-      <ArtifactPreviewModal
-        open={preview !== null}
-        nodeId={preview?.nodeId ?? ''}
-        label={preview?.label ?? ''}
-        output={preview?.output}
-        onClose={() => setPreview(null)}
-      />
+      {preview !== null ? (
+        <Suspense fallback={null}>
+          <ArtifactPreviewModal
+            open
+            nodeId={preview.nodeId}
+            label={preview.label}
+            output={preview.output}
+            onClose={() => setPreview(null)}
+          />
+        </Suspense>
+      ) : null}
     </div>
     {!atBottom && (
       <button
@@ -398,6 +562,9 @@ export function MessageFeed({
         <span>{t('jumpToBottom')}</span>
       </button>
     )}
+    {/* ADR 0565 — select a span in a completed assistant reply → Rewrite /
+        Shorter / Longer quotes it into the composer as a NEW user turn. */}
+    <SelectionRewriteOverlay containerRef={logRef} />
     </div>
   );
 }

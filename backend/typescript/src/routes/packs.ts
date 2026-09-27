@@ -15,6 +15,7 @@
  */
 
 import type { Express } from 'express';
+import { v1 } from '../middleware/protocolVersion.js';
 import type { Storage } from '../storage/storage.js';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentRegistry.js';
@@ -69,7 +70,7 @@ function listPackInstalledAgents(): readonly ResolvedAgentManifest[] {
 export function registerPackRoutes(app: Express, _deps: Deps): void {
   // ── search (more-specific routes registered first so they win over
   //     the wildcard `:name` route below) ──
-  app.get('/v1/packs/-/search', (req, res) => {
+  app.get(v1('/packs/-/search'), (req, res) => {
     const q = String(req.query.q ?? '');
     const registry = getNodeRegistry();
     const matches = registry.listTypeIds().filter((id) => !q || id.includes(q));
@@ -148,7 +149,7 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
   // pack-installed agent the export originated from its own manifest id.
   // Registered BEFORE the `/v1/packs/:name` wildcard so "export" is never
   // parsed as a (malformed) pack name.
-  app.get('/v1/packs/export', (_req, res) => {
+  app.get(v1('/packs/export'), (_req, res) => {
     const manifests = listPackInstalledAgents().map((a) => ({
       ...projectAgentManifest(a),
       sourceManifestId: a.agentId,
@@ -159,7 +160,7 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
   });
 
   // ── catalog list (root) ──
-  app.get('/v1/packs', (_req, res) => {
+  app.get(v1('/packs'), (_req, res) => {
     const registry = getNodeRegistry();
     const typeIds = registry.listTypeIds();
     const packs = new Map<
@@ -197,7 +198,7 @@ export function registerPackRoutes(app: Express, _deps: Deps): void {
 
   // ── pack-name lookup. Registered LAST so the more-specific routes above
   //     get first crack at matching. ──
-  app.get('/v1/packs/:name', (req, res, next) => {
+  app.get(v1('/packs/:name'), (req, res, next) => {
     try {
       const name = req.params.name;
       // The `-` token is reserved for sub-routes (e.g., /v1/packs/-/search)

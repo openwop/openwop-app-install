@@ -1,7 +1,7 @@
 /**
  * Campaign Studio orchestration (ADR 0158) — the MarketingCampaign route (finalize
  * from a brief), the consistency-check + finalize nodes over stubbed surfaces, the
- * parent orchestration workflow (DAG validity, sequential channel spine), and the
+ * parent orchestration workflow (DAG validity, both channel spines), and the
  * Campaign Strategist agent.
  */
 import http from 'node:http';
@@ -18,6 +18,7 @@ import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { nodes as nodePack } from '../../../packs/feature.campaign-orchestration.nodes/index.mjs';
 import { campaignOrchestrationWorkflow, campaignOrchestrationParallel, parallelFanOutEnabled, CAMPAIGN_ORCHESTRATION, ORCHESTRATION_ID } from '../src/features/campaign-orchestration/orchestrationWorkflow.js';
 import { CHANNEL_WORKFLOW_IDS } from '../src/features/campaign-channels/channelWorkflows.js';
+import { setKernel } from '../src/features/campaign-brief/briefService.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 let BASE: string;
@@ -30,7 +31,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['campaign-orchestration', 'campaign-brief']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -48,13 +49,21 @@ function client(): Client {
   return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), del: (p) => call('DELETE', p) };
 }
 const uniqEmail = (): string => `cs-${Date.now()}-${n++}@acme.test`;
-async function ownerWithOrg(): Promise<{ owner: Client; orgId: string }> {
+async function ownerWithOrg(): Promise<{ owner: Client; orgId: string; tenantId: string }> {
   const owner = client();
-  expect((await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail() })).status).toBe(201);
+  // Explicit tenant so a test can set the kernel via the service (there is no
+  // kernel HTTP route — it's set by the orchestration workflow surface).
+  const tenantId = `user:cs-${Date.now()}-${n++}`;
+  expect((await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail(), tenantId })).status).toBe(201);
   const org = await owner.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
   expect(org.status).toBe(201);
-  return { owner, orgId: org.body.orgId };
+  return { owner, orgId: org.body.orgId, tenantId };
 }
+
+const FINALIZE_KERNEL = {
+  headline: 'H', supportingStatement: 'S', proofPoints: ['p'], primaryCta: 'go', secondaryCta: 'see',
+  tone: 'warm', channelTones: {}, sourceDocIds: [], generatedAt: '2026-07-01T00:00:00Z',
+};
 
 describe('campaign-studio — finalize route', () => {
   it('404s when off', async () => {
@@ -65,10 +74,12 @@ describe('campaign-studio — finalize route', () => {
   });
 
   it('finalizes a brief into a campaign (one per brief) and lists it', async () => {
-    const { owner, orgId } = await ownerWithOrg();
+    const { owner, orgId, tenantId } = await ownerWithOrg();
     const brief = await owner.post('/v1/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Q4', productName: 'FlashPick' });
     const briefId = brief.body.brief.id;
     await owner.patch(`/v1/host/openwop-app/campaign-brief/briefs/${briefId}`, { channels: [{ type: 'landing_page', enabled: true, config: {} }] });
+    // ORCH-1: finalize now requires an approved messaging kernel — set it before finalizing.
+    await setKernel(tenantId, briefId, FINALIZE_KERNEL);
 
     const fin = await owner.post('/v1/host/openwop-app/campaign-orchestration/finalize', { briefId });
     expect(fin.status, JSON.stringify(fin.body)).toBe(201);
@@ -85,11 +96,76 @@ describe('campaign-studio — finalize route', () => {
   });
 
   it('a stranger cannot read a foreign campaign (404)', async () => {
-    const { owner, orgId } = await ownerWithOrg();
+    const { owner, orgId, tenantId } = await ownerWithOrg();
     const brief = await owner.post('/v1/host/openwop-app/campaign-brief/briefs', { orgId, name: 'Secret', productName: 'P' });
+    await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
     const fin = await owner.post('/v1/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
     const stranger = client(); await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail() });
     expect((await stranger.get(`/v1/host/openwop-app/campaign-orchestration/campaigns/${fin.body.campaign.id}`)).status).toBe(404);
+  });
+
+  it('R2 CO-SP-5: PATCH with an invalid status is a typed 400 naming the allowlist — never a 200 no-op', async () => {
+    const { owner, orgId, tenantId } = await ownerWithOrg();
+    const brief = await owner.post('/v1/host/openwop-app/campaign-brief/briefs', { orgId, name: 'P5', productName: 'X' });
+    await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
+    const fin = await owner.post('/v1/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    const id = fin.body.campaign.id;
+
+    // The old guard silently DROPPED an invalid status and returned 200 with
+    // the unchanged campaign — an agent's repair loop got success-with-no-op.
+    const bad = await owner.patch(`/v1/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 'launched' });
+    expect(bad.status).toBe(400);
+    expect(bad.body.message).toMatch(/launched/);
+    expect(bad.body.message).toMatch(/draft.*active.*paused/);
+
+    const badType = await owner.patch(`/v1/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 42 });
+    expect(badType.status).toBe(400);
+
+    const badName = await owner.patch(`/v1/host/openwop-app/campaign-orchestration/campaigns/${id}`, { name: '   ' });
+    expect(badName.status).toBe(400);
+
+    // Polarity: a VALID patch still lands.
+    const ok = await owner.patch(`/v1/host/openwop-app/campaign-orchestration/campaigns/${id}`, { status: 'paused', name: 'Renamed' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.campaign.status).toBe('paused');
+    expect(ok.body.campaign.name).toBe('Renamed');
+
+    // Review fold-in: a COMBINED body validates whole before ANY write — the
+    // 400 promises nothing changed, so the valid name must NOT have landed
+    // beside the invalid status.
+    const mixed = await owner.patch(`/v1/host/openwop-app/campaign-orchestration/campaigns/${id}`, { name: 'ShouldNotLand', status: 'bogus' });
+    expect(mixed.status).toBe(400);
+    const after = await owner.get(`/v1/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
+    const row = after.body.campaigns.find((c: any) => c.id === id);
+    expect(row.name).toBe('Renamed');
+    expect(row.status).toBe('paused');
+  });
+
+  it('R2: the dispatches route answers over HTTP (empty ledger => designed empty, stranger => 404)', async () => {
+    const { owner, orgId, tenantId } = await ownerWithOrg();
+    const brief = await owner.post('/v1/host/openwop-app/campaign-brief/briefs', { orgId, name: 'D5', productName: 'X' });
+    await setKernel(tenantId, brief.body.brief.id, FINALIZE_KERNEL);
+    const fin = await owner.post('/v1/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    const id = fin.body.campaign.id;
+
+    const ok = await owner.get(`/v1/host/openwop-app/campaign-orchestration/campaigns/${id}/dispatches`);
+    expect(ok.status).toBe(200);
+    expect(ok.body.dispatches).toEqual([]);
+
+    const stranger = client();
+    await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail() });
+    expect((await stranger.get(`/v1/host/openwop-app/campaign-orchestration/campaigns/${id}/dispatches`)).status).toBe(404);
+  });
+
+  it('rejects finalizing a kernel-less brief with 409 (ORCH-1)', async () => {
+    const { owner, orgId } = await ownerWithOrg();
+    const brief = await owner.post('/v1/host/openwop-app/campaign-brief/briefs', { orgId, name: 'NoKernel', productName: 'P' });
+    // No setKernel — the brief has no messaging kernel.
+    const fin = await owner.post('/v1/host/openwop-app/campaign-orchestration/finalize', { briefId: brief.body.brief.id });
+    expect(fin.status).toBe(409);
+    // And it produced no campaign.
+    const list = await owner.get(`/v1/host/openwop-app/campaign-orchestration/campaigns?orgId=${orgId}`);
+    expect(list.body.campaigns.length).toBe(0);
   });
 });
 
@@ -157,7 +233,7 @@ describe('campaign-studio — orchestration workflow', () => {
   it('is a sequential validate→kernel→approve→5 channels→consistency→finalize spine', () => {
     expect(campaignOrchestrationWorkflow.workflowId).toBe(ORCHESTRATION_ID);
     const ids = campaignOrchestrationWorkflow.nodes.map((nd) => nd.nodeId);
-    expect(ids).toEqual(['validate', 'kernel', 'kernel-approve', 'sw-landing-page', 'sw-ad-variants', 'sw-email-sequence', 'sw-creative-briefs', 'sw-social-posts', 'consistency', 'finalize']);
+    expect(ids).toEqual(['validate', 'kernel', 'kernel-approve', 'sw-landing-page', 'sw-ad-variants', 'sw-email-sequence', 'sw-creative-briefs', 'sw-social-posts', 'production-plan', 'consistency', 'finalize']); // ADR 0356 P1 — the post-merge production slot
     // The five channel nodes dispatch via core.subWorkflow, sequential.
     const swNodes = campaignOrchestrationWorkflow.nodes.filter((nd) => nd.typeId === 'core.subWorkflow');
     expect(swNodes).toHaveLength(5);
@@ -166,24 +242,41 @@ describe('campaign-studio — orchestration workflow', () => {
       expect((sw.config as Record<string, unknown>).onChildFailure).toBe('absorb');
     }
     // Linear chain of 9 edges; briefId is the shared variable.
-    expect(campaignOrchestrationWorkflow.edges).toHaveLength(9);
+    expect(campaignOrchestrationWorkflow.edges).toHaveLength(10);
     expect(campaignOrchestrationWorkflow.variables?.[0]?.name).toBe('briefId');
     expect(campaignOrchestrationWorkflow.metadata?.parallelUpgrade).toBe('RFC-0118');
   });
 
-  // ADR 0158 §P1.5 — the parallel spine is prepped but DORMANT until the host
-  // implements RFC 0118 (env-gated, default off → sequential ships today).
-  it('defaults to the SEQUENTIAL spine (parallel gated off)', () => {
-    expect(parallelFanOutEnabled()).toBe(false);
+  // ADR 0158 §P1.5 — RFC 0118 is Accepted and the host arm (#994) advertises
+  // dispatch.fanOutSupported:true, so the default DERIVES from the capability:
+  // parallel on this host, with OPENWOP_CAMPAIGN_FANOUT_PARALLEL as a two-way
+  // ops override ('false' = the kill-switch back to sequential).
+  it('defaults to the PARALLEL spine (derived from dispatchCapability)', () => {
+    expect(parallelFanOutEnabled()).toBe(true);
     expect(CAMPAIGN_ORCHESTRATION).toHaveLength(1);
-    expect(CAMPAIGN_ORCHESTRATION[0]).toBe(campaignOrchestrationWorkflow);
-    expect(CAMPAIGN_ORCHESTRATION[0].metadata?.fanOut).toBe('sequential');
+    expect(CAMPAIGN_ORCHESTRATION[0]).toBe(campaignOrchestrationParallel);
+    expect(CAMPAIGN_ORCHESTRATION[0].metadata?.fanOut).toBe('parallel');
+  });
+
+  it('the env override is two-way: "false" forces sequential, "true" forces parallel', () => {
+    const prev = process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL;
+    try {
+      process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL = 'false';
+      expect(parallelFanOutEnabled()).toBe(false);
+      process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL = 'true';
+      expect(parallelFanOutEnabled()).toBe(true);
+      delete process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL;
+      expect(parallelFanOutEnabled()).toBe(true); // follows the capability
+    } finally {
+      if (prev === undefined) delete process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL;
+      else process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL = prev;
+    }
   });
 
   it('the PARALLEL spine (RFC 0118) is supervisor → core.dispatch(parallel), same workflowId', () => {
     expect(campaignOrchestrationParallel.workflowId).toBe(ORCHESTRATION_ID); // same id → clean swap
     const ids = campaignOrchestrationParallel.nodes.map((nd) => nd.nodeId);
-    expect(ids).toEqual(['validate', 'kernel', 'kernel-approve', 'channel-supervisor', 'channel-dispatch', 'consistency', 'finalize']);
+    expect(ids).toEqual(['validate', 'kernel', 'kernel-approve', 'channel-supervisor', 'channel-dispatch', 'production-plan', 'consistency', 'finalize']); // ADR 0356 P1
     const supervisor = campaignOrchestrationParallel.nodes.find((nd) => nd.typeId === 'core.orchestrator.supervisor')!;
     const plan = (supervisor.config as { mockDispatchPlan: Array<{ kind: string; nextWorkerIds?: string[] }> }).mockDispatchPlan;
     // The supervisor fans out to ALL five channel child workflows, then terminates.
@@ -207,14 +300,16 @@ describe('campaign-studio — orchestration workflow', () => {
 });
 
 describe('campaign-studio — agent pack', () => {
-  it('loads the Campaign Strategist with cross-pack tool-allowlist', () => {
+  it('loads the Campaign Strategist with its registered tool-allowlist', () => {
+    // CFP-1: the strategist drives the orchestration through two REAL registered
+    // tools (status read + workflow igniter), not phantom node typeIds — the
+    // resolution tripwire is test/agent-allowlist-resolution.test.ts.
     const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.campaign-orchestration.agents'));
     expect(loaded.length).toBe(1);
     expect(loaded[0].agentId).toBe('feature.campaign-orchestration.agents.campaign-strategist');
-    expect(loaded[0].toolAllowlist).toEqual(expect.arrayContaining([
-      'openwop:feature.campaign-brief.nodes.generate-kernel',
-      'openwop:feature.campaign-channels.nodes.generate',
-      'openwop:feature.campaign-orchestration.nodes.finalize',
-    ]));
+    expect([...(loaded[0].toolAllowlist ?? [])].sort()).toEqual([
+      'openwop:campaign-orchestration.run',
+      'openwop:campaign-orchestration.status',
+    ]);
   });
 });

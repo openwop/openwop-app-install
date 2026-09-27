@@ -258,20 +258,11 @@ describe('core.conformance.mock-agent', () => {
       expect(data.threshold).toBe(0.7);
       expect(data.observed).toBe(0.5);
 
-      // 2 events: agent.decided + node.suspended (the rich one with reason)
-      expect(events).toHaveLength(2);
+      // ADR 0725 — ONE event from the node (agent.decided). The `node.suspended`
+      // row is the EXECUTOR's, minted with the `interruptId` the def requires and
+      // carrying `reason` from the interrupt data — never a second hand-rolled row.
+      expect(events).toHaveLength(1);
       expect(events[0].type).toBe('agent.decided');
-      expect(events[1].type).toBe('node.suspended');
-      const susPayload = events[1].payload as {
-        reason: string;
-        agentId: string;
-        threshold: number;
-        observed: number;
-      };
-      expect(susPayload.reason).toBe('low-confidence');
-      expect(susPayload.agentId).toBe('agent-foo');
-      expect(susPayload.threshold).toBe(0.7);
-      expect(susPayload.observed).toBe(0.5);
     });
 
     it('mockConfidence shorthand (no mockDecision) → emits synthetic decision + suspends below threshold', async () => {
@@ -280,7 +271,7 @@ describe('core.conformance.mock-agent', () => {
       });
       const out: NodeOutcome = await mockAgentNode.execute(ctx);
       expect(out.status).toBe('suspended');
-      expect(events).toHaveLength(2);
+      expect(events, 'ADR 0725 — the node emits agent.decided only; node.suspended is the executor\'s').toHaveLength(1);
       const decided = events[0].payload as { decision: unknown; confidence: number };
       expect(decided.confidence).toBe(0.3);
       expect(decided.decision).toBeDefined(); // synthetic

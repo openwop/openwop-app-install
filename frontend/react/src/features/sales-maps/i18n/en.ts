@@ -1,0 +1,56 @@
+/**
+ * `sales-maps` namespace — user-facing strings for the Sales Map page + the shared
+ * MapView (ADR 0282). FLAT camelCase keys (ADR 0065). Interpolation via {{name}}.
+ */
+export const messages = {
+  // Page header
+  title: 'Sales Map',
+  lede: 'Territories coloured by attainment on a CSP-safe geographic map.',
+  orgLabel: 'Organization',
+  // Empty / error states
+  noOrgsTitle: 'No organizations',
+  noOrgsBody: 'Create an organization in CRM first.',
+  noModelTitle: 'No active territory model',
+  noModelBody: 'Activate a territory model (in Territories) to colour the map by attainment.',
+  loadOrgsError: 'Failed to load orgs',
+  outletsUnavailable: 'Outlet pins couldn\u2019t be loaded — the map shows attainment only.',
+  loadAttainmentError: 'Failed to load attainment',
+  // Attainment panel
+  attainmentHeading: 'Territory attainment',
+  attainmentHeadingWithOutlets: 'Territory attainment + outlets',
+  matchNone: 'No territories match a country yet — name a territory after a country (e.g. “United States” or “USA”) to colour it.',
+  matchSome: '{{matched}} of {{total}} countries matched a territory.',
+  outletsPlotted_one: '{{count}} located outlet plotted.',
+  outletsPlotted_other: '{{count}} located outlets plotted.',
+  boundariesNote: 'Boundaries: Natural Earth (1:110m).',
+  regionsShaded: 'Regions are shaded by won revenue of the matching territory.',
+  wonRevenue: 'Won revenue',
+  tableCaption: 'Territory won revenue by region (the accessible representation of the map above).',
+  emptyMessage: 'No territories to plot — create and activate a territory model first.',
+  // MapView
+  nothingTitle: 'Nothing to map yet',
+  nothingBody: 'No regions or locations to plot.',
+  showTable: 'Show data table',
+  hideTable: 'Hide data table',
+  colRegion: 'Region',
+  colType: 'Type',
+  colLatLng: 'Lat, Lng',
+  plottedCaption: 'Plotted locations',
+  colLocation: 'Location',
+  legendLabel: 'Legend',
+  legendLow: 'Lower',
+  legendHigh: 'Higher',
+  legendPresence: 'Shaded — has a territory',
+  legendOutlet: 'Outlet',
+  zoomIn: 'Zoom in',
+  zoomOut: 'Zoom out',
+  zoomReset: 'Reset zoom',
+  zoomHint: 'Pinch or ⌘-scroll to zoom; drag to pan.',
+  legendDealer: 'Dealer',
+  ariaSummary: 'Map: {{regions}} of {{total}} regions shaded, {{points}} locations marked. The same data is in the table below.',
+  pointKindPoint: 'point',
+  currencyMixedNote: "This model's territories use more than one currency, so the figures below are shown without a currency symbol and are not converted.",
+  outletsUnplotted: "{{count}} more outlet(s) have no coordinates yet and are not on the map.",
+  territoriesUnplaced_one: '{{count}} territory has no matching country on this map, so its revenue is not shown.',
+  territoriesUnplaced_other: '{{count}} territories have no matching country on this map, so their revenue is not shown.',
+} as const;

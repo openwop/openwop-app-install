@@ -16,12 +16,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/work-patterns',
     element: <WorkGraphPage />,
-    tier: 'admin',
+    tier: 'admin', archetype: 'admin',
     nav: {
       group: 'Operations',
-      label: 'Work patterns',
+      label: 'Work patterns', labelKey: 'ambientWorkGraphLabel',
       icon: SparklesIcon,
-      hint: 'Recurring work → suggested workflows',
+      hint: 'Recurring work → suggested workflows', hintKey: 'ambientWorkGraphHint',
     },
   },
 ];

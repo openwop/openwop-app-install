@@ -1,7 +1,7 @@
 {
   "name": "feature.campaign-studio.nodes",
-  "version": "1.0.0",
-  "description": "Campaign-studio canvas producer node pack (ADR 0153 Phase 3). The `render` node emits a typed `canvas.campaign` artifact — { name, objective?, audience?, channels[], funnel?, assets? } — that flows through the run-output producer (ADR 0083) and renders inline in the chat artifact workbench. Constrained typed JSON, never executable code; pure transform; replay-safe.",
+  "version": "1.0.1",
+  "description": "Campaign-studio canvas producer node pack. The `render` node emits a typed `canvas.campaign` artifact — { name, objective?, audience?, channels[], funnel?, assets? } — that flows through the run-output producer and renders inline in the chat artifact workbench. Constrained typed JSON, never executable code; pure transform; replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "campaign-studio", "canvas", "marketing"],

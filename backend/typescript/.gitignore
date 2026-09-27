@@ -1,0 +1,9 @@
+
+# Stray SQLite files from a `memory://` DSN in an ad-hoc test run (literal `memory:` filename).
+# H18 closed the source of these — `openSqliteStorage` now normalises `memory://`
+# to `:memory:` instead of `resolve()`-ing it into a filename — so nothing in the
+# tree can create them any more. Kept because OLD checkouts still carry the file,
+# and a stale on-disk one is exactly what ADR 0551 P1 caught skipping a migration.
+memory:
+memory:-shm
+memory:-wal

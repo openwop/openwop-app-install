@@ -34,6 +34,7 @@
  */
 
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
+import { seedRunVariables } from './variablesRuntime.js';
 import { insertRunWithStartContext } from './runInsert.js';
 import { fetch as undiciFetch } from 'undici';
 import type { RunRecord } from '../types.js';
@@ -42,6 +43,8 @@ import type { Storage } from '../storage/storage.js';
 import { executeRun } from '../executor/executor.js';
 import { getEventLog } from '../executor/eventLog.js';
 import { createLogger } from '../observability/logger.js';
+import { resolveLaunchWorkflow } from './resolveLaunchDefinition.js';
+import { resolveOne } from './featureToggles/service.js';
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
 import {
   deliver,
@@ -56,13 +59,46 @@ const log = createLogger('host.triggerIngestion');
  *  body (webhook body / email / form). Reuses the RFC 0076 §B response-cap
  *  discipline. Overridable by the operator. */
 export const MAX_INGEST_BODY_BYTES = Number(process.env.OPENWOP_TRIGGER_INGEST_MAX_BODY_BYTES ?? 1_048_576);
+/** (2026-07 vuln-scan) Cap the attachment/file URL fan-out: the array length was
+ *  unbounded, so a single ingest with thousands of URLs occupied the handler for
+ *  hours and amplified outbound (SSRF-guarded) fetches. Extra entries are dropped
+ *  with a log line (never silently). */
+export const MAX_INGEST_ATTACHMENTS = Number(process.env.OPENWOP_TRIGGER_INGEST_MAX_ATTACHMENTS ?? 20);
+function capUrls<T>(urls: readonly T[] | undefined, kind: string): readonly T[] {
+  const all = urls ?? [];
+  if (all.length <= MAX_INGEST_ATTACHMENTS) return all;
+  log.warn('trigger_ingest_attachments_capped', { kind, received: all.length, cap: MAX_INGEST_ATTACHMENTS });
+  return all.slice(0, MAX_INGEST_ATTACHMENTS);
+}
 
-/** RFC 0099 §F.3 — the externally-ingested sources this host wires. */
+/** RFC 0099 §F.3 — the externally-ingested sources this host wires + ADVERTISES.
+ *  Deliberately does NOT include `stream`/`change` (RFC 0127): those stay off the
+ *  advertised set until RFC 0127 is Accepted (CDP-1c standing guardrail). */
 export const EXTERNAL_INGESTION_SOURCES = ['webhook', 'email', 'form'] as const;
 export type ExternalIngestionSource = (typeof EXTERNAL_INGESTION_SOURCES)[number];
 
+/** RFC 0127 (Draft) — streaming/CDC sources. Flag-gated + NOT advertised until the RFC
+ *  is Accepted; the ingest PATH accepts them (for the reference-host witness) only when
+ *  `OPENWOP_TRIGGER_STREAM_CDC_ENABLED=true`, but `EXTERNAL_INGESTION_SOURCES` (which
+ *  feeds `capabilities.triggerBridge.sources[]`/`ingestion`) never grows — advertise
+ *  only what an Accepted RFC covers. */
+export const STREAM_CDC_SOURCES = ['stream', 'change'] as const;
+export type StreamCdcSource = (typeof STREAM_CDC_SOURCES)[number];
+
+/** RFC 0127 gate — default OFF (honest-off; the advert stays webhook/email/form). */
+export function streamCdcIngestionEnabled(): boolean {
+  return process.env.OPENWOP_TRIGGER_STREAM_CDC_ENABLED === 'true';
+}
+
 export function isExternalIngestionSource(s: string): s is ExternalIngestionSource {
   return (EXTERNAL_INGESTION_SOURCES as readonly string[]).includes(s);
+}
+
+/** A source the ingest path will ACCEPT (advertised set, plus the flag-gated 0127 sources).
+ *  Type-guards to `SubscriptionSource` — every accepted value is one (a subset), so the true
+ *  branch may register a subscription without a cast. */
+export function isAcceptedIngestionSource(s: string): s is SubscriptionSource {
+  return isExternalIngestionSource(s) || (streamCdcIngestionEnabled() && (STREAM_CDC_SOURCES as readonly string[]).includes(s));
 }
 
 /**
@@ -112,8 +148,31 @@ export interface FormEvent {
   files?: AttachmentRef[];
 }
 
+/** RFC 0127 — a message consumed from a streaming broker. The broker `partition`/`offset`
+ *  MAY be carried for at-least-once dedup keying; `message` is the host-local body (lands
+ *  in `run.metadata.triggerData`, never an event payload — SR-1, same as webhook `body`). */
+export interface StreamEvent {
+  topic?: string;
+  partition?: number;
+  offset?: string;
+  /** Broker message key (partitioning/compaction) — CDP-1b seam contract. */
+  key?: string;
+  message?: unknown;
+}
+
+/** RFC 0127 — a change-data-capture row. `op` is REQUIRED (insert/update/delete); the CDC
+ *  `before`/`after` row images are the host-local body (SR-1-redacted like the others):
+ *  insert→after, update→before+after, delete→before. */
+export interface ChangeEvent {
+  op: 'insert' | 'update' | 'delete';
+  table?: string;
+  changelogId?: string;
+  before?: unknown;
+  after?: unknown;
+}
+
 export interface TriggerEvent {
-  source: ExternalIngestionSource;
+  source: ExternalIngestionSource | StreamCdcSource;
   subscriptionId: string;
   /** Stable per-delivery id; equals the `causationId` stamped on `run.started`. */
   deliveryId: string;
@@ -128,6 +187,8 @@ export interface TriggerEvent {
   webhook?: WebhookEvent;
   email?: EmailEvent;
   form?: FormEvent;
+  stream?: StreamEvent;
+  change?: ChangeEvent;
 }
 
 /** RFC 0099 §F.1 — credential-bearing headers a host MUST NOT pass through
@@ -279,7 +340,31 @@ export interface FormIngressInput {
   fileUrls?: { url: string; filename?: string; mediaType?: string }[];
 }
 
-export type IngressInput = WebhookIngressInput | EmailIngressInput | FormIngressInput;
+/** RFC 0127 — a broker message to land as `source:"stream"`. Dedup seed = the broker
+ *  coordinates `(topic,partition,offset)` (stable across redelivery of the SAME message). */
+export interface StreamIngressInput {
+  source: 'stream';
+  topic?: string;
+  partition?: number;
+  offset?: string;
+  key?: string;
+  /** The consumed message body (host-local; SR-1-redacted from the wire). */
+  message?: unknown;
+}
+
+/** RFC 0127 — a CDC changelog row to land as `source:"change"`. `op` REQUIRED; dedup seed =
+ *  `(table,changelogId)`. `before`/`after` are the row images (insert→after, update→both,
+ *  delete→before). */
+export interface ChangeIngressInput {
+  source: 'change';
+  op: 'insert' | 'update' | 'delete';
+  table?: string;
+  changelogId?: string;
+  before?: unknown;
+  after?: unknown;
+}
+
+export type IngressInput = WebhookIngressInput | EmailIngressInput | FormIngressInput | StreamIngressInput | ChangeIngressInput;
 
 export interface IngestDeps {
   storage: Storage;
@@ -290,7 +375,7 @@ export interface IngestResult {
   outcome: 'delivered' | 'deduped' | 'dead-lettered' | 'skipped' | 'rejected';
   runId?: string;
   /** Set on a `rejected`/`dead-lettered` verification failure (§F.2). */
-  reason?: 'signature-invalid' | 'body-too-large' | 'workflow-not-found' | 'paused';
+  reason?: 'signature-invalid' | 'body-too-large' | 'workflow-not-found' | 'paused' | 'feature-disabled';
 }
 
 /**
@@ -304,13 +389,38 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
   const sub = await getSubscription(subscriptionId);
   if (!sub) return { outcome: 'skipped' };
   if (sub.state !== 'active') return { outcome: 'skipped', reason: 'paused' };
+  // ADR 0599 §6 — OWNING-FEATURE gate, resolved PER TENANT at ingest time (the
+  // twin of `scheduleDaemon`'s). Absent `featureId` ⇒ ungated (every
+  // pre-existing subscription). Without it, disabling a feature for one tenant
+  // left its webhook accepting events and starting runs indefinitely — the
+  // tenant could not even see the config route to disarm it themselves.
+  // Fail-closed: an unreadable toggle does not start someone's workflow.
+  if (sub.featureId) {
+    let enabled = false;
+    try {
+      enabled = (await resolveOne(sub.featureId, { tenantId: sub.tenantId }))?.enabled === true;
+    } catch (err) {
+      log.warn('trigger_ingest_feature_unresolved', {
+        subscriptionId, featureId: sub.featureId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (!enabled) {
+      log.info('trigger_ingest_feature_disabled', { subscriptionId, featureId: sub.featureId });
+      return { outcome: 'skipped', reason: 'feature-disabled' };
+    }
+  }
   if (!sub.workflowId) {
     // Not an external-event subscription (e.g. the Kanban `queue` subscription).
     return { outcome: 'skipped' };
   }
   if (sub.source !== (input.source as SubscriptionSource)) return { outcome: 'skipped' };
+  // RFC 0127 flag gate — a stream/change event is accepted ONLY when the (default-off)
+  // flag is on; otherwise the host neither ingests nor advertises it (honest-off).
+  if (!isAcceptedIngestionSource(input.source)) return { outcome: 'skipped' };
 
-  const wf = await deps.hostSuite.workflowCatalog.getWorkflow(sub.workflowId);
+  // ADR 0474 P1b — event-triggered launches are production: published-when-present.
+      const wf = await resolveLaunchWorkflow(deps.hostSuite.workflowCatalog, sub.tenantId, sub.workflowId);
   if (!wf) {
     log.warn('trigger_ingest_workflow_not_found', { subscriptionId, workflowId: sub.workflowId });
     return { outcome: 'dead-lettered', reason: 'workflow-not-found' };
@@ -321,7 +431,7 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
 
   // -- Bound + verify + normalize, per source -----------------------------
   let verified = false;
-  let payload: { webhook?: WebhookEvent; email?: EmailEvent; form?: FormEvent } = {};
+  let payload: { webhook?: WebhookEvent; email?: EmailEvent; form?: FormEvent; stream?: StreamEvent; change?: ChangeEvent } = {};
   let dedupSeed: string;
 
   if (input.source === 'webhook') {
@@ -350,7 +460,7 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
     if (!bodyWithinCap(sizeProbe)) return { outcome: 'rejected', reason: 'body-too-large' };
     verified = input.dmarcPass === true;
     const attachments: AttachmentRef[] = [];
-    for (const a of input.attachmentUrls ?? []) {
+    for (const a of capUrls(input.attachmentUrls, 'email-attachment')) {
       const resolved = await resolveAttachment(a.url, { filename: a.filename, mediaType: a.mediaType });
       if (resolved) attachments.push(resolved); // a denied/failed fetch is DROPPED (§F.4 negative)
     }
@@ -365,12 +475,12 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
       },
     };
     dedupSeed = input.messageId ?? makeDedupKey('email', input.from ?? '', input.subject ?? '', input.text ?? '');
-  } else {
+  } else if (input.source === 'form') {
     const sizeProbe = JSON.stringify(input.fields ?? {});
     if (!bodyWithinCap(sizeProbe)) return { outcome: 'rejected', reason: 'body-too-large' };
     verified = input.originValid === true;
     const files: AttachmentRef[] = [];
-    for (const f of input.fileUrls ?? []) {
+    for (const f of capUrls(input.fileUrls, 'form-file')) {
       const resolved = await resolveAttachment(f.url, { filename: f.filename, mediaType: f.mediaType });
       if (resolved) files.push(resolved);
     }
@@ -381,6 +491,45 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
       },
     };
     dedupSeed = input.submissionId ?? makeDedupKey('form', sizeProbe);
+  } else if (input.source === 'stream') {
+    // RFC 0127 — the host is the broker consumer; its own authenticated consumption IS
+    // the verification (no per-message signature — §4: the broker connection is a
+    // credential-brokered egress, never a wire field). Dedup seed = (topic,partition,offset),
+    // stable across redelivery of the SAME broker message (at-least-once).
+    const sizeProbe = JSON.stringify(input.message ?? null);
+    if (!bodyWithinCap(sizeProbe)) return { outcome: 'rejected', reason: 'body-too-large' };
+    verified = true;
+    payload = {
+      stream: {
+        ...(input.topic !== undefined ? { topic: input.topic } : {}),
+        ...(input.partition !== undefined ? { partition: input.partition } : {}),
+        ...(input.offset !== undefined ? { offset: input.offset } : {}),
+        ...(input.key !== undefined ? { key: input.key } : {}),
+        ...(input.message !== undefined ? { message: input.message } : {}),
+      },
+    };
+    dedupSeed = makeDedupKey('stream', input.topic ?? '', String(input.partition ?? ''), input.offset ?? sizeProbe);
+  } else if (input.source === 'change') {
+    // RFC 0127 — a CDC changelog row. `op` is REQUIRED (validated); dedup seed =
+    // (table,changelogId). Host-consumed ⇒ verified.
+    if (input.op !== 'insert' && input.op !== 'update' && input.op !== 'delete') {
+      return { outcome: 'rejected', reason: 'signature-invalid' };
+    }
+    const sizeProbe = JSON.stringify({ b: input.before ?? null, a: input.after ?? null });
+    if (!bodyWithinCap(sizeProbe)) return { outcome: 'rejected', reason: 'body-too-large' };
+    verified = true;
+    payload = {
+      change: {
+        op: input.op,
+        ...(input.table !== undefined ? { table: input.table } : {}),
+        ...(input.changelogId !== undefined ? { changelogId: input.changelogId } : {}),
+        ...(input.before !== undefined ? { before: input.before } : {}),
+        ...(input.after !== undefined ? { after: input.after } : {}),
+      },
+    };
+    dedupSeed = makeDedupKey('change', input.table ?? '', input.changelogId ?? sizeProbe);
+  } else {
+    return { outcome: 'skipped' }; // unknown source (exhaustive)
   }
 
   // §F.2 — a `required`-verification event that fails MUST NOT start a run; it
@@ -410,6 +559,23 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
         contentTrust: 'untrusted',
         ...payload,
       };
+      // §C-3 causation — the delivery event is appended BEFORE the run so the
+      // run can carry that event's id as `causationId`. Ordering is the whole
+      // point: `trigger-bridge.md` §C-3 requires the link be "answerable via
+      // the existing /ancestry endpoint", and an internal `dlv-…` handle
+      // answers nothing — it names no addressable record. The delivery event
+      // IS the delivery's durable record (§C-2 calls it "the terminal record"),
+      // so its eventId is the delivery id that actually resolves. Emitting the
+      // event afterwards, as this path used to, left `causationId` pointing at
+      // a string that appears in no log.
+      //
+      // §C / §F.4 content-free: ids + opaque dedup key + attempt + outcome +
+      // runId ONLY — never the inbound body/headers/fields.
+      const deliveryEvent = await getEventLog().append({
+        runId,
+        type: 'trigger.delivery.attempted',
+        payload: { subscriptionId, dedupKey, attempt: 1, outcome: 'delivered', runId },
+      });
       const run: RunRecord = {
         runId,
         workflowId: sub.workflowId!,
@@ -420,13 +586,31 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
         // start snapshot → ctx.triggerData), never on an event payload. RFC
         // 0006 §C caches it for deterministic replay. RFC 0020 §D marks the
         // run's trust boundary untrusted so LLM nodes wrap the content.
-        metadata: { triggerData: triggerEvent, trustBoundary: 'untrusted' },
-        causationId: deliveryId, // §C-3 — delivery → run ancestry edge
+        metadata: { launchResolved: wf.launchResolved, triggerData: triggerEvent, trustBoundary: 'untrusted' },
+        // §C-3 — delivery → run ancestry edge. The DELIVERY EVENT's id, not the
+        // internal `dlv-…` handle (which stays on the envelope as
+        // `triggerData.deliveryId` for correlation with `listDeliveries`).
+        causationId: deliveryEvent.eventId,
         configurable: {},
         createdAt: now,
         updatedAt: now,
       };
-      await insertRunWithStartContext(deps.storage, run);
+      await insertRunWithStartContext(deps.storage, run, { definition: wf.definition });
+      // ADR 0677 `ISWF-6a` — seed the variable bag. Without this the trigger lane was the
+      // ONLY run-start path that never called `seedRunVariables` (the others:
+      // `runStarter.ts:139`, `mcpSemantics.ts:360`, `workflowEvalRunner.ts:262`,
+      // `workflow-author/routes.ts:84`), and `variablesRuntime.ts:117` is the sole creator
+      // of the bag — so no bag existed at all, not even the DECLARED DEFAULTS. A chain's
+      // `{{params.X}}` compiles to a variable-sourced PortValue
+      // (`workflowChainPackLoader.ts:1188-1190`), so every one resolved `undefined` and a
+      // trigger-started run died at node 1 on its first required param. That is why this is
+      // a DEAD LANE and not merely an unpersonalised one.
+      //
+      // SCOPE: `{}` seeds the declared defaults only. Mapping the trigger ENVELOPE into the
+      // bag is the RFC 0099 bridge (`ISWF-6b`) and is deliberately NOT done here — it is a
+      // cross-cutting wire decision. Deferring both on that reason is what left a shipped,
+      // reachable workflow dead for no gain.
+      seedRunVariables(runId, wf.definition.variables, {});
       setImmediate(() => {
         executeRun(deps.storage, run, wf.definition, {
           policyResolver: deps.hostSuite.providerPolicyResolver,
@@ -439,13 +623,10 @@ export async function ingestExternalEvent(deps: IngestDeps, subscriptionId: stri
   });
 
   if (result.outcome === 'delivered' && result.runId) {
-    // §C / §F.4 — the content-free delivery event (ids + opaque dedup key +
-    // attempt + outcome + runId ONLY; no inbound body/headers/fields).
-    await getEventLog().append({
-      runId: result.runId,
-      type: 'trigger.delivery.attempted',
-      payload: { subscriptionId, dedupKey, attempt: result.attempts, outcome: 'delivered', runId: result.runId },
-    });
+    // The delivery event was appended inside `fire` (above), before the run, so
+    // the run could carry its id as `causationId`. Appending it here too would
+    // double-record the attempt — and §C-1's effectively-once assertion counts
+    // `trigger.delivery.attempted{outcome:"delivered"}` per dedupKey.
     return { outcome: 'delivered', runId: result.runId };
   }
   if (result.outcome === 'deduped' && result.runId) {

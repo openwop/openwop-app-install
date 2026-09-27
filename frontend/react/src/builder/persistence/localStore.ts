@@ -6,20 +6,43 @@
 
 import type { SavedWorkflow } from '../schema/workflow.js';
 import i18n from '../../i18n/index.js';
+import {
+  STORAGE_KEYS, getStorageSubject, readRaw, scopedSpec, writeScoped,
+  type ScopedEnvelope,
+} from '../../platform/storage.js';
 
-const LS_KEY = 'openwop-app.builder.workflows';
-const LS_SEEDED_KEY = 'openwop-app.builder.workflows.seeded';
 const LS_MIGRATION_STRIPPED_FROM_TEMPLATE_SUFFIX = 'openwop-app.builder.workflows.migration.stripFromTemplate';
 const LS_MIGRATION_MOCK_AI_TO_CHAT = 'openwop-app.builder.workflows.migration.mockAiToChat';
 
 type Index = Record<string, SavedWorkflow>;
 
+/** ADR 0434 Phase 3 — draft workflows are subject-scoped. Signed in they live
+ *  at `<key>:<uid>`; anonymously they stay at the bare key, which is where all
+ *  pre-Phase-3 data already sits (so nothing needs migrating). Both the raw
+ *  legacy shape and the versioned envelope are accepted on read; writes
+ *  normalize to the envelope. */
+const LS_SPEC = STORAGE_KEYS.builderWorkflows;
+const LS_VERSION = 1;
+
+function isIndex(v: unknown): v is Index {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
 function readIndex(): Index {
+  const subject = getStorageSubject();
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = readRaw(scopedSpec(LS_SPEC, subject));
     if (!raw) return {};
-    const parsed = JSON.parse(raw) as Index;
-    return parsed && typeof parsed === 'object' ? parsed : {};
+    const parsed: unknown = JSON.parse(raw);
+    // Envelope (post-Phase-3 write) — honor its subject stamp.
+    const env = parsed as Partial<ScopedEnvelope<unknown>>;
+    if (isIndex(parsed) && 'v' in env && 'data' in env) {
+      if (env.v !== LS_VERSION) return {};
+      if ((env.subject ?? null) !== subject) return {}; // never another user's drafts
+      return isIndex(env.data) ? env.data : {};
+    }
+    // Legacy raw index (pre-Phase-3, anonymous by definition).
+    return isIndex(parsed) ? parsed : {};
   } catch {
     return {};
   }
@@ -31,7 +54,9 @@ function readIndex(): Index {
  *  un-migrated data and the migration would never re-run (BLD-5). */
 function writeIndex(idx: Index): boolean {
   try {
-    localStorage.setItem(LS_KEY, JSON.stringify(idx));
+    if (!writeScoped(LS_SPEC, getStorageSubject(), LS_VERSION, idx)) {
+      throw new Error('quota or storage unavailable');
+    }
     return true;
   } catch (err) {
     // Quota exceeded (or storage disabled). The current session keeps
@@ -174,65 +199,4 @@ export function exportSavedWorkflowAsJSON(
   const filename = `${slugify(wf.name)}-${wf.id}.json`;
   const blob = new Blob([JSON.stringify(wf, null, 2)], { type: 'application/json' });
   return { filename, blob };
-}
-
-/**
- * One-shot seed for the workflows dashboard. On the very first visit
- * (no `seeded` flag set yet AND no existing saved workflows), persist
- * the supplied workflows so the user lands on a populated dashboard
- * instead of an empty state with only a "Templates" section below.
- *
- * After it runs once, the `seeded` flag is set so subsequent visits
- * never re-seed — even if the user deletes everything (their intent).
- *
- * Returns the number of workflows seeded (0 if it no-op'd).
- */
-const LS_DELIVERED_KEY = 'openwop-app.builder.workflows.seedDelivered';
-
-/** Per-template seed top-up (replaces the all-or-nothing first-visit flag,
- *  2026-06-05). The old flag locked the WHOLE catalog after one visit, so
- *  templates ADDED to PREMADE_WORKFLOWS later were never delivered to
- *  existing browsers ("(not available)" welcome cards) — and a browser that
- *  had any workflow at all was locked out of every template forever.
- *
- *  Contract: each template (keyed by its stable NAME) is delivered AT MOST
- *  ONCE per browser. Already-delivered names never re-seed, so a deliberate
- *  deletion stays deleted. Migration (no delivered list yet): names that
- *  already exist among saved workflows count as delivered; everything else
- *  tops up — a one-time resurrection of templates deleted under the legacy
- *  flag, accepted to un-strand the never-delivered ones. */
-export function topUpSeededWorkflows(
-  workflows: readonly SavedWorkflow[],
-): number {
-  let delivered: Set<string>;
-  try {
-    const raw = localStorage.getItem(LS_DELIVERED_KEY);
-    delivered = new Set(raw ? (JSON.parse(raw) as string[]) : []);
-  } catch {
-    return 0;
-  }
-  const idx = readIndex();
-  const savedNames = new Set(Object.values(idx).map((w) => w.name.toLowerCase()));
-
-  if (delivered.size === 0) {
-    for (const wf of workflows) {
-      if (savedNames.has(wf.name.toLowerCase())) delivered.add(wf.name);
-    }
-  }
-
-  let inserted = 0;
-  for (const wf of workflows) {
-    if (delivered.has(wf.name)) continue;
-    delivered.add(wf.name);
-    if (!savedNames.has(wf.name.toLowerCase())) {
-      idx[wf.id] = wf;
-      inserted += 1;
-    }
-  }
-  if (inserted > 0) writeIndex(idx);
-  try {
-    localStorage.setItem(LS_DELIVERED_KEY, JSON.stringify([...delivered]));
-    localStorage.setItem(LS_SEEDED_KEY, '1'); // legacy flag kept for back-compat readers
-  } catch { /* ignore */ }
-  return inserted;
 }

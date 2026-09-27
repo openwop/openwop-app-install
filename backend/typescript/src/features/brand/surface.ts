@@ -11,13 +11,23 @@
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { getBrand, listBrands } from './brandService.js';
+import { getBrand, listBrands, resolveEffectiveBrandRules } from './brandService.js';
 import { getAppBrand } from '../../host/systemBrand.js';
 import { scoreComplianceDeterministic, resolveVoice } from './scoring.js';
-import { BRAND_CHANNELS, type BrandChannel } from './types.js';
+import { BRAND_CHANNELS, type Brand, type BrandChannel } from './types.js';
 
 const asChannel = (v: unknown): BrandChannel | undefined =>
   typeof v === 'string' && (BRAND_CHANNELS as readonly string[]).includes(v) ? (v as BrandChannel) : undefined;
+
+/** BRAND-CODE-4 grade fix (ADR 0354 P3) — the parent-cascaded bans the brand's OWN list
+ *  doesn't already carry, so the surface ops (and every pack composing them —
+ *  the channels pack + feature.brand.nodes compliance-check) see the SAME
+ *  effective rules the ads-dispatch checker enforces. */
+async function extraBannedFor(tenantId: string, brand: Brand): Promise<string[]> {
+  const effective = await resolveEffectiveBrandRules(tenantId, brand.id);
+  if (!effective) return [];
+  return effective.bannedPhrases.filter((p) => !brand.keyPhrases.bannedPhrases.includes(p));
+}
 
 export function buildBrandSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
@@ -33,18 +43,23 @@ export function buildBrandSurface(scope: BundleScope): FeatureSurface {
      *  publicly), so a workflow or the Brand Steward can read the live app identity. */
     getAppIdentity: async () => ({ identity: (await getAppBrand()).identity ?? {} }),
 
-    /** Render a brand's voice into a prompt-injectable block. */
+    /** Render a brand's voice into a prompt-injectable block (effective —
+     *  parent-cascaded bans included in the NEVER-use list). */
     resolveVoice: async (args) => {
       const brand = await getBrand(tenantId, str(args.brandId));
       if (!brand) return { voice: null };
-      return { voice: resolveVoice(brand, { channel: asChannel(args.channel), register: optStr(args.register) }) };
+      const extraBannedPhrases = await extraBannedFor(tenantId, brand);
+      return { voice: resolveVoice(brand, { channel: asChannel(args.channel), register: optStr(args.register), ...(typeof args.personaId === 'string' && args.personaId ? { personaId: args.personaId } : {}), ...(extraBannedPhrases.length ? { extraBannedPhrases } : {}) }) };
     },
 
-    /** Deterministic compliance score for `content` (the LLM leg is the node's). */
+    /** Deterministic compliance score for `content` (the LLM leg is the node's).
+     *  Scores over EFFECTIVE rules — a parent brand's bans flag here exactly as
+     *  they do at the ads-dispatch gate. */
     checkComplianceDeterministic: async (args) => {
       const brand = await getBrand(tenantId, str(args.brandId));
       if (!brand) return { report: null };
-      return { report: scoreComplianceDeterministic(str(args.content), brand, { channel: asChannel(args.channel) }) };
+      const extraBannedPhrases = await extraBannedFor(tenantId, brand);
+      return { report: scoreComplianceDeterministic(str(args.content), brand, { channel: asChannel(args.channel), ...(extraBannedPhrases.length ? { extraBannedPhrases } : {}) }) };
     },
   };
 }

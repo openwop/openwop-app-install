@@ -1,5 +1,5 @@
 /**
- * ENG-3 (CODEBASE-ASSESSMENT.md): builder-registered workflows are now durable,
+ * ENG-3 (docs/steward/CODEBASE-ASSESSMENT.md): builder-registered workflows are now durable,
  * so a run re-dispatched by the sweeper on ANOTHER instance can still resolve a
  * workflow that was registered on the instance that crashed. Previously the
  * registry was a process-local Map and cross-instance resolution returned null.

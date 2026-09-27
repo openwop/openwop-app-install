@@ -1,0 +1,28 @@
+{
+  "name": "feature.promotions.agents",
+  "version": "1.0.1",
+  "description": "Promotions feature agent pack — a Promotions Manager persona whose tools are registered chat tools over the promotions service (the same fns the REST routes call). Reviews promotions (active + proposed), previews cart discounts, and DRAFTS promotions — which land PROPOSED (inactive) for human activation (money-moving). There is no activate tool — confirmation rides the human gate. Tool-allowlisted to the promotions surface only. Driven through the ONE chat.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "promotions", "agent", "loss-leader", "discount"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": { "aiProviders": "supported", "agents.manifestRuntime": "supported" },
+  "agents": [
+    {
+      "agentId": "feature.promotions.agents.promotions-manager",
+      "persona": "RESEARCH",
+      "label": "Promotions Manager",
+      "description": "Reviews active promotions, previews the discount on a cart, and drafts new promotions (cart-threshold / product-discount / loss-leader) — drafts land PROPOSED for a human to activate, via feature.promotions.nodes over ctx.features.promotions.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/promotions-manager.md",
+      "toolAllowlist": [
+        "openwop:promotions.list",
+        "openwop:promotions.apply-preview",
+        "openwop:promotions.draft"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

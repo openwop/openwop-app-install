@@ -27,6 +27,9 @@ import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { createLogger } from '../../observability/logger.js';
 import { getProvider, type ProviderManifest } from './providerRegistry.js';
 import { getHostOAuthClient } from './oauthClientStore.js';
+import { guardedEgressFetch } from '../../host/webhookEgressGuard.js';
+import { OpenwopError } from '../../types.js';
+import { HELD_BUILTIN_MCP_REACH, canonicalResourceUri, isMcpReachOAuth, verifyAndPinMcpReach } from './mcpReachVerifier.js';
 
 const log = createLogger('connections.oauth');
 
@@ -41,6 +44,10 @@ interface PendingAuth {
   /** Where to bounce the browser after the callback completes (SPA route). */
   returnTo: string;
   createdAt: string;
+  /** RFC 0199 §C (ADR 0753 D9) — the `credential` interrupt this grant was
+   *  started from (via its `connectUrl`). Rides the single-use `state`, so the
+   *  grant that completes is the only thing that can resolve it. */
+  interruptId?: string;
 }
 
 const pending = new DurableCollection<PendingAuth>('connections:pendingAuth', (p) => p.state);
@@ -82,7 +89,23 @@ interface OAuthClient {
  *  Returns null when neither is set — the host then honestly cannot offer OAuth
  *  connect for that provider (ADR 0024 RFC-gate honesty rule). The store read
  *  fails closed (a decrypt error reads as absent), so we fall through to env. */
+/**
+ * Operator kill-switch: `OPENWOP_OAUTH_DISABLED_PROVIDERS=google,slack` makes each
+ * listed provider UNCONFIGURED on this deployment — no authorization URL, no token
+ * exchange, no refresh, not advertised — whatever client the store or env holds.
+ * The honest way to run a deployment (e.g. an RFC 0199 witness side revision) on
+ * which a provider held out of §B must not be grantable (ADR 0753 D6/D11).
+ */
+export function oauthProviderDisabled(provider: string): boolean {
+  return (process.env.OPENWOP_OAUTH_DISABLED_PROVIDERS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .includes(provider);
+}
+
 export async function oauthClient(provider: string): Promise<OAuthClient | null> {
+  if (oauthProviderDisabled(provider)) return null;
   const stored = await getHostOAuthClient(provider);
   if (stored) return stored;
   const key = provider.toUpperCase().replace(/[^A-Z0-9]/g, '_');
@@ -122,6 +145,17 @@ export function appBaseUrl(reqOrigin: string): string {
 export function callbackBaseUrl(reqOrigin: string): string {
   const explicit = process.env.OPENWOP_OAUTH_CALLBACK_BASE_URL;
   if (explicit && explicit.trim()) return stripTrailingSlash(explicit.trim());
+  // ONE FIXED REDIRECT URI PER PROVIDER (RFC 0199 / oauth.md rule 5). In
+  // production the redirect URI must not be derived from the inbound request's
+  // origin — a request arriving on a different host would mint an authorization
+  // URL whose redirect_uri the attacker's origin chose. Local dev (backend serves
+  // the SPA, no env set) keeps the request-origin fallback; production refuses
+  // unless a base is configured. Production sets OPENWOP_OAUTH_CALLBACK_BASE_URL,
+  // so this changes nothing there.
+  const publicBase = process.env.OPENWOP_PUBLIC_BASE_URL;
+  if (process.env.NODE_ENV === 'production' && !(publicBase && publicBase.trim())) {
+    throw new Error('OAuth redirect URI base is not configured: set OPENWOP_OAUTH_CALLBACK_BASE_URL (or OPENWOP_PUBLIC_BASE_URL) — production never derives it from the request origin');
+  }
   return appBaseUrl(reqOrigin);
 }
 
@@ -149,6 +183,35 @@ function assertHttps(url: string, label: string): void {
   }
 }
 
+/**
+ * RFC 0199 §B.1 — the RFC 8707 `resource` this provider's grant is bound to, or
+ * null when §B does not apply (not an MCP reach, or a built-in held out of §B —
+ * ADR 0753 D6). Derived from the manifest alone, so the authorize, token and
+ * refresh requests of one grant always agree.
+ */
+export function grantResourceOf(manifest: ProviderManifest): string | null {
+  if (!isMcpReachOAuth(manifest) || HELD_BUILTIN_MCP_REACH.has(manifest.id)) return null;
+  return canonicalResourceUri(manifest.mcpServer!.url);
+}
+
+/**
+ * RFC 0199 §B.4 — run §B.3 when an MCP-reach provider is REGISTERED, and pin the
+ * verified tuple. Only for a provider this host can actually grant (its OAuth
+ * client is configured): an unconfigured one can never reach a grant, so
+ * contacting its server would verify nothing that matters. Never throws; a
+ * failure here just leaves the pin to the first grant, which runs the same check
+ * and refuses on the same terms.
+ */
+export function verifyMcpReachOnRegistration(manifest: ProviderManifest): void {
+  if (grantResourceOf(manifest) === null) return;
+  void (async () => {
+    if (!(await isOAuthConfigured(manifest.id))) return;
+    await verifyAndPinMcpReach(manifest);
+  })().catch((err: unknown) => {
+    log.warn('mcp reach registration check failed', { provider: manifest.id, error: err instanceof Error ? err.message : String(err) });
+  });
+}
+
 /** Flatten a provider's WRITE scope groups into the scope strings a write
  *  re-consent must request (ADR 0024 §3 — write is a separate consent step). */
 export function writeScopesOf(provider: string): string[] {
@@ -172,6 +235,7 @@ export async function beginAuthorization(input: {
   includeWrite?: boolean;
   reqOrigin: string;
   returnTo?: string;
+  interruptId?: string;
 }): Promise<{ authorizeUrl: string; state: string }> {
   const manifest = getProvider(input.provider);
   if (!manifest) throw Object.assign(new Error(`unknown provider '${input.provider}'`), { code: 'unknown_provider' });
@@ -181,6 +245,15 @@ export async function beginAuthorization(input: {
   const client = await oauthClient(input.provider);
   if (!client) {
     throw Object.assign(new Error(`OAuth is not configured for '${input.provider}' on this host`), { code: 'oauth_not_configured' });
+  }
+  // RFC 0199 §B — an MCP-reach provider is verified (and pinned) BEFORE any
+  // authorization URL exists; a refusal means none is issued (§B.3, §E.2).
+  const resource = grantResourceOf(manifest);
+  if (resource !== null) {
+    const verdict = await verifyAndPinMcpReach(manifest);
+    if (!verdict.ok) {
+      throw new OpenwopError('connection_auth_metadata_mismatch', `The authorization metadata for '${input.provider}' could not be verified against its manifest.`, 422, { provider: input.provider });
+    }
   }
   const authorizeEndpoint = manifest.endpoints?.authorize;
   if (!authorizeEndpoint) throw Object.assign(new Error(`provider '${input.provider}' has no authorize endpoint`), { code: 'no_authorize_endpoint' });
@@ -204,6 +277,7 @@ export async function beginAuthorization(input: {
     returnTo: sanitizeReturnTo(input.returnTo),
     createdAt: new Date().toISOString(),
     ...(input.userId ? { userId: input.userId } : {}),
+    ...(input.interruptId ? { interruptId: input.interruptId } : {}),
   });
 
   const url = new URL(authorizeEndpoint);
@@ -212,8 +286,13 @@ export async function beginAuthorization(input: {
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('scope', scopes.join(' '));
   url.searchParams.set('state', state);
-  url.searchParams.set('code_challenge', codeChallenge);
-  url.searchParams.set('code_challenge_method', 'S256');
+  // RFC 0199 §A.1 — S256 always, `plain` never; omitted ONLY for a provider that
+  // declares `pkce: "unsupported"` (and advertises it, so the weaker posture is visible).
+  if (manifest.pkce !== 'unsupported') {
+    url.searchParams.set('code_challenge', codeChallenge);
+    url.searchParams.set('code_challenge_method', 'S256');
+  }
+  if (resource !== null) url.searchParams.set('resource', resource);
   // Google needs these to actually return a refresh_token on re-consent.
   if (manifest.refreshable) {
     url.searchParams.set('access_type', 'offline');
@@ -230,14 +309,51 @@ function sanitizeReturnTo(raw: string | undefined): string {
 
 // ── callback ─────────────────────────────────────────────────────────────────
 
+/**
+ * RFC 0199 §A.4 / RFC 9207 §2.4 — mix-up defense on the authorization response.
+ * For a provider with a known issuer: an `iss` that differs by simple string
+ * comparison is refused, and a MISSING `iss` is refused when the provider's
+ * metadata promises one. Called before any token request. An issuer-less
+ * provider is defended by its host-unique redirect URI instead, so its `iss`
+ * (if any) is not interpreted.
+ */
+export function authorizationResponseIssuerOk(provider: string, iss: unknown): boolean {
+  const manifest = getProvider(provider);
+  if (!manifest?.issuer) return true;
+  if (iss === undefined) return manifest.issResponseParameter !== true;
+  return typeof iss === 'string' && iss === manifest.issuer;
+}
+
+const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+
+/**
+ * The body of a REFUSED callback (ADR 0753 D1). A refusal must be observable as a
+ * 4xx, yet the browser still has to land back in the SPA with the same
+ * `?connectError=…&reason=…` a 302 used to carry — so the page meta-refreshes
+ * there. `target` is always an `appReturnUrl` (same-origin by construction); it is
+ * escaped as an attribute anyway, and the page renders nothing else of the request.
+ */
+export function callbackRefusalPage(target: string): string {
+  const href = target.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c]!);
+  return `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${href}"><title>Connection not completed</title><p><a href="${href}">Continue</a></p>`;
+}
+
 /** Consume a pending-auth by `state` (single-use). Returns null if absent,
  *  expired, or already consumed. */
 export async function consumePendingAuth(state: string, now: number = Date.now()): Promise<PendingAuth | null> {
   const p = await pending.get(state);
   if (!p) return null;
-  await pending.delete(state); // single-use — consume regardless of validity below
+  // SINGLE-USE IS THE DELETE, not the read (RFC 0199 §A.2). This used to be
+  // get-then-delete with `delete()`'s result ignored, so two callbacks carrying the
+  // same `state` could both read the row before either deleted it and BOTH go on
+  // to exchange the code — a replayed or raced callback minting a second
+  // connection. `delete()` reports whether THIS call removed the row, so exactly
+  // one concurrent caller wins the claim; every other caller is refused.
+  const claimed = await pending.delete(state);
+  if (!claimed) return null;
   if (now - new Date(p.createdAt).getTime() > PENDING_TTL_MS) {
-    log.warn('oauth state expired', { provider: p.provider, state });
+    // Never log the `state` itself: it is a bearer handle for an in-flight grant.
+    log.warn('oauth state expired', { provider: p.provider });
     return null;
   }
   return p;
@@ -280,7 +396,8 @@ export async function exchangeCodeForTokens(input: {
     redirect_uri: redirectUri(input.provider, input.reqOrigin),
     client_id: client.clientId,
     client_secret: client.clientSecret,
-    code_verifier: input.codeVerifier,
+    ...(manifest.pkce !== 'unsupported' ? { code_verifier: input.codeVerifier } : {}),
+    ...(grantResourceOf(manifest) !== null ? { resource: grantResourceOf(manifest)! } : {}),
   });
   const tokens = await postTokenRequest(tokenEndpoint, form, manifest);
   return shapeTokenMaterial(tokens, input.scopes);
@@ -305,6 +422,7 @@ export async function refreshAccessToken(input: {
     refresh_token: input.refreshToken,
     client_id: client.clientId,
     client_secret: client.clientSecret,
+    ...(grantResourceOf(manifest) !== null ? { resource: grantResourceOf(manifest)! } : {}),
   });
   const tokens = await postTokenRequest(tokenEndpoint, form, manifest);
   const material = shapeTokenMaterial(tokens, input.scopes);
@@ -328,11 +446,13 @@ interface RawTokenResponse {
 }
 
 async function postTokenRequest(endpoint: string, form: URLSearchParams, manifest: ProviderManifest): Promise<RawTokenResponse> {
-  let res: Response;
+  let res: Awaited<ReturnType<typeof guardedEgressFetch>>;
   try {
     // Bound the request: a hung provider token endpoint would otherwise stall the
     // browser on the callback and (via liveSecretFor) node execution mid-run.
-    res = await fetch(endpoint, {
+    // (2026-07 vuln-scan) SSRF-guarded egress (defense-in-depth for a compromised/
+    // unsigned pack manifest whose token endpoint points at an internal address).
+    res = await guardedEgressFetch(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
       body: form.toString(),

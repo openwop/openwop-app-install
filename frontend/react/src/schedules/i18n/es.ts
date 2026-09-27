@@ -46,4 +46,8 @@ export const messages = {
   // Run-now notices
   firedWithRun: 'Disparada — ',
   firedNoWorkflow: 'Disparada (sin flujo de trabajo asociado).',
+
+  // ADR 0313 D3 — chips de programación silenciosa
+  wontFire: 'No se activará: la cadencia no se pudo interpretar',
+  oneShotDone: 'Completada (única vez)',
 } as const;

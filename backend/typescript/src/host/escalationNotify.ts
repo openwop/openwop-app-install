@@ -1,5 +1,5 @@
 /**
- * Agent escalation notifications (ADR 0101 Phase 2).
+ * Agent escalation notifications (ADR 0493 Phase 2).
  *
  * When the heartbeat queues a proposal for human review, the agent's
  * `agentProfile.escalation.contacts` get an ADDRESSED in-app notification
@@ -57,7 +57,10 @@ export async function emitEscalationNotifications(args: {
         priority: 'high',
         title: `${args.persona} needs your review`,
         message: `${args.persona} queued “${args.cardTitle}” for approval.`,
-        actionUrl: '/inbox',
+        // Deep-link to the specific pending approval on /inbox (ADR 0336 Rec
+        // Phase 3). The emit has the approvalId but not its own (not-yet-issued)
+        // notificationId, so ?approval= is the resolvable key.
+        actionUrl: `/inbox?approval=${encodeURIComponent(args.approvalId)}`,
         metadata: { kind: ESCALATION_TYPE, rosterId: args.rosterId, approvalId: args.approvalId },
       });
     } catch (err) {

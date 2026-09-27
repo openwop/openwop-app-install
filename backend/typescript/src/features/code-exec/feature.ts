@@ -23,7 +23,7 @@ export const codeExecFeature: BackendFeature = {
   registerRoutes: () => { registerCodeExecArtifactType(); /* ADR 0114 Phase 4a — register the result artifact type */ },
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
   requiredPacks: [
-    { name: 'feature.code-exec.nodes', version: '1.0.0' },
+    { name: 'feature.code-exec.nodes', version: '1.1.0' },
     { name: 'feature.code-exec.agents', version: '1.0.0' }, // ADR 0114 Phase 6 — the Code Interpreter persona
   ],
 };

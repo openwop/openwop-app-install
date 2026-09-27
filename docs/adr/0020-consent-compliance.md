@@ -56,6 +56,14 @@ ConsentPolicy { tenantId, regulatedRegions: string[], defaultMode('opt-in'|'opt-
 `DurableCollection<ConsentRecord>('consent:record')` keyed by `(tenantId,
 subjectKey)`, latest-wins.
 
+> **CORRECTION 2026-08-19 ([ADR 0586](0586-consent-compliance-erasure-integrity.md)).**
+> "Opaque, non-PII" stopped being true at ADR 0394, which made a `subjectKey`
+> possibly a raw E.164 phone number. Three decisions here follow from that and
+> are recorded in ADR 0586: the erasure tombstone is keyed by a tenant-salted
+> DIGEST rather than the key (D1); the governance decision log hashes the
+> subject (D5, `WF-CONS-14`); and the public lane no longer lets an
+> unauthenticated caller choose the key at all (D3).
+
 ### Phase 1 — consent store + public record/read
 
 - **Public** `POST /v1/host/openwop-app/public-consent/:orgId` `{ subjectKey,
@@ -63,6 +71,18 @@ subjectKey)`, latest-wins.
   `consent` toggle; upsert latest-wins. `GET .../:orgId/:subjectKey` → current
   choices (or policy default). (Add `/v1/host/openwop-app/public-consent` to
   `PUBLIC_PATH_PREFIXES`.)
+
+> **CORRECTION 2026-08-19 ([ADR 0586](0586-consent-compliance-erasure-integrity.md) D3, `CONS-2`).**
+> Taking `subjectKey` from an unauthenticated body, into the keyspace shared with
+> CRM contactIds / `User.userId`s / emails / E.164 numbers, and then writing it
+> LATEST-WINS, meant anyone who knew a subject key could forge or wipe that
+> person's consent — and the matching `GET` was an anonymous oracle over the same
+> keyspace. The public lane now has its OWN identity space: the POST mints an
+> HMAC-signed `subjectToken` and stores under `visitor:<uuid>`; a body
+> `subjectKey` is REFUSED (400, naming the replacement) rather than ignored; the
+> read requires the token. The write also merges instead of replacing (`CONS-3`).
+> The `latest-wins` framing below is superseded for every partial write — see
+> ADR 0586 D4.
 
 ### Phase 2 — enforcement helper + wire into 0018/0019
 
@@ -132,6 +152,17 @@ to `packs.openwop.dev` (decoupled from toggle state for replay).
   primitive when the export UI lands.
 - [ ] **Granularity beyond 3 categories** (purpose-level) if a consumer needs it.
 - [ ] **Audit trail** of consent changes (append-only history vs latest-wins).
+> **CORRECTION 2026-08-19 ([ADR 0586](0586-consent-compliance-erasure-integrity.md) D1/D2,
+> `CONS-1` + `CONS-4`).** The cross-feature erasure below was correct about its
+> REACH and wrong about two things it never considered. (a) Deleting the consent
+> record FIRST made the erasure a GRANT on an `opt-out` tenant, because
+> `isAllowed` with no record falls through to the policy default — when a
+> default is fail-open, deletion becomes a grant. A PII-free erasure tombstone
+> now denies on that path. (b) The fan-out honoured no LEGAL HOLD: the hold
+> store lived inside the run-retention sweeper, so no other destructive lane
+> could import it. It moved to `host/retentionHold.ts` and now gates
+> `eraseSubject`, `purgeRetained` and `kvAgeOut`, with a 409 on both HTTP doors.
+
 - [x] **Cross-feature erasure** — **Done 2026-06-11.** A data-subject delete now
   cascades beyond the consent record: `deleteSubject` fans out through a neutral
   host-level **subject-erasure seam** (`src/host/subjectErasure.ts`) to every

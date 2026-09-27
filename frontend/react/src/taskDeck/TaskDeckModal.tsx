@@ -8,6 +8,7 @@
  *
  * @see docs/adr/0133-run-task-deck.md
  */
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
@@ -59,7 +60,7 @@ export default function TaskDeckModal({ conversationRunId, onClose }: { conversa
         ))}
       </div>
       <div className="action-bar u-mt-3">
-        <button type="button" className="secondary" onClick={onClose}>{t('close')}</button>
+        <Button variant="secondary" onClick={onClose}>{t('close')}</Button>
       </div>
     </Modal>
   );

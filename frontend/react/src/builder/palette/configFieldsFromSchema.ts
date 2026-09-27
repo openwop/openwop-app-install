@@ -33,6 +33,7 @@
  */
 
 import type { ConfigField } from './nodeCatalog.js';
+import { inferScalarKind } from '../../lib/formEngine.js';
 import i18n from '../../i18n/index.js';
 
 export function configFieldsFromSchema(schema: unknown): ConfigField[] {
@@ -51,12 +52,16 @@ export function configFieldsFromSchema(schema: unknown): ConfigField[] {
     const enumVals = Array.isArray(ps.enum)
       ? (ps.enum as unknown[]).filter((v) => typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')
       : null;
-    let kind: ConfigField['kind'] = 'text';
-    if (enumVals && enumVals.length > 0 && type !== 'object' && type !== 'array') kind = 'select';
-    else if (type === 'boolean') kind = 'checkbox';
-    else if (type === 'number' || type === 'integer') kind = 'number';
-    else if (type === 'array' && items?.type === 'string') kind = 'string-list';
-    else if (type === 'object' || type === 'array') kind = 'textarea';
+    // Scalar inference is the SHARED engine's (ADR 0331 §D4-B); the builder
+    // keeps its own non-scalar vocabulary (string-list / JSON textarea).
+    const scalar = inferScalarKind(type, Boolean(enumVals && enumVals.length > 0));
+    let kind: ConfigField['kind'] =
+      scalar === 'enum' ? 'select'
+      : scalar === 'boolean' ? 'checkbox'
+      : scalar === 'number' || scalar === 'integer' ? 'number'
+      : 'text';
+    if (kind === 'text' && type === 'array' && items?.type === 'string') kind = 'string-list';
+    else if (kind === 'text' && (type === 'object' || type === 'array')) kind = 'textarea';
     const labelBase = (ps.title as string | undefined) ?? key;
     const def = ps.default;
     const isScalarDefault =

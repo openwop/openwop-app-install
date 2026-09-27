@@ -7,15 +7,17 @@ import { test, expect } from '@playwright/test';
  * (E1) would otherwise swallow a crash into a fallback we can assert against.
  */
 test.describe('app shell', () => {
-  test('boots to the chat surface with sidebar + main', async ({ page }) => {
-    await page.goto('/');
+  test('boots the app shell with sidebar + main', async ({ page }) => {
+    // ADR 0487 — '/' is the public marketing home; the app shell lives under its
+    // own routes ('/dashboard' is the pinned home).
+    await page.goto('/dashboard');
     await expect(page.locator('main#main-content')).toBeVisible();
     // The persistent left-rail sidebar nav (labelled "Sections").
     await expect(page.getByRole('navigation', { name: 'Sections' })).toBeVisible();
   });
 
   test('exposes the skip-to-content link (a11y)', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard');
     await expect(page.getByRole('link', { name: /skip to content/i })).toHaveCount(1);
   });
 

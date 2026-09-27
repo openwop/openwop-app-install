@@ -1,7 +1,7 @@
 {
   "name": "feature.agent-knowledge.nodes",
-  "version": "1.1.0",
-  "description": "Agent-knowledge feature node pack (ADR 0038 / ADR 0014 Phase 2) — workflow nodes over the `ctx.features.agentKnowledge` surface (ADR 0038). `retrieve` reads an agent's bound knowledge (cited KB chunks + private memory facts) for a query. `ingest` writes a cited document into a collection BOUND to the agent — the write path for ADR 0038 §B trigger→workflow auto-ingest (RFC 0099 webhook/email/form → workflow → this node). Both are `role:action` (side-effect recorded; replay/fork read the recorded result, so ingest never double-writes). READ-ONLY LINE (ADR 0038 §9, redrawn 2026-06-14): the agent's MEMORY/notes namespace (RFC 0004 `MemoryAdapter`) stays read-only on the wire — this pack NEVER writes `ctx.memory`; `ingest` writes only the KB-DOCUMENT side (a host-extension feature store, ADR 0011), which is a normal feature write and touches no normative wire contract (no RFC). This corrects the prior note that removed ADR §4's `ingestToAgent` node by over-extending the RFC-0004 memory rule to KB documents.",
+  "version": "1.5.0",
+  "description": "Agent-knowledge feature node pack — workflow nodes over the `ctx.features.agentKnowledge` surface. `retrieve` reads an agent's bound knowledge (cited KB chunks + private memory facts) for a query; it is `role:action` and read-only. `ingest` writes a cited document into a collection BOUND to the agent — the write path for trigger→workflow auto-ingest (webhook/email/form → workflow → this node) — and is `role:side-effect` + `side-effectful` (WF-AKM-1 / ADR 0587 §7). CORRECTION 2026-08-19 (WF-AKM-1): this description previously declared BOTH nodes `role:action` and derived a replay guarantee from that role. No such derivation exists — the executor does not branch on a node's role at all; only the side-effect-floor generator reads it, and it reads `side-effect`. `ingest` was consequently in none of MANIFEST_SIDE_EFFECT_FLOOR / MANIFEST_FAST_PATH_SERVED / SIDE_EFFECTING_TYPE_PATTERNS, so a `:fork` in replay mode re-executed it and wrote a SECOND document with a new id, a second chunk set and a second embedding pass. Full trail in ADR 0587 §7. READ-ONLY LINE (redrawn 2026-06-14): the agent's MEMORY/notes namespace (`MemoryAdapter`) stays read-only on the wire — this pack NEVER writes `ctx.memory`; `ingest` writes only the KB-DOCUMENT side (a host-extension feature store), which is a normal feature write and touches no normative wire contract.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "agent-knowledge", "knowledge", "memory", "rag"],
@@ -9,19 +9,20 @@
   "nodes": [
     {
       "typeId": "feature.agent-knowledge.nodes.retrieve",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Agent Knowledge Retrieve",
-      "description": "Retrieve an agent's bound knowledge (cited KB chunks + private memory facts) via ctx.features.agentKnowledge.retrieve. Inputs: { agentId, query }. Output: { chunks, hasResults }. Read-only; replay-safe.",
+      "description": "Retrieve an agent's bound knowledge (cited KB chunks + private memory facts) via ctx.features.agentKnowledge.retrieve. Inputs: { agentId, query }. Output: { chunks, hasResults, failedSources }. `failedSources` names the sources ('kb' / 'memory') that could NOT be searched at all — a fault, never an empty result (KB-UX-3 / ADR 0583); `[]` on the happy path. Without it a faulted backend reaches this node's consumer (often a MODEL) as hasResults:false, which is indistinguishable from an empty corpus. `unavailable` names WHY there is no corpus ('capability-off' = a named reason, 'nothing-bound' = a genuinely empty corpus); a non-existent agent is a typed 404 and never reaches this node (WF-AKM-3 / ADR 0587 §4). Absent on the happy path. Read-only, so replay-safe by nature.",
       "category": "integration",
       "role": "action"
     },
     {
       "typeId": "feature.agent-knowledge.nodes.ingest",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Agent Knowledge Ingest",
-      "description": "Ingest a cited document into a collection BOUND to the agent via ctx.features.agentKnowledge.ingestDocument (ADR 0038 §B — trigger→workflow auto-ingest). Inputs: { agentId, collectionId, title, text }. Output: { documentId, chunkCount }. Writes the KB-document side only (never ctx.memory); role:action, recorded → replay-safe (no double-ingest). The collection must already be bound to the agent.",
+      "description": "Ingest a cited document into a collection BOUND to the agent via ctx.features.agentKnowledge.ingestDocument (ADR 0038 §B — trigger→workflow auto-ingest). Inputs: { agentId, collectionId, title, text }. Output: { documentId, chunkCount }. Writes the KB-document side only (never ctx.memory). SIDE-EFFECTING (WF-AKM-1 / ADR 0587 §7): one execution chunks, embeds and persists a durable document under a fresh randomUUID, so a replay/fork MUST be served the recorded outcome rather than re-executing — which is what `role:side-effect` + the `side-effectful` capability buy, and what the prior `role:action` claim did NOT. contentTrust is decided by `ctx.trustBoundary` (the run's boundary, constant across the run), never by the shape of ctx.inputs (WF-AKM-2). The collection must already be bound to the agent.",
       "category": "integration",
-      "role": "action"
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

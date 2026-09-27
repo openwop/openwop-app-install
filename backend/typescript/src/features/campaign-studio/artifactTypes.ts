@@ -39,6 +39,9 @@ export function campaignSchema(): Record<string, unknown> {
             stage: { type: 'string', enum: ['awareness', 'consideration', 'conversion', 'retention', 'advocacy'] },
             description: { type: 'string', maxLength: 600 },
             kpis: { type: 'array', maxItems: 8, items: { type: 'string', maxLength: 120 } },
+            // ADR 0360 — optional funnel-board positions (host-owned additive).
+            x: { type: 'number', minimum: 0, maximum: 4000 },
+            y: { type: 'number', minimum: 0, maximum: 4000 },
           },
           additionalProperties: false,
         },

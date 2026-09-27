@@ -21,6 +21,8 @@
  */
 import zlib from 'node:zlib';
 import type { Request, Response } from 'express';
+import { negotiatedMajor } from '../middleware/protocolVersion.js';
+import { projectV2RunIds } from './v2Ids.js';
 
 /** Encodings RFC 0115 allows in `restTransport.contentEncodings`. */
 type RunEncoding = 'gzip' | 'br' | 'zstd';
@@ -99,7 +101,14 @@ function negotiateEncoding(req: Request): RunEncoding | null {
  * the chosen encoding.
  */
 export function sendNegotiatedRunJson(req: Request, res: Response, body: unknown): void {
-  const json = JSON.stringify(body);
+  // `identity.md` §5 — this sender bypasses `res.json`, so it applies the
+  // major-2 run-id projection itself rather than inheriting the wrapper
+  // `middleware/protocolVersion.ts` installs. One implementation, two callers
+  // (see `host/v2Ids.ts`); under major 1 this is a single comparison.
+  const projected = negotiatedMajor(req) === 2
+    ? projectV2RunIds(body, (req as { tenantId?: string }).tenantId ?? 'default')
+    : body;
+  const json = JSON.stringify(projected);
   res.setHeader('Vary', 'Accept-Encoding');
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
 

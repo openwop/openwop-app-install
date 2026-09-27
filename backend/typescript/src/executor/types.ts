@@ -18,6 +18,9 @@ import type { WebResearchSurface } from '../host/webResearchSurface.js';
 import type { LaunchStudioSurface } from '../host/launchStudioSurface.js';
 import type { FeatureSurface } from '../host/featureSurfaces.js';
 import type { fetch as undiciFetch } from 'undici';
+import type { CompensationPolicy } from '../host/compensationUnwind.js';
+import type { PackNodeOrigin } from '../host/packWorkerContract.js';
+import type { TraceContext } from '../host/traceContext.js';
 
 /** Host-mediated egress fn (ctx.http.safeFetch). Mirrors the undici `fetch`
  *  signature exactly so the host injection layer + the pack agree on the shape
@@ -68,7 +71,7 @@ export interface AiCallRequest {
    *  the host MAY route through its own credential of last resort. */
   credentialRef?: string;
   /** ADR 0079 §Phase 4 — opt INTO progressive token streaming for this call:
-   *  the host emits `ai.message.chunk` deltas onto the run event log as the
+   *  the host emits `output.chunk` deltas onto the run event log as the
    *  plain reply generates. Default (omitted/false) emits NO deltas — set it
    *  only when an interactive surface tails this run's SSE, so non-interactive
    *  batch/agent nodes don't write one durable event per token for no consumer.
@@ -241,6 +244,67 @@ export interface ImageGenerationResult {
   usage?: { images: number };
 }
 
+/** Request/result for `ctx.callVideoGenerator(...)` (ADR 0411) — text-to-video.
+ *  The accepted spec contract (host-capabilities.md §host.aiProviders): host
+ *  HIDES async polling, videos return as a host-served URL (never inline
+ *  base64), and `ctx.signal` aborts. */
+export interface VideoGenerationRequest {
+  prompt: string;
+  provider?: string;        // default 'replicate' (hosts Veo 3 + many models)
+  model?: string;           // e.g. 'google/veo-3-fast'
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  durationSeconds?: number;
+  includeAudio?: boolean;
+  seed?: number;
+  brandColors?: string[];
+  credentialRef?: string;   // BYOK
+}
+
+export interface VideoGenerationResult {
+  video: {
+    url: string;            // host-served (videos are too large for inline base64)
+    durationSeconds: number;
+    width: number;
+    height: number;
+    mimeType: string;       // 'video/mp4' | 'video/webm'
+    fileSizeBytes?: number;
+    seed?: number;
+    safetyFiltered: boolean;
+    metadata?: { model?: string; provider?: string; generationTimeMs?: number };
+  };
+  totalTimeMs?: number;
+  usage?: { videos: number };
+}
+
+/** Request shape for `ctx.callImageEditor(...)` (ADR 0401) — raster edit ops on
+ *  an existing image: whole-image edit (prompt), inpaint/generative-fill
+ *  (prompt + mask), background-remove (no prompt). Bytes arrive base64 (the
+ *  node schema's `imageBase64`); results persist as Media assets, never raw
+ *  bytes on the result boundary. Unsupported (provider, op) pairs are a typed
+ *  `host_capability_missing` — never a silent fallback. */
+export interface ImageEditRequest {
+  imageBase64: string;
+  mimeType?: string;
+  op: 'edit' | 'inpaint' | 'background-remove';
+  prompt?: string;          // required for edit/inpaint; forbidden for background-remove
+  maskBase64?: string;      // required for inpaint (white = repaint)
+  provider?: string;        // default 'replicate' (the full-op-set vendor)
+  model?: string;
+  credentialRef?: string;
+}
+
+/** Request shape for `ctx.callImageUpscaler(...)` (ADR 0401). */
+export interface ImageUpscaleRequest {
+  imageBase64: string;
+  mimeType?: string;
+  scale: 2 | 4;
+  provider?: string;        // default 'replicate'
+  model?: string;
+  credentialRef?: string;
+}
+
 /** Request shape for `ctx.runSandboxedCode(...)` (ADR 0114) — execute a snippet in
  *  an EXTERNAL sandbox. Host-mediated; the sandbox endpoint + key are a brokered
  *  Connection credential, never carried in node code. */
@@ -325,7 +389,28 @@ export interface AgentRef {
  * `tool-output-compaction` feature (core owns the type, not the implementation).
  */
 export interface CompactionDecision {
-  /** `off` → identity. `lossless` → minify + drop-empty. `lossy` → also elide arrays. */
+  /** `off` → identity. `lossless` → MINIFY ONLY: insignificant whitespace is
+   *  DELETED FROM THE SOURCE TEXT, so the output is the input minus whitespace
+   *  and every other byte survives (keys, string values, numeric literals,
+   *  escapes, key order, duplicate keys). `lossy` → re-serialises, and
+   *  additionally drops structurally-empty fields and elides long arrays, each
+   *  with an explicit disclosure marker (`_emptied` / `_elided`); because it
+   *  rebuilds the value, IEEE-754 normalisation and last-key-wins apply there.
+   *
+   *  CORRECTED 2026-08-23 (review H2 / ADR 0604): the paragraph above used to
+   *  say `lossless` is "provably information-preserving: `JSON.parse(out)`
+   *  deep-equals `JSON.parse(in)`". That claim was true and the WRONG CLAIM —
+   *  the string is what reaches the model, and re-serialising rewrote it:
+   *  `{"a": 9007199254740993}` → `{"a":…992}`, `{"a":1e400}` → `{"a":null}`,
+   *  `{"status":"ok","status":"degraded"}` → `{"status":"degraded"}`. The
+   *  witness asserted the parse-level identity, so it was blind to all of it by
+   *  construction. `lossless` no longer re-serialises.
+   *
+   *  CORRECTED 2026-08-23 (TOCC-3 / ADR 0604): this line used to read "`lossless`
+   *  → minify + drop-empty", i.e. it defined a mode named lossless as one that
+   *  deletes fields. Measured, `{"results":[],"query":"q"}` became
+   *  `{"query":"q"}` and `{"agents":[],…}` became `{}` — an honest empty turned
+   *  into an absent field. Dropping now lives only under `lossy`. */
   mode: 'off' | 'lossless' | 'lossy';
   /** Lossy only: rows kept from the head of a long array (default 3). */
   head?: number;
@@ -341,6 +426,11 @@ export interface NodeContext {
   runId: string;
   nodeId: string;
   tenantId: string;
+  /** ADR 0632 — the run's abort signal (armed once per run by `executeRunBody`).
+   *  Fires on cancel and on an `immediate` pause; a long-running node body
+   *  (sleeps, provider calls) SHOULD race against it. `undefined` when the
+   *  node is reached outside a run body (a test harness). */
+  signal?: AbortSignal;
   scopeId?: string;
   inputs: unknown;
   config?: Record<string, unknown>;
@@ -372,12 +462,49 @@ export interface NodeContext {
    * the run. Defaults to `'trusted'` when metadata is absent. */
   trustBoundary?: 'trusted' | 'untrusted';
   /**
+   * ADR 0189 — true when a human chat session created this run
+   * (`run.metadata.chatSessionId`, stamped by the chat transport) AND an
+   * acting human exists (`metadata.actingUserId`). Gates the mid-run
+   * connect-to-continue prompt: only an interactive run may suspend on
+   * `connector_no_connection`; headless runs (scheduler / heartbeat / A2A /
+   * system) never carry the marker and keep the graceful fail-closed no-op
+   * (ADR 0033). Derived once at ctx build (the `trustBoundary` pattern). */
+  interactiveSession?: boolean;
+  /**
    * ADR 0099 — the per-run tool-output compaction decision, frozen into
    * `run.metadata.compaction` at run creation and read here at run-start
    * (the `trustBoundary` pattern). Constant across the run; copied verbatim on
    * `:fork`. Nodes that assemble tool-result content (the LLM-tools node) pass
    * it to `applyToolResultTransform`. `undefined` ⇒ identity (no compaction). */
   compaction?: CompactionDecision;
+  /**
+   * RFC 0151 §C — present ONLY when this node is executing as an INVERSE ACTION
+   * (a compensator the unwind invoked), absent on every forward execution.
+   *
+   * WHY A COMPENSATOR NEEDS THIS AND A FORWARD NODE DOES NOT. §C requires the
+   * inverse-action identity to be retry-stable — "a retry re-presents the SAME
+   * identity as its idempotency key; a second key at the downstream is a second
+   * obligation (two refunds)" — and `attempt` is deliberately OUTSIDE that
+   * identity for exactly this reason. The host holds the identity in the ledger,
+   * but the thing that must present it to the downstream provider is the
+   * compensator itself. Without this block it could not: a refund node had no
+   * way to reach its obligation's id, so its idempotency key would have to be
+   * derived from something else — and anything else varies per attempt, which
+   * is how one refund becomes three.
+   *
+   * `inverseActionId` is the §C tuple's opaque digest and is CONSTANT across
+   * retries of the same obligation; `attempt` moves. Use the former as the
+   * idempotency key, never a composition of the two.
+   *
+   * Added by the ADR 0554 wire flip, when advertising `capabilities.compensation`
+   * made §C a MUST this host had to be able to honour AND witness — the §21
+   * recovery seam reports the key the fake downstream received on each attempt,
+   * and a seam that invented that key would prove nothing about production.
+   */
+  compensation?: {
+    readonly inverseActionId: string;
+    readonly attempt: number;
+  };
   /** Resolved BYOK secret values keyed by `credentialRef`. Empty if none required. */
   secrets: Record<string, string>;
   /**
@@ -450,6 +577,12 @@ export interface NodeContext {
    * is configured (the speechSynthesis honesty rule).
    */
   callImageGenerator?(req: ImageGenerationRequest): Promise<ImageGenerationResult>;
+  /** ADR 0401 — raster edit ops (edit / inpaint / background-remove). */
+  callImageEditor?(req: ImageEditRequest): Promise<ImageGenerationResult>;
+  /** ADR 0401 — 2×/4× upscale. */
+  callImageUpscaler?(req: ImageUpscaleRequest): Promise<ImageGenerationResult>;
+  /** ADR 0411 — generative video (text-to-video); host-hidden async polling. */
+  callVideoGenerator?(req: VideoGenerationRequest): Promise<VideoGenerationResult>;
   /**
    * Host capability surfaces per RFCs 0014–0019. Present when the host
    * wires `initInMemorySurfaces()` (demo) or a real-backend equivalent.
@@ -510,6 +643,16 @@ export interface NodeContext {
    *  which is the correct fail-closed signal. Stamped on `run.metadata.actingUserId`
    *  at run creation and re-stamped to the FORKING caller on `:fork`. */
   actingUserId?: string;
+  /** RFC 0207 §A/§B — the W3C trace context the RUN was created under
+   *  (`run.metadata.traceContext`, a reserved key stamped host-side from the
+   *  creating request's `traceparent` header). A node that calls out over MCP
+   *  or A2A carries a CHILD of it in both the in-message carrier and the HTTP
+   *  header, so the peer's spans join the caller's trace. Absent when the run
+   *  was started with no inbound trace.
+   *
+   *  CORRELATION ONLY. It is never read as tenant, principal or scope, and no
+   *  node may derive authority from it. */
+  traceContext?: TraceContext;
   /** ctx.http — host-mediated egress (RFC 0076 §B). When present, the
    *  `core.openwop.http` pack routes ALL outbound calls through `safeFetch`
    *  (delegating SSRF defense to the host) instead of its in-pack fallback. The
@@ -536,21 +679,34 @@ export interface NodeContext {
     }): Promise<{ ok: boolean; ts?: string; channel?: string; error?: string }>;
   };
   /** ctx.ads — outbound ad-platform dispatch for `feature.campaign-channels.nodes.
-   *  publish-ad-variants` (ADR 0167; Meta Phase 1, Google Phase 2). Resolves the acting
-   *  human's ad-platform Connection and creates a PAUSED campaign pipeline through the
-   *  broker; fork-stable idempotent (no duplicate paid campaign on replay/fork). No
-   *  connection ⇒ `{ outcome:'no_connection' }` (the node falls back to the document
-   *  handoff, ADR 0166), never a throw. Inline to avoid an import cycle. */
+   *  publish-ad-variants` (ADR 0167; production payloads + LinkedIn per ADR 0223).
+   *  Resolves the acting human's ad-platform Connection and creates a PAUSED campaign
+   *  pipeline through the broker; fork-stable idempotent (no duplicate paid campaign
+   *  on replay/fork). No connection ⇒ `{ outcome:'no_connection' }` (the node falls
+   *  back to the document handoff, ADR 0166), never a throw. Inline to avoid an
+   *  import cycle. */
   ads?: {
     publishAd(args: {
-      platform: 'meta' | 'google' | 'tiktok';
+      platform: 'meta' | 'google' | 'tiktok' | 'linkedin';
       briefId: string;
       adAccountId: string;
       campaignName: string;
       objective?: string;
       copy: { headline: string; description?: string; bodyText?: string; ctaText?: string };
       dailyBudgetMinor?: number;
+      /** REQUIRED for google (`missing_landing_url` otherwise — finalUrls is
+       *  mandatory); threaded into the meta/tiktok/linkedin creative when present. */
       landingUrl?: string;
+      /** Meta ONLY: the Facebook Page publishing the creative story — REQUIRED for a
+       *  meta dispatch (`missing_page_id` otherwise). */
+      pageId?: string;
+      /** TikTok ONLY: the posting identity (`identity_type: 'CUSTOMIZED_USER'`) —
+       *  REQUIRED for a tiktok dispatch (`missing_identity_id` otherwise). */
+      identityId?: string;
+      /** Optional media-library asset (assetId or serve token), uploaded platform-side
+       *  (Meta adimages image_hash / TikTok image upload image_ids). Bytes are resolved
+       *  host-side and never appear in outputs or dry-run plans. */
+      mediaAssetId?: string;
       /** Preview mode: build the exact PAUSED create payloads and return them as a
        *  plan WITHOUT calling the platform — zero platform calls, nothing persisted. */
       dryRun?: boolean;
@@ -562,8 +718,46 @@ export interface NodeContext {
       // the UI on the flag, don't render the plan as "would create". `connectionReady`
       // false ⇒ the plan is valid but a real dispatch would fail closed (`no_connection`)
       // until the platform connection is wired.
-      | { outcome: 'preview'; platform: 'meta' | 'google' | 'tiktok'; plan: Array<{ step: string; body: Record<string, unknown> }>; alreadyDispatched?: boolean; connectionReady?: boolean; platformCampaignId?: string }
-      | { outcome: 'published'; platform: 'meta' | 'google' | 'tiktok'; platformCampaignId: string; platformAdSetId: string; platformAdId: string; reviewStatus: 'pending_review'; paused: true; reused: boolean }
+      | { outcome: 'preview'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; plan: Array<{ step: string; body: Record<string, unknown> }>; alreadyDispatched?: boolean; connectionReady?: boolean; platformCampaignId?: string }
+      // Spend governance (campaign gap plan §5B B3): the tenant's ad-spend policy
+      // requires a human sign-off (kind 'campaign-spend' in the ONE approvals
+      // inbox). Nothing was created; approve + re-run proceeds (same fork-stable key).
+      | { outcome: 'requires_approval'; approvalId: string }
+      | { outcome: 'published'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; platformCampaignId: string; platformAdSetId: string; platformAdId: string; reviewStatus: 'pending_review'; paused: true; reused: boolean }
+    >;
+    /** Read a campaign's performance metrics from the connected platform (ADR 0186
+     *  slice 4a) — READ-ONLY, provider-agnostic. Graceful `no_connection`;
+     *  `unsupported` for a platform without a reader (tiktok/linkedin today). */
+    /** Upload a hashed member list as a platform custom audience (ADR 0217).
+     *  Hashes only — never raw addresses; default require-approval gate. */
+    syncAudience?(args: { platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; adAccountId: string; audienceName: string; memberHashes: string[]; membersKey: string }): Promise<
+      | { outcome: 'no_connection' }
+      | { outcome: 'unsupported'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin' }
+      | { outcome: 'failed'; error: string }
+      | { outcome: 'requires_approval'; approvalId: string }
+      | { outcome: 'synced'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; platformAudienceId: string; uploaded: number }
+    >;
+    /** The tenant's dispatch-ledger rows (C2 sync + B5 checklist) — ids/names only. */
+    listDispatches?(): Promise<Array<{
+      platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; platformCampaignId: string; platformAdSetId: string; platformAdId: string;
+      briefId?: string; campaignName?: string; dailyBudgetMinor?: number; adAccountId?: string; createdAt: string;
+    }>>;
+    getMetrics?(args: { platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; adAccountId: string; campaignId: string; window?: 'lifetime' | 'yesterday' }): Promise<
+      | { outcome: 'no_connection' }
+      | { outcome: 'unsupported'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin' }
+      | { outcome: 'failed'; error: string }
+      | { outcome: 'ok'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; metrics: { impressions: number; clicks: number; spend: number; ctr: number; cpc: number } }
+    >;
+    /** Set a campaign's daily budget (ADR 0186 slice 4b) — the one live-spend
+     *  mutation. `dryRun` returns a preview WITHOUT calling the platform. Idempotent,
+     *  never unpauses; graceful `no_connection`; `unsupported` (tiktok/linkedin today). */
+    updateBudget?(args: { platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; adAccountId: string; campaignId: string; dailyBudgetMinor: number; dryRun?: boolean }): Promise<
+      | { outcome: 'no_connection' }
+      | { outcome: 'unsupported'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin' }
+      | { outcome: 'failed'; error: string }
+      | { outcome: 'requires_approval'; approvalId: string }
+      | { outcome: 'preview'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; dailyBudgetMinor: number; target: string }
+      | { outcome: 'updated'; platform: 'meta' | 'google' | 'tiktok' | 'linkedin'; dailyBudgetMinor: number; target: string }
     >;
   };
   /** ctx.email — email egress for `core.openwop.integration.email-send`
@@ -591,13 +785,13 @@ export interface NodeContext {
    *  chat node stays unimplemented — its own surface.) No connection ⇒ graceful
    *  `{ sent:false }`, never a throw. */
   messaging?: {
-    sendSms(args: { provider?: string; to: string; from: string; text: string }): Promise<{ sent: boolean; sid?: string; provider: string; error?: string }>;
+    sendSms(args: { provider?: string; to: string; from: string; text: string; idempotencyKey?: string }): Promise<{ sent: boolean; sid?: string; provider: string; error?: string }>;
   };
   /** ctx.notification — push egress for `core.openwop.integration.notification-push`
    *  (ADR 0024 §4 Phase 3). Resolves the acting human's push-provider Connection
    *  (v1: Expo) for the node's `provider`. No connection ⇒ graceful `{ sent:false }`. */
   notification?: {
-    push(args: { provider?: string; deviceToken: string; title: string; body: string; data?: Record<string, unknown> }): Promise<{ sent: boolean; id?: string; provider: string; error?: string }>;
+    push(args: { provider?: string; deviceToken: string; title: string; body: string; data?: Record<string, unknown>; idempotencyKey?: string }): Promise<{ sent: boolean; id?: string; provider: string; error?: string }>;
   };
   /** ctx.connectors — the ADR 0037 connector invoker, exposed to nodes (ADR 0076).
    *  `invoke(connectorId, request)` performs an audited, token-injected, eTLD+1-pinned
@@ -613,7 +807,20 @@ export interface NodeContext {
       body?: string;
       contentType?: string;
       authScheme?: 'bearer' | 'basic';
+      /** Static, non-secret headers a provider protocol requires (e.g. NetSuite
+       *  SuiteQL's `Prefer: transient`). The broker strips any `authorization` /
+       *  `content-type` variant, so a node can't override the credential. */
+      extraHeaders?: Record<string, string>;
     }): Promise<{ ok: boolean; status?: number; data?: unknown; error?: string }>;
+    /** Resolve the acting human's connected provider for a capability CATEGORY
+     *  ("email-calendar" / "hr" / …) — the Phase-2 binding (ADR 0186). Returns the
+     *  provider id for `invoke`, or `null` when no authorized connection of that
+     *  category exists, so a capability node degrades instead of hard-coding a vendor.
+     *  Optional so a node tolerates an older host that exposes only `invoke`. */
+    resolveForCapability?(capability: string): Promise<string | null>;
+    /** All authorized providers for a category (precedence-ordered) — a node that
+     *  supports a subset of a coarse category picks one it can serve (ADR 0186). */
+    resolveAllForCapability?(capability: string): Promise<string[]>;
   };
   /** ctx.variables — run-scoped mutable variable bag (get/set), backed by the
    *  variables runtime. Used by launch-studio to thread step context. */
@@ -684,7 +891,7 @@ export type NodeOutcome =
   | {
       status: 'suspended';
       interrupt: {
-        kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation';
+        kind: 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation' | 'timer' | 'tour-step' | 'walkthrough-step' | 'credential';
         data: unknown;
         resumeSchema?: Record<string, unknown>;
       };
@@ -697,6 +904,12 @@ export interface NodeModule {
   requires?: readonly string[];
   /** Secret requirements — node manifest declares these; resolver fetches at execute time. */
   requiresSecrets?: readonly { id: string; provider: string; scope: string }[];
+  /** ADR 0341 — marks a node whose execution IS an external side effect
+   *  (send/write/call-out). During a replay-mode fork the executor reproduces
+   *  the source run's recorded outcome instead of executing it live. Host/
+   *  pack-author-owned (never workflow-author config); the executor's
+   *  pattern list covers the core families when this flag is absent. */
+  sideEffecting?: boolean;
   /** RFC 0031 §B. Model capabilities this NodeModule requires the active
    *  model to advertise. Distinct from `requires`, which gates on HOST
    *  capabilities — this field gates on MODEL capabilities. Spec-reserved
@@ -714,6 +927,12 @@ export interface NodeModule {
    *  absent, the host refuses on any unmet capability. Recursive substitution
    *  is NOT permitted (RFC 0031 §"Unresolved questions" #3). */
   fallbackModel?: { provider: string; model: string };
+  /** ADR 0555 P1 — pack provenance + isolation eligibility, stamped by
+   *  `packs/tarballLoader.ts` at registration. ABSENT on host built-in modules,
+   *  and that absence is load-bearing: it is what tells the executor this is
+   *  the host's own code and never a candidate for the isolated-worker
+   *  contract. */
+  packOrigin?: PackNodeOrigin;
   execute(ctx: NodeContext): Promise<NodeOutcome>;
 }
 
@@ -774,6 +993,43 @@ export interface WorkflowDefinition {
      *  Also projected onto `RunSnapshot.agent` (the active-worker rotation
      *  per run-snapshot.schema.json) via `host/runAgentRuntime.ts`. */
     agent?: AgentRef;
+    /** RFC 0151 §B — the node's inverse action (ADR 0554 P2). CLOSED and
+     *  optional, mirroring `workflow-definition.schema.json`
+     *  `WorkflowNode.compensation` field-for-field; nothing host-private may be
+     *  added here, because a chain-pack node carrying an extra key would be
+     *  rejected by the wire schema.
+     *
+     *  Its presence is the AUTHOR'S DECLARATION that this node's effect can be
+     *  undone — P0 finding 3's requirement, since two of this host's senders
+     *  (`network-egress` via webhook and via the broker) have a compensability
+     *  the host cannot know. A node without this block owes nothing, and the
+     *  host never infers otherwise. */
+    compensation?: {
+      nodeTypeId: string;
+      inputMapping?: Record<string, unknown>;
+      retry?: { maxAttempts?: number; backoffMs?: number };
+      requiresApproval?: boolean;
+      /** RFC 0151 §B (S36) — gates ABANDONING this inverse (§E `skip` /
+       *  `terminate as uncompensated`) behind the same approval surface. Its
+       *  DEFAULT is the EFFECTIVE `requiresApproval`, not `false`; resolve it
+       *  through `compensationUnwind.effectiveWaiveRequiresApproval`, never by
+       *  reading this field raw. Does NOT apply to `substitute`. */
+      waiveRequiresApproval?: boolean;
+    };
+    /** RFC 0151 §B UQ4 (resolved 2026-08-16), reachable from a chain via
+     *  RFC 0157 — the author states that this node's committed effect HAS NO
+     *  INVERSE. OPTIONAL; absent or `false` means nothing (an undeclared
+     *  compensator is still not implied, so this is NOT the negation of
+     *  `compensation`). MUTUALLY EXCLUSIVE with `compensation`: a node
+     *  declaring both is contradictory and is refused at registration
+     *  (`validation_error`) and at chain expansion
+     *  (`chain_irreversible_with_compensation`).
+     *
+     *  Carried so the statement survives into the registered definition. The
+     *  §D consequence — a plan entry recorded `irreversible` so the rollup
+     *  caps at `partial` — is RFC 0151 UQ4 unwind work that rides
+     *  `compensationLedger`/`compensationUnwind`, NOT this carry. */
+    irreversibleEffect?: boolean;
   }>;
   /** DAG edges. When absent or empty, the executor builds an implicit linear
    *  chain from `nodes` (back-compat path for callers that pre-date the
@@ -793,7 +1049,30 @@ export interface WorkflowDefinition {
     description?: string;
     required?: boolean;
     defaultValue?: unknown;
+    /** RFC 0124 §Security — secret-class marking (from a chain parameter's
+     *  `x-openwop-sensitive` hint). A `sensitive` variable MUST NOT carry a
+     *  persisted `defaultValue` (SR-1 at-rest), is supplied per run via
+     *  `configurable`, and redacts to `[REDACTED:<id>]` in `prompt.composed`. */
+    sensitive?: boolean;
+    /** RFC 0136 — advisory JSON-Schema `format` hint for a `type: "string"`
+     *  variable (`email`, `uri`, `date`, …). PRESENTATIONAL ONLY: hosts SHOULD use
+     *  it to pick a run-input affordance but MUST NOT validate against it (a
+     *  mismatch never fails a run — requirement 3). Populated in deferred mode from
+     *  a chain parameter's `format` (requirement 7); survives `:fork`/replay
+     *  verbatim (requirement 5); orthogonal to `sensitive` (requirement 6). */
+    format?: string;
   }>;
+  /** `WorkflowSettings` (`workflow-definition.schema.json`) — authored,
+   *  workflow-level knobs alongside `timeout`/`maxRetries`. Kept as an open map
+   *  because the executor honours only the keys it implements; the RFC 0151 §B
+   *  `compensation` policy is the one this host reads, and it is REFUSED at
+   *  registration (`capability_required`) until the host advertises the family.
+   *  Authored, never per-run: the policy schema is explicit that there is no
+   *  run-options overlay, because a per-run caller who could drop a trigger
+   *  would be authorizing their own unwind. */
+  settings?: Record<string, unknown> & {
+    compensation?: CompensationPolicy;
+  };
   /** Authoring-time workflow metadata (tags, fixture annotations, …).
    *  Pass-through for the executor except for the conformance-relevant
    *  `requiresAgentId` key: when present, the run's dispatch surface

@@ -141,8 +141,15 @@ to `packs.openwop.dev` (decoupled from toggle state for replay).
 - [ ] **Bot/spam filtering** on the public beacon (UA heuristics, rate-limit tuning).
 - [ ] **Geo/IP handling** — IP-derived geo is PII and consent-sensitive; default to
   not storing raw IP; decide coarse-geo policy with ADR 0020.
-- [ ] **Core Web Vitals** (baseline `WebVitalsService`) — defer; needs the public
-  client helper to report LCP/INP/CLS.
+- [x] **Core Web Vitals** — DONE (CWV fold-in, 2026-07-12). Real-user LCP/CLS/TTFB/FCP
+  p75 from published pages. Rides `type:'event'` + `name:'web-vital'` + `props{metric,
+  value}` (**no new EventType, zero ingest changes**); `summarize()` computes a
+  nearest-rank p75 + a server-derived rating per metric. The client REUSES the
+  existing no-dep `PerformanceObserver` (extracted to `platform/measureWebVitals.ts`,
+  shared by the SPA telemetry sink + a new `site/webVitalsBeacon.ts` reporter wired
+  into the public `FrontPage`, riding the existing consent-gated beacon). One Web
+  Vitals card in the analytics page. **INP deferred** (event-timing + interaction
+  bucketing — a separate, easy-to-get-wrong measurement). No RFC (host-ext beacon).
 - [ ] **Sampling** for high-traffic orgs.
 - [ ] **Beacon idempotency** — `collect` takes no idempotency key, so a client/network
   retry duplicates an event. Acceptable at the sample tier (analytics is inherently

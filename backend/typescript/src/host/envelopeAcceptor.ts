@@ -82,6 +82,20 @@ function loadEnvelopeValidator(): ValidateFunction {
   return _envelopeValidator;
 }
 
+/** XCH-ENV-2 (LLM-EXCHANGE-AUDIT Wave 5): the RAW per-kind payload schema —
+ *  what a live `schema.request { envelopeType }` is answered WITH (the host
+ *  injects it out-of-band per `schema.request.schema.json`'s description).
+ *  Same file source and vendor-prefix guards as the validators. */
+export function loadEnvelopePayloadSchema(kind: string): Record<string, unknown> | null {
+  if (kind.startsWith('vendor.') || kind.startsWith('private.') || kind.startsWith('x-')) return null;
+  if (!/^[a-z0-9.-]+$/i.test(kind)) return null; // path-traversal guard — kind becomes a filename
+  try {
+    return JSON.parse(readFileSync(join(SCHEMAS_DIR, 'envelopes', `${kind}.schema.json`), 'utf8')) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 function loadPayloadValidator(kind: string): ValidateFunction | null {
   if (_payloadValidators.has(kind)) return _payloadValidators.get(kind) ?? null;
   // Validate against any in-tree per-kind schema we ship — the 4 universals
@@ -103,6 +117,49 @@ function loadPayloadValidator(kind: string): ValidateFunction | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * RFC 0209 §A.1 — kinds whose payload schema has one closed branch PER
+ * schema version. The engine MUST validate against exactly the branch the
+ * version selects, never the `anyOf` union the file carries for tooling: a
+ * version-2 envelope with a version-1 body is invalid, and so is the reverse.
+ *
+ * The branches are read from the vendored MAJOR-2 schema, whose `payloadV1` is
+ * byte-identical to the v1 file (`schemas/envelopes/ui.a2ui-surface.schema.json`),
+ * so a version-0/1 envelope is judged exactly as before on both majors.
+ */
+const VERSIONED_PAYLOAD_BRANCHES: Readonly<Record<string, { file: string; branch: (version: number) => string | null }>> = {
+  'ui.a2ui-surface': {
+    file: join('v2', 'envelopes', 'ui.a2ui-surface.schema.json'),
+    branch: (v) => (v <= 1 ? 'payloadV1' : v === 2 ? 'payloadV2' : null),
+  },
+};
+const _branchValidators = new Map<string, ValidateFunction | null>();
+
+/** The validator for `kind` at `version`, or `undefined` when the kind is not
+ *  versioned (the caller falls back to the one-schema path). `null` means the
+ *  kind IS versioned but has no branch for this version, or the branch file is
+ *  missing — the caller fails closed. */
+function loadBranchValidator(kind: string, version: number): ValidateFunction | null | undefined {
+  const spec = VERSIONED_PAYLOAD_BRANCHES[kind];
+  if (!spec) return undefined;
+  const branch = spec.branch(version);
+  if (branch === null) return null;
+  const key = `${kind}#${branch}`;
+  if (_branchValidators.has(key)) return _branchValidators.get(key) ?? null;
+  let v: ValidateFunction | null = null;
+  try {
+    const schema = JSON.parse(readFileSync(join(SCHEMAS_DIR, spec.file), 'utf8')) as { $id?: string };
+    if (typeof schema.$id === 'string') {
+      if (!ajv.getSchema(schema.$id)) ajv.addSchema(schema);
+      v = ajv.getSchema(`${schema.$id}#/$defs/${branch}`) ?? null;
+    }
+  } catch {
+    v = null;
+  }
+  _branchValidators.set(key, v);
+  return v;
 }
 
 export interface AIEnvelope {
@@ -162,7 +219,17 @@ export type EnvelopeOutcome =
     }
   | { status: 'invalid'; reason: string; details: ValidationDetail[] }
   | { status: 'gated'; reason: string; allowedKinds: readonly string[] }
-  | { status: 'breached'; reason: string; capKind: 'envelopes' | 'schema' | 'clarification' };
+  | {
+      status: 'breached';
+      reason: string;
+      capKind: 'envelopes' | 'schema' | 'clarification';
+      /** Explicit numeric cap + observed value at breach time (RFC 0021
+       *  §"cap.breached"). Threaded so projection emits real numeric fields
+       *  instead of regex-parsing `reason` (TODO-6). Both are known here —
+       *  the counter carries `cap` (limit) and `current` (observed). */
+      limit?: number;
+      observed?: number;
+    };
 
 export interface AcceptOptions {
   /** Run-level trust boundary. When `meta.contentTrust` is absent on the
@@ -322,16 +389,6 @@ export function acceptEnvelope(envelope: unknown, opts: AcceptOptions = {}): Env
   const payloadForValidation = normalizeOutcome.payload;
   const normalizerWarnings = normalizeOutcome.warnings;
 
-  // Step 3: payload validation against the per-kind schema (when available).
-  const payloadValidator = loadPayloadValidator(env.type);
-  if (payloadValidator && !payloadValidator(payloadForValidation)) {
-    return {
-      status: 'invalid',
-      reason: `payload for kind '${env.type}' failed validation`,
-      details: (payloadValidator.errors ?? []).map(validationDetail),
-    };
-  }
-
   // Step 3b: schema-version drift (RFC 0021 §"Schema discipline").
   // When the host advertises a per-kind floor version AND the inbound
   // `schemaVersion` diverges:
@@ -340,28 +397,60 @@ export function acceptEnvelope(envelope: unknown, opts: AcceptOptions = {}): Env
   //   - BELOW floor under `strict` → refuse `unknown_schema_version`.
   //   - BELOW floor under `warn` (default) → accept silently; engine
   //     projects the drift to `log.appended` at a higher layer.
-  if (opts.schemaVersionFloor && typeof env.schemaVersion === 'number') {
+  //
+  // RFC 0209 §A.1 / events.md §"The envelope-kind catalog": this runs BEFORE
+  // payload validation, because the catalog is "one flow, read in that order"
+  // and the version it settles is what selects the payload branch. (It used to
+  // run after, which was harmless while every kind had one schema; with
+  // per-version branches an above-floor envelope would otherwise report
+  // `envelope_invalid` instead of `unknown_schema_version`.)
+  // `ai-envelope.schema.json`: "Absent → treat as 0" — so an envelope with no
+  // `schemaVersion` is BELOW any positive floor, not exempt from the check.
+  const emittedVersion = typeof env.schemaVersion === 'number' ? env.schemaVersion : 0;
+  let effectiveVersion = emittedVersion;
+  if (opts.schemaVersionFloor) {
     const floor = opts.schemaVersionFloor[env.type];
-    if (typeof floor === 'number' && env.schemaVersion !== floor) {
+    if (typeof floor === 'number' && emittedVersion !== floor) {
       const strictness = opts.envelopeStrictness ?? 'warn';
-      const drift = env.schemaVersion > floor ? 'above' : 'below';
+      const drift = emittedVersion > floor ? 'above' : 'below';
       if (drift === 'above' || strictness === 'strict') {
         return {
           status: 'invalid',
-          reason: `unknown_schema_version: kind '${env.type}' advertises floor v${floor}, got v${env.schemaVersion} (drift=${drift}, strictness=${strictness})`,
+          reason: `unknown_schema_version: kind '${env.type}' advertises floor v${floor}, got v${emittedVersion} (drift=${drift}, strictness=${strictness})`,
           details: [
             {
               instancePath: '/schemaVersion',
               schemaPath: '#/properties/schemaVersion',
               keyword: 'schemaVersionFloor',
-              message: `expected v${floor} for type '${env.type}', got v${env.schemaVersion}`,
+              message: `expected v${floor} for type '${env.type}', got v${emittedVersion}`,
             },
           ],
         };
       }
-      // 'warn' + below-floor: fall through to accept; the engine emits
-      // `envelope_schema_version_drift` on the OTel span at the projection layer.
+      // 'warn' + below-floor: validate against the ADVERTISED version (below)
+      // and accept; the engine emits `envelope_schema_version_drift` on the
+      // OTel span at the projection layer.
+      effectiveVersion = floor;
     }
+  }
+
+  // Step 3: payload validation against the per-kind schema (when available) —
+  // for a versioned kind, against the ONE branch `effectiveVersion` selects.
+  const branchValidator = loadBranchValidator(env.type, effectiveVersion);
+  if (branchValidator === null) {
+    return {
+      status: 'invalid',
+      reason: `payload for kind '${env.type}' has no schema branch for schemaVersion ${effectiveVersion}`,
+      details: [{ instancePath: '/schemaVersion', schemaPath: '#/$defs', keyword: 'branch', message: `no payload branch for schemaVersion ${effectiveVersion}` }],
+    };
+  }
+  const payloadValidator = branchValidator ?? loadPayloadValidator(env.type);
+  if (payloadValidator && !payloadValidator(payloadForValidation)) {
+    return {
+      status: 'invalid',
+      reason: `payload for kind '${env.type}' failed validation`,
+      details: (payloadValidator.errors ?? []).map(validationDetail),
+    };
   }
 
   // Step 4: Envelope Contract gate (per-node permission set).
@@ -390,6 +479,8 @@ export function acceptEnvelope(envelope: unknown, opts: AcceptOptions = {}): Env
         status: 'breached',
         reason: `clarificationRounds cap (${counters.clarificationRounds.cap}) breached`,
         capKind: 'clarification',
+        limit: counters.clarificationRounds.cap,
+        observed: counters.clarificationRounds.current,
       };
     }
   } else if (env.type === 'schema.request' && counters.schemaRounds) {
@@ -398,6 +489,8 @@ export function acceptEnvelope(envelope: unknown, opts: AcceptOptions = {}): Env
         status: 'breached',
         reason: `schemaRounds cap (${counters.schemaRounds.cap}) breached`,
         capKind: 'schema',
+        limit: counters.schemaRounds.cap,
+        observed: counters.schemaRounds.current,
       };
     }
   } else if (counters.envelopesPerTurn) {
@@ -406,6 +499,8 @@ export function acceptEnvelope(envelope: unknown, opts: AcceptOptions = {}): Env
         status: 'breached',
         reason: `envelopesPerTurn cap (${counters.envelopesPerTurn.cap}) breached`,
         capKind: 'envelopes',
+        limit: counters.envelopesPerTurn.cap,
+        observed: counters.envelopesPerTurn.current,
       };
     }
   }
@@ -537,13 +632,6 @@ function redactCanaries(
   }
   const value = walk(input);
   return { value, count: total };
-}
-
-/** Test seam — clears the schema caches. Allows hot-reload tests to
- *  re-resolve schemas if they change on disk between runs. */
-export function _resetEnvelopeAcceptorCaches(): void {
-  _envelopeValidator = null;
-  _payloadValidators.clear();
 }
 
 /** Returns the universal-kind list. Discovery route MUST include

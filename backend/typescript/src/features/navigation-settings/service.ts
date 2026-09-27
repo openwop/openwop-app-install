@@ -13,6 +13,8 @@
  * @see docs/adr/0139-configurable-navigation-menu.md
  */
 import { DurableCollection } from '../../host/hostExtPersistence.js';
+import { registerSubjectEraser } from '../../host/subjectErasure.js';
+import { subjectKeyForms } from '../../host/subjectErasureRedaction.js';
 import { OpenwopError } from '../../types.js';
 import {
   EMPTY_MENU_CONFIG,
@@ -203,3 +205,29 @@ export async function putTenantConfig(tenantId: string, updatedBy: string, confi
 export async function putUserConfig(tenantId: string, userId: string, config: MenuConfig): Promise<void> {
   await store.put({ id: userKey(tenantId, userId), tenantId, scope: 'user', subject: userId, config, updatedAt: new Date().toISOString(), updatedBy: userId });
 }
+
+// ── ADR 0464 subject erasure (ADR 0587 §3, the bare-`subject` widening) ──────
+//
+// The USER layer is a person's own personalization keyed by their userId, so a
+// DSAR must take it. Surfaced by widening the feature-store gate's matcher set to
+// bind the bare field name `subject` — this store was previously invisible to the
+// gate (not covered, not debt, not exempt), and it is registered here rather than
+// recorded as debt so the widening does not raise the ceiling for something a
+// six-line point-delete closes.
+//
+// The TENANT layer (`${tenantId}:tenant`) is deliberately untouched: it is the
+// workspace's own navigation configuration, not the subject's data, and deleting
+// it on one member's DSAR would silently reset every other member's menu.
+// `updatedBy` on the tenant row is an actor attribution and is re-attributed
+// rather than deleted, matching the host convention.
+export async function eraseNavigationSettingsSubject(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return; // fail-closed on a falsy subject
+  const { forms } = subjectKeyForms(subjectKey);
+  for (const form of forms) await store.delete(userKey(tenantId, form));
+  const tenantRow = await store.get(tenantKey(tenantId));
+  if (tenantRow && forms.has(tenantRow.updatedBy)) {
+    await store.put({ ...tenantRow, updatedBy: 'erased:subject' });
+  }
+}
+
+registerSubjectEraser(eraseNavigationSettingsSubject);

@@ -16,6 +16,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { storeMediaAsset } from '../src/host/inMemorySurfaces.js';
+import { assertFlatErrorEnvelope, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
@@ -26,7 +27,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   delete process.env.OPENWOP_TEST_SEAM_ENABLED; // force the REAL url path, not the mock short-circuit
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -44,8 +45,11 @@ describe('RFC 0055 media-asset-url-tenant-scoped — callTranscriber tenant bind
     const res = await post({ audio: { url: victim.url } });
     // The tenant check throws before any provider call → 400 invalid_request, NOT a turn.
     expect(res.status).toBe(400);
-    const body = await res.json() as { error?: { code?: string }; finalText?: unknown; events?: unknown };
-    expect(body.error?.code).toBe('invalid_request');
+    // H27 / S22 — INVERTED. This read `error.code`; the canonical envelope is
+    // FLAT, so the code is `error` itself.
+    const body = await res.json() as { finalText?: unknown; events?: unknown };
+    assertFlatErrorEnvelope(body, 'foreign-tenant transcriber refusal');
+    expect(errorCodeOf(body)).toBe('invalid_request');
     // Crucially: NO transcript / events leaked for the foreign asset.
     expect(body.finalText).toBeUndefined();
     expect(body.events).toBeUndefined();

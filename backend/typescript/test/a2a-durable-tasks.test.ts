@@ -23,6 +23,7 @@ import {
   getA2aTask,
   setA2aPushSink,
   projectRunStatusToTaskState,
+  isTerminalTaskState,
   assertPushUrlAllowed,
   A2aPushUrlDeniedError,
 } from '../src/host/a2aTaskStore.js';
@@ -212,9 +213,23 @@ describe('ADR 0035 / RFC 0100 — projection + SSRF unit checks', () => {
     expect(projectRunStatusToTaskState('paused').state).toBe('working'); // drift #1
     expect(projectRunStatusToTaskState('waiting-approval')).toEqual({ state: 'input-required', interruptKind: 'approval' });
     expect(projectRunStatusToTaskState('waiting-input')).toEqual({ state: 'input-required', interruptKind: 'clarification' });
+    expect(projectRunStatusToTaskState('waiting-external')).toEqual({ state: 'input-required', interruptKind: 'clarification' }); // drift #2
     expect(projectRunStatusToTaskState('completed').state).toBe('completed');
     expect(projectRunStatusToTaskState('failed').state).toBe('failed');
     expect(projectRunStatusToTaskState('cancelled').state).toBe('canceled'); // spelling drift
+  });
+
+  // RFC 0094 §B `cancelling` arrived with the SDK 1.2.0 → 1.7.0 pin bump. The
+  // whole point of the row is that a cancel IN FLIGHT is not yet a cancel:
+  // `a2a-integration.md` §D.4 keeps it at `working` "until terminal", and
+  // §"Operational mapping" says CancelTask returns TASK_STATE_WORKING while
+  // cancelling. Asserting non-terminality alongside the state is what stops a
+  // future edit "tidying" it into `canceled` — which would fire the terminal
+  // push transition on a run that can still land `failed`.
+  it('projects RFC 0094 `cancelling` to a NON-terminal working task, not canceled', () => {
+    expect(projectRunStatusToTaskState('cancelling')).toEqual({ state: 'working' });
+    expect(isTerminalTaskState(projectRunStatusToTaskState('cancelling').state)).toBe(false);
+    expect(isTerminalTaskState(projectRunStatusToTaskState('cancelled').state)).toBe(true);
   });
 
   it('assertPushUrlAllowed accepts public https and rejects private/loopback/non-http', () => {

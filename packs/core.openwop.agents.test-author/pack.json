@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.test-author",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Test authoring agent. Generates unit, integration, and e2e tests from source code or specs. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -26,13 +26,10 @@
       "agentId": "core.openwop.agents.test-author.default",
       "persona": "Test Author",
       "label": "Test Author Agent",
-      "description": "Generates unit, integration, or e2e tests from source code or specs. Framework-aware (Jest/Vitest/Pytest/Go test/Playwright). Reads existing tests to match house style.",
+      "description": "Generates unit, integration, or e2e tests from source code or specs. Framework-aware (Jest/Vitest/Pytest/Go test/Playwright). Matches house style from a neighbor test supplied inline; returns the test file for the enclosing workflow to persist.",
       "modelClass": "coding",
       "systemPromptRef": "prompts/test-author.md",
-      "toolAllowlist": [
-        "openwop:core.files.write",
-        "openwop:core.files.read"
-      ],
+      "toolAllowlist": [],
       "memoryShape": {
         "scratchpad": true,
         "conversation": false,

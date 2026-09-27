@@ -18,6 +18,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { assertFlatErrorEnvelope, detailOf, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
@@ -27,7 +28,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -47,13 +48,13 @@ describe('RFC 0105 — speech-synthesis seam', () => {
   it('400s (invalid_request) on missing text', async () => {
     const res = await post(APP_PATH, { voiceId: 'male-qn-qingse' });
     expect(res.status).toBe(400);
-    expect((await res.json() as { error?: { code?: string } }).error?.code).toBe('invalid_request');
+    expect(errorCodeOf(await res.json())).toBe('invalid_request');
   });
 
   it('400s (invalid_request) on missing voiceId', async () => {
     const res = await post(APP_PATH, { text: 'hello' });
     expect(res.status).toBe(400);
-    expect((await res.json() as { error?: { code?: string } }).error?.code).toBe('invalid_request');
+    expect(errorCodeOf(await res.json())).toBe('invalid_request');
   });
 
   it('is wired to the real adapter under BOTH path prefixes (not 404, not a stub)', async () => {
@@ -72,7 +73,7 @@ describe('RFC 0105 — speech-synthesis seam', () => {
         expect(Boolean(body.audio?.url) !== Boolean(body.audio?.base64)).toBe(true); // exactly one
       } else {
         expect(res.status).toBe(400);
-        expect((await res.json() as { error?: { code?: string } }).error?.code).toBe('speech_synthesis_unsupported');
+        expect(errorCodeOf(await res.json())).toBe('speech_synthesis_unsupported');
       }
     }
   });
@@ -84,10 +85,13 @@ describe('RFC 0105 — speech-synthesis seam', () => {
     try {
       const res = await post(APP_PATH, { text: 'this text is well over five characters', voiceId: 'male-qn-qingse' });
       expect(res.status).toBe(429); // quota/budget — not 502 (provider outage), not 200
-      const body = await res.json() as { error?: { code?: string; details?: { kind?: string; cap?: number } } };
-      expect(body.error?.code).toBe('media_budget_exceeded');
-      expect(body.error?.details?.kind).toBe('tts');
-      expect(body.error?.details?.cap).toBe(5);
+      // H27 / S22 — the canonical envelope is FLAT: `error` is the code string
+      // and the budget context rides `details`, not `error.details`.
+      const body: unknown = await res.json();
+      assertFlatErrorEnvelope(body, 'tts budget refusal');
+      expect(errorCodeOf(body)).toBe('media_budget_exceeded');
+      expect(detailOf(body, 'kind')).toBe('tts');
+      expect(detailOf(body, 'cap')).toBe(5);
     } finally {
       delete process.env.OPENWOP_MEDIA_DAILY_TTS_CHARS;
     }

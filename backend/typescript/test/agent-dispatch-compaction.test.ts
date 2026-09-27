@@ -23,7 +23,13 @@ import { fenceUntrustedBlock } from '../src/host/untrustedContent.js';
 /** The tool result re-enters the loop fenced as untrusted (RFC 0021), so the
  *  byte-exact "raw" baseline is the FENCED raw content — compaction happens
  *  inside the fence. */
-const fencedRaw = (inner: string) => `Result of list: ${fenceUntrustedBlock(inner, 'tool list')}`;
+// The attribution label comes from `toModelToolResult`, which is now the SINGLE
+// fence owner for both model-facing paths (chat + voice). It was `'tool list'`
+// while `agentDispatch` applied its own blanket fence; that duplicate was removed,
+// so the label is the shared one. These tests assert COMPACTION behaviour — the
+// fence must still be present and its inner bytes byte-exact, which is what
+// changing only the label preserves.
+const fencedRaw = (inner: string) => `Result of list: ${fenceUntrustedBlock(inner, 'the `list` tool')}`;
 
 const LIST_TOOL: AgentToolDef = {
   name: 'list',
@@ -84,8 +90,18 @@ describe('runAgentDispatchLive — req.compaction at the tool-result boundary', 
     const msg = await runAndCaptureToolResult({ mode: 'lossless' });
     expect(msg).toContain('Result of list:');
     expect(msg).toContain('BEGIN UNTRUSTED CONTENT'); // fenced as untrusted (RFC 0021)
-    expect(msg).not.toContain('"tags"'); // empty field dropped
-    expect(msg.length).toBeLessThan(fencedRaw(VERBOSE).length); // compaction shrinks inside the fence
+    // ADR 0604 (TOCC-3) — this line used to read `expect(msg).not.toContain('"tags"')`
+    // with the comment "empty field dropped": the test PINNED a mode named
+    // lossless deleting a field. `lossless` now minifies and nothing else, so
+    // `tags` MUST survive — an empty array is a statement, not noise.
+    expect(msg).toContain('"tags"');
+    expect(msg.length).toBeLessThan(fencedRaw(VERBOSE).length); // minification shrinks inside the fence
+  });
+
+  it('lossy still drops the empty field, and names it (ADR 0604)', async () => {
+    const msg = await runAndCaptureToolResult({ mode: 'lossy', head: 5, tail: 5 });
+    expect(msg).toContain('_emptied'); // the disclosure reaches the model with the payload
+    expect(msg.length).toBeLessThan(fencedRaw(VERBOSE).length);
   });
 
   it('leaves the tool result raw when no compaction decision is supplied', async () => {

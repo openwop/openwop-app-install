@@ -1,5 +1,5 @@
 /**
- * MCP JSON-RPC method dispatch.
+ * The `mcp-2025-06-18-legacy` codec — MCP JSON-RPC method dispatch.
  *
  * Implements the subset of modelcontextprotocol.io 2025-06-18 the sample
  * host advertises in `capabilities.mcp.serverMount.transports`:
@@ -11,48 +11,63 @@
  *   - `sampling/createMessage`   (bridges into ctx.callAI via handle-sampling)
  *   - `elicitation/create`        (bridges into ctx.suspend via handle-elicitation)
  *
+ * ADR 0553 P2 — THIS FILE IS NOW ONE OF TWO CODECS, not the router. Everything
+ * a method MEANS moved to `host/mcpSemantics.ts` (tool authorization, argument
+ * validation, the untrusted run, the resource-URI sandbox); what stayed is the
+ * legacy WIRE: the `initialize` handshake, the live `sampling/createMessage` and
+ * `elicitation/create` callbacks, and result shapes without `resultType` or
+ * cache hints. `host/mcpCurrentCodec.ts` is the `mcp-2026-07-28` half.
+ *
+ * The legacy profile is served UNCHANGED and stays advertised (RFC 0153 §A
+ * legacy window — SHOULD NOT advertise after `MCP_LEGACY_PROFILE_SUNSET`).
+ * Everything below behaves exactly as it did before the split; a peer cannot
+ * tell the extraction happened, which is the point.
+ *
  * All inbound traffic crosses an `untrusted` boundary per RFC 0020 §D.
  * `tools/call.arguments` validates against the registered `inputSchema`
  * BEFORE workflow start — see `SECURITY/invariants.yaml`
  * `mcp-server-untrusted-args`. The resource URI sandbox normalizes via
  * `new URL()` + allowlists schemes (`mcp:`, `https:`, `openwop-resource:`)
  * + rejects path components containing `..` after decode, defeating
- * encoded-traversal attacks (`%2e%2e%2f`, `..%2f`, etc.).
+ * encoded-traversal attacks (`%2e%2e%2f`, `..%2f`, etc.). Both now live in
+ * `mcpSemantics.ts` so the current codec cannot drift from them.
  *
  * Downstream trustBoundary propagation (RFC 0020 §D): every MCP-originated
  * run is created with `metadata.trustBoundary: 'untrusted'`. The executor
  * reads that and surfaces it on each node's `ctx.trustBoundary` so pack
  * nodes that forward content to LLM surfaces can apply the
- * `threat-model-prompt-injection.md` UNTRUSTED-marker convention. Further
- * propagation hooks — emitting `agent.toolCalled` events with the trust
- * marker, attaching `inboundContentTrust` to `agent.reasoned` spans —
- * remain follow-up work and are tracked under the trust-marker plumbing
- * inside `core.openwop.ai`/`core.openwop.mcp` pack delegates.
+ * `threat-model-prompt-injection.md` UNTRUSTED-marker convention.
  *
  * @see RFCS/0020-host-mcp-server-composition.md §D
  */
 
-import { randomUUID } from 'node:crypto';
-import { insertRunWithStartContext } from './runInsert.js';
-import { seedRunVariables } from './variablesRuntime.js';
-import Ajv2020 from 'ajv/dist/2020.js';
+import { initializeVersionOutcome,
+  MCP_LEGACY_PROFILE,
+} from './mcpProfile.js';
+import {
+  callTool,
+  coerceContentText,
+  findElicitationHandler,
+  findPromptDescription,
+  findResourceMimeType,
+  findSamplingHandler,
+  getPrompt,
+  isMcpRefusal,
+  promptsView,
+  readResource,
+  resourcesView,
+  resourceTemplatesView,
+  runWorkflowById,
+  toolsView,
+  type McpRunOutcome,
+  type McpSemanticDeps,
+  type McpToolCallResult,
+} from './mcpSemantics.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from './index.js';
-import type { Principal, RunRecord } from '../types.js';
-import { executeRun } from '../executor/executor.js';
+import type { Principal } from '../types.js';
 import {
-  findElicitationHandler,
-  findPromptByName,
-  findResourceByUri,
-  findSamplingHandler,
-  findToolByName,
-  isToolAllowed,
-  listPrompts,
-  listResources,
-  listResourceTemplates,
-  listToolsForPrincipal,
-} from './mcpServerRegistry.js';
-import {
+  isErrorResponse,
   rpcError,
   rpcSuccess,
   RPC_INVALID_PARAMS,
@@ -63,27 +78,10 @@ import {
   type JsonRpcResponse,
 } from './mcpJsonRpc.js';
 import { createLogger } from '../observability/logger.js';
+import { classifyMcpRpcOutcome, recordMcpRequest, recordProtocolVersion } from '../observability/metricSeams.js';
+import { _resetToolSchemaCache } from './toolSchemaValidation.js';
 
 const log = createLogger('host.mcpServerRouter');
-
-/** Compiled Ajv2020 instance shared across requests. The instance is
- *  thread-safe within a Node worker. Tool inputSchemas are added on
- *  first reference and cached by content hash. */
-const ajv = new Ajv2020({ allErrors: true, strict: false });
-const schemaCache = new Map<string, ReturnType<typeof ajv.compile>>();
-
-function compileSchema(schema: Record<string, unknown>): ReturnType<typeof ajv.compile> {
-  // Cache key by JSON-stable hash of the schema. Cheap enough — tool
-  // schemas are small. `JSON.stringify(schema)` is a deterministic
-  // identity because Ajv treats object-property-order semantically.
-  const key = JSON.stringify(schema);
-  let validator = schemaCache.get(key);
-  if (!validator) {
-    validator = ajv.compile(schema);
-    schemaCache.set(key, validator);
-  }
-  return validator;
-}
 
 export interface RouterDeps {
   storage: Storage;
@@ -95,12 +93,32 @@ export async function dispatch(
   request: JsonRpcRequest,
   deps: RouterDeps,
 ): Promise<JsonRpcResponse> {
+  // ADR 0556 P1 — wrapped, for the same reason as the A2A server: the switch
+  // below has a return per method and a catch-all, and a per-branch counter is
+  // a counter with a hole in it the day someone adds a method.
+  const response = await dispatchMcpRequest(request, deps);
+  recordMcpRequest(
+    'inbound',
+    request.method,
+    classifyMcpRpcOutcome(isErrorResponse(response) ? response.error.code : undefined),
+  );
+  return response;
+}
+
+async function dispatchMcpRequest(
+  request: JsonRpcRequest,
+  deps: RouterDeps,
+): Promise<JsonRpcResponse> {
   const id: JsonRpcId = request.id ?? null;
   const params = request.params ?? {};
+  const semantics: McpSemanticDeps = deps;
   try {
     switch (request.method) {
       case 'initialize':
-        return rpcSuccess(id, initializeResult());
+        // `params` used to be bound and then dropped on the floor here —
+        // `initializeResult()` took no arguments, so the peer's requested
+        // version was structurally unreachable. It is read now (ADR 0553 P1).
+        return rpcSuccess(id, initializeResult(params.protocolVersion));
       case 'ping':
         return rpcSuccess(id, {});
       case 'logging/setLevel': {
@@ -109,25 +127,25 @@ export async function dispatch(
         return rpcSuccess(id, {});
       }
       case 'tools/list':
-        return rpcSuccess(id, { tools: await toolsListView(deps.principal) });
+        return rpcSuccess(id, { tools: await toolsView(deps.principal) });
       case 'tools/call':
-        return await dispatchToolsCall(id, params, deps);
+        return projectRunOutcome(id, await callTool(params.name, params.arguments, semantics));
       case 'resources/list':
-        return rpcSuccess(id, { resources: resourcesListView() });
+        return rpcSuccess(id, { resources: resourcesView() });
       case 'resources/templates/list':
-        return rpcSuccess(id, { resourceTemplates: resourceTemplatesListView() });
+        return rpcSuccess(id, { resourceTemplates: resourceTemplatesView() });
       case 'resources/read':
-        return await dispatchResourcesRead(id, params, deps);
+        return await dispatchResourcesRead(id, params, semantics);
       case 'prompts/list':
-        return rpcSuccess(id, { prompts: promptsListView() });
+        return rpcSuccess(id, { prompts: promptsView() });
       case 'prompts/get':
-        return await dispatchPromptsGet(id, params, deps);
+        return await dispatchPromptsGet(id, params, semantics);
       case 'completion/complete':
         return rpcSuccess(id, { completion: { values: [], total: 0, hasMore: false } });
       case 'sampling/createMessage':
-        return await dispatchSampling(id, params, deps);
+        return await dispatchSampling(id, params, semantics);
       case 'elicitation/create':
-        return await dispatchElicitation(id, params, deps);
+        return await dispatchElicitation(id, params, semantics);
       default:
         return rpcError(id, RPC_METHOD_NOT_FOUND, `method '${request.method}' not implemented`);
     }
@@ -138,10 +156,39 @@ export async function dispatch(
   }
 }
 
-function initializeResult(): Record<string, unknown> {
-  // Mirrors modelcontextprotocol.io 2025-06-18 initialize/result shape.
+function initializeResult(requestedVersion?: unknown): Record<string, unknown> {
+  // Mirrors the modelcontextprotocol.io initialize/result shape for the version
+  // `host/mcpProfile.ts` says this host serves on THIS profile.
+  //
+  // The reported version is NOT a literal any more (ADR 0553 P1). It was one,
+  // in three places that disagreed: this file said one thing while the outbound
+  // client probed peers with another. One owner, so they cannot drift again.
+  //
+  // A mismatch is reported, not enforced. Upstream's legacy-profile rule is that
+  // the server answers with a version it supports and the client decides;
+  // failing closed here would break standard clients that open with an older
+  // version. RFC 0153 §B's fail-closed rule lives in the CURRENT codec, where
+  // §B actually applies (`mcpCurrentCodec.ts`; `selectMcpCodec` refuses an
+  // explicit unserved revision `-32022`). `initialize` does not exist there at
+  // all, so a peer reaching this function is a legacy peer by construction.
+  const outcome = initializeVersionOutcome(requestedVersion);
+  // ADR 0556 P1 — the negotiation disposition. `absent` means a peer opened
+  // without stating a version, which is a different population from one that
+  // asked for a version this host does not serve; the mismatch is reported and
+  // NOT enforced here, so this counter is the only place the difference shows.
+  // `initialize` exists only on the legacy revision (see above), so a peer
+  // reaching here is served the legacy profile by construction — which is
+  // exactly the population the 2027-08-12 retirement needs counted.
+  recordProtocolVersion(
+    'mcp',
+    requestedVersion === undefined ? 'absent' : outcome.mismatch ? 'mismatch' : 'served',
+    outcome.mismatch ? 'none' : MCP_LEGACY_PROFILE,
+  );
+  if (outcome.mismatch) {
+    log.info('mcp_initialize_version_mismatch', { requested: outcome.requested, served: outcome.served });
+  }
   return {
-    protocolVersion: '2025-06-18',
+    protocolVersion: outcome.served,
     serverInfo: {
       name: 'openwop-workflow-engine',
       version: '0.1.0',
@@ -155,138 +202,36 @@ function initializeResult(): Record<string, unknown> {
   };
 }
 
-async function toolsListView(principal: Principal): Promise<unknown[]> {
-  // ADR 0087 — authorization-scoped: a caller sees only the tools their auth +
-  // feature toggles permit (gated tools hidden from anon / toggle-off callers).
-  const tools = await listToolsForPrincipal(principal);
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description ?? '',
-    inputSchema: t.inputSchema,
-  }));
-}
-
-function resourcesListView(): unknown[] {
-  return listResources().map((r) => {
-    const view: Record<string, unknown> = { uri: r.uri };
-    if (r.name !== undefined) view.name = r.name;
-    if (r.description !== undefined) view.description = r.description;
-    if (r.mimeType !== undefined) view.mimeType = r.mimeType;
-    return view;
-  });
-}
-
-function resourceTemplatesListView(): unknown[] {
-  return listResourceTemplates().map((r) => {
-    const view: Record<string, unknown> = { uriTemplate: r.uri };
-    if (r.name !== undefined) view.name = r.name;
-    if (r.description !== undefined) view.description = r.description;
-    if (r.mimeType !== undefined) view.mimeType = r.mimeType;
-    return view;
-  });
-}
-
-function promptsListView(): unknown[] {
-  return listPrompts().map((p) => {
-    const view: Record<string, unknown> = { name: p.name };
-    if (p.description !== undefined) view.description = p.description;
-    if (p.arguments !== undefined) view.arguments = p.arguments;
-    return view;
-  });
-}
-
 // ─────────────────────────────────────────────────────────────────
 // tools/call — workflow as MCP tool
 // ─────────────────────────────────────────────────────────────────
 
-async function dispatchToolsCall(
-  id: JsonRpcId,
-  params: Record<string, unknown>,
-  deps: RouterDeps,
-): Promise<JsonRpcResponse> {
-  const startedAt = Date.now();
-  const name = typeof params.name === 'string' ? params.name : null;
-  if (!name) return rpcError(id, RPC_INVALID_PARAMS, 'tools/call requires params.name');
-  const tool = findToolByName(name);
-  // ADR 0087 — fail-closed + uniform: a tool the caller isn't authorized for is
-  // indistinguishable from a non-existent one (no existence leak via the error).
-  if (!tool || !(await isToolAllowed(tool, deps.principal))) {
-    // MCP-2 — observability for a security-sensitive external surface: the WIRE
-    // error stays uniform (`not exposed`), but the LOG distinguishes unknown vs
-    // unauthorized so an operator can see denial RATE + abuse on the MCP door
-    // (the repo's log-as-metric convention; a denied call creates no run, so it
-    // is otherwise untraced).
-    log.info('mcp_tool_denied', {
-      toolName: name,
-      reason: tool ? 'unauthorized' : 'unknown_tool',
-      principalId: deps.principal.principalId,
-    });
-    return rpcError(id, RPC_INVALID_PARAMS, `tool '${name}' not exposed`);
-  }
-
-  const args: Record<string, unknown> =
-    params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
-      ? (params.arguments as Record<string, unknown>)
-      : {};
-
-  // RFC 0020 §D + SECURITY/invariants.yaml mcp-server-untrusted-args:
-  // arguments MUST validate against the tool's declared inputSchema
-  // BEFORE any workflow side-effects.
-  try {
-    const validate = compileSchema(tool.inputSchema);
-    if (!validate(args)) {
-      return rpcError(id, RPC_INVALID_PARAMS, 'tool arguments failed inputSchema validation', {
-        violations: validate.errors ?? [],
-      });
+/**
+ * Pack the semantic outcome as a legacy `CallToolResult` per RFC 0020 §C.
+ *
+ * A SUSPENDED run has no legacy answer: the 2025-06-18 way to ask the caller
+ * for more is the out-of-band `elicitation/create` callback, which is a
+ * different method on a different connection. So it surfaces as an `isError`
+ * result, exactly as before. The current profile is where a suspended run
+ * becomes a first-class `input_required` (§C.2) — that difference is the reason
+ * `mcpSemantics` returns an outcome rather than a `CallToolResult`.
+ */
+function projectRunOutcome(id: JsonRpcId, result: McpToolCallResult): JsonRpcResponse {
+  if (isMcpRefusal(result)) {
+    if (result.kind === 'invalid-args') {
+      return rpcError(id, RPC_INVALID_PARAMS, result.message, { violations: result.violations });
     }
-  } catch (err) {
-    return rpcError(id, RPC_INVALID_PARAMS, 'tool inputSchema compile failed', {
-      reason: err instanceof Error ? err.message : String(err),
-    });
+    return rpcError(id, RPC_INVALID_PARAMS, result.message);
   }
-
-  const runResult = await runWorkflowSync({
-    deps,
-    workflowId: tool.workflowId,
-    inputs: args,
-    trustBoundary: 'untrusted',
-  });
-
-  // MCP-2 — one structured line per executed tool call (count + latency +
-  // outcome), the SRE-alertable signal for the external MCP door.
-  log.info('mcp_tool_call', {
-    toolName: name,
-    workflowId: tool.workflowId,
-    outcome: runResult.status,
-    durationMs: Date.now() - startedAt,
-  });
-
-  // Pack the run's terminal outputs as CallToolResult per RFC 0020 §C.
-  if (runResult.status === 'completed') {
-    const text = coerceContentText(runResult.outputs);
-    return rpcSuccess(id, {
-      content: [{ type: 'text', text }],
-      isError: false,
-    });
+  if (result.kind === 'completed') {
+    return rpcSuccess(id, { content: [{ type: 'text', text: result.text }], isError: false });
   }
-  if (runResult.status === 'failed') {
-    return rpcSuccess(id, {
-      content: [
-        {
-          type: 'text',
-          text: runResult.error
-            ? `run failed: ${runResult.error.code}: ${runResult.error.message}`
-            : 'run failed',
-        },
-      ],
-      isError: true,
-    });
+  if (result.kind === 'failed') {
+    return rpcSuccess(id, { content: [{ type: 'text', text: result.text }], isError: true });
   }
   // Suspended or canceled — surface as MCP error result per §C.
-  return rpcSuccess(id, {
-    content: [{ type: 'text', text: `run ${runResult.status}` }],
-    isError: true,
-  });
+  const label = result.kind === 'cancelled' ? 'cancelled' : 'awaiting-input';
+  return rpcSuccess(id, { content: [{ type: 'text', text: `run ${label}` }], isError: true });
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -296,70 +241,36 @@ async function dispatchToolsCall(
 async function dispatchResourcesRead(
   id: JsonRpcId,
   params: Record<string, unknown>,
-  deps: RouterDeps,
+  deps: McpSemanticDeps,
 ): Promise<JsonRpcResponse> {
-  const uri = typeof params.uri === 'string' ? params.uri : null;
-  if (!uri) return rpcError(id, RPC_INVALID_PARAMS, 'resources/read requires params.uri');
-  // RFC 0020 §D: resource URIs MUST be normalized + sandboxed. Parse via
-  // WHATWG URL (handles percent-decoding), reject non-allowlisted schemes,
-  // then reject any path component that decodes to `..` (defeats
-  // encoded-traversal: `%2e%2e%2f`, `..%2f`, `%2e%2e/`, etc.).
-  if (!isSafeResourceUri(uri)) {
-    return rpcError(id, RPC_INVALID_PARAMS, 'resource uri rejected: unsupported scheme or path traversal');
+  const outcome = await readResource(params.uri, deps);
+  if (isMcpRefusal(outcome)) return rpcError(id, RPC_INVALID_PARAMS, outcome.message);
+  if (outcome.kind !== 'completed') {
+    return rpcError(id, RPC_INTERNAL_ERROR, `resource read failed: run ${outcome.kind}`);
   }
-  const resource = findResourceByUri(uri);
-  if (!resource) return rpcError(id, RPC_INVALID_PARAMS, `resource '${uri}' not exposed`);
-
-  const runResult = await runWorkflowSync({
-    deps,
-    workflowId: resource.workflowId,
-    inputs: { uri },
-    trustBoundary: 'untrusted',
-  });
-
-  if (runResult.status === 'completed') {
-    const text = coerceContentText(runResult.outputs);
-    const view: Record<string, unknown> = { uri, text };
-    if (resource.mimeType !== undefined) view.mimeType = resource.mimeType;
-    return rpcSuccess(id, { contents: [view] });
-  }
-  return rpcError(id, RPC_INTERNAL_ERROR, `resource read failed: run ${runResult.status}`);
+  const uri = String(params.uri);
+  const view: Record<string, unknown> = { uri, text: outcome.text };
+  const mimeType = findResourceMimeType(uri);
+  if (mimeType !== undefined) view.mimeType = mimeType;
+  return rpcSuccess(id, { contents: [view] });
 }
 
 async function dispatchPromptsGet(
   id: JsonRpcId,
   params: Record<string, unknown>,
-  deps: RouterDeps,
+  deps: McpSemanticDeps,
 ): Promise<JsonRpcResponse> {
-  const name = typeof params.name === 'string' ? params.name : null;
-  if (!name) return rpcError(id, RPC_INVALID_PARAMS, 'prompts/get requires params.name');
-  const prompt = findPromptByName(name);
-  if (!prompt) return rpcError(id, RPC_INVALID_PARAMS, `prompt '${name}' not exposed`);
-
-  // RFC 0020 §D: prompt arguments are NOT template-evaluated. We pass
-  // them as inputs.arguments and let the workflow do the rendering
-  // explicitly (no eval, no Function constructor).
-  const args: Record<string, unknown> =
-    params.arguments && typeof params.arguments === 'object' && !Array.isArray(params.arguments)
-      ? (params.arguments as Record<string, unknown>)
-      : {};
-
-  const runResult = await runWorkflowSync({
-    deps,
-    workflowId: prompt.workflowId,
-    inputs: { arguments: args },
-    trustBoundary: 'untrusted',
-  });
-
-  if (runResult.status === 'completed') {
-    const text = coerceContentText(runResult.outputs);
-    const view: Record<string, unknown> = {
-      messages: [{ role: 'user', content: { type: 'text', text } }],
-    };
-    if (prompt.description !== undefined) view.description = prompt.description;
-    return rpcSuccess(id, view);
+  const outcome = await getPrompt(params.name, params.arguments, deps);
+  if (isMcpRefusal(outcome)) return rpcError(id, RPC_INVALID_PARAMS, outcome.message);
+  if (outcome.kind !== 'completed') {
+    return rpcError(id, RPC_INTERNAL_ERROR, `prompt render failed: run ${outcome.kind}`);
   }
-  return rpcError(id, RPC_INTERNAL_ERROR, `prompt render failed: run ${runResult.status}`);
+  const view: Record<string, unknown> = {
+    messages: [{ role: 'user', content: { type: 'text', text: coerceContentText(outcome.outputs) } }],
+  };
+  const description = findPromptDescription(String(params.name));
+  if (description !== undefined) view.description = description;
+  return rpcSuccess(id, view);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -369,7 +280,7 @@ async function dispatchPromptsGet(
 async function dispatchSampling(
   id: JsonRpcId,
   params: Record<string, unknown>,
-  deps: RouterDeps,
+  deps: McpSemanticDeps,
 ): Promise<JsonRpcResponse> {
   const handler = findSamplingHandler();
   if (!handler) {
@@ -379,16 +290,11 @@ async function dispatchSampling(
       'sampling/createMessage requires a workflow with core.openwop.mcp.handle-sampling',
     );
   }
-  const runResult = await runWorkflowSync({
-    deps,
-    workflowId: handler.workflowId,
-    inputs: { request: params },
-    trustBoundary: 'untrusted',
-  });
+  const outcome = await runHandlerWorkflow(deps, handler.workflowId, params);
 
-  if (runResult.status === 'completed') {
+  if (outcome.kind === 'completed') {
     // The handle-sampling delegate returns outputs.result = ctx.callAI result.
-    const outputs = (runResult.outputs ?? {}) as Record<string, unknown>;
+    const outputs = (outcome.outputs ?? {}) as Record<string, unknown>;
     const result = (outputs.result ?? {}) as Record<string, unknown>;
     return rpcSuccess(id, {
       role: 'assistant',
@@ -400,11 +306,7 @@ async function dispatchSampling(
       stopReason: typeof result.finishReason === 'string' ? result.finishReason : 'endTurn',
     });
   }
-  return rpcError(
-    id,
-    RPC_INTERNAL_ERROR,
-    `sampling bridge failed: ${runResult.status}${runResult.error ? ` (${runResult.error.code})` : ''}`,
-  );
+  return rpcError(id, RPC_INTERNAL_ERROR, `sampling bridge failed: ${outcome.kind}`);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -414,7 +316,7 @@ async function dispatchSampling(
 async function dispatchElicitation(
   id: JsonRpcId,
   params: Record<string, unknown>,
-  deps: RouterDeps,
+  deps: McpSemanticDeps,
 ): Promise<JsonRpcResponse> {
   const handler = findElicitationHandler();
   if (!handler) {
@@ -424,166 +326,41 @@ async function dispatchElicitation(
       'elicitation/create requires a workflow with core.openwop.mcp.handle-elicitation',
     );
   }
-  const runResult = await runWorkflowSync({
-    deps,
-    workflowId: handler.workflowId,
-    inputs: { request: params },
-    trustBoundary: 'untrusted',
-    /** Elicitation pauses the run — the suspend status is the normal
-     *  terminal-for-this-call signal. The conformance test's host-side
-     *  resolver can post the answer via the standard interrupt routes;
-     *  here we just acknowledge the bridge dispatched. */
-    acceptSuspended: true,
-  });
+  const outcome = await runHandlerWorkflow(deps, handler.workflowId, params);
 
-  if (runResult.status === 'awaiting-input') {
+  if (outcome.kind === 'awaiting-input' || outcome.kind === 'awaiting-input-opaque') {
     // Bridge dispatched and the workflow is waiting. Return a pending
-    // response shape — MCP clients will receive the final accept/decline
-    // /cancel via a follow-up notification once the interrupt resolves.
-    return rpcSuccess(id, {
-      action: 'pending',
-      content: {},
-    });
+    // response shape — a legacy MCP client resolves the interrupt through the
+    // standard interrupt routes. (Under the current profile this same run state
+    // is answered inline as MRTR `input_required`, which is the whole point of
+    // §C: the current revision has no out-of-band channel to finish on.)
+    return rpcSuccess(id, { action: 'pending', content: {} });
   }
-  if (runResult.status === 'completed') {
+  if (outcome.kind === 'completed') {
     // Workflow completed without pausing — e.g., test mode with synthetic
     // accept. Surface outputs as the elicitation response.
-    const outputs = (runResult.outputs ?? {}) as Record<string, unknown>;
+    const outputs = (outcome.outputs ?? {}) as Record<string, unknown>;
     return rpcSuccess(id, {
       action: typeof outputs.action === 'string' ? outputs.action : 'accept',
       content: (outputs.content ?? {}) as Record<string, unknown>,
     });
   }
-  return rpcError(
-    id,
-    RPC_INTERNAL_ERROR,
-    `elicitation bridge failed: ${runResult.status}${runResult.error ? ` (${runResult.error.code})` : ''}`,
-  );
+  return rpcError(id, RPC_INTERNAL_ERROR, `elicitation bridge failed: ${outcome.kind}`);
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Run-and-collect helper
-// ─────────────────────────────────────────────────────────────────
-
-interface RunResult {
-  status: 'completed' | 'failed' | 'awaiting-input' | 'cancelled';
-  outputs: Record<string, unknown> | null;
-  error: { code: string; message: string } | null;
+/**
+ * The two legacy CALLBACK bridges start a handler workflow with the inbound
+ * JSON-RPC params as `inputs.request` — a shape neither `tools/call` nor
+ * `resources/read` uses, and one that has no current-profile counterpart at all
+ * (§C replaced server-initiated requests with MRTR). The RUN itself is the
+ * shared semantics (same untrusted boundary, same variable seeding); only this
+ * input shape is legacy.
+ */
+async function runHandlerWorkflow(
+  deps: McpSemanticDeps,
+  workflowId: string,
+  params: Record<string, unknown>,
+): Promise<McpRunOutcome> {
+  return runWorkflowById(deps, workflowId, { request: params });
 }
 
-async function runWorkflowSync(input: {
-  deps: RouterDeps;
-  workflowId: string;
-  inputs: Record<string, unknown>;
-  trustBoundary: 'trusted' | 'untrusted';
-  acceptSuspended?: boolean;
-}): Promise<RunResult> {
-  const { deps, workflowId, inputs } = input;
-  const wf = await deps.hostSuite.workflowCatalog.getWorkflow(workflowId);
-  if (!wf) {
-    return {
-      status: 'failed',
-      outputs: null,
-      error: { code: 'workflow_not_found', message: `workflowId ${workflowId} unknown` },
-    };
-  }
-
-  const tenantId = deps.principal.tenants[0] && deps.principal.tenants[0] !== '*'
-    ? deps.principal.tenants[0]
-    : 'mcp-default';
-
-  const runId = randomUUID();
-  const now = new Date().toISOString();
-  const run: RunRecord = {
-    runId,
-    workflowId,
-    tenantId,
-    status: 'pending',
-    inputs,
-    metadata: { source: 'mcp-server-mount', trustBoundary: input.trustBoundary },
-    configurable: {},
-    createdAt: now,
-    updatedAt: now,
-  };
-  await insertRunWithStartContext(deps.storage, run);
-
-  // Seed the run's variable bag from the inbound inputs (the MCP `arguments`) per the
-  // workflow's `variables[]`, so `{type:'variable'}` node inputs resolve — the
-  // subWorkflowDispatcher precedent. Without this, an expose-tool workflow whose
-  // backing node reads tool args via variables (e.g. the ADR 0087 notebook tools)
-  // would see them undefined (executeRun only HYDRATES a previously-seeded bag).
-  seedRunVariables(runId, wf.definition.variables, inputs);
-
-  const exec = await executeRun(deps.storage, run, wf.definition, {
-    policyResolver: deps.hostSuite.providerPolicyResolver,
-  });
-
-  // Read terminal status + outputs from the event log.
-  const events = await deps.storage.listEvents(runId);
-  let outputs: Record<string, unknown> | null = null;
-  let error: { code: string; message: string } | null = null;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (!e) continue;
-    if (e.type === 'node.completed' && outputs === null) {
-      const p = e.payload as { outputs?: unknown } | undefined;
-      if (p?.outputs && typeof p.outputs === 'object') {
-        outputs = p.outputs as Record<string, unknown>;
-      }
-    }
-    if ((e.type === 'run.failed' || e.type === 'node.failed') && error === null) {
-      const p = e.payload as { error?: { code?: string; message?: string } } | undefined;
-      if (p?.error) {
-        error = {
-          code: typeof p.error.code === 'string' ? p.error.code : 'internal_error',
-          message: typeof p.error.message === 'string' ? p.error.message : 'run failed',
-        };
-      }
-    }
-  }
-
-  const status: RunResult['status'] =
-    exec.status === 'completed'
-      ? 'completed'
-      : exec.status === 'failed'
-        ? 'failed'
-        : exec.status === 'cancelled'
-          ? 'cancelled'
-          : 'awaiting-input';
-  return { status, outputs, error };
-}
-
-/** RFC 0020 §D resource URI sandbox. Returns true iff the URI parses,
- *  uses an allowlisted scheme, and no decoded path segment contains a
- *  parent-directory marker (`..`) or empty/space segment. Defeats
- *  encoded-traversal attacks: `%2e%2e%2f`, `..%2f`, `%2e%2e/`, etc. */
-const ALLOWED_RESOURCE_SCHEMES = new Set(['mcp:', 'openwop-resource:', 'https:']);
-function isSafeResourceUri(raw: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(raw);
-  } catch {
-    return false;
-  }
-  if (!ALLOWED_RESOURCE_SCHEMES.has(parsed.protocol)) return false;
-  // pathname is automatically percent-decoded for the comparison below.
-  const segments = decodeURIComponent(parsed.pathname).split('/');
-  for (const seg of segments) {
-    const trimmed = seg.trim();
-    if (trimmed === '..' || trimmed === '.') return false;
-  }
-  return true;
-}
-
-function coerceContentText(outputs: Record<string, unknown> | null): string {
-  if (!outputs) return '';
-  if (typeof outputs.text === 'string') return outputs.text;
-  if (typeof outputs.output === 'string') return outputs.output;
-  if (typeof outputs.result === 'string') return outputs.result;
-  return JSON.stringify(outputs);
-}
-
-/** Test seam — clears the schema cache. */
-export function _resetMcpRouterCaches(): void {
-  schemaCache.clear();
-}

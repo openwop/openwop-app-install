@@ -1,0 +1,195 @@
+{
+  "name": "core.openwop.workflows.seo-content-ops",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "SEO content-ops chains (RFC 0013): a research-grounded content pipeline — a keyword brief from live search, a drafted article for human review, and an on-publish internal-link suggestion pass. Drafts are reviewed before anything is treated as final. Replay-deterministic.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "SEO content ops"
+  ],
+  "chains": [
+    {
+      "chainId": "seo.keyword-brief",
+      "version": "1.1.0",
+      "label": "Topic → Research-Grounded Brief",
+      "description": "Researches a topic with live web search and produces a keyword-targeted content brief (angle, outline, target queries, sources) as a saved draft for the writer.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["triggerEventName"],
+        "properties": {
+          "topic": {
+            "type": "string",
+            "default": "",
+            "description": "The topic to brief."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Topic requested",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "search",
+            "typeId": "core.web.search",
+            "name": "Research topic",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "brief",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Write brief",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "You are an SEO content strategist. From the search results, write a brief for an article on {{params.topic}}: primary + secondary target queries, a distinct angle, a section outline, and the sources to cite. Ground every claim in a result; never fabricate a source. If the search results' `engine` field is 'demo' or 'stub' they are PLACEHOLDERS, not research: do not treat them as findings or invent specifics from them — say plainly that live web search is not configured (a 'web-search' key on the keys page unlocks it) and stop there.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "save",
+            "typeId": "core.email.draft",
+            "name": "Save brief",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "search"
+          },
+          {
+            "from": "search",
+            "to": "brief"
+          },
+          {
+            "from": "brief",
+            "to": "save"
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    },
+    {
+      "chainId": "seo.draft-for-review",
+      "version": "1.0.0",
+      "label": "Brief → Draft → Publish Gate",
+      "description": "Turns an approved brief into a full first draft, then holds it at a human publish gate — the article is never treated as live until a person approves.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["triggerEventName"],
+        "properties": {
+          "voice": {
+            "type": "string",
+            "default": "clear and practical",
+            "description": "Editorial voice."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Brief approved",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "draft",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Write draft",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Write a complete first draft from this content brief in a {{params.voice}} voice. Follow the outline, weave in the target queries naturally (never keyword-stuff), and cite the brief's sources. Flag any section where you lacked source material rather than inventing it.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Publish gate",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the draft — approve to mark it ready to publish"
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "draft"
+          },
+          {
+            "from": "draft",
+            "to": "gate"
+          }
+        ]
+      },
+      "outputs": {
+        "draft": {
+          "type": "string",
+          "description": "The reviewed article draft."
+        }
+      }
+    }
+  ]
+}

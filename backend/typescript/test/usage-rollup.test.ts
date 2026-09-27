@@ -33,7 +33,13 @@ describe('usage rollup', () => {
 
 import { getUsageRollupWithCost } from '../src/features/usage-analytics/usageRollupService.js';
 describe('getUsageRollupWithCost (ADR 0118 Phase 5)', () => {
-  it('estimates costUsd from the rate table; unpriced model → 0 (no fabricated cost)', async () => {
+  // UA-G1 — this expectation MOVED, deliberately. It used to assert
+  // `unpriced.costUsd === 0` under the title "no fabricated cost". That test was
+  // encoding the bug: 0 IS a fabricated cost, and on a spend dashboard it is the
+  // one number that asserts the model was FREE. `computeCostUsd` returns
+  // undefined for "no rate for this model", and that distinction now survives to
+  // the client. Rewritten rather than deleted so the reasoning is visible.
+  it('estimates costUsd from the rate table; an UNPRICED model has no cost at all', async () => {
     const CT = 'usage-cost-tenant';
     await recordUsage(CT, { provider: 'openai', model: 'gpt-4o', inputTokens: 1_000_000, outputTokens: 1_000_000, at: 't1' });
     await recordUsage(CT, { provider: 'mystery', model: 'mystery-model-9000', inputTokens: 500, outputTokens: 500, at: 't2' });
@@ -42,6 +48,10 @@ describe('getUsageRollupWithCost (ADR 0118 Phase 5)', () => {
     // (1M*2.5 + 1M*10) / 1M = 12.5
     expect(priced.costUsd).toBeCloseTo(12.5, 4);
     const unpriced = rows.find((r) => r.model === 'mystery-model-9000')!;
-    expect(unpriced.costUsd).toBe(0);
+    // Absent, not zero — the row exists and its token counts are real; only the
+    // price is unknown.
+    expect(unpriced.costUsd).toBeUndefined();
+    expect('costUsd' in unpriced).toBe(false);
+    expect(unpriced.inputTokens).toBe(500);
   });
 });

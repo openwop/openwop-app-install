@@ -4,11 +4,14 @@
  * is selected (the dependency via dependsOn → sibling provider field).
  */
 
+import { Button } from '../../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { PROVIDERS } from '../../byok/lib/providers.js';
 import { ArrowLeftIcon, ImageIcon, WrenchIcon } from '../../ui/icons/index.js';
 
 interface Props {
+  /** Associates the control with ConfigInput's <label htmlFor> (A11Y-3). */
+  id?: string | undefined;
   value: string | undefined;
   onChange(next: string | undefined): void;
   /** Provider id resolved via dependsOn from the sibling provider field.
@@ -18,11 +21,11 @@ interface Props {
   required?: boolean | undefined;
 }
 
-export function ModelPickerInput({ value, onChange, providerId, required }: Props): JSX.Element {
+export function ModelPickerInput({ value, onChange, providerId, required, id }: Props): JSX.Element {
   const { t } = useTranslation('builder');
   if (!providerId) {
     return (
-      <select disabled>
+      <select disabled {...(id ? { id } : {})}>
         <option>{t('pickProviderFirst')}</option>
       </select>
     );
@@ -31,7 +34,7 @@ export function ModelPickerInput({ value, onChange, providerId, required }: Prop
   const models = provider?.models ?? [];
   if (models.length === 0) {
     return (
-      <select disabled>
+      <select disabled {...(id ? { id } : {})}>
         <option>{t('noModelsForProvider', { provider: providerId })}</option>
       </select>
     );
@@ -47,20 +50,20 @@ export function ModelPickerInput({ value, onChange, providerId, required }: Prop
     return (
       <div className="u-flex u-gap-1-5 u-items-center">
         <input
+          {...(id ? { id } : {})}
           type="text"
           value={value}
           onChange={(e) => onChange(e.target.value || undefined)}
           placeholder={t('customModelIdPlaceholder')}
           className="u-flex-1"
         />
-        <button
-          type="button"
-          className="secondary modelpicker-list-btn"
+        <Button
+          variant="secondary" className="modelpicker-list-btn"
           onClick={() => onChange(undefined)}
           title={t('modelListButtonTitle')}
         >
           <ArrowLeftIcon size={12} /> {t('modelListButton')}
-        </button>
+        </Button>
       </div>
     );
   }
@@ -70,6 +73,7 @@ export function ModelPickerInput({ value, onChange, providerId, required }: Prop
   return (
     <>
       <select
+        {...(id ? { id } : {})}
         value={value ?? ''}
         required={required}
         onChange={(e) => {

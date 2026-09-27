@@ -1,0 +1,37 @@
+{
+  "name": "core.openwop.connections.zendesk",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Zendesk connection pack (RFC 0095) — OAuth2 (authorization-code, per-subdomain) provider for the Zendesk Ticketing REST API. ADR 0033 DEPLOY-GATED. Endpoints are per-tenant (https://{subdomain}.zendesk.com/oauth/…), so the pack carries an instanceUrlTemplate and no fixed endpoints — the host resolves them from the connected subdomain (the NetSuite precedent). Reach is `openapi` against Zendesk's documented Ticketing API: no first-party hosted MCP server, so the documented REST surface is the honest day-1 reach (ADR 0033 §4). Zendesk was the top helpdesk absence vs the market-standard app surface in the ADR 0190 template research. Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "provider": {
+    "id": "zendesk",
+    "displayName": "Zendesk",
+    "category": "ticketing",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "instanceUrlTemplate": "https://{subdomain}.zendesk.com",
+      "scopes": {
+        "read": [
+          { "key": "tickets.read", "label": "Read tickets", "scopes": ["tickets:read"] },
+          { "key": "users.read", "label": "Read users + organizations", "scopes": ["users:read", "organizations:read"] }
+        ],
+        "write": [
+          { "key": "tickets.write", "label": "Create + update tickets", "scopes": ["tickets:write"] },
+          { "key": "users.write", "label": "Create + update users", "scopes": ["users:write"] }
+        ]
+      }
+    },
+    "apiHosts": ["zendesk.com"],
+    "reach": {
+      "openapi": {
+        "ref": "https://developer.zendesk.com/api-reference/ticketing/introduction/"
+      }
+    },
+    "consumerNodes": ["core.openwop.http"],
+    "docsUrl": "https://developer.zendesk.com/documentation/ticketing/working-with-oauth/using-oauth-authentication-with-your-application/"
+  }
+}

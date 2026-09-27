@@ -1,0 +1,32 @@
+{
+  "name": "vendor.conformance.forms",
+  "version": "1.0.0",
+  "kind": "form-content",
+  "description": "RFC 0137 conformance fixture templates. Driven by form-content-instantiation.test.ts via the /v1/host/sample/formcontent/instantiate seam. NOT a shippable pack — never placed under packs/, so it can never reach a real operator's catalog.",
+  "license": "Apache-2.0",
+  "author": "openwop",
+  "engines": { "openwop": ">=1.0.0" },
+  "templates": [
+    {
+      "templateId": "vendor.conformance.form.basic",
+      "version": "1.0.0",
+      "label": "Conformance basic",
+      "title": "Conformance basic",
+      "fields": [
+        { "id": "name", "label": "Name", "type": "text", "required": true },
+        { "id": "email", "label": "Email", "type": "text", "format": "email" },
+        { "id": "notes", "label": "Notes", "type": "longtext" }
+      ]
+    },
+    {
+      "templateId": "vendor.conformance.form.extended",
+      "version": "1.0.0",
+      "label": "Conformance extended",
+      "title": "Conformance extended",
+      "fields": [
+        { "id": "name", "label": "Name", "type": "text", "required": true },
+        { "id": "vendorExtended", "label": "Rating", "type": "vendor.acme.rating" }
+      ]
+    }
+  ]
+}

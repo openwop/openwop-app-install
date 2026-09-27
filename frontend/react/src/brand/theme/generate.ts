@@ -46,6 +46,24 @@ const NEUTRAL_L = {
   dark: { paper: 0.16, paper2: 0.205, rule: 0.3, rule2: 0.38, ink: 0.955, ink2: 0.87 },
 };
 
+/** Resolved stock on-color fallbacks (ADR 0510 §5 — DSA-014). The stock
+ *  passthrough map deliberately leaves the derived on-colors to CSS
+ *  relative-color (`oklch(from var(--clay) …)` in global.css / defaults.ts
+ *  CLAY_RAMP_DERIVATIONS), which the contrast analyzer cannot parse. These are
+ *  those SAME derivations resolved for the stock accent, so the analyzer can
+ *  evaluate the effective merged map instead of skipping pairs. Owned here —
+ *  next to the identical derivation constants the generator applies to custom
+ *  accents (seedText / tDark below) — so the two cannot drift apart. */
+export function stockOnColorFallbacks(): { light: Record<string, string>; dark: Record<string, string> } {
+  const a = parseColorToOklch(STOCK_ACCENT)!;
+  const lightOn = formatOklch({ L: a.L - 0.12, C: a.C + 0.02, H: a.H }); // :root --clay-text/--clay-strong
+  const darkText = formatOklch({ L: a.L + 0.14, C: a.C, H: a.H });      // .theme-dark --clay-text
+  return {
+    light: { ...STOCK_LIGHT, '--clay-text': lightOn, '--clay-strong': lightOn },
+    dark: { ...STOCK_DARK, '--clay': STOCK_ACCENT, '--clay-text': darkText, '--clay-strong': lightOn },
+  };
+}
+
 const isStock = (i: ThemeInputs): boolean =>
   ((i.accentSeed ?? STOCK_ACCENT).replace(/\s+/g, '') === STOCK_ACCENT.replace(/\s+/g, '')) &&
   !i.neutralSeed && (i.contrastLevel ?? 'standard') === 'standard' && !i.radius;

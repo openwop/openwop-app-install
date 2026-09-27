@@ -47,6 +47,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
+import { readDeployPosture } from '../host/deployPosture.js';
 import type { NodeContext, NodeModule, NodeOutcome } from '../executor/types.js';
 
 const DEFAULT_ESCALATION_THRESHOLD = 0.7;
@@ -257,12 +258,10 @@ export const mockAgentNode: NodeModule = {
           // so the executor's own thin node.suspended event also fires
           // (suite asserts on the existence of the reason field, not on
           // exclusivity of the event).
-          await ctx.emit('node.suspended', {
-            reason: 'low-confidence',
-            agentId,
-            threshold,
-            observed,
-          });
+          // ADR 0725 — no hand-emitted `node.suspended` here: the executor's suspend
+          // seam mints the `interruptId` the def REQUIRES and carries `reason` from the
+          // interrupt data (RFC 0186 seat). The hand-rolled row had no id and was a
+          // second `node.suspended` for one suspension.
           return {
             status: 'suspended',
             interrupt: {
@@ -317,6 +316,11 @@ export function conformanceNodesEnabled(): boolean {
   const flag = process.env.OPENWOP_ENABLE_CONFORMANCE_NODES;
   if (flag === 'true') return true;
   if (flag === 'false') return false;
+  // LEAK-8: fail CLOSED in the enterprise (auth) posture even if NODE_ENV is
+  // mis-set — a real deploy must opt IN explicitly (the reference deploy sets
+  // the flag). This closes the "prod fork forgot NODE_ENV=production" hole that
+  // would otherwise expose `conformance.secret.echo` & the mock agent as live.
+  if (readDeployPosture() === 'auth') return false;
   return process.env.NODE_ENV !== 'production';
 }
 

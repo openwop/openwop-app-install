@@ -1,0 +1,30 @@
+{
+  "name": "feature.accessibility.agents",
+  "version": "1.0.0",
+  "description": "Accessibility agent pack (ADR 0363) — the Accessibility Reviewer, a manifest agent driven from the AI chat that checks authored content for WCAG issues and proposes AI alt text for images. Tool-allowlisted to the registered accessibility agent tools (openwop:accessibility.*), the chat-drivable seam — NOT the workflow node typeIds.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "accessibility", "a11y", "wcag", "agent", "reviewer"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.accessibility.agents.accessibility-reviewer",
+      "persona": "RESEARCH",
+      "label": "Accessibility Reviewer",
+      "description": "Reviews authored content (pages, screens, documents) for accessibility problems — missing image alt text, skipped heading levels, non-descriptive link text, low color contrast — and proposes AI alt text for images. Recommends fixes; the human applies them.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/accessibility-reviewer.md",
+      "toolAllowlist": [
+        "openwop:accessibility.check",
+        "openwop:accessibility.alt-text.generate"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

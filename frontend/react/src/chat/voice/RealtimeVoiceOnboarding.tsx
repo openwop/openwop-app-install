@@ -6,6 +6,7 @@
  * Shown once per browser (a localStorage flag); after that the Voice button uses the walkie-
  * talkie fallback directly.
  */
+import { Button } from '../../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 import { Modal } from '../../ui/Modal.js';
@@ -50,12 +51,12 @@ export function RealtimeVoiceOnboarding({ onClose, onUseRecorded }: { onClose: (
       </ol>
 
       <div className="action-bar u-justify-end u-mt-3">
-        <button type="button" className="secondary btn-sm" onClick={() => { onClose(); onUseRecorded(); }}>
+        <Button variant="secondary" size="sm" onClick={() => { onClose(); onUseRecorded(); }}>
           {t('voiceRtOnbLater')}
-        </button>
-        <button type="button" className="btn-primary btn-sm" onClick={() => { onClose(); navigate('/keys'); }}>
+        </Button>
+        <Button variant="primary" size="sm" onClick={() => { onClose(); navigate('/keys'); }}>
           {t('voiceRtOnbSetup')}
-        </button>
+        </Button>
       </div>
     </Modal>
   );

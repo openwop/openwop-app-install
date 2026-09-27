@@ -12,7 +12,7 @@
  * INVARIANTS (architect review, ADR 0148 Phase 1):
  *  - NON-MUTATING. These helpers build NEW objects; they never mutate the
  *    caller's `messages`/`tools` arrays. The replay cache key
- *    (`llmCacheKey.ts:projectRecipe`) is computed over the LOGICAL recipe
+ *    (`llmCacheKey.ts:projectSemanticRequestV2`) is computed over the LOGICAL recipe
  *    (messages, tools{name,description,parameters}), not the HTTP body — so
  *    cache_control is invisible to it ONLY as long as we don't mutate those
  *    inputs and never place cache_control INSIDE a tool's `input_schema`.

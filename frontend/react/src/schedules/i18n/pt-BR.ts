@@ -46,4 +46,8 @@ export const messages = {
   // Run-now notices
   firedWithRun: 'Disparado — ',
   firedNoWorkflow: 'Disparado (nenhum workflow vinculado).',
+
+  // ADR 0313 D3 — chips de agendamento silencioso
+  wontFire: 'Não vai disparar — a cadência não pôde ser interpretada',
+  oneShotDone: 'Concluído (execução única)',
 } as const;

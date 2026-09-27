@@ -45,7 +45,7 @@ const STORE_SUMMARY = 'feature.notebooks.nodes.store-summary';
 const SUMMARIZE_SYSTEM_PROMPT =
   'Summarize the following source for a research notebook in 3-5 sentences; plain text; no preamble.';
 
-export const summarizeWorkflowDefinition: WorkflowDefinition = {
+const summarizeWorkflowDefinition: WorkflowDefinition = {
   workflowId: NOTEBOOKS_SUMMARIZE_ID,
   nodes: [
     {

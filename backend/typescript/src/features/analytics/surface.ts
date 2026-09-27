@@ -6,8 +6,9 @@
  */
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { surfaceStr as str, type FeatureSurface } from '../../host/featureSurfaces.js';
-import { summarize, listEvents } from './analyticsService.js';
+import type { FeatureSurface } from '../../host/featureSurfaces.js';
+import { requireString } from '../featureRoute.js';
+import { summarizeForReport, listEvents } from './analyticsService.js';
 
 const INTERNAL = new Set(['tenantId']);
 function project(o: object): Record<string, unknown> {
@@ -19,9 +20,13 @@ function project(o: object): Record<string, unknown> {
 export function buildAnalyticsSurface(scope: BundleScope): FeatureSurface {
   const tenantId = scope.tenantId;
   return {
-    summary: async (args) => ({ summary: await summarize(tenantId, str(args.orgId)) }),
+    // ANL-UX-4 R2 — `summarizeForReport`, NOT `summarize`: this all-time read
+    // feeds workflow nodes whose output reaches a model (the exec-ops board
+    // pack), so it must carry the SAME deployment-scoped `uniqueVisitorsSince`
+    // the page and the chat tool do. Same single indexed read.
+    summary: async (args) => ({ summary: (await summarizeForReport(tenantId, requireString(args.orgId, 'orgId'))).summary }),
     events: async (args) => {
-      const evs = await listEvents(tenantId, str(args.orgId), 50);
+      const evs = await listEvents(tenantId, requireString(args.orgId, 'orgId'), 50);
       return { events: evs.map(project) };
     },
   };

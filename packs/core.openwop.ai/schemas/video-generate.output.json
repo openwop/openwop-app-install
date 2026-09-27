@@ -1,21 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/video-generate.output.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/video-generate.output.json",
   "title": "AiVideoGenerateOutput",
   "type": "object",
-  "required": [
-    "videoBase64"
-  ],
+  "required": ["video"],
   "properties": {
-    "videoBase64": {
-      "type": "string"
+    "video": {
+      "type": "object",
+      "required": ["url", "mimeType", "durationSeconds", "width", "height", "safetyFiltered"],
+      "properties": {
+        "url": { "type": "string", "description": "Host-served video URL (videos are too large for inline base64)." },
+        "mimeType": { "type": "string" },
+        "durationSeconds": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" },
+        "fileSizeBytes": { "type": "number" },
+        "seed": { "type": "number" },
+        "safetyFiltered": { "type": "boolean" },
+        "metadata": { "type": "object" }
+      }
     },
-    "contentType": {
-      "type": "string"
-    },
-    "durationSec": {
-      "type": "integer"
-    }
+    "totalTimeMs": { "type": "number" },
+    "usage": { "type": "object" }
   },
-  "additionalProperties": false
+  "additionalProperties": true
 }

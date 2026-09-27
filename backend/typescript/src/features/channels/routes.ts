@@ -6,7 +6,13 @@ import type { Request } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { tenantOf } from '../featureRoute.js';
 import { OpenwopError } from '../../types.js';
-import { addChannelAgent, addChannelMember, archiveChannel, assertChannelAccess, createChannel, getChannel, isChannelOwner, joinChannel, listChannelsForViewer, listChannelMessages, postChannelMessage, removeChannelAgent, removeChannelMember, renameChannel } from './channelService.js';
+import { encodeMessageCursor, decodeMessageCursor, MAX_MESSAGE_PAGE } from '../../host/messageCursor.js';
+import { addChannelAgent, addChannelMember, archiveChannel, assertChannelAccess, channelRoster, createChannel, getChannel, isChannelOwner, joinChannel, leaveChannel, listChannelsForViewer, listChannelMessages, postChannelMessage, removeChannelAgent, removeChannelMember, renameChannel, setChannelDescription, setChannelAgentPolicy, resolveChannelCatchup } from './channelService.js';
+import { startWorkflowRun } from '../../host/runStarter.js';
+import { CHANNEL_TURN_WORKFLOW_ID, CHANNEL_MANAGED_CREDENTIAL_REF } from './channelTurnWorkflow.js';
+import { resolveSubjectDisplays } from '../../host/subjectDisplay.js';
+import { userRef } from '../../host/conversationStore.js';
+import { listReactionsForConversation, aggregateReactions } from '../../host/messageReactionsStore.js';
 import { dispatchChannelAgentTurns } from './channelAgentDispatch.js';
 import { seedChannelTurnWorkflow } from './channelTurnWorkflow.js';
 import { openSseChannel } from '../../host/sseChannel.js';
@@ -72,18 +78,33 @@ export function registerChannelRoutes(deps: RouteDeps): void {
     try {
       await gate(req);
       const c = caller(req);
-      const meta = await getChannel(tenantOf(req), req.params.channelId, c);
+      const tenantId = tenantOf(req);
+      const meta = await getChannel(tenantId, req.params.channelId, c);
       // viewerIsOwner is server-computed (ADR 0154 Phase 2) — the FE gates its
       // management UI on this, never on a reconstructed identity comparison.
-      res.json({ channel: { ...meta, viewerIsOwner: isChannelOwner(meta, c) } });
+      // ADR 0192 D2 — `roster` carries the RESOLVED display identities (incl.
+      // the synthesized owner row); the FE renders names, never raw refs.
+      // ADR 0192 Phase-2 amendment — `viewerSubjectRef` lets the feed align the
+      // caller's OWN posts (other humans also post role:'user'; without knowing
+      // "me", their messages would render as yours).
+      res.json({ channel: { ...meta, viewerIsOwner: isChannelOwner(meta, c), roster: await channelRoster(tenantId, meta), ...(c ? { viewerSubjectRef: userRef(c) } : {}) } });
     } catch (err) { next(err); }
   });
   app.patch(`${BASE}/:channelId`, async (req, res, next) => {
     try {
       await gate(req);
-      const name = (req.body as { name?: unknown })?.name;
-      if (typeof name !== 'string') throw new OpenwopError('validation_error', '`name` is required.', 400, { field: 'name' });
-      res.json({ channel: await renameChannel(tenantOf(req), req.params.channelId, caller(req), name) });
+      const b = (req.body ?? {}) as { name?: unknown; description?: unknown };
+      // ADR 0192 D4 — rename and/or set the description (owner-gated in the service).
+      if (typeof b.name !== 'string' && typeof b.description !== 'string') {
+        throw new OpenwopError('validation_error', '`name` or `description` is required.', 400, { field: 'name' });
+      }
+      let channel = typeof b.name === 'string'
+        ? await renameChannel(tenantOf(req), req.params.channelId, caller(req), b.name)
+        : undefined;
+      if (typeof b.description === 'string') {
+        channel = await setChannelDescription(tenantOf(req), req.params.channelId, caller(req), b.description);
+      }
+      res.json({ channel });
     } catch (err) { next(err); }
   });
   app.post(`${BASE}/:channelId/archive`, async (req, res, next) => {
@@ -91,7 +112,59 @@ export function registerChannelRoutes(deps: RouteDeps): void {
   });
   // ADR 0126 Phase 2 — membership-gated post + read (the gate is in the service).
   app.get(`${BASE}/:channelId/messages`, async (req, res, next) => {
-    try { await gate(req); res.json({ messages: await listChannelMessages(tenantOf(req), req.params.channelId, caller(req)) }); } catch (err) { next(err); }
+    // ADR 0192 D2 — each message carries its author's RESOLVED display identity
+    // (raw subjectRefs never render as UI). Names resolve once per distinct
+    // author via the subjectDisplay seam (point lookups) + the roster's
+    // add-time agent labels.
+    try {
+      await gate(req);
+      const tenantId = tenantOf(req);
+      // CS-CH-3 — reverse pagination, the chat-sessions idiom: ?limit=N → the N
+      // most-recent (ASC) + nextCursor; &before=<cursor> pages older; no limit →
+      // the legacy full-thread shape (back-compat). One cursor owner
+      // (host/messageCursor.ts).
+      let paging: { limit: number; before?: { createdAt: string; messageId: string } } | undefined;
+      if (req.query.limit !== undefined) {
+        const limit = Number(req.query.limit);
+        if (!Number.isInteger(limit) || limit < 1 || limit > MAX_MESSAGE_PAGE) {
+          throw new OpenwopError('validation_error', `limit MUST be an integer between 1 and ${MAX_MESSAGE_PAGE}.`, 400, {});
+        }
+        let before: { createdAt: string; messageId: string } | undefined;
+        if (req.query.before !== undefined) {
+          const decoded = typeof req.query.before === 'string' ? decodeMessageCursor(req.query.before) : null;
+          if (!decoded) throw new OpenwopError('validation_error', 'before MUST be a cursor of the form `<ISO-8601>~<messageId>`.', 400, {});
+          before = decoded;
+        }
+        paging = { limit: limit + 1, ...(before ? { before } : {}) }; // +1 = has-more probe
+      }
+      const fetched = await listChannelMessages(tenantId, req.params.channelId, caller(req), paging);
+      const hasMore = paging !== undefined && fetched.length === paging.limit;
+      const messages = hasMore ? fetched.slice(1) : fetched; // ASC; surplus oldest at the front
+      const oldest = messages[0];
+      const nextCursor = paging === undefined ? undefined : (hasMore && oldest ? encodeMessageCursor(oldest) : null);
+      const meta = await getChannel(tenantId, req.params.channelId, caller(req));
+      const roster = await channelRoster(tenantId, meta);
+      const byRef = new Map(roster.map((r) => [r.subjectRef, r]));
+      const unresolved = [...new Set(messages.map((m) => m.authorSubject).filter((s): s is string => !!s && !byRef.has(s)))];
+      const extra = unresolved.length ? await resolveSubjectDisplays(tenantId, unresolved) : new Map();
+      // ADR 0195 D3 — join the message reactions (one batched read).
+      const reactionsByMessage = await listReactionsForConversation(tenantId, req.params.channelId);
+      const viewer = caller(req);
+      const viewerRef = viewer ? userRef(viewer) : null;
+      res.json({
+        messages: messages.map((m) => {
+          const d = m.authorSubject ? (byRef.get(m.authorSubject) ?? extra.get(m.authorSubject)) : undefined;
+          const agg = aggregateReactions(reactionsByMessage.get(m.messageId), viewerRef);
+          return {
+            ...m,
+            ...(d ? { authorDisplayName: d.displayName, authorKind: d.kind } : {}),
+            ...(agg.length ? { reactions: agg } : {}),
+          };
+        }),
+        // Present only in paged mode (additive — the legacy shape is unchanged).
+        ...(nextCursor !== undefined ? { nextCursor } : {}),
+      });
+    } catch (err) { next(err); }
   });
   // ADR 0154 FU-6 — live message delivery. Always-on (cross-instance via the host-ext
   // pub/sub, unlike the per-instance presence SSE), membership-gated. Carries only the
@@ -121,11 +194,12 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       const callerId = caller(req);
       const content = (req.body as { content?: unknown })?.content;
       const result = await postChannelMessage(tenantId, channelId, callerId, content);
-      res.status(201).json(result);
+      res.status(201).json({ messageId: result.messageId });
       // ADR 0154 Phase 4 — fire-and-forget agent turn for an addressed agent member.
       // Best-effort: never blocks or fails the human post (the helper never throws).
-      // `content` is a validated string here (postChannelMessage threw otherwise).
-      void dispatchChannelAgentTurns(deps, tenantId, channelId, result.messageId, typeof content === 'string' ? content : '', callerId);
+      // ADR 0192 D5 — dispatch reads the EXTRACTED text (an envelope post's text
+      // parts), not the raw serialized content.
+      void dispatchChannelAgentTurns(deps, tenantId, channelId, result.messageId, result.text, callerId);
     } catch (err) { next(err); }
   });
   app.post(`${BASE}/:channelId/members`, async (req, res, next) => {
@@ -142,12 +216,52 @@ export function registerChannelRoutes(deps: RouteDeps): void {
       res.json({ channel: await addChannelMember(tenantOf(req), req.params.channelId, caller(req), b.userId) });
     } catch (err) { next(err); }
   });
+  // ADR 0192 D3 — self-serve leave. MUST be registered BEFORE the
+  // `:userId`-parameterized remove below: Express matches the FIRST registrant,
+  // so a later registration would bind `me` to `:userId` and the leaver would
+  // hit the owner-gate 403 (a dead feature). Pinned by a route test.
+  app.delete(`${BASE}/:channelId/members/me`, async (req, res, next) => {
+    try { await gate(req); await leaveChannel(tenantOf(req), req.params.channelId, caller(req)); res.status(204).end(); } catch (err) { next(err); }
+  });
   app.delete(`${BASE}/:channelId/members/:userId`, async (req, res, next) => {
     try { await gate(req); res.json({ channel: await removeChannelMember(tenantOf(req), req.params.channelId, caller(req), req.params.userId) }); } catch (err) { next(err); }
   });
   // ADR 0154 Phase 4 — remove an agent member (owner-gated).
   app.delete(`${BASE}/:channelId/agents/:agentId`, async (req, res, next) => {
     try { await gate(req); res.json({ channel: await removeChannelAgent(tenantOf(req), req.params.channelId, caller(req), req.params.agentId) }); } catch (err) { next(err); }
+  });
+  // ADR 0202 D1 — set an agent member's reply policy (owner-gated).
+  app.put(`${BASE}/:channelId/agents/:agentId/policy`, async (req, res, next) => {
+    try {
+      await gate(req);
+      const policy = (req.body as { policy?: unknown })?.policy;
+      if (policy !== 'all' && policy !== 'mention') {
+        throw new OpenwopError('validation_error', '`policy` MUST be "all" or "mention".', 400, { field: 'policy' });
+      }
+      res.json({ channel: await setChannelAgentPolicy(tenantOf(req), req.params.channelId, caller(req), req.params.agentId, policy) });
+    } catch (err) { next(err); }
+  });
+  // ADR 0202 D2 — AI catch-up: fire the channel-turn workflow WITHOUT a
+  // conversationId (so the agent-runner does NOT append in-channel — the
+  // summary is returned to the requester, not posted). Member-gated; requires a
+  // channel agent member. Returns { runId, unreadCount }; the FE reads the
+  // completion via the run-event subscription seam.
+  app.post(`${BASE}/:channelId/catchup`, async (req, res, next) => {
+    try {
+      await gate(req);
+      const tenantId = tenantOf(req);
+      const channelId = req.params.channelId;
+      const { agentId, task, unreadCount } = await resolveChannelCatchup(tenantId, channelId, caller(req));
+      const runId = await startWorkflowRun(deps, {
+        tenantId,
+        workflowId: CHANNEL_TURN_WORKFLOW_ID,
+        // conversationId OMITTED → no in-channel append (ADR 0125 by construction).
+        configurable: { agentId, task, credentialRef: CHANNEL_MANAGED_CREDENTIAL_REF },
+        metadata: { channel: { source: 'channel-catchup', channelId, requestedBy: caller(req) ?? undefined } },
+      });
+      if (!runId) throw new OpenwopError('internal_error', 'Could not start the catch-up summary.', 500, { channelId });
+      res.status(202).json({ runId, unreadCount });
+    } catch (err) { next(err); }
   });
 
   // ADR 0126 Phase 4 / RFC 0110 — ephemeral channel presence. The SSE connection IS the

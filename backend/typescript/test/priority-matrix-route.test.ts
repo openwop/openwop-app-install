@@ -10,50 +10,27 @@
  *   - planning session → agenda contains the top idea (documents OFF ⇒ inline md)
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 let n = 0;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  const d = getToggleDefault('priority-matrix');
-  if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
+  await enableToggle('priority-matrix', 'on');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
-function client(): Client {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
-}
+const client = (): Client => makeClient(() => BASE);
 
-const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
   const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pm'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
-const enable = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('priority-matrix'); if (d) await saveConfig({ ...d, status }, 'test'); };
+const enable = (status: 'on' | 'off'): Promise<void> => enableToggle('priority-matrix', status);
 
 async function ownerWithOrg(): Promise<{ owner: Client; userId: string; orgId: string }> {
   const owner = client();
@@ -189,6 +166,8 @@ describe('priority-matrix — cross-org isolation (project-scoped lists)', () =>
 describe('priority-matrix — planning session', () => {
   it('generates an agenda from the top-N ideas (inline markdown when documents is off)', async () => {
     const { owner, orgId } = await ownerWithOrg();
+    // documents defaults ON (2026-07-09) — set off explicitly for the inline path.
+    await enableToggle('documents', 'off');
     const list = (await owner.post(L, { orgId, name: 'Plan it', presetId: 'weighted' })).body;
     const base = `${L}/${encodeURIComponent(list.id)}`;
     const a = (await owner.post(`${base}/ideas`, { title: 'Top idea' })).body;
@@ -248,7 +227,7 @@ describe('priority-matrix — planning session', () => {
   });
 
   it('persists the agenda as a board-agenda document when the documents feature is on', async () => {
-    const setDocs = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('documents'); if (d) await saveConfig({ ...d, status }, 'test'); };
+    const setDocs = (status: 'on' | 'off'): Promise<void> => enableToggle('documents', status);
     await setDocs('on');
     try {
       const { owner, orgId } = await ownerWithOrg();

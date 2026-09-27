@@ -3,8 +3,13 @@
  *
  * Every failure path in `executeRun` MUST emit:
  *   1. (when a node is active) `node.failed`
- *   2. `run.failed`
- *   3. storage.updateRun({ status: 'failed', error, completedAt })
+ *   2. `run.dead_lettered` (RFC 0053 — the run-level sink)
+ *   3. `run.failed`
+ *   4. storage.updateRun({ status: 'failed', error, completedAt })
+ *
+ * The dead-letter row sits BETWEEN them deliberately: `observability.md`
+ * §"Terminal events" requires the terminal event to be LAST in the stream, so
+ * `run.failed` must stay at the end.
  *
  * Two paths were previously emitting only `run.failed` and skipping
  * `node.failed` (workflow_not_found / capability_not_provided). The
@@ -80,8 +85,8 @@ describe('executor terminal-failure event sequence', () => {
     const events = await storage.listEvents(run.runId);
     const sequence = events.map((e) => e.type);
     // run.started fires before the node loop; then the helper appends
-    // node.failed + run.failed in that order.
-    expect(sequence).toEqual(['run.started', 'node.failed', 'run.failed']);
+    // node.failed + the RFC 0053 dead-letter row + run.failed, in that order.
+    expect(sequence).toEqual(['run.started', 'node.failed', 'run.dead_lettered', 'run.failed']);
 
     const nodeFailed = events.find((e) => e.type === 'node.failed')!;
     const runFailed = events.find((e) => e.type === 'run.failed')!;
@@ -89,6 +94,10 @@ describe('executor terminal-failure event sequence', () => {
     expect((nodeFailed.payload as { error: { code: string } }).error.code).toBe('workflow_not_found');
     expect((runFailed.payload as { error: { code: string } }).error.code).toBe('workflow_not_found');
     expect(nodeFailed.sequence).toBeLessThan(runFailed.sequence);
+    // RFC 0053 + observability.md: the sink row precedes the terminal event,
+    // and the terminal event is the last thing in the stream.
+    expect(events.find((e) => e.type === 'run.dead_lettered')!.sequence).toBeLessThan(runFailed.sequence);
+    expect(events[events.length - 1]!.type).toBe('run.failed');
 
     const stored = (await storage.getRun(run.runId))!;
     expect(stored.status).toBe('failed');
@@ -118,7 +127,7 @@ describe('executor terminal-failure event sequence', () => {
 
     const events = await storage.listEvents(run.runId);
     const sequence = events.map((e) => e.type);
-    expect(sequence).toEqual(['run.started', 'node.failed', 'run.failed']);
+    expect(sequence).toEqual(['run.started', 'node.failed', 'run.dead_lettered', 'run.failed']);
 
     const nodeFailed = events.find((e) => e.type === 'node.failed')!;
     const runFailed = events.find((e) => e.type === 'run.failed')!;
@@ -126,6 +135,10 @@ describe('executor terminal-failure event sequence', () => {
     expect((nodeFailed.payload as { error: { code: string } }).error.code).toBe('capability_not_provided');
     expect((runFailed.payload as { error: { code: string } }).error.code).toBe('capability_not_provided');
     expect(nodeFailed.sequence).toBeLessThan(runFailed.sequence);
+    // RFC 0053 + observability.md: the sink row precedes the terminal event,
+    // and the terminal event is the last thing in the stream.
+    expect(events.find((e) => e.type === 'run.dead_lettered')!.sequence).toBeLessThan(runFailed.sequence);
+    expect(events[events.length - 1]!.type).toBe('run.failed');
 
     const stored = (await storage.getRun(run.runId))!;
     expect(stored.status).toBe('failed');

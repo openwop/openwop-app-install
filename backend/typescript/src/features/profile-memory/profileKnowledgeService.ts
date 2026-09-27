@@ -19,6 +19,7 @@
 
 import { OpenwopError } from '../../types.js';
 import { getOrCreateProfile, setProfileKnowledge, type Profile } from '../profiles/profilesService.js';
+import { mayPruneKnowledgeBinding } from '../../host/knowledgeBindingPrune.js';
 import {
   createCollection,
   getCollection,
@@ -29,6 +30,8 @@ import {
 } from '../kb/kbService.js';
 import { createSubjectMemoryPort, subjectMemoryScope, countSubjectNotes } from '../../host/subjectMemory.js';
 import { resolveSubjectKnowledgeRetrieve } from '../../host/agentKnowledgeComposition.js';
+import { PREAUTHORIZED_CALLER, type SubjectCaller } from '../../host/subjectAccess.js'; // KBC-1 — `PREAUTHORIZED_CALLER` only for the EXISTENCE listing that feeds the prune (see `getProfileKnowledge`)
+import type { KnowledgeSourceKind } from '../../host/agentDispatch.js';
 
 /** Per-profile binding cap (mirrors the agent BINDING_CAP). */
 const BINDING_CAP = 20;
@@ -48,12 +51,15 @@ export interface ProfileKnowledgeView {
   userId: string;
   collections: Array<BoundCollection & { documents: Awaited<ReturnType<typeof listDocuments>> }>;
   noteCount: number;
+  /** TWIN-UX-10 — a leg of this read failed. The shared empty state cannot tell
+   *  "you bound nothing" from "we could not read it", so say which. */
+  degraded?: boolean;
 }
 
 /** Resolve a bound collection across the tenant's orgs (the binding stores only
  *  the collectionId; KB keys are tenant+org+collection). */
-async function findBoundCollection(tenantId: string, collectionId: string): Promise<BoundCollection | null> {
-  const all = await listAllTenantCollections(tenantId);
+async function findBoundCollection(tenantId: string, collectionId: string, caller: SubjectCaller): Promise<BoundCollection | null> {
+  const all = await listAllTenantCollections(tenantId, caller); // KBC-1 / R3 Blocker 2 — the profile OWNER's principal, every lane
   const col = all.find((c) => c.collectionId === collectionId);
   if (!col) return null;
   return { collectionId: col.collectionId, orgId: col.orgId, name: col.name, documentCount: col.documentCount, chunkCount: col.chunkCount };
@@ -68,7 +74,10 @@ async function mustOwnedCollectionBound(
   if (!(profile.knowledge?.collectionIds ?? []).includes(collectionId)) {
     throw new OpenwopError('not_found', 'Collection is not bound to your profile.', 404, { collectionId });
   }
-  const col = await getCollection(tenantId, orgId, collectionId);
+  // ADR 0643 R3 (Blocker 2) — every profile-memory lane KNOWS its principal (the profile
+  // owner is the binder AND the reader), so it re-resolves at use, never PREAUTHORIZED:
+  // a binding to a project corpus the owner has since left stops resolving here.
+  const col = await getCollection(tenantId, orgId, collectionId, { subject: profile.userId }); // KBC-1
   if (!col) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
 }
 
@@ -77,29 +86,66 @@ async function mustOwnedCollectionBound(
 export async function getProfileKnowledge(tenantId: string, userId: string): Promise<ProfileKnowledgeView> {
   const profile = await getOrCreateProfile(tenantId, userId);
   const collectionIds = profile.knowledge?.collectionIds ?? [];
-  const byId = new Map((await listAllTenantCollections(tenantId)).map((c) => [c.collectionId, c]));
+  // TWIN-UX-10 — the listing is only AUTHORITATIVE if it actually resolved. A
+  // throw used to propagate (a 500, no prune), which was fine; what was NOT fine
+  // is that the prune below could not tell an authoritative answer from a
+  // degraded one, and it is a DURABLE WRITE on a GET. A `listForTenant` scan
+  // reads a secondary index, so an empty or partial answer is possible without a
+  // throw — and the failure mode is "a GET permanently unbinds the user's
+  // documents and renders the shared empty state," i.e. absence-is-a-claim with a
+  // write attached.
+  let listing: Awaited<ReturnType<typeof listAllTenantCollections>>;
+  let authoritative = true;
+  try {
+    // R3 Blocker 2 — EXISTENCE only (this listing feeds the prune below, and a
+    // caller-filtered listing would durably UNBIND what the owner cannot currently
+    // read). VISIBILITY is re-resolved per collection with the OWNER's principal.
+    listing = await listAllTenantCollections(tenantId, PREAUTHORIZED_CALLER); // KBC-1 — existence only
+  } catch {
+    listing = [];
+    authoritative = false;
+  }
+  const byId = new Map(listing.map((c) => [c.collectionId, c]));
   const collections: ProfileKnowledgeView['collections'] = [];
   const liveIds: string[] = [];
+  let degraded = !authoritative;
   for (const collectionId of collectionIds) {
     const col = byId.get(collectionId);
-    if (!col) continue; // a deleted collection self-heals out of the view
+    if (!col) continue; // a deleted collection self-heals out of the view (below)
     liveIds.push(collectionId);
-    const documents = await listDocuments(tenantId, col.orgId, collectionId);
-    collections.push({ collectionId: col.collectionId, orgId: col.orgId, name: col.name, documentCount: col.documentCount, chunkCount: col.chunkCount, documents });
+    if (!(await getCollection(tenantId, col.orgId, collectionId, { subject: userId }))) continue; // R3 Blocker 2 — bound, but no longer the owner's to read
+    try {
+      const documents = await listDocuments(tenantId, col.orgId, collectionId, { subject: userId }); // KBC-1 — the owner's principal
+      collections.push({ collectionId: col.collectionId, orgId: col.orgId, name: col.name, documentCount: col.documentCount, chunkCount: col.chunkCount, documents });
+    } catch {
+      // The collection EXISTS — only its document list could not be read. Render
+      // it (so it is not mistaken for unbound) and mark the view degraded.
+      degraded = true;
+      collections.push({ collectionId: col.collectionId, orgId: col.orgId, name: col.name, documentCount: col.documentCount, chunkCount: col.chunkCount, documents: [] });
+    }
   }
   // Self-heal: a collection deleted via the kb feature leaves a dangling binding.
   // Prune it on read (a write-on-read, like the agent-knowledge path). Idempotent
   // — concurrent reads converge on the same `liveIds`, so the write is safe.
-  if (liveIds.length < collectionIds.length) {
+  //
+  // GUARDED (TWIN-UX-10). NEVER prune when the listing did not resolve, or when it
+  // came back EMPTY while the profile HAS bindings — see
+  // `host/knowledgeBindingPrune.ts`, which now owns that rule for all three
+  // features that self-heal a binding this way (`ADR 0603 R1 H1` found the two
+  // siblings still unguarded and moved the rule out of this file rather than
+  // hand-copying it a third time). Behaviour here is unchanged.
+  if (mayPruneKnowledgeBinding({ boundIds: collectionIds, listingSize: listing.length, liveIds, authoritative })) {
     await setProfileKnowledge(tenantId, userId, { collectionIds: liveIds });
   }
   const noteCount = await countSubjectNotes(tenantId, userSubject(userId));
-  return { userId, collections, noteCount };
+  return { userId, collections, noteCount, ...(degraded ? { degraded: true } : {}) };
 }
 
 /** Bind an EXISTING collection (owned by the caller's tenant) to the profile. */
 export async function bindCollection(tenantId: string, userId: string, collectionId: string): Promise<void> {
-  const found = await findBoundCollection(tenantId, collectionId);
+  // ADR 0643 R3 (Blocker 2) — the BIND door resolves the OWNER (who is the binder here)
+  // against the collection's subject; a non-member cannot launder a bound corpus.
+  const found = await findBoundCollection(tenantId, collectionId, { subject: userId });
   if (!found) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
   const profile = await getOrCreateProfile(tenantId, userId);
   const current = profile.knowledge?.collectionIds ?? [];
@@ -145,7 +191,7 @@ export async function ingestDocToProfile(
 ): Promise<Awaited<ReturnType<typeof ingestDocument>>> {
   const profile = await getOrCreateProfile(tenantId, userId);
   await mustOwnedCollectionBound(profile, tenantId, orgId, collectionId);
-  return ingestDocument(tenantId, orgId, actor, collectionId, input);
+  return ingestDocument(tenantId, orgId, actor, collectionId, input, {}, { subject: userId }); // KBC-1 / R3 Blocker 2 — the owner's principal
 }
 
 /** Delete a document from a bound collection. */
@@ -158,7 +204,7 @@ export async function deleteDocFromProfile(
 ): Promise<void> {
   const profile = await getOrCreateProfile(tenantId, userId);
   await mustOwnedCollectionBound(profile, tenantId, orgId, collectionId);
-  await deleteDocument(tenantId, orgId, collectionId, documentId);
+  await deleteDocument(tenantId, orgId, collectionId, documentId, { subject: userId }); // KBC-1 / R3 Blocker 2 — the owner's principal
 }
 
 /** Read-only retrieval over the caller's OWN bound knowledge — cited KB chunks +
@@ -169,14 +215,18 @@ export async function retrieveForProfile(
   tenantId: string,
   userId: string,
   query: string,
-): Promise<{ chunks: Array<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust: 'trusted' | 'untrusted' }>; hasResults: boolean }> {
+): Promise<{ chunks: Array<{ content: string; title?: string; kind: 'kb' | 'memory'; contentTrust: 'trusted' | 'untrusted' }>; hasResults: boolean; failedSources: KnowledgeSourceKind[] }> {
   const profile = await getOrCreateProfile(tenantId, userId);
   const memory = createSubjectMemoryPort(tenantId);
-  const retrieve = resolveSubjectKnowledgeRetrieve(tenantId, profile.knowledge, memory, subjectMemoryScope(userSubject(userId)));
-  if (!retrieve) return { chunks: [], hasResults: false };
-  const out = await retrieve(query);
+  const retrieve = resolveSubjectKnowledgeRetrieve(tenantId, profile.knowledge, memory, subjectMemoryScope(userSubject(userId)), { subject: userId }); // R3 Blocker 2 — the owner reads as themselves
+  if (!retrieve) return { chunks: [], hasResults: false, failedSources: [] };
+  // KB-UX-3 / ADR 0583 — see `retrieveForAgent`: a swallowed per-source fault
+  // must not reach the panel as "No matches".
+  const failedSources: KnowledgeSourceKind[] = [];
+  const out = await retrieve(query, (s) => { if (!failedSources.includes(s)) failedSources.push(s); });
   return {
     chunks: out.map((c) => ({ content: c.content, ...(c.title ? { title: c.title } : {}), kind: c.kind, contentTrust: c.contentTrust === 'untrusted' ? 'untrusted' : 'trusted' })),
     hasResults: out.length > 0,
+    failedSources,
   };
 }

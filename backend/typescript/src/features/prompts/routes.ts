@@ -18,23 +18,23 @@ export function registerPromptLibraryRoutes(deps: RouteDeps): void {
 
   app.get(BASE, async (req, res, next) => {
     try {
-      const { user, orgId } = await requireOrgScope(req, 'workspace:read');
-      res.json({ entries: await listEntries(user.tenantId, orgId) });
+      const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:read');
+      res.json({ entries: await listEntries(tenantId, orgId, user.userId) });
     } catch (err) { next(err); }
   });
 
   app.post(BASE, async (req, res, next) => {
     try {
-      const { user, orgId } = await requireOrgScope(req, 'workspace:write');
-      const entry = await createEntry(user.tenantId, orgId, user.userId, (req.body ?? {}) as Record<string, unknown>);
+      const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      const entry = await createEntry(tenantId, orgId, user.userId, (req.body ?? {}) as Record<string, unknown>);
       res.status(201).json({ entry });
     } catch (err) { next(err); }
   });
 
   app.get(`${BASE}/:entryId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await requireOrgScope(req, 'workspace:read');
-      const entry = await getEntry(user.tenantId, orgId, req.params.entryId);
+      const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:read');
+      const entry = await getEntry(tenantId, orgId, req.params.entryId, user.userId);
       if (!entry) throw new OpenwopError('not_found', 'Prompt entry not found.', 404, { entryId: req.params.entryId });
       res.json({ entry });
     } catch (err) { next(err); }
@@ -45,25 +45,25 @@ export function registerPromptLibraryRoutes(deps: RouteDeps): void {
   // calls this. Read-gated; untrusted bindings are fenced by the composer.
   app.post(`${BASE}/:entryId/render`, async (req, res, next) => {
     try {
-      const { user, orgId } = await requireOrgScope(req, 'workspace:read');
+      const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:read');
       const bindings = ((req.body as { variables?: unknown })?.variables ?? {}) as Record<string, unknown>;
       // Single source for render — the SAME `renderEntry` the ctx.prompts surface uses.
-      res.json(await renderEntry(user.tenantId, orgId, req.params.entryId, bindings));
+      res.json(await renderEntry(tenantId, orgId, req.params.entryId, bindings, user.userId));
     } catch (err) { next(err); }
   });
 
   app.patch(`${BASE}/:entryId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await requireOrgScope(req, 'workspace:write');
-      const entry = await updateEntry(user.tenantId, orgId, req.params.entryId, user.userId, (req.body ?? {}) as Record<string, unknown>);
+      const { user, orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      const entry = await updateEntry(tenantId, orgId, req.params.entryId, user.userId, (req.body ?? {}) as Record<string, unknown>);
       res.json({ entry });
     } catch (err) { next(err); }
   });
 
   app.delete(`${BASE}/:entryId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await requireOrgScope(req, 'workspace:write');
-      await deleteEntry(user.tenantId, orgId, req.params.entryId);
+      const { orgId, tenantId } = await requireOrgScope(req, 'workspace:write');
+      await deleteEntry(tenantId, orgId, req.params.entryId);
       res.status(204).end();
     } catch (err) { next(err); }
   });

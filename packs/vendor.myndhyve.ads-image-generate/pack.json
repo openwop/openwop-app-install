@@ -24,7 +24,7 @@
       "typeId": "ads.image.generate",
       "version": "1.0.0",
       "label": "Generate Ad Images",
-      "description": "Batches inputs.prompts[] through ctx.callImageGenerator. Per-placement dimensions resolved from inputs.placementSpec.imageSpec (recommendedWidth/Height, capped at config.maxDimension) or fallback to inputs.aspectRatio + maxDimension. Each prompt enhanced with platform/placement/style/brandColors context. Aborts mid-batch on ctx.signal. Returns assets[] + per-prompt stats + total filtered count.",
+      "description": "Batches inputs.prompts[] through ctx.callImageGenerator. Per-placement dimensions resolved from inputs.placementSpec.imageSpec (recommendedWidth/Height, capped at config.maxDimension) or fallback to inputs.aspectRatio + maxDimension. Each prompt enhanced with platform/placement/style/brandColors context. Aborts mid-batch on ctx.signal. Returns images[] (host media-output convention, minted as Library assets) + per-prompt stats + total filtered count.",
       "category": "data",
       "role": "action",
       "capabilities": ["side-effectful"],

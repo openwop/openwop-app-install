@@ -28,7 +28,14 @@
     "exactOptionalPropertyTypes": true
   },
   "include": [
-    "src/**/*"
+    "src/**/*",
+    // The e2e specs too. Playwright TRANSPILES without type-checking, so before
+    // this a type error in any spec reached main silently — `npm run build` did
+    // not look at `e2e/` at all. Matches the backend, which has always checked
+    // its tests in one config (`backend/typescript/tsconfig.json:23`).
+    // Measured: costs nothing — e2e compiles under the app's existing
+    // `types: ["vite/client"]`, so no Node globals leak into the app's type space.
+    "e2e/**/*"
   ],
   "exclude": [
     "node_modules",

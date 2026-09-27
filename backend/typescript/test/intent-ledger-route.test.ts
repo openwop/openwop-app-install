@@ -13,7 +13,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -61,11 +61,13 @@ describe('intent-ledger routes (ADR 0136, always-on)', () => {
     expect((await c('PUT', u(conv), { goal: 'changed' })).status).toBe(409);
   });
 
-  it('draft validation: missing goal + no auto-extract material ⇒ 4xx', async () => {
+  it('draft validation: a body with no goal ⇒ 4xx (manual draft requires a goal)', async () => {
     const c = client();
     await c('POST', '/v1/host/openwop-app/test/login', { email: 'il-val@test.dev', tenantId: T });
     const conv = await ownedConversation(c);
-    const r = await c('POST', u(conv, '/draft'), { lastUserMessage: '', ceiling: [] });
+    // Model-authored drafting moved to the intent-ledger.draft-contract agent tool;
+    // the REST /draft path is manual-only and fail-closed without a goal.
+    const r = await c('POST', u(conv, '/draft'), {});
     expect(r.status).toBeGreaterThanOrEqual(400);
   });
 

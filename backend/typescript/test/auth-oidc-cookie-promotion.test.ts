@@ -23,6 +23,8 @@ import express, { type Express } from 'express';
 import http from 'node:http';
 import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { authMiddleware, _resetOidcVerifier } from '../src/middleware/auth.js';
+import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { usersSessionAuthority } from '../src/features/users/feature.js';
 
 interface SyntheticIssuer {
   issuer: string;
@@ -44,7 +46,7 @@ async function startSyntheticIssuer(audience: string): Promise<SyntheticIssuer> 
   const app = express();
   app.get('/.well-known/jwks.json', (_req, res) => res.json(jwks));
   const server = await new Promise<http.Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const port = (server.address() as { port: number }).port;
   const issuer = `http://127.0.0.1:${port}`;
@@ -81,6 +83,13 @@ beforeAll(async () => {
   process.env.OPENWOP_OIDC_JWKS_URL = issuer.jwksUrl;
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = ''; // cookie mode ON
   process.env.OPENWOP_SESSION_SECRET = 'a'.repeat(48);
+  // ADR 0621 rev. 2 — the unbound OIDC lane now consults the session authority
+  // (no permissive default on the seam). This harness mounts the bare
+  // middleware with NO host-ext persistence and no users store, so the honest
+  // unbound-lane answer is "no durable row was ever bound" (`null`); the
+  // `userId` read is the feature's real one (never reached — no bound cookie).
+  registerSessionAuthority(usersSessionAuthority);
+  registerPersonalTenantSessionAuthority(async () => null);
   _resetOidcVerifier();
 
   const app: Express = express();
@@ -90,7 +99,7 @@ beforeAll(async () => {
     res.json({ tenantId: req.tenantId, principalId: req.principal?.principalId }),
   );
   appServer = await new Promise<http.Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   appPort = (appServer.address() as { port: number }).port;
 });

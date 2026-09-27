@@ -28,6 +28,7 @@ import { branchConversation } from '../../client/chatSessionsClient.js';
 import { exportConversation, importConversation, detectImportFormat } from '../../client/chatExportClient.js';
 import { listOrgs } from '../../client/promptLibraryClient.js';
 import { toast } from '../../ui/toast.js';
+import { copyToClipboard } from '../../ui/copyToClipboard.js';
 
 export interface UseConversationActionsOptions {
   /** The conversation these actions operate on. */
@@ -99,12 +100,32 @@ export function useConversationActions({ sessionId, refreshList, onOpenConversat
   const onShare = useCallback(async () => {
     try {
       const { createLink, sharedPageUrl } = await import('../../features/sharing/sharingClient.js');
-      const orgId = (await listOrgs())[0]?.orgId;
-      if (!orgId) { toast.error(t('shareFailed', { defaultValue: 'Could not create a share link.' })); return; }
-      const link = await createLink(orgId, { resourceType: 'conversation', resourceId: sessionId });
+      // Conversations are TENANT-scoped, so the org only decides which org's
+      // Sharing page manages the link (R2 SR-9: with several orgs, say WHICH —
+      // an undisclosed orgs[0] pick makes the link unfindable later).
+      const orgs = await listOrgs();
+      const org = orgs[0];
+      if (!org) { toast.error(t('shareFailed', { defaultValue: 'Could not create a share link.' })); return; }
+      const link = await createLink(org.orgId, { resourceType: 'conversation', resourceId: sessionId });
       const url = sharedPageUrl(link.token);
-      try { await navigator.clipboard.writeText(url); toast.success(t('shareCopied', { defaultValue: 'Public link copied to clipboard' })); }
-      catch { toast.success(url); }
+      const copied = orgs.length > 1
+        ? t('shareCopiedManagedIn', { defaultValue: 'Public link copied — manage it under {{org}} → Sharing.', org: org.name })
+        : t('shareCopied', { defaultValue: 'Public link copied to clipboard' });
+      // SHARE-UX-3 — the catch used to be `toast.success(url)`: a SUCCESS toast
+      // whose entire body was the URL, with no statement that the copy had
+      // failed. The shared helper reports the failure itself; this path then
+      // says what happened and keeps the (unrepeatable, ADR 0448 P2) URL where
+      // the user can still select it, rather than dressing a failure as a win.
+      const res = await copyToClipboard(url, null);
+      if (res.ok) toast.success(copied);
+      // R2 review F7 — this toast carries the ONLY copy of an unrepeatable URL
+      // (ADR 0448 P2: the raw token exists exactly once, on the mint response).
+      // The other two share surfaces keep that URL on screen — SharingPage in its
+      // `linkMintedCopyFailed` box, the canvas toolbar in its re-copy affordance —
+      // while this one put it in a toast that auto-dismissed after 6 seconds and
+      // took the link with it. `ttlMs: 0` makes it persist until the user
+      // dismisses it, which is the same bar the PR sets for the other two.
+      else toast.error(t('shareCopyFailed', { defaultValue: 'The link was created but couldn’t be copied — copy it now: {{url}}', url }), 0);
     } catch (e) {
       const owner = e instanceof Error && /owner/i.test(e.message);
       toast.error(owner ? t('shareOwnerOnly', { defaultValue: 'Only the conversation owner can share it.' }) : t('shareFailed', { defaultValue: 'Could not create a share link.' }));

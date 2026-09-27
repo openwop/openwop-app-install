@@ -8,18 +8,26 @@ import { saveTabDeck } from '../tabDeckPersistence.js';
 vi.mock('../TabSession.js', () => ({
   TabSession: ({ sessionId, scopeAgentId }: { sessionId: string; scopeAgentId?: string }) => <div data-testid="tabsession" data-sid={sessionId} data-scope={scopeAgentId ?? ''} />,
 }));
-let sessionsState = { sessions: [{ sessionId: 'a', title: 'Alpha' }, { sessionId: 'b', title: 'Beta' }], isLoading: false, error: null as string | null };
+// messageCount > 0 — the rail hides empty conversations that aren't open as tabs.
+let sessionsState = { sessions: [{ sessionId: 'a', title: 'Alpha', messageCount: 2 }, { sessionId: 'b', title: 'Beta', messageCount: 5 }], isLoading: false, error: null as string | null };
 const removeSpy = vi.fn(() => Promise.resolve());
 const renameSpy = vi.fn(() => Promise.resolve());
 vi.mock('../../hooks/useChatSessions.js', () => ({
-  useChatSessions: () => ({ ...sessionsState, markRead: vi.fn(), createSession: vi.fn(), rename: renameSpy, remove: removeSpy }),
+  useChatSessions: () => ({
+    ...sessionsState, markRead: vi.fn(), createSession: vi.fn(), rename: renameSpy, remove: removeSpy,
+    refresh: vi.fn(() => Promise.resolve()), openWorkspace: vi.fn(() => Promise.resolve(null)),
+    addParticipant: vi.fn(), removeParticipant: vi.fn(), attachBoard: vi.fn(),
+  }),
 }));
 vi.mock('../../../auth/useAuth.js', () => ({ useAuth: () => ({ user: { uid: 'u1' } }) }));
 
 import { TabChatDeck } from '../TabChatDeck.js';
 
 const CONFIG = { provider: 'demo', model: 'demo-model', credentialRef: 'managed:demo' } as never;
-const tabSids = () => screen.getAllByRole('tab').map((el) => el.getAttribute('data-sid'));
+// Conversation tabs carry data-sid; the persistent Conversations rail also renders a
+// mode tablist (Conversations/Workflow/Reviews) whose tabs have none — filter them out.
+const convTabs = () => screen.getAllByRole('tab').filter((el) => el.getAttribute('data-sid'));
+const tabSids = () => convTabs().map((el) => el.getAttribute('data-sid'));
 
 function renderDeck(initialEntry = '/') {
   return render(<MemoryRouter initialEntries={[initialEntry]}><TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} /></MemoryRouter>);
@@ -27,7 +35,7 @@ function renderDeck(initialEntry = '/') {
 
 beforeEach(() => {
   localStorage.clear();
-  sessionsState = { sessions: [{ sessionId: 'a', title: 'Alpha' }, { sessionId: 'b', title: 'Beta' }], isLoading: false, error: null };
+  sessionsState = { sessions: [{ sessionId: 'a', title: 'Alpha', messageCount: 2 }, { sessionId: 'b', title: 'Beta', messageCount: 5 }], isLoading: false, error: null };
   removeSpy.mockClear();
   renameSpy.mockClear();
 });
@@ -65,21 +73,19 @@ describe('TabChatDeck P7 — keyboard shortcuts (Alt-based)', () => {
     await act(async () => { fireEvent.keyDown(window, { altKey: true, code: 'KeyN' }); }); // 2 tabs now
     const sids = tabSids();
     await act(async () => { fireEvent.keyDown(window, { altKey: true, code: 'Digit1' }); });
-    const active = screen.getAllByRole('tab').find((el) => el.getAttribute('aria-selected') === 'true');
+    const active = convTabs().find((el) => el.getAttribute('aria-selected') === 'true');
     expect(active?.getAttribute('data-sid')).toBe(sids[0]);
   });
 });
 
-describe('TabChatDeck P7 — library picker', () => {
-  it('opens the library and selecting a conversation opens it as a tab', async () => {
+describe('TabChatDeck — persistent Conversations rail (ADR 0140 amend)', () => {
+  it('opens on the Conversations panel by default; selecting a row opens it as a tab', async () => {
     await act(async () => { renderDeck(); });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Conversations' })); });
-    // The picker lists the conversations; the open button's name is the title exactly
-    // ("Rename Beta"/"Delete Beta" are the other row controls).
-    const betaRow = screen.getByRole('button', { name: 'Beta' });
+    // The Conversations list is visible by default (non-mobile) — no launcher click.
+    // The row's open action is a real <button> whose name is the title exactly
+    // ("Rename Beta"/"Delete Beta" are the sibling row controls).
+    const betaRow = screen.getByRole('button', { name: /Beta/ });
     await act(async () => { fireEvent.click(betaRow); });
     expect(tabSids()).toContain('b');
   });
-
-  // Rename/delete logic is unit-tested directly in TabLibraryPicker.test.tsx.
 });

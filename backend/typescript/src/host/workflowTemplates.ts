@@ -207,17 +207,16 @@ export const WORKFLOW_TEMPLATES: readonly WorkflowTemplateSpec[] = [
 
 const BY_ID = new Map<string, WorkflowTemplateSpec>(WORKFLOW_TEMPLATES.map((t) => [t.workflowId, t]));
 
-/** Resolve a pinned template definition by id (catalog source). Null = absent. */
+/** Resolve a pinned template definition by id (catalog source). Null = absent.
+ *
+ *  This by-id resolver is the pack's ONLY production surface: the work-twin
+ *  agents bind templates via `core.subWorkflow` (ADR 0032) and the workflow
+ *  catalog resolves them here. There is deliberately NO listing export and NO
+ *  gallery integration — ADR 0190 §Phase 6 decided these deterministic
+ *  mock-AI templates stay out of the template gallery (the chain-pack loader
+ *  is the gallery's single catalog source, ADR 0149 §Correction; real-AI
+ *  chains cover every tmpl.* category). Do not re-add a listing surface to
+ *  feed a UI; a wanted shape becomes a real chain pack instead. */
 export function getWorkflowTemplate(workflowId: string): WorkflowDefinition | null {
   return BY_ID.get(workflowId)?.definition ?? null;
-}
-
-/** All template specs (UI/catalog listing). */
-export function listWorkflowTemplates(): readonly WorkflowTemplateSpec[] {
-  return WORKFLOW_TEMPLATES;
-}
-
-/** Template specs in one category. */
-export function listWorkflowTemplatesByCategory(category: WorkflowTemplateCategory): WorkflowTemplateSpec[] {
-  return WORKFLOW_TEMPLATES.filter((t) => t.category === category);
 }

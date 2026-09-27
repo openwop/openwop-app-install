@@ -10,7 +10,7 @@
 import { beforeEach, afterAll, describe, expect, it } from 'vitest';
 import express from 'express';
 import http from 'node:http';
-import { ipRateLimitMiddleware, runQuotaMiddleware, reserveConcurrentSlot, _resetRateLimitState } from '../src/middleware/rateLimit.js';
+import { ipRateLimitMiddleware, runQuotaMiddleware, reserveConcurrentSlot, _resetRateLimitState , snapshotRateLimits } from '../src/middleware/rateLimit.js';
 import { notifyRunTerminal, _resetRunLifecycle } from '../src/executor/runLifecycle.js';
 
 let server: http.Server;
@@ -28,13 +28,23 @@ async function startApp(): Promise<{ port: number; close: () => Promise<void> }>
   app.use(ipRateLimitMiddleware());
   app.get('/ping', (_req, res) => res.json({ ok: true }));
   app.post('/v1/runs', runQuotaMiddleware(), (_req, res) => res.status(201).json({ ok: true }));
+  // A route that RESERVES, mirroring what `routes/runs.ts` does. The previous
+  // version of this file said "Need a test route that actually calls
+  // reserveConcurrentSlot… (Done via the synthetic app in startApp())" — it was
+  // not done, and the concurrent-run quota ended up with no coverage at all.
+  let seq = 0;
+  app.post('/v1/runs-reserving', runQuotaMiddleware(), (req, res) => {
+    const runId = `run-${++seq}`;
+    reserveConcurrentSlot(req, runId);
+    res.status(201).json({ runId });
+  });
   // Long-lived SSE stream routes — exempt from the per-IP burst bucket when
   // requested as text/event-stream (the reconnect-feedback-loop fix). The
   // handlers reply immediately so the test's fetch resolves.
   app.get('/v1/host/openwop-app/notifications/stream', (_req, res) => res.json({ ok: true }));
   app.get('/v1/runs/:runId/events', (_req, res) => res.json({ ok: true }));
   return new Promise((resolve) => {
-    server = app.listen(0, () => {
+    server = app.listen(0, '127.0.0.1', () => {
       port = (server.address() as { port: number }).port;
       resolve({ port, close: () => new Promise<void>((r) => server.close(() => r())) });
     });
@@ -52,6 +62,9 @@ describe('P0.4 rate limit', () => {
     // loopback-self exemption (otherwise every test request would be exempt).
     process.env.OPENWOP_RATELIMIT_TRUST_LOOPBACK = 'false';
     process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN = '5';
+    // ADR 0640 — reads have their own tier (default 600, floored at the write
+    // budget); the legs below burst GET /ping, so pin the read tier too.
+    process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN = '5';
     process.env.OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN = '3';
     process.env.OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY = '100';
     process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '100';
@@ -78,8 +91,39 @@ describe('P0.4 rate limit', () => {
     expect(body.error).toBe('rate_limited');
     // Canonical closed enum per rest-endpoints.md §429 (per-IP bucket → "key").
     expect(body.details.scope).toBe('key');
-    // Host detail: which limiter fired.
-    expect(body.details.reason).toBe('ip_request_rate');
+    // Host detail: which limiter fired — a GET burst lands in the READ tier (ADR 0640).
+    expect(body.details.reason).toBe('ip_read_rate');
+  });
+
+  it('ADR 0640: reads and writes are SEPARATE per-IP buckets — a read flood cannot starve writes, and vice versa', async () => {
+    process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN = '5';
+    process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN = '2';
+    _resetRateLimitState();
+    // Exhaust the write bucket first: the middleware runs before routing, so a
+    // POST to a path with no handler still spends write budget (404, then 429).
+    const w1 = await fetch(`http://127.0.0.1:${port}/ping`, { method: 'POST' });
+    const w2 = await fetch(`http://127.0.0.1:${port}/ping`, { method: 'POST' });
+    expect([w1.status, w2.status].every((s) => s !== 429)).toBe(true);
+    const w3 = await fetch(`http://127.0.0.1:${port}/ping`, { method: 'POST' });
+    expect(w3.status).toBe(429);
+    expect(((await w3.json()) as { details: { reason: string } }).details.reason).toBe('ip_request_rate');
+    // Reads are untouched by the exhausted write bucket…
+    for (let i = 0; i < 5; i++) expect((await fetch(`http://127.0.0.1:${port}/ping`)).status).toBe(200);
+    // …until their OWN budget runs out, with their own reason.
+    const r6 = await fetch(`http://127.0.0.1:${port}/ping`);
+    expect(r6.status).toBe(429);
+    expect(((await r6.json()) as { details: { reason: string; scope: string } }).details).toMatchObject({ reason: 'ip_read_rate', scope: 'key' });
+  });
+
+  it('ADR 0640: the read tier is FLOORED at the write budget — raising the old single knob never lowers reads', () => {
+    process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN = '900';
+    delete process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN;
+    expect(snapshotRateLimits().ipReadReqsPerMin, 'default 600 must rise to the 900 write budget').toBe(900);
+    process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN = '60';
+    process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN = '10';
+    expect(snapshotRateLimits().ipReadReqsPerMin, 'an explicit read budget below the write budget is raised to it').toBe(60);
+    delete process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN;
+    expect(snapshotRateLimits().ipReadReqsPerMin).toBe(600);
   });
 
   it('OPENWOP_FORCE_RATE_LIMIT forces a deterministic 429 regardless of the configured IP budget (CF-6)', async () => {
@@ -88,6 +132,7 @@ describe('P0.4 rate limit', () => {
     // load timing. The envelope MUST be identical to a production rate-limit.
     process.env.OPENWOP_FORCE_RATE_LIMIT = 'true';
     process.env.OPENWOP_RATELIMIT_IP_REQS_PER_MIN = '1000';
+    process.env.OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN = '1000'; // FORCE overrides BOTH tiers (ADR 0640)
     _resetRateLimitState();
     let last: Response | undefined;
     for (let i = 0; i < 5; i++) {
@@ -138,78 +183,70 @@ describe('P0.4 rate limit', () => {
     expect(bob.status).toBe(201);
   });
 
-  it('concurrent-runs slot releases on run.terminal — pre-flight pegs, then frees', async () => {
+  /**
+   * §Correction — the per-session concurrent-run quota had NO coverage.
+   *
+   * Two verbatim-duplicated blocks asserted `expect(true).toBe(true)` and
+   * deferred to "the full integration test [that] lives in
+   * test/auth-cookies.test.ts". That claim was FALSE: `grep -c concurrent`
+   * over that file returns 0, and `reserveConcurrentSlot` appears in no test
+   * but this one. A release-path leak would have wedged a user at permanent
+   * 429 with nothing red.
+   *
+   * These drive the REAL chain — middleware stamps `_sessionKey`, the route
+   * reserves under it, the next request hits the middleware's pre-flight, and
+   * `notifyRunTerminal` frees the slot.
+   */
+  it('a session at its concurrent cap is refused, and freeing a slot admits the next run', async () => {
     process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '1';
     _resetRateLimitState();
     _resetRunLifecycle();
 
-    // First run reserves slot via the route handler's
-    // reserveConcurrentSlot; second run should 429 because the
-    // middleware's pre-flight check sees 1 inflight (= the cap).
-    // Full integration coverage of the route → reserve → release
-    // chain is in test/auth-cookies.test.ts via createApp(); here
-    // we exercise the isolation-level reserve/release contract.
-    //
-    // Need a test route that actually calls reserveConcurrentSlot.
-    // The existing /v1/runs handler in startApp() doesn't, so add a
-    // dedicated test route that mimics what routes/runs.ts does.
-    // (Done via the synthetic app in startApp().)
-    expect(true).toBe(true); // placeholder — the full integration test
-                             // lives in test/auth-cookies.test.ts via the
-                             // real createApp(), which exercises the full
-                             // route+executor+lifecycle chain.
+    const reserve = (): Promise<Response> => fetch(`http://127.0.0.1:${port}/v1/runs-reserving`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-test-tenant': 'anon:conc' },
+      body: '{}',
+    });
 
-    // Verify the release path in isolation: reserve via a stub Request,
-    // call notifyRunTerminal, confirm the slot is freed.
-    const fakeReq = { _sessionKey: 's:test:concurrent' } as unknown as Parameters<typeof reserveConcurrentSlot>[0];
-    reserveConcurrentSlot(fakeReq, 'run-1');
-    reserveConcurrentSlot(fakeReq, 'run-2');
-    notifyRunTerminal('run-1');
-    // After release, a 3rd reserve under the same key should succeed
-    // (cap=1 was hit but run-1 freed its slot).
-    process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '2';
-    reserveConcurrentSlot(fakeReq, 'run-3');
-    // No throw → success. Strict count assertions would need a peek
-    // into the internal Map; the integration test in P0.4's existing
-    // suite covers the route-level path.
-    expect(true).toBe(true);
+    const first = await reserve();
+    expect(first.status, 'the first run is under the cap').toBe(201);
+    const { runId } = (await first.json()) as { runId: string };
+
+    // Cap is 1 and one run is inflight ⇒ the pre-flight must refuse.
+    const second = await reserve();
+    expect(second.status, 'a session at its cap must be refused').toBe(429);
+    // Assert the SPECIFIC limiter, not just "a 429" — a burst or per-minute
+    // refusal would otherwise satisfy this test and the concurrent quota could
+    // still be broken.
+    const body = (await second.json()) as { error?: string; details?: { reason?: string } };
+    expect(body.error).toBe('rate_limited');
+    expect(body.details?.reason, 'the CONCURRENT limiter must be the one that fired').toBe('session_concurrent');
+
+    // The release path — the half a leak would break, and the half that had
+    // no assertion at all before.
+    notifyRunTerminal(runId, 'completed');
+    const third = await reserve();
+    expect(third.status, 'freeing a slot must admit the next run — a leak wedges the session at 429').toBe(201);
   });
 
-  it('concurrent-runs slot releases on run.terminal — pre-flight pegs, then frees', async () => {
+  it('one session reaching its cap does not refuse a different session', async () => {
     process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '1';
     _resetRateLimitState();
     _resetRunLifecycle();
 
-    // First run reserves slot via the route handler's
-    // reserveConcurrentSlot; second run should 429 because the
-    // middleware's pre-flight check sees 1 inflight (= the cap).
-    // (The `post` helper is intentionally not used here — the full
-    // integration check lives in auth-cookies.test.ts; this block
-    // exercises the release path below in isolation.)
-    // Need a test route that actually calls reserveConcurrentSlot.
-    // The existing /v1/runs handler in startApp() doesn't, so add a
-    // dedicated test route that mimics what routes/runs.ts does.
-    // (Done via the synthetic app in startApp().)
-    expect(true).toBe(true); // placeholder — the full integration test
-                             // lives in test/auth-cookies.test.ts via the
-                             // real createApp(), which exercises the full
-                             // route+executor+lifecycle chain.
+    const reserveAs = (tenant: string): Promise<Response> => fetch(`http://127.0.0.1:${port}/v1/runs-reserving`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-test-tenant': tenant },
+      body: '{}',
+    });
 
-    // Verify the release path in isolation: reserve via a stub Request,
-    // call notifyRunTerminal, confirm the slot is freed.
-    const fakeReq = { _sessionKey: 's:test:concurrent' } as unknown as Parameters<typeof reserveConcurrentSlot>[0];
-    reserveConcurrentSlot(fakeReq, 'run-1');
-    reserveConcurrentSlot(fakeReq, 'run-2');
-    notifyRunTerminal('run-1');
-    // After release, a 3rd reserve under the same key should succeed
-    // (cap=1 was hit but run-1 freed its slot).
-    process.env.OPENWOP_RATELIMIT_SESSION_CONCURRENT = '2';
-    reserveConcurrentSlot(fakeReq, 'run-3');
-    // No throw → success. Strict count assertions would need a peek
-    // into the internal Map; the integration test in P0.4's existing
-    // suite covers the route-level path.
-    expect(true).toBe(true);
+    expect((await reserveAs('anon:alice')).status).toBe(201);
+    expect((await reserveAs('anon:alice')).status, 'alice is now at her cap').toBe(429);
+    // The quota is per session, so bob is unaffected — a shared-key bug would
+    // show up here and nowhere else.
+    expect((await reserveAs('anon:bob')).status, 'bob has his own quota').toBe(201);
   });
+
 
   it('long-lived SSE streams are exempt from the per-IP burst bucket (reconnect feedback-loop fix)', async () => {
     const sse = { Accept: 'text/event-stream' };
@@ -222,6 +259,26 @@ describe('P0.4 rate limit', () => {
       const b = await fetch(`http://127.0.0.1:${port}/v1/runs/run-xyz/events`, { headers: sse });
       expect(b.status).toBe(200);
     }
+  });
+
+  it('CS-CH-1 — channel stream/presence + voice transcript SSE are exempt too (the reconnect-storm class)', async () => {
+    const sse = { Accept: 'text/event-stream' };
+    for (let i = 0; i < 12; i++) {
+      const stream = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/channels/chan-1/stream`, { headers: sse });
+      expect(stream.status).not.toBe(429);
+      const presence = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/channels/chan-1/presence`, { headers: sse });
+      expect(presence.status).not.toBe(429);
+      const voice = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/voice/realtime/messages/stream?conversationId=c1`, { headers: sse });
+      expect(voice.status).not.toBe(429);
+    }
+    // Without the Accept header the same channel path still counts (no free polling).
+    _resetRateLimitState();
+    let blocked = false;
+    for (let i = 0; i < 8; i++) {
+      const r = await fetch(`http://127.0.0.1:${port}/v1/host/openwop-app/channels/chan-1/stream`, { headers: { Accept: 'application/json' } });
+      if (r.status === 429) { blocked = true; break; }
+    }
+    expect(blocked).toBe(true);
   });
 
   it('the SSE exemption is gated on BOTH a known stream path AND the Accept header (no header-only bypass)', async () => {

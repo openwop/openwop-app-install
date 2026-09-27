@@ -46,12 +46,26 @@ type ErrorAction = NonNullable<KnownError['action']>;
 const byokAction = (): ErrorAction => ({ kind: 'reconfigure-byok', label: i18n.t('chat:openByokSettings') });
 const retryAction = (): ErrorAction => ({ kind: 'retry', label: i18n.t('common:retry') });
 
-export function classifyChatError(error: { code: string; message: string }): KnownError {
+export function classifyChatError(error: { code: string; message: string; reason?: string }): KnownError {
   switch (error.code) {
+    // ADR 0482 (ux-1) — a workflow dispatch rejected by the owner-set daily
+    // budget. The wrapper (useWorkflowRunMentions) passes the machine-readable
+    // envelope reason through; a reasonless dispatch_failed stays generic.
+    case 'dispatch_failed':
+      if (error.reason === 'workflow_budget_exhausted') {
+        return {
+          title: i18n.t('common:errorBudgetTitle'),
+          detail: i18n.t('common:errorBudgetDetail'),
+        };
+      }
+      return { title: i18n.t('chat:errSomethingWrongTitle'), detail: error.message };
     case 'empty_completion':
       return {
         title: i18n.t('chat:errNoResponseTitle'),
         detail: i18n.t('chat:errNoResponseDetail'),
+        // AB-R2-1 — a regenerate is free of side effects here (nothing was
+        // produced), so the card offers it instead of dead-ending.
+        action: retryAction(),
       };
     case 'credential_unavailable':
     case 'credential_required':
@@ -61,6 +75,19 @@ export function classifyChatError(error: { code: string; message: string }): Kno
         title: i18n.t('chat:errApiKeyMissingTitle'),
         detail: i18n.t('chat:errApiKeyMissingDetail'),
         action: byokAction(),
+      };
+    // Track-3 i18n — the conversation gate-open timeouts (conversationTransport).
+    case 'conversation_start_timeout':
+      return {
+        title: i18n.t('chat:errConvStartTimeoutTitle'),
+        detail: i18n.t('chat:errConvStartTimeoutDetail'),
+        action: retryAction(),
+      };
+    case 'conversation_gate_timeout':
+      return {
+        title: i18n.t('chat:errConvGateTimeoutTitle'),
+        detail: i18n.t('chat:errConvGateTimeoutDetail'),
+        action: retryAction(),
       };
     case 'provider_rate_limited':
       return {
@@ -90,6 +117,14 @@ export function classifyChatError(error: { code: string; message: string }): Kno
       return {
         title: i18n.t('chat:errInvalidOutputTitle'),
         detail: i18n.t('chat:errInvalidOutputDetail'),
+        // AB-R2-1 (UX_UPGRADE-app-builder R3) — the AI-AUTHORING failure class.
+        // The backend already runs the bounded error-fed repair on authoring
+        // paths; when even that surfaces here, the turn used to dead-end with
+        // no affordance (the Lovable "try to fix" gap). Retry re-runs the
+        // prior user turn through the same repair loop. `safety_filter` /
+        // `content_filtered` stay action-less DELIBERATELY — re-running
+        // filtered content is not a fix.
+        action: retryAction(),
       };
     case 'internal_error': {
       const m = PROVIDER_STATUS_RE.exec(error.message);

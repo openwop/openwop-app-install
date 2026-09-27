@@ -7,6 +7,42 @@
 **Surface:** host-extension under `/v1/host/openwop-app/workflow-author/*` (a new `workflow-author` feature-package) + a node pack whose nodes read the catalog, author a graph, validate it, and register it. No wire change.
 **RFC gate:** **no new RFC.** "Workflow" is not a normative wire object — only the run lifecycle is. The catalog read (`/v1/host/openwop-app/node-catalog`) and the workflow registration (`POST /v1/host/openwop-app/workflows`) are non-normative host-extension routes. Making "AI workflow authoring" or node-schema introspection a **portable, cross-host advertised capability** would require an OpenWOP RFC — out of scope here.
 
+> **Correction (2026-07-22) — the `BackendFeature.builtinWorkflows` contract this
+> ADR introduced is DEPRECATED.** Workflows are never hard-coded: a workflow ships
+> as a **chain** (nodes + edges, an RFC 0013 / ADR 0163 workflow-chain pack, loaded
+> via `host/workflowChainPackLoader.ts` → surfaced in the builder + the `/` picker,
+> instantiated tenant-owned + editable via `…/workflows/from-chain`) or as a
+> **stack** (todos on a kanban board, ADR 0311; a chain can be *stacked* as a card).
+> A code-pinned `builtinWorkflows` definition is invisible to `/builder` + `/` (both
+> list only the tenant ownership index) and is not user-editable. The ~18 existing
+> in-tree builtins (this ADR's meta-workflow included) are **legacy to migrate**;
+> new features MUST NOT declare `builtinWorkflows`. Where a workflow's shape exceeds
+> today's chain format (composes `core.subWorkflow`, or threads run-produced
+> `variables[]`), extend the chain format via a new RFC 0013 revision — do not revert
+> to hard-coding. Governing docs: `ARCHITECTURE.md` § "Agents, workflows, and
+> schedules" + `CLAUDE.md` § "Workflows — never hard-code".
+>
+> **Correction 2 (2026-08-21, ADR 0596) — "deprecated" now UNDERSTATES it, and
+> this ADR's own meta-workflow has already migrated.** The seam is not merely
+> discouraged: the `BackendFeature.builtinWorkflows` FIELD is GONE (declaring one
+> is a TypeScript error), `host/builtinWorkflows.ts` is DELETED, and
+> `LEGACY_PINNED_WORKFLOWS` is frozen EMPTY by the ADR 0472 P4 ratchet. The
+> meta-workflow described at §Phase 3 and §"New seams" below is now the RFC 0013
+> chain pack `core.openwop.workflows.workflow-author`
+> (`examples/workflow-chain-packs/workflow-author/`), registered same-id via
+> `registerChainBackedWorkflow` in `metaWorkflow.ts`. Those two sections are left
+> as written — they record what shipped in June 2026, which is the point of the
+> record — but nothing below describes a live mechanism. **Three** *current-state*
+> doc sites still asserted otherwise and had their prose REPLACED by ADR 0596:
+> `FEATURES.md`'s row, this feature's `feature.ts` docblock (which contradicted
+> its own `registerRoutes` body twelve lines later), and its `routes.ts` header.
+> `ROADMAP.md`'s Done row is a HISTORICAL record like this one, so it carries an
+> APPENDED correction note instead — the same treatment as this note.
+> *(Count corrected 2026-08-21, ADR 0596 §Correction 10: this said "four … and
+> `ROADMAP.md`", which contradicted ADR 0596 §9's own account of what it did. In
+> a doc-rot PR, the record of the fix drifting from the fix is the same defect
+> one level up.)*
+
 ## Why this exists
 
 The app already ships every mechanical piece needed to *build and run* a workflow: a node catalog with inlined JSON Schemas, a workflow-registration endpoint, a DAG executor, and a full xyflow visual builder. What it lacked is the **authoring brain** — the thing that turns "when a new high-value lead comes in, summarize it and notify the deal owner" into a connected, schema-valid node/edge graph that materializes in the builder. This feature is the one capability that makes every *other* workflow cheaper to build and maintain.

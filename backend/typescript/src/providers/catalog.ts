@@ -24,12 +24,20 @@ interface ProviderModel {
   capabilities: readonly string[];
   cost?: { input: number; output: number };
   recommended?: boolean;
+  /** Does this model do NATIVE web search? Present in providers.json but was
+   *  absent from this type, so the SSoT and the type disagreed. Read through
+   *  `host/webSearchCapability.ts`, never inline. */
+  webSearch?: boolean;
 }
 
 interface ProviderConfig {
   id: string;
   label: string;
   models: readonly ProviderModel[];
+  /** LICENSING tier for this provider's native search results — whether they may
+   *  be stored as durable citations. A provider fact (it comes from the vendor's
+   *  terms), not a model fact. See `host/webSearchCapability.ts`. */
+  searchSuitability?: 'durable' | 'answer-only' | 'none';
   [extra: string]: unknown;
 }
 
@@ -122,6 +130,25 @@ export function listSelectableProviderIds(): readonly string[] {
  * else first model. Used by the chat responder node when inputs.model
  * isn't supplied.
  */
+/**
+ * CS-GB-1 — the provider's OWN default model for a model class (providers.json
+ * `classDefaults`, e.g. `{ "reasoning": "claude-opus-4-8" }`). This is what
+ * makes a SAME-provider tier bump possible for multi-agent rooms: the routed
+ * provider never changes (the tenant's key keeps working), only the model steps
+ * up to that provider's declared class default. Returns null when the provider
+ * is unknown, declares no default for the class, or the declared id has gone
+ * stale against the model list (the catalog stays the source of truth).
+ */
+export function getClassDefault(providerId: string, modelClass: string): string | null {
+  const p = getProviderConfig(providerId);
+  if (!p) return null;
+  const defaults = (p as { classDefaults?: unknown }).classDefaults;
+  if (!defaults || typeof defaults !== 'object') return null;
+  const id = (defaults as Record<string, unknown>)[modelClass];
+  if (typeof id !== 'string' || id.length === 0) return null;
+  return p.models.some((m) => m.id === id) ? id : null;
+}
+
 export function getDefaultModel(providerId: string): string {
   const p = getProviderConfig(providerId);
   if (!p) {

@@ -28,16 +28,21 @@ import type { Subject, SubjectKind } from '../../host/subject.js';
 import { getUser } from '../users/usersService.js';
 import { getRosterEntry } from '../../host/rosterService.js';
 import { getSeedTemplate } from './seedTemplates.js';
-import { renderMarkdownToPdf, renderMarkdownToPptx, renderMarkdownToCsv } from './render.js';
+import { renderMarkdownToPdf, renderMarkdownToPptx, renderMarkdownToCsv, renderMarkdownToDocx, renderMarkdownToEpub, renderMarkdownToOdt, renderMarkdownToLatex, probeImageDims, type ExportImageResolver } from './render.js';
+import { resolveMediaAsset, storeMediaAsset } from '../../host/inMemorySurfaces.js';
 import * as mediaStorage from '../media/mediaStorage.js';
 import { createAsset } from '../media/mediaService.js';
+import { assertNoRetentionHold } from '../../host/retentionHold.js';
+import { createLogger } from '../../observability/logger.js';
 import { isRegisteredArtifactType } from '../../host/artifactTypes.js';
 import { getCanvasForTenant } from '../../host/canvasSurface.js';
+
+const log = createLogger('features.documents');
 
 // ─── vocabulary ──────────────────────────────────────────────────────────────
 
 export type DocFormat = 'markdown' | 'pdf' | 'slides' | 'diagram' | 'sheet' | 'doc';
-export const DOC_FORMATS: readonly DocFormat[] = ['markdown', 'pdf', 'slides', 'diagram', 'sheet', 'doc'];
+const DOC_FORMATS: readonly DocFormat[] = ['markdown', 'pdf', 'slides', 'diagram', 'sheet', 'doc'];
 
 export type DocStatus = 'draft' | 'in-review' | 'approved' | 'final';
 export const DOC_STATUSES: readonly DocStatus[] = ['draft', 'in-review', 'approved', 'final'];
@@ -87,6 +92,10 @@ export interface DocumentRecord {
   /** Deterministic id of the current (latest) version, or undefined before any. */
   currentVersionId?: string;
   templateId?: string;
+  /** ADR 0350 Phase 3 — set once this markdown doc has been promoted to a rich
+   *  `canvas.document`. Makes promotion one-way + idempotent (re-promote opens
+   *  this canvas) and drives the "Opened as a rich document" link. */
+  promotedCanvasId?: string;
   provenance: Provenance;
   createdBy: string;
   updatedBy: string;
@@ -104,6 +113,12 @@ export interface DocumentVersion {
   content: string;
   /** A Media (RFC 0055) token for a rendered non-markdown representation. */
   renderedMediaToken?: string;
+  /** WF-DOC-4 — per-format render stamps for the DURABLE formats (pdf/slides/
+   *  sheet). A version is immutable and every renderer deterministic, so ONE
+   *  stored asset per (version, format) is the whole truth; a re-render/replay
+   *  returns the stamped token instead of minting a duplicate library asset or
+   *  rewriting `renderedMediaToken` (which invalidated shared PDF links). */
+  renderedTokens?: Record<string, { token: string; sizeBytes: number }>;
   producedBy: Provenance['producedBy'];
   /** Caller-supplied dedup key (a retried run reuses the same version). */
   idempotencyKey?: string;
@@ -127,8 +142,16 @@ export interface DocumentTemplate {
   /** Feature-owned schema the generated content is validated against (the output
    *  contract is the template's, not the wire's). */
   outputSchema?: Record<string, unknown>;
-  /** OPTIONAL opaque artifact-type tag (RFC 0071/0075 NOT implemented here). */
+  /** Bound host artifact type (ADR 0055 — validated as REGISTERED at write;
+   *  generation from a bound template emits a typed `artifact.created`). */
   artifactTypeId?: string;
+  /** WF-DOC-9 — the seed-catalog id this template was instantiated from (the
+   *  ADR 0516 §Provenance lesson, ported from the forms `originTemplate` lane).
+   *  Stamped at COPY time because it is unbackfillable: instantiation copies,
+   *  so once the row exists nothing can recover which starter produced it.
+   *  Absent on hand-authored templates; server-stamped only (never from a
+   *  request body). */
+  catalogId?: string;
   version: number;
   createdBy: string;
   createdAt: string;
@@ -154,10 +177,24 @@ const MAX = {
 
 const docs = new DurableCollection<DocumentRecord>('documents:doc', (d) => d.documentId);
 const versions = new DurableCollection<DocumentVersion>('documents:version', (v) => v.versionId);
+
+/** Test seam — write a version row in a LEGACY shape (e.g. a pre-WF-DOC-4 row
+ *  with `renderedMediaToken` but no `renderedTokens` map) so migration-honoring
+ *  branches can be exercised without reaching into the collection. */
+export async function _putVersionForTest(v: DocumentVersion): Promise<void> {
+  await versions.put(v);
+}
 const templates = new DurableCollection<DocumentTemplate>('documents:template', (t) => t.templateId);
 // ADR 0056 — deterministic (tenant,org,canvas) → documentId mapping so re-materializing
 // a canvas updates its document (a new version) rather than spawning duplicates.
-const canvasMap = new DurableCollection<{ key: string; documentId: string }>('documents:canvasmap', (m) => m.key);
+/** WF-DOC-7 — `tenantId` is a REAL field on the row. It used to live only
+ *  inside the composite `key` (`${tenantId}:${orgId}:${canvasId}` — unparseable,
+ *  tenant ids contain ':'), so BOTH teardown probes missed these rows and they
+ *  survived tenant deletion permanently. With the field, `purgeTenantHostExt`'s
+ *  `jsonTenantId` probe reaches new rows. Legacy rows (written before this)
+ *  remain field-less and teardown-invisible — additive fix, no backfill: the
+ *  stale-mapping self-heal on read tolerates a missing/purged mapping. */
+const canvasMap = new DurableCollection<{ key: string; tenantId?: string; documentId: string }>('documents:canvasmap', (m) => m.key);
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -209,8 +246,8 @@ async function resolveOwnerSubject(value: unknown, tenantId: string, orgId: stri
       throw new OpenwopError('not_found', 'Owning user not found in this tenant.', 404, {});
     }
   } else {
-    const a = await getRosterEntry(subject.id);
-    if (!a || a.tenantId !== tenantId) {
+    const a = await getRosterEntry(tenantId, subject.id);
+    if (!a) {
       throw new OpenwopError('not_found', 'Owning agent not found in this tenant.', 404, {});
     }
   }
@@ -242,6 +279,26 @@ export async function getDocumentByIdForTenant(tenantId: string, documentId: str
  *  never trusted here. */
 export async function listDocumentsForTenant(tenantId: string): Promise<DocumentRecord[]> {
   return (await docs.list()).filter((d) => d.tenantId === tenantId);
+}
+
+/**
+ * ADR 0350 Phase 3 follow-up (DOCS-1) — a deleted `canvas.document` must not
+ * leave `promotedCanvasId` dangling on its source markdown doc. Called from the
+ * feature's `onCanvasDeleted` hook (fired AFTER the canvas row is gone); clears
+ * the field on every referencing doc in the tenant (set-once ⇒ at most one, but
+ * sweep-all is the safe shape). Direct `docs.put` — this is a lifecycle cascade,
+ * not a caller PATCH (updateDocument's set-once/ownership rules don't apply to
+ * unsetting a now-dead reference). The full-collection scan matches the store's
+ * existing access pattern (listDocuments) and canvas deletes are rare.
+ */
+export async function clearPromotedCanvasRefs(tenantId: string, canvasId: string): Promise<number> {
+  const referencing = (await docs.list()).filter((d) => d.tenantId === tenantId && d.promotedCanvasId === canvasId);
+  for (const d of referencing) {
+    const next: DocumentRecord = { ...d, updatedAt: new Date().toISOString() };
+    delete next.promotedCanvasId;
+    await docs.put(next);
+  }
+  return referencing.length;
 }
 
 export async function listDocuments(
@@ -296,7 +353,7 @@ export async function createDocument(input: {
 
 export async function updateDocument(
   tenantId: string, orgId: string, documentId: string, actor: string,
-  patch: { title?: unknown; status?: unknown; ownerSubject?: unknown },
+  patch: { title?: unknown; status?: unknown; ownerSubject?: unknown; promotedCanvasId?: unknown },
 ): Promise<DocumentRecord | null> {
   const existing = await getDocument(tenantId, orgId, documentId);
   if (!existing) return null;
@@ -316,6 +373,16 @@ export async function updateDocument(
     const owner = patch.ownerSubject === null ? undefined : await resolveOwnerSubject(patch.ownerSubject, tenantId, orgId);
     if (owner) next.ownerSubject = owner; else delete next.ownerSubject;
   }
+  if (patch.promotedCanvasId !== undefined) {
+    // Set once (ADR 0350 Phase 3). Idempotent: a repeat with the SAME id is a
+    // no-op; a DIFFERENT id after one is set is rejected (a doc promotes to ONE
+    // canvas — no silent re-point that would strand the first).
+    const id = boundString(patch.promotedCanvasId, 'promotedCanvasId', MAX.title);
+    if (existing.promotedCanvasId && existing.promotedCanvasId !== id) {
+      throw new OpenwopError('conflict', 'Document is already promoted to a rich document.', 409, { promotedCanvasId: existing.promotedCanvasId });
+    }
+    next.promotedCanvasId = id;
+  }
   await docs.put(next);
   return next;
 }
@@ -323,9 +390,62 @@ export async function updateDocument(
 export async function deleteDocument(tenantId: string, orgId: string, documentId: string): Promise<boolean> {
   const existing = await getDocument(tenantId, orgId, documentId);
   if (!existing) return false;
+  // `DOCWF-2` — assert the retention hold before anything is destroyed.
+  //
+  // This cascades versions (whose `content` is declared PII), the rendered assets below, and
+  // the public share links, and it ran under a legal hold without a word. It is the same shape
+  // the projects cascade had one iteration ago, and — like that one — it is structurally
+  // INVISIBLE to `destructive-lane-census.test.ts`, whose population derives from
+  // storage-level deletes plus seam runners; a `DurableCollection.delete()` is neither. The
+  // census row lands with this change.
+  //
+  // Inline, not behind a helper: the census scans a lane's OWN text for the consult.
+  await assertNoRetentionHold(tenantId);
+  // `DOCWF-3` — the RENDERED BYTES, before the versions that point at them.
+  //
+  // This cascade already purges the public share links, with a comment saying the point is that
+  // no row may "report in use externally". The rendered PDF/DOCX is the actual CONTENT, it is
+  // served by a PUBLIC token-authed route (`GET /assets/:token` — the token IS the capability),
+  // and nothing deleted it. So a document could be deleted, its links purged, and its rendered
+  // bytes keep serving forever to anyone holding the URL — the opposite of what the person was
+  // told, and incomplete against this function's own stated intent rather than merely a missing
+  // nicety.
+  //
+  // Best-effort and ordered FIRST so a media failure cannot strand a version row that is the
+  // only remaining way to find the token.
+  const renderedTokens = new Set<string>();
+  const priorVersions = await listVersions(tenantId, orgId, documentId);
+  for (const v of priorVersions) {
+    if (v.renderedMediaToken) renderedTokens.add(v.renderedMediaToken);
+    for (const entry of Object.values(v.renderedTokens ?? {})) {
+      if (entry?.token) renderedTokens.add(entry.token);
+    }
+  }
+  if (renderedTokens.size > 0) {
+    try {
+      const { listAssets, deleteAsset } = await import('../media/mediaService.js');
+      const orgAssets = await listAssets(tenantId, orgId);
+      for (const a of orgAssets) {
+        if (a.serveToken && renderedTokens.has(a.serveToken)) await deleteAsset(tenantId, orgId, a.assetId);
+      }
+    } catch (err) {
+      log.error('document_delete_rendered_asset_purge_failed', {
+        tenantId, orgId, documentId, error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
   // Cascade versions FIRST so a mid-failure leaves no orphan reachable from a
   // surviving parent (partial-failure fails closed).
-  for (const v of await listVersions(tenantId, orgId, documentId)) await versions.delete(v.versionId);
+  for (const v of priorVersions) await versions.delete(v.versionId);
+  // WF-SHARE-4 — cascade the public share links that referenced this document.
+  // Dynamic import: sharing imports THIS module for its resolver, so a static
+  // edge back would cycle (the crm/signService precedent). Best-effort — a
+  // cascade failure must not fail the delete, and the link would 404 anyway;
+  // what it must not do is leave a row that reports "in use externally".
+  try {
+    const { purgeLinksForResource } = await import('../sharing/sharingService.js');
+    await purgeLinksForResource(tenantId, 'document', documentId);
+  } catch { /* best-effort cascade — the link resolves 404 regardless */ }
   return docs.delete(documentId);
 }
 
@@ -428,6 +548,9 @@ export async function createTemplate(input: {
   tenantId: string; orgId: string; name: unknown; kind: unknown; outputFormat?: unknown;
   promptBody: unknown; promptRef?: unknown; parameters?: unknown; outputSchema?: unknown;
   artifactTypeId?: unknown; createdBy: string;
+  /** WF-DOC-9 — seed-catalog origin. Supplied ONLY by `instantiateSeedTemplate`
+   *  (the HTTP route never forwards it), so a client cannot forge provenance. */
+  catalogId?: string;
 }): Promise<DocumentTemplate> {
   const total = (await templates.list()).filter((t) => t.tenantId === input.tenantId && t.orgId === input.orgId).length;
   if (total >= MAX.templatesPerOrg) throw new OpenwopError('validation_error', `Template cap reached (${MAX.templatesPerOrg}).`, 400, {});
@@ -453,6 +576,7 @@ export async function createTemplate(input: {
     parameters: sanitizeParams(input.parameters),
     ...(input.outputSchema && typeof input.outputSchema === 'object' ? { outputSchema: input.outputSchema as Record<string, unknown> } : {}),
     ...(typeof input.artifactTypeId === 'string' && input.artifactTypeId.trim() ? { artifactTypeId: input.artifactTypeId } : {}),
+    ...(typeof input.catalogId === 'string' && input.catalogId.trim() ? { catalogId: input.catalogId } : {}),
     version: 1,
     createdBy: input.createdBy,
     createdAt: now,
@@ -473,7 +597,10 @@ export async function instantiateSeedTemplate(tenantId: string, orgId: string, c
   return createTemplate({
     tenantId, orgId, name: seed.name, kind: seed.kind, outputFormat: seed.outputFormat,
     promptBody: seed.promptBody, parameters: seed.parameters,
-    ...(artifactTypeId ? { artifactTypeId } : {}), createdBy,
+    ...(artifactTypeId ? { artifactTypeId } : {}),
+    // WF-DOC-9 — stamp the origin at copy time (unbackfillable afterwards).
+    catalogId,
+    createdBy,
   });
 }
 
@@ -492,8 +619,15 @@ export async function updateTemplate(
     else if (typeof patch.outputSchema === 'object') next.outputSchema = patch.outputSchema as Record<string, unknown>;
   }
   if (patch.artifactTypeId !== undefined) {
-    if (typeof patch.artifactTypeId === 'string' && patch.artifactTypeId.trim()) next.artifactTypeId = patch.artifactTypeId;
-    else delete next.artifactTypeId;
+    if (typeof patch.artifactTypeId === 'string' && patch.artifactTypeId.trim()) {
+      // DOCT-6 — the SAME registered-type check `createTemplate` enforces. An
+      // edit could previously bind an unregistered type, and generation from
+      // the template then silently skipped typed-artifact validation.
+      if (!isRegisteredArtifactType(patch.artifactTypeId)) {
+        throw new OpenwopError('validation_error', `Unknown artifactTypeId \`${patch.artifactTypeId}\` — not a registered host artifact type.`, 400, { field: 'artifactTypeId' });
+      }
+      next.artifactTypeId = patch.artifactTypeId;
+    } else delete next.artifactTypeId;
   }
   await templates.put(next);
   return next;
@@ -548,6 +682,12 @@ export async function publicDocumentView(tenantId: string, orgId: string, docume
   const doc = await getDocument(tenantId, orgId, documentId);
   if (!doc || !(SHAREABLE_STATUSES as readonly string[]).includes(doc.status)) return null;
   const current = doc.currentVersionId ? await getVersion(tenantId, orgId, documentId, doc.currentVersionId) : null;
+  // DOCTPL-2 — public attribution. The content shown IS the current version,
+  // so its producer wins; the document's provenance is the fallback. KIND
+  // only — internal agent/user/run ids never reach the public surface. An
+  // agent can mint an SOW, a human can approve it, and it can publish to the
+  // open internet: the page must be able to say a model wrote it.
+  const producer = current?.producedBy ?? doc.provenance?.producedBy;
   return {
     kind: 'document',
     documentId: doc.documentId,
@@ -557,19 +697,47 @@ export async function publicDocumentView(tenantId: string, orgId: string, docume
     status: doc.status,
     content: current?.content ?? '',
     ...(current?.renderedMediaToken ? { renderedMediaToken: current.renderedMediaToken } : {}),
+    ...(producer?.kind ? { producedByKind: producer.kind } : {}),
     updatedAt: doc.updatedAt,
   };
 }
 
-export type RenderFormat = 'pdf' | 'slides' | 'sheet';
-export const RENDER_FORMATS: readonly RenderFormat[] = ['pdf', 'slides', 'sheet'];
+export type RenderFormat = 'pdf' | 'slides' | 'sheet' | 'docx' | 'epub' | 'odt' | 'latex';
+export const RENDER_FORMATS: readonly RenderFormat[] = ['pdf', 'slides', 'sheet', 'docx', 'epub', 'odt', 'latex'];
 export interface RenderResult { versionId: string; format: RenderFormat; renderedMediaToken: string; url: string; sizeBytes: number; }
 
 const RENDER_SPEC: Record<RenderFormat, { contentType: string; ext: string }> = {
   pdf: { contentType: 'application/pdf', ext: 'pdf' },
   slides: { contentType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation', ext: 'pptx' },
   sheet: { contentType: 'text/csv', ext: 'csv' },
+  docx: { contentType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', ext: 'docx' },
+  epub: { contentType: 'application/epub+zip', ext: 'epub' },
+  odt: { contentType: 'application/vnd.oasis.opendocument.text', ext: 'odt' },
+  latex: { contentType: 'application/x-tex', ext: 'tex' },
 };
+
+/** ADR 0400 — editable exports are REGENERABLE from the immutable version, so
+ *  they ride short-TTL scratch Media (the slidesExport posture) instead of the
+ *  durable library path; kvAgeOut (ADR 0380) sweeps them with no new purger. */
+const EXPORT_FORMATS: ReadonlySet<RenderFormat> = new Set(['docx', 'epub', 'odt', 'latex']);
+const EXPORT_TTL_SECONDS = 60 * 60; // 1 hour — the slides/code-export posture
+const MAX_EXPORT_BYTES = 25 * 1024 * 1024;
+
+/** Markdown image src → embeddable bytes, tenant-checked (ADR 0400): only a
+ *  HOST asset serve URL/token resolves; external URLs return null (the walker
+ *  degrades them to linked text — never fetched, the SSRF posture). */
+function exportImageResolver(tenantId: string): ExportImageResolver {
+  return async (src) => {
+    const m = src.match(/\/assets\/([A-Za-z0-9_-]{1,512})\/?(?:[?#]|$)/);
+    if (!m) return null;
+    const entry = await resolveMediaAsset(m[1] ?? '');
+    if (!entry || entry.tenantId !== tenantId) return null;
+    const data = Buffer.from(entry.contentBase64, 'base64');
+    const dims = probeImageDims(data);
+    if (!dims) return null;
+    return { data, kind: dims.kind, width: dims.width, height: dims.height };
+  };
+}
 
 /**
  * Render the document's CURRENT version (ADR 0057). Deterministic + provider-free,
@@ -584,19 +752,76 @@ export async function renderDocument(tenantId: string, orgId: string, documentId
   const version = doc.currentVersionId ? await getVersion(tenantId, orgId, documentId, doc.currentVersionId) : null;
   if (!version) throw new OpenwopError('validation_error', 'Document has no content to render.', 400, { documentId });
 
+  // WF-DOC-4 — idempotent render→store for the DURABLE formats (pdf/slides/
+  // sheet). The version is immutable and every renderer deterministic (the
+  // JSZip pin), so a re-render/replay of the SAME version converges on the
+  // SAME stored asset + serve token. Before this, every invocation minted a
+  // fresh library asset and (for pdf) REWROTE the version's
+  // renderedMediaToken, invalidating previously shared PDF links. Scratch
+  // exports (docx/epub/odt/latex) stay per-call by design: TTL'd
+  // download-and-go, no durable growth.
+  if (!EXPORT_FORMATS.has(format)) {
+    const prior = version.renderedTokens?.[format];
+    if (prior) {
+      return { versionId: version.versionId, format, renderedMediaToken: prior.token, url: mediaStorage.serveUrl(prior.token), sizeBytes: prior.sizeBytes };
+    }
+  }
+
   const bytes = format === 'slides'
     ? await renderMarkdownToPptx(version.content, { title: doc.title })
     : format === 'sheet'
       ? renderMarkdownToCsv(version.content)
-      : await renderMarkdownToPdf(version.content, { title: doc.title });
+      : format === 'docx'
+        ? await renderMarkdownToDocx(version.content, { title: doc.title, resolveImage: exportImageResolver(tenantId) })
+        : format === 'epub'
+          ? await renderMarkdownToEpub(version.content, { title: doc.title, identifier: `urn:openwop:doc:${version.versionId}`, modifiedAt: version.createdAt, resolveImage: exportImageResolver(tenantId) })
+          : format === 'odt'
+            ? await renderMarkdownToOdt(version.content, { title: doc.title, resolveImage: exportImageResolver(tenantId) })
+            : format === 'latex'
+              ? Buffer.from(await renderMarkdownToLatex(version.content, { title: doc.title }), 'utf8')
+              : await renderMarkdownToPdf(version.content, { title: doc.title });
   const spec = RENDER_SPEC[format];
+  if (bytes.byteLength > MAX_EXPORT_BYTES) {
+    throw new OpenwopError('validation_error', `Export exceeds the ${Math.floor(MAX_EXPORT_BYTES / (1024 * 1024))} MiB cap.`, 413, { format });
+  }
+  // ADR 0400 — editable exports are scratch-TTL, download-and-go; PDF (the
+  // canonical shareable rep) stays a durable library asset with the stamped
+  // version pointer, exactly as before.
+  if (EXPORT_FORMATS.has(format)) {
+    const scratch = await storeMediaAsset(tenantId, { contentBase64: bytes.toString('base64'), contentType: spec.contentType, ttlSeconds: EXPORT_TTL_SECONDS });
+    return { versionId: version.versionId, format, renderedMediaToken: scratch.token, url: mediaStorage.serveUrl(scratch.token), sizeBytes: scratch.bytes };
+  }
+  // WF-DOC-4 — a LEGACY pdf stamp (pre-`renderedTokens` rows): honor the
+  // existing token rather than rewrite it. The bytes above are deterministic
+  // for this immutable version, so only the size needed re-deriving — no new
+  // asset, no restamp, and the previously shared link stays valid.
+  if (format === 'pdf' && version.renderedMediaToken && !version.renderedTokens?.pdf) {
+    return { versionId: version.versionId, format, renderedMediaToken: version.renderedMediaToken, url: mediaStorage.serveUrl(version.renderedMediaToken), sizeBytes: bytes.byteLength };
+  }
   const stored = await mediaStorage.put(tenantId, { contentBase64: bytes.toString('base64'), contentType: spec.contentType });
   const safeName = (doc.title.replace(/[^\w .-]/g, '_').slice(0, 120) || 'document');
   await createAsset({
     tenantId, orgId, name: `${safeName}.${spec.ext}`, contentType: spec.contentType,
     sizeBytes: stored.sizeBytes, storageRef: stored.storageRef, serveToken: stored.serveToken, uploadedBy: actor,
   });
-  if (format === 'pdf') await versions.put({ ...version, renderedMediaToken: stored.serveToken });
+  // Review F6 — the stamp write is a real cross-instance CAS, not a blind put.
+  // Two concurrent renders of DIFFERENT formats each read `version` above,
+  // then each wrote its own merged `renderedTokens` map — a classic lost
+  // update: the last writer erased the other format's stamp, so the NEXT
+  // render of the erased format minted a duplicate asset (and, for pdf,
+  // restamped the token this whole block exists to keep stable). Merge from
+  // the FRESH row inside a compareAndSwap retry loop so both stamps survive.
+  for (let attempt = 0; ; attempt++) {
+    const fresh = await getVersion(tenantId, orgId, documentId, version.versionId);
+    if (!fresh) break; // version row gone (concurrent purge) — nothing to stamp
+    const next = {
+      ...fresh,
+      ...(format === 'pdf' ? { renderedMediaToken: stored.serveToken } : {}),
+      renderedTokens: { ...(fresh.renderedTokens ?? {}), [format]: { token: stored.serveToken, sizeBytes: stored.sizeBytes } },
+    };
+    if (await versions.compareAndSwap(fresh, next)) break;
+    if (attempt >= 7) throw new OpenwopError('conflict', 'Could not stamp the rendered asset (too many concurrent writes).', 409, { documentId, format });
+  }
   return { versionId: version.versionId, format, renderedMediaToken: stored.serveToken, url: mediaStorage.serveUrl(stored.serveToken), sizeBytes: stored.sizeBytes };
 }
 
@@ -645,7 +870,7 @@ export async function materializeCanvasToDocument(tenantId: string, orgId: strin
     ...(ownerSubject ? { ownerSubject } : {}),
     provenance: { producedBy: { kind: 'user', id: actor } }, createdBy: actor,
   });
-  await canvasMap.put({ key, documentId: doc.documentId });
+  await canvasMap.put({ key, tenantId, documentId: doc.documentId });
   const v = await addVersion(tenantId, orgId, doc.documentId, { content, producedBy: { kind: 'user', id: actor }, idempotencyKey });
   return { documentId: doc.documentId, versionId: v.versionId, created: true };
 }

@@ -21,6 +21,11 @@ export const messages = {
   emptyBodyDefault: 'Adicione fatos e preferências aqui; eles são recuperados quando relevantes.',
   externalUnverified: 'Externa · não verificada',
   externalUnverifiedTitle: 'Importada de uma fonte externa — tratada como não confiável (ADR 0038 §C).',
+  autoLearned: 'Aprendida automaticamente',
+  autoLearnedTitle: 'Seu assistente deduziu isto de uma conversa — não foi você quem digitou, portanto é tratada como não verificada.',
+  learnedOn: 'Aprendida em {{date}}',
+  recallOnlyDisclosure_one: 'Mais {{n}} item foi lembrado de uma conversa e não aparece aqui. Seu assistente ainda pode recordá-lo; ele não é editável nesta lista.',
+  recallOnlyDisclosure_other: 'Mais {{n}} itens foram lembrados de conversas e não aparecem aqui. Seu assistente ainda pode recordá-los; eles não são editáveis nesta lista.',
   removeMemory: 'Remover memória',
   // MemoryInspectorPage — header
   eyebrow: 'Memória',
@@ -66,8 +71,14 @@ export const messages = {
   emptyNoMatchTitle: 'Nenhuma entrada de memória correspondente',
   emptyNoEntriesTitle: 'Nenhuma entrada de memória ainda',
   emptyNoMatchBody: 'Nenhuma entrada corresponde à pesquisa ou ao filtro de tag atual. Limpe os filtros para ver o ledger completo.',
+  clearFilters: 'Limpar filtros',
   emptyNoEntriesBody: 'As entradas são gravadas internamente pelo host — o executor grava um resumo de execução na conclusão. Execute um workflow para popular o ledger.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry retornou {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry retornou {{status}}',
+  removeMemoryConfirmBody: 'Remover esta memória? O agente não vai mais lembrá-la.',
+  storedUnknown: "Memórias armazenadas: desconhecido",
+  loadFailedTitle: "Não foi possível carregar estas memórias",
+  loadFailedBody: "Esta é uma leitura que falhou, não uma memória vazia: o que estiver armazenado continua lá.",
+  retry: "Tentar novamente",
 } as const;

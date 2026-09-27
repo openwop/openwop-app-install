@@ -1,7 +1,7 @@
 {
   "name": "core.openwop.agents.devops-crew",
-  "version": "1.0.0",
-  "description": "DevOps crew. Planner decomposes runbook → executor runs steps via host.fs + host.queueBus + http → verifier confirms desired state. Gated on host fs + queue capabilities.",
+  "version": "1.0.1",
+  "description": "DevOps crew. Planner decomposes a runbook into safe ordered steps → executor performs http step actions (fs / queue / crypto steps run through the enclosing workflow's nodes, not conversational tools) → verifier confirms desired state via read-only http checks.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.agents.devops-crew",
@@ -29,15 +29,13 @@
       "agentId": "core.openwop.agents.devops-crew.planner",
       "persona": "DevOps Planner",
       "label": "DevOps Planner",
-      "description": "Reads a runbook or operational goal, decomposes into safe ordered steps (with pre-checks, action, post-checks), flags steps requiring human approval, dispatches executor.",
+      "description": "Reads a runbook or operational goal (supplied in the task payload), decomposes into safe ordered steps (with pre-checks, action, post-checks), flags steps requiring human approval, dispatches executor. Reasons over the provided text; holds no conversational tools.",
       "modelClass": "reasoning",
       "systemPromptRef": "prompts/planner.md",
-      "toolAllowlist": [
-        "openwop:core.files.read"
-      ],
+      "toolAllowlist": [],
       "memoryShape": {
         "scratchpad": true,
-        "conversation": true,
+        "conversation": false,
         "longTerm": false
       },
       "handoff": {
@@ -52,17 +50,11 @@
       "agentId": "core.openwop.agents.devops-crew.executor",
       "persona": "DevOps Executor",
       "label": "DevOps Executor",
-      "description": "Executes one runbook step at a time. Performs fs / queue / http operations as specified by the planner. Halts on first failure or unexpected state.",
+      "description": "Executes one runbook step at a time. Performs http step actions as specified by the planner; refuses steps whose action tool is outside its allowlist. Halts on first failure or unexpected state.",
       "modelClass": "coding",
       "systemPromptRef": "prompts/executor.md",
       "toolAllowlist": [
-        "openwop:core.files.read",
-        "openwop:core.files.write",
-        "openwop:core.openwop.http.fetch",
-        "openwop:core.messaging.publish",
-        "openwop:core.messaging.consume",
-        "openwop:core.crypto.hash",
-        "openwop:core.crypto.hmac-sign"
+        "openwop:core.openwop.http.fetch"
       ],
       "memoryShape": {
         "scratchpad": true,
@@ -81,11 +73,10 @@
       "agentId": "core.openwop.agents.devops-crew.verifier",
       "persona": "DevOps Verifier",
       "label": "DevOps Verifier",
-      "description": "Runs read-only checks to confirm that the desired post-state holds after executor steps. Returns pass/fail per check with evidence.",
+      "description": "Runs read-only http checks to confirm that the desired post-state holds after executor steps. Returns pass/fail per check with evidence.",
       "modelClass": "reasoning",
       "systemPromptRef": "prompts/verifier.md",
       "toolAllowlist": [
-        "openwop:core.files.read",
         "openwop:core.openwop.http.fetch"
       ],
       "memoryShape": {

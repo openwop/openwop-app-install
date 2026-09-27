@@ -3,9 +3,16 @@
  * revoke an agent's offered tools without editing + redeploying a pack. Thin client
  * over the Phase-2 REST surface; the backend is authority (super-admin gated there,
  * so a non-admin gets a 403 rendered as a Notice). Pick an agent → toggle tools from
- * the catalog (manifest tools pre-checked) → Save (a full-replace override) or Reset
- * to the manifest.
+ * the catalog (manifest + ADR 0315 default-on tools pre-checked) → Save (a
+ * full-replace override) or Reset to the manifest.
+ *
+ * ADR 0315 note: an override FULL-REPLACES, so it is also the REVOKE path — to
+ * take a default-on tool from one agent, uncheck it and Save. The default-on six
+ * are pre-checked (the backend's `effective` unions them), so a save never
+ * silently strips them; but saving ANY override PINS the agent's tool set — it
+ * will no longer auto-receive future default-on additions until Reset.
  */
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../ui/PageHeader.js';
@@ -43,13 +50,18 @@ export function AgentAllowlistPanel(): JSX.Element {
   const { t } = useTranslation('agentAllowlists');
   const [agents, setAgents] = useState<AgentAllowlistRow[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** AA-G1 — the read FAILED, as distinct from `agents === null` = still loading.
+   *  Same shape as MEM-G1/PL-G1 (#2584) and CF-G2 (#2588): without it a failed
+   *  read renders the loading card forever, on the surface that says which tools
+   *  each agent may call. */
+  const [loadFailed, setLoadFailed] = useState(false);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const navRef = useRef<HTMLElement>(null);
 
   const refresh = useCallback(async () => {
-    try { setAgents(await listAgentAllowlists()); }
-    catch (e) { setError(e instanceof Error ? e.message : t('loadFailed')); }
+    try { setAgents(await listAgentAllowlists()); setLoadFailed(false); setError(null); }
+    catch (e) { setLoadFailed(true); setError(e instanceof Error ? e.message : t('loadFailed')); }
   }, [t]);
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -73,21 +85,27 @@ export function AgentAllowlistPanel(): JSX.Element {
   };
 
   return (
-    <div>
+    <div data-walkthrough="agent-allowlists.page">
       <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('lede')} />
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {agents === null ? (
+      {agents === null && loadFailed ? (
+        <StateCard announce
+          icon={<ShieldIcon size={20} />}
+          title={t('loadFailedTitle')}
+          body={t('loadFailedBody')}
+          action={<Button variant="secondary" size="sm" onClick={() => void refresh()}>{t('retry')}</Button>}
+        />
+      ) : agents === null ? (
         <StateCard icon={<ShieldIcon size={20} />} title={t('loading')} loading />
       ) : agents.length === 0 ? (
         <StateCard icon={<ShieldIcon size={22} />} title={t('noAgentsTitle')} body={t('noAgentsBody')} />
       ) : (
         <div className="u-grid u-grid-2 u-gap-4">
-          <nav ref={navRef} className="surface-card u-flex u-flex-col u-gap-1" aria-label={t('agentListLabel')} onKeyDown={onNavKeyDown}>
+          <nav ref={navRef} className="surface-card u-flex u-flex-col u-gap-1" aria-label={t('agentListLabel')} role="toolbar" aria-orientation="vertical" onKeyDown={onNavKeyDown}>
             {agents.map((a) => (
-              <button
+              <Button
                 key={a.agentId}
-                type="button"
-                className={`ghost btn-sm u-justify-start ${selectedId === a.agentId ? 'is-active' : ''}`}
+                variant="quiet" size="sm" className={`u-justify-start${selectedId === a.agentId ? ' is-active' : ''}`}
                 aria-pressed={selectedId === a.agentId}
                 aria-current={selectedId === a.agentId ? 'true' : undefined}
                 onClick={() => setSelectedId(a.agentId)}
@@ -96,7 +114,7 @@ export function AgentAllowlistPanel(): JSX.Element {
                   <span className="u-truncate">{a.label}</span>
                   {a.override ? <span className="chip chip--accent u-fs-11">{t('overriddenChip')}</span> : null}
                 </span>
-              </button>
+              </Button>
             ))}
           </nav>
           {selectedId ? (
@@ -129,12 +147,13 @@ function AgentEditor(props: { agentId: string; onChanged: () => Promise<void>; o
   // aren't currently mounted are still visible (flagged) rather than silently absent.
   const allIds = useMemo(() => {
     if (!detail) return [];
-    return [...new Set([...detail.toolCatalog, ...detail.manifestAllowlist, ...(detail.override?.toolAllowlist ?? [])])].sort((a, b) => a.localeCompare(b));
+    return [...new Set([...detail.toolCatalog, ...detail.manifestAllowlist, ...detail.baseline, ...(detail.override?.toolAllowlist ?? [])])].sort((a, b) => a.localeCompare(b));
   }, [detail]);
 
   if (!detail) return <StateCard icon={<ShieldIcon size={18} />} title={t('loading')} loading />;
 
   const manifest = new Set(detail.manifestAllowlist);
+  const baseline = new Set(detail.baseline);
   const catalog = new Set(detail.toolCatalog);
   const dirty = !sameSet(selected, new Set(detail.effective));
 
@@ -166,6 +185,10 @@ function AgentEditor(props: { agentId: string; onChanged: () => Promise<void>; o
         </div>
       </div>
       <p className="muted u-fs-12 u-m-0">{t('explainer')}</p>
+      {/* ADR 0315 — an override full-replaces, so saving PINS this agent's set:
+          it won't auto-receive future default-on tools until Reset. Surfaced so
+          the pin is a choice, not a surprise. */}
+      {dirty && !detail.override ? <Notice variant="info">{t('pinWarning')}</Notice> : null}
 
       <fieldset className="u-flex u-flex-col u-gap-2 u-p-0 u-border-0" aria-label={t('toolChecklistLabel', { label: detail.label })}>
         {allIds.map((id) => (
@@ -180,6 +203,7 @@ function AgentEditor(props: { agentId: string; onChanged: () => Promise<void>; o
                   <span className="u-fs-12 u-fw-600">{toolLabel(id)}</span>
                   <code className="muted u-fs-11">{id}</code>
                 </span>
+                {baseline.has(id) ? <span className="chip chip--accent u-fs-11">{t('defaultOnTag')}</span> : null}
                 {manifest.has(id) ? <span className="chip chip--muted u-fs-11">{t('manifestTag')}</span> : null}
                 {!catalog.has(id) ? <span className="chip chip--warning u-fs-11">{t('notMountedTag')}</span> : null}
               </span>
@@ -189,8 +213,8 @@ function AgentEditor(props: { agentId: string; onChanged: () => Promise<void>; o
       </fieldset>
 
       <div className="action-bar u-justify-end">
-        <button type="button" className="secondary btn-sm" disabled={busy || !detail.override} onClick={() => void reset()}>{t('resetToManifest')}</button>
-        <button type="button" className="primary btn-sm" disabled={busy || !dirty} onClick={() => void save()}>{busy ? t('saving') : t('saveOverride')}</button>
+        <Button variant="secondary" size="sm" disabled={busy || !detail.override} onClick={() => void reset()}>{t('resetToManifest')}</Button>
+        <Button variant="primary" size="sm" disabled={busy || !dirty} onClick={() => void save()}>{busy ? t('saving') : t('saveOverride')}</Button>
       </div>
     </section>
   );

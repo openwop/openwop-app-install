@@ -14,17 +14,20 @@
  */
 
 import type { BackendFeature } from '../types.js';
-import { CHANNEL_WORKFLOWS } from './channelWorkflows.js';
+import { registerCampaignChannelsAgentTools } from './agentTools.js';
 
 export const campaignChannelsFeature: BackendFeature = {
   id: 'campaign-channels',
-  // No REST routes — the surface is the node pack + the channel workflows,
-  // driven through the existing run/chat surfaces (ADR 0058).
-  registerRoutes: () => { /* node/workflow surface only */ },
-  builtinWorkflows: CHANNEL_WORKFLOWS,
+  // No REST routes — the surface is the node pack + the channel workflows +
+  // the Channel Generator's chat tools, driven through the existing run/chat
+  // surfaces (ADR 0058). CFP-1 (ADR 0308 D2): register the generator's real
+  // tools here (the run-starter deps ride the closure).
+  registerRoutes: (deps) => {
+    registerCampaignChannelsAgentTools({ storage: deps.storage, hostSuite: deps.hostSuite });
+  },
   requiredPacks: [
-    { name: 'feature.campaign-channels.nodes', version: '1.0.0' },
-    { name: 'feature.campaign-channels.agents', version: '1.0.0' },
+    { name: 'feature.campaign-channels.nodes', version: '1.12.0' },
+    { name: 'feature.campaign-channels.agents', version: '1.2.0' },
   ],
   toggleDefault: {
     id: 'campaign-channels',

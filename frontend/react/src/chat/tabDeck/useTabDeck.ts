@@ -88,7 +88,6 @@ export function useTabDeck(
       // not just a DEV console.warn (a tab vanishing unannounced is disorienting).
       onEvictRef.current?.(victim.sessionId, victim.kind);
       if (import.meta.env?.DEV) {
-        // eslint-disable-next-line no-console
         console.warn(
           `[tabDeck] working set at capacity (${stateRef.current.tabs.length}/${maxTabs}); evicting ${victim.kind} tab ${victim.sessionId} to open ${sessionId}. It stays in the sidebar and reopens from the backend.`,
         );

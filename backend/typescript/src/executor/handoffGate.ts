@@ -30,7 +30,7 @@
  * @see schemas/agent-manifest.schema.json #/properties/handoff
  */
 
-import { getAgentRegistry } from './agentRegistry.js';
+import { resolveAgentForTenant } from '../host/agentVisibility.js';
 import type { WorkflowDefinition } from './types.js';
 
 export type HandoffGateResult =
@@ -50,12 +50,16 @@ const SCENARIO_KEY = 'scenario';
 export async function enforceManifestHandoffContract(input: {
   definition: WorkflowDefinition;
   runInputs: unknown;
+  /** ADR 0379 P1 — the run's tenant: a cross-tenant `requiresAgentId` resolves
+   *  to null (same as absent), so another tenant's handoff schemas are never
+   *  read into this tenant's contract enforcement. */
+  tenantId: string;
 }): Promise<HandoffGateResult> {
   const requiresAgentId = input.definition.metadata?.['requiresAgentId'];
   if (typeof requiresAgentId !== 'string' || requiresAgentId.length === 0) {
     return { ok: true };
   }
-  const agent = await getAgentRegistry().resolve(requiresAgentId);
+  const agent = await resolveAgentForTenant(requiresAgentId, input.tenantId);
   if (!agent?.handoff) return { ok: true };
 
   const firstNodeId = input.definition.nodes[0]?.nodeId;

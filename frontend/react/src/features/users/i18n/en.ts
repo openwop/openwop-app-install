@@ -11,6 +11,7 @@ export const messages = {
 
   // Signed-in notice
   signedInAs: 'Signed in as <0>{{name}}</0> (source: {{source}}; status: {{status}}).',
+  meFailed: 'Could not load your own user record. The list and SSO settings below are unaffected.',
 
   // Form field labels
   fieldPrincipalId: 'Principal id',
@@ -27,6 +28,8 @@ export const messages = {
 
   // aria-labels
   deleteRowLabel: 'Delete {{name}}',
+  disableRowLabel: 'Disable {{name}}',
+  enableRowLabel: 'Enable {{name}}',
 
   // Table caption + column headers
   captionUsers: 'Users',
@@ -51,6 +54,7 @@ export const messages = {
   ssoLede:
     'SAML 2.0 single sign-on and SCIM 2.0 provisioning. Host seams for white-label / B2B deployments — advertised only when configured + honored.',
   ssoReadingCaps: 'Reading host capabilities…',
+  ssoCapsFailed: 'Could not read this host’s advertised capabilities, so we can’t say whether SAML or SCIM is enabled. This is not confirmation that they are off.',
 
   // SSO row state chips
   ssoAdvertised: 'Advertised',
@@ -75,4 +79,46 @@ export const messages = {
   // SSO not-enabled alert (rich markup via <Trans>)
   ssoNotEnabled:
     'Not enabled on this deployment. A white-label host turns these on by configuring an IdP certificate / SCIM bearer; the host then advertises the <0> openwop-auth-saml</0> / <1>openwop-auth-scim</1> profiles above.',
+  deleteUserConfirm: 'Delete user "{{name}}"?',
+
+  // Collection kit (§4.5 rules 11+13) — filterbar, facets, grid view, zero-match
+  filterGroup: 'Filter users',
+  filterPlaceholder: 'Search users…',
+  filterAria: 'Search users by name or email',
+  filterStatusLabel: 'Filter by status',
+  filterSourceLabel: 'Filter by source',
+  allStatuses: 'All statuses',
+  allSources: 'All sources',
+  status_active: 'Active',
+  status_disabled: 'Disabled',
+  source_oidc: 'OIDC',
+  source_password: 'Password',
+  source_saml: 'SAML',
+  source_scim: 'SCIM',
+  source_manual: 'Manual',
+  viewTable: 'Table',
+  noMatchTitle: 'No matching users',
+  noMatchBody: 'No users match the current filters.',
+  clearFilters: 'Clear filters',
+
+  // ── ADR 0621 D5/D7 — lifecycle consequences, self-lockout, sign-out-everywhere ──
+  ownRowHint: 'Your own account — ask another admin to change it.',
+  signOutEverywhere: 'Sign out everywhere',
+  revokeRowLabel: 'Sign {{name}} out everywhere',
+  revokeUserConfirm: 'Sign "{{name}}" out everywhere?',
+  revokeUserBody: 'This ends every active session of this user on every device immediately. The account stays active and they can sign in again.',
+  userSessionsRevoked: '{{name}} was signed out everywhere.',
+  revokeFailed: 'Could not sign the user out.',
+  disableUserConfirm: 'Disable "{{name}}"?',
+  disableUserBody: 'Disabling ends every active session of this user immediately and blocks new sign-ins until the account is re-enabled.',
+  userDisabled: '{{name}} was disabled and signed out everywhere.',
+  userEnabled: '{{name}} was enabled.',
+  userDeleted: '{{name}} was deleted.',
+  deleteUserBody: 'This permanently erases the account of {{name}} and every record stored under it — profile, memories, workflows, runs, and stored credentials. There is no undo.',
+  selfLockoutRefused: 'You can\'t disable, sign out, or delete your own account from here — ask another admin.',
+  legalHoldRefused: 'This workspace is under legal hold, so user data cannot be erased. Lift the hold, then retry.',
+  addRequired: 'Enter a principal id.',
+  addInvalidPrincipal: 'A principal id is a single token without spaces, e.g. oidc:sub-123.',
+  addDuplicate: 'A user with this principal id already exists.',
+  principalIdHelp: 'The identity-provider subject this user signs in with.',
 } as const;

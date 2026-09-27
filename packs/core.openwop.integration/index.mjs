@@ -17,11 +17,18 @@
  *   the cached payload — emails NOT re-sent, Slack messages NOT
  *   duplicated. Cost-once + replay-deterministic.
  *
- * Idempotency-Key derivation: deterministic SHA-256 over
- * (runId, nodeId, recipient/channel, subject/text, body/blocks).
- * Same run + node + payload → same key across replays. Surfaced in
- * output for debug + so provider-side dedup (if supported by
- * provider) sees a consistent key across retries.
+ * Idempotency-Key derivation: deterministic SHA-256.
+ *   email-send  → (nodeId, recipient, subject, body) — NO runId, so the key is
+ *     FORK-STABLE: a `:fork` (which mints a new runId) derives the SAME key and
+ *     the host sent-ledger (`emailSentLedger`) dedups the re-send (WF-EM-6). A
+ *     send is a non-idempotent side effect; biasing toward suppression is the
+ *     safe direction (a genuinely-intended identical re-send is recoverable; a
+ *     spurious fork re-send is not).
+ *   slack-message → (runId, nodeId, channel, text, blocks) — runId retained
+ *     because there is NO host slack sent-ledger to dedup against, so the key is
+ *     provider-side-only (used only if the provider supports dedup); it is not a
+ *     fork-resend guard and carries no cross-run suppression to defeat.
+ * Same node + payload → same key across replays; surfaced in output for debug.
  *
  * @see spec/v1/capabilities.md (host email + slack advertisement)
  * @see spec/v1/replay.md
@@ -63,11 +70,15 @@ function deriveIdempotencyKey(parts) {
 
 export async function emailSend(ctx) {
   ensureEmailAdapter(ctx);
-  const { from, provider, replyTo, fallbackOnFailure } = ctx.config;
+  const { from, provider, replyTo, fallbackOnFailure, purpose } = ctx.config;
   const { to, cc, bcc, subject, text, html } = ctx.inputs;
 
+  // WF-EM-6: content-anchored, NO runId. A `:fork` mints a new runId; keeping it
+  // here defeated the sent-ledger (`emailSentLedger`), so a fork re-sent the email.
+  // Dropping runId (keeping nodeId, which is fork-stable and distinguishes multiple
+  // send nodes in one chain) makes the key fork-stable so the ledger dedups the re-send.
   const idempotencyKey = deriveIdempotencyKey([
-    String(ctx.runId), String(ctx.nodeId),
+    String(ctx.nodeId),
     Array.isArray(to) ? to.sort().join(',') : to,
     subject, text ?? '', html ?? '',
   ]);
@@ -83,10 +94,23 @@ export async function emailSend(ctx) {
     ...(replyTo !== undefined ? { replyTo } : {}),
     ...(provider !== undefined ? { provider } : {}),
     ...(fallbackOnFailure !== undefined ? { fallbackOnFailure } : {}),
+    // ADR 0655 D1 — what this message IS. A chain send is marketing unless the
+    // author declares `config.purpose: "transactional"` (receipts, resets).
+    purpose: purpose === 'transactional' ? 'transactional' : 'marketing',
     idempotencyKey,
   });
 
   const sent = result?.sent === true || (result?.messageId !== undefined && result?.messageId !== '');
+  // ADR 0655 D2 (WF-EM-7 / EMWF-5) — a failed send is a typed node FAILURE, never
+  // `status:'success', sent:false`. No chain branched on `sent`, so a run that
+  // mailed nobody completed green. The adapter's code rides `error.code`; egress
+  // REFUSALS are non-retryable in the executor, transport failures retry.
+  if (!sent) {
+    throw Object.assign(new Error(`email send failed: ${result?.error ?? 'email_send_failed'}`), {
+      code: typeof result?.error === 'string' && /^[a-z_]+$/.test(result.error) ? result.error : 'email_send_failed',
+      provider: result?.provider,
+    });
+  }
 
   return {
     status: 'success',
@@ -161,7 +185,10 @@ export async function smsSend(ctx) {
   if (typeof ctx.messaging?.sendSms !== 'function') {
     throw Object.assign(new Error('host does not implement ctx.messaging.sendSms'), { code: 'HOST_CAPABILITY_MISSING' });
   }
-  const r = await ctx.messaging.sendSms({ provider: ctx.config.provider, to: ctx.inputs.to, from: ctx.inputs.from, text: ctx.inputs.text });
+  // ADR 0619 — fork-stable key so a within-run config.retry re-run / re-dispatch
+  // dedups host-side (egressSentLedger) instead of double-sending.
+  const idempotencyKey = deriveIdempotencyKey([String(ctx.runId), String(ctx.nodeId), ctx.inputs.to, ctx.inputs.text ?? '']);
+  const r = await ctx.messaging.sendSms({ provider: ctx.config.provider, to: ctx.inputs.to, from: ctx.inputs.from, text: ctx.inputs.text, idempotencyKey });
   return { status: 'success', outputs: r };
 }
 
@@ -169,7 +196,9 @@ export async function voiceCallPlace(ctx) {
   if (typeof ctx.voice?.placeCall !== 'function') {
     throw Object.assign(new Error('host does not implement ctx.voice.placeCall'), { code: 'HOST_CAPABILITY_MISSING' });
   }
-  const r = await ctx.voice.placeCall({ provider: ctx.config.provider, to: ctx.inputs.to, from: ctx.inputs.from, twiml: ctx.inputs.twiml, callbackUrl: ctx.inputs.callbackUrl });
+  // ADR 0619 — key authored now; the dedup binds when ctx.voice lands (latent today).
+  const idempotencyKey = deriveIdempotencyKey([String(ctx.runId), String(ctx.nodeId), ctx.inputs.to, ctx.inputs.twiml ?? '']);
+  const r = await ctx.voice.placeCall({ provider: ctx.config.provider, to: ctx.inputs.to, from: ctx.inputs.from, twiml: ctx.inputs.twiml, callbackUrl: ctx.inputs.callbackUrl, idempotencyKey });
   return { status: 'success', outputs: r };
 }
 
@@ -177,7 +206,9 @@ export async function voiceCallTtsGreet(ctx) {
   if (typeof ctx.voice?.tts !== 'function') {
     throw Object.assign(new Error('host does not implement ctx.voice.tts'), { code: 'HOST_CAPABILITY_MISSING' });
   }
-  const r = await ctx.voice.tts({ callId: ctx.inputs.callId, text: ctx.inputs.text, voice: ctx.config.voice });
+  // ADR 0619 — key authored now; the dedup binds when ctx.voice lands (latent today).
+  const idempotencyKey = deriveIdempotencyKey([String(ctx.runId), String(ctx.nodeId), ctx.inputs.callId, ctx.inputs.text ?? '']);
+  const r = await ctx.voice.tts({ callId: ctx.inputs.callId, text: ctx.inputs.text, voice: ctx.config.voice, idempotencyKey });
   return { status: 'success', outputs: r };
 }
 
@@ -185,9 +216,12 @@ export async function notificationPush(ctx) {
   if (typeof ctx.notification?.push !== 'function') {
     throw Object.assign(new Error('host does not implement ctx.notification.push'), { code: 'HOST_CAPABILITY_MISSING' });
   }
+  // ADR 0619 — fork-stable key so a within-run config.retry re-run / re-dispatch
+  // dedups host-side (egressSentLedger) instead of double-sending.
+  const idempotencyKey = deriveIdempotencyKey([String(ctx.runId), String(ctx.nodeId), ctx.inputs.deviceToken, ctx.inputs.title ?? '', ctx.inputs.body ?? '']);
   const r = await ctx.notification.push({
     provider: ctx.config.provider,
-    deviceToken: ctx.inputs.deviceToken, title: ctx.inputs.title, body: ctx.inputs.body, data: ctx.inputs.data ?? {},
+    deviceToken: ctx.inputs.deviceToken, title: ctx.inputs.title, body: ctx.inputs.body, data: ctx.inputs.data ?? {}, idempotencyKey,
   });
   return { status: 'success', outputs: r };
 }

@@ -11,6 +11,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { assertFlatErrorEnvelope, detailOf, errorCodeOf } from './helpers/errorEnvelope.js';
 import {
   archiveWidget,
   listWidgets,
@@ -33,7 +34,7 @@ beforeAll(async () => {
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 
 afterAll(async () => {
@@ -100,9 +101,16 @@ describe('widget reference domain — route conventions', () => {
     const first = await api<{ status: string }>(`/v1/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
     expect(first.status).toBe(200);
 
-    const second = await api<{ error: string; reason: string }>(`/v1/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
+    const second = await api<unknown>(`/v1/host/openwop-app/widgets/${id}/archive`, { method: 'POST', body: '{}' });
     expect(second.status).toBe(409);
-    expect(second.body).toMatchObject({ error: 'conflict', reason: 'already_archived' });
+    // H27-b — INVERTED. The machine-readable discriminator was a NEW TOP-LEVEL
+    // `reason`, which `error-envelope.schema.json` forbids
+    // (`additionalProperties: false`); it now rides `details.reason`. The point
+    // of this leg — that the 409 is machine-readable and not just a status — is
+    // unchanged, and the full-envelope assertion is what keeps it that way.
+    assertFlatErrorEnvelope(second.body, 'widget archive conflict');
+    expect(errorCodeOf(second.body)).toBe('conflict');
+    expect(detailOf(second.body, 'reason')).toBe('already_archived');
   });
 
   it('validation failures are 400 with the canonical envelope', async () => {

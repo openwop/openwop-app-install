@@ -22,7 +22,8 @@
  * `component` discriminator and the `surface` wrapper.
  */
 
-import { useState, useId } from 'react';
+import { Button } from '../../ui/Button.js';
+import { useState, useId, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../../client/interruptsClient.js';
 import { exchange } from '../conversationClient.js';
@@ -37,6 +38,9 @@ import {
   type A2uiComponent,
   type A2uiFieldComponent,
 } from './catalog.js';
+import { isV09Payload, parseV09Payload, type V09Payload } from './v09/profile.js';
+import { foldSurface } from './v09/fold.js';
+import { A2uiV09Surface, exceedsRenderBudget } from './v09/A2uiV09Surface.js';
 
 type FieldValue = string | boolean;
 
@@ -127,7 +131,61 @@ function Heading({ level, text }: { level: number | undefined; text: string }): 
   return <div role="heading" aria-level={ariaLevel} className="u-mbox-b2 u-fs-13 u-fw-600">{text}</div>;
 }
 
-export function A2uiSurfaceCard({ payload, onAction, isLoading }: CardProps): JSX.Element {
+/**
+ * RFC 0209 (ADR 0749) — the card renders BOTH per-kind schema versions: an
+ * A2UI v0.9 body (`version: "v0.9"`, or `{ surfaces: [...] }` — several
+ * envelopes of one surface, folded in order) goes to the v0.9 renderer, and
+ * everything else stays on the 0.9.1 tree renderer below, which keeps reading
+ * version-1 surfaces for as long as they exist (legacy-readable, §C.11).
+ */
+export function A2uiSurfaceCard(props: CardProps): JSX.Element {
+  return isV09CardPayload(props.payload) ? <A2uiV09Card {...props} /> : <A2uiLegacySurfaceCard {...props} />;
+}
+
+function v09Payloads(payload: unknown): unknown[] {
+  const surfaces = (payload as { surfaces?: unknown } | null)?.surfaces;
+  return Array.isArray(surfaces) ? surfaces : [payload];
+}
+function isV09CardPayload(payload: unknown): boolean {
+  const list = v09Payloads(payload);
+  return list.length > 0 && list.every(isV09Payload);
+}
+
+function A2uiV09Card({ payload, onAction, isLoading }: CardProps): JSX.Element {
+  const { t } = useTranslation('chat');
+  // Parse, fold and key once per payload identity (WIT-A2UI-7: the key was a
+  // JSON.stringify of every message on EVERY feed render).
+  const view = useMemo(() => {
+    const parsed: V09Payload[] = [];
+    for (const p of v09Payloads(payload)) {
+      const r = parseV09Payload(p);
+      if (!r.ok) return { reason: r.reason } as const;
+      parsed.push(r.payload);
+    }
+    if (parsed.some((p) => p.surfaceId !== parsed[0]?.surfaceId)) return { reason: t('a2uiV09RejectMixedSurfaces') } as const;
+    const state = foldSurface(parsed);
+    // WIT-A2UI-1 — refuse a surface whose expansion exceeds the render budget.
+    if (exceedsRenderBudget(state.components)) return { reason: t('a2uiV09RejectTooLarge') } as const;
+    // Re-mount whenever the recorded fold changes, so the local data model
+    // re-seeds from it (a same-length replacement must re-seed too).
+    return { state, foldKey: JSON.stringify(parsed) } as const;
+  }, [payload, t]);
+  // Fail-closed, exactly as the 0.9.1 path: never render what the profile refused.
+  if ('reason' in view) {
+    return (
+      <div className="card u-bg-surface-2">
+        <Notice variant="warning">{t('a2uiUnsafe', { reason: view.reason })}</Notice>
+      </div>
+    );
+  }
+  return (
+    <div className="card u-bg-surface-2">
+      <A2uiV09Surface key={view.foldKey} state={view.state} onAction={onAction} isLoading={isLoading} />
+    </div>
+  );
+}
+
+function A2uiLegacySurfaceCard({ payload, onAction, isLoading }: CardProps): JSX.Element {
   const { t } = useTranslation('chat');
   const parsed = parseSurface(payload);
   // Hooks must run unconditionally — seed from the parsed components, or empty.
@@ -193,9 +251,9 @@ export function A2uiSurfaceCard({ payload, onAction, isLoading }: CardProps): JS
         {surface.components
           .filter((c): c is Extract<A2uiComponent, { component: 'action.button' }> => c.component === 'action.button')
           .map((btn) => (
-            <button
+            <Button
               key={btn.id}
-              className={btn.action.target === 'resume' ? '' : 'secondary'}
+              variant={btn.action.target === 'resume' ? 'primary' : 'secondary'}
               disabled={actionsDisabled}
               {...(showHint ? { 'aria-describedby': hintId } : {})}
               // a2ui-action-confinement: a surface action can do exactly one
@@ -211,7 +269,7 @@ export function A2uiSurfaceCard({ payload, onAction, isLoading }: CardProps): JS
               )}
             >
               {btn.label}
-            </button>
+            </Button>
           ))}
       </div>
     </div>

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/reindex-drain.input.json",
+  "title": "KbReindexDrainInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) \u2014 a chain may supply either, so nothing is `required` here; the SURFACE refuses a missing or unusable key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string",
+      "description": "The org that owns the collection. A cross-org id is simply not found (the service enforces the tenant+org key)."
+    },
+    "collectionId": {
+      "type": "string",
+      "description": "The KB collection to act on."
+    },
+    "maxChunks": {
+      "type": "number",
+      "description": "Chunks to embed in THIS slice. Absent \u21d2 the host default sized to fit inside the RFC 0058 run-duration ceiling. Bounded by the surface.",
+      "minimum": 1
+    }
+  },
+  "additionalProperties": true
+}

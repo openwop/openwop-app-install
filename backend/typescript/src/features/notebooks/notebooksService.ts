@@ -23,9 +23,12 @@
  */
 
 import { OpenwopError } from '../../types.js';
+import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js'; // KBC-1 (ADR 0643 D2 precondition) — an in-process lane that owns these rows / gates at its own door
+import type { KbEmitOptions } from '../kb/emit.js'; // ADR 0643 D3
 import { createLogger } from '../../observability/logger.js';
 import {
-  createProject, getProject, listProjects, deleteProject, projectSubject, type Project,
+  createProject, getProject, listProjects, deleteProject, projectSubject, setNotebookCollectionId,
+  notebookCorpusToDelete, type Project,
 } from '../projects/projectsService.js';
 import {
   createCollection, deleteCollection, ingestDocument, listDocuments, getDocument, search,
@@ -162,7 +165,10 @@ export type NotebookSource = Omit<KnowledgeDocument, 'text'> & {
  *  `project:<id>` subject — created + bound by `createNotebook`. */
 async function toNotebook(tenantId: string, p: Project): Promise<Notebook | null> {
   const binding = await getSubjectKnowledge(tenantId, projectSubject(p.id));
-  const collectionId = binding.collectionIds?.[0];
+  // R3 — prefer the SURFACE-PROVISIONED collection stamped on the row; the binding
+  // list's position 0 is bind-order, not ownership (the Knowledge tab can put a
+  // SHARED collection there). Legacy rows without the stamp keep the old read.
+  const collectionId = p.notebookCollectionId ?? binding.collectionIds?.[0];
   if (!collectionId) return null; // not a fully-provisioned notebook
   return {
     id: p.id,
@@ -208,12 +214,17 @@ export async function createNotebook(
   // against the workspace cap. Roll the partial provision back so the create is atomic.
   let collectionId: string | undefined;
   try {
+    // H1 — stamp the corpus with the project subject at birth. Without it, the KB
+    // guard (`assertCollectionSubjectReadable`) early-returns on the unstamped
+    // collection and org scope becomes the whole rule → a private project's Sources
+    // leak to any non-member org reader. Mirrors `projectKnowledgeService:152`.
     const collection = await createCollection(tenantId, orgId, actor, {
       name: `Notebook: ${project.name}`,
       description: `Sources for the “${project.name}” research notebook.`,
-    });
+    }, { boundSubject: projectSubject(project.id) });
     collectionId = collection.collectionId;
     await setSubjectKnowledge(tenantId, projectSubject(project.id), { collectionIds: [collectionId] });
+    await setNotebookCollectionId(tenantId, project.id, collectionId);
     const notebook = await toNotebook(tenantId, project);
     if (!notebook) {
       // Should never happen (we just bound the collection) — fail loud rather than
@@ -224,7 +235,7 @@ export async function createNotebook(
   } catch (err) {
     // Best-effort rollback of the just-minted collection + project; log if cleanup itself
     // fails (an orphan we couldn't reach), then re-throw the original provisioning error.
-    if (collectionId) await deleteCollection(tenantId, orgId, collectionId).catch(() => undefined);
+    if (collectionId) await deleteCollection(tenantId, orgId, collectionId, PREAUTHORIZED_CALLER).catch(() => undefined); // KBC-1
     await deleteProject(tenantId, project.id).catch((e) =>
       log.warn('notebook_create_rollback_failed', { id: project.id, error: e instanceof Error ? e.message : String(e) }));
     throw err;
@@ -244,17 +255,21 @@ export async function ensureNotebookForProject(tenantId: string, id: string, act
   if (!project) throw new OpenwopError('not_found', 'Project not found.', 404, { id });
   const existing = await toNotebook(tenantId, project);
   if (existing) return existing; // already has a bound collection — no-op
+  // H1 — stamp the corpus with the project subject at birth (see createNotebook).
   const collection = await createCollection(tenantId, project.orgId, actor, {
     name: `Sources: ${project.name}`,
     description: `Research sources for the “${project.name}” project.`,
-  });
+  }, { boundSubject: projectSubject(project.id) });
   const binding = await getSubjectKnowledge(tenantId, projectSubject(project.id));
   await setSubjectKnowledge(tenantId, projectSubject(project.id), {
     // Append the new collection; preserve any existing collections + retrieval projection.
     collectionIds: [...(binding.collectionIds ?? []), collection.collectionId],
     ...(binding.retrieval ? { retrieval: binding.retrieval } : {}),
   });
-  const notebook = await toNotebook(tenantId, project);
+  await setNotebookCollectionId(tenantId, project.id, collection.collectionId);
+  // Re-read: the stamp changed the row, and toNotebook prefers it.
+  const stamped = await getProject(tenantId, id);
+  const notebook = await toNotebook(tenantId, stamped ?? project);
   if (!notebook) throw new OpenwopError('internal_error', 'Sources provisioning failed.', 500, { id });
   return notebook;
 }
@@ -275,17 +290,54 @@ export async function listNotebooks(tenantId: string): Promise<Notebook[]> {
 /** Delete a notebook: drop its KB collection (sources), then cascade the project
  *  (board + memory + the subject-knowledge binding). Tenant-scoped fail-closed —
  *  a foreign-tenant / non-notebook id is a no-op (`deleted:false`). */
-export async function deleteNotebook(tenantId: string, id: string): Promise<{ deleted: boolean }> {
+/**
+ * Delete a notebook: its exclusive KB collection, then the project cascade.
+ *
+ * Returns `deleteProject`'s real counts rather than just `{deleted}` — the
+ * projects DELETE route surfaces them, and narrowing them here forced that
+ * route to substitute ZEROS for cleanup that had actually happened (R2
+ * PRJ2-M1). "0 memory entries cleared" for a delete that cleared twelve is the
+ * same failure-rendered-as-an-answer shape this round exists to close.
+ */
+export async function deleteNotebook(tenantId: string, id: string): Promise<{ deleted: boolean; memoryEntriesCleared: number; schedulesCleared: number; collectionDeleted: boolean }> {
   const p = await getProject(tenantId, id);
-  if (!p || p.facet !== 'notebook') return { deleted: false };
-  // The bound collection holds this notebook's sources exclusively (created +
-  // bound at createNotebook), so deleting it is safe — unlike a shared project
-  // binding, which projectsService deliberately leaves intact.
-  const binding = await getSubjectKnowledge(tenantId, projectSubject(id));
-  const collectionId = binding.collectionIds?.[0];
+  // ADR 0601 / NBC-1 — the `p.facet !== 'notebook'` half of this guard is GONE.
+  // The ADR 0084 correction redefined a notebook as ANY project with a bound KB
+  // collection and dropped the facet check from `getNotebook`; this door kept it,
+  // and `ensureNotebookForProject` never stamps `facet`. So every project
+  // provisioned by opening the Sources tab was a first-class notebook to reads and
+  // a silent NO-OP to deletes — while the route had already cascaded its entire
+  // group conversation. Two doors, two different answers to "is this a notebook".
+  //
+  // Dropping it (rather than 404-ing at the route) is what makes the doors AGREE:
+  // a 404 here would just move the disagreement, leaving `GET /notebooks/:id` → 200
+  // beside `DELETE /notebooks/:id` → 404. The authority is unchanged — both delete
+  // doors already require `workspace:write` on this very project, exactly as
+  // `DELETE /projects/:id` does.
+  //
+  // What narrows the blast radius is `notebookCorpusToDelete` below.
+  //
+  // CORRECTED (ADR 0601 § Corrections / HIGH-1): this comment used to say that
+  // guard "is about OWNERSHIP of the corpus", and it was FALSE. The guard's last
+  // resort was `col.name.startsWith('Notebook: ' | 'Sources: ')` — a prefix test
+  // on a name the USER chooses and can edit. Widening the delete's population
+  // (dropping the facet check) widened the ERASER's population in the same
+  // stroke, from "projects created via POST /notebooks" to "every project with
+  // any bound KB collection" — including Knowledge-tab bindings that ADR 0084
+  // says may be SHARED. A shared collection named `Sources: Q3 research` was
+  // deleted out from under every other project bound to it. PROVED: shared
+  // collection 200 → 404, a second project's knowledge list → [].
+  if (!p) return { deleted: false, memoryEntriesCleared: 0, schedulesCleared: 0, collectionDeleted: false };
+  // The one predicate the consent dialog also reads (`deletesCorpus` on the
+  // project projection). Stamp-only: no name guess, no position-0 guess. A
+  // legacy notebook whose corpus predates the stamp keeps its collection —
+  // an orphan, which is recoverable; a destroyed shared corpus is not.
+  const collectionId = notebookCorpusToDelete(p);
+  let collectionDeleted = false;
   if (collectionId) {
     try {
-      await deleteCollection(tenantId, p.orgId, collectionId);
+      await deleteCollection(tenantId, p.orgId, collectionId, PREAUTHORIZED_CALLER); // KBC-1
+      collectionDeleted = true;
     } catch (err) {
       // best-effort: a missing collection must not block the project cascade,
       // but surface it (orphaned vectors are otherwise invisible).
@@ -296,7 +348,7 @@ export async function deleteNotebook(tenantId: string, id: string): Promise<{ de
   const res = await deleteProject(tenantId, id);
   // Defensive: ensure the binding is gone even if deleteProject's cascade changes.
   await clearSubjectKnowledge(tenantId, projectSubject(id));
-  return { deleted: res.deleted };
+  return { deleted: res.deleted, memoryEntriesCleared: res.memoryEntriesCleared, schedulesCleared: res.schedulesCleared, collectionDeleted };
 }
 
 /** Add a TEXT source to the notebook: ingest into the bound KB collection (chunk
@@ -306,6 +358,10 @@ export async function addSource(
   id: string,
   actor: string,
   input: { title?: unknown; text?: unknown; contentBase64?: unknown; contentType?: unknown },
+  /** ADR 0643 D3 — the workflow surface passes the run's `origin`. A notebook source
+   *  is ONE user-driven document (there is no bulk source lane in this service), so it
+   *  emits `document.ingested` like the KB route does. */
+  emit: KbEmitOptions = {},
 ): Promise<NotebookSource> {
   const nb = await mustGet(tenantId, id);
   // REPLAY GUARD (ADR 0108): KB media→text (image/audio) extraction is a live LLM call —
@@ -327,8 +383,7 @@ export async function addSource(
     text: input.text,
     ...(typeof input.contentBase64 === 'string' ? { contentBase64: input.contentBase64 } : {}),
     ...(typeof input.contentType === 'string' ? { contentType: input.contentType } : {}),
-    contentTrust: 'untrusted',
-  });
+  }, { contentTrust: 'untrusted', ...emit }, PREAUTHORIZED_CALLER); // KBC-1
   // A new source defaults to 'full' — no level row is stored until it's changed.
   return { ...doc, contextLevel: 'full', hasSummary: false };
 }
@@ -338,7 +393,7 @@ export async function addSource(
 export async function listSources(tenantId: string, id: string): Promise<NotebookSource[]> {
   const nb = await mustGet(tenantId, id);
   const [docs, levels, summaries] = await Promise.all([
-    listDocuments(tenantId, nb.orgId, nb.collectionId),
+    listDocuments(tenantId, nb.orgId, nb.collectionId, PREAUTHORIZED_CALLER), // KBC-1 — `requireNotebook`/the surface's org-visibility gate is this lane's door
     notebookLevels(tenantId, id),
     notebookSummaries(tenantId, id),
   ]);
@@ -390,7 +445,7 @@ async function recomputeBindingProjection(tenantId: string, nb: Notebook): Promi
 
 /** The unsynchronized recompute (always called under the per-notebook chain). */
 async function recomputeBindingProjectionUnsynced(tenantId: string, nb: Notebook): Promise<void> {
-  const docs = await listDocuments(tenantId, nb.orgId, nb.collectionId);
+  const docs = await listDocuments(tenantId, nb.orgId, nb.collectionId, PREAUTHORIZED_CALLER); // KBC-1
   const titleById = new Map(docs.map((d) => [d.documentId, d.title]));
   const { excludeDocumentIds, extraContext } = await deriveContextProjection(
     tenantId,
@@ -425,7 +480,7 @@ export async function setSourceContextLevel(
 ): Promise<NotebookSource> {
   const nb = await mustGet(tenantId, id);
   // sid must be a real document in THIS notebook's collection (no level rows for ghosts).
-  const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId);
+  const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER); // KBC-1
   if (!doc) throw new OpenwopError('not_found', 'Source not found.', 404, { id, sourceId });
 
   // `summary` is selectable ONLY once a summary has been generated for the source
@@ -449,7 +504,7 @@ export async function setSourceContextLevel(
 export async function getSourceText(tenantId: string, id: string, sourceId: string): Promise<string | null> {
   const nb = await getNotebook(tenantId, id);
   if (!nb) return null;
-  const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId);
+  const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER); // KBC-1
   return doc ? doc.text : null;
 }
 
@@ -475,7 +530,7 @@ export async function setSourceSummary(
   summary: unknown,
 ): Promise<{ stored: boolean }> {
   const nb = await mustGet(tenantId, id);
-  const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId);
+  const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sourceId, PREAUTHORIZED_CALLER); // KBC-1
   if (!doc) throw new OpenwopError('not_found', 'Source not found.', 404, { id, sourceId });
   const text = typeof summary === 'string' ? summary.trim() : '';
   if (text.length === 0) {
@@ -486,10 +541,51 @@ export async function setSourceSummary(
   return { stored: true };
 }
 
-/** Add a NOTE to the notebook (subject memory in the `project:<id>` scope). */
-export async function addNote(tenantId: string, id: string, content: unknown): Promise<SubjectNote[]> {
+/**
+ * ADR 0601 — where a notebook note's TEXT came from. This is the prompt-injection
+ * boundary the source lane already draws (`addSource` ingests every source
+ * `contentTrust:'untrusted'`, see :349), carried through to notes.
+ *
+ *   - `'authored'`    — a human composed this text in the note composer. Their own
+ *                       words, their own instructions ⇒ agent-TRUSTED.
+ *   - `'third-party'` — the text was COPIED out of research material or handed in
+ *                       by an external client: a retrieved KB passage the user
+ *                       clicked "save to notes" beside, or MCP `params.arguments`
+ *                       (ADR 0087 §73 declares inbound MCP content untrusted).
+ *                       The ACT may be a human's; the WORDS are not ⇒ UNTRUSTED.
+ */
+export type NoteContentOrigin = 'authored' | 'third-party';
+
+/**
+ * ADR 0601 — THE RULE, written once. Exhaustive by construction
+ * (`Record<NoteContentOrigin, …>`), so a new origin cannot be added without the
+ * compiler demanding its trust. This is what replaces the omission that shipped:
+ * `addNote` used to call `addSubjectNote` with NO options, which defaulted to
+ * `source:'user'` ⇒ no `MEMORY_UNTRUSTED_TAG` ⇒ recalled UNFENCED into a
+ * tool-enabled agent's prompt.
+ */
+const ORIGIN_TRUST: Record<NoteContentOrigin, 'trusted' | 'untrusted'> = {
+  authored: 'trusted',
+  'third-party': 'untrusted',
+};
+
+/**
+ * Add a NOTE to the notebook (subject memory in the `project:<id>` scope).
+ *
+ * `origin` is REQUIRED and has NO default — deliberately. Every caller of this
+ * function is a lane that knows whether a human composed the text, and the defect
+ * this closes was precisely a caller that said nothing and got `trusted` for free.
+ * A required argument makes the omission a COMPILE error rather than a silent
+ * trust upgrade, for the two callers that exist today and for every future one.
+ */
+export async function addNote(
+  tenantId: string,
+  id: string,
+  content: unknown,
+  origin: NoteContentOrigin,
+): Promise<SubjectNote[]> {
   await mustGet(tenantId, id);
-  await addSubjectNote(tenantId, projectSubject(id), content);
+  await addSubjectNote(tenantId, projectSubject(id), content, { contentTrust: ORIGIN_TRUST[origin] });
   return listSubjectNotes(tenantId, projectSubject(id));
 }
 
@@ -510,7 +606,7 @@ export async function searchNotebook(
   topK: unknown,
 ): Promise<{ hits: SearchHit[]; citations: Array<{ documentId: string; title: string }> }> {
   const nb = await mustGet(tenantId, id);
-  const rawHits = await search(tenantId, nb.orgId, nb.collectionId, query, topK);
+  const rawHits = await search(tenantId, nb.orgId, nb.collectionId, query, topK, 'dense', PREAUTHORIZED_CALLER); // KBC-1
   // ADR 0084: drop hits from excluded sources so Ask honors the same context levels
   // as the grounded chat. Read the DERIVED projection on the binding (a single
   // point-get, maintained on every setSourceContextLevel) rather than re-scanning

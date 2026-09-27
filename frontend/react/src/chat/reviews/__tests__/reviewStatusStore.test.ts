@@ -11,9 +11,17 @@ import type { ReviewRequest } from '../reviewClient.js';
 const listReviews = vi.fn<() => Promise<ReviewRequest[]>>();
 const decideReview = vi.fn<() => Promise<{ reviewId: string; status: string }>>();
 
+class MockReviewRequestError extends Error {
+  constructor(message: string, readonly errorCode: string, readonly httpStatus: number, readonly reason?: string) {
+    super(message);
+    this.name = 'ReviewRequestError';
+  }
+}
+
 vi.mock('../reviewClient.js', () => ({
   listReviews: (...a: unknown[]) => listReviews(...(a as [])),
   decideReview: (...a: unknown[]) => decideReview(...(a as [])),
+  ReviewRequestError: MockReviewRequestError,
 }));
 
 const { useReviewStatusStore } = await import('../reviewStatusStore.js');
@@ -36,7 +44,7 @@ function review(id: string, extra: Partial<ReviewRequest> = {}): ReviewRequest {
 beforeEach(() => {
   listReviews.mockReset();
   decideReview.mockReset();
-  useReviewStatusStore.setState({ reviews: [], statusById: {}, loading: false, error: null, _busCleanup: null, _refcount: 0 });
+  useReviewStatusStore.setState({ reviews: [], statusById: {}, loading: false, error: null, initialized: false, _busCleanup: null, _refcount: 0 });
 });
 
 describe('reviewStatusStore — signal frames', () => {
@@ -123,6 +131,15 @@ describe('reviewStatusStore — connect / refresh', () => {
     await s().refresh();
     // 'interrupt:a' was resolved mid-fetch (override) ⇒ not resurrected.
     expect(s().reviews.map((r) => r.reviewId)).toEqual(['interrupt:b']);
+    expect(s().initialized).toBe(true);
+  });
+
+  it('marks the first read settled on failure without claiming an empty inbox', async () => {
+    listReviews.mockRejectedValue(new Error('offline'));
+    await s().refresh();
+    expect(s().initialized).toBe(true);
+    expect(s().error).toBe('offline');
+    expect(s().reviews).toEqual([]);
   });
 
   it('connect is ref-counted: one subscription shared, last disconnect tears down', async () => {
@@ -135,5 +152,26 @@ describe('reviewStatusStore — connect / refresh', () => {
     expect(s()._busCleanup).not.toBeNull(); // still one caller
     s().disconnect();
     expect(s()._busCleanup).toBeNull();
+  });
+});
+
+describe('reviewStatusStore — ADR 0473 still-pending 409s (review F1)', () => {
+  it('proposal_stale RESTORES the optimistically-dropped review and rethrows', async () => {
+    useReviewStatusStore.setState({ reviews: [review('approval:cw-1'), review('approval:other')] });
+    listReviews.mockResolvedValue([review('approval:cw-1'), review('approval:other')]);
+    decideReview.mockRejectedValue(new MockReviewRequestError(
+      'conflict: The draft changed since it was reviewed', 'conflict', 409, 'proposal_stale',
+    ));
+    await expect(s().decide('approval:cw-1', 'approve', {})).rejects.toThrow(/draft changed/);
+    // NOT swallowed as success: the review is back in the pending list.
+    expect(s().reviews.map((r) => r.reviewId)).toContain('approval:cw-1');
+    expect(s().statusById['approval:cw-1']).toBeUndefined();
+  });
+
+  it('a classic already-resolved 409 (no reason) stays treat-as-success', async () => {
+    useReviewStatusStore.setState({ reviews: [review('approval:cw-2')] });
+    decideReview.mockRejectedValue(new MockReviewRequestError('conflict: Approval already approved.', 'conflict', 409));
+    await expect(s().decide('approval:cw-2', 'approve', {})).resolves.toBeUndefined();
+    expect(s().reviews.map((r) => r.reviewId)).not.toContain('approval:cw-2');
   });
 });

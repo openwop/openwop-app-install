@@ -11,12 +11,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/profile',
     element: <ProfilePage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
   },
   {
     path: '/team',
     element: <TeamPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
   },
 ];
 

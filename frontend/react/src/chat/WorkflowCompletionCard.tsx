@@ -23,13 +23,15 @@
  * different device).
  */
 
+import { Button } from '../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { getSavedWorkflow } from '../builder/persistence/localStore.js';
 import { formatElapsed } from './workflowProgress/formatters.js';
 import { formatNumber } from '../i18n/format.js';
-import { AlertIcon, BanIcon, CheckIcon } from '../ui/icons/index.js';
+import { AlertIcon, BanIcon, CheckIcon, ExternalLinkIcon } from '../ui/icons/index.js';
+import { announce } from '../ui/announce.js';
 import type { WorkflowRunState } from './types.js';
 
 interface Props {
@@ -51,7 +53,7 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
   // Both hooks are cheap during the running phase (no work done, just
   // initial-state reads), so the render-time cost of always calling
   // them is negligible.
-  const terminals = useTerminalNodes(run);
+  const { terminals, graphUnavailable } = useTerminalNodes(run);
   const elapsed = useElapsedSince(run.startedAt);
 
   const isTerminal = run.status === 'completed' || run.status === 'failed' || run.status === 'cancelled';
@@ -101,13 +103,19 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
   return (
     <CompletionShell tone="success" iconKind="check" title={translate('workflowCompleted')}>
       <Meta items={[stepCount, elapsed]} />
+      {/* ADR 0600 §4 — say WHY there is no output link, instead of leaving a
+          bare "Open run" that reads as "this run produced nothing". */}
+      {graphUnavailable && (
+        <div className="muted wfcomplete-error" data-testid="wfcomplete-graph-unavailable">
+          {translate('outputsNotOnThisDevice')}
+        </div>
+      )}
       <Actions>
         {terminals.length > 0
           ? terminals.map((t) => (
               <span key={t.nodeId} className="u-iflex u-gap-1 u-items-center">
-                <button
-                  type="button"
-                  className="secondary u-fs-12"
+                <Button
+                  variant="secondary" className="u-fs-12"
                   onClick={() => onPreviewArtifact?.(t.nodeId, t.output, t.label)}
                   disabled={!onPreviewArtifact}
                   // Button label:
@@ -119,7 +127,7 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
                   title={t.isPrimary ? translate('primaryOutputTitle') : undefined}
                 >
                   {(t.isPrimary || terminals.length > 1) ? translate('viewLabeled', { label: t.label }) : translate('viewOutput')} →
-                </button>
+                </Button>
                 {run.runId && !unavailable && (
                   // Deep-link companion to the modal-opening View button —
                   // opens /runs/:runId#node-:nodeId in a new tab so the user
@@ -133,7 +141,7 @@ export function WorkflowCompletionCard({ run, onPreviewArtifact }: Props): JSX.E
                     className="wfcomplete-deeplink"
                     aria-label={translate('openLabeledInRunDetail', { label: t.label })}
                   >
-                    ↗
+                    <ExternalLinkIcon size={12} />
                   </a>
                 )}
               </span>
@@ -203,7 +211,7 @@ interface Terminal {
  * fast path; a future cross-device path would re-fetch the BE
  * workflow definition and read the same field server-side.
  */
-function useTerminalNodes(run: WorkflowRunState): Terminal[] {
+function useTerminalNodes(run: WorkflowRunState): { terminals: Terminal[]; graphUnavailable: boolean } {
   // Memo key is a stable string hash of the inputs that actually
   // matter — using the raw `run.nodeNames` / `run.nodeOutputs` object
   // references would invalidate on every SSE event (the session
@@ -218,13 +226,47 @@ function useTerminalNodes(run: WorkflowRunState): Terminal[] {
   // the exhaustive-deps warning is reported.
   return useMemo(() => {
     const saved = getSavedWorkflow(run.workflowId);
-    if (!saved) return [];
+    // ADR 0600 §4 — the THIRD state, previously undisclosed. A cache miss and
+    // "this run produced no readable outputs" both returned `[]`, and the card
+    // rendered the identical bare "Open run". They are different facts and the
+    // second one is a claim: this workflow's graph has simply never been opened
+    // in the Builder ON THIS DEVICE, which for a feature with no page (driven
+    // from chat, a schedule or a trigger) is the COMMON case, not the edge one.
+    if (!saved) return { terminals: [], graphUnavailable: true };
     // A node is terminal if no edge has it as `source`.
     const hasOutgoing = new Set<string>();
     for (const e of saved.edges) hasOutgoing.add(e.source);
     const terminals: Terminal[] = [];
     for (const n of saved.nodes) {
-      if (hasOutgoing.has(n.id)) continue;
+      // ── ADR 0600 §4 (`ISU-23`) ────────────────────────────────────────
+      // An EXPLICIT `outputRole` outranks graph position. `outputRole:'primary'`
+      // means "the canonical deliverable" (RFC 0065) — a claim about what the
+      // user should be handed, not about where the node sits in the DAG. This
+      // filter used to drop every explicitly-tagged node that had an outgoing
+      // edge, which is most of them: a deliverable is usually followed by an
+      // approval gate and a notification.
+      //
+      // MEASURED on `insights-suite`, which is what surfaced it: the three
+      // chains tag `emailDraft` (the drafted email) and `score` (the 9-box
+      // result) as primary, and each is followed by `approve → notify`. So the
+      // author's declared deliverable was filtered out and the surfaced
+      // "output" was a bell ring — on two of three chains the annotation made
+      // the card STRICTLY worse than no annotation at all, because the host
+      // post-processor also cleared the auto-terminal-primary off `notify`.
+      //
+      // ── ADR 0600 §Correction 4 — `primary` ONLY ───────────────────────────
+      // This read `=== 'primary' || === 'secondary'`, which quietly INVENTED
+      // the consumer §4 says it considered and rejected: with no primary
+      // anywhere, a mid-graph node tagged `secondary` entered `terminals` and
+      // surfaced as a "View output" button on every workflow in the app. It
+      // also falsified three shipped statements at once — the `metaWorkflows`
+      // retirement docblock, §4's retirement REASON ("nothing in the SPA reads
+      // it — the only consumer tests `=== 'primary'`") and §9's
+      // `GEN-OUTPUTROLE-1` ("rendered NOWHERE in the SPA"). The rule this
+      // filter is FOR is "an explicit `primary` outranks graph position";
+      // `secondary` was never part of it.
+      const declared = n.outputRole === 'primary';
+      if (hasOutgoing.has(n.id) && !declared) continue;
       // Only surface terminals the run actually reached — a half-run
       // with one branch failed shouldn't claim un-run terminals.
       // Match the builder node id against the backend nodeId via the
@@ -260,10 +302,10 @@ function useTerminalNodes(run: WorkflowRunState): Terminal[] {
     const [primary] = primaries.sort((a, b) =>
       a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0,
     );
-    if (primary) return [primary];
+    if (primary) return { terminals: [primary], graphUnavailable: false };
     // Fallback (v1 convention): show every terminal as a separate
     // "View output" link.
-    return terminals;
+    return { terminals, graphUnavailable: false };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional: key on memoKey, not raw `run`
   }, [memoKey]);
 }
@@ -306,20 +348,51 @@ function CompletionShell({ tone, iconKind, title, children }: ShellProps): JSX.E
     ? 'var(--color-success)'
     : tone === 'danger'
       ? 'var(--color-danger)'
-      : 'var(--color-text-muted)';
+      : 'var(--ink-3)';
   // Danger uses a 2px border for non-color differentiation so users
   // with limited color discrimination still see the failure call-out.
   const borderWidth = tone === 'danger' ? 2 : 1;
   // ARIA landmark label so SR users can navigate the row as a unit.
   const ariaLabel = translate('workflowRunAria', { title });
+
+  // ── ADR 0600 §3 (`ISU-27`) — this was `role="status"` for ALL THREE tones ──
+  //
+  // Three defects rode on that one attribute, and only one of them is the role:
+  //
+  //  1. A terminal FAILURE was marked polite. `ui/Notice.tsx` already maps
+  //     `variant === 'error'` → `role="alert" aria-live="assertive"`; this
+  //     hand-rolled region did not.
+  //  2. It is a live region NESTED inside `MessageFeed`'s
+  //     `role="log" aria-live="polite" aria-relevant="additions"` — the
+  //     competing-voices defect MessageFeed's own skeleton comment refuses.
+  //  3. `aria-label` on a live region makes AT read the LABEL instead of the
+  //     row's real content, so the error code and message were unreachable.
+  //
+  // Flipping `status` → `alert` would have fixed exactly one of the three, and
+  // would have left the outcome resting on a CONDITIONALLY MOUNTED inline
+  // region — the mechanism `ui/Notice.tsx:6-28` and `ui/StateCard.tsx` both say
+  // must not be treated as established. So the false live region is REMOVED
+  // (`role="group"` keeps the label legal and the row navigable as a unit), and
+  // the speech moves to the one region this app trusts.
+  //
+  // Only FAILURE announces, and that is deliberate rather than partial: the
+  // ancestor log announces the card's insertion politely already, which is the
+  // right channel for a completed or cancelled run. Announcing those again here
+  // is the double-announce that boundary exists to prevent. A failure is the one
+  // outcome that must not wait behind a polite queue.
+  const failureAnnouncement = tone === 'danger' ? ariaLabel : '';
+  useEffect(() => {
+    if (failureAnnouncement) announce(failureAnnouncement, { assertive: true });
+  }, [failureAnnouncement]);
+
   return (
     <div
-      role="status"
+      role="group"
       aria-label={ariaLabel}
       className="wfcomplete-shell"
       style={{
         background: `color-mix(in oklch, ${color} 8%, transparent)`,
-        border: `${borderWidth}px solid color-mix(in oklch, ${color} 40%, var(--color-border))`,
+        border: `${borderWidth}px solid color-mix(in oklch, ${color} 40%, var(--rule))`,
       }}
     >
       <div className="u-flex u-items-center u-gap-2">

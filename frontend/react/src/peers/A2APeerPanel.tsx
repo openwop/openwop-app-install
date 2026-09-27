@@ -1,66 +1,34 @@
 /**
- * A2APeerPanel — placeholder for the A2A composition pairing with the
- * already-shipped `McpToolsPanel`.
+ * A2APeerPanel — the honest not-yet-available state for A2A peer discovery,
+ * paired with `McpToolsPanel` on `/capabilities`.
  *
- * `spec/v1/a2a-integration.md` (FINAL v1.1, 2026-05-05) documents how
- * an openwop host can expose itself as an A2A agent (each Workflow →
- * an `AgentSkill`, each run → a `Task`) and how an openwop client can
- * dispatch into a remote A2A peer. But:
+ * ADR 0196 re-grade (ADM-2/DEMO-12): this panel previously rendered internal
+ * spec/handoff document paths (`spec/v1/a2a-integration.md`,
+ * `docs/myndhyve-round-2-handoff.md`) and vendor pack ids as USER-FACING copy
+ * — contributor context that reads as another vendor's internals on an
+ * enterprise install. That context lives HERE, in the comment, for
+ * contributors only:
  *
- *   - the capability advertisement shape is still a candidate
- *     (`{supported: boolean, agentCardUrl: string}` is the leading
- *     candidate per `a2a-integration.md` §"Capability advertisement");
- *   - `capabilities.schema.json` does NOT yet define a `capabilities.a2a`
- *     block;
- *   - the reference host does NOT expose itself as an A2A agent and
- *     no `core.a2a.*` NodeModule is registered;
- *   - no non-steward host publishes an A2A AgentCard yet.
- *
- * So this panel does the only honest thing the reference app can do
- * today: tell the operator that A2A peer discovery is not yet
- * advertised, point at the spec, and point at the round-2 handoff
- * (`docs/myndhyve-round-2-handoff.md` §3) that asks MyndHyve to publish
- * an A2A peer endpoint — which would convert this panel from a
- * placeholder into a real peer browser.
- *
- * The MCP companion (`McpToolsPanel`) renders right above it on
- * `/capabilities`, so the operator sees the paired surface even
- * though one side is not yet implementable end-to-end.
+ *   - `spec/v1/a2a-integration.md` (FINAL v1.1) documents the composition;
+ *     the capability-advertisement shape is still a candidate
+ *     (`{supported, agentCardUrl}`) and `capabilities.schema.json` defines no
+ *     `capabilities.a2a` block yet.
+ *   - The reference host does not expose itself as an A2A agent; no
+ *     `core.a2a.*` NodeModule is registered.
+ *   - `docs/myndhyve-round-2-handoff.md` §3 asks a non-steward host to
+ *     publish an AgentCard, which would convert this into a real peer
+ *     browser (Card fetch → Skills list → dispatch-node CTA).
  */
 
 import { useTranslation } from 'react-i18next';
+import { StateCard } from '../ui/StateCard.js';
 
 export function A2APeerPanel() {
   const { t } = useTranslation('peers');
   return (
     <div className="surface-card">
-      <h2>
-        {t('title')}{' '}
-        <span className="muted u-fs-12 u-fw-400">
-          (<code>spec/v1/a2a-integration.md</code>)
-        </span>
-      </h2>
-      <p className="muted u-fs-13">
-        {t('introLead')}{' '}
-        <code>{t('introAgentSkill')}</code>{t('introMid')} <code>{t('introTask')}</code>{t('introTail')}{' '}
-        <strong>{t('notAdvertised')}</strong>
-      </p>
-      <p className="muted u-fs-12">
-        {t('statusLead')} <em>{t('statusStable')}</em> {t('statusMid1')}{' '}
-        <code>spec/v1/a2a-integration.md</code> {t('statusMid2')}{' '}
-        <code>{'{supported: true, agentCardUrl: "…"}'}</code>{t('statusMid3')}{' '}
-        <code>capabilities.schema.json</code> {t('statusMid4')}{' '}
-        <code>{t('statusBlock')}</code> {t('statusTail')} <code>core.a2a.*</code>{' '}
-        {t('statusNodeModule')}
-      </p>
-      <p className="muted u-fs-12">
-        {t('pathForwardLead')}{' '}
-        <code>docs/myndhyve-round-2-handoff.md</code> {t('pathForwardMid')}{' '}
-        <code>vendor.myndhyve.agent-orchestration</code>{' '}
-        {t('pathForwardAnd')} <code>vendor.myndhyve.ads-crew</code>{t('pathForwardTail')}{' '}
-        <code>{t('pathForwardShape')}</code> {t('pathForwardEnd')}{' '}
-        <code>{t('pathForwardNode')}</code> {t('pathForwardCta')}
-      </p>
+      <h2>{t('title')}</h2>
+      <StateCard title={t('notAvailableTitle')} body={t('notAvailableBody')} />
     </div>
   );
 }

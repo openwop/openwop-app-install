@@ -23,6 +23,7 @@ import { useElapsedMs } from './hooks/useElapsedMs.js';
 import { useStreamCadence } from './hooks/useStreamCadence.js';
 import { formatDurationMs } from '../i18n/format.js';
 import { ChevronRightIcon, ChevronDownIcon } from '../ui/icons/index.js';
+import { copyToClipboard } from '../ui/copyToClipboard.js';
 
 interface Props {
   thoughts: ChatMessageThoughts;
@@ -85,12 +86,13 @@ export function ThoughtsDisclosure({ thoughts }: Props): JSX.Element {
   async function onCopy(e: React.MouseEvent): Promise<void> {
     e.stopPropagation();
     try {
-      await navigator.clipboard.writeText(thoughts.content);
+      const r = await copyToClipboard(thoughts.content, null);
+      if (!r.ok) return;
       setCopied(true);
       if (copyResetRef.current) clearTimeout(copyResetRef.current);
       copyResetRef.current = setTimeout(() => setCopied(false), 1400);
     } catch {
-      /* clipboard denied — silently ignore */
+      /* copyToClipboard reports failure itself; nothing left to swallow */
     }
   }
 

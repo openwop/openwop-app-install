@@ -1,0 +1,30 @@
+{
+  "name": "feature.production.nodes",
+  "version": "1.1.1",
+  "description": "Production Intelligence node pack — build the production context (rank team + vendors by channel fit) and generate a production plan (per-asset execution route internal/contractor/agency/hybrid with budget & timeline), grounded in the ranked context via the run-scoped provider. Persists the plan via ctx.features.production and emits a production.plan artifact.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "production", "vendor", "planning", "sourcing", "campaign"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.production.nodes.context-build",
+      "version": "1.0.0",
+      "label": "Production: Build Context",
+      "description": "Ranks the internal team (Profiles) + the Vendor Directory against a brief's enabled channels into a token-capped prompt context over ctx.features.production. Inputs: { orgId, channels }. Output: { relevantCategories, teamCapabilitySection, vendorSection, rankedMembers, rankedVendors, gaps }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.production.nodes.plan-generate",
+      "version": "1.0.0",
+      "label": "Production: Generate Plan",
+      "description": "Generates a production plan (per-asset execution route + budget + timeline + capability assessment) grounded in the ranked production context, via the run-scoped ctx.callAI. Persists the plan via ctx.features.production.savePlan and emits a production.plan artifact. Inputs: { orgId, channels, assets?, briefId?, provider?, model? }. Output: { plan, artifact }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

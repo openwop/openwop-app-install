@@ -30,6 +30,7 @@ import { create } from 'zustand';
 import {
   listReviews,
   decideReview,
+  ReviewRequestError,
   type ReviewRequest,
   type ReviewStatus,
 } from './reviewClient.js';
@@ -70,6 +71,9 @@ interface ReviewStatusState {
   statusById: Record<string, StatusEntry>;
   loading: boolean;
   error: string | null;
+  /** True after the first list read settles. Distinguishes a proven empty
+   * inbox from the store's pre-hydration empty array. */
+  initialized: boolean;
   /** Unsubscribe handle for the signal-bus subscription. */
   _busCleanup: (() => void) | null;
   /** Count of live `connect()` callers, so the last `disconnect()` tears down. */
@@ -82,8 +86,10 @@ interface ReviewStatusState {
   /** Re-hydrate the pending list from the server (reconcile after a gap). */
   refresh: () => Promise<void>;
   /** Decide a review (optimistic: drop locally, then dispatch). 409 (already
-   *  resolved) is treated as success; other errors reconcile + rethrow. */
-  decide: (reviewId: string, action: string, body?: { value?: unknown; note?: string }) => Promise<void>;
+   *  resolved) is treated as success; a `proposal_stale`/`proposal_expired`
+   *  409 (ADR 0473 — the row REOPENED server-side) restores + rethrows; other
+   *  errors reconcile + rethrow. */
+  decide: (reviewId: string, action: string, body?: { value?: unknown; note?: string; expectedDefinitionHash?: string }) => Promise<void>;
   /** Apply a `review.updated` signal frame (also used by tests). */
   _applySignal: (frame: Notification) => void;
 }
@@ -129,6 +135,7 @@ export const useReviewStatusStore = create<ReviewStatusState>((set, get) => ({
   statusById: {},
   loading: false,
   error: null,
+  initialized: false,
   _busCleanup: null,
   _refcount: 0,
 
@@ -163,9 +170,9 @@ export const useReviewStatusStore = create<ReviewStatusState>((set, get) => ({
         const o = overrides[r.reviewId];
         return !(o && isTerminal(o.status));
       });
-      set({ reviews, loading: false, error: null });
+      set({ reviews, loading: false, error: null, initialized: true });
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+      set({ loading: false, error: err instanceof Error ? err.message : String(err), initialized: true });
     }
   },
 
@@ -179,9 +186,16 @@ export const useReviewStatusStore = create<ReviewStatusState>((set, get) => ({
       // more to do on success.
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // ADR 0473 (review F1) — a `proposal_stale`/`proposal_expired` 409 means
+      // the row is STILL PENDING (the server reopened it): the optimistic drop
+      // is WRONG. Restore + reconcile + rethrow so the card re-renders and
+      // surfaces why. Only the classic already-resolved conflict stays a
+      // treat-as-success.
+      const reason = err instanceof ReviewRequestError ? err.reason : undefined;
+      const stillPending = reason === 'proposal_stale' || reason === 'proposal_expired';
       // 409 / already-resolved ⇒ someone else decided first. The optimistic
       // drop is correct; treat as success (ADR 0068 stale-safe contract).
-      if (/\b409\b/.test(msg) || /already[_-]?resolved|conflict/i.test(msg)) return;
+      if (!stillPending && (/\b409\b/.test(msg) || /already[_-]?resolved|conflict/i.test(msg))) return;
       // Any other failure: the decision didn't take. Restore + reconcile, then
       // rethrow so the card can surface the error.
       set({ reviews: prev });

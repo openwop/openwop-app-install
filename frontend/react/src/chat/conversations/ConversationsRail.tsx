@@ -1,35 +1,38 @@
 /**
  * Conversations rail (ADR 0043) — the unified sidebar tab that REPLACED both
  * the chat-history drawer and the in-chat "Active agents" panel (both deleted
- * once this became the sole chat IA). It is now the only conversation surface.
+ * once this became the sole chat IA).
  *
- * Two stacked zones, mirroring how Slack/Teams present a channel:
- *   1. "In this conversation" — the active participants of the OPEN
- *      conversation (the live active-agents lineup: the default assistant +
- *      any @-mentioned agents). Click a row to switch the routing voice; × to
- *      drop an agent. This is the active-agents panel's controls, folded in.
- *   2. "Conversations" — every persistent conversation for the tenant, grouped
- *      People · Agents · Groups (see `conversationGroups.ts`), searchable, with
- *      hover rename/delete. Click a row to resume that conversation.
+ * It is a pure conversation LIST: every persistent conversation for the tenant,
+ * grouped Agents · Channels · Groups · Workspace (see `conversationGroups.ts`),
+ * searchable, with hover rename/delete. Click a row to resume that conversation.
  *
- * Presentational: all state lives in `useChatSessions` (the list) +
- * `useActiveAgents` (the lineup); the parent (ChatSidebar) wires the callbacks.
- * Reuses the existing `sesshist-*` / `activeagents-*` style hooks so it stays
- * within the token system (DESIGN.md §10) and visually matches the panels it
- * supersedes.
+ * The active conversation's PARTICIPANTS ("In this conversation") used to be a
+ * Zone-1 header here, but moved OUT to the right-docked `MembersPane` (ADR 0140
+ * follow-on) — members belong in a right contextual pane, not the left list
+ * column (Discord/Slack/Teams/Zoom). Both chat surfaces now render this rail
+ * list-only.
+ *
+ * Presentational: all state lives in `useChatSessions`; the parent wires the
+ * callbacks. Reuses the existing `sesshist-*` style hooks so it stays within the
+ * token system (DESIGN.md §10).
  */
 
+import { Button } from '../../ui/Button.js';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { searchChatConversations, type ChatSessionHeader, type ConversationSearchHit } from '../../client/chatSessionsClient.js';
-import type { ActiveAgentRow } from '../activeAgents/types.js';
 import {
   groupConversations,
   isUnread,
+  mentionCountOf,
+  unreadCountOf,
   SECTION_ORDER,
   type ConversationSection,
 } from './conversationGroups.js';
 import {
+  BellIcon,
+  BellOffIcon,
   BotIcon,
   BuildingIcon,
   HashIcon,
@@ -38,12 +41,11 @@ import {
   PlusIcon,
   SearchIcon,
   TrashIcon,
-  XIcon,
 } from '../../ui/icons/index.js';
+import { LeftRailPanelHeader } from '../leftRail/LeftRailPanelHeader.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { confirm } from '../../ui/confirm.js';
-import { ConversationLineup } from './ConversationLineup.js';
 
 interface Props {
   conversations: readonly ChatSessionHeader[];
@@ -55,14 +57,10 @@ interface Props {
   onRename: (sessionId: string, title: string) => Promise<void>;
   onDelete: (sessionId: string) => Promise<void>;
 
-  /** Active participants of the OPEN conversation (the live lineup, assistant
-   *  first). Folds in what the retired active-agents panel showed. */
-  lineup: ReadonlyArray<ActiveAgentRow>;
-  currentAgentId: string;
-  /** The advisor currently generating a reply — pulses their row. Null = idle. */
-  thinkingAgentId: string | null;
-  onSwitchAgent: (agentId: string) => void;
-  onRemoveAgent: (agentId: string) => void;
+  /** Soften the active-row highlight to a quiet edge-tick. In the deck the tab
+   *  strip owns "what's open", so the list only ECHOES the open tab rather than
+   *  competing with a second loud selection (ADR 0140 amend / design pass). */
+  selectionEcho?: boolean;
 
   /** Start a fresh conversation — the single next action on the empty state. */
   onNewChat: () => void;
@@ -76,6 +74,10 @@ interface Props {
   /** Browse + join public channels (ADR 0154 FU-4) — the rail only lists channels
    *  you're in, so this surfaces discoverable public ones. */
   onBrowseChannels?: () => void;
+  /** ADR 0192 D7 — muted conversation ids (dimmed rows, counters suppressed). */
+  mutedIds?: ReadonlySet<string>;
+  /** Mute/unmute a channel/group row. Present ⇒ the row action renders. */
+  onToggleMute?: (sessionId: string) => void;
   onClose: () => void;
 }
 
@@ -104,21 +106,28 @@ export function ConversationsRail({
   onSelect,
   onRename,
   onDelete,
-  lineup,
-  currentAgentId,
-  thinkingAgentId,
-  onSwitchAgent,
-  onRemoveAgent,
   onNewChat,
   onOpenWorkspace,
   onCreateChannel,
   onBrowseChannels,
+  mutedIds,
+  onToggleMute,
+  selectionEcho,
   onClose,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const [query, setQuery] = useState('');
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  // Open-continuity cue (design pass): a picked row briefly brightens so opening
+  // it as a tab reads as caused, not teleported. One-shot, reduced-motion-guarded
+  // in CSS. `pulsingId` clears after the animation so it never re-fires on rerender.
+  const [pulsingId, setPulsingId] = useState<string | null>(null);
+  const selectWithPulse = (sessionId: string): void => {
+    setPulsingId(sessionId);
+    setTimeout(() => setPulsingId((cur) => (cur === sessionId ? null : cur)), 450);
+    onSelect(sessionId);
+  };
 
   const grouped = useMemo(() => groupConversations(conversations, query), [conversations, query]);
   const headingId = 'conversations-rail-heading';
@@ -165,40 +174,32 @@ export function ConversationsRail({
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <aside
       className="conversations-rail u-w-full u-h-full u-bg-surface u-flex u-flex-col"
+      data-selection-echo={selectionEcho ? 'true' : undefined}
       tabIndex={-1}
       onKeyDown={(e) => { if (e.key === 'Escape') onClose(); }}
       aria-labelledby={headingId}
     >
-      <header className="sesshist-header">
-        <strong id={headingId} className="u-flex-1 u-fs-13">{t('conversationsHeading')}</strong>
-        <button
-          type="button"
-          className="secondary sesshist-mini-btn u-mr-2"
-          onClick={onOpenWorkspace}
-          title={t('openWorkspaceAssistant')}
-        >
-          <span aria-hidden className="u-iflex u-mr-1"><BuildingIcon size={12} /></span>
-          {t('workspace')}
-        </button>
-        <button
-          type="button"
-          className="secondary sesshist-mini-btn"
-          onClick={onClose}
-          aria-label={t('closeConversations')}
-        >
-          <XIcon size={14} />
-        </button>
-      </header>
-
-      {/* Zone 1 — participants of the open conversation (ADR 0140 G2: extracted to the
-          shared ConversationLineup, also rendered per-tab in TabSession). */}
-      <ConversationLineup
-        lineup={lineup}
-        currentAgentId={currentAgentId}
-        thinkingAgentId={thinkingAgentId}
-        onSwitchAgent={onSwitchAgent}
-        onRemoveAgent={onRemoveAgent}
+      <LeftRailPanelHeader
+        titleId={headingId}
+        title={t('conversationsHeading')}
+        onClose={onClose}
+        closeLabel={t('closeConversations')}
+        actions={
+          <Button
+            variant="secondary" className="sesshist-mini-btn u-mr-2"
+            onClick={onOpenWorkspace}
+            title={t('openWorkspaceAssistant')}
+          >
+            <span aria-hidden className="u-iflex u-mr-1"><BuildingIcon size={12} /></span>
+            {t('workspace')}
+          </Button>
+        }
       />
+
+      {/* The active conversation's participants (Zone 1) moved OUT of the rail into the
+          right-docked MembersPane (ADR 0140 follow-on) — the rail is now a pure
+          conversation LIST for both surfaces. Members live in a right pane, per the
+          Discord/Slack/Teams/Zoom convention. */}
 
       <div className="u-p-2 u-border-b">
         <input
@@ -222,13 +223,12 @@ export function ConversationsRail({
               <li
                 key={`${h.conversationId}:${h.messageId ?? 'title'}`}
                 className="session-row sesshist-row"
-                role="button"
-                tabIndex={0}
-                onClick={() => onSelect(h.conversationId)}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onSelect(h.conversationId); } }}
               >
+                {/* DECK-2: real <button> body — the last role="button" li of the refactored family. */}
+                <button type="button" className="sesshist-row-open" onClick={() => selectWithPulse(h.conversationId)}>
                 <div className="sesshist-row-title u-truncate" title={h.title}>{h.title || t('untitledConversation')}</div>
                 <div className="muted u-fs-11 u-truncate">{h.snippet}</div>
+              </button>
               </li>
             ))}
           </ul>
@@ -242,9 +242,9 @@ export function ConversationsRail({
             <Notice variant="error">
               {error}
               <div className="u-mt-1-5">
-                <button type="button" className="secondary sesshist-mini-btn" onClick={() => { void onRefresh(); }}>
+                <Button variant="secondary" className="sesshist-mini-btn" onClick={() => { void onRefresh(); }}>
                   {t('tryAgain')}
-                </button>
+                </Button>
               </div>
             </Notice>
           </div>
@@ -255,7 +255,7 @@ export function ConversationsRail({
             title={t('noConversationsYet')}
             body={t('noConversationsBody')}
             action={(
-              <button type="button" className="primary sesshist-dialog-btn" onClick={onNewChat}>
+              <button type="button" className="sesshist-dialog-btn" onClick={onNewChat}>
                 {t('newChat')}
               </button>
             )}
@@ -302,14 +302,14 @@ export function ConversationsRail({
                   <p className="muted u-fs-12 u-m-0 u-mb-2">{t('channelsEmptyBody')}</p>
                   <div className="u-flex u-gap-2 u-wrap">
                     {onCreateChannel ? (
-                      <button type="button" className="btn-primary btn-sm u-iflex u-items-center u-gap-1" onClick={onCreateChannel}>
+                      <Button variant="primary" size="sm" className="u-iflex u-items-center u-gap-1" onClick={onCreateChannel}>
                         <PlusIcon size={13} /> {t('newChannelCta')}
-                      </button>
+                      </Button>
                     ) : null}
                     {onBrowseChannels ? (
-                      <button type="button" className="secondary btn-sm" onClick={onBrowseChannels}>
+                      <Button variant="secondary" size="sm" onClick={onBrowseChannels}>
                         {t('browseChannelsCta')}
-                      </button>
+                      </Button>
                     ) : null}
                   </div>
                 </div>
@@ -321,10 +321,13 @@ export function ConversationsRail({
                     conversation={c}
                     isActive={c.sessionId === activeSessionId}
                     unread={c.sessionId !== activeSessionId && isUnread(c)}
+                    muted={mutedIds?.has(c.sessionId) ?? false}
+                    justOpened={c.sessionId === pulsingId}
+                    {...(onToggleMute && (c.type === 'channel' || c.type === 'group') ? { onToggleMute: () => onToggleMute(c.sessionId) } : {})}
                     isRenaming={renamingId === c.sessionId}
                     renameDraft={renameDraft}
                     onRenameDraftChange={setRenameDraft}
-                    onSelect={() => onSelect(c.sessionId)}
+                    onSelect={() => selectWithPulse(c.sessionId)}
                     onStartRename={() => { setRenameDraft(c.title); setRenamingId(c.sessionId); }}
                     onCommitRename={() => { void commitRename(c.sessionId); }}
                     onCancelRename={() => setRenamingId(null)}
@@ -344,6 +347,9 @@ function ConversationRow({
   conversation,
   isActive,
   unread,
+  muted,
+  justOpened,
+  onToggleMute,
   isRenaming,
   renameDraft,
   onRenameDraftChange,
@@ -356,6 +362,11 @@ function ConversationRow({
   conversation: ChatSessionHeader;
   isActive: boolean;
   unread: boolean;
+  /** ADR 0192 D7 — dimmed row, counters suppressed (dot only). */
+  muted: boolean;
+  /** One-shot open-continuity cue — brightens for ~450ms after selection. */
+  justOpened?: boolean;
+  onToggleMute?: () => void;
   isRenaming: boolean;
   renameDraft: string;
   onRenameDraftChange: (v: string) => void;
@@ -373,6 +384,11 @@ function ConversationRow({
   // it: those call the ungated chat-session routes, which would desync channel.name
   // and bypass the owner-only, reversible archive.
   const isChannel = conversation.type === 'channel';
+  // ADR 0192 D6 — the two-tier signal from the CALLER's own row: an exact
+  // unread count (differencing) and a distinct mention tier. One number per
+  // row — the more urgent one wins. Muted rows suppress both (dot only).
+  const mentions = isActive || muted ? 0 : mentionCountOf(conversation);
+  const unreadCount = isActive || muted || mentions > 0 ? null : unreadCountOf(conversation);
   return (
     // ARIA 1.2: the row's open action is a real <button> (the row body); the
     // rename/delete controls are SIBLINGS of it, not interactive descendants of a
@@ -382,6 +398,8 @@ function ConversationRow({
       className="session-row sesshist-row"
       data-active={isActive ? 'true' : undefined}
       data-unread={unread ? 'true' : undefined}
+      data-muted={muted ? 'true' : undefined}
+      data-just-opened={justOpened ? 'true' : undefined}
     >
       {isRenaming ? (
         <input
@@ -405,7 +423,9 @@ function ConversationRow({
             title={conversation.title}
           >
             <div className="sesshist-row-title u-flex u-items-center u-gap-1-5">
-              {unread && (
+              {/* The dot yields to a count/mention chip (one unread signal per
+                  row); muted rows keep only the dimmed dot. */}
+              {unread && mentions === 0 && (unreadCount === null || unreadCount === 0 || muted) && (
                 <span
                   role="img"
                   aria-label={t('unread')}
@@ -414,33 +434,63 @@ function ConversationRow({
                 />
               )}
               {isChannel && <span aria-hidden className="u-iflex muted"><HashIcon size={12} /></span>}
-              <span className="u-truncate">{conversation.title}</span>
+              <span className="u-truncate u-minw-0">{conversation.title}</span>
+              {muted && (
+                <span className="u-iflex muted" title={t('mutedLabel')}>
+                  <BellOffIcon size={12} />
+                  <span className="sr-only">{t('mutedLabel')}</span>
+                </span>
+              )}
+              {/* ADR 0192 D6 — mention tier beats the plain count; the `@` glyph
+                  carries the semantics so color is never the sole signal. */}
+              {mentions > 0 && (
+                <span className="sesshist-mention-chip">
+                  <span aria-hidden>@ {mentions > 99 ? '99+' : mentions}</span>
+                  <span className="sr-only">{t('mentionCountAria', { count: mentions })}</span>
+                </span>
+              )}
+              {unreadCount !== null && unreadCount > 0 && (
+                <span className="sesshist-count-chip">
+                  <span aria-hidden>{unreadCount > 99 ? '99+' : unreadCount}</span>
+                  <span className="sr-only">{t('unreadCountAria', { count: unreadCount })}</span>
+                </span>
+              )}
             </div>
             <div className="muted sesshist-row-count">
               {memberCount > 0 && <span>{t('participants', { count: memberCount })} · </span>}
               {t('messages', { count: conversation.messageCount })}
             </div>
           </button>
-          {isChannel ? null : (
-            <div className="session-row-actions sesshist-row-actions">
-              <button
-                type="button"
-                className="secondary sesshist-action-btn"
-                onClick={onStartRename}
-                aria-label={t('renameConversation')}
+          <div className="session-row-actions sesshist-row-actions">
+            {onToggleMute && (
+              <Button
+                variant="secondary" className="sesshist-action-btn"
+                onClick={onToggleMute}
+                aria-label={muted ? t('unmuteChannel') : t('muteChannel')}
+                title={muted ? t('unmuteChannel') : t('muteChannel')}
               >
-                <PencilIcon size={12} />
-              </button>
-              <button
-                type="button"
-                className="secondary sesshist-action-btn"
-                onClick={onRequestDelete}
-                aria-label={t('deleteConversation')}
-              >
-                <TrashIcon size={12} />
-              </button>
-            </div>
-          )}
+                {muted ? <BellIcon size={12} /> : <BellOffIcon size={12} />}
+              </Button>
+            )}
+            {isChannel ? null : (
+              <>
+                <Button
+                  variant="secondary" className="sesshist-action-btn"
+                  onClick={onStartRename}
+                  aria-label={t('renameConversation')}
+                >
+                  <PencilIcon size={12} />
+                </Button>
+                <Button
+                  variant="secondary" className="sesshist-action-btn"
+                  onClick={onRequestDelete}
+                  aria-label={t('deleteConversation')}
+                >
+                  <TrashIcon size={12} />
+                </Button>
+              </>
+            )}
+          </div>
         </>
       )}
     </li>

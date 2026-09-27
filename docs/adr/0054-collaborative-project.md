@@ -155,10 +155,47 @@ The reframe that makes this clean: visibility ≠ authority.**
   already derives a board's owning org from its `ownerSubject`) becomes a single
   `subjectAccess(tenantId, subject, caller) → 'none' | 'read' | 'write'` resolver. **Every
   project-owned surface read** — board cards, memory, knowledge, schedules, AND the group chat —
-  routes its read gate through this ONE seam. So a `private` project cannot leak through any
-  surface *by construction* (this closes, structurally, the exact class of gap PR #325 fixed for
+  routes its read gate through this ONE seam. ~~So a `private` project cannot leak through any
+  surface *by construction*~~ (this closes, structurally, the exact class of gap PR #325 fixed for
   org-scoped boards). The projects feature fills the seam (it owns `members`/`visibility`);
   `accessControl` remains the sole owner of authority; the seam *composes* them — no second owner.
+
+  > **CORRECTION 2026-08-24 (ADR 0608 D1–D6) — "cannot leak through any surface by
+  > construction" was FALSIFIED THREE TIMES, each by EXECUTION against a booted app, and
+  > "this ONE seam" was never true either.**
+  >
+  > 1. **Schedules (`CPC-1`).** A project schedule is an ordinary `ScheduledJob`, and
+  >    `routes/scheduler.ts` mentioned `ownerSubject` **zero** times. A co-tenant with no org
+  >    scopes listed a `private` project's job, `PATCH`ed its `workflowId` to their own
+  >    workflow, `POST …/trigger`ed a real run, and `DELETE`d it. Not only a read leak — a
+  >    `requireProject('workspace:write')` bypass.
+  > 2. **Knowledge (`CPC-2`).** The bound collection is an ORG KB row; `features/kb/routes.ts`
+  >    gated the same rows on org read, returning the collection name, the document titles and
+  >    the **verbatim chunk text** to an org viewer who is 404'd at
+  >    `/projects/:id/knowledge`.
+  > 3. **A shared KB surviving the flip (`CPC-3`).** The visibility carve-out ran at share time
+  >    only, so `org → private` left every advisor still bound and retrieving.
+  >
+  > **"ONE seam" is three.** `resolveSubjectAccess` has FOUR callers repo-wide; every other
+  > project consumer calls the exported `resolveProjectAccess` directly (notebooks, podcasts,
+  > strategy, advisory-board) or the projects-local `requireProject`. They agree **by
+  > registration**, not by construction — nothing structurally enforces it (`CPC-8`, open).
+  >
+  > **The transferable lesson is about the shape of the claim, not the bugs.** "By
+  > construction" is a claim about a POPULATION — every row stamped
+  > `ownerSubject:{kind:'project'}` — while the seam is a property of a SET OF DOORS. The
+  > population grows every time any feature stamps that subject on a row, and nothing made
+  > the omission visible. `test/projects-route.test.ts:438-478` is a genuinely good
+  > private-visibility test that passes; all three leaks are **structurally invisible** to it
+  > because it enumerates the doors that call `requireProject`, not the rows. The defensible
+  > claim is the narrow one: *"every door that resolves a project subject through
+  > `subjectAccess` is gated."* Making the broad claim true needs a ratchet on the WRITERS
+  > (`CPC-8`), not more doors.
+  >
+  > 1 and 2 are FIXED (ADR 0608 D1, D4); 3 is FIXED (D5). Still open and recorded there:
+  > `GET /v1/host/openwop-app/export` leaks the same schedule rows (`CPC-13`), and the
+  > documents / canvas / artifact-Library / priority-matrix doors accept project-owned rows
+  > under org scope alone (`CPC-14`, `CPC-15`).
 - **Sequenced into Phase 2 (membership), NOT deferred.** Membership is the input the read gate
   consumes; shipping descriptive-only membership first and retrofitting visibility later would be a
   behaviour migration (org-visible projects silently becoming private). Because the field defaults
@@ -239,9 +276,28 @@ toggle (no new toggle). No new route — the two fields ride the existing additi
 | Phase | Scope | Surface | Gate |
 |---|---|---|---|
 | 1 — Charter | `Project.charter` + `updateProject` validation + caps; Overview tab (read/edit) | host-ext `PATCH /projects/:id`; FE Overview tab | `npm test` + build |
-| 2 — Membership **+ visibility (D5)** | `Project.members[]` + `Project.visibility` (default `'org'`) + add/remove/set-role routes (validate user∈org, agent∈roster); **generalize `subjectOrgScope` → `subjectAccess`** and route EVERY project-owned-surface read (board / memory / knowledge / schedules) through it; Members tab + a private/org visibility control | host-ext `/projects/:id/members*` + `PATCH …/visibility`; the `subjectAccess` seam; FE Members tab | route tests: write always org-scoped (membership never grants write); a `private` project is 404 for a non-member on the project AND its board/memory/knowledge/schedules (no surface leak); an `org` project unchanged; can't add a stranger |
+| 2 — Membership **+ visibility (D5)** | `Project.members[]` + `Project.visibility` (default `'org'`) + add/remove/set-role routes (validate user∈org, agent∈roster); **generalize `subjectOrgScope` → `subjectAccess`** and route EVERY project-owned-surface read (board / memory / knowledge / schedules) through it; Members tab + a private/org visibility control | host-ext `/projects/:id/members*` + `PATCH …/visibility`; the `subjectAccess` seam; FE Members tab | route tests: write always org-scoped (membership never grants write); a `private` project is 404 for a non-member on the project AND its board/memory/knowledge/schedules (no surface leak); an `org` project unchanged; can't add a stranger — **see the CORRECTION below: this gate is why the leaks shipped** |
 | 3 — Group chat | `ConversationMeta.ownerSubject`; `bindConversationToSubject` (advisory wrapper preserved); project-chat ensure/open route gated via `subjectAccess`; deep-link + rail surfacing; convene project agents via the ADR 0040 lineup | host-ext chat-session binding; FE deep-link | route test: project chat bound to `project:<id>`, members seeded, read-gated by `subjectAccess`; convene fires existing exchange |
 | 4 — moderator + turn policy (D6) | optional `Project.{moderatorRosterId, turnPolicy}` (additive on `PATCH /projects/:id`); **extract** advisory's turn-policy validator → shared `host/turnPolicy.ts`; a **project branch** in the `ChatSidebar` cadence glue reusing `planBoardroomTurns`/`useBoardroomCadence` (no fork); explicit **Convene** affordance; convened cohort capped at 8; moderator MUST be a project agent member; FE chat-policy controls (mirror advisory) | host-ext `PATCH /projects/:id`; FE cadence glue + controls | route tests: turnPolicy validation/caps, moderator∈members (else 422/404), write-gated; cadence test: a project group plans the same turns as the board planner |
+
+> **CORRECTION 2026-08-24 (ADR 0608 § Corrections) — this Phase-2 gate UNDER-SPECIFIES, in
+> exactly the direction the shipped UI copy does, which is why neither caught the other.**
+>
+> The gate enumerates four surfaces — "board / memory / knowledge / schedules". `FEATURES.md`
+> ordinal 21 claims "READ gains a membership dimension over **every project-owned surface**".
+> A gate that lists surfaces is a gate on a LANE; a claim that says "every" is a claim about a
+> POPULATION. So the ADR's own acceptance criterion was fully satisfiable while the feature's
+> stated promise was false — and it was: podcast episodes generated from a `private` project
+> stayed org-readable (`podcasts/routes.ts:228-281` is `hasOrgScope` only after creation), and
+> three more doors over project-owned rows were never in the list at all.
+>
+> The same under-specification appears in the UI: `visibilityPrivateHelp` named FOUR of the ten
+> tabs it governs — the same four. **The doc and the code were wrong together.** A phase gate
+> that enumerates instances cannot witness a claim quantified over a population; that needs a
+> ratchet on the writers (`CPC-8`).
+>
+> Corrected in ADR 0608 D8: the disclosure now enumerates what it governs AND states the
+> podcast exception rather than widening a claim that does not hold.
 
 **Core-app extension surface:** `ctx.features.projects` could later expose read-only project
 context (charter/members) to workflows; node/agent packs — **none** day-1 (this is a
@@ -308,4 +364,30 @@ loudly then.
 | 1 — charter | **implemented** — `Project.charter` (+ `parseCharter` validate/cap) on the existing always-on `PATCH /projects/:id`; `ProjectOverviewTab` (default tab); `projects-route.test.ts` charter block. (Charter is benign metadata → rides the always-on projects surface, consistent with the other project tabs; the `project-collab` toggle is reserved for Phase 2/3, which actually change visibility/auth/chat.) |
 | 2 — membership + visibility (`subjectAccess` seam) | **implemented** — `Project.{members,visibility}`; `resolveProjectAccess` (the visibility ≠ authority rule); the new `host/subjectAccess.ts` seam (projects fills it) consumed by kanban `authorizeBoard`/list/claim/assigned so a `private` project is read-gated to members across board + memory + knowledge + schedules; `requireProject` gates the project routes the same; `/:id/members*` + `/:id/visibility` writes gated on the new `project-collab` toggle (OFF); `ProjectMembersTab` (toggle-gated). `projects-route.test.ts` membership + private-gating blocks — 15/15. |
 | 3 — group chat | **implemented** — `ConversationMeta.ownerSubject` + a deterministic `subjectConversationId(tenantId, subject)` (idempotent bind, no second chat) in `host/conversationStore.ts`; `POST /projects/:id/chat` (gated on `project-collab`) ensures the `type:'group'` conversation bound to `project:<id>`, **reconciles** the lineup to the project's CURRENT agent members (add + prune) via `addParticipant`/`removeParticipant`; the chat DATA path (`chat/sessions/:id(/messages)`) is membership-gated via `requireVisibleAsync`/`requireManageAsync` → `resolveSubjectAccess` for any `ownerSubject`-bound conversation (see the D3 correction — members read, non-members + removed owners denied, manage needs org write); FE `ProjectChatTab` (toggle-gated tab) → `ensureProjectChat` → deep-links `/chat?conversation=<id>`; `ChatSidebar` honors the `?conversation=` param (mirrors `?agent=`). `projects-route.test.ts` group-chat block (idempotent sessionId, `ownerSubject={kind:'project'}`, `type:'group'`, foreign-tenant 404, **membership-gated chat history**) — 17/17. |
+> **CORRECTION 2026-08-24 (ADR 0608 D6) — "cohort cap 8" and "moderator-must-be-a-member" are
+> both weaker than this record states.**
+>
+> - ~~cohort capped at 8 (`CONVENE_COHORT_CAP`)~~ — the cap is a **client-side constant**
+>   (`frontend/react/src/chat/conversations/convene.ts:31`) applied by one `.slice()`. Grepping
+>   `cohort` / `COHORT_CAP` / `CONVENE` across `backend/typescript/src` returns **nothing**:
+>   there is no server convene endpoint, `MAX_MEMBERS` is **100**, and `POST /projects/:id/chat`
+>   seats every agent member unconditionally. A modified client convenes 100. This matters more
+>   than a cost guardrail because the host **ADVERTISES** `multiPartyConversation
+>   {maxParticipants: 8}` at `routes/discovery.ts:841` — and the enforcement that would make
+>   that honest (`host/multiPartyConversation.ts`) was keyed on `meta.boardId`, a *board
+>   spelling*, so it was a **no-op for every project group chat**. The SPEAKER arm is fixed in
+>   ADR 0608 D6; the **CAP arm is deliberately still open** (`CPWF-3`) because no audit has
+>   established whether a deployed tenant already seats >8 agents, and capping first would 4xx
+>   live rooms.
+> - **"moderator MUST be a project agent member"** is enforced server-side (422) and cleared on
+>   removal — but the CONSUMER silently substituted. `chairAgentId ??= routed` promoted
+>   whichever agent resolved first into a chair that both frames and synthesizes, so an ordinary
+>   async-load race defeated the invariant. Worse, `projectsService.ts:299` asserted the consumer
+>   "falls back to no chair", which was false — the false sentence sat in the file that owns the
+>   invariant, which is why nobody checked. Both fixed in ADR 0608 D9 (the convene now REFUSES).
+> - **The cadence has no durable representation** (`CPWF-2`): plan, round index, chair and queue
+>   live in browser `useRef`s, and `orchestrated: true` reaches the chat-session row's opaque
+>   content blob but never the RFC 0005 `ConversationTurn` that `:fork` replays. Making that
+>   honest is an `../openwop` RFC 0005 change, not host work.
+
 | 4 — moderator + turn policy (D6) | **implemented** — shared `host/turnPolicy.ts` validator (advisory repointed to it — one validator, no drift); `Project.{moderatorRosterId,turnPolicy}` on the additive `PATCH /projects/:id` (moderator MUST be a project agent member → 422 else; removing the moderator member clears the chair); FE reuses the cadence primitive 1:1 — a project branch in the `ChatSidebar` glue (`planBoardroomTurns` + `useBoardroomCadence`, unchanged) triggered by an explicit **Convene** button or a leading `@@` in the project chat, cohort capped at 8 (`CONVENE_COHORT_CAP`); `ProjectChatTab` gains the moderator/rounds/order/synthesis controls (`updateChatCadence`); `toConversation` surfaces `ownerSubject` so the chat knows it's a project group. `projects-route.test.ts` cadence block (turnPolicy clamp, moderator∈members 422/404, remove-clears-chair, write-gated 403) — 18/18; advisory suite green after the extraction (8/8). |

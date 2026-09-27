@@ -8,6 +8,7 @@
  * and kept — demoted into a collapsible "Evidence & details" section so the page
  * sells the value before it shows the proof.
  */
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -143,7 +144,7 @@ export function WorkforceOverviewPage(): JSX.Element {
   const isShowcase = (metrics?.source ?? governance?.source) === 'showcase' && hasRuns;
 
   return (
-    <div>
+    <div data-walkthrough="workforces.page">
       <PageHeader
         eyebrow={t('overviewEyebrow')}
         title={wf.name}
@@ -186,19 +187,18 @@ export function WorkforceOverviewPage(): JSX.Element {
               </p>
             ) : (
               <div className="action-bar u-gap-2 u-wrap u-mt-2 u-items-center">
-                <button
-                  type="button"
-                  className="btn-accent-solid"
+                <Button
+                  variant="accent-solid"
                   disabled={cutoverBusy || productionGated}
                   onClick={() => { void cutOver(next.status); }}
                   title={productionGated ? t('advanceGatedTitle') : undefined}
                 >
                   {t('advanceTo', { label: t(journeyLabelKey(next.status)) })}
-                </button>
+                </Button>
                 {prev ? (
-                  <button type="button" className="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }} title={t('rollBackTitle')}>
+                  <Button variant="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }} title={t('rollBackTitle')}>
                     {t('rollBackTo', { label: t(journeyLabelKey(prev.status)) })}
-                  </button>
+                  </Button>
                 ) : null}
               </div>
             )}
@@ -208,7 +208,7 @@ export function WorkforceOverviewPage(): JSX.Element {
             <p className="wf-gate"><strong>{t('runningOnItsOwnLead')}</strong> {t('runningOnItsOwnTail')}{!isShowcase ? <>{' '}{t('rollBackAnyTimeClause')}</> : null}</p>
             {!isShowcase && prev ? (
               <div className="action-bar u-mt-2">
-                <button type="button" className="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }}>{t('rollBackTo', { label: t(journeyLabelKey(prev.status)) })}</button>
+                <Button variant="secondary" disabled={cutoverBusy} onClick={() => { void cutOver(prev.status); }}>{t('rollBackTo', { label: t(journeyLabelKey(prev.status)) })}</Button>
               </div>
             ) : null}
           </>
@@ -216,31 +216,37 @@ export function WorkforceOverviewPage(): JSX.Element {
         {cutoverError ? <Notice variant="error">{cutoverError}</Notice> : null}
       </section>
 
-      {/* NEEDS YOU — decision-first (DESIGN.md §4.5 rule 1). Real fields only. */}
-      {metrics || governance ? (() => {
+      {/* NEEDS YOU — decision-first (DESIGN.md §4.5 rule 1). Real fields only.
+          WF-G2 (the PR-2568 gallery rule, applied here): the all-clear is a
+          written compliance assurance, so it requires BOTH reads to have
+          succeeded — a one-failed read used to zero-fill into `clear` and
+          assert "nothing needs you" from numbers that were never read. */}
+      {(() => {
         const openApprovals = metrics?.openApprovals ?? 0;
         const violations = metrics?.policyViolations ?? governance?.posture.policyViolations ?? 0;
         const eligible = governance?.autonomy.eligibleForNext ?? false;
-        const clear = openApprovals === 0 && violations === 0 && !eligible;
+        const partial = !metrics || !governance;
+        const clear = !partial && openApprovals === 0 && violations === 0 && !eligible;
         return (
           <section className="surface-card u-mb-4">
             <h2 className="u-mt-0">{t('needsYou')}</h2>
+            {partial ? <Notice variant="warning">{t('overviewSignalsUnreadable')}</Notice> : null}
             {clear ? (
               <p className="muted u-m-0">{t('needsYouClear')}</p>
-            ) : (
+            ) : openApprovals > 0 || eligible || violations > 0 ? (
               <div className="action-bar u-gap-2 u-wrap u-items-center">
                 {openApprovals > 0 ? <span className="chip chip--warning"><AlertIcon size={12} /> {t('awaitingApprovalChip', { count: openApprovals })}</span> : null}
                 {eligible ? <span className="chip chip--success">{t('readyForMoreChip')}</span> : null}
                 {violations > 0 ? <span className="chip chip--danger"><AlertIcon size={12} /> {t('policyIssuesChip', { count: violations })}</span> : null}
-                {openApprovals > 0 && isVisible('notifications') ? <button type="button" className="btn-sm" onClick={() => navigate('/inbox')}>{t('reviewInInbox')}</button> : null}
+                {openApprovals > 0 && isVisible('notifications') ? <Button variant="primary" size="sm" onClick={() => navigate('/inbox')}>{t('reviewInInbox')}</Button> : null}
               </div>
-            )}
+            ) : null}
           </section>
         );
-      })() : null}
+      })()}
 
       {/* WHAT IT'S DONE — outcomes in business terms (the value). */}
-      <h2>{t('whatItsDone')}</h2>
+      <h2>{t('whatItsDone')} {isShowcase && <IllustrativeBadge detail={t('showcaseBadgeDetail')} />}</h2>
       {hasRuns && metrics ? (
         <div className="surface-card wf-outcomes u-mb-4">
           <Outcome n={pctRound(Math.max(0, 1 - metrics.escalationRate))} l={t('outcomeClearedWithoutEscalation')} />
@@ -253,7 +259,7 @@ export function WorkforceOverviewPage(): JSX.Element {
           icon={<BoxesIcon />}
           title={t('noResultsTitle')}
           body={t('noResultsHistoryBody')}
-          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/example-data')}>{t('loadExampleData')}</button>}
+          action={<Button variant="accent-solid" onClick={() => navigate('/example-data')}>{t('loadExampleData')}</Button>}
         />
       ) : (
         <StateCard

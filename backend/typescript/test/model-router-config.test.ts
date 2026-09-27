@@ -27,17 +27,32 @@ describe('ModelRouterConfig', () => {
     expect(c.cooldownMs).toBe(60000);
   });
 
-  it('accepts + rejects an intentIs rule (ADR 0130 Phase 4)', () => {
-    const ok = validateRouterConfig({ rules: [{ when: { kind: 'intentIs', intent: 'code' }, target: { provider: 'a', model: 'b' } }], fallback: { provider: 'a', model: 'b' } });
-    expect(ok.rules[0]!.when).toEqual({ kind: 'intentIs', intent: 'code' });
-    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'intentIs', intent: '  ' }, target: { provider: 'a', model: 'b' } }], fallback: { provider: 'a', model: 'b' } })).toThrow();
+  it('TOLERATES a retired intentIs rule — drops it, never throws (CHAT-FIRST-PORT A8)', () => {
+    // The `intentIs` kind was retired with its zero-caller intent classifier; a
+    // config persisted before that is tolerated (the rule is skipped, inert) so a
+    // tenant's saved config is never crashed. Even a malformed legacy rule is dropped.
+    const c = validateRouterConfig({
+      rules: [
+        { when: { kind: 'intentIs', intent: 'code' }, target: { provider: 'anthropic', model: 'b' } },
+        { when: { kind: 'always' }, target: { provider: 'anthropic', model: 'b' } },
+      ],
+      fallback: { provider: 'anthropic', model: 'b' },
+    });
+    expect(c.rules).toHaveLength(1);
+    expect(c.rules[0]!.when).toEqual({ kind: 'always' });
+  });
+
+  it('accepts + rejects a conversationKind rule (ADR 0130 Phase 6)', () => {
+    const ok = validateRouterConfig({ rules: [{ when: { kind: 'conversationKind', value: 'group' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } });
+    expect(ok.rules[0]!.when).toEqual({ kind: 'conversationKind', value: 'group' });
+    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'conversationKind', value: 'dm' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } })).toThrow();
   });
 
   it('rejects a bad rule kind / missing target / missing fallback', () => {
-    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'nope' }, target: { provider: 'a', model: 'b' } }], fallback: { provider: 'a', model: 'b' } })).toThrow();
-    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'always' }, target: { provider: '', model: 'b' } }], fallback: { provider: 'a', model: 'b' } })).toThrow();
-    expect(() => validateRouterConfig({ rules: [], fallback: { provider: 'a' } })).toThrow();
-    expect(() => validateRouterConfig({ fallback: { provider: 'a', model: 'b' } })).toThrow(); // missing rules
+    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'nope' }, target: { provider: 'anthropic', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } })).toThrow();
+    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'always' }, target: { provider: '', model: 'b' } }], fallback: { provider: 'anthropic', model: 'b' } })).toThrow();
+    expect(() => validateRouterConfig({ rules: [], fallback: { provider: 'anthropic' } })).toThrow();
+    expect(() => validateRouterConfig({ fallback: { provider: 'anthropic', model: 'b' } })).toThrow(); // missing rules
   });
 
   it('stores + reads the config; enable requires an existing config', async () => {
@@ -51,5 +66,18 @@ describe('ModelRouterConfig', () => {
 
   it('enable on a missing config 404s', async () => {
     await expect(setRouterEnabled(T, 'org-none', 'u1', true)).rejects.toMatchObject({ code: 'not_found' });
+  });
+
+  // ADR 0610 D4 / MRC-2 — a routing target may only name a KNOWN routable provider.
+  // Without the allowlist a workspace:write editor could route org prompts to an
+  // arbitrary external vendor on the run's existing credentialRef.
+  it('REJECTS a routing target naming a non-routable provider (write-time allowlist)', () => {
+    // Control: a real provider passes.
+    const routable = { rules: [{ when: { kind: 'always' }, target: { provider: 'openai', model: 'm' } }], fallback: { provider: 'anthropic', model: 'm' } };
+    expect(validateRouterConfig(routable).rules).toHaveLength(1);
+    // An arbitrary vendor in a RULE target → typed rejection.
+    expect(() => validateRouterConfig({ rules: [{ when: { kind: 'always' }, target: { provider: 'evil-exfil-vendor', model: 'm' } }], fallback: { provider: 'anthropic', model: 'm' } })).toThrow(/not a routable provider/);
+    // The `compat` custom-endpoint provider is deliberately NOT routable (the SSRF/arbitrary-URL egress hole).
+    expect(() => validateRouterConfig({ rules: [], fallback: { provider: 'compat', model: 'm' } })).toThrow(/not a routable provider/);
   });
 });

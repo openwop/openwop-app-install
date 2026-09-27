@@ -9,6 +9,8 @@
  * the reference app; multi-instance hosts would replicate via a shared store.
  */
 
+import type { PackTrustReason, PackTrustTier } from '../host/packTrust.js';
+
 /** A pack-declared agent manifest, resolved for runtime use.
  *  Mirrors `schemas/agent-manifest.schema.json` (RFC 0003). After load,
  *  `systemPromptRef` is resolved to inline `systemPrompt`, and the two
@@ -78,58 +80,121 @@ export interface ResolvedAgentManifest {
  *  the violation without re-touching Ajv. */
 export type AgentSchemaValidator = (value: unknown) => { ok: boolean; errors?: string };
 
-type AgentPackResolver = (agentId: string) => Promise<unknown>;
+type AgentPackResolver = (agentId: string, tenant?: string) => Promise<unknown>;
 
+/**
+ * ADR 0555 P1 (P0 residue (b)) — an untrusted pack's agents, VISIBLY refused.
+ *
+ * P0 had `agentLoader` return `[]` for a non-dispatchable pack, which made those
+ * agents invisible rather than refused: an operator debugging "why is my agent
+ * missing" had a log line and nothing else. The residue asked for a registry
+ * field carrying tier + reason.
+ *
+ * They land in a SEPARATE map, not in `inProcess` with a flag, and the reason is
+ * the sentence P0 wrote about this path: "an agent has no separate execute seam
+ * to wrap — being in the AgentRegistry IS being dispatchable". A flag on a row
+ * every existing consumer already reads (`list()`, the @-mention picker, chat
+ * dispatch resolution) would make refusal depend on ~a dozen call sites each
+ * remembering to check it. A second map cannot be dispatched from by
+ * construction: `get`, `has` and `resolve` never look in it.
+ *
+ * It deliberately carries NO `systemPrompt`, `toolAllowlist` or handoff schema.
+ * Those are the parts of an agent manifest that STEER a model and gate which
+ * host tools it may call; surfacing them from unattested bytes would put the
+ * untrusted content into host read surfaces, which is most of what refusing the
+ * pack was for. Identity and the refusal reason are the whole payload.
+ */
+export interface RefusedAgentEntry {
+  readonly agentId: string;
+  readonly label?: string;
+  readonly description?: string;
+  readonly packName: string;
+  readonly packVersion: string;
+  readonly tier: PackTrustTier;
+  readonly reason: PackTrustReason;
+  readonly detail?: string;
+  /** Always false. Present so a consumer reads a decision, not infers one. */
+  readonly dispatchable: false;
+}
+
+/** ADR 0379 Phase 2 — the registry keys USER-authored agents by
+ *  (ownerTenant, agentId) so persona-scoped ids (`user.<slug>`, shared across
+ *  tenants after Phase 3) can coexist. Pack agents (no `ownerTenant`) remain
+ *  keyed by bare agentId — their ids are globally unique by convention
+ *  (`<packId>.<agent>`). A tenant-less lookup therefore sees pack agents only;
+ *  every user-agent lookup must carry the tenant (Phase 1 made that threadable
+ *  everywhere). */
 const inProcess = new Map<string, ResolvedAgentManifest>();
+const refused = new Map<string, RefusedAgentEntry>();
 let resolver: AgentPackResolver | null = null;
+
+const userKey = (tenant: string, agentId: string): string => `u\u0000${tenant}\u0000${agentId}`;
+
+function lookup(agentId: string, tenant?: string): ResolvedAgentManifest | null {
+  const pack = inProcess.get(agentId);
+  if (pack) return pack;
+  if (tenant !== undefined) return inProcess.get(userKey(tenant, agentId)) ?? null;
+  return null;
+}
 
 export function getAgentRegistry() {
   return {
-    /** Append-only install of a resolved manifest agent (RFC 0003). */
+    /** Append-only install of a resolved manifest agent (RFC 0003). User
+     *  agents key under their `ownerTenant`; pack agents under the bare id. */
     register(agent: ResolvedAgentManifest): void {
-      inProcess.set(agent.agentId, agent);
+      inProcess.set(agent.ownerTenant ? userKey(agent.ownerTenant, agent.agentId) : agent.agentId, agent);
     },
     /** Drop one agent from the in-process registry. Returns true when
      *  a row was removed. The pack-loader path is append-only (RFC
      *  0003), so this is intended only for user-authored agents
-     *  (`DELETE /v1/host/openwop-app/agents/:agentId`, phase E1 2026-05-28).
-     *  Calling on a pack-installed agentId is not blocked here — the
-     *  delete route gates that at the storage layer (a row that
-     *  doesn't exist in `user_agents` returns 404 before we get
-     *  here). */
-    remove(agentId: string): boolean {
-      return inProcess.delete(agentId);
+     *  (`DELETE /v1/host/openwop-app/agents/:agentId`, phase E1 2026-05-28) —
+     *  which is why `tenant` is REQUIRED here, unlike the lookups. */
+    remove(agentId: string, tenant: string): boolean {
+      return inProcess.delete(userKey(tenant, agentId));
     },
-    has(agentId: string): boolean {
-      return inProcess.has(agentId);
+    has(agentId: string, tenant?: string): boolean {
+      return lookup(agentId, tenant) !== null;
     },
-    /** Synchronous get (in-process only). */
-    get(agentId: string): ResolvedAgentManifest | null {
-      return inProcess.get(agentId) ?? null;
+    /** Synchronous get (in-process only). Tenant-less ⇒ pack agents only. */
+    get(agentId: string, tenant?: string): ResolvedAgentManifest | null {
+      return lookup(agentId, tenant);
     },
     /** Async resolve — falls through to the pack resolver on miss. As with
      *  the node registry, the resolver typically registers EVERY agent in
      *  the matching pack, so we re-read after it runs. */
-    async resolve(agentId: string): Promise<ResolvedAgentManifest | null> {
-      const direct = inProcess.get(agentId);
+    async resolve(agentId: string, tenant?: string): Promise<ResolvedAgentManifest | null> {
+      const direct = lookup(agentId, tenant);
       if (direct) return direct;
       if (resolver) {
-        await resolver(agentId);
-        const reread = inProcess.get(agentId);
+        await resolver(agentId, tenant);
+        const reread = lookup(agentId, tenant);
         if (reread) return reread;
       }
       return null;
     },
     listAgentIds(): readonly string[] {
-      return Array.from(inProcess.keys()).sort();
+      // Project from VALUES — the map keys are composite for user agents.
+      return Array.from(inProcess.values()).map((a) => a.agentId).sort();
     },
-    /** All resolved manifests (for the inventory route / CLI). */
+    /** All resolved manifests (for the inventory route / CLI). Dispatchable
+     *  agents only — refused ones are read through `listRefused()`. */
     list(): readonly ResolvedAgentManifest[] {
       return Array.from(inProcess.values()).sort((a, b) => a.agentId.localeCompare(b.agentId));
     },
-    /** Test seam — clears the in-process map. */
+    /** ADR 0555 P1 — record an agent this host refuses to register, with the
+     *  trust verdict that caused it. Never reachable by `get`/`has`/`resolve`. */
+    registerRefused(entry: RefusedAgentEntry): void {
+      refused.set(`${entry.packName}\u0000${entry.agentId}`, entry);
+    },
+    /** Agents a pack declared that this host will not dispatch, with tier +
+     *  reason. Feeds the Operations/marketplace surface (matrix row 10). */
+    listRefused(): readonly RefusedAgentEntry[] {
+      return Array.from(refused.values()).sort((a, b) => a.agentId.localeCompare(b.agentId));
+    },
+    /** Test seam — clears the in-process maps. */
     _resetForTest(): void {
       inProcess.clear();
+      refused.clear();
     },
   };
 }

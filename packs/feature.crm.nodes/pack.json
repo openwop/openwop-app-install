@@ -1,29 +1,44 @@
 {
   "name": "feature.crm.nodes",
-  "version": "1.1.0",
-  "description": "CRM feature node pack (ADR 0001 §4 / ADR 0014) — contact-triage nodes (the two basic/enriched variants back the CRM toggle's A/B bindings) PLUS read nodes over the ctx.features.crm surface (companies / deals / tasks) so a workflow can read CRM data. Reads are role:action (recorded → replay/fork-safe), tenant+org-guarded (CTI-1).",
+  "version": "1.10.0",
+  "description": "CRM feature node pack \u2014 contact-triage nodes (the two basic/enriched variants back the CRM toggle's A/B bindings) PLUS the full ctx.features.crm surface: nine role:\"action\" read nodes (companies / deals / tasks / a saved segment's live members / suppression-cause analytics / bookings / sign status) and thirteen role:\"side-effect\" write nodes (create/update contacts, convert a lead, create companies/deals, move a deal's stage, create/complete tasks, log an activity, sync Gmail). Every write calls the SAME service function the HTTP routes call, emitting the same host event + audit row \u2014 agent/workflow writes and human writes are indistinguishable to the audit trail. Creation nodes default to a deterministic `<prefix>:<runId>:<nodeId>` id when the caller omits one \u2014 a PER-RUN dedupe key (a retried node converges), NOT a cross-run fork guard. v1.4.0 adds `gmail-sync` (scheduler-fired Gmail inbox \u2192 CRM activity sync, refs-only metadata, matched contacts only, never creates) and `suppression-summary` (suppression-cause analytics, counts only, no PII). Read nodes are role:action (recorded \u2192 replay-served); tenant+org-guarded (CTI-1). v1.5.0 adds segment-vocabulary + validate-segment (ADR 0265 CDP-C \u2014 the segment-author closed-world grounding pair; role:pure, deterministic). v1.9.0 adds persist-segment (ADR 0265 CDP-C \u2014 the copilot's draft\u2192validate\u2192persist write; role:action, surface re-validates + fail-closes on an invalid draft). v1.10.0 (ADR 0627 D1/D5): the 13 write nodes are role:\"side-effect\" + `side-effectful` \u2014 the derived floor/served set is what stops a `mode:'replay'` fork from re-executing them (a `branch` fork re-runs the tail live by design) \u2014 each with ADR 0525 input/output schemas; `gmail-sync` (now role:\"side-effect\" \u2014 it writes activities AND the sync row's own status) pins the sync row's owner-verified `connectionId` on every connector invoke (no user\u2192org\u2192workspace fall-through at the broker), keys its cursor on the typed `logGmailActivity` outcome (`logged | duplicate | capped | failed`), pauses itself on `capped`, marks `needs-reconsent` when the pinned connection is refused, and refuses to run a paused / needs-reconsent sync.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "crm", "triage", "companies", "deals", "tasks"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "crm",
+    "triage",
+    "companies",
+    "deals",
+    "tasks",
+    "contacts",
+    "activities"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.crm.nodes.triage",
       "version": "1.0.0",
       "label": "CRM Triage (basic)",
-      "description": "Rule-based contact triage — scores a contact from its stage. The `basic` variant binding.",
+      "description": "Rule-based contact triage \u2014 scores a contact from its stage. The `basic` variant binding.",
       "category": "integration",
       "role": "pure",
-      "capabilities": ["cacheable"]
+      "capabilities": [
+        "cacheable"
+      ]
     },
     {
       "typeId": "feature.crm.nodes.triage-enriched",
       "version": "1.0.0",
       "label": "CRM Triage (enriched)",
-      "description": "Enriched contact triage — adds company-signal weighting. The `enriched` variant binding.",
+      "description": "Enriched contact triage \u2014 adds company-signal weighting. The `enriched` variant binding.",
       "category": "integration",
       "role": "pure",
-      "capabilities": ["cacheable"]
+      "capabilities": [
+        "cacheable"
+      ]
     },
     {
       "typeId": "feature.crm.nodes.list-companies",
@@ -39,6 +54,15 @@
       "version": "1.0.0",
       "label": "CRM: Get Company",
       "description": "Fetches one CRM company by id over ctx.features.crm.getCompany. Inputs: { orgId, companyId }. Output: { company } (null when absent). Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.suppression-summary",
+      "version": "1.0.0",
+      "label": "CRM: Suppression Summary",
+      "description": "Suppression-cause analytics over ctx.features.crm.suppressionSummary (ADR 0251): counts by reason (unsubscribed/bounced/complaint/manual) + coarse source bucket + newest timestamp. No inputs. Output: { summary }. Counts only \u2014 no addresses (no PII).",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -69,7 +93,237 @@
       "category": "integration",
       "role": "action",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.create-contact",
+      "version": "1.1.0",
+      "label": "CRM: Create Contact",
+      "description": "Creates (or, given an explicit contactId that already exists, idempotently returns) a tenant-scoped contact over ctx.features.crm.createContact. Inputs: { contactId?, name, email?, company?, stage?, owner?, title?, address?, leadSource?, phone? } (CRM-2: title/address/leadSource are first-class strings validated fail-closed; phone upserts the phone identifier, the identity-resolution SoT \u2014 never a stored scalar). Output: { success, contact } (a read-only derived `phone` is surfaced from the identifier). Explicit id MUST be `crm:`-prefixed (ADR 0162); omitted, the host derives `crm:${runId}:${nodeId}`.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/create-contact.input.json",
+      "outputSchemaRef": "schemas/create-contact.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.update-contact-stage",
+      "version": "1.0.0",
+      "label": "CRM: Update Contact Stage",
+      "description": "Advances/sets a contact's lifecycle stage over ctx.features.crm.updateContactStage. Inputs: { contactId, stage }. Output: { success, contact }. Tenant-guarded; refuses a tombstoned (merged-away) contact.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/update-contact-stage.input.json",
+      "outputSchemaRef": "schemas/update-contact-stage.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.update-contact-owner",
+      "version": "1.0.0",
+      "label": "CRM: Update Contact Owner",
+      "description": "Reassigns a contact's owner over ctx.features.crm.updateContactOwner. Inputs: { contactId, owner } \u2014 `contactId` falls back to `entityId` so this node can be driven directly off a `host.crm.contact.created` trigger edge (the ids-only event payload). Output: { success, contact }. Tenant-guarded; refuses a tombstoned contact.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/update-contact-owner.input.json",
+      "outputSchemaRef": "schemas/update-contact-owner.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.convert-contact",
+      "version": "1.0.0",
+      "label": "CRM: Convert Contact",
+      "description": "ADR 0209 \u00a73 lead conversion \u2014 get-or-creates a company + deal for the contact and advances its stage, over ctx.features.crm.convertContact. Inputs: { contactId, orgId, companyName?, pipelineId?, dealTitle? }. Output: { success, contact, company, deal, created }. Idempotent-by-outcome (a re-convert reuses the existing open deal). Tenant+org-guarded; refuses a tombstoned contact.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/convert-contact.input.json",
+      "outputSchemaRef": "schemas/convert-contact.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.create-company",
+      "version": "1.1.0",
+      "label": "CRM: Create Company",
+      "description": "Creates (or idempotently returns, given an existing explicit id) an org-scoped company over ctx.features.crm.createCompany. Inputs: { orgId, companyId?, name, domain?, size?, revenue? } (CRM-2: size = employee count, revenue = annual revenue in major units; both validated fail-closed). Output: { success, company }. Explicit id MUST be `cmp:`-prefixed (ADR 0162); omitted, the host derives `cmp:${runId}:${nodeId}`.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/create-company.input.json",
+      "outputSchemaRef": "schemas/create-company.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.create-deal",
+      "version": "1.0.0",
+      "label": "CRM: Create Deal",
+      "description": "Creates (or idempotently returns, given an existing explicit id) an org-scoped deal over ctx.features.crm.createDeal. Inputs: { orgId, dealId?, title, amount?, companyId?, contactId?, pipelineId?, stageId?, closeDate? }. Output: { success, deal }. Explicit id MUST be `deal:`-prefixed (ADR 0162); omitted, the host derives `deal:${runId}:${nodeId}`. Tenant+org link validation (companyId/contactId) applies.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/create-deal.input.json",
+      "outputSchemaRef": "schemas/create-deal.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.move-deal-stage",
+      "version": "1.0.0",
+      "label": "CRM: Move Deal Stage",
+      "description": "Moves a deal to a new pipeline stage over ctx.features.crm.moveDealStage, deriving the deal's outcome from the stage name (won/lost) exactly as the org route does. Inputs: { orgId, dealId, stageId }. Output: { success, deal }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/move-deal-stage.input.json",
+      "outputSchemaRef": "schemas/move-deal-stage.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.create-task",
+      "version": "1.0.0",
+      "label": "CRM: Create Task",
+      "description": "Creates (or idempotently returns, given an existing explicit id) an org-scoped task over ctx.features.crm.createTask. Inputs: { orgId, taskId?, title, dueDate?, dealId? }. Output: { success, task }. Explicit id MUST be `task:`-prefixed (ADR 0162); omitted, the host derives `task:${runId}:${nodeId}`.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/create-task.input.json",
+      "outputSchemaRef": "schemas/create-task.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.complete-task",
+      "version": "1.0.0",
+      "label": "CRM: Complete Task",
+      "description": "Marks a task done over ctx.features.crm.completeTask. Inputs: { orgId, taskId }. Output: { success, task }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/complete-task.input.json",
+      "outputSchemaRef": "schemas/complete-task.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.log-activity",
+      "version": "1.0.0",
+      "label": "CRM: Log Activity",
+      "description": "Appends a note/call/email/meeting to a deal/contact/company's timeline over ctx.features.crm.logActivity (append-only \u2014 no update/delete). Inputs: { orgId, activityId?, kind, body, dealId?, contactId?, companyId? }. Output: { success, activity }. Explicit id MUST be `act:`-prefixed (ADR 0162); omitted, the host derives `act:${runId}:${nodeId}`. Tenant+org link validation applies.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/log-activity.input.json",
+      "outputSchemaRef": "schemas/log-activity.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.list-segment-members",
+      "version": "1.0.0",
+      "label": "CRM: List Segment Members",
+      "description": "Resolves a saved segment's LIVE membership over ctx.features.crm.listSegmentMembers (ADR 0211 \u00a72) \u2014 evaluated at read against the tenant rolodex; membership is never materialized. Inputs: { segmentId }. Output: { members }. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.gmail-sync",
+      "version": "1.1.0",
+      "label": "CRM: Gmail Inbox Sync",
+      "description": "ADR 0252 \u2014 scheduler-fired Gmail inbox \u2192 CRM activity sync. Reads gmailSyncId from ctx.config (frozen in at chain expansion, RFC 0013 Path A), resolves the opt-in row over ctx.features.crm.getGmailSyncForRun, pages (nextPageToken, bounded) the connected user's recent Gmail messages via ctx.connectors.invoke('google', \u2026), matches From/To participants to EXISTING CRM contacts only (ctx.features.crm.findContactByEmail \u2014 never creates), and appends metadata-only email activities (no subject/body/snippet/email, back-dated to the email's own time) via ctx.features.crm.logGmailActivity. Every connector invoke PINS the sync row's owner-verified `connectionId` (ADR 0627 D5 \u2014 the broker never falls through to an org/workspace credential). Advances the sync's time cursor only past messages whose every append returned `logged | duplicate` (the typed ctx.features.crm.logGmailActivity outcome); a `capped` outcome pauses the sync (`status:'paused', pausedReason:'capped'`) and a refused pin marks it `needs-reconsent` via ctx.features.crm.markGmailSyncRunStatus. Refuses (typed failure) a sync that is already paused or needs-reconsent. Inputs: { gmailSyncId }. Output: { scanned, matched (appends actually LOGGED \u2014 duplicates excluded), truncated }. truncated=true holds the cursor and persists a scan window (`scan.before`/`scan.newest`, via ctx.features.crm.recordGmailSyncScan) so later passes drain BELOW what was reached instead of re-listing the same newest 500; an unsettled message holds the cursor for at most 5 passes, then is released with a warn naming the id. Requires ctx.connectors (host_capability_missing otherwise) + a `google` connection (gmail.readonly) bound to the sync's owning user.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.crm.nodes.segment-vocabulary",
+      "version": "1.0.0",
+      "label": "CRM: Segment Vocabulary",
+      "description": "Reads the legal segment-filter vocabulary over ctx.features.crm.segmentVocabulary (ADR 0265 CDP-C) \u2014 the closed-world grounding for drafting segment filters. No inputs. Deterministic (code constants) \u2014 role:pure.",
+      "category": "integration",
+      "role": "pure",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.validate-segment",
+      "version": "1.0.0",
+      "label": "CRM: Validate Segment",
+      "description": "Validates a draft segment filter set over ctx.features.crm.validateSegment (non-throwing \u2014 returns the validation result for a draft\u2192validate loop). Inputs: { filters }. Deterministic \u2014 role:pure.",
+      "category": "integration",
+      "role": "pure",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.persist-segment",
+      "version": "1.0.0",
+      "label": "CRM: Persist Segment",
+      "description": "Persists a validated segment over ctx.features.crm.persistSegment (ADR 0265 CDP-C \u2014 the segment-author copilot's draft\u2192validate\u2192persist trio). The surface RE-VALIDATES closed-world and refuses an invalid draft WITHOUT writing (fail-closed { success:false, errors }); a saved segment is inert until wired to activation. Inputs: { name, filters, segmentId? }. Explicit id MUST be `seg:`-prefixed (ADR 0162); omitted, the host derives a deterministic `seg:${runId}:${nodeId}` (a per-run dedupe key; the side-effect classification is the fork guard). Output: { success, segment } | { success:false, errors }. Tenant-guarded. role:side-effect (ADR 0627 D1).",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/persist-segment.input.json",
+      "outputSchemaRef": "schemas/persist-segment.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.booking-create-link",
+      "version": "1.0.0",
+      "label": "CRM: Create Booking Link",
+      "description": "ADR 0402 \u2014 creates (or idempotently returns) a public booking link over ctx.features.crm.createBookingLink. Inputs: { bookingLinkId?, orgId, title, timezone, weeklyHours:[{day,start,end}], durations:[minutes], description?, status?, ownerUserId?, location?, videoLink?, bufferBeforeMin?, bufferAfterMin?, minNoticeMin?, maxAdvanceDays?, slug? }. Output: { success, bookingLink }. Explicit id MUST be `booking-link:`-prefixed (ADR 0162); omitted, the host derives `booking-link:${runId}:${nodeId}` (a per-run dedupe key; the side-effect classification is the fork guard). The public slot-CLAIM is a visitor action, not a node.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/booking-create-link.input.json",
+      "outputSchemaRef": "schemas/booking-create-link.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.booking-list",
+      "version": "1.0.0",
+      "label": "CRM: List Bookings",
+      "description": "ADR 0402 \u2014 lists an org's bookings over ctx.features.crm.listBookings. Inputs: { orgId, bookingLinkId?, status? }. Output: { bookings }. Org-scoped read.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.crm.nodes.sign-request",
+      "version": "1.0.0",
+      "label": "CRM: Request Signature",
+      "description": "ADR 0402 \u00a7b \u2014 requests native click-to-sign signatures on a commerce quote or document over ctx.features.crm.requestSignature. Inputs: { signRequestId?, orgId, target:{kind:'commerce_quote'|'document', id}, signers:[{email,name?,order?}] }. Output: { success, signRequest } (status projection: signers + audit). Binds to a SHA-256 content hash of the target at request time. Explicit id MUST be `sign-request:`-prefixed (ADR 0162); omitted, the host derives `sign-request:${runId}:${nodeId}` (a per-run dedupe key; the side-effect classification is what keeps a replay fork from re-minting signer tokens). The public SIGN action is a signer action, not a node.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/sign-request.input.json",
+      "outputSchemaRef": "schemas/sign-request.output.json"
+    },
+    {
+      "typeId": "feature.crm.nodes.sign-status",
+      "version": "1.0.0",
+      "label": "CRM: Signature Status",
+      "description": "ADR 0402 \u00a7b \u2014 reads a sign request's status over ctx.features.crm.getSignatureStatus. Inputs: { orgId, signRequestId }. Output: { signRequest } (per-signer status + audit + certificate URL when completed). Org-scoped read.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

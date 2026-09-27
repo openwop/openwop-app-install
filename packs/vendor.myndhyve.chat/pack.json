@@ -1,6 +1,6 @@
 {
   "name": "vendor.myndhyve.chat",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "description": "MyndHyve chat-bridge nodes — sendMessage, progressCard, updateCard, phaseInputGate, approvalGate, clarificationGate. Routes through the host's chat adapter (ctx.chat.*) + ctx.suspend for HITL gates. Preserves the core.chat.* typeIds in the wild.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
@@ -64,9 +64,9 @@
     },
     {
       "typeId": "core.chat.approvalGate",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Chat Approval Gate",
-      "description": "HITL approval gate. Suspends via ctx.suspend({reason:'approval'}) and routes the decision (accept | edit-accept | refine | ask | reject | timeout) back into the workflow. Tracks loopback counter on `_loopbackCount:<nodeId>` and refine feedback history on `_feedbackHistory:<nodeId>` for downstream re-generation context.",
+      "description": "HITL approval gate. Suspends via ctx.suspend({reason:'approval'}) and routes the decision (accept | edit-accept | refine | ask | reject | timeout) back into the workflow. Tracks loopback counter on `_loopbackCount:<nodeId>` and refine feedback history on `_feedbackHistory:<nodeId>` for downstream re-generation context. ADR 0582 §9 (v1.1.0): the decision verb is read from `action` OR `decision` — every shipped UI surface sends `action`, so reading `decision` alone made `approved` ALWAYS false and inverted every `truthy approved` edge (an Approve took the reject branch). ADR 0582 §11 (v1.1.0): also emits `artifact`, the approved artifact (the reviewer's edited version when edited, else the input), so a side-effecting successor can take its content FROM THE GATE on the conditioned edge — a chain that feeds the effect node straight from the author node leaves an unconditional edge that satisfies `all_success` by itself and fires the effect on a REJECTION.",
       "category": "chat",
       "role": "gate",
       "capabilities": ["side-effectful"],

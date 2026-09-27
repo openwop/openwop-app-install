@@ -12,6 +12,7 @@
  * mutates the textarea's selection and bubbles the new string up via onChange.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { formatNumber } from '../i18n/format.js';
@@ -202,37 +203,34 @@ export function MarkdownEditor({
         {actions(compact).map((a) => {
           const label = t(a.labelKey);
           return (
-          <button
+          <Button
             key={a.key}
-            type="button"
-            className="secondary btn-sm u-iflex u-items-center u-minw-0 u-pad-2x6"
+            variant="secondary" size="sm" className="u-iflex u-items-center u-minw-0 u-pad-2x6"
             title={label}
             aria-label={label}
             disabled={mode === 'preview'}
             onClick={() => apply(a)}
           >
             {a.icon}
-          </button>
+          </Button>
           );
         })}
         {!compact ? (
           <div className="u-ml-auto u-iflex u-gap-1">
-            <button
-              type="button"
-              className={mode === 'write' ? 'primary btn-sm' : 'secondary btn-sm'}
+            <Button
+              variant={mode === 'write' ? 'primary' : 'secondary'} size="sm"
               aria-pressed={mode === 'write'}
               onClick={() => setMode('write')}
             >
               {t('mdWrite')}
-            </button>
-            <button
-              type="button"
-              className={mode === 'preview' ? 'primary btn-sm' : 'secondary btn-sm'}
+            </Button>
+            <Button
+              variant={mode === 'preview' ? 'primary' : 'secondary'} size="sm"
               aria-pressed={mode === 'preview'}
               onClick={() => setMode('preview')}
             >
               {t('mdPreview')}
-            </button>
+            </Button>
           </div>
         ) : null}
       </div>
@@ -240,23 +238,21 @@ export function MarkdownEditor({
       {recoverable != null ? (
         <div className="u-flex u-items-center u-gap-2 u-wrap u-fs-12 u-mb-1 u-border u-radius u-pad-4x8 u-bg-surface-2">
           <span className="muted">{t('mdDraftFound')}</span>
-          <button
-            type="button"
-            className="secondary btn-sm"
+          <Button
+            variant="secondary" size="sm"
             onClick={() => { onChange(recoverable); setRecoverable(null); }}
           >
             {t('mdRestoreDraft')}
-          </button>
-          <button
-            type="button"
-            className="secondary btn-sm"
+          </Button>
+          <Button
+            variant="secondary" size="sm"
             onClick={() => {
               if (autosaveKey) { try { window.localStorage.removeItem(autosaveKey); } catch { /* ignore */ } }
               setRecoverable(null);
             }}
           >
             {t('mdDiscard')}
-          </button>
+          </Button>
         </div>
       ) : null}
 
@@ -270,7 +266,7 @@ export function MarkdownEditor({
           placeholder={placeholder}
           aria-label={ariaLabel}
           className="ui-input mdeditor-textarea"
-          style={{ fontFamily: monospace ? 'var(--font-mono, monospace)' : 'inherit' }}
+          style={{ fontFamily: monospace ? 'var(--mono, monospace)' : 'inherit' }}
         />
       ) : (
         <div
@@ -286,7 +282,7 @@ export function MarkdownEditor({
           {draftSaved ? t('mdDraftSaved') : t('mdMarkdownSupported')}
         </span>
         {maxLength != null ? (
-          <span className="mdeditor-count" style={{ color: over ? 'var(--color-danger)' : 'var(--color-text-muted)' }}>
+          <span className="mdeditor-count" style={{ color: over ? 'var(--color-danger)' : 'var(--ink-3)' }}>
             {t('mdCharCountMax', { n: formatNumber(value.length), max: formatNumber(maxLength) })}
           </span>
         ) : (

@@ -12,12 +12,12 @@
  * initHostExtPersistence, since the store is read-through DurableCollection.
  */
 
-import { afterAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { openSqliteStorage } from '../src/storage/sqlite/index.js';
-import { __resetHostExtPersistence, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { __resetHostExtPersistence, DurableCollection, initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
   __resetUsersStore,
   createUser,
@@ -29,6 +29,8 @@ import {
   setUserStatus,
   updateUser,
   upsertFromPrincipal,
+  userIdFor,
+  type User,
 } from '../src/features/users/usersService.js';
 
 const dir = mkdtempSync(join(tmpdir(), 'owop-users-'));
@@ -114,6 +116,56 @@ describe('users service: identity reconciliation', () => {
   });
 });
 
+// USERS-3 — the auth hot path point-reads the deterministic id instead of
+// scanning every user row; the scan survives ONLY for legacy (randomUUID-era)
+// rows whose id is unrelated to the join key.
+describe('users service: getUserByPrincipal point-read (USERS-3)', () => {
+  beforeEach(async () => {
+    __resetHostExtPersistence();
+    initHostExtPersistence(openSqliteStorage(join(dir, 'pointread.db')));
+    await __resetUsersStore();
+  });
+
+  it('resolves a deterministic-id row WITHOUT a collection scan', async () => {
+    await createUser({ tenantId: 't', principalId: 'oidc:point', email: 'p@t.test' });
+    const listSpy = vi.spyOn(DurableCollection.prototype, 'list');
+    try {
+      const found = await getUserByPrincipal('t', 'oidc:point');
+      expect(found).not.toBeNull();
+      expect(found!.userId).toBe(userIdFor('t', 'oidc:point'));
+      // THE pin: the hot path must not fall through to the full scan.
+      expect(listSpy).not.toHaveBeenCalled();
+    } finally {
+      listSpy.mockRestore();
+    }
+  });
+
+  it('still finds a LEGACY row keyed by a non-deterministic id (scan fallback)', async () => {
+    // Simulate a pre-deterministic-id record: same namespace, unrelated key —
+    // exactly what a randomUUID-era row looks like in a real deploy.
+    const legacyStore = new DurableCollection<User>('users:user', (u) => u.userId);
+    const now = new Date().toISOString();
+    const legacy: User = {
+      userId: 'user:legacy-nondeterministic-0001',
+      tenantId: 't',
+      principalId: 'oidc:legacy',
+      groups: [],
+      source: 'oidc',
+      status: 'active',
+      createdAt: now,
+      updatedAt: now,
+    };
+    await legacyStore.put(legacy);
+    const found = await getUserByPrincipal('t', 'oidc:legacy');
+    expect(found).not.toBeNull();
+    expect(found!.userId).toBe('user:legacy-nondeterministic-0001');
+  });
+
+  it('a missing principal resolves null (point miss + scan miss)', async () => {
+    expect(await getUserByPrincipal('t', 'oidc:ghost')).toBeNull();
+  });
+});
+
 describe('users service: reconcilable-principal guard (no transient minting)', () => {
   it('refuses non-durable shapes; maps durable shapes to their source', async () => {
     const { reconcilableSource } = await import('../src/features/users/usersGuards.js');
@@ -143,7 +195,7 @@ describe('users service: fail-closed lifecycle (finding H5)', () => {
     expect(await isActiveUser('t', 'p1')).toBe(true);
     expect(await isActiveUser('t', 'ghost')).toBe(false); // unknown => denied
 
-    await setUserStatus(u.userId, 'disabled');
+    await setUserStatus(u.userId, 'disabled', { reason: 'admin' });
     expect(await isActiveUser('t', 'p1')).toBe(false); // fail-closed
 
     // A re-login MUST NOT silently re-activate a disabled user.
@@ -152,7 +204,7 @@ describe('users service: fail-closed lifecycle (finding H5)', () => {
     expect(await isActiveUser('t', 'p1')).toBe(false);
 
     // Only the explicit lifecycle call re-enables.
-    await setUserStatus(u.userId, 'active');
+    await setUserStatus(u.userId, 'active', { reason: 'admin' });
     expect(await isActiveUser('t', 'p1')).toBe(true);
   });
 });

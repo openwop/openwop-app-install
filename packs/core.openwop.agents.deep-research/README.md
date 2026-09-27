@@ -26,10 +26,10 @@ Don't use it for: short fact lookups (use `react`), single-document extraction (
 ## Tool allowlist
 
 Default permits:
-- `openwop:core.http.fetch` — HTTP GET for direct URL retrieval
-- `openwop:core.rag.retrieve` — RAG retrieval against installed vector indices
-- `openwop:core.rag.contextual-compression` — relevance-pruning for long retrievals
-- `openwop:vendor.myndhyve.web-research` — web-search-aware retrieval over the host's search adapter
+- `openwop:core.openwop.http.fetch` — HTTP GET for direct URL retrieval
+- `openwop:core.rag.retriever-basic` — RAG retrieval against installed vector indices
+- `openwop:core.rag.retriever-contextual-compression` — relevance-pruning for long retrievals
+- `openwop:ai.research.web` — web-search-aware retrieval over the host's search adapter
 
 Hosts MAY restrict at dispatch time. Workflows MAY extend via `task.toolAllowlist`.
 

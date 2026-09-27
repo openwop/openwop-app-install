@@ -56,10 +56,13 @@ afterEach(() => {
 
 /** A member (default autonomy = `auto`) with a board carrying one To Do card
  *  whose pick triggers `WF`. Card priority overridable. */
+let ivySeq = 0;
 async function makeAgentWithTask(over: { priority?: 'low' | 'normal' | 'high' } = {}): Promise<RosterEntry> {
   const entry = await createRosterEntry({
     tenantId: TENANT,
-    persona: 'Ivy',
+    // ADR 0379 P2 — rosterIds are deterministic per persona now, so each
+    // fixture agent needs a distinct persona (a repeat would 409).
+    persona: `Ivy ${++ivySeq}`,
     agentRef: { agentId: 'host:it-service-desk' },
     workflows: [WF],
   });
@@ -154,21 +157,21 @@ describe('runHeartbeatOnce — agentProfile policy enforcement (ADR 0036)', () =
     // guided agent, on-readiness, not forbidden/hitl. Re-fetch the entry AFTER
     // the level update — the heartbeat reads `autonomyOf(entry)` off the entry.
     const high = await makeAgentWithTask({ priority: 'high' });
-    await updateRosterEntry(high.rosterId, { autonomyLevel: 'guided' });
+    await updateRosterEntry(high.tenantId, high.rosterId, { autonomyLevel: 'guided' });
     await upsertAgentProfile(TENANT, high.rosterId, {
       roleKey: 'it-service-desk',
       autonomy: { specLevel: 'execute-with-approval' },
     });
-    const hi = await runHeartbeatOnce(deps, (await getRosterEntry(high.rosterId))!);
+    const hi = await runHeartbeatOnce(deps, (await getRosterEntry(high.tenantId, high.rosterId))!);
     expect(hi.proposed).toBe(true);
 
     const routine = await makeAgentWithTask({ priority: 'normal' });
-    await updateRosterEntry(routine.rosterId, { autonomyLevel: 'guided' });
+    await updateRosterEntry(routine.tenantId, routine.rosterId, { autonomyLevel: 'guided' });
     await upsertAgentProfile(TENANT, routine.rosterId, {
       roleKey: 'it-service-desk',
       autonomy: { specLevel: 'execute-with-approval' },
     });
-    const lo = await runHeartbeatOnce(deps, (await getRosterEntry(routine.rosterId))!);
+    const lo = await runHeartbeatOnce(deps, (await getRosterEntry(routine.tenantId, routine.rosterId))!);
     expect(lo.proposed).toBeUndefined();
     expect(lo.runId).toBeTruthy();
   });

@@ -15,7 +15,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
-import { createCard, listBoards, getCard } from '../src/host/kanbanService.js';
+import { createBoard, createCard, listBoards, getCard } from '../src/host/kanbanService.js';
 
 let server: http.Server;
 let BASE: string;
@@ -27,7 +27,7 @@ beforeAll(async () => {
   const app = await createApp({
     port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 
 afterAll(async () => {
@@ -81,6 +81,14 @@ describe('host.kanban: board.create node bridges to the durable store', () => {
 describe('host.kanban: computed methods over live cards', () => {
   const k = () => buildHostSurfaceBundle({ tenantId: 'kanban-svc-test' }).kanban;
 
+  it('refuses automation that would be lost on restart', async () => {
+    await expect(k().automateRules({
+      boardId: 'board-not-needed',
+      rules: [],
+      idempotencyKey: 'automation-not-durable',
+    })).rejects.toMatchObject({ code: 'kanban_automation_unavailable' });
+  });
+
   it('boardReview aggregates column counts + at-risk cards; resourceMonitor tallies load', async () => {
     const { boardId } = await k().boardCreate({ name: 'Ops', columns: [{ id: 'todo', label: 'To Do' }, { id: 'done', label: 'Done' }], idempotencyKey: 'b1' });
     const soon = new Date(Date.now() + 86_400_000).toISOString(); // due in 1 day → at risk
@@ -113,6 +121,50 @@ describe('host.kanban: computed methods over live cards', () => {
     expect((await getCard(card.id))!.assigneeId).toBe('grace');
   });
 
+  it('keeps every workflow-surface board and card operation inside its bound tenant', async () => {
+    const { boardId } = await k().boardCreate({
+      name: 'Scoped', columns: [{ id: 'todo', label: 'To Do' }], idempotencyKey: 'scoped-board',
+    });
+    const card = await createCard({ boardId, columnId: 'todo', title: 'Owner-only work' });
+    const foreign = buildHostSurfaceBundle({ tenantId: 'kanban-svc-foreign' }).kanban;
+
+    await expect(foreign.boardReview({ boardId })).rejects.toMatchObject({ code: 'kanban_board_not_found' });
+    await expect(foreign.taskGet(card.id)).rejects.toMatchObject({ code: 'kanban_board_not_found' });
+    await expect(foreign.taskAssign({ taskId: card.id, assigneeId: 'mallory', idempotencyKey: 'foreign-card' }))
+      .rejects.toMatchObject({ code: 'kanban_board_not_found' });
+    await expect(foreign.taskCreateBatch({ parentTaskId: card.id, subtasks: [{ title: 'Foreign child' }], idempotencyKey: 'foreign-batch' }))
+      .rejects.toMatchObject({ code: 'kanban_board_not_found' });
+    await expect(foreign.moveTask(card.id, 'todo')).rejects.toMatchObject({ code: 'kanban_board_not_found' });
+    expect((await getCard(card.id))!.assigneeId).toBeUndefined();
+  });
+
+  it('keeps workflow idempotency durable across fresh host-surface instances', async () => {
+    const first = await k().boardCreate({
+      name: 'Durable idempotency', columns: [{ id: 'todo', label: 'To Do' }], idempotencyKey: 'durable-board-1',
+    });
+    // `k()` creates a fresh surface object. This mimics a different worker or a
+    // process after restart; it must see the same durable board, not a module
+    // cache or a second random board.
+    const replay = await k().boardCreate({
+      name: 'Durable idempotency', columns: [{ id: 'todo', label: 'To Do' }], idempotencyKey: 'durable-board-1',
+    });
+    expect(replay).toEqual(first);
+
+    const parent = await createCard({ boardId: first.boardId, columnId: 'todo', title: 'Parent' });
+    const batch = await k().taskCreateBatch({
+      parentTaskId: parent.id,
+      subtasks: [{ title: 'One' }, { title: 'Two' }],
+      idempotencyKey: 'durable-batch-1',
+    });
+    const batchReplay = await k().taskCreateBatch({
+      parentTaskId: parent.id,
+      subtasks: [{ title: 'One' }, { title: 'Two' }],
+      idempotencyKey: 'durable-batch-1',
+    });
+    expect(batchReplay).toEqual(batch);
+    expect((await Promise.all(batch.subtaskIds.map((id) => getCard(id)))).every(Boolean)).toBe(true);
+  });
+
   it('timelinePlan schedules a dependency chain with a real critical path', async () => {
     const { boardId } = await k().boardCreate({ name: 'Plan', columns: [{ id: 'todo', label: 'To Do' }], idempotencyKey: 'b3' });
     const a = await createCard({ boardId, columnId: 'todo', title: 'A', estimateHours: 8 });
@@ -142,5 +194,17 @@ describe('host.kanban: computed methods over live cards', () => {
 
     ready = await k().getReadyTasks(boardId);
     expect(ready.map((t) => t.id)).toContain(b.id); // A done → B ready
+  });
+
+  it('moveTask uses the same durable trigger delivery as the HTTP board', async () => {
+    const discovery = await jsonFetch<{ fixtures?: string[] }>('/.well-known/openwop');
+    const workflowId = discovery.body.fixtures?.[0];
+    expect(workflowId).toBeTruthy();
+    const board = await createBoard({ tenantId: 'kanban-svc-test', name: 'Workflow move', triggerWorkflowId: workflowId });
+    const card = await createCard({ boardId: board.id, columnId: 'doing', title: 'Dispatch me' });
+
+    const result = await k().moveTask(card.id, 'To Do');
+    expect(result.triggeredRunId).toEqual(expect.any(String));
+    expect((await getCard(card.id))?.lastRunId).toBe(result.triggeredRunId);
   });
 });

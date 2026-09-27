@@ -32,7 +32,7 @@ import { randomUUID } from 'node:crypto';
 import { createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 
-export type SubscriptionSource = 'webhook' | 'schedule' | 'queue' | 'email' | 'form';
+export type SubscriptionSource = 'webhook' | 'schedule' | 'queue' | 'email' | 'form' | 'stream' | 'change';
 export type SubscriptionState = 'active' | 'paused' | 'failed' | 'dead-lettered';
 export type DeliveryOutcome = 'delivered' | 'retrying' | 'dead-lettered';
 
@@ -59,6 +59,14 @@ export interface TriggerSubscription {
    *  `POST /v1/trigger-subscriptions`; absent on internal sources (the Kanban
    *  `queue` subscription resolves its workflow per-card). */
   workflowId?: string;
+  /** ADR 0599 §6 — the feature that OWNS this subscription, resolved against the
+   *  feature-toggle service at INGEST time (`triggerIngestionService`). Absent ⇒
+   *  ungated, which is every pre-existing subscription. The scheduler twin of
+   *  this field is `ScheduledJob.featureId`, and the rationale is the same: a
+   *  toggle-status listener gates the CREATION lane, not the USE lane, so a
+   *  per-tenant disable left the webhook accepting events for a tenant the
+   *  feature was explicitly off for. */
+  featureId?: string;
   /** RFC 0099 §F.2 — source-authenticity policy. Defaults `required` for
    *  external sources. */
   verificationMode?: VerificationMode;
@@ -182,6 +190,57 @@ export function __setDedupRetentionMs(ms: number): void {
  * `subscriptionId` -- a caller (e.g. a Kanban board) uses a deterministic id so
  * one durable subscription backs the source across restarts.
  */
+/**
+ * ADR 0722 — the demo auto-ingest subscription id, deterministic per tenant and
+ * inside the opaque grammar `^[A-Za-z0-9._~-]{16,128}$`. A tenant id is hashed
+ * rather than embedded: it may carry `:` (`anon:<sid>`) and is not itself bound
+ * by the opaque grammar.
+ */
+export function demoAutoIngestSubscriptionId(tenantId: string): string {
+  return `demo-agent-knowledge-auto-ingest-${createHash('sha256').update(tenantId).digest('hex').slice(0, 32)}`;
+}
+
+/** The pre-ADR-0721 spelling, kept ONLY so migration 21 can find the rows it re-keys. */
+export const LEGACY_DEMO_AUTO_INGEST_PREFIX = 'demo:agent-knowledge:auto-ingest:';
+
+/**
+ * Migration 21 — move a subscription to a new id, keeping every field. Idempotent:
+ * a missing source is a no-op, an existing target wins (concurrent boots converge).
+ */
+/**
+ * ADR 0726 — a HOST-DERIVED subscription id inside the corpus opaque grammar
+ * (`^[A-Za-z0-9._~-]{16,128}$`, `identity.md` §5). Two host-ext features
+ * derived theirs with colons (`host:kanban:<boardId>`,
+ * `host:connections:<connectionId>`), so `trigger.delivery.attempted.subscriptionId`
+ * could never bind on the major-2 wire (measured: every kanban/connection
+ * delivery). The derivation is deterministic in the same inputs; a row minted
+ * under the old spelling is moved on first use (`rekeySubscription`, the
+ * migration-21 pattern) so nothing needs a boot-time scan.
+ */
+export function hostDerivedSubscriptionId(family: 'kanban' | 'connections', key: string): { id: string; legacyId: string } {
+  return { id: `host-${family}-${key.replace(/[^A-Za-z0-9._~-]/g, '-')}`, legacyId: `host:${family}:${key}` };
+}
+/** Register under the grammar-safe id, moving a legacy-spelled row first if one exists. */
+export async function registerHostDerivedSubscription(family: 'kanban' | 'connections', key: string, input: Omit<Parameters<typeof registerSubscription>[0], 'subscriptionId'>): Promise<string> {
+  const { id, legacyId } = hostDerivedSubscriptionId(family, key);
+  await rekeySubscription(legacyId, id);
+  await registerSubscription({ ...input, subscriptionId: id });
+  return id;
+}
+
+export async function rekeySubscription(oldId: string, newId: string): Promise<'moved' | 'absent' | 'target-exists'> {
+  const existing = await subscriptions.get(oldId);
+  if (!existing) return 'absent';
+  if (await subscriptions.get(newId)) { await subscriptions.delete(oldId); return 'target-exists'; }
+  await subscriptions.put({ ...existing, subscriptionId: newId, updatedAt: nowIso() });
+  await subscriptions.delete(oldId);
+  return 'moved';
+}
+
+export async function listLegacyDemoAutoIngestIds(): Promise<string[]> {
+  return (await subscriptions.listByPrefix(LEGACY_DEMO_AUTO_INGEST_PREFIX)).map((s) => s.subscriptionId);
+}
+
 export async function registerSubscription(input: {
   subscriptionId: string;
   tenantId: string;
@@ -190,6 +249,7 @@ export async function registerSubscription(input: {
   retryPolicy?: Partial<RetryPolicy>;
   label?: string;
   workflowId?: string;
+  featureId?: string;
   verificationMode?: VerificationMode;
   secretFingerprint?: string;
 }): Promise<TriggerSubscription> {
@@ -204,6 +264,7 @@ export async function registerSubscription(input: {
     tenantId: input.tenantId,
     label: input.label,
     ...(input.workflowId ? { workflowId: input.workflowId } : {}),
+    ...(input.featureId ? { featureId: input.featureId } : {}),
     ...(input.verificationMode ? { verificationMode: input.verificationMode } : {}),
     ...(input.secretFingerprint ? { secretFingerprint: input.secretFingerprint } : {}),
     createdAt: nowIso(),
@@ -221,6 +282,12 @@ export async function listSubscriptions(tenantId: string): Promise<TriggerSubscr
   return (await subscriptions.list())
     .filter((s) => s.tenantId === tenantId)
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/** ADR 0395 — the operator webhook-health panel's cross-tenant read. Reaches
+ *  the caller ONLY through the superadmin-gated operations route. */
+export async function listAllSubscriptions(): Promise<TriggerSubscription[]> {
+  return (await subscriptions.list()).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
 export async function listDeliveries(subscriptionId: string): Promise<DeliveryAttempt[]> {

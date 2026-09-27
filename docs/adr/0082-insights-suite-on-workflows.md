@@ -33,6 +33,24 @@ notification surfaces. The "insight" is the LIVE output of a run against a real
 1. **A `workday` BUILTIN provider** (`features/connections/providerRegistry.ts`) — apiHosts
    pinned to `workday.com` / `myworkday.com` (the per-tenant `{instance}.workday.com/{tenant}`
    is supplied at connection time via the existing connection pack's `instanceUrlTemplate`),
+
+   > **CORRECTION (2026-08-22, ADR 0599 §5) — the `instanceUrlTemplate` mechanism named
+   > here does not exist, and this sentence is why both Workday chains shipped dead.**
+   > The field is declared in `examples/connection-packs/workday/pack.json` and typed in
+   > `features/connections/connectionPackLoader.ts`, and it is **read by no code path**:
+   > nothing substitutes `{instance}`/`{tenant}` from a stored connection, and nothing
+   > hands the result to `core.workday.query`. So `config.baseUrl` was never supplied,
+   > and both `anniversary-draft` and `talent-prep` failed `invalid_config` at their
+   > first node on **every** fire from this ADR's own rebuild until ADR 0599.
+   >
+   > ADR 0599 weighed implementing the resolver against retiring the claim and
+   > **retired the claim**: implementing it means designing per-connection instance
+   > storage, a template resolver, and a node-side lookup — a new host seam that
+   > deserves its own ADR, not a line in this one. The tenant REST base is now an
+   > explicit, required chain **parameter** (`workdayBaseUrl`), which is the lane every
+   > other tenant-specific value in the chain format already uses: builder-visible,
+   > per-tenant, replay-safe. The node's own docblock and `invalid_config` message were
+   > corrected to stop pointing readers at the absent mechanism.
    `oauth2`/`pkce`, `readOnly` (HCM/succession read — no write scope group). Mirrors the
    `bigquery` / `microsoft-graph` / `gmail` dedicated builtins (a connection pack carries no
    `apiHosts`, so it fails closed at `brokeredFetch` — the P2/P6 learning).

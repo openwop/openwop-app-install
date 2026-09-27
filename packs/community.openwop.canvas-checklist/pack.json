@@ -1,0 +1,72 @@
+{
+  "name": "community.openwop.canvas-checklist",
+  "version": "1.0.0",
+  "kind": "artifact-type",
+  "description": "ADR 0310 Phase D witness: a third-party canvas type with ZERO frontend code. Declares the `canvas.checklist` artifact type plus the `x-openwop-app.canvas` vendor extension (elements-trait editor hints as pure data). Falsifiability: with this pack installed and the `canvas-packs` toggle on, /canvas/canvas.checklist/:canvasId serves a full generic editor (add/edit/reorder/delete items, undo/redo, version history) validated by this pack's own schema; remove the pack and the routes are gone.",
+  "artifactTypes": [
+    {
+      "artifactTypeId": "canvas.checklist",
+      "schemaRef": "schemas/canvas.checklist.schema.json",
+      "schemaVersion": 1,
+      "displayName": "Checklist",
+      "exportFormats": [
+        "json"
+      ],
+      "x-openwop-app.canvas": {
+        "editor": {
+          "docNameKey": "title",
+          "collections": [
+            {
+              "key": "items",
+              "label": "Items",
+              "max": 200,
+              "min": 1,
+              "itemLabelField": "text",
+              "adders": [
+                {
+                  "id": "item",
+                  "label": "Checklist item",
+                  "defaults": {
+                    "text": "New item",
+                    "done": false
+                  }
+                }
+              ],
+              "fields": [
+                {
+                  "name": "text",
+                  "type": "string",
+                  "label": "Text",
+                  "required": true
+                },
+                {
+                  "name": "done",
+                  "type": "boolean",
+                  "label": "Done"
+                },
+                {
+                  "name": "priority",
+                  "type": "enum",
+                  "label": "Priority",
+                  "options": [
+                    "low",
+                    "medium",
+                    "high"
+                  ]
+                },
+                {
+                  "name": "notes",
+                  "type": "longtext",
+                  "label": "Notes"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  }
+}

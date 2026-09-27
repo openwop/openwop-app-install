@@ -13,19 +13,19 @@ describe('networkRecorder redaction (threat-model-secret-leakage)', () => {
 
   it('drops the BYOK secrets POST body entirely', () => {
     const body = JSON.stringify({ credentialRef: 'openai:default', value: SECRET });
-    const out = redactRequestBody('/v1/host/openwop-app/byok/secrets', body);
+    const out = redactRequestBody('/host/openwop-app/byok/secrets', body);
     expect(out).toBe('[redacted: credential request body]');
     expect(out).not.toContain(SECRET);
   });
 
   it('redacts the same route behind the /api Firebase rewrite', () => {
     const body = JSON.stringify({ credentialRef: 'x', value: SECRET });
-    expect(redactRequestBody('/api/v1/host/openwop-app/byok/secrets', body)).not.toContain(SECRET);
+    expect(redactRequestBody('/api/host/openwop-app/byok/secrets', body)).not.toContain(SECRET);
   });
 
   it('redacts the DELETE-by-ref subpath form too', () => {
     const body = JSON.stringify({ value: SECRET });
-    expect(redactRequestBody('/v1/host/openwop-app/byok/secrets/openai:default', body)).not.toContain(SECRET);
+    expect(redactRequestBody('/host/openwop-app/byok/secrets/openai:default', body)).not.toContain(SECRET);
   });
 
   it('scrubs secret-named fields on unknown routes (defense in depth)', () => {
@@ -50,13 +50,13 @@ describe('networkRecorder redaction (threat-model-secret-leakage)', () => {
   // (VITE_ENABLE_NETWORK_RECORDER), so they get the same redaction discipline.
   it('drops the BYOK secrets response body entirely (route-level)', () => {
     const body = JSON.stringify({ credentialRefs: ['openai:default'] });
-    expect(redactResponseBody('/v1/host/openwop-app/byok/secrets', body)).toBe('[redacted: credential response body]');
-    expect(redactResponseBody('/api/v1/host/openwop-app/byok/secrets', body)).not.toContain('openai');
+    expect(redactResponseBody('/host/openwop-app/byok/secrets', body)).toBe('[redacted: credential response body]');
+    expect(redactResponseBody('/api/host/openwop-app/byok/secrets', body)).not.toContain('openai');
   });
 
   it('scrubs secret-named fields in a response body (defense in depth)', () => {
     const body = JSON.stringify({ ok: true, token: SECRET, nested: { apiKey: SECRET }, harmless: 1 });
-    const out = redactResponseBody('/v1/host/openwop-app/connections/x', body)!;
+    const out = redactResponseBody('/host/openwop-app/connections/x', body)!;
     expect(out).not.toContain(SECRET);
     expect(out).toContain('harmless');
     expect(out).toContain('[redacted]');

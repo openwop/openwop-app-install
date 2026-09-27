@@ -63,7 +63,8 @@ describe('app-builder component catalog (closed-world)', () => {
     expect(errs).toEqual([]);
   });
   it('rejects an unknown component type', () => {
-    const errs = validateComponentTree(APP_BUILDER_CANVAS_TYPE, [{ type: 'carousel' }]);
+    // 'carousel' joined the catalog in ADR 0305 Phase C — use a genuinely unknown type.
+    const errs = validateComponentTree(APP_BUILDER_CANVAS_TYPE, [{ type: 'holo-deck' }]);
     expect(errs.map((e) => e.code)).toContain('unknown_component_type');
   });
   it('rejects an unknown prop and a bad enum value', () => {

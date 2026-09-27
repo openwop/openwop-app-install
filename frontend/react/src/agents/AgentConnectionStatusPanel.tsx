@@ -94,7 +94,7 @@ export function AgentConnectionStatusPanel({ rosterId }: { rosterId: string }): 
         </Notice>
       )}
 
-      <div className="u-flex u-flex-wrap u-gap-2" aria-label={t('connRequiredLabel')}>
+      <div role="group" className="u-flex u-flex-wrap u-gap-2" aria-label={t('connRequiredLabel')}>
         {entries.map((e) => <ProviderChip key={e.provider} {...e} t={t} />)}
       </div>
 

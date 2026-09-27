@@ -57,7 +57,6 @@ export function sanitizeTabDeck(raw: unknown, subject: string): TabDeckState | n
       .slice(0, HARD_MAX_TABS);
     const keptIds = new Set(kept.map((t) => t.sessionId));
     if (import.meta.env?.DEV) {
-      // eslint-disable-next-line no-console
       console.warn(`[tabDeck] restored ${tabs.length} tabs > HARD_MAX_TABS (${HARD_MAX_TABS}); dropping ${tabs.length - HARD_MAX_TABS} (kept pinned + most-recent).`);
     }
     tabs = tabs.filter((t) => keptIds.has(t.sessionId)); // preserve display order among the kept

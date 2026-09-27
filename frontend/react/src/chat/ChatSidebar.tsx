@@ -3,13 +3,13 @@
  * input) inside a vertical flex container.
  */
 
+import { Button } from '../ui/Button.js';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { ChatHeader } from './ChatHeader.js';
 import { listOrgs } from '../client/promptLibraryClient.js';
 import { registerPromptCommands } from './promptCommands.js';
-import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { ConversationView } from './ConversationView.js';
 import { LeftRail, type LeftRailTab } from './leftRail/LeftRail.js';
 // ADR budget reclaim — the artifact workbench is a modal (renders only when an
@@ -21,16 +21,21 @@ const CompareView = lazy(() => import('./CompareView.js').then((m) => ({ default
 // ADR 0154 — channel-only chrome; lazy so it (and channelsClient's SSE code)
 // stays out of the eager chat entry chunk (only loads when a channel is open).
 const ChannelPresenceBar = lazy(() => import('./conversations/ChannelPresenceBar.js').then((m) => ({ default: m.ChannelPresenceBar })));
+// ADR 0140 follow-on — the right-docked members pane (shared with the deck), lazy.
+const MembersPane = lazy(() => import('./conversations/MembersPane.js').then((m) => ({ default: m.MembersPane })));
 // ADR 0154 Phase 2 — channel management chrome, lazy (only mounts on demand).
 const ChannelCreateDialog = lazy(() => import('./conversations/ChannelCreateDialog.js').then((m) => ({ default: m.ChannelCreateDialog })));
 const ChannelBrowseDialog = lazy(() => import('./conversations/ChannelBrowseDialog.js').then((m) => ({ default: m.ChannelBrowseDialog })));
 const ChannelManageDialog = lazy(() => import('./conversations/ChannelManageDialog.js').then((m) => ({ default: m.ChannelManageDialog })));
+// ADR 0192 — channel-only empty state, lazy (entry-budget posture).
+const ChannelEmptyState = lazy(() => import('./conversations/ChannelEmptyState.js').then((m) => ({ default: m.ChannelEmptyState })));
 import { useReviewStatusStore, useReviewCount } from './reviews/reviewStatusStore.js';
 import { DEFAULT_ASSISTANT_ID } from './activeAgents/constants.js';
 import { useScopeToAgent } from './activeAgents/useScopeToAgent.js';
 import { SparklesIcon } from '../ui/icons/index.js';
 import { toast } from '../ui/toast.js';
 import { useChatSession } from './hooks/useChatSession.js';
+import { useCommentsContext } from './hooks/useCommentsContext.js';
 import { useChatSessions } from './hooks/useChatSessions.js';
 import { useComposerModifiers } from './hooks/useComposerModifiers.js';
 import { useConversationActions } from './hooks/useConversationActions.js';
@@ -39,11 +44,21 @@ import { resolveActiveModel } from '../byok/lib/providers.js';
 import type { BYOKActiveConfig } from '../byok/lib/useBYOKConfig.js';
 import type { ContentPart } from './hooks/useChatSession.js';
 import { runCoreSubmit } from './lib/chatSubmit.js';
+// Entry-weight: the reviews strip pulls the whole review-card tree (~16 kB min
+// after the ADR 0478 HITL additions) — lazy so the chat entry stays light; the
+// cheap count store above stays eager for the badge.
+const ConversationReviewsStrip = lazy(() =>
+  import('./reviews/ConversationReviewsStrip.js').then((m) => ({ default: m.ConversationReviewsStrip })));
 import { useAgentMentions } from './lib/agentMentions.js';
 import { buildBoardInterceptor, buildProjectConveneInterceptor, runProjectConvene, type ConveneDeps } from './conversations/convene.js';
 import { useBoardroomCadence } from './conversations/useBoardroomCadence.js';
 import { participantsToLineup } from './conversations/participantLineup.js';
 import { useChannelMessageStream } from './conversations/useChannelMessageStream.js';
+import { useChannelRoster } from './conversations/useChannelRoster.js';
+import { useChannelMessageActions } from './conversations/useChannelMessageActions.js';
+import { submitChannelPost } from './conversations/channelSubmit.js';
+import { useNotificationStore } from '../notifications/notificationStore.js';
+import { confirm } from '../ui/confirm.js';
 
 // localStorage keys for rail persistence — keeps the user's "which
 // tab" / "which run is focused" choice across page reloads.
@@ -63,6 +78,16 @@ function progressFocusedKey(tenantId: string): string {
 
 function readRailTabFromStorage(tenantId: string): LeftRailTab | null {
   try {
+    // Grade-ux fix (CS-FE-6 follow-up) — one-time migration: prefs written
+    // under the old shared 'demo' scope move to the caller's scope on first
+    // read, instead of silently resetting every returning user's rail tab.
+    if (tenantId !== 'demo' && localStorage.getItem(railTabKey(tenantId)) === null) {
+      const legacy = localStorage.getItem(railTabKey('demo'));
+      if (legacy !== null) {
+        localStorage.setItem(railTabKey(tenantId), legacy);
+        localStorage.removeItem(railTabKey('demo'));
+      }
+    }
     const v = localStorage.getItem(railTabKey(tenantId));
     if (v === 'progress') return 'progress';
     if (v === 'reviews') return 'reviews';
@@ -112,20 +137,27 @@ registerDefaultCommands();
 
 interface Props {
   config: BYOKActiveConfig;
+  /** ADR 0711 OQ1 — false when `config` is the effective managed default. */
+  byokStored?: boolean;
   onOpenSettings: () => void;
   onRemoveKey: () => void | Promise<void>;
   tenantId?: string;
 }
 
-export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'demo' }: Props): JSX.Element {
+// CS-FE-6 (conversation-stack audit) — `tenantId` scopes ONLY the local UI
+// preference keys (rail tab, progress focus); it feeds no API call. ChatTab
+// now passes the signed-in user's uid so preferences stop sharing one 'demo'
+// bucket across every user of a browser profile; 'anon' is the signed-out
+// fallback (matching TabChatDeck's keying).
+export function ChatSidebar({ config, byokStored, onOpenSettings, onRemoveKey, tenantId = 'anon' }: Props): JSX.Element {
   const { t } = useTranslation('chat');
-  const { session, isSending, thinkingAgentId, error, send, cancel, emitSystem, reset, resolveInterrupt, runWorkflowMention, cancelWorkflowRun, regenerate, setFeedback, loadSessionFromBackend, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents } = useChatSession();
+  const { session, isSending, thinkingAgentId, error, send, cancel, emitSystem, upsertTranscriptTurn, refreshNewestMessages, reset, resolveInterrupt, runWorkflowMention, cancelWorkflowRun, regenerate, setFeedback, loadSessionFromBackend, hasOlderMessages, isLoadingEarlier, loadEarlierMessages, activeAgents } = useChatSession();
   // ADR 0116 Phase 3c — when the prompt library is enabled, register the org's
   // prompts as `/p-<slug>` slash commands (best-effort; scoped to the primary org).
   // They surface in the existing SlashAutocomplete — no bespoke composer affordance.
   const promptsAccess = { enabled: true }; // always-on
   const exportAccess = { enabled: true }; // always-on
-  const sharingAccess = useFeatureAccess('sharing'); // ADR 0122 — gates the Share item (default OFF)
+  const commentsContext = useCommentsContext(); // ADR 0021 ext — inline per-message comments (null when off/no org)
   useEffect(() => {
     if (!promptsAccess.enabled) return;
     void (async () => {
@@ -179,7 +211,7 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
     (agentId: string) => activeAgents.lineup.find((a) => a.agentId === agentId)?.persona ?? t('advisorFallbackPersona'),
     [activeAgents.lineup, t],
   );
-  const cadence = useBoardroomCadence({ isSending, errored: error !== null, send, personaOf });
+  const cadence = useBoardroomCadence({ isSending, errored: error !== null, send, personaOf, emitSystem });
   const [activeRailTab, setActiveRailTab] = useState<LeftRailTab | null>(
     () => readRailTabFromStorage(tenantId),
   );
@@ -241,7 +273,7 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
       }
       try { localStorage.setItem(flagKey, '1'); } catch { /* disabled — a later mount retries */ }
     })();
-  }, [tenantId, sessionsCollection.isLoading, sessionsCollection.sessions, sessionsCollection.remove, session.id]);
+  }, [tenantId, sessionsCollection, session.id]);
 
   // ADR 0068/0070 — the unified review inbox (rail tab) + its pending-count badge,
   // and ADR 0069 — the artifact workbench opened from a review pinned to an
@@ -336,6 +368,24 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
     setActiveRailTab(tab);
     if (tab !== null) setLastRailTab(tab);
   }, []);
+
+  // ADR 0458 residue — the `?rail=` deep-link, a sibling of `?agent=` above:
+  // read ONCE per value, apply only if it names a real rail tab, strip
+  // immediately so refresh/share keeps a clean URL. Lets feature CTAs land on
+  // a specific rail (e.g. the Studio publication link → the reviews inbox)
+  // instead of whatever tab localStorage last held.
+  const railParamHandled = useRef<string | null>(null);
+  useEffect(() => {
+    const wanted = searchParams.get('rail');
+    if (!wanted || railParamHandled.current === wanted) return;
+    railParamHandled.current = wanted;
+    if (wanted === 'conversations' || wanted === 'progress' || wanted === 'reviews') {
+      selectRailTab(wanted);
+    }
+    const next = new URLSearchParams(searchParams);
+    next.delete('rail');
+    setSearchParams(next, { replace: true });
+  }, [searchParams, setSearchParams, selectRailTab]);
 
   const openProgressForRun = useCallback((messageId: string) => {
     setFocusedWorkflowMessageId(messageId);
@@ -432,8 +482,11 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
   // (the manage dialog reads `viewerIsOwner` from GET /:id); nothing here needs
   // to know the caller identity.
   const isChannelActive = activeConversation?.type === 'channel';
+  // ADR 0195 D3b — multi-party surfaces carry public reactions; the PRIVATE
+  // feedback thumbs are suppressed there (they stay the 1:1 affordance).
+  const isMultiPartyActive = isChannelActive || activeConversation?.type === 'group';
   // ADR 0154 FU-6 — live channel message delivery (debounced reload on each frame).
-  useChannelMessageStream(session.id, isChannelActive, loadSessionFromBackend);
+  useChannelMessageStream(session.id, isChannelActive, refreshNewestMessages); // ADR 0327 P2 slice — incremental merge, not a full session reset per frame
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [showBrowseChannels, setShowBrowseChannels] = useState(false);
   const [showChannelDetails, setShowChannelDetails] = useState(false);
@@ -443,12 +496,97 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
       void selectConversation(channelId);
     })();
   }, [sessionsCollection, selectConversation]);
+  // ADR 0192 D2/D8 — the ONE resolved-roster fetch for the open channel: Zone 1,
+  // the header facepile, the channel-scoped @ entries, feed attribution, and
+  // the empty state all read from it.
+  const channelRoster = useChannelRoster(session.id, isChannelActive);
+  // ADR 0192 D7 — conversation mute rides the notifications prefs store.
+  const notifPreferences = useNotificationStore((s) => s.preferences);
+  const toggleConversationMute = useNotificationStore((s) => s.toggleConversationMute);
+  const mutedIds = useMemo(() => new Set(notifPreferences.mutedConversations ?? []), [notifPreferences.mutedConversations]);
+  // ADR 0192 D3 — leaving (or archiving) the open channel drops the surface
+  // back to a fresh chat + refreshed rail.
+  const onLeftChannel = useCallback(() => {
+    void sessionsCollection.refresh();
+    reset();
+  }, [sessionsCollection, reset]);
+  // ADR 0195 D5 — multi-party message affordances via the ONE shared owner
+  // (ADR 0327 P3: previously copy-pasted verbatim here and in TabSession).
+  const channelMessageActions = useChannelMessageActions(session.id, loadSessionFromBackend);
+
+  // ADR 0202 D5 — the caller's first-unread index (from their own participant
+  // row's readMessageCount, ADR 0192 D6) drives the "New messages" divider.
+  // Only when the FULL thread is loaded (`!hasOlderMessages`) — otherwise the
+  // absolute readMessageCount doesn't map to the loaded window index
+  // (code-review finding 2).
+  const unreadFromIndex = useMemo(() => {
+    if (!isChannelActive || hasOlderMessages) return undefined;
+    const self = (activeConversation?.participants ?? []).find((p) => p.isSelf);
+    const read = self?.readMessageCount;
+    if (read === undefined || read <= 0 || read >= session.messages.length) return undefined;
+    return read;
+  }, [isChannelActive, hasOlderMessages, activeConversation?.participants, session.messages.length]);
+  const hasChannelAgent = channelRoster.mentionEntries.length > 0;
+  const [summarizing, setSummarizing] = useState(false);
+  // ADR 0202 D2/D5 — request the AI catch-up, poll the run to completion, and
+  // surface the summary as a transient system message (NOT a channel message —
+  // the run posts nothing in-channel by construction). The in-flight state is a
+  // toast (auto-dismisses, no stale banner) + a button guard (no double-fire).
+  const requestCatchup = useCallback(() => {
+    if (summarizing) return;
+    setSummarizing(true);
+    toast.info(t('summarizingRecap'));
+    void (async () => {
+      try {
+        const { requestChannelCatchup } = await import('../client/channelsClient.js');
+        const { pollEvents } = await import('../client/runsClient.js');
+        const { runId } = await requestChannelCatchup(session.id);
+        for (let i = 0; i < 30; i++) {
+          const { events } = await pollEvents(runId, 0);
+          const done = events.find((e) => e.type === 'run.completed' || e.type === 'run.failed');
+          if (done) {
+            const text = (done.payload as { outputs?: { text?: unknown } } | undefined)?.outputs?.text;
+            emitSystem(typeof text === 'string' && text.trim() ? t('recapPrefix', { summary: text }) : t('recapFailed'));
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        toast.error(t('recapTimedOut'));
+      } catch {
+        toast.error(t('recapFailed'));
+      } finally {
+        setSummarizing(false);
+      }
+    })();
+  }, [session.id, summarizing, emitSystem, t]);
+
+  const requestLeaveChannel = useCallback(() => {
+    void (async () => {
+      const ok = await confirm({
+        title: t('leaveChannelConfirmTitle'),
+        body: t('leaveChannelConfirmBody'),
+        confirmLabel: t('leaveChannelCta'),
+      });
+      if (!ok) return;
+      try {
+        const { leaveChannel } = await import('../client/channelsClient.js');
+        await leaveChannel(session.id);
+        toast.success(t('leftChannelToast', { name: activeConversation?.title ?? '' }));
+        onLeftChannel();
+      } catch {
+        toast.error(t('leaveChannelError'));
+      }
+    })();
+  }, [session.id, activeConversation?.title, onLeftChannel, t]);
 
   // Convene/board deps (ADR 0140 G3) — the SHARED interceptors (chat/conversations/
   // convene.ts) run on THIS surface's activeAgents/cadence/send/session, so convened
   // turns land here. `session.id` is read live (getSessionId) so a board attach targets
   // the CURRENT chat after a reset/switch.
   const sessionId = session.id;
+  // Ref-backed emptiness so the memoized deps don't churn per message.
+  const sessionMessagesLenRef = useRef(0);
+  sessionMessagesLenRef.current = session.messages.length;
   const conveneDeps: ConveneDeps = useMemo(() => ({
     agentEntries,
     activeAgents: { activateAgent: activeAgents.activateAgent, switchTo: activeAgents.switchTo },
@@ -457,7 +595,11 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
     attachBoard: sessionsCollection.attachBoard,
     getSessionId: () => sessionId,
     conveneProjectId,
-  }), [agentEntries, activeAgents.activateAgent, activeAgents.switchTo, cadence.start, send, config, emitSystem, t, sessionsCollection.attachBoard, sessionId, conveneProjectId]);
+    // ADR 0278 summon routing — a pure @@summon in an EMPTY chat opens the
+    // board's canonical conversation instead of stamping this one.
+    isSessionEmpty: () => sessionMessagesLenRef.current === 0,
+    openBoardConversation: (id: string) => { void selectConversation(id); },
+  }), [agentEntries, activeAgents.activateAgent, activeAgents.switchTo, cadence.start, send, config, emitSystem, t, sessionsCollection.attachBoard, sessionId, conveneProjectId, selectConversation]);
 
   // The "Convene the team" button (ADR 0054 D6) calls this directly.
   const conveneProject = useCallback((topic: string) => runProjectConvene(topic, conveneDeps), [conveneDeps]);
@@ -486,22 +628,14 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
     // (parity with the retired standalone view). @agent → server-side turn is
     // Phase 4.
     if (activeConversation?.type === 'channel') {
-      const body = text.trim();
-      // v1 is text-only — warn rather than silently drop an attachment (the
-      // composer has already cleared it), then return if there's no text.
-      if (attachments?.length) toast.error(t('channelTextOnly'));
-      if (!body) return;
-      try {
-        const { postChannelMessage } = await import('../client/channelsClient.js');
-        await postChannelMessage(session.id, body);
-        await loadSessionFromBackend(session.id);
-        void sessionsCollection.markRead(session.id);
-        void sessionsCollection.refresh();
-      } catch {
-        // A failed post (403/429/network) must surface — the old standalone view
-        // toasted; the unified surface does too (the composer already cleared).
-        toast.error(t('channelPostError'));
-      }
+      // ADR 0192 D5 — the shared channel submit (attachments ride the
+      // ChatMessage envelope; shared with TabSession so the copies can't drift).
+      await submitChannelPost(session.id, text, attachments, {
+        loadSessionFromBackend,
+        markRead: (id) => { void sessionsCollection.markRead(id); },
+        refreshConversations: () => { void sessionsCollection.refresh(); },
+        draftKey: `openwop-app.chat.draft:${tenantId}:${session.id}`,
+      });
       return;
     }
     await runCoreSubmit(text, attachments, {
@@ -511,6 +645,16 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
     }, [conveneInterceptor, boardInterceptor]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [send, cancel, reset, emitSystem, config, getSubmitExtras, runWorkflowMention, activeAgents.currentAgentId, activeAgents.activateAgent, agentEntries, session.id, sessionsCollection.addParticipant, conveneInterceptor, boardInterceptor, activeConversation?.type, loadSessionFromBackend, sessionsCollection.markRead, sessionsCollection.refresh, t]);
+
+  // ADR 0140 follow-on — the right-docked members pane (parity with the deck; the
+  // active conversation's roster lives in a RIGHT pane, not the left rail). Default
+  // closed; the header toggle only shows when there's a roster to reveal.
+  const [membersOpen, setMembersOpen] = useState(false);
+  // ADR 0304 P2 residue — the live-boardroom floor, mirrored up from the view so
+  // the members pane can pulse the agent being voiced right now.
+  const [voiceSpeakingAgentId, setVoiceSpeakingAgentId] = useState<string | null>(null);
+  const memberCount = isChannelActive ? channelRoster.roster.length : activeAgents.lineup.length;
+  const showRoster = isChannelActive ? channelRoster.roster.length > 0 : (session.messages.length > 0 || activeAgents.lineup.length > 1);
 
   return (
     <div className="u-flex u-flex-1 u-minh-0 u-border u-radius u-bg-surface u-overflow-hidden u-relative">
@@ -532,13 +676,8 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
             // a fresh local chat so the message feed isn't orphaned.
             if (id === session.id) reset();
           },
-          // The open conversation's live participants — folds in the active-
-          // agents panel's controls (switch routing voice / drop an agent).
-          lineup: activeAgents.lineup,
-          currentAgentId: activeAgents.currentAgentId ?? DEFAULT_ASSISTANT_ID,
-          thinkingAgentId,
-          onSwitchAgent: activeAgents.switchTo,
-          onRemoveAgent: (agentId) => { activeAgents.remove(agentId); void sessionsCollection.removeParticipant(session.id, `agent:${agentId}`); },
+          // The open conversation's participants moved OUT of the rail into the
+          // right-docked MembersPane (ADR 0140 follow-on) — the rail is a pure list.
           onNewChat: () => { cadence.cancel(); reset(); selectRailTab(null); },
           onOpenWorkspace: () => {
             void (async () => {
@@ -549,6 +688,9 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
           },
           onCreateChannel: () => setShowCreateChannel(true),
           onBrowseChannels: () => setShowBrowseChannels(true),
+          // ADR 0192 D7 — mute (notifications prefs owner).
+          mutedIds,
+          onToggleMute: toggleConversationMute,
         }}
         progressProps={{
           workflowRunMessages,
@@ -596,27 +738,40 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
           <ChannelManageDialog
             channelId={session.id}
             onClose={() => setShowChannelDetails(false)}
-            onChanged={() => sessionsCollection.refresh()}
+            onChanged={async () => { await sessionsCollection.refresh(); await channelRoster.refresh(); }}
             onArchived={() => { reset(); }}
+            onLeft={onLeftChannel}
           />
         </Suspense>
       ) : null}
       <div className="u-flex-1 u-flex u-flex-col u-minw-0">
         <ChatHeader
           config={config}
+          byokStored={byokStored ?? true}
           onOpenSettings={onOpenSettings}
           onRemoveKey={onRemoveKey}
           onNewChat={() => { cadence.cancel(); reset(); }}
           onBranch={() => { void onBranch(); }}
           onCompare={openCompare}
           {...(exportAccess.enabled ? { onExport: (format: 'md' | 'json') => { void onExport(format); }, onImport: (f: File) => { void onImport(f); } } : {})}
-          {...(sharingAccess.enabled ? { onShare: () => { void onShare(); } } : {})}
+          onShare={() => { void onShare(); }}
           session={session}
           modelSwitcher={modelSwitcher}
           railOpen={activeRailTab !== null}
           onToggleRail={() => selectRailTab(activeRailTab === null ? lastRailTab : null)}
           railBadgeCount={workflowRunMessages.length + Math.max(0, activeAgents.lineup.length - 1)}
+          membersOpen={membersOpen}
+          memberCount={memberCount}
+          {...(showRoster ? { onToggleMembers: () => setMembersOpen((o) => !o) } : {})}
           {...(isChannelActive ? { onOpenChannelDetails: () => setShowChannelDetails(true) } : {})}
+          {...(isChannelActive && activeConversation && channelRoster.detail ? {
+            channelContext: {
+              name: channelRoster.detail.channel?.name ?? activeConversation.title,
+              description: channelRoster.detail.channel?.description,
+              members: channelRoster.roster,
+              onOpenDetails: () => setShowChannelDetails(true),
+            },
+          } : {})}
         />
 
         {activeConversation?.type === 'channel' ? (
@@ -627,7 +782,51 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
           messages={session.messages}
           tenantId={tenantId}
           draftKey={`openwop-app.chat.draft:${tenantId}:${session.id}`}
+          {...(commentsContext ? { commentsContext: { orgId: commentsContext.orgId, sessionId: session.id } } : {})}
+          onLiveTranscript={upsertTranscriptTurn}
+          // GRADE-D1 — the LIGHT merge-refresh: a voice-transcript frame must not
+          // tear down live subscriptions or sever an in-flight typed turn.
+          onReloadConversation={refreshNewestMessages}
+          voiceConversationId={session.id}
           {...(scopeAgentId ? { voiceAgentId: scopeAgentId } : {})}
+          // ADR 0304 D3 auto-voice — a live boardroom here (board attached to the
+          // conversation, or a cadence mid-flight) makes voice sessions speak
+          // every advisor turn in its own voice.
+          voiceBoardActive={cadence.active || Boolean(activeConversation?.boardId)}
+          // ADV-UX-1 — the simulated-persona disclaimer, on the surface where the
+          // advice is actually read. Server-authored text; absent on non-board chats.
+          {...(activeConversation?.boardId ? { boardId: activeConversation.boardId } : {})}
+          onVoiceSpeakingAgent={setVoiceSpeakingAgentId}
+          {...(isChannelActive && activeConversation ? {
+            // ADR 0192 D8 — the channel-aware surface: beginning-of-channel
+            // empty state, `Message #name` composer, roster-scoped @ entries,
+            // resolved attribution + own-message alignment.
+            renderEmptyState: () => (
+              <Suspense fallback={null}>
+                <ChannelEmptyState
+                  name={channelRoster.detail?.channel?.name ?? activeConversation.title}
+                  description={channelRoster.detail?.channel?.description}
+                  viewerIsOwner={channelRoster.viewerIsOwner}
+                  hasAgents={channelRoster.mentionEntries.length > 0}
+                  onOpenDetails={() => setShowChannelDetails(true)}
+                />
+              </Suspense>
+            ),
+            composerPlaceholder: t('channelComposerPlaceholder', { name: channelRoster.detail?.channel?.name ?? activeConversation.title }),
+            mentionEntries: channelRoster.mentionEntries,
+            // Alignment/attribution only once the roster RESOLVED (review
+            // finding 3): with an empty directory + no viewerSubjectRef the
+            // feed would mis-align the viewer's own posts during load/failure;
+            // ungated, every channel open flashed all-left. Until resolved the
+            // feed keeps the pre-0192 role-based rendering.
+            ...(channelRoster.detail ? {
+              authorDirectory: channelRoster.authorDirectory,
+              ...(channelRoster.viewerSubjectRef ? { viewerSubjectRef: channelRoster.viewerSubjectRef } : {}),
+            } : {}),
+            // ADR 0202 D5 — New-messages divider + Summarize (only with an agent).
+            ...(unreadFromIndex !== undefined ? { unreadFromIndex } : {}),
+            ...(hasChannelAgent ? { onSummarize: requestCatchup, summarizeBusy: summarizing } : {}),
+          } : {})}
           error={error}
           isSending={isSending}
           onPickSuggestion={(text) => onUserSubmit(text)}
@@ -641,21 +840,54 @@ export function ChatSidebar({ config, onOpenSettings, onRemoveKey, tenantId = 'd
           progress={{ focusedMessageId: activeRailTab === 'progress' ? focusedWorkflowMessageId : null, onOpen: openProgressForRun }}
           onRegenerate={onRegenerate}
           onBranchFrom={(fromSeq) => { void onBranchFrom(fromSeq); }}
-          onFeedback={setFeedback}
+          {...(isMultiPartyActive ? { messageActions: channelMessageActions } : { onFeedback: setFeedback })}
           onReconfigureBYOK={onOpenSettings}
           hasOlderMessages={hasOlderMessages}
           isLoadingEarlier={isLoadingEarlier}
           onLoadEarlier={loadEarlierMessages}
-          footerSlot={conveneProjectId && conveneAgentCount > 0 ? (
-            <div className="u-flex u-items-center u-wrap u-gap-2 u-pad-2-4 u-fs-12 muted">
-              <button type="button" className="secondary btn-sm" disabled={isSending} onClick={() => void conveneProject('')}>
-                <SparklesIcon size={13} /> {t('conveneTheTeam')}
-              </button>
-              <span>{t('conveneHelpPrefix')}<code>@@</code>{t('conveneHelpSuffix')}</span>
-            </div>
-          ) : null}
+          footerSlot={(
+            <>
+              {/* ADR 0311 P2 — approvals that trace back to THIS conversation
+                  (a todo filed here -> heartbeat proposal) render where the
+                  promise was made; the projection's authz means non-approvers
+                  see nothing. */}
+              <Suspense fallback={null}>
+                <ConversationReviewsStrip conversationId={session.id} isSending={isSending} />
+              </Suspense>
+              {conveneProjectId && conveneAgentCount > 0 ? (
+                <div className="u-flex u-items-center u-wrap u-gap-2 u-pad-2-4 u-fs-12 muted">
+                  <Button variant="secondary" size="sm" disabled={isSending} onClick={() => void conveneProject('')}>
+                    <SparklesIcon size={13} /> {t('conveneTheTeam')}
+                  </Button>
+                  <span>{t('conveneHelpPrefix')}<code>@@</code>{t('conveneHelpSuffix')}</span>
+                </div>
+              ) : null}
+            </>
+          )}
         />
       </div>
+      {membersOpen && showRoster ? (
+        <Suspense fallback={null}>
+          <MembersPane
+            isChannel={isChannelActive}
+            channelId={session.id}
+            lineup={activeAgents.lineup}
+            currentAgentId={activeAgents.currentAgentId ?? DEFAULT_ASSISTANT_ID}
+            thinkingAgentId={thinkingAgentId}
+            speakingAgentId={voiceSpeakingAgentId}
+            onSwitchAgent={activeAgents.switchTo}
+            onRemoveAgent={(agentId) => { activeAgents.remove(agentId); void sessionsCollection.removeParticipant(session.id, `agent:${agentId}`); }}
+            {...(isChannelActive && channelRoster.detail ? { channelRoster: {
+              roster: channelRoster.roster,
+              viewerIsOwner: channelRoster.viewerIsOwner,
+              viewerSubjectRef: channelRoster.viewerSubjectRef,
+              onManage: () => setShowChannelDetails(true),
+              onLeave: requestLeaveChannel,
+            } } : {})}
+            onClose={() => setMembersOpen(false)}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }

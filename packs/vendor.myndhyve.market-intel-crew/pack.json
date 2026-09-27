@@ -1,6 +1,6 @@
 {
   "name": "vendor.myndhyve.market-intel-crew",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "MyndHyve Market Intelligence research-director crew. Wraps the 9 vendor.myndhyve.market-intel-* node typeIds into a research-director agent persona that orchestrates the VoC → ad-angles pipeline from a single chat-driven dispatch. Vendor showcase agent pack.",
   "author": "MyndHyve",
   "license": "Apache-2.0",
@@ -18,20 +18,10 @@
       "agentId": "vendor.myndhyve.market-intel-crew.research-director",
       "persona": "Research Director",
       "label": "Market Intel Research Director",
-      "description": "Single chat-driven persona over the full MyndHyve Market Intel pipeline. Translates a user brief (\"research the ICP for X\") into orchestrated calls across query-builder → discovery → community-rank → thread-triage → content-extraction → voc-extraction → opportunity-scoring → ad-angles → audience-targeting. Persists ICP / topic / cycle results to long-term memory for re-use across runs.",
+      "description": "Single chat-driven persona over the full MyndHyve Market Intel pipeline. Translates a user brief (\"research the ICP for X\") into a sequenced run of the workflow's stages (query-builder → discovery → community-rank → thread-triage → content-extraction → voc-extraction → opportunity-scoring → ad-angles → audience-targeting), whose nodes perform the work; the director interprets the brief, orders the stages, and synthesizes the deliverable. Persists ICP / topic / cycle results to long-term memory for re-use across runs.",
       "modelClass": "research",
       "systemPromptRef": "prompts/research-director.md",
-      "toolAllowlist": [
-        "openwop:market-intel.query-builder",
-        "openwop:market-intel.ai-discovery",
-        "openwop:market-intel.community-rank",
-        "openwop:market-intel.thread-triage",
-        "openwop:market-intel.content-extraction",
-        "openwop:market-intel.voc-extraction",
-        "openwop:market-intel.opportunity-scoring",
-        "openwop:market-intel.ad-angles",
-        "openwop:market-intel.audience-targeting"
-      ],
+      "toolAllowlist": [],
       "memoryShape": { "scratchpad": true, "conversation": true, "longTerm": true },
       "handoff": {
         "taskSchemaRef": "schemas/research-director.task.schema.json",

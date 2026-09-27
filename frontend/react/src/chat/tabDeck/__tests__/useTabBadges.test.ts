@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { computeTabBadge, deriveActivity, useTabBadges, NO_BADGE } from '../useTabBadges.js';
 import type { ChatMessage } from '../../types.js';
@@ -103,5 +103,73 @@ describe('useTabBadges (state machine)', () => {
     // Reopen 'b' — clean slate (no stale unread until a NEW reply lands).
     rerender({ open: ['a', 'b'] });
     expect(result.current.statusFor('b')).toEqual(NO_BADGE);
+  });
+});
+
+describe('useTabBadges — MTCU-201: background activity is ANNOUNCED to SR (onRaise)', () => {
+  it('fires onRaise once when a background tab gains a NEW unread reply (after baseline)', () => {
+    const onRaise = vi.fn();
+    const { result } = renderHook(() => useTabBadges('a', ['a', 'b'], onRaise));
+    act(() => { result.current.reportActivity('b', null, false); }); // baseline (on-load snapshot)
+    act(() => { result.current.reportActivity('b', 'b-1', false); }); // a NEW reply lands
+    expect(onRaise).toHaveBeenCalledTimes(1);
+    expect(onRaise).toHaveBeenCalledWith('b', 'unread');
+  });
+
+  it('announces the FIRST live reply after a reload to a tab restored ALREADY-unread (id-advance, not the badge boolean)', () => {
+    // Regression for the adversarial-review find: keying the rising edge on the unread
+    // BOOLEAN silently swallowed the first live reply after a reload, because a
+    // restored-with-history tab baselines unread=true and the boolean never re-rises.
+    const onRaise = vi.fn();
+    const { result } = renderHook(() => useTabBadges('a', ['a', 'b'], onRaise));
+    act(() => { result.current.reportActivity('b', 'b-history', false); }); // restored WITH unread history
+    expect(onRaise).not.toHaveBeenCalled();                                  // on-load snapshot suppressed
+    act(() => { result.current.reportActivity('b', 'b-new', false); });      // a genuinely NEW reply lands
+    expect(onRaise).toHaveBeenCalledTimes(1);
+    expect(onRaise).toHaveBeenCalledWith('b', 'unread');                     // must NOT be silent
+  });
+
+  it('fires onRaise with "blocked" when a background tab hits a HITL interrupt (blocked outranks)', () => {
+    const onRaise = vi.fn();
+    const { result } = renderHook(() => useTabBadges('a', ['a', 'b'], onRaise));
+    act(() => { result.current.reportActivity('b', 'b-1', false); }); // baseline
+    act(() => { result.current.reportActivity('b', 'b-1', true); });  // interrupt opens
+    expect(onRaise).toHaveBeenCalledWith('b', 'blocked');
+  });
+
+  it('does NOT announce the on-load baseline (a restored tab\'s first report / history)', () => {
+    const onRaise = vi.fn();
+    const { result } = renderHook(() => useTabBadges('a', ['a', 'b'], onRaise));
+    act(() => { result.current.reportActivity('b', 'b-history', false); }); // first report = snapshot
+    expect(onRaise).not.toHaveBeenCalled();
+  });
+
+  it('never announces the ACTIVE tab (its content is visible inline)', () => {
+    const onRaise = vi.fn();
+    const { result } = renderHook(() => useTabBadges('a', ['a', 'b'], onRaise));
+    act(() => { result.current.reportActivity('a', 'a-1', false); }); // self-reply in the active tab
+    act(() => { result.current.reportActivity('a', 'a-2', true); });
+    expect(onRaise).not.toHaveBeenCalled();
+  });
+
+  it('does not RE-announce the same unread reply (rising edge only)', () => {
+    const onRaise = vi.fn();
+    const { result } = renderHook(() => useTabBadges('a', ['a', 'b'], onRaise));
+    act(() => { result.current.reportActivity('b', null, false); }); // baseline
+    act(() => { result.current.reportActivity('b', 'b-1', false); }); // NEW reply → announce
+    act(() => { result.current.reportActivity('b', 'b-1', false); }); // same id re-reported (re-render)
+    expect(onRaise).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays referentially stable with onRaise passed (memo intact)', () => {
+    const onRaise = vi.fn();
+    const { result, rerender } = renderHook(
+      ({ active }) => useTabBadges(active, ['a', 'b'], onRaise),
+      { initialProps: { active: 'a' as string | null } },
+    );
+    const first = result.current.reportActivity;
+    act(() => { result.current.reportActivity('b', 'b-1', false); });
+    rerender({ active: 'b' });
+    expect(result.current.reportActivity).toBe(first);
   });
 });

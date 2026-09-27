@@ -23,8 +23,13 @@ import {
   listSubscriptions,
 } from '../src/host/triggerBridgeService.js';
 import { ingestExternalEvent, type TriggerEvent } from '../src/host/triggerIngestionService.js';
-import { registerBuiltinWorkflow } from '../src/host/builtinWorkflows.js';
-import { anniversaryDraftDefinition, ANNIVERSARY_DRAFT_ID } from '../src/features/insights-suite/metaWorkflows.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
+import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/service.js';
+import { insightsSuiteFeature } from '../src/features/insights-suite/feature.js';
+import { registerInsightsMetaWorkflows, ANNIVERSARY_DRAFT_ID } from '../src/features/insights-suite/metaWorkflows.js';
+import {
+  loadWorkflowChainPacks, defaultWorkflowChainPackRoots, _resetChainRegistryForTest,
+} from '../src/host/workflowChainPackLoader.js';
 import {
   applyConfig,
   anniversaryTriggerSubscriptionId,
@@ -51,7 +56,17 @@ describe('ADR 0081 §4 — work-anniversary trigger subscription (sqlite memory)
     setEventLogBackend(storage);
     // The catalog resolves feature built-ins from a module-global map populated at boot;
     // register it directly so ingestion resolves the anniversary-draft workflow.
-    registerBuiltinWorkflow(anniversaryDraftDefinition);
+    // ADR 0472 P2 — the anniversary workflow is chain-backed now (resolve-by-id under
+    // the same id via getChainBackedWorkflow); load the pack + register it.
+    _resetChainRegistryForTest();
+    loadWorkflowChainPacks({ roots: defaultWorkflowChainPackRoots() });
+    registerInsightsMetaWorkflows();
+    // ADR 0599 §6 — ingest now resolves the subscription's owning feature for the
+    // subscription's tenant and FAILS CLOSED when it cannot. This suite previously
+    // registered no toggle default at all, so `resolveOne` answered null and every
+    // ingest would skip `feature-disabled`. Registering the real default + turning
+    // it on is what keeps these deliveries measuring delivery.
+    registerToggleDefault(insightsSuiteFeature.toggleDefault!);
   });
   afterAll(async () => {
     __resetHostExtPersistence();
@@ -61,6 +76,8 @@ describe('ADR 0081 §4 — work-anniversary trigger subscription (sqlite memory)
     initHostExtPersistence(storage);
     await __resetTriggerBridgeStore();
     await __resetInsightsSuiteStore();
+    await __clearToggleStore();
+    await saveConfig({ ...insightsSuiteFeature.toggleDefault!, status: 'on' }, 'trigger-test');
   });
 
   it('enabled config registers a deterministic, active subscription bound to anniversary-draft', async () => {

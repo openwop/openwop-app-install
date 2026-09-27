@@ -1,7 +1,7 @@
 {
   "name": "feature.code-exec.agents",
   "version": "1.0.0",
-  "description": "Code Interpreter agent (ADR 0114). Drives the sandboxed code-execution node through chat — composes the existing AI chat + the feature.code-exec.nodes pack; no new chat system. Pure-agent pack.",
+  "description": "Code Interpreter agent. Drives the sandboxed code-execution node through chat — composes the existing AI chat + the feature.code-exec.nodes pack; no new chat system. Pure-agent pack.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/feature.code-exec.agents",

@@ -38,6 +38,11 @@ export interface MockBehavior {
   outputTokens?: number;
   /** Reported input token count. */
   inputTokens?: number;
+  /** ADR 0326 P3a — throw a provider-failure for this call instead of
+   *  returning a completion (the deterministic stand-in for a transient
+   *  upstream error; `mapDispatchErrors` classifies it). Exercises the
+   *  node-retry + invocation-log failure-recording paths. */
+  errorCode?: string;
 }
 
 export type MockProgram = readonly MockBehavior[];
@@ -62,14 +67,67 @@ const programs = new Map<string, ProgramState>();
  *  conformance test can program without knowing the runId in advance.
  *  Conformance scenarios run with `--no-file-parallelism` so each
  *  fixture's unique nodeId is sufficient to avoid cross-test
- *  collisions. Each new program seed REPLACES the previous queue. */
+ *  collisions WITHIN a scenario. Each new program seed REPLACES the
+ *  previous queue for that nodeId.
+ *
+ *  It does NOT protect across scenarios: an UNDRAINED program on any nodeId
+ *  outlives the scenario that seeded it, because the store is module-level and
+ *  the host process spans the whole suite. That is what `resetMockPrograms`
+ *  (and the seam route that now exposes it) is for — see its header. */
 export function programMock(nodeId: string, program: MockProgram): void {
   programs.set(nodeId, { program, cursor: 0, lastReceivedMaxTokens: null, lastReceivedMessages: null });
 }
 
-/** Wipe all programs. Called between conformance scenarios. */
+/**
+ * Wipe all programs.
+ *
+ * CORRECTED 2026-09-16 — this comment used to read "Called between conformance
+ * scenarios." **IT WAS NOT, AND HAD NEVER BEEN.** Every caller in the repo was a
+ * backend unit test; the conformance seam exposed `programMock` (SEED) and no
+ * route at all for the reset, so the out-of-process conformance suite had no way
+ * to wipe this store and never tried.
+ *
+ * THAT IS NOT A TIDINESS GAP — it leaked state ACROSS SCENARIOS. The store is
+ * module-level and keyed by `nodeId` with a cursor, and several scenarios
+ * (`envelope-truncation-cap-exhaustion`, `envelope-truncated`,
+ * `envelope-retry-exhausted`, …) deliberately seed programs that return
+ * `finishReason: 'length'`. A program not fully drained stays PENDING for the
+ * rest of the host process. A later scenario dispatching on a colliding nodeId
+ * consumes those leftovers, `aiProvidersHost` classifies them as truncation,
+ * the retry budget exhausts, and the run fails
+ * `envelope_truncation_unrecoverable` — with nothing in its own diff to explain
+ * it.
+ *
+ * MEASURED: `replay-observable-sequence-determinism` red in-suite and green
+ * alone across five runs on unchanged bases, including one red at load1 3.4 on
+ * an empty box. It cost a peer session two full gate cycles before the cause was
+ * found, because the symptom points at the victim scenario and the cause is in
+ * whichever scenario ran earlier.
+ *
+ * The keying comment on `programMock` rests on TWO premises stated as fact:
+ * `--no-file-parallelism` (true — `test:strict` passes it) and "reset between
+ * scenarios" (false). Because both were asserted, nobody checked the second.
+ */
+/** How many nodeIds currently hold a program, drained or not. Exists so the
+ *  reset seam can REPORT what it cleared: a reset that returns nothing is
+ *  indistinguishable from a reset that did not run, which is the failure mode
+ *  this whole change is about. */
+export function mockProgramCount(): number {
+  return programs.size;
+}
+
 export function resetMockPrograms(): void {
   programs.clear();
+}
+
+/** True when `nodeId` has a staged program entry not yet consumed. A pending
+ *  program is a DELIBERATE divergence injection (host-sample-test-seams.md §5:
+ *  the mock "MUST honor the program deterministically by attempt index"), so
+ *  the invocation-log replay fallback must NOT short-circuit the dispatch —
+ *  that is how the RFC 0041 §B refusal-divergence witness reaches the mock. */
+export function hasPendingMockProgram(nodeId: string): boolean {
+  const state = programs.get(nodeId);
+  return state !== undefined && state.cursor < state.program.length;
 }
 
 /** Return the most-recent `maxTokens` passed to a mock dispatch for
@@ -83,6 +141,60 @@ export function lastReceivedMaxTokens(nodeId: string): number | null {
  *  composed system prompt + prior turns). `null` when no call has fired. */
 export function lastReceivedMessages(nodeId: string): ReadonlyArray<{ role: string; content: string }> | null {
   return programs.get(nodeId)?.lastReceivedMessages ?? null;
+}
+
+/** `dispatchStructured()` appends this exact directive + the JSON schema to the
+ *  system prompt (aiProvidersHost.ts). The unprogrammed mock keys off it below. */
+const SCHEMA_HINT_MARKER = 'matches this schema, with no preamble or trailing text: ';
+
+/** Deterministic minimal instance of a JSON schema — the unprogrammed mock's
+ *  answer to a STRUCTURED call. Without this, an unprogrammed structured
+ *  dispatch returns `''`, which can never parse, so any conformance fixture
+ *  that routes `core.ai.structuredOutput` through the default mock (e.g.
+ *  `conformance-phase4-nondet-tool`) dies in the retry loop. Synthesis is
+ *  pure + input-deterministic, so replay/fork byte-stability holds. */
+function minimalInstance(schema: unknown): unknown {
+  if (schema === null || typeof schema !== 'object') return null;
+  const s = schema as { type?: unknown; enum?: unknown[]; const?: unknown; required?: unknown; properties?: Record<string, unknown> };
+  if (s.const !== undefined) return s.const;
+  if (Array.isArray(s.enum) && s.enum.length > 0) return s.enum[0];
+  switch (s.type) {
+    case 'boolean': return true;
+    case 'string': return 'mock';
+    case 'number':
+    case 'integer': return 0;
+    case 'array': return [];
+    case 'null': return null;
+    case 'object': {
+      const out: Record<string, unknown> = {};
+      const required = Array.isArray(s.required) ? s.required.filter((r): r is string => typeof r === 'string') : [];
+      for (const key of required) out[key] = minimalInstance(s.properties?.[key]);
+      return out;
+    }
+    default: return {};
+  }
+}
+
+/** When the (unprogrammed) request carries `dispatchStructured`'s schema hint,
+ *  emit a minimal schema-valid JSON object; otherwise keep the historical
+ *  empty-stop completion (a misaligned CHAT test still surfaces as "expected
+ *  N calls, got N+1" rather than a hang). */
+function defaultStructuredCompletion(messages: DispatchRequest['messages']): string {
+  for (const m of messages) {
+    const content = typeof m.content === 'string' ? m.content : '';
+    const at = content.indexOf(SCHEMA_HINT_MARKER);
+    if (at < 0) continue;
+    const raw = content.slice(at + SCHEMA_HINT_MARKER.length);
+    // The schema is the trailing JSON of the directive line; further directives
+    // (e.g. the RFC 0030 reasoning directive) are appended after a blank line.
+    const jsonText = raw.split('\n\n')[0]?.trim() ?? '';
+    try {
+      return JSON.stringify(minimalInstance(JSON.parse(jsonText)));
+    } catch {
+      return '';
+    }
+  }
+  return '';
 }
 
 /** Dispatch entry point. Returns a `DispatchResult`-shaped value built
@@ -106,7 +218,12 @@ export async function dispatchMock(req: DispatchRequest & { nodeId?: string }): 
       ? state.program[state.cursor++]!
       : {};
 
-  const completion = behavior.refusalText ?? behavior.content ?? '';
+  // ADR 0326 P3a — a programmed failure throws (a plain coded error; the
+  // adapter's mapDispatchErrors classifies it into an AiProviderError).
+  if (behavior.errorCode) {
+    throw Object.assign(new Error(`mock programmed failure (${behavior.errorCode})`), { code: behavior.errorCode });
+  }
+  const completion = behavior.refusalText ?? behavior.content ?? defaultStructuredCompletion(req.messages);
   // ADR 0079 — stream the canned reply so the mock/test/demo path exercises the
   // streaming UI. Deterministic word-chunks; best-effort (a callback throw must
   // not fail the dispatch).

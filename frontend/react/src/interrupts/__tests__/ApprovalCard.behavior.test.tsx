@@ -26,7 +26,7 @@ describe('ApprovalCard behavior', () => {
   it('resolves the interrupt once on approve', async () => {
     resolveByRun.mockResolvedValue(undefined);
     render(<ApprovalCard {...common} data={{ prompt: 'Approve?', actions: ['approve'] }} />);
-    fireEvent.click(screen.getByRole('button', { name: 'approve' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(resolveByRun).toHaveBeenCalledTimes(1));
     expect(resolveByRun).toHaveBeenCalledWith('r1', 'n1', { action: 'approve', comment: undefined });
     await waitFor(() => expect(common.onResolved).toHaveBeenCalled());
@@ -37,7 +37,7 @@ describe('ApprovalCard behavior', () => {
     // second synchronous click hits the guard, not the re-rendered disabled state.
     resolveByRun.mockReturnValue(new Promise(() => {}));
     render(<ApprovalCard {...common} data={{ prompt: 'Approve?', actions: ['approve'] }} />);
-    const btn = screen.getByRole('button', { name: 'approve' });
+    const btn = screen.getByRole('button', { name: 'Approve' });
     fireEvent.click(btn);
     fireEvent.click(btn);
     await waitFor(() => expect(resolveByRun).toHaveBeenCalledTimes(1));

@@ -14,14 +14,13 @@
  * away entirely (the parent renders nothing).
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useRef } from 'react';
+import { scrollBehavior } from '../ui/motion.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
-import { CheckSquareIcon, InboxIcon, InfoIcon } from '../ui/icons/index.js';
-import { IconButton } from '../ui/IconButton.js';
+import { CheckSquareIcon, InboxIcon } from '../ui/icons/index.js';
 import type { AssignedCard } from './kanbanClient.js';
-
-const ASSIGNED_HINT = 'A cross-board, read-only view of cards assigned to you. Open a card on its origin board to work it.';
 
 export function AssignedColumn({
   cards,
@@ -41,7 +40,7 @@ export function AssignedColumn({
   // once it has rendered in the rail.
   useEffect(() => {
     if (highlightId && highlightRef.current) {
-      highlightRef.current.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      highlightRef.current.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
     }
   }, [highlightId, cards]);
 
@@ -50,11 +49,13 @@ export function AssignedColumn({
       <div className="kb-col-head">
         <span className="kb-col-name">
           <InboxIcon size={13} aria-hidden /> {t('assignedToMe')}
-          <IconButton label={ASSIGNED_HINT} icon={<InfoIcon size={13} />} />
         </span>
         <span className="kb-col-count">{cards.length}</span>
       </div>
-      <p className="muted u-fs-12 u-mt-1">{ASSIGNED_HINT}</p>
+      {/* i18n fix (was a hardcoded EN constant serving all 4 locales) + one
+          affordance instead of two: the visible hint IS the accessible hint —
+          the old info IconButton repeated the same sentence to SR users. */}
+      <p className="muted u-fs-12 u-mt-1">{t('assignedHint')}</p>
       <ul className="u-list-none u-grid u-gap-2">
         {cards.map((card) => {
           const highlighted = card.id === highlightId;
@@ -78,17 +79,16 @@ export function AssignedColumn({
               ) : null}
               <div className="kb-card-foot">
                 {unclaimed ? (
-                  <button
-                    type="button"
-                    className="btn-accent-solid btn-sm u-iflex u-items-center u-gap-1"
+                  <Button
+                    variant="accent-solid" size="sm" className="u-iflex u-items-center u-gap-1"
                     disabled={busyId === card.id}
                     onClick={() => onClaim(card.id)}
                   >
                     <CheckSquareIcon size={12} aria-hidden /> {busyId === card.id ? t('claiming') : t('claim')}
-                  </button>
+                  </Button>
                 ) : null}
                 <span className="kb-card-foot-spacer" />
-                <Link to={`/boards?board=${encodeURIComponent(card.boardId)}`} className="kb-run-link" title={t('openOnBoard', { board: card.boardName })}>
+                <Link to={`/boards/${encodeURIComponent(card.boardId)}?card=${encodeURIComponent(card.id)}`} className="kb-run-link" title={t('openOnBoard', { board: card.boardName })}>
                   {t('boardArrow', { board: card.boardName })}
                 </Link>
               </div>

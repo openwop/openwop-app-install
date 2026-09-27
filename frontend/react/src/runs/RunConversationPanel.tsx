@@ -21,7 +21,9 @@
  * it yet; this panel is ready when one does.
  */
 
+import { Button } from '../ui/Button.js';
 import { useMemo, useState } from 'react';
+import { Notice } from '../ui/Notice.js';
 import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { resolveByToken, type OpenInterrupt } from '../client/interruptsClient.js';
@@ -168,6 +170,8 @@ function ResumeForm({
     setError(null);
     setSubmitting(true);
     try {
+      // ADR 0755 D3 — the list omits the token for a caller without approvals:respond.
+      if (!interrupt.token) throw new Error(t('noRespondPermission'));
       await resolveByToken(interrupt.token, payload);
       setText('');
       onResolved();
@@ -185,11 +189,11 @@ function ResumeForm({
         <p className="muted runconv-close-copy">
           {t('confirmCloseBodyPre')}<code>conversation.closed</code>{t('confirmCloseBodyPost')}
         </p>
-        {error && <div className="alert error u-fs-12 u-mb-1-5">{error}</div>}
+        {error && <div className="u-fs-12 u-mb-1-5"><Notice variant="error">{error}</Notice></div>}
         <div className="button-row">
-          <button type="button" onClick={() => void submit(undefined)} disabled={submitting}>
+          <Button variant="primary" onClick={() => void submit(undefined)} disabled={submitting}>
             {submitting ? t('closing') : t('confirmClose')}
-          </button>
+          </Button>
         </div>
       </div>
     );
@@ -225,7 +229,10 @@ function ResumeForm({
           <strong>{t('agentPromptLabel')}</strong> {prompt}
         </div>
       )}
+      {/* §11 / BLD-7: focus moves into the response form when the gate appears. */}
       <textarea
+        autoFocus
+        aria-label={hasSchema ? t('resumeJsonPlaceholder') : t('resumeReplyPlaceholder')}
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder={hasSchema ? t('resumeJsonPlaceholder') : t('resumeReplyPlaceholder')}
@@ -234,11 +241,11 @@ function ResumeForm({
         style={{ fontFamily: hasSchema ? 'var(--mono)' : 'inherit' }}
         disabled={submitting}
       />
-      {error && <div className="alert error u-fs-12 u-mt-1">{error}</div>}
+      {error && <div className="u-fs-12 u-mt-1"><Notice variant="error">{error}</Notice></div>}
       <div className="button-row u-mt-1-5">
-        <button type="submit" disabled={submitting || text.trim().length === 0}>
+        <Button variant="primary" type="submit" disabled={submitting || text.trim().length === 0}>
           {submitting ? t('sending') : t('sendTurn')}
-        </button>
+        </Button>
       </div>
     </form>
   );

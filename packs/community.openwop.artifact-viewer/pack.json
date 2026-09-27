@@ -1,0 +1,18 @@
+{
+  "name": "community.openwop.artifact-viewer",
+  "version": "1.0.0",
+  "kind": "frontend-plugin",
+  "description": "Reference OpenWOP front-end plugin pack. A sandboxed custom artifact-viewer that reads a typed artifact over the ui-plugin/1 host-RPC channel and renders it — the graduation witness for the downloaded-plugin-runs-isolated boundary. Carries no secret, no backend runtime.",
+  "author": "OpenWOP",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/community.openwop.artifact-viewer",
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "uiPlugins": [
+    {
+      "pluginId": "artifact-viewer",
+      "surface": "artifact-viewer",
+      "entry": "entry.html",
+      "hostApi": ["artifact.read"]
+    }
+  ]
+}

@@ -97,7 +97,8 @@ export function summarizeProvenance(
 
   for (const ev of events) {
     if (!causationId && ev.causationId) causationId = ev.causationId;
-    if (!engineVersion && ev.engineVersion) engineVersion = ev.engineVersion;
+    // `engineVersion` is a number on the major-2 wire (`RunEventDoc.engineVersion?: number`).
+    if (!engineVersion && ev.engineVersion !== undefined) engineVersion = String(ev.engineVersion);
     const p = asRecord(ev.payload);
     switch (ev.type) {
       case 'run.started':
@@ -319,7 +320,7 @@ export function RunProvenancePanel({ events, snapshot }: Props) {
       )}
 
       <p className="muted runprov-caveat">
-        <InfoIcon size={12} style={{ flexShrink: 0, marginTop: 1 }} />
+        <span className="u-icon-note u-iflex" aria-hidden><InfoIcon size={12} /></span>
         {t('provCaveat')}
       </p>
     </div>

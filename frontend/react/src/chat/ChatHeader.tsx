@@ -11,6 +11,7 @@
  * (they change the next message), not here — see ChatInput's leadingControls.
  */
 
+import { Button } from '../ui/Button.js';
 import { useRef, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ConfiguredProviderCard } from '../byok/ConfiguredProviderCard.js';
@@ -18,13 +19,16 @@ import type { BYOKActiveConfig } from '../byok/lib/useBYOKConfig.js';
 import type { ChatSession } from './hooks/useChatSession.js';
 import { messageText } from './types.js';
 import { formatUsd, sessionCostUsd } from './lib/cost.js';
-import { MenuIcon, MoreHorizontalIcon, SettingsIcon } from '../ui/icons/index.js';
+import { HashIcon, MenuIcon, MoreHorizontalIcon, SettingsIcon, UsersIcon } from '../ui/icons/index.js';
+import { Avatar } from '../ui/Avatar.js';
 import { Menu, type MenuEntry } from '../ui/Menu.js';
 import { IntentLedgerButton } from '../intentLedger/IntentLedgerPanel.js';
 import { TaskDeckButton } from '../taskDeck/TaskDeckPanel.js';
 
 interface Props {
   config: BYOKActiveConfig;
+  /** ADR 0711 OQ1 — false when `config` is the effective managed default, not a choice. */
+  byokStored?: boolean;
   onOpenSettings: () => void;
   onRemoveKey: () => void | Promise<void>;
   onNewChat: () => void;
@@ -59,10 +63,28 @@ interface Props {
   /** ADR 0154 Phase 2 — open the channel-settings dialog. Set only when the
    *  active conversation is a channel; renders a settings control in the header. */
   onOpenChannelDetails?: () => void;
+  /** ADR 0192 D8 — the channel identity segment: `#name`, truncated
+   *  description, and a member facepile opening the details dialog. Set only
+   *  when the active conversation is a channel. */
+  channelContext?: {
+    name: string;
+    description?: string | undefined;
+    /** Resolved members for the facepile (display name + kind). */
+    members: ReadonlyArray<{ displayName: string; kind: 'user' | 'agent' | 'other' }>;
+    onOpenDetails: () => void;
+  };
+  /** ADR 0140 follow-on — toggle the right-docked members pane. Set only when
+   *  there's a roster to reveal; renders a people affordance in the header. */
+  onToggleMembers?: () => void;
+  /** Whether the members pane is open — drives the toggle's pressed state. */
+  membersOpen?: boolean;
+  /** Participant count shown on the toggle. */
+  memberCount?: number;
 }
 
 export function ChatHeader({
   config,
+  byokStored,
   onOpenSettings,
   onRemoveKey,
   onNewChat,
@@ -77,6 +99,10 @@ export function ChatHeader({
   railOpen,
   railBadgeCount = 0,
   onOpenChannelDetails,
+  channelContext,
+  onToggleMembers,
+  membersOpen = false,
+  memberCount = 0,
 }: Props): JSX.Element {
   const { t } = useTranslation('chat');
   const totalCost = sessionCostUsd(session);
@@ -106,29 +132,72 @@ export function ChatHeader({
     <div className="chathdr">
       <div className="chathdr-context">
         {onToggleRail && (
-          <button
-            type="button"
+          <Button
             onClick={onToggleRail}
             aria-label={railOpen ? t('closeChatTools') : t('openChatTools')}
             aria-pressed={railOpen}
             title={t('chatToolsTitle')}
-            className="secondary chathdr-rail-btn"
+            variant="secondary" className="chathdr-rail-btn"
           >
             <MenuIcon size={14} />
             {railBadgeCount > 0 && (
               <span className="chathdr-badge">{railBadgeCount}</span>
             )}
-          </button>
+          </Button>
         )}
         {/* Unified model zone — the BYOK provider identity + the per-exchange
             switcher read as ONE control rather than two competing affordances. */}
         <span className="chathdr-model">
-          <ConfiguredProviderCard config={config} onChange={onOpenSettings} onRemoved={onRemoveKey} compact />
+          <ConfiguredProviderCard config={config} onChange={onOpenSettings} onRemoved={onRemoveKey} compact stored={byokStored ?? true} />
           {modelSwitcher}
         </span>
+        {/* ADR 0192 D8 — the channel identity segment: hairline-quiet, no pills.
+            The facepile is a real button opening Channel details. */}
+        {channelContext && (
+          <span className="chathdr-channel">
+            <span aria-hidden className="u-iflex muted"><HashIcon size={14} /></span>
+            <span className="chathdr-channel-name u-truncate">{channelContext.name}</span>
+            {channelContext.description && (
+              <span className="chathdr-channel-desc u-truncate" title={channelContext.description}>
+                {channelContext.description}
+              </span>
+            )}
+            {channelContext.members.length > 0 && (
+            <button
+              type="button"
+              className="chathdr-facepile"
+              onClick={channelContext.onOpenDetails}
+              aria-label={t('channelMembersAria', { count: channelContext.members.filter((m) => m.kind !== 'agent').length })}
+              title={t('channelMembersAria', { count: channelContext.members.filter((m) => m.kind !== 'agent').length })}
+            >
+              {channelContext.members.slice(0, 4).map((m, i) => (
+                <span key={`${m.displayName}-${i}`} className="chathdr-facepile-item">
+                  <Avatar name={m.displayName} size={20} kind={m.kind === 'agent' ? 'agent' : 'user'} />
+                </span>
+              ))}
+              {channelContext.members.length > 4 && (
+                <span className="chathdr-facepile-item chathdr-facepile-overflow">+{channelContext.members.length - 4}</span>
+              )}
+            </button>
+            )}
+          </span>
+        )}
       </div>
 
       <div className="chathdr-actions">
+        {onToggleMembers && (
+          <Button
+            variant="secondary" className={`chathdr-more-btn chathdr-members-btn${membersOpen ? ' is-active' : ''}`}
+            onClick={onToggleMembers}
+            aria-expanded={membersOpen}
+            aria-controls="members-pane"
+            title={t('membersToggleAria', { count: memberCount })}
+          >
+            <UsersIcon size={14} />
+            <span aria-hidden className="chathdr-members-count">{memberCount}</span>
+            <span className="sr-only">{t('membersToggleAria', { count: memberCount })}</span>
+          </Button>
+        )}
         {totalCost > 0 && (
           <span
             className="status-badge u-fs-11"
@@ -147,14 +216,14 @@ export function ChatHeader({
         {/* ADR 0154 Phase 2 — channel settings (rename · archive · members),
             only for a channel conversation. */}
         {onOpenChannelDetails && (
-          <button type="button" className="secondary chathdr-more-btn" onClick={onOpenChannelDetails} aria-label={t('channelSettingsAria')} title={t('channelSettingsAria')}>
+          <Button variant="secondary" className="chathdr-more-btn" onClick={onOpenChannelDetails} aria-label={t('channelSettingsAria')} title={t('channelSettingsAria')}>
             <SettingsIcon size={15} />
-          </button>
+          </Button>
         )}
         {hasTurns && (
-          <button type="button" className="secondary u-fs-11" onClick={onNewChat} aria-label={t('newChat')}>
+          <Button variant="secondary" className="u-fs-11" onClick={onNewChat} aria-label={t('newChat')}>
             {t('newChat')}
-          </button>
+          </Button>
         )}
         {moreItems.length > 0 && (
           <Menu

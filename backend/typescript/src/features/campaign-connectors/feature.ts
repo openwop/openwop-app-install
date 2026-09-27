@@ -19,7 +19,7 @@ export const campaignConnectorsFeature: BackendFeature = {
   registerRoutes: (deps) => registerCampaignConnectorsRoutes(deps),
   surface: { id: 'campaign-connectors', build: buildCampaignConnectorsSurface },
   requiredPacks: [
-    { name: 'feature.campaign-connectors.nodes', version: '1.0.0' },
+    { name: 'feature.campaign-connectors.nodes', version: '1.2.0' },
   ],
   toggleDefault: {
     id: 'campaign-connectors',

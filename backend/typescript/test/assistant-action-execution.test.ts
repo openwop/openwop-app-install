@@ -15,6 +15,7 @@ import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
 import { enqueueActionWithApproval, decideActionViaApproval } from '../src/features/assistant/actionApproval.js';
 import { getRegisteredWorkflow } from '../src/host/workflowsRegistry.js';
+import { getChainBackedWorkflow } from '../src/host/chainBackedWorkflows.js';
 import { __hostExtStorage } from '../src/host/hostExtPersistence.js';
 
 const TENANT = 'default';
@@ -39,19 +40,35 @@ async function waitForStatus(actionId: string, statuses: string[], timeoutMs = 5
   }
 }
 
+/**
+ * WF-COS-1 — resolve a workflow the way the RUNTIME does, not the way one
+ * registry does. These six moved from `registerWorkflow(<in-tree literal>)` to
+ * `registerChainBackedWorkflow(<chainId>)`, which lands them in a different
+ * registry that the host catalog resolves alongside the first. Asserting
+ * through `getRegisteredWorkflow` alone would have pinned the MECHANISM, so the
+ * migration would read as a regression while dispatch worked fine.
+ *
+ * Node ids are expansion-prefixed after the migration (`<chain>_<hash>_fetch`),
+ * so lookups match on the SUFFIX rather than on equality.
+ */
+const resolveWorkflow = (id: string) => getRegisteredWorkflow(id) ?? getChainBackedWorkflow(id);
+type ResolvedDef = NonNullable<ReturnType<typeof getRegisteredWorkflow>>;
+const nodeBySuffix = (def: ResolvedDef, id: string): ResolvedDef['nodes'][number] | undefined =>
+  def.nodes.find((n) => n.nodeId === id || n.nodeId.endsWith(`_${id}`));
+
 describe('execution workflows (boot-registered)', () => {
   it('registers assistant.action.* schema-clean (Option C: opt-in is run-level) with the send-verdict gate, never a secret', () => {
     for (const wfId of ['assistant.action.email-send', 'assistant.action.calendar-invite', 'assistant.action.calendar-reschedule']) {
-      const def = getRegisteredWorkflow(wfId);
+      const def = resolveWorkflow(wfId);
       expect(def, wfId).toBeDefined();
-      const send = def!.nodes.find((n) => n.nodeId === 'send');
+      const send = nodeBySuffix(def!, 'send');
       expect(send?.typeId).toBe('core.openwop.http.fetch');
       // ADR 0024 §4 / Option C — nothing connection-shaped in node config;
       // the opt-in is run-level configurable.connections (asserted below).
       expect(send?.config?.connection).toBeUndefined();
       // The verdict gate: without it a refused send would record as `sent`
       // (fetch completes on any outcome, side-effect-once).
-      expect(def!.nodes.find((n) => n.nodeId === 'confirm')?.typeId).toBe('feature.assistant.nodes.confirm-action-send');
+      expect(nodeBySuffix(def!, 'confirm')?.typeId).toBe('feature.assistant.nodes.confirm-action-send');
       expect(JSON.stringify(def)).not.toMatch(/Bearer |secret|token/i);
     }
   });
@@ -142,8 +159,23 @@ describe('execute-on-approve', () => {
     // injected; whatever the unauthenticated call yields (provider 401 or
     // network refusal), the confirm-action-send verdict gate fails the run
     // and the terminal projection marks the action failed — never sent.
-    expect(await waitForStatus(action.actionId, ['sent', 'failed'], 15_000)).toBe('failed');
-  });
+    // The inner deadline is 10s against a 30s test budget, and the ORDER of those
+    // two numbers is the fix. It used to wait 15_000 under the global
+    // `testTimeout: 15_000` — an inner deadline EQUAL to the outer one, so the
+    // test could only pass if everything above this line took zero time. It did
+    // pass, for a while, because the status normally arrives in well under a
+    // second; suite growth (1957 → 1965 files) ate the remaining margin and it
+    // began timing out deterministically in full parallel runs — at external load
+    // 190 and again at 7.8, while passing 7/7 in isolation. Reported by the
+    // kicktodo-1 distribution, which carries this file downstream.
+    //
+    // What the ordering BUYS is not headroom, it is legibility: with the inner
+    // deadline strictly smaller, a slow run now fails on the ASSERTION below and
+    // prints the status it actually saw. Before, it died as "Test timed out in
+    // 15000ms" — a message that names no expectation and no observed value, and
+    // cannot distinguish "the dispatch never ran" from "the box was busy".
+    expect(await waitForStatus(action.actionId, ['sent', 'failed'], 10_000)).toBe('failed');
+  }, 30_000);
 
   it('a rejected action never dispatches', async () => {
     const action = await enqueueActionWithApproval(TENANT, {

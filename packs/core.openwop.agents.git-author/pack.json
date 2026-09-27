@@ -27,7 +27,7 @@
       "agentId": "core.openwop.agents.git-author.default",
       "persona": "Git Author",
       "label": "Git Author Agent",
-      "description": "Drafts commit messages, PR titles + bodies, release notes, and changelog entries from a diff. Conventional-Commits-aware. Optionally fetches the project's recent history via openwop:core.http.fetch (GitHub API) to match house style.",
+      "description": "Drafts commit messages, PR titles + bodies, release notes, and changelog entries from a diff. Conventional-Commits-aware. Optionally fetches the project's recent history via openwop:core.openwop.http.fetch (GitHub API) to match house style.",
       "modelClass": "writing",
       "systemPromptRef": "prompts/git-author.md",
       "toolAllowlist": [

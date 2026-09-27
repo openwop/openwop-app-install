@@ -6,7 +6,7 @@
  * external resets reseed the draft without clobbering in-progress edits.
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
 import { type ConfigField } from '../palette/nodeCatalog.js';
@@ -47,14 +47,18 @@ export function ConfigInput({
   // model-picker with dependsOn: 'provider' looks up
   // `config.provider`). Undefined when this field has no dependency.
   const dependsOnValue = field.dependsOn ? (config[field.dependsOn] as string | undefined) : undefined;
+  // A11Y-3: programmatically associate the visible label with whichever
+  // control this field renders (incl. through the picker components).
+  const id = useId();
   return (
     <div className="form-row">
-      <label>
+      <label htmlFor={id}>
         {field.label}
         {field.required && <span className="builder-inspector-required" aria-hidden> *</span>}
       </label>
       {field.kind === 'checkbox' ? (
         <input
+          id={id}
           type="checkbox"
           checked={value === true}
           required={field.required}
@@ -63,6 +67,7 @@ export function ConfigInput({
         />
       ) : field.kind === 'prompt-picker' ? (
         <PromptPickerInput
+          id={id}
           value={typeof value === 'string' ? value : undefined}
           onChange={(next) => onChange(next)}
           promptKind={field.promptKind}
@@ -70,6 +75,7 @@ export function ConfigInput({
         />
       ) : field.kind === 'credential-picker' ? (
         <CredentialPickerInput
+          id={id}
           value={typeof value === 'string' ? value : undefined}
           onChange={(next) => onChange(next)}
           {...(field.credentialProvider
@@ -81,12 +87,14 @@ export function ConfigInput({
         />
       ) : field.kind === 'provider-picker' ? (
         <ProviderPickerInput
+          id={id}
           value={typeof value === 'string' ? value : undefined}
           onChange={(next) => onChange(next)}
           required={field.required}
         />
       ) : field.kind === 'model-picker' ? (
         <ModelPickerInput
+          id={id}
           value={typeof value === 'string' ? value : undefined}
           onChange={(next) => onChange(next)}
           providerId={dependsOnValue}
@@ -94,6 +102,7 @@ export function ConfigInput({
         />
       ) : field.kind === 'textarea' ? (
         <textarea
+          id={id}
           rows={3}
           value={textareaValue(value)}
           placeholder={field.placeholder}
@@ -104,6 +113,7 @@ export function ConfigInput({
         />
       ) : field.kind === 'number' ? (
         <input
+          id={id}
           type="number"
           value={typeof value === 'number' ? value : ''}
           placeholder={field.placeholder}
@@ -115,6 +125,7 @@ export function ConfigInput({
         />
       ) : field.kind === 'select' ? (
         <select
+          id={id}
           value={typeof value === 'string' ? value : ''}
           required={field.required}
           onChange={(e) => onChange(e.target.value === '' ? undefined : e.target.value)}
@@ -126,6 +137,7 @@ export function ConfigInput({
         </select>
       ) : field.kind === 'string-list' ? (
         <StringListInput
+          id={id}
           value={Array.isArray(value) ? (value as unknown[]).filter((v) => typeof v === 'string') as string[] : []}
           onChange={(next) => onChange(next.length === 0 ? undefined : next)}
           placeholder={field.placeholder}
@@ -133,6 +145,7 @@ export function ConfigInput({
         />
       ) : (
         <input
+          id={id}
           value={typeof value === 'string' ? value : ''}
           placeholder={field.placeholder}
           required={field.required}
@@ -161,11 +174,13 @@ function StringListInput({
   onChange,
   placeholder,
   maxItems,
+  id,
 }: {
   value: readonly string[];
   onChange: (next: string[]) => void;
   placeholder?: string | undefined;
   maxItems?: number | undefined;
+  id?: string | undefined;
 }): JSX.Element {
   const { t } = useTranslation('builder');
   const [draft, setDraft] = useState<string>(value.join('\n'));
@@ -187,6 +202,7 @@ function StringListInput({
   return (
     <>
       <textarea
+        {...(id ? { id } : {})}
         rows={Math.min(6, Math.max(2, value.length + 1))}
         value={draft}
         placeholder={placeholder ?? t('stringListPlaceholder')}

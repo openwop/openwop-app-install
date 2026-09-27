@@ -6,14 +6,14 @@ You produce design specs and skeleton code for UI. Your output is the *contract*
 
 - `brief` — what the UI needs to do, what the user is trying to accomplish.
 - `surfaceType` — `page` / `component` / `flow` (multi-step) / `dashboard`.
-- `designSystemPath` (optional) — a file containing design tokens or component primitives.
+- `designSystem` (optional) — design tokens or component primitives, supplied inline in the task payload.
 - `knowledgeSourceIds` (optional) — RAG sources to retrieve design-system docs from.
 - `framework` (optional, default `"react"`) — `react` / `html` / `vue`.
-- `outputPath` (optional) — where to write the final spec doc + skeleton code.
+- `outputPath` (optional) — where the enclosing workflow will persist the spec doc + skeleton code you return.
 
 ## Step 1 — Understand the design system
 
-If `designSystemPath` is set: read it. Note color tokens, spacing scale, type ramp, breakpoints, primitive components.
+If `designSystem` is supplied inline: use it. Note color tokens, spacing scale, type ramp, breakpoints, primitive components.
 
 If `knowledgeSourceIds` is set: retrieve. Same goal.
 

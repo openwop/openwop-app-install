@@ -1,0 +1,125 @@
+{
+  "name": "core.openwop.workflows.kicktodo-replan",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Participant-replan workflow (ADR 0459/0463), migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; the falsy reject-safe barrier rides RFC 0134.",
+  "keywords": [
+    "KickTodo"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "openwop-app.kicktodo.replan",
+      "version": "1.0.0",
+      "label": "Replan a participant's plan",
+      "description": "Compose a plan revision → clarify (one round) → humanize → approve in chat → apply the changes.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enrollmentId": {
+            "type": "string"
+          },
+          "ownerSubject": {
+            "type": "string"
+          },
+          "participantIntent": {
+            "type": "string"
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "compose",
+            "typeId": "local.openwop-app.agent-runner",
+            "config": {
+              "offerTools": [
+                "openwop:kicktodo.today",
+                "openwop:kicktodo.progress"
+              ]
+            },
+            "inputs": {
+              "agentId": "feature.kicktodo.agents.replan-composer",
+              "task": "{{params.participantIntent}}",
+              "credentialRef": "managed:openwop-free"
+            }
+          },
+          {
+            "id": "clarify",
+            "typeId": "feature.kicktodo.nodes.replan-clarify"
+          },
+          {
+            "id": "enrich",
+            "typeId": "feature.kicktodo.nodes.enrich-plan-revision",
+            "inputs": {
+              "enrollmentId": "{{params.enrollmentId}}"
+            }
+          },
+          {
+            "id": "approve",
+            "typeId": "core.chat.approvalGate",
+            "config": {
+              "title": "Apply these changes to your plan?",
+              "artifactType": "kicktodo.plan-revision",
+              "maxRequestChangesIterations": 0
+            }
+          },
+          {
+            "id": "reject",
+            "typeId": "core.fail",
+            "config": {
+              "code": "replan_rejected",
+              "message": "The plan changes were declined — nothing was changed."
+            }
+          },
+          {
+            "id": "apply",
+            "typeId": "feature.kicktodo.nodes.apply-revision-commands",
+            "inputs": {
+              "enrollmentId": "{{params.enrollmentId}}",
+              "subject": "{{params.ownerSubject}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "compose.result",
+            "to": "clarify.revision",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "clarify.result",
+            "to": "enrich.revision",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "enrich.result",
+            "to": "approve.artifact",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "approve",
+            "to": "reject",
+            "condition": {
+              "type": "falsy",
+              "left": "approved"
+            }
+          },
+          {
+            "from": "clarify.result",
+            "to": "apply",
+            "triggerRule": "none_failed"
+          },
+          {
+            "from": "reject",
+            "to": "apply",
+            "triggerRule": "none_failed"
+          }
+        ]
+      }
+    }
+  ]
+}

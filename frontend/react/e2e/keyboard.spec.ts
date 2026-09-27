@@ -8,7 +8,7 @@ import { test, expect } from '@playwright/test';
  */
 test.describe('command palette — keyboard only', () => {
   test('Ctrl+K opens it and focus lands in the search box', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard'); // ADR 0487 — '/' is the public home; the command palette is app chrome
     await page.waitForSelector('main#main-content');
 
     await page.keyboard.press('Control+k');
@@ -19,7 +19,7 @@ test.describe('command palette — keyboard only', () => {
   });
 
   test('arrow keys move the selection within the listbox', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard'); // ADR 0487 — '/' is the public home; the command palette is app chrome
     await page.waitForSelector('main#main-content');
     await page.keyboard.press('Control+k');
     await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible();
@@ -33,7 +33,7 @@ test.describe('command palette — keyboard only', () => {
   });
 
   test('Escape closes the palette', async ({ page }) => {
-    await page.goto('/');
+    await page.goto('/dashboard'); // ADR 0487 — '/' is the public home; the command palette is app chrome
     await page.waitForSelector('main#main-content');
     await page.keyboard.press('Control+k');
     await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible();

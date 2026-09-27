@@ -21,6 +21,9 @@ import {
   OPENWOP_COST_ATTRIBUTE_NAMES as SDK_OPENWOP_COST_ATTRIBUTE_NAMES,
   sanitizeCostAttributes,
 } from '@openwop/openwop';
+import { createLogger } from './logger.js';
+
+const costLog = createLogger('observability.costEmitter');
 
 /** Canonical allowlist of cost-attribute names per
  *  `spec/v1/observability.md §"Cost attribution attributes"`.
@@ -138,4 +141,132 @@ export function applyCostRollup(runId: string, sanitized: Record<string, number 
  *  entirely (spec-allowed per `run-snapshot.schema.json §metrics`). */
 export function snapshotCostRollup(runId: string): CostRollup | null {
   return runCostRollups.get(runId) ?? null;
+}
+
+/**
+ * ADR 0476 §1 (+ grade-trio correction) — stamp DURABLE run cost at the run's
+ * terminal transition (the ONE queryable cost record — fleet stats read run
+ * rows, never event logs).
+ *
+ * TWO disjoint sources, summed:
+ *  - the run's `provider.usage` events (RFC 0026) — the DURABLE record every
+ *    real AI dispatch emits. This is instance-independent, so a cancel routed
+ *    to a non-executor instance now stamps real spend (grade-data M4: the
+ *    in-process-only fold silently zeroed cross-instance cancels; it also
+ *    missed ALL real AI-node spend, whose only rollup writer was the
+ *    conformance fixture node).
+ *  - the in-process rollup (`applyCostRollup`) — the conformance
+ *    `conformance.cost.emit` lane, which emits no `provider.usage` event.
+ *
+ * The write is `storage.mergeRunMetadata(..., { ifAbsentKey: 'costUsd' })` —
+ * ONE atomic statement (grade-code H2: the previous whole-metadata
+ * read-modify-write raced the connectionUse stamp and the retention-pin
+ * route, the exact ADR 0024 lost-update class this program fixed twice
+ * elsewhere), with never-overwrite folded into the same statement
+ * (`workforceHistory` stamps first for workforce runs and stays
+ * authoritative). Client-supplied values never survive to here:
+ * `costUsd`/`costTokens`/`costByNode` are RESERVED_RUN_METADATA_KEYS.
+ * Best-effort — a stamp failure must never affect the terminal transition,
+ * but it is LOGGED (grade-code L8), never swallowed silently.
+ *
+ * ADR 0482 §1 — the SAME fold additionally aggregates per `nodeId` and writes
+ * `costByNode: { [nodeId]: usd }` (top 8 nodes by spend + an `__other`
+ * remainder, 6-decimal rounding) INSIDE the same atomic merge — the
+ * never-overwrite key guards the pair, so a workforce-stamped run never gets
+ * an orphan costByNode. Unattributed spend (rollup lane, events without a
+ * nodeId) folds into `__other`; the field is written only when at least one
+ * event attributed spend to a real node.
+ *
+ * Returns the run's total computed usd (0 when none) so the ADR 0482 §2
+ * spend-day fold at the same terminal seam consumes the SAME figure without
+ * a second event scan.
+ */
+export const COST_BY_NODE_TOP_N = 8;
+
+export function aggregateCostByNode(
+  perNode: ReadonlyMap<string, number>,
+  unattributedUsd: number,
+): Record<string, number> | null {
+  if (perNode.size === 0) return null;
+  const round6 = (n: number): number => Number(n.toFixed(6));
+  const sorted = [...perNode.entries()].sort((a, b) => b[1] - a[1]);
+  const top = sorted.slice(0, COST_BY_NODE_TOP_N);
+  let other = unattributedUsd;
+  for (const [, v] of sorted.slice(COST_BY_NODE_TOP_N)) other += v;
+  const out: Record<string, number> = {};
+  for (const [nodeId, v] of top) {
+    const r = round6(v);
+    // Review L1 — a top-8 entry that rounds to ≤0 folds into __other instead
+    // of vanishing (sum(costByNode) must track costUsd, not drift under it).
+    if (r > 0) out[nodeId] = r;
+    else other += v;
+  }
+  const otherR = round6(other);
+  if (otherR > 0) out.__other = otherR;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+export async function stampRunCostOnTerminal(
+  storage: {
+    listEvents(runId: string, opts?: { fromSeq?: number; limit?: number }): Promise<readonly { type: string; nodeId?: string; payload?: unknown }[]>;
+    mergeRunMetadata(runId: string, patch: Record<string, unknown>, opts?: { ifAbsentKey?: string }): Promise<boolean>;
+  },
+  runId: string,
+): Promise<number> {
+  try {
+    let usd = 0;
+    let tokensIn = 0;
+    let tokensOut = 0;
+    let sawTokens = false;
+    // ADR 0482 §1 — per-node attribution rides the same single event scan.
+    const perNode = new Map<string, number>();
+    let unattributedUsd = 0;
+    // Durable lane: fold the run's own provider.usage events (bounded read —
+    // the event log is per-run and already capped by the executor's budgets).
+    for (const ev of await storage.listEvents(runId, { limit: 5000 })) {
+      if (ev.type !== 'provider.usage') continue;
+      const p = (ev.payload ?? {}) as { costEstimateUsd?: unknown; inputTokens?: unknown; outputTokens?: unknown };
+      if (typeof p.costEstimateUsd === 'number' && Number.isFinite(p.costEstimateUsd)) {
+        usd += p.costEstimateUsd;
+        if (typeof ev.nodeId === 'string' && ev.nodeId.length > 0) {
+          perNode.set(ev.nodeId, (perNode.get(ev.nodeId) ?? 0) + p.costEstimateUsd);
+        } else {
+          unattributedUsd += p.costEstimateUsd;
+        }
+      }
+      if (typeof p.inputTokens === 'number' && Number.isFinite(p.inputTokens)) { tokensIn += p.inputTokens; sawTokens = true; }
+      if (typeof p.outputTokens === 'number' && Number.isFinite(p.outputTokens)) { tokensOut += p.outputTokens; sawTokens = true; }
+    }
+    // In-process lane (conformance fixture node — no provider.usage event).
+    const rollup = runCostRollups.get(runId);
+    if (rollup) {
+      usd += rollup.usd ?? 0;
+      unattributedUsd += rollup.usd ?? 0;
+      if (rollup.tokens) {
+        tokensIn += rollup.tokens.input ?? 0;
+        tokensOut += rollup.tokens.output ?? 0;
+        sawTokens = true;
+      }
+    }
+    if (usd <= 0 && !sawTokens) return 0;
+    const costByNode = aggregateCostByNode(perNode, unattributedUsd);
+    const wrote = await storage.mergeRunMetadata(runId, {
+      ...(usd > 0 ? { costUsd: Number(usd.toFixed(6)) } : {}),
+      ...(sawTokens ? { costTokens: { input: tokensIn, output: tokensOut } } : {}),
+      ...(costByNode ? { costByNode } : {}),
+    }, { ifAbsentKey: 'costUsd' });
+    // ADR 0482 review C1 — the return is the FOLD TICKET: the budget counter
+    // consumes only spend this call actually WROTE. A skipped merge (an
+    // earlier writer stamped — a raced cancel, a crash-retry re-dispatch, the
+    // workforce demo lane) returns 0, so one run can never fold twice. The
+    // counter therefore mirrors the WRITTEN stamp exactly (a cancel-time
+    // partial figure stays the counted truth — under-counting the post-cancel
+    // remainder is the disclosed trade against double-counting).
+    // Return the ROUNDED figure (data-grade LOW-2) so the spend counter is a
+    // byte-exact projection of Σ costUsd stamps, not a sub-µ$-drifting sum.
+    return wrote && usd > 0 ? Number(usd.toFixed(6)) : 0;
+  } catch (err) {
+    costLog.warn('run_cost_stamp_failed', { runId, error: err instanceof Error ? err.message : String(err) });
+    return 0;
+  }
 }

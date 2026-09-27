@@ -18,6 +18,91 @@ Commits by the `/cut-app-release` skill; required upgrade stops are tracked in
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-09-27
+
+The first versioned release since the inaugural `v0.1.0` (2026-06-30): three months
+of work — 3,364 commits and **593 architecture decision records (ADRs 0172–0757)**,
+each in `docs/adr/`. `0.x` caveat applies: this MINOR bump carries breaking changes
+(listed under **Upgrading**), as SemVer §4 permits before 1.0.
+
+### Highlights
+
+The ADR titles, bucketed by keyword (approximate — an ADR is counted once, in the
+first bucket its title matches; 161 fit no bucket):
+
+- **OpenWOP v2 wire, RFC adoption & conformance** (~57 ADRs) — this host now speaks
+  **both majors**: v2 identity (tenant-bound ids, the Subject as owner, the `ow2.`
+  token scheme), the era key and codemap read path, the closed v2 snapshot, signed
+  certification bundles published after every deploy, and host witnesses for
+  RFCs 0199 (outbound OAuth client + credential interrupt), 0200/0201/0205/0206/
+  0209/0210, 0173 (effect identity) and 0176 (persistence migration rows).
+- **Workflows, chains, builder & execution** (~94) — chain packs and the builder
+  gallery replace every in-tree built-in workflow; durable dispatch outbox, Layer-2
+  effect ledger and atomic claim, replay/fork safety, webhook delivery isolation.
+- **Agents, chat & AI exchange** (~47) — one embeddable chat, agent packs + node
+  packs as the drivability pattern, standing roster, heartbeat/work loop, MCP + A2A.
+- **Canvas, docs, slides & app builder** (~45) — shared canvas chassis with
+  collaboration, slides, documents, drawings, app builder.
+- **CRM, commerce, billing & marketing** (~97) — one content kernel, Stripe billing
+  and Connect commerce, paid feature bundles, campaigns, CDP.
+- **CMS, publishing & site** (~27), **Security, identity, orgs & BYOK** (~35),
+  **Platform, deploy & operations** (~30).
+
+The detailed entries below were recorded as the work landed (they cover the most
+recent part of the window in depth; the ADRs are the complete record).
+
+#### Upgrading from 0.1.0
+
+- **Required stop:** no (`releases.json`). There is no intermediate version.
+- **Migrations (replay forward on boot, no manual step):** Postgres schema
+  **29 → 46**, SQLite **32 → 48**, app migrations **1 → 21**. All are forward-only;
+  several are additive columns with no backfill.
+- **Not rolling-safe — stop the 0.1.0 binary before starting 0.2.0.** Postgres
+  migration 37 / SQLite 39 **renames** `invocation_log.provider_key` →
+  `invocation_id`; a 0.1.0 process sharing the upgraded database fails on that
+  table. Take a backup first; downtime is the boot-time migration window.
+- **Breaking wire/config changes:**
+  - **Webhook headers:** the pre-spec combined `openwop-signature: t=…,v1=…`
+    encoding and the `openwop-subscription-id` header are **removed**. Verify with
+    the `OpenWOP-*` (or `X-openwop-*`) family — same `${timestamp}.${rawBody}`
+    recipe; the OpenWOP SDK helpers (TS 1.9.0 / Py 1.7.0 / Go v1.6.0) read both.
+  - **Rate limiting split into two tiers (ADR 0640):**
+    `OPENWOP_RATELIMIT_IP_REQS_PER_MIN` is now the **write** budget (default 60);
+    reads use the new `OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN` (default 600, floored
+    at the write budget, so an old raised value still lifts reads).
+  - **Interrupt resume tokens change shape** (`ow2.hs256.<kid>.…`). Tokens issued
+    by 0.1.0 keep resolving. Set **`OPENWOP_INTERRUPT_TOKEN_SECRET`** (new) — it
+    falls back to a built-in value that is not a secret.
+  - **`/v1` is unchanged for v1 clients.** v2 behaviour applies only to a request
+    that negotiates `OpenWOP-Version: 2`.
+- **After upgrading:** `GET /readiness` → `200` and its `version` reads `0.2.0`.
+
+### Added
+- **RFC 0209 — A2UI v0.9 surfaces at major 2 (ADR 0749).** The v2 root now advertises the envelope-kind catalog (`supportedEnvelopes` `["ui.a2ui-surface"]`, `schemaVersions` `{"ui.a2ui-surface": 2}`, `envelopeStrictness: warn`), printed from the same constant the new admission path enforces: the schema version selects ONE payload branch (never the union), the RFC's cross-field rules and the surface-fold guard are checked at record time, and an approval bound to a surface any untrusted envelope touched cannot be resolved (`untrusted_content_blocks_approval`). The `emitA2uiSurface` v2 seam drives it. The chat's A2UI card renders the ten-component v0.9 profile — and nothing of a surface until its fold holds `root` — beside the unchanged 0.9.1 renderer. No v2 `deltaTransport`. v1 unchanged.
+- **v2 charter Phase 4 (P4-D) — v2 identity: the Subject is the owner, ids have a grammar, tokens have a scheme (ADR 0629).** Under **major 2 only**, `RunSnapshot.owner` is the closed `{ tenant, workspace?, subject }` block with `subject` REQUIRED and `principal`/`principalKind` removed (`spec/v2/core/identity.md` §1.1); `run.started` echoes the same block, projected by the same function so the two cannot disagree. A run this host recorded no principal for reads with the §1.2 legacy subject (`urn:openwop:legacy`) instead of omitting a required field, and the two v2 lanes (`session`, `anonymous`) are read back from the issuer the subject was attested under — a READ projection over the same persisted stamp, so nothing is re-minted and nothing is rewritten (migration row `openwop.migration.C3.4`).
+- **RFC 0207 — the outbound trace carrier: this host's cross-host calls now continue the caller's trace.** An MCP request or A2A message this host sends carries the W3C trace context the RUN was created under, in BOTH carriers: `params._meta.traceparent` (MCP, unprefixed — the mapping `mcp-integration.md` §D names) and `Message.metadata.openwop.traceparent` (A2A), plus the HTTP `traceparent` header on each. Either carrier conforms alone; sending both satisfies the SHOULD. **The trace is read off the run row, not the ambient context** (`run.metadata.traceContext`, a new RESERVED key stamped host-side from the creating request's own header): a run is dispatched on `setImmediate` and, on the durable path, redelivered from the `dispatch_outbox` by a timer daemon with no request context at all, so an outbound call made mid-run cannot read the caller's trace any other way. Each outbound request gets a fresh CHILD span of it, so two concurrent calls stay distinguishable while joining one trace. Nothing is invented: a run started with no inbound `traceparent`, or with a malformed one, sends no carrier. **Correlation only — never read as tenant, principal or scope.** The §22 A2A and §23 MCP invoke seams thread the seam request's own `traceparent` for the same reason they drive the real clients.
+- **The tenant-bound run id (`identity.md` §5, ADR 0629 Decision 1).** A major-2 caller sees `<tenantId>/<opaque>` and a `runId` whose tenant segment is not the caller's is refused with `403 id_tenant_mismatch` before the store is touched. **Run ids are NOT re-minted and no row is rewritten** — the store keeps the bare UUID and the `/v1` wire keeps returning it; the tenant-bound form is a reversible projection at the major-2 boundary (`host/v2Ids.ts`), applied by both JSON senders (`res.json` and `sendNegotiatedRunJson`, which bypasses it).
+- **`Idempotency-Key` grammar (`idempotency.md` §Layer 1).** Under major 2 a key outside `^[A-Za-z0-9._~-]{22,128}$` is `400 idempotency_key_invalid`, refused before a claim is taken (the code MUST NOT be cached). The v1 wire's free-form key is untouched.
+- **The `ow2.` resume-token scheme (`identity.md` §4, `interrupt.md` §Tokens).** Interrupt tokens are now minted as `ow2.hs256.<kid>.<payload>.<mac>`, with `kid` derived from `OPENWOP_INTERRUPT_TOKEN_SECRET` so a secret rotates without orphaning outstanding tokens. Under major 2 an unadvertised `alg`, an unheld `kid`, a bad MAC or a malformed token are one refusal: `401 interrupt_token_invalid`.
+- **`schemaVersion` on the v2 event envelope (`events.md` §"The envelope").** Supplied at the ADR 0628 storage seat on a major-2 read (`1` — this host has never versioned an event payload, so a column would hold one constant); absent from the v1 read, which is unchanged.
+- **v2 charter Phase 4 (P4-C) — the era key and the codemap read path (ADR 0628).** Every run this host creates is now stamped `eventLogSchemaVersion: 3` (`spec/v2/core/persistence.md` §"The era key"), and the v2 discovery root advertises that same one constant. The stamp lives on `Storage.insertRun`, the single interface method all **23** run-creation call sites funnel into, so persistence.md's "MUST begin stamping `3` on ALL of them in the same change" holds by construction rather than by inspection. Additive nullable column, **no backfill**: sqlite migration 44, Postgres migration 41, no `UPDATE`. A run that predates the cut keeps its absent era, reads as `2`, and its rows are never rewritten; the snapshot's REQUIRED `eventLogSchemaVersion` is synthesized as `2` for those runs at read time, because a missing stored era is not a read error.
+- **The storage seat (ADR 0628 §2).** `Storage.listEvents` — the storage interface's event-list method, which every one of the backend's 35 event reads passes through (poll, SSE, fork, replay divergence, debug bundle, the analytics folds) — translates an era-`2` log through the vendored `schemas/v2/event-codemap.json` for a major-2 reader, with `sequence` preserved verbatim; an unmapped type with no vendor prefix fails the read with `500 event_type_unmapped`. Its writers `appendEvent`/`appendEventsBatch` hold each log to its era's vocabulary and refuse a v2 name an era-`2` log cannot express. The adapter is installed by decorating the Storage object in `openStorage()`, the one place a Storage is constructed, so no call site can bypass it and the two backends cannot drift.
+- **RFC 0165 host leg (ADR 0625, 2026-09-02)** — root `protocolVersions: ["1.1"]` on discovery; `RunSnapshot.owner` for EVERY run with a principal (was anonymous-actor-only), now carrying the RFC 0165 `subject` record minted at creation from the caller's lane and persisted on the reserved `metadata.owner` key, with the `urn:openwop:legacy` synthesis for runs that predate it; `run.started` echoes the owner block; `:fork` copies the owner (principal + subject) verbatim while `actingUserId` keeps its ADR 0024 re-stamp; `GET /.well-known/openwop` sends a standard `ETag` and honors `If-None-Match` → `304` (`ETag` added to the CORS expose list). Suite pin `^1.152.0 → ^1.159.0` (1.157.0 and 1.159.0 fix two defects in the suite's `owner-subject-echo` leg that this leg surfaced: an async-start race and a `lastSequence=0` read that skips a 0-numbered first event); vendored schemas re-synced at `openwop-conformance/v1.159.0`.
+
+### Changed
+- **The v2 run snapshot is CLOSED (`runs.md` §Snapshot, ADR 0629 Decision 5).** Under major 2 the snapshot is filtered against the `properties` of the vendored `schemas/v2/run-snapshot.schema.json` — read from the artifact, never retyped — which drops eleven fields the v1 wire carries and v2 declares no seat for: `parentRunId`, `parentSeq`, `forkMode`, `parentNodeId`, `inputs`, `removalAt`, `pinned`, `costUsd`, `costByNode`, `childRuns`, `interrupt`. `parentRunId` and `inputs` are not host extensions in spirit and their loss is reported upstream rather than smuggled through `metadata`. **The `/v1` snapshot still carries all of them.**
+- **Interrupt resume tokens change shape on BOTH wires** (43 characters/one segment → 105/five). The token is an opaque capability with no v1 grammar and every consumer treats it as opaque, but the bytes differ; tokens outstanding across the deploy keep resolving unchanged.
+- **v2 charter Phase 4 (P4-A) — the corpus pin moves to the v2 line.** `schemas/CORPUS_TAG` is now `v2.0.0-rc.3` and the vendored set is re-copied from that tag (182 schemas, including `schemas/v2/` for the first time). The suite and its new peer are pinned EXACTLY — `@openwop/openwop-conformance@2.0.0-rc.3` and `@openwop/spec-artifacts@2.0.0-rc.3`, not a caret range: a host measuring itself against a moving suite is not evidence.
+- **`check-vendored-schemas.mjs` learns both corpus release lines and reads the pinned tag.** The pin regex accepted only `openwop-conformance/vX.Y.Z` with a three-part version, so it could not express the v2 coordinated release (`vX.Y.Z[-rc.N]`, which publishes the suite AND `@openwop/spec-artifacts` together). It now accepts both. Separately, the drift comparison read whatever the sibling checkout happened to be on rather than the tag the pin names — so it could report agreement with a corpus nobody released. It now reads `git show <CORPUS_TAG>:<path>`, the same rule `sync-schemas.sh` already applies on the copying side, and the source label says which tag it compared against.
+- **Webhook `OpenWOP-*` header family now carries the spec's values (RFC 0165 §C.1; closes ADR 0538 Phase 2).** `OpenWOP-Webhook-Id`, `OpenWOP-Event-Type`, `OpenWOP-Timestamp`, `OpenWOP-Signature: sha256=…`, `OpenWOP-Signature-Algorithm: v1` are emitted value-identical to their `X-openwop-*` twins. The pre-spec combined `openwop-signature: t=…,v1=…` encoding and the `openwop-subscription-id` header are removed. A subscriber may verify from either family with the same `${timestamp}.${rawBody}` recipe; the openwop-sdks helpers (TS 1.9.0 / Py 1.7.0 / Go v1.6.0) read both.
+- **Vendored schemas are pinned to a corpus tag** (v2 charter Phase 0, 2026-09-02). `scripts/sync-schemas.sh` now requires `--tag openwop-conformance/vX.Y.Z` (or `OPENWOP_CORPUS_TAG`), refuses to copy unless the sibling corpus checkout is exactly at that tag with a clean `schemas/`, and records the tag in `schemas/CORPUS_TAG`. `scripts/check-vendored-schemas.mjs` (in `npm run ci`) fails when that tag's version differs from the installed `@openwop/openwop-conformance`. Why: the corpus is about to grow `schemas/v2/`, and an unpinned sync from whatever HEAD `../openwop` is on would ship v2 schemas into a v1 image (the H34 drift class, one major up). Suite pin `^1.151.0` → `^1.152.0`; schemas re-vendored from `openwop-conformance/v1.152.0` (only the bundle-v1 schema's deprecation note and `schemas/README.md` changed).
+
+### Fixed
+- **`GET /v1/agents/roster` is served (RFC 0086 §B, #4163).** Discovery advertised `agents.roster.supported`, but the route was never registered and `/agents/roster` fell into `/agents/:agentId` (`404 "agent 'roster' is not installed"`). It now returns the closed `agent-roster-response` projection of the tenant's standing roster, registered ahead of the id route.
+- **RFC 0176 pinned-run disposition fires for every caller (#4159).** A run pinned to an unimplemented change id was cancelled only when read by the wildcard operator; a configured tenant key read it back as `running` indefinitely.
+- **`sync-fixtures.sh` vendors a named corpus TAG, and the guard's remediation line now works.** The script took no tag and copied the sibling corpus clone's WORKING TREE, so with the clone ahead of the pin (found by an adopter: clone 2.36.1, pin 2.36.0) a failing `check-vendored-fixtures` printed "run `sync-fixtures.sh`" and that run vendored the wrong release — failing the same guard for the opposite reason, with a throwaway detached worktree as the only way out. It now requires `--tag` (the same contract `sync-schemas.sh` has) and `git archive`s that tag, never touching the shared clone's HEAD, index or working tree; the guard prints the tag matching the installed suite, reads the corpus AT that tag for its which-side-is-stale call, and no longer tells you to reconcile a working tree. `sync-schemas.sh` gets the same read-at-the-tag treatment: it demanded the clone already be checked out at the tag — an instruction that mutates a checkout shared with other sessions — and its three `spec/v2/*.json` copies came from the working tree, which its clean-`schemas` check never covered. `check-vendored-schemas.mjs`'s remedy no longer tells you to build a throwaway detached worktree at the tag and point `OPENWOP_CORPUS_DIR` at it — the sync reads the tag itself, so `git -C ../openwop fetch --tags` is the whole preparation. `deploy/gcp/up.sh` passes both tags (its untagged `sync-schemas.sh` call had aborted every confirmed deploy since 2026-09-02).
+- **`GET /v1/runs/{id}/events/poll?lastSequence=0` dropped the first event (ADR 0625).** The route added 1 to the cursor on top of storage's already strictly-after `listEvents`; with this host's first event at sequence 1, `run.started` was never returned through the spec-canonical cursor. Caught by the RFC 0165 echo scenario; fixed 1:1.
+
 ## [0.1.0] — 2026-06-30
 
 Inaugural versioned white-label release (ADR 0052) — replaces the rolling `whitelabel`
@@ -238,7 +323,7 @@ voice + ads-dispatch host arms. Fresh install — no prior version to upgrade fr
   tenant-scoped notifications SSE stream (the emitter's new `signal()` path — never an inbox
   row, no second connection); a shared client `reviewStatusStore` (single source of truth)
   patches/evicts the affected review and drives every surface + the pending-count badge.
-  Host-internal, no RFC (reuses the `node.interrupt.resolved` event; adds no wire surface).
+  Host-internal, no RFC (reuses the `interrupt.resolved` event; adds no wire surface).
 - **CMS content localization — real localized delivery + Phase-3 workflow surface (ADR 0064 / RFC 0103).**
   `GET /v1/content/pages/{slug}` now negotiates over the **host-advertised** content set
   (`OPENWOP_I18N_LOCALES` / `capabilities.content`) instead of the system-site's empty per-org

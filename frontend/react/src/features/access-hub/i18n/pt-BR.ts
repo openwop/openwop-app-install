@@ -5,12 +5,14 @@ export const messages = {
   eyebrow: 'Acesso e dados',
   title: 'Acesso',
   lede: 'Gerencie credenciais, conexões e quem pode fazer o quê — tudo em um só lugar.',
+  anonSignInPrompt: 'Você está em uma sessão de demonstração anônima — conexões e chaves adicionadas aqui são redefinidas após 24 horas. Entre para mantê-las.',
 
   scopeLabel: 'Escopo',
   scope_workspace: 'Espaço de trabalho',
   scope_personal: 'Pessoal',
 
   tablistLabel: 'Seções de acesso',
+  panelRegion: 'Painel de acesso {{panel}}',
 
   tab_keys: 'Chaves',
   tab_connections: 'Conexões',

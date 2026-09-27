@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/update-contact-owner.input.json",
+  "title": "CrmUpdateContactOwnerInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) — chain-authored config and DAG-forwarded inputs are both legal sources, so nothing is `required` here; the SURFACE refuses a missing key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "contactId": {
+      "type": "string",
+      "description": "Target contact. Falls back to `entityId`."
+    },
+    "entityId": {
+      "type": "string",
+      "description": "Trigger-payload alias for `contactId`."
+    },
+    "owner": {
+      "type": "string",
+      "description": "The new owning subject id."
+    }
+  },
+  "additionalProperties": true
+}

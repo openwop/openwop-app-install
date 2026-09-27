@@ -43,6 +43,7 @@ import {
 } from '../byok/secretResolver.js';
 import { isKmsConfigured } from '../byok/kmsEncryption.js';
 import { personalTenantOf } from '../host/requestSubject.js';
+import { dedupePersonasBeforeAdopt } from '../host/adoptDedup.js';
 
 const log = createLogger('routes.migrate');
 
@@ -136,10 +137,14 @@ export function registerMigrateRoute(app: Express, deps: { storage: Storage }): 
         );
       }
 
-      const { runs, workflows, notifications, pushSubscriptions, hostExt } = await deps.storage.reassignTenant(
-        anonTenantId,
-        userTenantId,
-      );
+      // Dedup per-persona demo entities BEFORE the fold — otherwise every
+      // adopted anon session folds in another "Chief of Staff" etc. (the
+      // agent-allowlists duplication). Preserves the anon-populated demo; only
+      // drops what the user tenant already has. Best-effort, idempotent.
+      await dedupePersonasBeforeAdopt(anonTenantId, userTenantId, deps.storage);
+
+      const { runs, workflows, notifications, pushSubscriptions, hostExt, hostExtKeysRekeyed, hostExtKeysDeduped } =
+        await deps.storage.reassignTenant(anonTenantId, userTenantId);
 
       let secrets = 0;
       let secretsFailed = 0;
@@ -162,13 +167,26 @@ export function registerMigrateRoute(app: Express, deps: { storage: Storage }): 
         action: 'tenant.migrate',
         resource: userTenantId,
         outcome: 'success',
-        payload: { from: anonTenantId, to: userTenantId, runs, workflows, notifications, pushSubscriptions, hostExt, secrets, secretsFailed },
+        payload: { from: anonTenantId, to: userTenantId, runs, workflows, notifications, pushSubscriptions, hostExt, hostExtKeysRekeyed, hostExtKeysDeduped, secrets, secretsFailed },
       });
 
-      // Expire the anon cookie so the next request carries only the
-      // bearer. The bearer-only path skips cookie minting.
-      res.append('Set-Cookie', `${COOKIE_NAME}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
-      res.json({ migrated: true, runs, workflows, notifications, pushSubscriptions, hostExt, secrets, secretsFailed });
+      // ADR 0434 Phase 2 — DO NOT expire the cookie here.
+      //
+      // This used to append `Set-Cookie: <name>=; Max-Age=0` to "expire the anon
+      // cookie so the next request carries only the bearer". But the auth
+      // middleware has ALREADY appended a Set-Cookie on this same response,
+      // PROMOTING that cookie to user-tier (auth.ts, the bearer-path promotion).
+      // Two Set-Cookie headers, same name and path — the later one wins, so the
+      // promotion was silently discarded and the browser finished sign-in with
+      // NO session cookie at all.
+      //
+      // That left the device bearer-only, which is precisely the state where a
+      // routine token-rotation race had nothing to fall back to and minted a
+      // fresh anonymous tenant (see the `bearerRejected` guard in auth.ts).
+      // Keeping the promoted user-tier cookie is both the correct end state and
+      // the safety net. The anon session is not "left behind": it was promoted
+      // in place, and its data has just been folded into the user tenant above.
+      res.json({ migrated: true, runs, workflows, notifications, pushSubscriptions, hostExt, hostExtKeysRekeyed, hostExtKeysDeduped, secrets, secretsFailed });
     } catch (err) {
       next(err);
     }

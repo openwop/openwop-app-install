@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { readCollapsedHeaders, writeCollapsedHeaders, toggleCollapsedHeader } from '../navCollapseCookie.js';
+import { readExpandedHeaders, writeExpandedHeaders, toggleExpandedHeader } from '../navCollapseCookie.js';
 
 function clearCookies(): void {
   for (const row of document.cookie.split('; ')) {
@@ -11,24 +11,39 @@ function clearCookies(): void {
 describe('navCollapseCookie', () => {
   beforeEach(clearCookies);
 
-  it('reads an empty set when no cookie is set', () => {
-    expect(readCollapsedHeaders().size).toBe(0);
+  it('defaults to only Workspace expanded when no cookie is set', () => {
+    expect(readExpandedHeaders()).toEqual(new Set(['Workspace']));
+  });
+
+  it('ignores the legacy collapsed-ids cookie (default still applies)', () => {
+    document.cookie = 'openwop.nav.collapsed=Platform%2COperations; path=/';
+    expect(readExpandedHeaders()).toEqual(new Set(['Workspace']));
   });
 
   it('round-trips a set of header ids', () => {
-    writeCollapsedHeaders(new Set(['Platform', 'Operations']));
-    expect(readCollapsedHeaders()).toEqual(new Set(['Platform', 'Operations']));
+    writeExpandedHeaders(new Set(['Platform', 'Operations']));
+    expect(readExpandedHeaders()).toEqual(new Set(['Platform', 'Operations']));
   });
 
-  it('toggles a header on and off', () => {
-    expect(toggleCollapsedHeader('Platform')).toEqual(new Set(['Platform']));
-    expect(readCollapsedHeaders().has('Platform')).toBe(true);
-    expect(toggleCollapsedHeader('Platform')).toEqual(new Set());
-    expect(readCollapsedHeaders().has('Platform')).toBe(false);
+  it('an explicit empty set sticks (collapsing the default does not resurrect it)', () => {
+    writeExpandedHeaders(new Set());
+    expect(readExpandedHeaders().size).toBe(0);
+  });
+
+  it('toggles a header on and off (first toggle starts from the default set)', () => {
+    expect(toggleExpandedHeader('Platform')).toEqual(new Set(['Workspace', 'Platform']));
+    expect(readExpandedHeaders().has('Platform')).toBe(true);
+    expect(toggleExpandedHeader('Platform')).toEqual(new Set(['Workspace']));
+    expect(readExpandedHeaders().has('Platform')).toBe(false);
+  });
+
+  it('collapsing the default Workspace group persists', () => {
+    expect(toggleExpandedHeader('Workspace')).toEqual(new Set());
+    expect(readExpandedHeaders().size).toBe(0);
   });
 
   it('encodes ids safely (round-trips an id with separators)', () => {
-    writeCollapsedHeaders(new Set(['Access & data']));
-    expect(readCollapsedHeaders()).toEqual(new Set(['Access & data']));
+    writeExpandedHeaders(new Set(['Access & data']));
+    expect(readExpandedHeaders()).toEqual(new Set(['Access & data']));
   });
 });

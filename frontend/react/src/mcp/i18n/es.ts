@@ -5,9 +5,9 @@
 export const messages = {
   title: 'Herramientas MCP',
   probing: 'Sondeando la conexión MCP del host…',
-  disabledPrefix: 'Este host no expone un montaje de servidor MCP (',
+  disabledPrefix: 'El servidor MCP está desactivado en esta implementación. Un operador puede activarlo con el ajuste ',
   disabledSuffix:
-    ' está desactivado). Cuando se habilite, el host anunciará aquí sus flujos de trabajo registrados como herramientas MCP.',
+    '. Una vez activado, los flujos de trabajo registrados se anuncian aquí como herramientas MCP.',
   noToolsAdvertised: 'El montaje MCP está habilitado, pero no se anuncia ninguna herramienta.',
   inputSchema: 'esquema de entrada',
   endpointReturned: 'El extremo MCP devolvió {{status}}',

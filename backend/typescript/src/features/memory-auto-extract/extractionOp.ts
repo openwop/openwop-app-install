@@ -3,18 +3,23 @@
  *
  * FAIL-CLOSED: nothing is written without an explicit grant (Phase 1). Given a
  * grant, the op extracts durable facts (an injected LLM `extract`) and writes each
- * as a subject note (the caller binds `addNote` to `addSubjectNote` with the
- * untrusted/`auto-extracted` tag). Deps are injected so the consent gate + the
- * extraction flow are unit-testable without the dispatch/memory coupling; the
- * post-turn wiring is Phase 2b.
+ * as a subject note. Deps are injected so the consent gate + the extraction flow
+ * are unit-testable without the dispatch/memory coupling; the post-turn wiring is
+ * Phase 2b.
+ *
+ * This op does NOT decide trust — it has no view of the store. The BINDING
+ * (`extractionBinding.ts`) passes `source:'auto-extract'`, from which
+ * `addSubjectNote` derives `contentTrust:'untrusted'` (ADR 0587 / AGMEM-2).
  *
  * @see docs/adr/0120-chat-memory-auto-extraction.md
+ * @see docs/adr/0587-memory-trust-provenance-and-erasure.md
  */
 export interface ExtractionDeps {
   isGranted: (tenantId: string, subject: string) => Promise<boolean>;
   /** LLM extraction: conversation text → durable fact strings (bounded by caps). */
   extract: (conversationText: string) => Promise<string[]>;
-  /** Persist one extracted fact (untrusted, `auto-extracted`-tagged, provenance). */
+  /** Persist one extracted fact. The binding is responsible for stamping
+   *  `source:'auto-extract'` (⇒ untrusted) — this op passes the fact verbatim. */
   addNote: (tenantId: string, subject: string, fact: string) => Promise<void>;
 }
 

@@ -47,6 +47,9 @@ export interface UseAudioRecorderResult {
   stop: () => Promise<RecordedAudio | null>;
   /** Abort + discard any in-flight recording. */
   cancel: () => void;
+  /** RT-8 (clip variant) — analysis-only mic tap for the recording waveform; null when
+   *  not recording or where AudioContext is unavailable (recording itself unaffected). */
+  inputAnalyser: AnalyserNode | null;
 }
 
 /** The MIME type this host's recorder will capture — exported so a streaming caller can
@@ -72,14 +75,26 @@ export function useAudioRecorder(): UseAudioRecorderResult {
 
   const [isRecording, setIsRecording] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [inputAnalyser, setInputAnalyser] = useState<AnalyserNode | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
+  const analysisCtxRef = useRef<AudioContext | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const startedAtRef = useRef<number>(0);
   const stopResolveRef = useRef<((value: RecordedAudio | null) => void) | null>(null);
 
+  // RT-8 (clip variant): tear the analysis tap down with the recording.
+  const closeAnalysis = useCallback(() => {
+    const ctx = analysisCtxRef.current;
+    analysisCtxRef.current = null;
+    if (ctx) { try { void ctx.close(); } catch { /* already closed */ } }
+    setInputAnalyser(null);
+  }, []);
+
   useEffect(() => () => {
     streamRef.current?.getTracks().forEach((t) => t.stop());
+    const ctx = analysisCtxRef.current;
+    if (ctx) { try { void ctx.close(); } catch { /* already closed */ } }
   }, []);
 
   const start = useCallback(async (opts?: StartRecordingOpts) => {
@@ -117,6 +132,7 @@ export function useAudioRecorder(): UseAudioRecorderResult {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
       recorderRef.current = null;
+      closeAnalysis();
       setIsRecording(false);
       stopResolveRef.current?.({ blob, mimeType, durationSeconds });
       stopResolveRef.current = null;
@@ -131,8 +147,19 @@ export function useAudioRecorder(): UseAudioRecorderResult {
     // mode (no onChunk) emits one chunk on stop.
     if (opts?.onChunk) rec.start(opts.timeslice ?? 250);
     else rec.start();
+    // RT-8 (clip variant) — analysis-only tap for the recording waveform. Guarded:
+    // where AudioContext is unavailable (jsdom, exotic embeds) there is simply no
+    // waveform; the recording itself is unaffected.
+    try {
+      const ctx = new AudioContext();
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 1024;
+      ctx.createMediaStreamSource(stream).connect(analyser);
+      analysisCtxRef.current = ctx;
+      setInputAnalyser(analyser);
+    } catch { /* no analyser → no waveform */ }
     setIsRecording(true);
-  }, [isSupported, isRecording]);
+  }, [isSupported, isRecording, closeAnalysis]);
 
   const stop = useCallback(async () => {
     const rec = recorderRef.current;
@@ -153,27 +180,20 @@ export function useAudioRecorder(): UseAudioRecorderResult {
     }
     recorderRef.current = null;
     chunksRef.current = [];
+    closeAnalysis();
     setIsRecording(false);
-  }, []);
+  }, [closeAnalysis]);
 
-  return { isSupported, isRecording, error, start, stop, cancel };
+  return { isSupported, isRecording, error, start, stop, cancel, inputAnalyser };
 }
 
-/** Convert a Blob to a base64-encoded string (no data URI prefix). */
-export async function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = reader.result;
-      if (typeof result !== 'string') {
-        reject(new Error('FileReader returned non-string for audio blob'));
-        return;
-      }
-      // result is "data:audio/webm;base64,<...>" — strip the prefix.
-      const commaIdx = result.indexOf(',');
-      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
-    };
-    reader.onerror = () => reject(reader.error ?? new Error('FileReader failed'));
-    reader.readAsDataURL(blob);
-  });
-}
+/**
+ * Re-exported from `client/blobToBase64.ts`, which is the real home.
+ *
+ * That module's docblock already claimed "The hook re-exports it" — it did not.
+ * The hook carried its own copy, and `features/{profiles,media}` still imported
+ * THIS path, so the entry-chunk split that module was created to perform had
+ * silently regressed. Keeping the named export here so the chat call sites and
+ * the two suites that `vi.mock` this module are unaffected.
+ */
+export { blobToBase64 } from '../../client/blobToBase64.js';

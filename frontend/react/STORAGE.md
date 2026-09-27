@@ -57,6 +57,16 @@ Some chat keys are suffixed with the tenant id and built from a static prefix
 by their owning module (all class `pref`/`content`):
 
 - `openwop-app.chat.leftRail.activeTab.<tenant>`
+- **Subject-scoped `content` keys (ADR 0434 Phase 3)** — the four `content`
+  rows above are suffixed with the signed-in subject: `<key>:<uid>`. An
+  ANONYMOUS visitor uses the bare key, which is also where all pre-Phase-3 data
+  already sits, so nothing needed migrating. Signing in ADOPTS the anonymous
+  payload into the user scope (union, never destroy, signed-in copy wins a
+  collision) — the client-side mirror of the backend's anon-sandbox adoption.
+  Owner: `platform/storage.ts` (`scopedKey` / `readScoped` / `writeScoped` /
+  `adoptAnonScoped` / `setStorageSubject`); the single writer of the subject is
+  `auth/useAuth.ts` via `auth/localContentAdoption.ts`. Without this, a shared
+  browser showed the previous user's chat threads, prompts, and drafts.
 - `openwop-app.chat.progressPanel.{open,focusedRunMsgId}.<tenant>`
 - `openwop-app.chat.activeAgentsPanel.open.<tenant>`
 - `MarkdownEditor` autosave keys (caller-supplied prefix; draft text only)

@@ -43,8 +43,12 @@ describe('ADR 0077 §3 — processRetentionSweep', () => {
     const deleted: string[] = [];
     const rows = [{ id: 'old', tenantId: 'tenantA', ts: new Date(now - 400 * DAY).toISOString() },
                   { id: 'fresh', tenantId: 'tenantA', ts: new Date(now - 10 * DAY).toISOString() }];
+    // ANL-4 — this SYNTHETIC purger used to be named `feature: 'analytics'`, so a
+    // grep for the analytics purger's test read green over a fixture that never
+    // touched `analytics:event`. The real purger's witness is
+    // `analytics-retention-purger.test.ts`.
     registerRetentionPurger({
-      feature: 'analytics',
+      feature: 'synthetic-sweep-fixture',
       async purge(tenantId, classification, cutoffIso) {
         if (!tenantId || classification !== 'confidential-pii') return 0;
         let n = 0;
@@ -143,7 +147,7 @@ describe('GOV-3 — crash-recoverable slot lease (stale claim + completion marke
     await setGovernancePolicy('tenantA', { retention: { confidentialPiiDays: 365 } });
     // A holder claimed the slot 3h ago (> STALE_CLAIM_MS = 2h) then crashed before completing —
     // the start-claim exists but no completion marker does.
-    await storage.claimIdempotency(startKey('tenantA', 'confidential-pii'), new Date(now - 3 * HOUR).toISOString());
+    await storage.claimOnce(startKey('tenantA', 'confidential-pii'), new Date(now - 3 * HOUR).toISOString());
     let invoked = 0;
     registerRetentionPurger({ feature: 'x', async purge() { invoked++; return 1; } });
 
@@ -151,15 +155,15 @@ describe('GOV-3 — crash-recoverable slot lease (stale claim + completion marke
     expect(invoked).toBe(1);   // recovered — re-swept same day, not locked until tomorrow
     expect(total).toBe(1);
     // ...and it's now marked complete, so a subsequent stale tick won't re-sweep it again.
-    const marker = await storage.claimIdempotency(doneKey('tenantA', 'confidential-pii'), new Date(now).toISOString());
+    const marker = await storage.claimOnce(doneKey('tenantA', 'confidential-pii'), new Date(now).toISOString());
     expect(marker.claimed).toBe(false); // the completion marker is present
   });
 
   it('does NOT re-sweep a COMPLETED slot whose start-claim is merely old (no hourly re-scan)', async () => {
     await setGovernancePolicy('tenantA', { retention: { confidentialPiiDays: 365 } });
     // Swept 3h ago and DID complete: both the start-claim AND the completion marker exist.
-    await storage.claimIdempotency(startKey('tenantA', 'confidential-pii'), new Date(now - 3 * HOUR).toISOString());
-    await storage.putIdempotency({ key: doneKey('tenantA', 'confidential-pii'), responseBody: 'done', responseStatus: 200, createdAt: new Date(now - 3 * HOUR).toISOString() });
+    await storage.claimOnce(startKey('tenantA', 'confidential-pii'), new Date(now - 3 * HOUR).toISOString());
+    await storage.putOnce({ key: doneKey('tenantA', 'confidential-pii'), responseBody: 'done', responseStatus: 200, createdAt: new Date(now - 3 * HOUR).toISOString() });
     let invoked = 0;
     registerRetentionPurger({ feature: 'x', async purge() { invoked++; return 1; } });
 
@@ -170,7 +174,7 @@ describe('GOV-3 — crash-recoverable slot lease (stale claim + completion marke
   it('does NOT recover a FRESH start-claim (an actively-sweeping peer is left alone — GOV-5 preserved)', async () => {
     await setGovernancePolicy('tenantA', { retention: { confidentialPiiDays: 365 } });
     // A peer claimed the slot just now (fresh) and is mid-sweep — not stale, so no recovery.
-    await storage.claimIdempotency(startKey('tenantA', 'confidential-pii'), new Date(now).toISOString());
+    await storage.claimOnce(startKey('tenantA', 'confidential-pii'), new Date(now).toISOString());
     let invoked = 0;
     registerRetentionPurger({ feature: 'x', async purge() { invoked++; return 1; } });
 

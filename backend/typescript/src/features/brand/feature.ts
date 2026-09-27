@@ -22,15 +22,32 @@
 
 import type { BackendFeature } from '../types.js';
 import { registerBrandRoutes } from './routes.js';
+import { registerBrandAgentTools } from './agentTools.js';
+import { setAdsComplianceChecker } from '../../host/adsAdapter.js';
+import { buildAdsComplianceChecker } from './brandService.js';
 import { buildBrandSurface } from './surface.js';
 
 export const brandFeature: BackendFeature = {
   id: 'brand',
-  registerRoutes: (deps) => registerBrandRoutes(deps),
+  registerRoutes: (deps) => {
+    registerBrandRoutes(deps);
+    // CFP-1 — the Brand Steward's three READ chat tools (list-brands,
+    // resolve-voice, compliance-check), sharing the brand routes' org-scope
+    // predicate. Before this the pack allowlisted raw node typeIds that project
+    // into no conversational tool, so the Steward was toothless (ADR 0308 seam).
+    registerBrandAgentTools();
+    // ADR 0354 P1 — brand-compliance enforcement at the ads-dispatch edge. The
+    // brief→brand resolution composes campaign-brief lazily (no static cycle).
+    setAdsComplianceChecker(buildAdsComplianceChecker(async (tenantId, briefId) => {
+      const { getBrief } = await import('../campaign-brief/briefService.js');
+      const brief = await getBrief(tenantId, briefId);
+      return brief?.brandId;
+    }));
+  },
   surface: { id: 'brand', build: buildBrandSurface },
   requiredPacks: [
-    { name: 'feature.brand.nodes', version: '1.1.0' },
-    { name: 'feature.brand.agents', version: '1.0.0' },
+    { name: 'feature.brand.nodes', version: '1.2.0' },
+    { name: 'feature.brand.agents', version: '1.0.1' },
   ],
   // ADR 0170: NO `toggleDefault` — brand is always-on/core (like cms/connections
   // per ADR 0027 / ADR 0024 §Correction). RBAC stays enforced in routes.ts.

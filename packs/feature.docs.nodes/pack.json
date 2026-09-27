@@ -1,0 +1,30 @@
+{
+  "name": "feature.docs.nodes",
+  "version": "1.0.0",
+  "description": "Product-docs feature node pack (ADR 0392) — two READ-ONLY nodes over the ctx.features.docs surface backing the docs.search / docs.get MCP tools. No authoring/mutation: docs are authored in the CMS and published through its editorial gate.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "docs", "documentation", "mcp", "search", "rag"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.docs.nodes.search",
+      "version": "1.0.0",
+      "label": "Docs Search",
+      "description": "Searches published product documentation over ctx.features.docs → ranked hits (title, snippet, /docs URL, score). Read-only, tenant-scoped by the surface.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.docs.nodes.get",
+      "version": "1.0.0",
+      "label": "Docs Get",
+      "description": "Fetches one published documentation page by slug over ctx.features.docs → title + full text + /docs URL. Read-only.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

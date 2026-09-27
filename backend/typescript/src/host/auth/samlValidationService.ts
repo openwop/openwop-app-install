@@ -53,6 +53,17 @@ export interface SamlPrincipal {
   /** Opaque, non-PII principal id derived from the SAML NameID. */
   principalId: string;
   nameId: string;
+  /** RFC 0163 §B — the assertion's `<saml:Issuer>` entityID (inside the SIGNED
+   *  element, so it cannot be swapped post-signing). The SAML lane's trust-root
+   *  identity: a host compares this against the IdP entityID recorded for the
+   *  SCIM connection and MUST NOT form a cross-lane link across two distinct
+   *  trust roots even when the opaque subject id collides. Always present on a
+   *  principal returned by `validate` under the ≥1.147.0 suite pin: the consumed-
+   *  assertion parse REQUIRES `<saml:Issuer>`, so an issuer-less assertion is
+   *  rejected as `malformed` before any principal is built. The `?` is retained
+   *  only so the field can be omitted structurally (e.g. a synthetic principal in
+   *  a test), never to signal a valid issuer-less login. */
+  issuer?: string;
   /** Raw IdP group attributes, verbatim. Group->role mapping is ADR 0006. */
   groups: string[];
 }
@@ -65,14 +76,31 @@ export interface SamlValidationResult {
 
 /** The exact canonical byte string the synthetic IdP signs — reconstructed from
  *  the parsed consumed assertion so the RSA-SHA256 verify agrees without a full
- *  C14N stack (the deterministic-template approach the harness documents). */
-function canonicalAssertion(id: string, subject: string, notBefore: string, notOnOrAfter: string): string {
+ *  C14N stack (the deterministic-template approach the harness documents).
+ *
+ *  RFC 0163 §B / conformance suite ≥1.147.0: the `<saml:Issuer>` is INSIDE the
+ *  signed element (the trust-root identity is signed, so it cannot be swapped
+ *  post-signing). The reconstruction MUST include it in the exact position the
+ *  IdP mints it (between the opening tag and `<saml:Conditions>`) — otherwise the
+ *  digest differs and every previously-`valid` assertion fails `bad-signature`
+ *  under the pinned suite. `createSyntheticSamlIdp.canonicalAssertion` is the
+ *  byte-for-byte reference. */
+function canonicalAssertion(id: string, issuer: string, subject: string, notBefore: string, notOnOrAfter: string): string {
   return (
     `<saml:Assertion ID="${id}" Version="2.0">` +
+    `<saml:Issuer>${issuer}</saml:Issuer>` +
     `<saml:Conditions NotBefore="${notBefore}" NotOnOrAfter="${notOnOrAfter}"/>` +
     `<saml:Subject><saml:NameID>${subject}</saml:NameID></saml:Subject>` +
     `</saml:Assertion>`
   );
+}
+
+/** RFC 0163 §B — extract the `<saml:Issuer>` (IdP entityID) of the CONSUMED
+ *  (first) assertion without cryptographic validation. Used by the SCIM
+ *  provisioning seam to record the trust-root entityID an `idpUrl` asserts.
+ *  `null` when the assertion carries no Issuer. */
+export function extractSamlIssuer(assertionXml: string): string | null {
+  return /<saml:Assertion\b[^>]*>[\s\S]*?<saml:Issuer>([^<]*)<\/saml:Issuer>/.exec(assertionXml)?.[1] ?? null;
 }
 
 /**
@@ -88,11 +116,11 @@ export function validateSamlAssertion(assertionXml: string, certificatePem: stri
   // one a downstream reader would use. The XSW defense (below) binds the
   // signature to THIS element, not to whichever element the signature covers.
   const consumed =
-    /<saml:Assertion ID="([^"]+)"[^>]*>[\s\S]*?<saml:Conditions NotBefore="([^"]+)" NotOnOrAfter="([^"]+)"\/>[\s\S]*?<saml:NameID>([^<]*)<\/saml:NameID>/.exec(
+    /<saml:Assertion ID="([^"]+)"[^>]*>[\s\S]*?<saml:Issuer>([^<]*)<\/saml:Issuer>[\s\S]*?<saml:Conditions NotBefore="([^"]+)" NotOnOrAfter="([^"]+)"\/>[\s\S]*?<saml:NameID>([^<]*)<\/saml:NameID>/.exec(
       assertionXml,
     );
   if (consumed === null) return { valid: false, reason: 'malformed' };
-  const [, consumedId, notBefore, notOnOrAfter, subject] = consumed;
+  const [, consumedId, issuer, notBefore, notOnOrAfter, subject] = consumed;
 
   // 1. signature present — `unsigned` means no <ds:Signature> element at all
   //    (no SignatureValue / no SignatureMethod). An `alg:none` assertion DOES
@@ -108,8 +136,11 @@ export function validateSamlAssertion(assertionXml: string, certificatePem: stri
   if (refId !== consumedId) {
     return { valid: false, reason: 'signature-wrapping' };
   }
-  // 4. signature cryptographically valid against the IdP cert.
-  const canonical = canonicalAssertion(consumedId, subject, notBefore, notOnOrAfter);
+  // 4. signature cryptographically valid against the IdP cert. The signed
+  //    canonical INCLUDES the `<saml:Issuer>` (RFC 0163 §B): an assertion from a
+  //    different trust root carries a different Issuer AND is signed by a
+  //    different key, so a swapped/forged Issuer fails the verify here.
+  const canonical = canonicalAssertion(consumedId, issuer, subject, notBefore, notOnOrAfter);
   let ok = false;
   try {
     ok = createVerify('RSA-SHA256').update(canonical, 'utf8').verify(certificatePem, sigValue, 'base64');
@@ -139,6 +170,8 @@ export function validateSamlAssertion(assertionXml: string, certificatePem: stri
   return {
     valid: true,
     reason: null,
-    principal: { principalId: `saml:${subject}`, nameId: subject, groups: [] },
+    // RFC 0163 §B — surface the SIGNED issuer so the SAML decision path can
+    // trust-root-scope the cross-lane link (an empty `<saml:Issuer>` ⇒ omitted).
+    principal: { principalId: `saml:${subject}`, nameId: subject, ...(issuer ? { issuer } : {}), groups: [] },
   };
 }

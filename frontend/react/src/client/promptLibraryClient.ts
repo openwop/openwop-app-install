@@ -22,12 +22,12 @@ export interface Org { orgId: string; name: string }
 
 /** The caller's orgs (the library org picker). */
 export async function listOrgs(): Promise<Org[]> {
-  return (await http<{ orgs: Org[] }>('/v1/host/openwop-app/orgs')).orgs ?? [];
+  return (await http<{ orgs: Org[] }>('/host/openwop-app/orgs')).orgs ?? [];
 }
 
 export interface PromptEntry { entryId: string; name: string; description?: string; promptRef: string }
 
-const BASE = (orgId: string): string => `/v1/host/openwop-app/prompts/orgs/${encodeURIComponent(orgId)}/entries`;
+const BASE = (orgId: string): string => `/host/openwop-app/prompts/orgs/${encodeURIComponent(orgId)}/entries`;
 
 export async function listPrompts(orgId: string): Promise<PromptEntry[]> {
   return (await http<{ entries: PromptEntry[] }>(BASE(orgId))).entries ?? [];

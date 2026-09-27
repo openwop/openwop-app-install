@@ -25,7 +25,7 @@ describe('ADR 0025 — personal boards + polymorphic owner', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => {
-      server = app.listen(0, res);
+      server = app.listen(0, '127.0.0.1', res);
     });
   });
   afterAll(async () => {

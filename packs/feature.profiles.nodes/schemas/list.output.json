@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.1.0/list.output.json",
+  "title": "ProfilesListOutput",
+  "description": "The tenant's team roster \u2014 every profile in the run's tenant as a descriptive projection (tenant bookkeeping columns stripped; endorsements as `{ count, endorserUserIds }`). Descriptive only: a profile confers no authority and carries no ranking (ADR 0005).",
+  "type": "object",
+  "required": [
+    "profiles"
+  ],
+  "properties": {
+    "profiles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "userId"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The member's opaque `User.userId` \u2014 the key `get` was called with."
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "proficiency",
+                "endorsements"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "proficiency": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 5
+                },
+                "endorsements": {
+                  "type": "object",
+                  "required": [
+                    "count",
+                    "endorserUserIds"
+                  ],
+                  "properties": {
+                    "count": {
+                      "type": "integer",
+                      "minimum": 0
+                    },
+                    "endorserUserIds": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false,
+                  "description": "Viewer-independent projection (no `endorsedByMe`) so a recorded output replays actor-free."
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true,
+        "description": "One roster row \u2014 the same projection `get` returns as `profile`."
+      }
+    }
+  },
+  "additionalProperties": false
+}

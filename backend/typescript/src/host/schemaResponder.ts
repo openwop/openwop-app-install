@@ -10,10 +10,14 @@
  * structured schemas; the next turn injects the response so the LLM
  * can continue with the schemas in context.
  *
- * Pure function. The chat executor (chatResponderNode) detects
- * a `schema.request` in the LLM's completion text, calls this
- * builder, and emits both envelopes as `agent.envelope` events so
- * the FE EnvelopeInspector can render the round-trip inline.
+ * Pure function. LIVE CALLER (XCH-ENV-5, LLM-EXCHANGE-AUDIT Wave 5): the
+ * `openwop:schema.lookup` agent tool (kind "node") serves this registry on
+ * demand. NOTE: this is NOT the RFC 0021 `schema.request` responder — that
+ * wire kind asks for an ENVELOPE KIND's schema ({ envelopeType }, answered
+ * out-of-band by `agentDispatch.runChatToolLoop` from
+ * `loadEnvelopePayloadSchema`); node-type schemas are a tool-mediated
+ * ask-path. (The `chatResponderNode` this docstring once promised never
+ * existed — the audit's N-ENV finding.)
  *
  * Schema library source: the backend's NodeRegistry (`getNodeRegistry().listTypeIds()`)
  * — same source as `GET /v1/host/openwop-app/node-catalog`, which is the

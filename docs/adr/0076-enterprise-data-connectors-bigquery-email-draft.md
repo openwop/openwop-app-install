@@ -138,6 +138,17 @@ the primary control):
    `registerProvider` (the marketplace override hook stays permissive). Open Q1's "lean: add
    an optional host-side guard" is thus implemented.
 
-## RFC verdict
+## Correction note — the write-scoped variant is a SEPARATE id, not a loosening of `bigquery` (ADR 0292 / CDP-D §6, 2026-07-06)
 
-**Host-extension — no new RFC.** Connection packs + node packs are non-normative; credentials stay off the wire (opaque `credentialRef`). No capability is advertised beyond what is wired and honored.
+CDP-D's reverse-ETL warehouse write (ADR 0292) needs a `bigquery.insertdata` **write** scope,
+which this ADR's `bigquery` provider deliberately does not carry (`readOnly: true`,
+`assertReadOnlyConsistent`). That read-only invariant is **NOT loosened**. The write scope lives
+on a **separate provider id `bigquery-write`** (`providerRegistry.ts`) — the standard
+offerable-not-granted posture: the write scope is a distinct consent the acting human must
+explicitly grant, and every `bigquery-write` load rides the connector-action-governance gate
+(ADR 0028, `actionPolicyOf('warehouse.load')`, **default `approval-required`**). The original
+`bigquery` id stays `readOnly` + override-immune (the marketplace-override hazard this ADR closed
+is unaffected); a `cdp-bigquery-write` unit test pins both invariants (bigquery-write has the
+write group and is not readOnly; bigquery stays readOnly with no write group). This is a **narrow,
+governed additive** — a new id, not an edit to the read-only one — so ADR 0076's design and its
+`assertReadOnlyConsistent` guard stand unchanged.

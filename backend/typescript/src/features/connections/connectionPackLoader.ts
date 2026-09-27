@@ -31,6 +31,9 @@ import addFormats from 'ajv-formats';
 import { OpenwopError, type OpenwopErrorCode } from '../../types.js';
 import { createLogger } from '../../observability/logger.js';
 import { locateRepoSchemasDir } from '../../host/_repoPath.js';
+import { isParkedPackDirName } from '../../bootstrap/mountLocalPacks.js';
+import { semverGte } from '../../util/semver.js';
+import { verifyMcpReachOnRegistration } from './oauthFlow.js';
 import {
   registerProvider,
   listProviders,
@@ -70,6 +73,9 @@ interface ConnectionPackManifest {
   provider: {
     id: string;
     displayName: string;
+    /** RFC 0123 — commercial vendor/ecosystem for catalog grouping (presentational,
+     *  free-form, OPTIONAL). Not the RFC 0047 resolution key; gates nothing. */
+    vendor?: string;
     category: string;
     auth: {
       kind: CredentialKind;
@@ -78,6 +84,10 @@ interface ConnectionPackManifest {
       endpoints?: { authorize?: string; token?: string; revoke?: string };
       scopes?: { read?: ScopeGroup[]; write?: ScopeGroup[] };
       instanceUrlTemplate?: string;
+      /** RFC 0199 §A.4 / §B.3 — the authorization server's issuer identifier. */
+      issuer?: string;
+      /** RFC 0199 §A.1 — `unsupported` ⇒ no PKCE for this provider. */
+      pkce?: 'S256' | 'unsupported';
     };
     reach:
       | { mcp: { server: { url: string; transport: 'http' | 'sse' } } }
@@ -132,11 +142,25 @@ function toProviderManifest(p: ConnectionPackManifest['provider']): ProviderMani
   const base: ProviderManifest = {
     id: p.id,
     label: p.displayName,
+    // Surface the manifest's capability category (was dropped at load) so a
+    // workflow/agent can bind "the user's <category> connection" (host-only).
+    ...(p.category ? { category: p.category } : {}),
+    // RFC 0123 (ADR 0185 follow-on) — honor the pack-delivered `provider.vendor`:
+    // the amended §A schema now permits the additive OPTIONAL free-form string, so a
+    // pack-delivered connector groups under its declared commercial vendor via the
+    // SAME ADR 0185 catalog grouping the built-ins use (`ProviderManifest.vendor`).
+    // Presentational only — not the RFC 0047 resolution key; absent ⇒ own-label group.
+    ...(p.vendor ? { vendor: p.vendor } : {}),
     kind: p.auth.kind,
     authFlow: p.auth.authFlow ?? 'none',
     reach: 'openapi', // overwritten below per reach
     scopes: { read, ...(p.auth.scopes?.write ? { write: p.auth.scopes.write } : {}) },
     ...(p.auth.endpoints ? { endpoints: p.auth.endpoints } : {}),
+    // RFC 0199 §A.1/§A.4 — both were dropped at load before ADR 0753, so a pack's
+    // declared issuer never reached the callback's `iss` check and a declared
+    // `pkce: "unsupported"` was silently overridden with S256.
+    ...(p.auth.issuer ? { issuer: p.auth.issuer } : {}),
+    ...(p.auth.pkce ? { pkce: p.auth.pkce } : {}),
     refreshable: p.auth.kind === 'oauth2',
     defaultScopes,
     consumerNodes: p.consumerNodes ?? [],
@@ -215,6 +239,7 @@ export function loadConnectionPacks(opts: { roots: string[] }): ConnectionPackLo
   for (const root of opts.roots) {
     if (!existsSync(root)) continue;
     for (const entry of readdirSync(root)) {
+      if (isParkedPackDirName(entry)) continue;
       const packDir = join(root, entry);
       const manifestPath = join(packDir, 'pack.json');
       if (!existsSync(manifestPath) || !statSync(packDir).isDirectory()) continue;
@@ -259,7 +284,9 @@ export function loadConnectionPacks(opts: { roots: string[] }): ConnectionPackLo
         }
         const overrodeBuiltin = builtinIds.has(id) && prevInstalled === undefined;
 
-        registerProvider(toProviderManifest(manifest.provider));
+        const registered = toProviderManifest(manifest.provider);
+        registerProvider(registered);
+        verifyMcpReachOnRegistration(registered); // RFC 0199 §B.4
         installedVersions.set(id, version);
         installed.push({ pack: packName, providerId: id, version, overrodeBuiltin });
         log.info('installed connection pack', { pack: packName, provider: id, version, overrodeBuiltin });
@@ -281,46 +308,9 @@ export function loadConnectionPacks(opts: { roots: string[] }): ConnectionPackLo
 
 /** SemVer §11 precedence: `a >= b`. A PRE-RELEASE is lower than its release
  *  (`1.0.0-alpha.1 < 1.0.0`), so a prerelease pack must NOT silently supersede a
- *  release of the same core — §B.6 forbids the silent choice (myndhyve-1 937c). */
-function semverGte(a: string, b: string): boolean {
-  return semverCompare(a, b) >= 0;
-}
-function semverCompare(a: string, b: string): number {
-  // Split on the FIRST hyphen only — a prerelease tag may itself contain hyphens
-  // (`1.0.0-x-y` → pre `x-y`); `String.split('-', 2)` would truncate to `x`.
-  const splitPre = (s: string): [string, string] => {
-    const v = s.split('+')[0];
-    const i = v.indexOf('-');
-    return i < 0 ? [v, ''] : [v.slice(0, i), v.slice(i + 1)];
-  };
-  const [coreA, preA] = splitPre(a);
-  const [coreB, preB] = splitPre(b);
-  const na = coreA.split('.').map((n) => parseInt(n, 10) || 0);
-  const nb = coreB.split('.').map((n) => parseInt(n, 10) || 0);
-  for (let i = 0; i < 3; i++) {
-    if ((na[i] ?? 0) !== (nb[i] ?? 0)) return (na[i] ?? 0) > (nb[i] ?? 0) ? 1 : -1;
-  }
-  // Equal core. No-prerelease outranks a prerelease.
-  if (!preA && !preB) return 0;
-  if (!preA) return 1;
-  if (!preB) return -1;
-  // Both prerelease — compare dot identifiers (numeric < alphanumeric; SemVer §11.4).
-  const ia = preA.split('.');
-  const ib = preB.split('.');
-  for (let i = 0; i < Math.max(ia.length, ib.length); i++) {
-    const x = ia[i];
-    const y = ib[i];
-    if (x === undefined) return -1; // shorter prerelease set is lower
-    if (y === undefined) return 1;
-    const xn = /^\d+$/.test(x);
-    const yn = /^\d+$/.test(y);
-    if (xn && yn) { const d = parseInt(x, 10) - parseInt(y, 10); if (d !== 0) return d > 0 ? 1 : -1; }
-    else if (xn) return -1; // numeric identifiers have lower precedence than alphanumeric
-    else if (yn) return 1;
-    else if (x !== y) return x > y ? 1 : -1;
-  }
-  return 0;
-}
+ *  release of the same core — §B.6 forbids the silent choice (myndhyve-1 937c).
+ *  The comparison itself now lives in `util/semver.ts`, shared with the
+ *  workflow-chain loader (WF-DUP-2) so the two cannot drift on prereleases. */
 
 function ajvErrors(v: ValidateFunction): string {
   return (v.errors ?? []).map((e) => `${e.instancePath || '/'} ${e.message}`).join('; ');
@@ -392,7 +382,9 @@ export function installConnectionPackManifest(raw: unknown): SeamInstallOutcome 
         { provider: id, installed: prev, incoming: version },
       );
     }
-    registerProvider(toProviderManifest(manifest.provider));
+    const registered = toProviderManifest(manifest.provider);
+    registerProvider(registered);
+    verifyMcpReachOnRegistration(registered); // RFC 0199 §B.4
     seamInstalledVersions.set(id, version);
     log.info('seam-installed connection pack', { pack: packName, provider: id, version });
     return { installed: true };

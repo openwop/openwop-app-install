@@ -17,6 +17,8 @@
  * into a sandboxed dir. The verification logic is the same.
  */
 
+import { resolveRegistry, templateFor, expandEndpoint, legacyPathsEnabled, type EndpointKey } from './registryEndpoints.js';
+import { PROTOCOL_VERSION_V2 } from '../middleware/protocolVersion.js';
 import { createHash, createPublicKey, verify as verifySig } from 'node:crypto';
 import {
   existsSync,
@@ -32,10 +34,17 @@ import { homedir, tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { gunzipSync } from 'node:zlib';
 import { createLogger } from '../observability/logger.js';
+import { isTombstoned } from '../host/packTombstones.js';
+import { assertCanonicalManifest } from './canonicalManifestGate.js';
+import { assertKeyPermittedForPack } from '../host/packSignature.js';
+import { verifyContentHashes } from './packContentDigest.js';
+import { checkPackManifestForMajor } from '../host/packManifestV2Gate.js';
 
 const log = createLogger('packs.registryInstaller');
 
 const DEFAULT_REGISTRY = 'https://packs.openwop.dev';
+/** This host serves major 2, so it reads the tree a major-2 host must read (ADR 0663). */
+const HOST_PROTOCOL_MAJOR = Number(PROTOCOL_VERSION_V2.split('.')[0]);
 const MARKER = '.openwop-installed.json';
 
 export interface InstallTarget {
@@ -50,21 +59,69 @@ export interface InstallOptions {
   trustedKeysDir?: string;
 }
 
+/** A version manifest's `signing` block. Its shape depends on the TREE it came
+ *  from: v1 `{ method, publicKeyRef, signatureRef? }`; v2 `{ keyId, scheme }`
+ *  (`spec/v2/core/packs.md` §Signing). Every field optional here so the reader
+ *  below decides, per tree, what a valid block is. */
+interface ManifestSigning {
+  keyId?: unknown;
+  scheme?: unknown;
+  method?: unknown;
+  publicKeyRef?: unknown;
+  signatureRef?: unknown;
+}
+
 interface PackVersionManifest {
   name: string;
   version: string;
-  signing?: {
-    method: string;
-    publicKeyRef: string;
-    signatureRef?: string;
-  };
+  signing?: ManifestSigning;
   integrity: string;
+}
+
+/** The v2 tree's one signing scheme (`spec/v2/core/packs.md` §Signing). */
+export const V2_SIGNING_SCHEME = 'ed25519-canonical-json';
+
+/**
+ * ADR 0713 — the signing key id a version manifest names, read the way its TREE
+ * defines it, or a thrown `pack_signature_unverifiable`.
+ *
+ * This used to read `signing.publicKeyRef` unconditionally. ADR 0663 moved this
+ * host onto the v2 tree, whose manifests carry `{ keyId, scheme }` and where
+ * "`publicKeyRef` does not exist" — so every v2 install in production failed here
+ * (16 of 16 at the 2026-09-16 boot), and the image-vendored copy served instead.
+ *
+ * - v2: `keyId` (non-empty string) AND `scheme === 'ed25519-canonical-json'`,
+ *   REQUIRED; a block carrying `method` "fails validation" per the spec. The
+ *   signed bytes are the canonical-JSON `pack.json` inside the tarball — what
+ *   `extractPackJsonFromTarball` already returns, and what the registry's own
+ *   `verify-signatures.mjs` verifies for v2.
+ * - v1 / flat / legacy paths: `publicKeyRef`, unchanged.
+ */
+export function manifestSigningKeyId(signing: ManifestSigning | undefined, tree: string): string {
+  if (tree === 'v2') {
+    if (!signing || typeof signing.keyId !== 'string' || signing.keyId.length === 0) {
+      throw new Error('pack_signature_unverifiable: v2 manifest has no signing.keyId');
+    }
+    if (signing.scheme !== V2_SIGNING_SCHEME) {
+      throw new Error(`pack_signature_unverifiable: v2 signing.scheme must be ${V2_SIGNING_SCHEME}`);
+    }
+    if (signing.method !== undefined || signing.publicKeyRef !== undefined) {
+      throw new Error('pack_signature_unverifiable: v2 signing block carries a v1 field (method/publicKeyRef)');
+    }
+    return signing.keyId;
+  }
+  if (!signing || typeof signing.publicKeyRef !== 'string' || signing.publicKeyRef.length === 0) {
+    throw new Error('pack_signature_unverifiable: no signing.publicKeyRef in manifest');
+  }
+  return signing.publicKeyRef;
 }
 
 interface InstallMarker {
   name: string;
   version: string;
   integrity: string;
+  /** The signing key id. Named for its v1 origin and kept (the marketplace
+   *  listing reads it); for a v2 install it holds `signing.keyId` (ADR 0713). */
   publicKeyRef: string;
   registry: string;
   installedAt: string;
@@ -102,7 +159,47 @@ export async function installPackFromRegistry(
   }
 
   // 1. Fetch the version manifest.
-  const manifestUrl = `${registry}/v1/packs/${target.name}/-/${target.version}.json`;
+  // ADR 0663 — `packs.md` §"The registry tree": a client MUST resolve every
+  // registry path through `.well-known/openwop-registry.json` `endpoints`
+  // rather than constructing one. Constructing `/v1/…` both violated that and
+  // pinned this host to the frozen tree, where no major-2-admissible version
+  // is published.
+  const resolution = await resolveRegistry(registry, HOST_PROTOCOL_MAJOR);
+  const urlFor = (key: EndpointKey, vars: Record<string, string>): string => {
+    if (resolution.ok) {
+      const tpl = templateFor(resolution.resolved, key);
+      if (tpl) return `${registry.replace(/\/+$/, '')}${expandEndpoint(tpl, vars)}`;
+      throw new Error(
+        `registry_endpoint_missing: ${key} is not named by ${registry}/.well-known/openwop-registry.json`,
+      );
+    }
+    if (!legacyPathsEnabled()) {
+      // An unreachable registry keeps the vocabulary the rest of the install
+      // path already uses for exactly that cause (ADR 0660); only a registry
+      // that ANSWERED without `endpoints` gets the new code.
+      if (resolution.reason === 'unreachable') {
+        throw new Error(
+          `pack_registry_unreachable: ${registry}/.well-known/openwop-registry.json did not answer`,
+        );
+      }
+      throw new Error(
+        `registry_endpoints_unresolvable: ${registry}/.well-known/openwop-registry.json publishes no `
+        + '`endpoints` map. packs.md §"The registry tree" requires paths to be resolved through it; this host '
+        + 'will not construct one. Set OPENWOP_REGISTRY_LEGACY_V1_PATHS=true only for a registry that predates it.',
+      );
+    }
+    const legacy: Record<EndpointKey, string> = {
+      registryIndex: '/v1/index.json',
+      packMetadata: `/v1/packs/${vars.name}/index.json`,
+      versionManifest: `/v1/packs/${vars.name}/-/${vars.version}.json`,
+      versionTarball: `/v1/packs/${vars.name}/-/${vars.version}.tgz`,
+      versionSignature: `/v1/packs/${vars.name}/-/${vars.version}.sig`,
+      publicKey: `/keys/${vars.keyId}.pub`,
+    };
+    return `${registry.replace(/\/+$/, '')}${legacy[key]}`;
+  };
+
+  const manifestUrl = urlFor('versionManifest', { name: target.name, version: target.version });
   const manifestRes = await fetch(manifestUrl);
   if (!manifestRes.ok) {
     throw new Error(`manifest_fetch_failed (${manifestRes.status}): ${manifestUrl}`);
@@ -115,7 +212,7 @@ export async function installPackFromRegistry(
   }
 
   // 2. Fetch the tarball.
-  const tarballUrl = `${registry}/v1/packs/${target.name}/-/${target.version}.tgz`;
+  const tarballUrl = urlFor('versionTarball', { name: target.name, version: target.version });
   const tarballRes = await fetch(tarballUrl);
   if (!tarballRes.ok) {
     throw new Error(`tarball_fetch_failed (${tarballRes.status}): ${tarballUrl}`);
@@ -135,18 +232,17 @@ export async function installPackFromRegistry(
   // 4. Resolve public key. Try the on-disk registry/keys/ first
   // (faster + works offline), then fall back to the registry's
   // /keys/<keyId>.pub endpoint.
-  const keyRef = manifest.signing?.publicKeyRef;
-  if (!keyRef) {
-    throw new Error('pack_signature_unverifiable: no signing.publicKeyRef in manifest');
-  }
-  const publicKeyPem = await resolvePublicKey(keyRef, registry, opts.trustedKeysDir);
+  // ADR 0713 — the tree the manifest was fetched from decides the signing shape.
+  // The legacy constructed paths are `/v1/…`, so they read as v1.
+  const keyRef = manifestSigningKeyId(manifest.signing, resolution.ok ? resolution.resolved.tree : 'v1');
+  const publicKeyPem = await resolvePublicKey(keyRef, opts.trustedKeysDir, urlFor);
 
   // 5. Fetch the signature and verify Ed25519 against the pack.json
   // bytes inside the tarball. Canonical recipe per
   // registry/scripts/verify-signatures.mjs — the signature is over the
   // raw pack.json file (not the whole tarball), so we gunzip + USTAR-
   // parse to find pack.json before verifying.
-  const sigUrl = `${registry}/v1/packs/${target.name}/-/${target.version}.sig`;
+  const sigUrl = urlFor('versionSignature', { name: target.name, version: target.version });
   const sigRes = await fetch(sigUrl);
   if (!sigRes.ok) {
     throw new Error(`signature_fetch_failed (${sigRes.status}): ${sigUrl}`);
@@ -157,6 +253,34 @@ export async function installPackFromRegistry(
   if (!verified) {
     throw new Error('pack_signature_invalid');
   }
+
+  // 5a. ADR 0660 D1 — STEP 4 of the spec's trust model, which this host did not
+  // implement at all: the signature proves the key signed this pack; THIS proves
+  // the issuing registry AUTHORIZED that key for this pack's namespace
+  // (`spec/v1/registry-operations.md:405-409`). Without it, the steps above accept
+  // ANY key the registry serves, so a key issued for `acme.*` signs
+  // `core.openwop.*`. Fail-closed, including on an unreachable discovery document.
+  await assertKeyPermittedForPack(registry, keyRef, target.name);
+
+  // 5b. PMC-5 — canonical MANIFEST validation, on the bytes we just verified.
+  // A signature proves AUTHORSHIP, not SHAPE: until now a correctly-signed pack
+  // with a structurally invalid manifest installed cleanly. Runs BEFORE extraction
+  // so a malformed pack never reaches disk.
+  //
+  // Deliberately gated to kinds whose shipped packs already validate (measured:
+  // form-content 1/1, artifact-type 0/4). Enforcing every kind today would reject
+  // packs this repo ships — see docs/steward/PACK-MANIFEST-CANONICAL-GAP.md.
+  {
+    assertCanonicalManifest(packJsonBytes);
+  }
+
+  // RFC 0177 §A.1/§B.1/§E.1 — the same major-2 admission gate used
+  // by the mirror test surface also owns the production registry path. A
+  // signature proves who authored these bytes; it does not make an inadmissible
+  // engine range, peer family, or ranged chain reference safe to install.
+  const packManifest = JSON.parse(packJsonBytes.toString('utf8')) as unknown;
+  const refusal = checkPackManifestForMajor(packManifest, HOST_PROTOCOL_MAJOR);
+  if (refusal) throw new Error(`${refusal.code}: ${refusal.message}`);
 
   // 6. Extract. Stage into a temp dir to detect any wrapper directory
   // (e.g., npm-style `package/`). Then copy only the load-bearing
@@ -191,6 +315,16 @@ export async function installPackFromRegistry(
     mkdirSync(destDir, { recursive: true });
     copyAllowlistedFiles(packRoot, destDir);
     packJsonSha = createHash('sha256').update(readFileSync(join(destDir, 'pack.json'))).digest('hex');
+    // ADR 0660 D3 — verify-one / install-another. `extractPackJsonFromTarball`
+    // returns the FIRST root `pack.json` entry, while `tar -xzf` lets the LAST
+    // one win on disk: so the signature AND the canonical-manifest gate can both
+    // validate bytes that are then overwritten. Re-hash what actually landed.
+    // (`copyAllowlistedFiles` is a byte copy, so this cannot fail spuriously.)
+    // Scope: this binds `pack.json` only — `index.mjs` has no verified reference
+    // bytes to compare against, and is covered by the marker below, not a signature.
+    if (packJsonSha !== createHash('sha256').update(packJsonBytes).digest('hex')) {
+      throw new Error('pack_integrity_mismatch: the installed pack.json is not the bytes that were verified');
+    }
     const indexPath = join(destDir, 'index.mjs');
     if (existsSync(indexPath)) {
       indexMjsSha = createHash('sha256').update(readFileSync(indexPath)).digest('hex');
@@ -228,8 +362,8 @@ export async function installPackFromRegistry(
 
 async function resolvePublicKey(
   keyRef: string,
-  registry: string,
-  trustedKeysDir?: string,
+  trustedKeysDir: string | undefined,
+  urlFor: (key: EndpointKey, vars: Record<string, string>) => string,
 ): Promise<string> {
   if (trustedKeysDir) {
     const localPath = join(trustedKeysDir, `${keyRef}.pub`);
@@ -237,7 +371,9 @@ async function resolvePublicKey(
       return readFileSync(localPath, 'utf-8');
     }
   }
-  const keyUrl = `${registry}/keys/${keyRef}.pub`;
+  // `publicKey` is unversioned by design ("keys are not protocol-versioned"),
+  // so it resolves from the flat alias rather than a tree.
+  const keyUrl = urlFor('publicKey', { keyId: keyRef });
   const keyRes = await fetch(keyUrl);
   if (!keyRes.ok) {
     throw new Error(`public_key_fetch_failed (${keyRes.status}): ${keyUrl}`);
@@ -251,8 +387,11 @@ async function resolvePublicKey(
  * whitespace and break the signature).
  *
  * Ported from registry/scripts/verify-signatures.mjs's extractPackJson.
- * Pack tarballs MUST keep entry names <= 100 bytes — PAX extended
- * headers and GNU LongLink throw rather than risk silent mis-identification.
+ * Pack tarballs MUST keep the pack.json entry name <= 100 bytes. PAX metadata
+ * records are skipped: bsdtar emits them for ordinary short-name archives on
+ * macOS, and ignoring their optional overrides is fail-closed here (we only
+ * accept a literal root pack.json header, then bind it to the extracted bytes).
+ * GNU LongLink still throws rather than risk silent name substitution.
  */
 function extractPackJsonFromTarball(tarballBytes: Buffer): Buffer {
   const decompressed = gunzipSync(tarballBytes);
@@ -269,7 +408,7 @@ function extractPackJsonFromTarball(tarballBytes: Buffer): Buffer {
       .trim();
     const size = parseInt(sizeStr, 8) || 0;
     const typeflag = decompressed[off + 156];
-    if (typeflag === 0x78 || typeflag === 0x4c) {
+    if (typeflag === 0x4c) {
       throw new Error(
         `tarball uses extended USTAR header (typeflag=0x${typeflag.toString(16)}); not supported`,
       );
@@ -352,13 +491,37 @@ export function verifyInstalledPack(packDir: string): string | null {
   if (!marker.contentHashes || typeof marker.contentHashes !== 'object') {
     return 'marker_missing_content_hashes';
   }
-  for (const [relPath, expectedSha] of Object.entries(marker.contentHashes)) {
-    const filePath = join(packDir, relPath);
-    if (!existsSync(filePath)) return `content_missing:${relPath}`;
-    const actual = createHash('sha256').update(readFileSync(filePath)).digest('hex');
-    if (actual !== expectedSha) return `content_modified:${relPath}`;
+  // ADR 0555 P0 — one hasher, not two. `host/packTrust.ts` re-verifies these
+  // same hashes to decide `operator-trusted`, and two implementations of "does
+  // this file still hash to what the marker says" would drift into disagreeing
+  // about whether an install is tampered.
+  return verifyContentHashes(packDir, marker.contentHashes);
+}
+
+/**
+ * On-disk presence tier for a pack, by name (ADR 0194 Phase 2; `tombstoned`
+ * added in Phase 4). Read-only, display-grade — the runtime loader's verify
+ * path stays the authority:
+ *  - `installed`  — dir present WITH a verified-install trust marker (registry path)
+ *  - `mounted`    — dir present without a marker (dev-mount / symlink)
+ *  - `missing`    — no pack dir
+ *  - `tombstoned` — removed from this host (bytes may remain for replay)
+ * `version` is the on-disk `pack.json` version when present — callers compare it
+ * to their pinned ref so the UI never claims a pinned version is installed when a
+ * different one is on disk.
+ */
+export function packPresence(name: string): { status: 'installed' | 'mounted' | 'missing' | 'tombstoned'; version?: string } {
+  if (isTombstoned(name)) return { status: 'tombstoned' };
+  const dir = join(resolveDefaultPackDir(), name);
+  const manifestPath = join(dir, 'pack.json');
+  if (!existsSync(manifestPath)) return { status: 'missing' };
+  const status = isInstalledPack(dir) ? 'installed' : 'mounted';
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { version?: string };
+    return typeof manifest.version === 'string' ? { status, version: manifest.version } : { status };
+  } catch {
+    return { status }; // malformed manifest: presence is still honest, version unknown
   }
-  return null;
 }
 
 /** Parse `name@version` pairs from `OPENWOP_INSTALL_PACKS`. */
@@ -371,6 +534,29 @@ export function parseInstallList(raw: string | undefined): InstallTarget[] {
     out.push({ name, version });
   }
   return out;
+}
+
+/**
+ * A pack name that is SAFE to join onto the pack dir for a filesystem operation
+ * (ADR 0194 review hardening). Rejects path traversal + separators so a
+ * `join(packDir, name)` can never escape the pack dir — defense-in-depth for the
+ * marketplace remove/purge routes, independent of any upstream existence gate.
+ * Deliberately looser than the publish-surface `PACK_NAME_RE` (`routes/packs.ts`)
+ * because the marketplace also handles in-tree `feature.*` packs, which that
+ * publish regex excludes. The one invariant here is "no path escape".
+ */
+export function isSafePackName(name: string): boolean {
+  return (
+    name.length > 0 &&
+    name.length <= 214 &&
+    !name.includes('/') &&
+    !name.includes('\\') &&
+    !name.includes('\0') &&
+    name !== '.' &&
+    name !== '..' &&
+    !name.split('.').includes('') && // rejects leading/trailing/`..` dot segments
+    /^[a-zA-Z0-9._-]+$/.test(name)
+  );
 }
 
 export function resolveDefaultPackDir(): string {

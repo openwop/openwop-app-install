@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.1.0/get.output.json",
+  "title": "ProfilesGetOutput",
+  "description": "One member's descriptive profile projection (tenant bookkeeping columns stripped; endorsements projected as `{ count, endorserUserIds }` \u2014 viewer-independent so a recorded output replays actor-free), or an EXPLICIT miss. `found` is the branch flag: a chain gates on `{ falsy found }` for a real id that is not in the tenant. A missing/empty `userId` never reaches this shape \u2014 it is a typed node failure.",
+  "type": "object",
+  "required": [
+    "profile",
+    "found"
+  ],
+  "properties": {
+    "profile": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "required": [
+        "userId"
+      ],
+      "properties": {
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The member's opaque `User.userId` \u2014 the key `get` was called with."
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "proficiency",
+              "endorsements"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "proficiency": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 5
+              },
+              "endorsements": {
+                "type": "object",
+                "required": [
+                  "count",
+                  "endorserUserIds"
+                ],
+                "properties": {
+                  "count": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "endorserUserIds": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "additionalProperties": false,
+                "description": "Viewer-independent projection (no `endorsedByMe`) so a recorded output replays actor-free."
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true,
+      "description": "The projected profile, or null when `found` is false. Descriptive fields (`jobTitle`, `bio`, `availability`, \u2026) ride on `additionalProperties`; the pinned shape is the key + the endorsement projection."
+    },
+    "found": {
+      "type": "boolean",
+      "description": "Whether a profile for `userId` exists in the run's tenant."
+    }
+  },
+  "additionalProperties": false
+}

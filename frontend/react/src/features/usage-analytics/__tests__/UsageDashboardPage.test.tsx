@@ -6,10 +6,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../client/usageAnalyticsClient.js', () => ({ listOrgs: vi.fn(), fetchUsageRollup: vi.fn() }));
 let enabled = true;
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled, status: enabled ? 'on' : 'off', isBeta: false, variant: null }),
+  useFeatureAccess: () => makeFeatureAccess({ enabled, status: enabled ? 'on' : 'off', isBeta: false, variant: null }),
 }));
 
 import { listOrgs, fetchUsageRollup, type UsageRollupRow } from '../../../client/usageAnalyticsClient.js';

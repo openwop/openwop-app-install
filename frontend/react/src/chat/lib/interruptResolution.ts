@@ -60,7 +60,7 @@ export function mergeOpenInterrupts(
 }
 
 /** Drop a resolved interrupt from the open set by `nodeId`. The
- *  `node.interrupt.resolved` event carries the node id, not the interrupt id,
+ *  `interrupt.resolved` event carries the node id, not the interrupt id,
  *  so we match on node. */
 export function removeInterruptByNode(
   open: readonly OpenInterrupt[] | undefined,

@@ -283,7 +283,7 @@ export async function creativeValidate(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'ads.creative.validate': creativeValidate,
 };
 

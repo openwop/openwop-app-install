@@ -30,7 +30,7 @@
  * @see src/host/kanbanService.ts — the board surface a roster member owns
  */
 
-import { randomUUID } from 'node:crypto';
+import { OpenwopError } from '../types.js';
 import { DurableCollection } from './hostExtPersistence.js';
 
 /** The manifest/deployment a roster member instantiates (a trimmed
@@ -65,10 +65,12 @@ export interface RosterEntry {
    *  as "last checked …"; the heartbeat is a manual pull in this sample, so
    *  there is no persisted "next check" beyond any enabled scheduler job. */
   lastHeartbeatAt?: string;
-  /** Opt-in autonomous heartbeat cadence in milliseconds. When > 0, the
-   *  background heartbeat daemon (host/heartbeatService.ts) auto-runs this
-   *  member's "Check now" on this interval. Absent or <= 0 ⇒ manual pull only
-   *  (the prior, default behavior) — the daemon never touches it. */
+  /** Autonomous heartbeat cadence in milliseconds. ADR 0313 D1 — three states,
+   *  resolved by `effectiveHeartbeatIntervalMs`: `> 0` = this explicit cadence;
+   *  absent or `0` = "not configured" ⇒ the HOST DEFAULT cadence applies
+   *  (`OPENWOP_HEARTBEAT_DEFAULT_MS`, default 10 min — the daemon DOES run it);
+   *  `-1` (`HEARTBEAT_OFF`) = explicit opt-out ⇒ the daemon never touches it.
+   *  (Pre-0313 this was opt-in: absent/0 meant manual-only.) */
   heartbeatIntervalMs?: number;
   /** How much autonomy this member has when its heartbeat picks up work.
    *  `auto` (default) — start the proposed run immediately (today's behavior).
@@ -95,13 +97,70 @@ export interface RosterEntry {
  *  TRIPWIRE: this host-ext field MUST NEVER be serialized onto a normative
  *  /v1/agents/roster response (agent-roster-entry.schema.json is
  *  additionalProperties:false — any host that leaks it fails conformance). */
+/** `agent-roster-entry.schema.json` — the normative wire shape. CLOSED: the
+ *  schema is `additionalProperties: false`, so this is an allowlist, never a
+ *  spread of the stored row (which carries host-ext fields such as
+ *  `autonomyLevel`, `roleKey`, heartbeat state). */
+export interface NormativeRosterEntry {
+  rosterId: string;
+  persona: string;
+  agentRef: RosterAgentRef;
+  workflows: string[];
+  owner: { tenantId: string };
+  enabled: boolean;
+  label?: string;
+  description?: string;
+}
+
+const NORMATIVE_ROSTER_ID = /^host:[a-z0-9][a-z0-9._-]*$/;
+
+/**
+ * RFC 0086 (Accepted) / `agent-roster.md` §B — project the tenant's roster onto
+ * `GET /v1/agents/roster`. ONE projection, owned here beside the store, so the
+ * normative read cannot drift from the host-extension one.
+ *
+ * Advisor-subject entries (`roleKey: 'advisor'`, ADR 0040) are excluded for the
+ * same reason the host-ext roster excludes them by default: they are persona-only
+ * Board-of-Advisors subjects, not standing members with a portfolio. An entry
+ * whose id cannot be expressed in the normative grammar (a pre-ADR 0379 legacy
+ * row that was never rekeyed) is omitted rather than rewritten — renaming it on
+ * the wire would hand clients an id the host-ext API does not know.
+ */
+export async function listNormativeRoster(tenantId: string): Promise<NormativeRosterEntry[]> {
+  const all = await listRoster(tenantId);
+  return all
+    .filter((e) => e.roleKey !== 'advisor' && NORMATIVE_ROSTER_ID.test(e.rosterId))
+    .map((e) => ({
+      rosterId: e.rosterId,
+      persona: e.persona,
+      agentRef: {
+        agentId: e.agentRef.agentId,
+        // RFC 0082 §A — version XOR channel; the write path already refuses both.
+        ...(e.agentRef.version !== undefined ? { version: e.agentRef.version }
+          : e.agentRef.channel !== undefined ? { channel: e.agentRef.channel } : {}),
+      },
+      workflows: [...e.workflows],
+      owner: { tenantId: e.tenantId },
+      enabled: e.enabled,
+      ...(e.label !== undefined ? { label: e.label } : {}),
+      ...(e.description !== undefined ? { description: e.description } : {}),
+    }));
+}
+
 export function autonomyOf(entry: RosterEntry): 'auto' | 'guided' | 'review' {
   if (entry.autonomyLevel === 'review') return 'review';
   if (entry.autonomyLevel === 'guided') return 'guided';
   return 'auto';
 }
 
-const roster = new DurableCollection<RosterEntry>('roster', (e) => e.rosterId);
+// ADR 0379 P2 (PR-A) — TENANT-QUALIFIED key: deterministic per-persona
+// rosterIds (`host:<slug>`, Phase 2 new-mint) repeat across tenants, so the
+// row key carries the tenant. Existing rows are rekeyed in-place by
+// app-migrations v5/v6/v8 (old shape `hostext:roster:host:…` → `…:<tenant>:host:…`).
+// All external access rides the four tenant-scoped accessors (Phase 1), so
+// the key scheme is an internal detail of this module.
+const rosterKey = (tenantId: string, rosterId: string): string => `${tenantId}:${rosterId}`;
+const roster = new DurableCollection<RosterEntry>('roster', (e) => rosterKey(e.tenantId, e.rosterId));
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -129,8 +188,15 @@ export async function createRosterEntry(input: {
   autonomyLevel?: 'auto' | 'guided' | 'review';
   roleKey?: string;
 }): Promise<RosterEntry> {
-  // `host:<slug>-<short>` keeps the id human-readable + collision-safe.
-  const rosterId = `host:${slugify(input.persona)}-${randomUUID().slice(0, 8)}`;
+  // ADR 0379 P2 (PR-B) — DETERMINISTIC per-persona id (`host:<slug>`), no
+  // random suffix: the same persona folds/reseeds onto the SAME row instead of
+  // duplicating (the fold-idempotency invariant, by construction). Within a
+  // tenant a duplicate persona is a 409 — the user-agent create's semantics.
+  const rosterId = `host:${slugify(input.persona)}`;
+  if (await getRosterEntry(input.tenantId, rosterId)) {
+    // 'conflict' mirrors the user-agent duplicate-persona 409 semantics.
+    throw new OpenwopError('conflict', `A roster member for persona "${input.persona}" already exists.`, 409, { rosterId });
+  }
   const now = nowIso();
   const entry: RosterEntry = {
     rosterId,
@@ -150,19 +216,30 @@ export async function createRosterEntry(input: {
     createdAt: now,
     updatedAt: now,
   };
-  await roster.put(entry);
+  // Grade-pass fix: insert-if-absent CAS, not a plain put — two concurrent
+  // same-persona creates (cross-instance; the check above is not a lock) would
+  // otherwise BOTH pass the 409 check and the loser's row would be silently
+  // clobbered while both callers got a 201.
+  if (!(await roster.compareAndSwap(null, entry))) {
+    throw new OpenwopError('conflict', `A roster member for persona "${input.persona}" already exists.`, 409, { rosterId });
+  }
   return entry;
 }
 
 export async function listRoster(tenantId: string): Promise<RosterEntry[]> {
-  return (await roster.list())
-    .filter((e) => e.tenantId === tenantId)
+  // ADR 0379 P2 — the tenant-qualified key makes this a prefix scan instead
+  // of the previous full cross-tenant list+filter.
+  return (await roster.listByPrefix(`${tenantId}:`))
     .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 }
 
-export async function getRosterEntry(rosterId: string): Promise<RosterEntry | null> {
-  return roster.get(rosterId);
+/** ADR 0379 P1 — tenant-scoped fail-closed (mirrors `getAgentProfile`): a
+ *  cross-tenant rosterId returns null, indistinguishable from absent. Since
+ *  P2 the tenant is part of the ROW KEY, so the scoping is structural. */
+export async function getRosterEntry(tenantId: string, rosterId: string): Promise<RosterEntry | null> {
+  return roster.get(rosterKey(tenantId, rosterId));
 }
+
 
 /** Distinct tenant ids that own at least one roster member. The background
  *  heartbeat daemon uses this to scope its per-tenant scan (the store lists
@@ -173,7 +250,23 @@ export async function listRosterTenants(): Promise<string[]> {
   return [...tenants];
 }
 
+/** ADR 0414 M3-2 (KickTodo B2) — a persona rename that collides with another
+ *  same-tenant roster entry's mention handle is refused. The chat @-mention
+ *  picker keys on persona text, so two entries sharing a (case-insensitive)
+ *  persona make mentions ambiguous — and a user-renamed agent (KickBot) must
+ *  not be able to impersonate an existing coworker by taking its name. Rename
+ *  continuity itself stays structural: `rosterId`/`roleKey` are never touched
+ *  by any patch. */
+export class PersonaCollisionError extends Error {
+  constructor(public readonly persona: string) {
+    super(`Persona \`${persona}\` is already used by another agent in this workspace.`);
+  }
+}
+
+const personaKey = (p: string): string => p.trim().toLowerCase();
+
 export async function updateRosterEntry(
+  tenantId: string,
   rosterId: string,
   patch: {
     persona?: string;
@@ -188,15 +281,25 @@ export async function updateRosterEntry(
     autonomyLevel?: 'auto' | 'guided' | 'review';
   },
 ): Promise<RosterEntry | null> {
-  const entry = await roster.get(rosterId);
+  const entry = await getRosterEntry(tenantId, rosterId); // ADR 0379 P1 — fail-closed
   if (!entry) return null;
+  if (patch.persona !== undefined && personaKey(patch.persona) !== personaKey(entry.persona)) {
+    // ADR 0414 M3-2 — collision-checked mention handle on the rename path.
+    const siblings = await listRoster(tenantId);
+    if (siblings.some((s) => s.rosterId !== rosterId && personaKey(s.persona) === personaKey(patch.persona as string))) {
+      throw new PersonaCollisionError(patch.persona);
+    }
+  }
   if (patch.persona !== undefined) entry.persona = patch.persona;
   if (patch.workflows !== undefined) entry.workflows = [...patch.workflows];
   if (patch.enabled !== undefined) entry.enabled = patch.enabled;
   if (patch.label !== undefined) entry.label = patch.label;
   if (patch.description !== undefined) entry.description = patch.description;
   if (patch.heartbeatIntervalMs !== undefined) {
-    if (patch.heartbeatIntervalMs > 0) entry.heartbeatIntervalMs = patch.heartbeatIntervalMs;
+    // ADR 0313 D1 — three storable states: a positive cadence, the -1 OFF
+    // sentinel (explicit opt-out of the host default), or cleared (0 ⇒ follow
+    // the host default). Deleting -1 here would silently re-enroll the agent.
+    if (patch.heartbeatIntervalMs > 0 || patch.heartbeatIntervalMs === -1) entry.heartbeatIntervalMs = patch.heartbeatIntervalMs;
     else delete entry.heartbeatIntervalMs;
   }
   if (patch.avatarUrl !== undefined) {
@@ -217,16 +320,17 @@ export async function updateRosterEntry(
  *  heartbeat actually runs). Returns the updated entry, or null if missing.
  *  Does not touch `updatedAt` — a heartbeat is an activity marker, not an
  *  edit to the agent's definition. */
-export async function recordHeartbeat(rosterId: string): Promise<RosterEntry | null> {
-  const entry = await roster.get(rosterId);
+export async function recordHeartbeat(tenantId: string, rosterId: string): Promise<RosterEntry | null> {
+  const entry = await getRosterEntry(tenantId, rosterId); // ADR 0379 P1 — fail-closed
   if (!entry) return null;
   entry.lastHeartbeatAt = nowIso();
   await roster.put(entry);
   return entry;
 }
 
-export async function deleteRosterEntry(rosterId: string): Promise<boolean> {
-  return roster.delete(rosterId);
+export async function deleteRosterEntry(tenantId: string, rosterId: string): Promise<boolean> {
+  // ADR 0379 P2 — the tenant-qualified key IS the scope (no read needed).
+  return roster.delete(rosterKey(tenantId, rosterId));
 }
 
 /** Test-only: drop all roster entries. */

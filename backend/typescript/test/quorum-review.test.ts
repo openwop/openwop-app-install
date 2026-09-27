@@ -20,7 +20,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -113,21 +113,26 @@ describe('quorum gate — anon / no-identity callers fail closed (ADR 0070 harde
   // authorization on a quorum vote. A caller with NO bound user identity and NO
   // capability token (an auto-minted anon cookie session) must NOT be able to
   // vote — neither on an explicit-approverRefs gate nor on an OPEN gate.
-  it('rejects an anonymous caller on an explicit-approverRefs quorum gate (403)', async () => {
+  it('rejects an anonymous caller on an explicit-approverRefs quorum gate', async () => {
     const { ownerId, memberId, runId } = await suspendQuorumGate((o, m) => [o, m]);
     void ownerId; void memberId;
-    const anon = client(); // never logs in → auto-minted anon session (no userId)
+    const anon = client(); // never logs in → auto-minted anon session in its OWN fresh tenant
     const r = await vote(anon, runId, 'accept', { voter: 'forged-approver' });
-    expect(r.status).toBe(403);
+    // Fails closed. As of the 2026-07 vuln-scan H1 fix, the node-resume route is
+    // tenant-owner-gated (loadOwnedRun): a cross-tenant anon session is rejected at
+    // the tenant layer (404 run_not_found, no existence oracle) BEFORE it can reach
+    // the quorum-eligibility check — a stronger rejection than the prior 403. The
+    // same-tenant quorum-eligibility 403 path is covered by the member tests below.
+    expect(r.status).toBe(404);
   });
 
-  it('rejects an anonymous caller on an OPEN (empty-list) quorum gate (403)', async () => {
+  it('rejects an anonymous caller on an OPEN (empty-list) quorum gate', async () => {
     // An open gate admits any voter id ON THE CAPABILITY-TOKEN path, but an anon
-    // cookie session is not a capability token — it still fails closed.
+    // cookie session is not a capability token — it still fails closed (tenant gate, H1).
     const { runId } = await suspendQuorumGate(() => []);
     const anon = client();
     const r = await vote(anon, runId, 'accept', { voter: 'a' });
-    expect(r.status).toBe(403);
+    expect(r.status).toBe(404);
   });
 });
 

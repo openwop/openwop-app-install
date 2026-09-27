@@ -1,0 +1,18 @@
+{
+  // Type-checks the UNIT TESTS, which `tsconfig.json` excludes.
+  //
+  // vitest transpiles without checking, so a type error in any of the 506 test
+  // files reaches main silently — the same class fixed for `e2e/` in #2827.
+  // Including them in the main config was measured at 200 errors, which is a
+  // migration, not a drive-by: a gate that red trains people to bypass it.
+  //
+  // So this is a RATCHET, not a wall. It runs separately, reports the count, and
+  // fails only if the count GROWS. Existing debt is tolerated; new debt is not.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "noEmit": true },
+  // `include` OVERRIDES the base (it does not merge), and this `exclude` drops the
+  // base's `src/**/__tests__/**` — which is what actually pulls the tests in.
+  // `src/**/*` already subsumes `__tests__`, so one entry is enough.
+  "include": ["src/**/*", "scripts/**/__tests__/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

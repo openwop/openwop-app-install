@@ -1,0 +1,64 @@
+{
+  "name": "feature.orgs.nodes",
+  "version": "1.0.0",
+  "description": "Org invitations node pack (ADR 0622 D2) \u2014 invite someone into THIS workspace (or a named org in it) over the ctx.features.orgs surface, list its pending/declined invitations, revoke one. Every node is gated on the run's acting user holding host:members:manage in the target org \u2014 the same predicate the /orgs/:orgId/invites routes use; a system run (schedule, webhook, host-event-started) fails closed. Delivery brokers the ACTING USER's email connection and needs OPENWOP_PUBLIC_BASE_URL for the accept link. Ids-only inputs and outputs \u2014 never the token. The onboarding step people-hr.onboarding's `invite-host` composes.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "orgs",
+    "invitations",
+    "onboarding",
+    "membership"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.orgs.nodes.invite",
+      "version": "1.0.0",
+      "label": "Orgs: Invite to Workspace",
+      "description": "Mints an email-token invitation into the run's workspace root (or `orgId`) over ctx.features.orgs and delivers the accept link through the acting user's brokered email connection (send-once per inviteId). Requires an ACTIVE acting user holding host:members:manage in that org and OPENWOP_PUBLIC_BASE_URL on the host. An undeliverable invite is rolled back and fails TYPED (never success over an unreachable row); a prior live invite for the same (org, email) is superseded only after the new one is delivered. Side-effecting: a replay/fork is served the recorded outcome \u2014 a re-executed mint would be a NEW inviteId that kills the previously emailed link. Emits host.orgs.invitation.created stamped with the run's origin (workflow + chain lineage) so a binding on that event cannot re-trigger the executing chain or a sibling instance. `email` from inputs.email, else the frozen config.email ({{params.newHireEmail}}).",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "configSchemaRef": "schemas/invite.config.json",
+      "inputSchemaRef": "schemas/invite.input.json",
+      "outputSchemaRef": "schemas/invite.output.json"
+    },
+    {
+      "typeId": "feature.orgs.nodes.list-invitations",
+      "version": "1.0.0",
+      "label": "Orgs: List Invitations",
+      "description": "Reads the invitations of the run's workspace root (or `orgId`): inviteId, role, status (pending/declined \u2014 ADR 0564), expiresAt. Never the recipient email, never the token. Requires an active acting user holding host:members:manage in that org.",
+      "category": "integration",
+      "role": "read",
+      "configSchemaRef": "schemas/list-invitations.config.json",
+      "inputSchemaRef": "schemas/list-invitations.input.json",
+      "outputSchemaRef": "schemas/list-invitations.output.json"
+    },
+    {
+      "typeId": "feature.orgs.nodes.revoke-invitation",
+      "version": "1.0.0",
+      "label": "Orgs: Revoke Invitation",
+      "description": "Deletes one invitation (row, then its token-hash index) in the run's workspace root (or `orgId`) \u2014 the emailed link stops resolving. Requires an active acting user holding host:members:manage. A missing/foreign invite is a uniform typed not_found. Does not emit host.orgs.invitation.revoked (that event is the admin route's \u2014 one site, ADR 0622 D1).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "configSchemaRef": "schemas/revoke-invitation.config.json",
+      "inputSchemaRef": "schemas/revoke-invitation.input.json",
+      "outputSchemaRef": "schemas/revoke-invitation.output.json"
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/list-collections.output.json",
+  "title": "KbListCollectionsOutput",
+  "type": "object",
+  "required": [
+    "collections"
+  ],
+  "properties": {
+    "collections": {
+      "type": "array",
+      "description": "The org's KB collections VISIBLE TO THIS RUN. `KBC-1` (ADR 0643): a collection bound to a membership-scoped Subject (a private project's corpus) is omitted unless the run's acting user is a member \u2014 and a run with NO acting user (schedule / webhook) sees none of them.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

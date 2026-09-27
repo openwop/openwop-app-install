@@ -30,6 +30,17 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
  */
 export const DEFAULT_LLM_REQUEST_TIMEOUT_MS = 120_000;
 
+/**
+ * The example-data seed routes (`/example-data/{seed,run,clear,provision-demo}`)
+ * run a full multi-domain reseed — hundreds of real service calls, well past the
+ * 30s default (ADR 0292). The streaming path flushes headers first (so the timer
+ * below is a no-op), but the plain-JSON path (`curl`, tests) still needs room, so
+ * these routes get a batch budget bounded by Cloud Run's 300s outer timeout.
+ * Note: the `/api` Firebase-Hosting rewrite caps ~60s regardless — the streaming
+ * path via the direct `*.run.app` URL is how the UI actually dodges that.
+ */
+export const DEFAULT_BATCH_REQUEST_TIMEOUT_MS = 300_000;
+
 export function resolveRequestTimeoutMs(): number {
   const raw = process.env.OPENWOP_REQUEST_TIMEOUT_MS;
   if (raw === undefined) return DEFAULT_REQUEST_TIMEOUT_MS;
@@ -44,15 +55,28 @@ export function resolveLlmRequestTimeoutMs(): number {
   return Number.isFinite(n) && n >= 0 ? n : DEFAULT_LLM_REQUEST_TIMEOUT_MS;
 }
 
+export function resolveBatchRequestTimeoutMs(): number {
+  const raw = process.env.OPENWOP_BATCH_REQUEST_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_BATCH_REQUEST_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_BATCH_REQUEST_TIMEOUT_MS;
+}
+
 /** True for the in-request LLM routes (interrupt resolve / conversation exchange). */
 export function isLlmBlockingRoute(req: Request): boolean {
   return req.method === 'POST' && /(^|\/)interrupts(\/|$)/.test(req.path);
 }
 
-/** Per-request budget: the longer LLM budget for the blocking interrupt routes,
- *  the tight default everywhere else. A resolver (not a fixed number) so the
- *  decision is made per request from its path. */
+/** True for the long-running example-data seed/provision routes. */
+export function isBatchSeedRoute(req: Request): boolean {
+  return req.method === 'POST' && /(^|\/)example-data\/(seed|run|clear|provision-demo)$/.test(req.path);
+}
+
+/** Per-request budget: the batch budget for the seed routes, the longer LLM
+ *  budget for the blocking interrupt routes, the tight default everywhere else.
+ *  A resolver (not a fixed number) so the decision is made per request. */
 export function resolveTimeoutForRequest(req: Request): number {
+  if (isBatchSeedRoute(req)) return resolveBatchRequestTimeoutMs();
   return isLlmBlockingRoute(req) ? resolveLlmRequestTimeoutMs() : resolveRequestTimeoutMs();
 }
 

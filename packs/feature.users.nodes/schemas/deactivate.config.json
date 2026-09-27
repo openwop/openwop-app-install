@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.users.nodes/1.0.1/deactivate.config.json",
+  "title": "UsersDeactivateConfig",
+  "description": "Authoring-time configuration. `userId` is the chain-parameter fallback (`{{params.userId}}`, frozen at instantiation) — used only when neither an edge-delivered input nor the host-event trigger payload supplies one. Authorization is never configured here: it is the run's acting user holding host:members:manage in the run's tenant.",
+  "type": "object",
+  "properties": {
+    "userId": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Fallback target account id (`user:<id>`). Runtime inputs win on conflict."
+    }
+  },
+  "additionalProperties": false
+}

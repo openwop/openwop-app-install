@@ -1,7 +1,7 @@
 /**
  * Per-user UI-state client (ADR 0071) — durable, non-authoritative display
  * preferences (selected artifact revision, compare mode, expanded panels,
- * dismissed notices) over the host `/v1/host/openwop-app/ui-state` store. The
+ * dismissed notices) over the host `/host/openwop-app/ui-state` store. The
  * caller's subject is derived server-side; this client never sends it.
  *
  * Mirrors `host/uiStateStore.ts`. Use this instead of localStorage for state
@@ -10,7 +10,7 @@
 
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
-const BASE = '/v1/host/openwop-app/ui-state';
+const BASE = '/host/openwop-app/ui-state';
 
 export type UiStateResourceType = 'conversation' | 'review' | 'artifact' | 'message';
 

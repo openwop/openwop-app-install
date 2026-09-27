@@ -1,0 +1,33 @@
+{
+  "name": "kicktodo",
+  "description": "KickTodo \u2014 the consumer guided-achievement distribution (PRD docs/kicktodo-prd.md \u00a79.1\u2013\u00a79.3, ADR 0414). Include-mode: core substrate (goals/scheduler/kanban/chat/media/billing ride core) + the bundles the participant/creator/commerce loops compose (crm rides along: the commerce bundle hard-depends on it). The `kicktodo-core`/`kicktodo-creator` feature packages join `features[]` as they register (Workstream C/D); a dedicated `kicktodo` bundle grouping is added to bundles.json once those features exist with `category: kicktodo` (an empty grouping would violate the catalog invariants). Build identity only \u2014 runtime activation stays server-authoritative toggles.",
+  "bundles": [
+    "commerce",
+    "crm",
+    "content",
+    "agents",
+    "marketing"
+  ],
+  "features": [
+    "kicktodo-core",
+    "kicktodo-creator",
+    "kicktodo-commerce",
+    "kicktodo-accountability",
+    "kicktodo-integrations",
+    "kicktodo-engagement",
+    "kicktodo-community",
+    "kicktodo-organizations",
+    "kicktodo-metrics",
+    "kicktodo",
+    "kicktodo-circles",
+    "kicktodo-studio",
+    "kicktodo-admin",
+    "kicktodo-org-programs",
+    "kicktodo-seats",
+    "documents",
+    "notebooks",
+    "podcasts",
+    "slides",
+    "campaign-studio"
+  ]
+}

@@ -37,6 +37,10 @@ interface Props {
   cursorPos: number;
   onPick: (newText: string, newCursorPos: number) => void;
   onDismiss: () => void;
+  /** ADR 0192 D8 — channel-scoped entries (the channel's agent members with
+   *  their server-persisted mention slugs). When set, the tenant-wide agent
+   *  fetch is skipped entirely. */
+  entriesOverride?: readonly AgentMentionEntry[];
 }
 
 interface MentionState {
@@ -72,9 +76,15 @@ export function AgentMentionAutocomplete({
   cursorPos,
   onPick,
   onDismiss,
+  entriesOverride,
 }: Props): JSX.Element | null {
   const { t } = useTranslation('chat');
-  const { entries, isLoading, error } = useAgentMentions();
+  // Unconditional hook call; the fetch is skipped when the caller supplies its
+  // own entry source (a channel roster — ADR 0192 D8).
+  const fetched = useAgentMentions(entriesOverride !== undefined);
+  const entries = entriesOverride ?? fetched.entries;
+  const isLoading = entriesOverride !== undefined ? false : fetched.isLoading;
+  const error = entriesOverride !== undefined ? null : fetched.error;
   const mention = detectMentionState(text, cursorPos);
   const query = mention?.query ?? '';
   const matches = useMemo(
@@ -211,8 +221,8 @@ function EmptyPanel({
       ref={listRef}
       className="mentionac-empty"
       style={{
-        border: `1px solid ${tone === 'error' ? 'var(--color-danger)' : 'var(--color-border)'}`,
-        color: tone === 'error' ? 'var(--color-danger)' : 'var(--color-text-muted)',
+        border: `1px solid ${tone === 'error' ? 'var(--color-danger)' : 'var(--rule)'}`,
+        color: tone === 'error' ? 'var(--color-danger)' : 'var(--ink-3)',
       }}
     >
       {children}
@@ -239,14 +249,17 @@ function AgentRow({
       onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } }}
       onMouseEnter={onHover}
       className="mentionac-row"
-      style={{ background: selected ? 'var(--color-surface-2)' : 'transparent' }}
+      style={{ background: selected ? 'var(--paper-2)' : 'transparent' }}
     >
       <div className="u-flex u-items-center u-gap-2 u-wrap">
         <code className="u-fw-600 u-fs-12">@{entry.slug}</code>
         <span className="muted u-fs-11">{entry.displayName}</span>
-        <span className="u-fs-10 u-pad-1x6 u-radius u-bg-surface-2 muted u-mono">
-          {entry.modelClass}
-        </span>
+        {/* Channel-roster entries carry no modelClass — no empty chip (ADR 0192). */}
+        {entry.modelClass && (
+          <span className="u-fs-10 u-pad-1x6 u-radius u-bg-surface-2 muted u-mono">
+            {entry.modelClass}
+          </span>
+        )}
       </div>
       <div className="muted u-fs-11">{entry.description}</div>
     </div>

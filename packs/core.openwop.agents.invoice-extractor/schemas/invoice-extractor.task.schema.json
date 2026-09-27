@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.invoice-extractor/1.0.0/invoice-extractor.task.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.invoice-extractor/1.0.1/invoice-extractor.task.schema.json",
   "title": "InvoiceExtractorTask",
   "type": "object",
   "oneOf": [

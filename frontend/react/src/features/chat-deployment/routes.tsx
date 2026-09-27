@@ -21,15 +21,22 @@ const ChatDeploymentHubPage = lazy(() =>
 
 const routes: FeatureRoute[] = [
   {
+    // ADR 0610 D6 (CDC-2) — the console subsumes scheduled-agent-chats + chat-widget, both
+    // `workspace:write` on the backend (their sole authority), so it relocates to the workspace
+    // rail: `workspace`-tier not `admin`, the workspace index archetype (the `admin` archetype means
+    // "on the admin rail", featureTypes.ts), and nav.group `Workspace` (`Platform` is admin-only).
+    // NB this rationale sits ABOVE `path:` on purpose — a comment between path: and nav: pushes the
+    // path→nav distance past the walkthrough anchor-coverage scanner's 600-char window
+    // (anchorCoverage.test.ts), silently dropping this route from that ratchet.
     path: '/chat-deployment',
     element: <ChatDeploymentHubPage />,
-    tier: 'admin',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'Platform',
-      label: 'Chat deployment',
+      group: 'Workspace',
+      label: 'Always-on chat',
       labelKey: 'chatDeploymentLabel',
       icon: SendIcon,
-      hint: 'Run the chat on a schedule, or embed it on your website',
+      hint: 'Schedule it, or put it on your website',
       hintKey: 'chatDeploymentHint',
       order: 6,
       featureId: 'chat-deployment',

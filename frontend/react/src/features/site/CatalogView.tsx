@@ -16,7 +16,7 @@
  * so ordinary CMS pages — including the home page — render through the plain
  * renderer untouched.
  */
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { RenderSection } from '../cms/SectionRenderer.js';
 import type { Section } from '../cms/cmsClient.js';
@@ -50,17 +50,20 @@ export function CatalogView({ sections }: { sections: Section[] }): JSX.Element 
     [sections],
   );
   const searchAt = cardIdxs[1] ?? cardIdxs[0] ?? -1;
-  const filterable = (i: number): boolean => i >= searchAt && isCardsSection(sections[i]!);
+  const filterable = useCallback(
+    (i: number): boolean => i >= searchAt && isCardsSection(sections[i]!),
+    [sections, searchAt],
+  );
 
   const totalCards = useMemo(
     () => sections.reduce((n, s, i) => (filterable(i) ? n + cardsOf(s).length : n), 0),
-    [sections, searchAt],
+    [sections, filterable],
   );
   const matchCount = useMemo(
     () => (!q ? totalCards : sections.reduce(
       (n, s, i) => (filterable(i) ? n + cardsOf(s).filter((c) => matches(c, q)).length : n), 0,
     )),
-    [sections, q, totalCards, searchAt],
+    [sections, q, totalCards, filterable],
   );
 
   const searchBar = (

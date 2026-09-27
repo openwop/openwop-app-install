@@ -1,6 +1,7 @@
 # ADR 0153 — Canvas & Projects program (MyndHyve port): the canvas-as-artifact architecture
 
-**Status:** Proposed — 2026-06-27. (Umbrella/program ADR; each phase lands its own ADR.)
+**Status:** Implemented (Track 1) — 2026-07-06; Track 2 remains deferred/RFC-gated. (Umbrella/program ADR; each phase lands its own ADR.)
+> **Correction note (2026-07-06):** Track 1 is complete (all phases in the §Status table landed). The editor-parity follow-ups this ADR recorded inline — drag-drop reorder (Phase 2b), and the broader gap to the MyndHyve editor baseline (undo/redo, screen CRUD, property-editor depth, interactive preview, version history, templates, publish) — are now owned by **ADR 0305 (App-Builder Editor Parity Program)**, not by this ADR's follow-up notes.
 **Toggle:** per-canvas feature toggles (one per canvas type); the shared substrate is core (no toggle).
 **Surface:** host-extension only. **No new OpenWOP wire RFC for Track 1** (see §RFC gate).
 **Depends on (all already implemented/Accepted):**

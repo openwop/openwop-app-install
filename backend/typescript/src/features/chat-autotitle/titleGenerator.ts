@@ -15,6 +15,29 @@ import { createLogger } from '../../observability/logger.js';
 
 const log = createLogger('features.chat-autotitle');
 const MANAGED_PROVIDER = 'openwop-free';
+
+/** ATC-2 — a FEATURE-OWNED wall-clock bound on the fire-and-forget title dispatch.
+ *  Passing no signal did NOT hang forever: `dispatchChat` applies a coarse default
+ *  floor (`AbortSignal.timeout`, `OPENWOP_PROVIDER_DISPATCH_TIMEOUT_MS`, default
+ *  120s) to an unguarded caller. But 120s is far too long for a detached,
+ *  best-effort background title, and a title timeout was indistinguishable from any
+ *  other provider error in the log. This passes our OWN signal — which the dispatch
+ *  layer then leaves untouched, so 15s REPLACES the 120s floor — and the catch
+ *  labels the abort (`timedOut`) so the "silently never lands" mode is legible.
+ *  Mirrors the chat-responder bound (`nodes.ts` MANAGED_CHAT_TIMEOUT_MS) but is
+ *  tighter (background work, not an interactive turn). Override per-deploy via
+ *  `OPENWOP_AUTOTITLE_TIMEOUT_MS`; `let` (not `const`) so the `_setTitleTimeoutMs`
+ *  test affordance can shrink it for a fast, deterministic witness. */
+let TITLE_TIMEOUT_MS = (() => {
+  const n = Number(process.env.OPENWOP_AUTOTITLE_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : 15_000;
+})();
+
+/** TEST-ONLY — override the title dispatch timeout so a witness need not wait the
+ *  full production window. Mirrors `_setManagedChatTimeoutMs` in `nodes.ts`. */
+export function _setTitleTimeoutMs(ms: number): void {
+  TITLE_TIMEOUT_MS = ms;
+}
 /** Per the data model (≈ ≤ 30 output tokens/chat); headroom for multi-byte scripts. */
 const MAX_OUTPUT_TOKENS = 24;
 const MAX_INPUT_CHARS = 1000;
@@ -59,6 +82,8 @@ export async function generateTitle(
   replyText: string,
 ): Promise<string | null> {
   const transcript = `User: ${userText}\nAI: ${replyText}`.slice(0, MAX_INPUT_CHARS);
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), TITLE_TIMEOUT_MS);
   try {
     const r = await dispatchManagedChat({
       userFacingProvider: MANAGED_PROVIDER,
@@ -68,11 +93,19 @@ export async function generateTitle(
         { role: 'user', content: transcript },
       ],
       maxTokens: MAX_OUTPUT_TOKENS,
+      signal: abort.signal,
     });
     return sanitizeTitle(r.completion ?? '');
   } catch (err) {
     // Fail-soft (no title), but surface the failure (provider error only — no PII).
-    log.warn('autotitle_generate_failed', { error: err instanceof Error ? err.message : String(err) });
+    // Distinguish a wall-clock abort so the "silently never lands" mode is legible.
+    const timedOut = abort.signal.aborted;
+    log.warn('autotitle_generate_failed', {
+      error: err instanceof Error ? err.message : String(err),
+      ...(timedOut ? { timedOut: true, timeoutMs: TITLE_TIMEOUT_MS } : {}),
+    });
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }

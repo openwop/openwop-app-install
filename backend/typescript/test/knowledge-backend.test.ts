@@ -20,14 +20,15 @@ let server: http.Server;
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
+  process.env.OPENWOP_DEMO_MODE = 'true'; // LEAK-10: the demo-corpus fallback case is demo-gated (real-KB case still returns real data first)
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, res); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
   // The KB feature installs the knowledge backend at boot; enable the toggle so
   // tenantRetrieve serves real data (it is toggle-aware).
   const kb = getToggleDefault('kb');
   if (kb) await saveConfig({ ...kb, status: 'on' }, 'test');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { delete process.env.OPENWOP_DEMO_MODE; await new Promise<void>((res) => server.close(() => res())); });
 
 const knowledge = (tenantId: string) => buildHostSurfaceBundle({ tenantId }).knowledge;
 

@@ -1,0 +1,50 @@
+{
+  "id": "conformance-context-budget-multiturn",
+  "name": "Conformance: Context-Budget Multi-Turn Orchestrator (RFC 0111)",
+  "version": "1.0",
+  "description": "RFC 0111 — SUPERSEDED as the witness gate in suite 2.41.0. This fixture scripts the supervisor with `mockDecisions`, i.e. a mock supervisor, which RFC 0111 §Scope forbids from advertising `contextBudget`; no honest host can witness the capability against it. Kept so hosts that still list it keep validating. Both RFC 0111 scenarios (`context-budget-transcript-bound`, `context-summarization-replay`) gate on `conformance-context-budget-live`, which drives the host's live model.",
+  "nodes": [
+    {
+      "id": "supervisor",
+      "typeId": "core.orchestrator.supervisor",
+      "name": "Supervisor",
+      "position": { "x": 0, "y": 0 },
+      "config": {
+        "mockDecisions": [
+          { "kind": "next-worker", "nextWorkerIds": ["conformance-noop"] },
+          { "kind": "next-worker", "nextWorkerIds": ["conformance-noop"] },
+          { "kind": "next-worker", "nextWorkerIds": ["conformance-noop"] },
+          { "kind": "next-worker", "nextWorkerIds": ["conformance-noop"] },
+          { "kind": "terminate", "reason": "goal-reached" }
+        ]
+      },
+      "inputs": {},
+      "agent": {
+        "agentId": "core.conformance.supervisor",
+        "modelClass": "reasoning"
+      }
+    },
+    {
+      "id": "dispatch",
+      "typeId": "core.dispatch",
+      "name": "Dispatch",
+      "position": { "x": 200, "y": 0 },
+      "config": {
+        "askUserRouting": "auto",
+        "workerDispatchModel": "child-run",
+        "fanOutPolicy": "sequential"
+      },
+      "inputs": {}
+    }
+  ],
+  "edges": [
+    { "id": "e1", "sourceNodeId": "supervisor", "targetNodeId": "dispatch" },
+    { "id": "e2", "sourceNodeId": "dispatch", "targetNodeId": "supervisor" }
+  ],
+  "triggers": [
+    { "id": "manual", "type": "manual", "enabled": true }
+  ],
+  "variables": [],
+  "metadata": { "tags": ["conformance", "multi-agent", "phase-5", "orchestrator", "context-budget", "rfc-0111"] },
+  "settings": { "timeout": 60000 }
+}

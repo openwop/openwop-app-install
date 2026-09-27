@@ -7,14 +7,17 @@
  * extract the same way.
  */
 
+import { Button } from '../ui/Button.js';
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { OrgMember, EffectiveAccess } from '../client/accessClient.js';
 import { StateCard } from '../ui/StateCard.js';
+import { InvitesSection } from './InvitesSection.js';
 import { UserIcon, ShieldIcon, PencilIcon, TrashIcon } from '../ui/icons/index.js';
 import { NEUTRAL_CHIP } from './orgUi.js';
 
 export interface MembersPanelProps {
+  orgId: string;
   members: OrgMember[];
   memberName: string;
   setMemberName: (v: string) => void;
@@ -40,6 +43,7 @@ export interface MembersPanelProps {
 }
 
 export function MembersPanel({
+  orgId,
   members, memberName, setMemberName, memberEmail, setMemberEmail, memberRoles, setMemberRoles,
   assignableRoleIds, editingId, setEditingId, draftRoles, setDraftRoles, accessFor, access,
   onCreateMember, onShowAccess, startEdit, onDeleteMember, onSaveRoles, can, roleLabel, toggleStr,
@@ -50,12 +54,16 @@ export function MembersPanel({
       <h3 className="u-fs-14 u-flex u-items-center u-gap-2">
         <UserIcon size={15} /> {t('membersHeading')}
       </h3>
+      {/* Email invitations (ADR 0004; AUTH-3): the enterprise on-ramp. Renders
+          only when the `orgs` invitation feature is enabled + caller can manage
+          members; the direct-add form below stays for service/local accounts. */}
+      <InvitesSection orgId={orgId} canManage={can('host:members:manage')} assignableRoleIds={assignableRoleIds} roleLabel={roleLabel} />
       <form onSubmit={onCreateMember} className="action-bar u-wrap u-mb-3">
         <input value={memberName} onChange={(e) => setMemberName(e.target.value)} placeholder={t('memberNamePlaceholder')} aria-label={t('memberNameAriaLabel')} />
         <input value={memberEmail} onChange={(e) => setMemberEmail(e.target.value)} placeholder={t('memberEmailPlaceholder')} aria-label={t('memberEmailAriaLabel')} />
         <span className="action-bar u-gap-1-5">
           {assignableRoleIds.map((role) => (
-            <label key={role} className={`${NEUTRAL_CHIP} members-chip-toggle`} style={{ opacity: memberRoles.has(role) ? 1 : 0.6 }}>
+            <label key={role} className={`${NEUTRAL_CHIP} members-chip-toggle`} data-off={!memberRoles.has(role) || undefined}>
               <input
                 type="checkbox"
                 checked={memberRoles.has(role)}
@@ -66,7 +74,7 @@ export function MembersPanel({
             </label>
           ))}
         </span>
-        <button type="submit" className="primary" disabled={!memberName.trim() || !can('host:members:manage')} title={can('host:members:manage') ? undefined : t('addMemberRequiresScope')}>{t('addMember')}</button>
+        <Button variant="primary" type="submit" disabled={!memberName.trim() || !can('host:members:manage')} title={can('host:members:manage') ? undefined : t('addMemberRequiresScope')}>{t('addMember')}</Button>
       </form>
 
       {members.length === 0 ? (
@@ -80,15 +88,15 @@ export function MembersPanel({
                 {m.email ? <span className="members-muted"> · {m.email}</span> : null}
               </span>
               <span className="action-bar">
-                <button type="button" className="secondary" onClick={() => void onShowAccess(m)}>
+                <Button variant="secondary" onClick={() => void onShowAccess(m)}>
                   <ShieldIcon size={13} /> {t('accessButton')}
-                </button>
-                <button type="button" className="secondary" disabled={!can('host:members:manage')} onClick={() => startEdit(m)} aria-label={t('editRolesAriaLabel', { name: m.displayName })}>
+                </Button>
+                <Button variant="secondary" disabled={!can('host:members:manage')} onClick={() => startEdit(m)} aria-label={t('editRolesAriaLabel', { name: m.displayName })}>
                   <PencilIcon size={13} /> {t('rolesButton')}
-                </button>
-                <button type="button" className="secondary" disabled={!can('host:members:manage')} onClick={() => void onDeleteMember(m)} aria-label={t('removeMemberAriaLabel', { name: m.displayName })}>
+                </Button>
+                <Button variant="secondary" disabled={!can('host:members:manage')} onClick={() => void onDeleteMember(m)} aria-label={t('removeMemberAriaLabel', { name: m.displayName })}>
                   <TrashIcon size={13} />
-                </button>
+                </Button>
               </span>
             </div>
 
@@ -105,7 +113,7 @@ export function MembersPanel({
             {editingId === m.memberId ? (
               <div className="action-bar u-wrap u-mt-2">
                 {assignableRoleIds.map((role) => (
-                  <label key={role} className={`${NEUTRAL_CHIP} members-chip-toggle`} style={{ opacity: draftRoles.has(role) ? 1 : 0.6 }}>
+                  <label key={role} className={`${NEUTRAL_CHIP} members-chip-toggle`} data-off={!draftRoles.has(role) || undefined}>
                     <input
                       type="checkbox"
                       checked={draftRoles.has(role)}
@@ -115,8 +123,8 @@ export function MembersPanel({
                     {roleLabel(role)}
                   </label>
                 ))}
-                <button type="button" className="primary" onClick={() => void onSaveRoles(m)}>{t('common:save')}</button>
-                <button type="button" className="secondary" onClick={() => setEditingId(null)}>{t('common:cancel')}</button>
+                <Button variant="primary" onClick={() => void onSaveRoles(m)}>{t('common:save')}</Button>
+                <Button variant="secondary" onClick={() => setEditingId(null)}>{t('common:cancel')}</Button>
               </div>
             ) : null}
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 /**
@@ -30,18 +30,25 @@ function sids(): string[] {
   return screen.getAllByTestId('tabsession').map((el) => el.getAttribute('data-sid')!).sort();
 }
 
+// Two "New chat" buttons exist now — the tab-strip launcher AND the persistent
+// Conversations rail's empty-state action. Target the strip's (outside the rail).
+function clickStripNewTab(): void {
+  const btn = screen.getAllByRole('button', { name: 'New chat' }).find((b) => !b.closest('.conversations-rail'))!;
+  fireEvent.click(btn);
+}
+
 describe('TabChatDeck — keep-alive', () => {
   it('bootstraps one tab, and opening a second keeps BOTH mounted', async () => {
-    await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
+    await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
     expect(screen.getAllByTestId('tabsession')).toHaveLength(1); // bootstrap
 
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'New chat' })); });
+    await act(async () => { clickStripNewTab(); });
     expect(screen.getAllByTestId('tabsession')).toHaveLength(2); // both mounted
   });
 
   it('switching the active tab does NOT unmount the background tab (keep-alive)', async () => {
-    await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'New chat' })); });
+    await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
+    await act(async () => { clickStripNewTab(); });
 
     const before = sids();
     expect(before).toHaveLength(2);
@@ -55,7 +62,9 @@ describe('TabChatDeck — keep-alive', () => {
     // sessions, every tab's title falls back to "New chat", so the two role=tab buttons
     // are the tab controls (the new-tab CTA is a button, not a tab).
     const hiddenSid = hidden[0]!.querySelector('[data-testid="tabsession"]')!.getAttribute('data-sid');
-    const tabButtons = screen.getAllByRole('tab');
+    // Filter to the conversation tabs (they carry data-sid); the persistent
+    // Conversations rail also renders a mode tablist (Conversations/Workflow/Reviews).
+    const tabButtons = screen.getAllByRole('tab').filter((el) => el.getAttribute('data-sid'));
     expect(tabButtons).toHaveLength(2);
     await act(async () => { fireEvent.click(tabButtons[0]!); });
 
@@ -68,11 +77,13 @@ describe('TabChatDeck — keep-alive', () => {
   });
 
   it('closing a tab removes exactly that one; the other stays mounted', async () => {
-    await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
-    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'New chat' })); });
+    await act(async () => { render(<MemoryRouter><TabChatDeck config={CONFIG} byokStored onReconfigureBYOK={vi.fn()} /></MemoryRouter>); });
+    await act(async () => { clickStripNewTab(); });
     expect(screen.getAllByTestId('tabsession')).toHaveLength(2);
 
-    const closeButtons = screen.getAllByRole('button', { name: /^Close / });
+    // Scope to the conversation tab strip so the rail's "Close conversations" and the
+    // strip's "Close chat tools" rail-toggle don't shadow the per-tab close buttons.
+    const closeButtons = within(screen.getByRole('tablist', { name: 'Open chat tabs' })).getAllByRole('button', { name: /^Close / });
     await act(async () => { fireEvent.click(closeButtons[0]!); });
     expect(screen.getAllByTestId('tabsession')).toHaveLength(1);
   });

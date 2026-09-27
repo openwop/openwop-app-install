@@ -8,9 +8,17 @@
  */
 import type { BackendFeature } from '../types.js';
 import { registerChatExportRoutes } from './routes.js';
+import { registerChatExportAgentTools } from './agentTools.js';
 
 export const chatExportFeature: BackendFeature = {
   id: 'chat-export',
-  registerRoutes: (deps) => { registerChatExportRoutes(deps); },
+  registerRoutes: (deps) => {
+    registerChatExportRoutes(deps);
+    // A6 (chat-first port) — the `openwop:conversations.export-document` agent
+    // tool: igniting the ADR 0119 Phase-3 export helper. Registered here (the
+    // same feature-init seam documents uses); the tool re-checks the `documents`
+    // toggle per tenant and enforces ADR 0043 conversation READ visibility.
+    registerChatExportAgentTools();
+  },
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
 };

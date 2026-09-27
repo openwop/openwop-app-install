@@ -1,0 +1,44 @@
+{
+  "name": "feature.creative-video.nodes",
+  "version": "1.1.0",
+  "description": "AI video node pack (ADR 0404) — `generate` (avatar script→MP4 via the HeyGen-class provider), `text-to-video` (frontier text→video, ADR 0404 §P4, behind the creative-video.t2v sub-toggle), and `status`. All ride the Connections broker (async submit→poll→download→media asset; ADR 0106 cost-metered; replay-safe — the asset id is the recorded output, never a regenerate). Over ctx.features['creative-video']; adapterOnly consumer of the heygen + runway providers.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "creative-video", "heygen", "runway", "ai", "media"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.creative-video.nodes.generate",
+      "version": "1.0.0",
+      "label": "AI Video: Generate",
+      "description": "Generates an avatar video from a script over ctx.features['creative-video'].generateVideo (async: submit → bounded-poll → download → media asset). Inputs: { orgId, script, avatarId, voiceId? }. Output: { success, status: 'completed'|'pending'|'failed', jobId, assetId? } — on completion the output is the MEDIA ASSET ID (replay returns it, never regenerates). Cost-metered (ADR 0106 video); the governed spend rides the adapterOnly heygen provider.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-video.nodes.text-to-video",
+      "version": "1.0.0",
+      "label": "AI Video: Text-to-Video",
+      "description": "Generates a video directly from a text prompt with a frontier text-to-video model (Runway/Veo/Sora-class) over ctx.features['creative-video'].textToVideo (async: submit → bounded-poll → download → media asset). Inputs: { orgId, prompt, model?, durationSec? }. Output: { success, status: 'completed'|'pending'|'failed', jobId, assetId? } — the asset id is the recorded output (replay returns it). Gated by the creative-video.t2v sub-toggle (AND the parent); metered at a heavier weight against the ADR 0106 daily video budget; governed spend rides the adapterOnly runway provider.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-video.nodes.status",
+      "version": "1.0.0",
+      "label": "AI Video: Job Status",
+      "description": "Reads a video job's status over ctx.features['creative-video'].getVideoStatus — resolves a `pending` generate into its final asset id once the provider finishes. Inputs: { orgId, jobId }. Output: { success, status, assetId?, error? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

@@ -1,0 +1,24 @@
+<!doctype html>
+<!-- vendor.openwop.trusted-demo — the SANDBOX (Tier-2) fallback view. The same
+     pack degrades honestly: when the trusted-plugins lane is off (or the
+     signature/keyring/revocation check fails), the host serves THIS document
+     into the cross-origin sandboxed iframe instead of the main-frame module. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Trusted demo (sandbox fallback)</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 1rem; color: inherit; }
+      .note { opacity: 0.75; font-size: 0.9rem; }
+    </style>
+  </head>
+  <body>
+    <strong>Trusted demo plugin — sandbox fallback</strong>
+    <p class="note">
+      The trusted lane is off (or verification did not pass), so this pack is
+      running in the Tier-2 sandbox: opaque origin, deny-egress CSP, host-RPC
+      allowlist only. Enable the <code>trusted-plugins</code> toggle with the
+      publisher key pinned to see the main-frame (Tier-1) mount.
+    </p>
+  </body>
+</html>

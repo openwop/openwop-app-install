@@ -13,6 +13,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { assertFlatErrorEnvelope, errorCodeOf } from './helpers/errorEnvelope.js';
 
 let BASE: string;
 const H = { authorization: 'Bearer dev-token', 'content-type': 'application/json' };
@@ -24,7 +25,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/v1/host/openwop-app/ai/call`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; URL = `${BASE}/v1/host/openwop-app/ai/call`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -81,8 +82,13 @@ describe('RFC 0091 — callai-multimodal seam', () => {
       { type: 'video', mimeType: 'video/mp4', dataBase64: 'AAAA' },
     ] }] });
     expect(res.status).toBe(400);
-    const body = await res.json() as { error?: { code?: string } };
-    expect(body.error?.code).toBe('unsupported_modality');
+    // H27 / S22 — INVERTED. This read `error.code`; the canonical envelope is
+    // FLAT, so the code is `error` itself. Against the flat shape the old read
+    // was `undefined`, which would have matched any 400 at all — the modality
+    // gate is exactly the thing this leg must not lose sight of.
+    const body: unknown = await res.json();
+    assertFlatErrorEnvelope(body, 'unadvertised-modality refusal');
+    expect(errorCodeOf(body)).toBe('unsupported_modality');
   });
 
   it('400s on a missing/empty messages array', async () => {

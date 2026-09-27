@@ -1,0 +1,250 @@
+/* ── Admin tier (white-label PRD §2: two-tier IA as framework chrome) ──────
+ * <AdminLayout> = pathless layout route; the embedded rail derives from the
+ * feature manifest's admin tier. Renders inside .app-main-fullbleed. */
+.admin-shell {
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
+  gap: var(--space-4);
+  align-items: start;
+  padding: var(--space-4) var(--space-5);
+  width: 100%;
+}
+.admin-rail {
+  position: sticky;
+  top: var(--space-4);
+  align-self: start;
+  /* ADR 0139 — the rail can now exceed the viewport (configurable headers/items),
+     so pin it and let its nav scroll independently (mirrors .app-sidebar-nav). */
+  max-height: calc(100dvh - var(--space-4) - var(--space-4));
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.admin-rail nav { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.admin-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0 var(--space-2-5) var(--space-2);
+}
+.admin-rail-title {
+  font-size: var(--text-eyebrow);
+  font-weight: var(--weight-marquee);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.admin-rail-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.admin-rail-toggle:hover { color: var(--ink); background: var(--paper-2); border-color: transparent; }
+/* Chevron points right when collapsed (expand), left when expanded. */
+.admin-shell:not(.is-collapsed) .admin-rail-toggle svg { transform: rotate(180deg); }
+.admin-rail nav ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.admin-nav-group + .admin-nav-group { margin-top: var(--space-3); }
+.admin-nav-group-label {
+  font-family: var(--mono);
+  font-size: var(--text-eyebrow);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding: 0 var(--space-2-5) var(--space-1);
+}
+/* ADR 0139 — section label doubles as a collapse toggle (admin rail). */
+.admin-nav-group-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  min-height: 32px;
+}
+.admin-nav-group-toggle:hover { color: var(--ink-2); background: none; border-color: transparent; }
+.admin-nav-group-chevron { transition: transform 120ms var(--ease-standard); flex-shrink: 0; }
+.admin-nav-group-chevron.is-collapsed { transform: rotate(-90deg); }
+@media (prefers-reduced-motion: reduce) {
+  .admin-nav-group-chevron { transition: none; }
+}
+.admin-nav-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2-5);
+  padding: var(--space-2) var(--space-2-5);
+  border-radius: var(--radius);
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-emphasis);
+  line-height: 1.2;
+  min-height: 36px;
+}
+.admin-nav-link:focus-visible,
+.admin-nav-group-toggle:focus-visible,
+.admin-rail-toggle:focus-visible,
+.admin-rail-mobile-toggle:focus-visible,
+.admin-home-recent-link:focus-visible,
+.admin-directory-link:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+}
+.admin-nav-link:visited { color: var(--ink-2); }
+.admin-nav-link:hover { background: var(--paper-2); color: var(--ink); }
+.admin-nav-link.is-active { background: var(--clay-soft); color: var(--clay-text); font-weight: var(--weight-head); }
+.admin-nav-link.is-active:visited { color: var(--clay-text); }
+.admin-nav-link .nav-badge { margin-inline-start: auto; }
+.admin-nav-icon { display: inline-flex; align-items: center; color: var(--ink-3); flex-shrink: 0; }
+.admin-nav-link:hover .admin-nav-icon { color: var(--ink-2); }
+.admin-nav-link.is-active .admin-nav-icon { color: var(--clay-text); }
+.admin-nav-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Collapsed icon strip — desktop only; the ≤860px layout stacks instead. */
+@media (min-width: 861px) {
+  .admin-shell.is-collapsed { grid-template-columns: 44px minmax(0, 1fr); gap: var(--space-3); padding-inline-start: var(--space-3); }
+  .admin-shell.is-collapsed .admin-rail-head { justify-content: center; padding-inline-start: 0; padding-inline-end: 0; }
+  .admin-shell.is-collapsed .admin-nav-label { display: none; }
+  .admin-shell.is-collapsed .admin-nav-link { justify-content: center; padding: var(--space-2) 0; }
+}
+@media (pointer: coarse) {
+  .admin-rail-toggle,
+  .admin-nav-group-toggle,
+  .admin-nav-link { min-height: var(--hit-target); }
+  .admin-rail-toggle { min-width: var(--hit-target); }
+}
+/* DSA-026 (ADR 0510 Phase 7): ≤860px the rail is a COMPACT DISCLOSURE, not a
+ * wrapping link cloud — one labeled row naming the current destination; the
+ * sections expand vertically on demand and close on navigation. Desktop never
+ * sees the toggle. */
+.admin-rail-mobile-toggle { display: none; }
+@media (max-width: 860px) {
+  .admin-shell { grid-template-columns: minmax(0, 1fr); padding: var(--space-3); }
+  .admin-rail { position: static; border-bottom: 1px solid var(--rule); padding-bottom: var(--space-2); }
+  .admin-rail-mobile-toggle {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    width: 100%;
+    background: var(--paper);
+    border: 1px solid var(--rule);
+    border-radius: var(--radius);
+    color: var(--ink);
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    cursor: pointer;
+    min-height: var(--hit-target);
+  }
+  .admin-rail-mobile-toggle:hover { background: var(--paper-2); color: var(--ink); }
+  .admin-rail-mobile-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The desktop collapse chrome is meaningless in the stacked layout. */
+  .admin-rail-head { display: none; }
+  .admin-rail nav { display: none; }
+  .admin-shell.is-mobile-nav-open .admin-rail nav { display: block; padding-top: var(--space-2); }
+  /* Accordion, not cloud: the lists stay VERTICAL when disclosed. */
+  .admin-rail nav ul { flex-direction: column; }
+  .admin-content { border-inline-start: 0; padding-inline-start: 0; }
+}
+/* Content column: owns its width so admin pages stay shell-width-agnostic.
+ * `--narrow` preserves the manifest's reading-width tier inside the shell.
+ * The full-height divider lives HERE (the tall column), not on the short
+ * sticky rail. */
+.admin-content {
+  min-width: 0;
+  max-width: 1200px;
+  border-inline-start: 1px solid var(--rule);
+  padding-inline-start: var(--space-5);
+}
+.admin-content--narrow { max-width: 760px; }
+
+/* The single Admin entry pinned under the workspace groups. */
+.app-nav-group--admin { margin-top: var(--space-4); padding-top: var(--space-3); border-top: 1px solid var(--rule); }
+
+/* Admin overview (/admin): decisions first, then a compact manifest directory. */
+.admin-home-status-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+.admin-home-status {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+}
+.admin-home-status.is-attention { border-color: var(--color-warning); }
+.admin-home-status.is-attention .admin-home-status-icon { color: var(--color-warning-text); }
+.admin-home-status-icon { display: inline-flex; color: var(--clay-text); flex-shrink: 0; margin-top: 2px; }
+.admin-home-status h2,
+.admin-home-recent h2,
+.admin-directory h2 { margin: 0; font-size: var(--text-lg); }
+.admin-home-status p { margin: var(--space-1) 0 var(--space-2); color: var(--ink-2); }
+.admin-home-recent { margin-top: var(--space-5); }
+.admin-home-recent h2 { display: flex; align-items: center; gap: var(--space-2); }
+.admin-home-recent-list { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.admin-home-recent-link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--hit-target);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  color: var(--ink);
+  text-decoration: none;
+}
+.admin-home-recent-link:visited { color: var(--ink); }
+.admin-home-recent-link:hover { border-color: var(--clay-text); background: var(--paper-2); }
+.admin-directory { margin-top: var(--space-6); padding-top: var(--space-5); border-top: 1px solid var(--rule); }
+.admin-directory-head { display: flex; align-items: flex-end; justify-content: space-between; gap: var(--space-5); }
+.admin-directory-head p { max-width: 62ch; margin: var(--space-1) 0 0; color: var(--ink-2); }
+.admin-directory-search { display: flex; flex-direction: column; gap: var(--space-1); min-width: min(100%, 320px); color: var(--ink-2); font-size: var(--text-sm); font-weight: var(--weight-emphasis); }
+.admin-directory-search-control { position: relative; display: flex; align-items: center; }
+.admin-directory-search-control > svg { position: absolute; inset-inline-start: var(--space-3); color: var(--ink-3); pointer-events: none; }
+.admin-directory-search-control .ui-input { width: 100%; padding-inline-start: var(--space-6); }
+.admin-directory-result-count { color: var(--ink-3); font-family: var(--mono); font-size: var(--text-eyebrow); font-weight: var(--weight-emphasis); }
+.admin-directory-group { margin-top: var(--space-5); }
+.admin-directory-group h3 {
+  margin: 0 0 var(--space-2);
+  font-family: var(--mono);
+  font-size: var(--text-eyebrow);
+  font-weight: var(--weight-head);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.admin-directory-list { border-top: 1px solid var(--rule); }
+.admin-directory-link {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--hit-target);
+  padding: var(--space-3) var(--space-2);
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink);
+  text-decoration: none;
+}
+.admin-directory-link:visited { color: var(--ink); }
+.admin-directory-link:hover { background: var(--paper-2); }
+.admin-directory-icon { display: inline-flex; color: var(--clay-text); }
+.admin-directory-meta { display: flex; flex-direction: column; min-width: 0; }
+.admin-directory-label { font-weight: var(--weight-head); }
+.admin-directory-hint { color: var(--ink-2); font-size: var(--text-sm); line-height: 1.4; }
+@media (max-width: 1024px) {
+  .admin-home-status-grid { grid-template-columns: minmax(0, 1fr); }
+  .admin-directory-head { align-items: stretch; flex-direction: column; }
+  .admin-directory-search { min-width: 0; width: 100%; }
+}

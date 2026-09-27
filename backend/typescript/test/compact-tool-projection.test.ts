@@ -5,6 +5,9 @@
  * notebooks-mcp.test.ts (the notebook tools are the projected `mcp` source).
  */
 import http from 'node:http';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { Ajv2020 } from 'ajv/dist/2020.js';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -25,7 +28,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TOOLCATALOG_COMPACTVIEW = 'true'; // RFC 0112 advert ON for this suite
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['notebooks', 'kb', 'users']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -84,6 +87,24 @@ describe('RFC 0112 — GET /v1/tools?view=compact', () => {
     }
   });
 
+  it('every served compact descriptor VALIDATES against the vendored v2 schema (closed inputSchema)', async () => {
+    // The same check suite 2.40.0's `tool-catalog-compact-projection` runs. The
+    // keyword greps above could not see a leaked `required`/`additionalProperties`,
+    // which is how this shipped: every descriptor with an argument schema was
+    // invalid on the v2 wire. Validate the SHAPE, against the pinned schema.
+    const schema = JSON.parse(readFileSync(join(process.cwd(), '..', '..', 'schemas', 'v2', 'compact-tool-descriptor.schema.json'), 'utf8')) as object;
+    const validate = new Ajv2020({ allErrors: true, strict: false }).compile(schema);
+    const c = await owner('cmp-schema');
+    const res = await c.get('/v1/tools?view=compact');
+    expect(res.status).toBe(200);
+    const tools = (res.body as { tools: Array<Record<string, unknown>> }).tools;
+    const withSchema = tools.filter((d) => d.inputSchema !== undefined);
+    expect(withSchema.length, 'non-vacuity: at least one compact descriptor must carry an inputSchema').toBeGreaterThan(0);
+    for (const d of tools) {
+      expect(validate(d), `${String(d.toolId)}: ${JSON.stringify(validate.errors)}`).toBe(true);
+    }
+  });
+
   it('compact toolId set EQUALS the standard view for the same principal (RFC 0074)', async () => {
     const c = await owner('compact-parity');
     const std = (await c.get('/v1/tools')).body as Array<{ toolId: string }>;
@@ -104,9 +125,12 @@ describe('RFC 0112 — GET /v1/tools?view=compact', () => {
 });
 
 describe('RFC 0112 — compactInputSchema / toCompactDescriptor unit', () => {
-  it('keeps a self-contained object schema (annotations stripped)', () => {
-    const out = compactInputSchema({ $schema: 'x', title: 'T', type: 'object', properties: { a: { type: 'string', description: 'keep' } }, required: ['a'] });
-    expect(out).toEqual({ type: 'object', properties: { a: { type: 'string', description: 'keep' } }, required: ['a'] });
+  it('keeps a self-contained object schema as exactly {type, properties} (annotations stripped)', () => {
+    // CORRECTED 2026-09-26: this used to assert `required: ['a']` SURVIVED, which
+    // pinned the defect — the v2 compact schema closes the top level to
+    // `{type, properties}`, so the leak failed suite 2.40.0 on production.
+    const out = compactInputSchema({ $schema: 'x', title: 'T', type: 'object', properties: { a: { type: 'string', description: 'keep' } }, required: ['a'], additionalProperties: false });
+    expect(out).toEqual({ type: 'object', properties: { a: { type: 'string', description: 'keep' } } });
   });
   it('OMITS a schema that uses $ref/oneOf (not losslessly representable in the subset)', () => {
     expect(compactInputSchema({ type: 'object', properties: { a: { $ref: '#/$defs/x' } }, $defs: { x: { type: 'string' } } })).toBeUndefined();

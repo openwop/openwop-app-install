@@ -1,0 +1,174 @@
+{
+  "name": "core.openwop.workflows.tutorial-connect-your-ai",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "ADR 0488 D2 — the NESTING PROOF. The 'Connect Your AI' tutorial expressed as phase-granular sub-chains: one child chain per driveable phase, plus a parent chain that composes them via core.subWorkflow + subChainRef (RFC 0133). 'Show me this phase' runs a child; 'Drive the whole tutorial' runs the parent. Deliberately ONE tutorial: the ADR requires proving nesting on a single tutorial before converting the library.",
+  "keywords": [
+    "Tutorials",
+    "Walkthroughs",
+    "Onboarding"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "tutorial.connect-your-ai.phase-2",
+      "version": "1.0.0",
+      "label": "Connect Your AI — Phase 2: Add your provider key",
+      "description": "Drives the Keys page, where a provider credential is added (BYOK). Opens with an ADR 0489 already-satisfied checkpoint: a learner who has already connected a provider is told so and that step is marked skipped, rather than being walked through it.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "c1",
+            "typeId": "ui.walkthrough.checkpoint",
+            "config": {
+              "expect": "byok.provider-configured",
+              "narration": "keysWalkthroughAlreadyConfigured"
+            }
+          },
+          {
+            "id": "s1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "keys.page.view",
+              "narration": "keysWalkthroughProviders"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "c1",
+            "to": "s1"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tutorial.connect-your-ai.phase-3",
+      "version": "1.0.0",
+      "label": "Connect Your AI — Phase 3: Choose your models",
+      "description": "Drives the Models page, where the workspace's models are selected.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "s1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "models.page.view",
+              "narration": "modelsWalkthroughHub"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tutorial.connect-your-ai.phase-4",
+      "version": "1.0.0",
+      "label": "Connect Your AI — Phase 4: Your first conversation",
+      "description": "The learner sends a real message (HITL — only the user's own action resolves it), then a checkpoint confirms an assistant reply actually arrived. Two nodes, so this phase also proves a child chain is not limited to a single step.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "s1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "chat.composer.send-message",
+              "narration": "chatWalkthroughCompose",
+              "hitl": true
+            }
+          },
+          {
+            "id": "s2",
+            "typeId": "ui.walkthrough.checkpoint",
+            "config": {
+              "expect": "chat.response-received",
+              "narration": "chatWalkthroughResponse"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "s1",
+            "to": "s2"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "tutorial.connect-your-ai",
+      "version": "1.0.0",
+      "label": "Connect Your AI — drive the whole tutorial",
+      "description": "The PARENT: composes the three driveable phases as sub-chains, in order. Phases 1 and 5 of the narrative are read-only (they explain the managed tier and what to do next) and correctly have no spine — a chain step exists only where there is something to DO.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "subChains": [
+        {
+          "ref": "tutorial.connect-your-ai.phase-2"
+        },
+        {
+          "ref": "tutorial.connect-your-ai.phase-3"
+        },
+        {
+          "ref": "tutorial.connect-your-ai.phase-4"
+        }
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "phase-2",
+            "typeId": "core.subWorkflow",
+            "config": {
+              "waitForCompletion": true,
+              "subChainRef": "tutorial.connect-your-ai.phase-2"
+            }
+          },
+          {
+            "id": "phase-3",
+            "typeId": "core.subWorkflow",
+            "config": {
+              "waitForCompletion": true,
+              "subChainRef": "tutorial.connect-your-ai.phase-3"
+            }
+          },
+          {
+            "id": "phase-4",
+            "typeId": "core.subWorkflow",
+            "config": {
+              "waitForCompletion": true,
+              "subChainRef": "tutorial.connect-your-ai.phase-4"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "phase-2",
+            "to": "phase-3"
+          },
+          {
+            "from": "phase-3",
+            "to": "phase-4"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import { setAgentPackResolver } from '../executor/agentRegistry.js';
 import { hydrateUserAgentIntoRegistry } from '../routes/userAgents.js';
 import { loadAgentsFromManifest } from '../packs/agentLoader.js';
 import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
+import { isParkedPackDirName } from './mountLocalPacks.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 
@@ -47,6 +48,7 @@ export function loadAllLocalAgents(): number {
   if (!existsSync(PACK_DIR)) return 0;
   let total = 0;
   for (const entry of readdirSync(PACK_DIR)) {
+    if (isParkedPackDirName(entry)) continue; // shadow-pass leftovers are recoverable, never loadable
     const manifestPath = join(PACK_DIR, entry, 'pack.json');
     if (!existsSync(manifestPath)) continue;
     try {
@@ -65,15 +67,18 @@ export function loadAllLocalAgents(): number {
 export function ensureAgentPackResolverInstalled(storage: Storage): void {
   // Lazy resolver — handles a registry miss for both user-authored agents and
   // packs installed after boot.
-  setAgentPackResolver(async (agentId) => {
+  setAgentPackResolver(async (agentId, tenant) => {
     // User-authored / seeded agents live in durable storage, NOT the pack dir.
     // The registry is boot-hydrated (not read-through), so on an instance that
     // booted before the agent was created/seeded it's absent from the in-process
     // map though present in storage. Hydrate it first so `resolve()` re-reads it
     // — this closes the multi-instance gap for chat-callable seeded personas.
-    if (await hydrateUserAgentIntoRegistry(storage, agentId)) return null;
+    // ADR 0379 P2: the tenant rides the resolve call, so the hydrate read is
+    // tenant-scoped whenever a tenant is known.
+    if (await hydrateUserAgentIntoRegistry(storage, agentId, tenant)) return null;
     if (!existsSync(PACK_DIR)) return null;
     for (const entry of readdirSync(PACK_DIR)) {
+      if (isParkedPackDirName(entry)) continue;
       const manifestPath = join(PACK_DIR, entry, 'pack.json');
       if (!existsSync(manifestPath)) continue;
       try {

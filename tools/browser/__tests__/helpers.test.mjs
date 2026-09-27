@@ -5,9 +5,15 @@
  * branch in the server-side command handlers so regressions surface
  * without having to spin up the browser integration harness.
  *
- * Uses Node's built-in test runner (`node --test tools/browser/`) so the repo
- * root needs no test framework dependency (openwop-app keeps the root manifest
- * lean — each workspace owns its own deps).
+ * Uses Node's built-in test runner so the repo root needs no test framework
+ * dependency (openwop-app keeps the root manifest lean — each workspace owns
+ * its own deps). Run with a QUOTED glob so Node expands it, not the shell:
+ *
+ *     node --test 'tools/browser/__tests__/*.test.mjs'
+ *
+ * The bare-directory form (`node --test tools/browser/`) does NOT work on
+ * Node 22 — it resolves the path as a module and exits 1 having run nothing,
+ * which reads like one failing test rather than fourteen skipped ones.
  */
 
 import { describe, it } from 'node:test';

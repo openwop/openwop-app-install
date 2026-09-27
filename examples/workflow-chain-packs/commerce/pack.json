@@ -1,0 +1,388 @@
+{
+  "name": "core.openwop.workflows.commerce",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0152) \u2014 the Commerce operations cluster (ecommerce gap plan \u00a75C C8): Post-Purchase Thank-You, Low-Stock Reorder Draft, and the Order Exception Digest. Designed to bind to the ADR 0221 host events (host.commerce.order.paid, host.commerce.inventory.low-stock \u2014 create a host-event binding to enroll; ADR 0208) or the schedule trigger. Every outbound send rides the governed email-send integration node (drafts/approval per the tenant's actionPolicy \u2014 ADR 0033) and the ONE notification seam; order data flows through feature.commerce.nodes over ctx.features.commerce, so the ADR 0221 audit rows + spend thresholds apply by construction. Enrollment state = the run itself; a binding fires one run per event.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "Commerce"
+  ],
+  "chains": [
+    {
+      "chainId": "commerce.post-purchase-thankyou",
+      "version": "1.0.0",
+      "label": "Post-Purchase Thank-You",
+      "description": "On order paid (bind to host.commerce.order.paid): read the order, AI-compose a grounded thank-you, human sign-off, then the governed email-send (compose output flows to send via the edge \u2014 the corpus convention; the tenant actionPolicy decides draft-vs-send, the ADR 0193 ledger dedups re-fires).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId", "recipientEmail", "senderEmail"],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The merchant org id."
+          },
+          "orderId": {
+            "type": "string",
+            "default": "",
+            "description": "The paid order (from the trigger payload when event-bound)."
+          },
+          "tone": {
+            "type": "string",
+            "default": "warm, brief, no upsell",
+            "description": "Voice for the thank-you note."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "Thank you for your order", "description": "Subject line for the sent email." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "order",
+            "typeId": "feature.commerce.nodes.get-order",
+            "name": "Read the order",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "orderId": "{{params.orderId}}"
+            }
+          },
+          {
+            "id": "compose",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Compose thank-you",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Write a short post-purchase thank-you email for this order (tone: {{params.tone}}). Ground every detail in the order data; never invent items or amounts.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "signoff",
+            "typeId": "core.chat.approvalGate",
+            "name": "Approve the thank-you email",
+            "position": {
+              "x": 440,
+              "y": 0
+            },
+            "config": {
+              "title": "Approve this thank-you email before it is sent",
+              "artifactType": "email.body",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no email sent",
+            "position": {
+              "x": 640,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.integration.email-send",
+            "name": "Send (governed)",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "to": "{{params.recipientEmail}}",
+              "subject": "{{params.emailSubject}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "order",
+            "to": "compose"
+          },
+          {
+            "from": "compose.content",
+            "to": "signoff.artifact"
+          },
+          {
+            "from": "signoff.artifact",
+            "to": "send.text",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "signoff",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "sent": {
+          "type": "string",
+          "description": "Send outcome (sent / draft-per-policy)."
+        }
+      }
+    },
+    {
+      "chainId": "commerce.low-stock-reorder",
+      "version": "1.0.0",
+      "label": "Low-Stock Reorder Draft",
+      "description": "On a low-stock crossing (bind to host.commerce.inventory.low-stock): read catalog context, draft a supplier reorder email, hold it at a purchasing sign-off gate, then send + notify the owner (draft content flows to the send/notify nodes via edges \u2014 the corpus convention). Never mutates inventory.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId", "recipientEmail", "senderEmail"],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The merchant org id."
+          },
+          "productId": {
+            "type": "string",
+            "default": "",
+            "description": "The low product (from the trigger payload when event-bound)."
+          },
+          "supplierHint": {
+            "type": "string",
+            "default": "",
+            "description": "Optional supplier name/email to address the draft to."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "Reorder request", "description": "Subject line for the sent email." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "catalog",
+            "typeId": "feature.commerce.nodes.list-products",
+            "name": "Catalog context",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "productId": "{{params.productId}}"
+            }
+          },
+          {
+            "id": "draft",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Draft reorder email",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Draft a concise supplier reorder email for the low-stock product {{params.productId}} (supplier hint: {{params.supplierHint}}). Include current stock and a sensible reorder quantity based on the catalog data; flag assumptions.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "approve",
+            "typeId": "core.chat.approvalGate",
+            "name": "Purchasing sign-off",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": {
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no reorder sent, no notification",
+            "position": {
+              "x": 960,
+              "y": 280
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.integration.email-send",
+            "name": "Send reorder",
+            "position": {
+              "x": 960,
+              "y": 0
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "to": "{{params.recipientEmail}}",
+              "subject": "{{params.emailSubject}}"
+            }
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.notifications.nodes.notify",
+            "name": "Notify owner",
+            "position": {
+              "x": 960,
+              "y": 140
+            },
+            "config": { "audience": "tenant" },
+            "inputs": { "title": "Low-Stock Reorder Draft" }
+          }
+        ],
+        "edges": [
+          {
+            "from": "catalog",
+            "to": "draft"
+          },
+          {
+            "from": "draft.content",
+            "to": "approve.artifact"
+          },
+          {
+            "from": "approve.artifact",
+            "to": "send.text",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "approve",
+            "to": "notify",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "approve",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "sent": {
+          "type": "string",
+          "description": "Send outcome after sign-off."
+        }
+      }
+    },
+    {
+      "chainId": "commerce.order-exception-digest",
+      "version": "1.0.0",
+      "label": "Order Exception Digest",
+      "description": "On a schedule (pair with core.trigger.schedule): list orders, AI-summarize the exceptions \u2014 paid-but-unfulfilled beyond the SLA, aging pending reservations \u2014 and push the summary to the operations inbox (the digest node's output flows to the notification via the edge, the corpus convention). Read-only; escalation stays human.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The merchant org id."
+          },
+          "slaDays": {
+            "type": "string",
+            "default": "3",
+            "description": "Paid-but-unfulfilled SLA in days before an order counts as an exception."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "orders",
+            "typeId": "feature.commerce.nodes.list-orders",
+            "name": "List orders",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}"
+            }
+          },
+          {
+            "id": "digest",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Summarize exceptions",
+            "position": {
+              "x": 320,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "From these orders, list the exceptions: paid but not fulfilled for more than {{params.slaDays}} days, and pending orders close to reservation expiry. One line each with order id, age, and amount; totals at the top. If none, say so plainly.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.notifications.nodes.notify",
+            "name": "Push digest",
+            "position": {
+              "x": 640,
+              "y": 0
+            },
+            "config": { "audience": "tenant" },
+            "inputs": { "title": "Order Exception Digest" }
+          }
+        ],
+        "edges": [
+          {
+            "from": "orders",
+            "to": "digest"
+          },
+          {
+            "from": "digest",
+            "to": "notify"
+          }
+        ]
+      },
+      "outputs": {
+        "digest": {
+          "type": "string",
+          "description": "The exception summary."
+        }
+      }
+    }
+  ]
+}

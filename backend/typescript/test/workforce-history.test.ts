@@ -69,6 +69,16 @@ describe('generateWorkforceHistory', () => {
     }
   });
 
+  it('approval decisions use the corpus enum granted | rejected | overridden (RFC 0183 §A.3)', () => {
+    const h = generateWorkforceHistory(BASE);
+    const allowed = new Set(['granted', 'rejected', 'overridden']);
+    const decisions = h.runs.flatMap((r) => r.events)
+      .filter((e) => e.type === 'approval.granted' || e.type === 'approval.overridden')
+      .map((e) => (e.payload as { decision?: unknown } | undefined)?.decision);
+    expect(decisions.length).toBeGreaterThan(0);
+    for (const d of decisions) expect(allowed.has(d as string)).toBe(true);
+  });
+
   it('terminal runs are completed or failed and stamp completedAt', () => {
     const h = generateWorkforceHistory(BASE);
     for (const r of h.runs) {

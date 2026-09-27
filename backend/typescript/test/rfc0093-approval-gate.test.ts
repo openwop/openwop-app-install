@@ -5,7 +5,7 @@
  *
  *   §D.1 Timeout ⇒ auto-reject (fail closed): an approval gate past its
  *        `timeoutSec` resolves as rejected with reason `timeout`, emitting
- *        the standard `interrupt.resolved` event with outcome "rejected" /
+ *        the standard `interrupt.resolved` event with decision "rejected" (RFC 0183; ADR 0722) /
  *        reason "timeout". Enforced lazily on every interrupt access AND by
  *        the periodic sweep that rides the webhook worker tick.
  *   §D.2 Quorum override is opt-in: `overrideBypassesQuorum: true` lets a
@@ -155,7 +155,7 @@ describe('rfc0093 §D.1 — gate timeout ⇒ auto-reject', () => {
     expect(resolved).toBeDefined();
     expect(resolved!.payload).toMatchObject({
       interruptId: gate.interruptId,
-      outcome: 'rejected',
+      decision: 'rejected',
       reason: 'timeout',
     });
 

@@ -13,8 +13,8 @@ const routes: FeatureRoute[] = [
   {
     path: '/csm',
     element: <CsmPage />,
-    tier: 'workspace',
-    nav: { group: 'Workspace', label: 'CSM', icon: BotIcon, hint: 'Customer-success accounts', featureId: 'csm' },
+    tier: 'workspace', archetype: 'standard-index',
+    nav: { group: 'CRM', label: 'CSM', labelKey: 'csmLabel', icon: BotIcon, hint: 'Customer-success accounts', hintKey: 'csmHint', featureId: 'csm' },
   },
 ];
 

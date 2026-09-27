@@ -5,7 +5,7 @@
  * Storage: localStorage under `openwop:notification-prefs:v1`. As of ADR 0010
  * Phase 2 this is the SYNCHRONOUS BOOTSTRAP CACHE, not the source of truth: the
  * durable, cross-device record lives server-side (`GET`/`PUT
- * /v1/host/openwop-app/notifications/preferences`). The store seeds from this cache
+ * /host/openwop-app/notifications/preferences`). The store seeds from this cache
  * for an immediate value, then `hydratePreferences()` adopts the server copy and
  * refreshes the cache; writes go to the server and mirror back here. The cache
  * keeps the desktop-toast predicate working synchronously + offline/anon.
@@ -191,6 +191,12 @@ function isPreferences(v: unknown): v is NotificationPreferences {
   if (typeof r.globalMute !== 'boolean') return false;
   if (!Array.isArray(r.types)) return false;
   if (!isQuietHours(r.quietHours)) return false;
+  // ADR 0192 D7 — optional; when present it must be a bounded string list
+  // (mirrors the server's validation so a corrupt cache resets cleanly).
+  if (r.mutedConversations !== undefined) {
+    if (!Array.isArray(r.mutedConversations) || r.mutedConversations.length > 500
+      || r.mutedConversations.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 128)) return false;
+  }
   return r.types.every(isTypePref);
 }
 

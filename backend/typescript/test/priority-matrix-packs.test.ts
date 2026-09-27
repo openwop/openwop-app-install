@@ -17,15 +17,19 @@ const AGENT_PACK = join(REPO_ROOT, 'packs', 'feature.priority-matrix.agents');
 const ASSISTANT_PACK = join(REPO_ROOT, 'packs', 'feature.assistant.agents');
 
 describe('feature.priority-matrix.nodes — node pack', () => {
-  it('exports the seven priority-matrix node fns', () => {
+  it('exports the eleven priority-matrix node fns (v1.3 adds the intake verbs, ADR 0232 §7)', () => {
     expect(Object.keys(nodePack).sort()).toEqual([
+      'feature.priority-matrix.nodes.add-evidence',
       'feature.priority-matrix.nodes.generate-agenda',
+      'feature.priority-matrix.nodes.get-intake',
       'feature.priority-matrix.nodes.list-lists',
       'feature.priority-matrix.nodes.list-portfolio',
       'feature.priority-matrix.nodes.list-ranked-ideas',
+      'feature.priority-matrix.nodes.propose-scenario',
       'feature.priority-matrix.nodes.schedule-status',
       'feature.priority-matrix.nodes.score-idea',
       'feature.priority-matrix.nodes.submit-idea',
+      'feature.priority-matrix.nodes.update-intake',
     ]);
   });
 
@@ -86,8 +90,8 @@ describe('feature.priority-matrix.agents — agent pack manifest', () => {
     expect(a.agentId).toBe('feature.priority-matrix.agents.prioritization-analyst');
     expect(a.systemPromptRef).toBe('prompts/prioritization-analyst.md');
     expect(a.systemPrompt.length).toBeGreaterThan(0);
-    expect(a.toolAllowlist).toContain('openwop:feature.priority-matrix.nodes.score-idea');
-    expect(a.toolAllowlist).toContain('openwop:feature.priority-matrix.nodes.schedule-status');
+    expect(a.toolAllowlist).toContain('openwop:priority-matrix.score-idea');
+    expect(a.toolAllowlist).toContain('openwop:priority-matrix.schedule-status');
     expect(getAgentRegistry().listAgentIds()).toContain(a.agentId);
   });
 
@@ -96,6 +100,6 @@ describe('feature.priority-matrix.agents — agent pack manifest', () => {
   it('grants the Chief of Staff the schedule-status node (ADR 0103)', () => {
     const cos = loadAgentsFromManifest(ASSISTANT_PACK).find((x) => x.agentId === 'feature.assistant.agents.chief-of-staff');
     expect(cos, 'chief-of-staff agent must load').toBeDefined();
-    expect(cos?.toolAllowlist).toContain('openwop:feature.priority-matrix.nodes.schedule-status');
+    expect(cos?.toolAllowlist).toContain('openwop:priority-matrix.schedule-status');
   });
 });

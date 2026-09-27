@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.web-search/1.0.0/search.output.json",
+  "$id": "https://packs.openwop.dev/core.openwop.web-search/1.1.0/search.output.json",
   "title": "WebSearchOutput",
   "type": "object",
   "required": ["results", "engine", "query"],

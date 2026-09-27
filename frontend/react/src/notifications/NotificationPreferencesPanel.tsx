@@ -13,7 +13,10 @@
  * inline-edit pattern.
  */
 
+import { Button } from '../ui/Button.js';
+import { Suspense, lazy } from 'react';
 import { useTranslation } from 'react-i18next';
+const EmailApprovalSection = lazy(() => import('./EmailApprovalSection.js').then((m) => ({ default: m.EmailApprovalSection })));
 import { useNotificationStore } from './notificationStore.js';
 import { KNOWN_TYPES, TYPE_LABEL_KEYS, type NotificationPreferences } from './types.js';
 import { ArrowLeftIcon } from '../ui/icons/index.js';
@@ -45,8 +48,15 @@ export function NotificationPreferencesPanel(): JSX.Element {
     updatePreferences({ ...prefs, types });
   };
 
-  const setQuietHours = (patch: Partial<NotificationPreferences['quietHours']>): void =>
-    updatePreferences({ ...prefs, quietHours: { ...prefs.quietHours, ...patch } });
+  // NOTIF-2 — stamp the browser IANA zone on any quiet-hours edit, so server-side
+  // producers (channel-activity notifications) evaluate the window in the user's zone.
+  const browserTz = (): string | undefined => {
+    try { return Intl.DateTimeFormat().resolvedOptions().timeZone || undefined; } catch { return undefined; }
+  };
+  const setQuietHours = (patch: Partial<NotificationPreferences['quietHours']>): void => {
+    const tz = browserTz();
+    updatePreferences({ ...prefs, quietHours: { ...prefs.quietHours, ...(tz ? { timezone: tz } : {}), ...patch } });
+  };
 
   const toggleDay = (day: number): void => {
     const next = prefs.quietHours.days.includes(day)
@@ -58,16 +68,21 @@ export function NotificationPreferencesPanel(): JSX.Element {
   return (
     <div className="u-flex-1 u-overflow-y-auto u-pad-3-4">
       <header className="u-flex u-items-center u-gap-2 u-mb-3">
-        <button
-          type="button"
-          className="secondary u-fs-12"
+        <Button
+          variant="secondary" className="u-fs-12"
           onClick={closePreferences}
           aria-label={t('prefsBackLabel')}
         >
           <ArrowLeftIcon size={13} /> {t('prefsBack')}
-        </button>
+        </Button>
         <h3 className="u-m-0 u-fs-14">{t('prefsHeading')}</h3>
       </header>
+
+      {/* ADR 0478 §2 — email delivery of addressed approval requests (opt-in;
+          lazy — the notification panel rides the entry chunk). */}
+      <Suspense fallback={null}>
+        <EmailApprovalSection />
+      </Suspense>
 
       {/* Global mute */}
       <Section title={t('prefsSectionGlobal')}>
@@ -144,7 +159,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
           />
         </Row>
 
-        <div className="notifprefs-quiet-times" style={{ opacity: prefs.quietHours.enabled ? 1 : 0.4 }}>
+        <div className={`notifprefs-quiet-times${prefs.quietHours.enabled ? '' : ' is-disabled'}`}>
           <label className="u-flex-1 u-flex u-flex-col u-gap-1 u-fs-11">
             {t('prefsQuietStart')}
             <input
@@ -167,6 +182,12 @@ export function NotificationPreferencesPanel(): JSX.Element {
           </label>
         </div>
 
+        {/* SCHEDUX-1 — surface WHICH timezone the window is evaluated in (the value
+            server-side producers honor), so a user whose device tz differs isn't guessing. */}
+        {prefs.quietHours.enabled && (prefs.quietHours.timezone ?? browserTz()) && (
+          <p className="muted u-fs-10 u-mt-1 u-mb-0">{t('prefsQuietTz', { tz: prefs.quietHours.timezone ?? browserTz() })}</p>
+        )}
+
         <div className="u-mt-2">
           <div className="muted u-fs-11 u-mb-1">{t('prefsQuietDays')}</div>
           <div className="u-flex u-gap-1 u-wrap">
@@ -180,12 +201,6 @@ export function NotificationPreferencesPanel(): JSX.Element {
                   disabled={!prefs.quietHours.enabled}
                   aria-pressed={active}
                   className="notifprefs-day"
-                  style={{
-                    border: `1px solid ${active ? 'var(--color-accent)' : 'var(--color-border)'}`,
-                    background: active ? 'color-mix(in oklch, var(--color-accent) 12%, transparent)' : 'transparent',
-                    color: active ? 'var(--color-accent)' : 'var(--color-text)',
-                    cursor: prefs.quietHours.enabled ? 'pointer' : 'not-allowed',
-                  }}
                 >
                   {t(labelKey)}
                 </button>
@@ -194,7 +209,7 @@ export function NotificationPreferencesPanel(): JSX.Element {
           </div>
         </div>
 
-        <Row style={{ marginTop: 8, opacity: prefs.quietHours.enabled ? 1 : 0.4 }}>
+        <Row className={`u-mt-2 notifprefs-urgent-row${prefs.quietHours.enabled ? '' : ' is-disabled'}`}>
           <Label htmlFor="prefs-quiet-allowUrgent">{t('prefsAllowUrgent')}</Label>
           <input
             id="prefs-quiet-allowUrgent"
@@ -225,9 +240,9 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function Row({ children, style }: { children: React.ReactNode; style?: React.CSSProperties }): JSX.Element {
+function Row({ children, style, className }: { children: React.ReactNode; style?: React.CSSProperties; className?: string }): JSX.Element {
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, ...style }}>
+    <div className={`u-flex u-items-center u-gap-2${className ? ` ${className}` : ''}`} style={style}>
       {children}
     </div>
   );

@@ -1,0 +1,36 @@
+{
+  "name": "core.openwop.workflows.agent-knowledge",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "WF-KB-1 — the ADR 0038 §B auto-ingest workflow, migrated off the in-tree `registerWorkflow({...})` pin site in features/agent-knowledge/feature.ts. A trigger (webhook/email/form, RFC 0099) ignites this chain; the single `feature.agent-knowledge.nodes.ingest` node writes an UNTRUSTED, cited KB document into a collection bound to the agent. Registered chain-backed under the ORIGINAL id `feature.agent-knowledge.auto-ingest`, so the seeded demo trigger subscription keeps resolving and replay is unchanged — and it is now gallery-visible and builder-editable like every other chain.",
+  "keywords": [
+    "Knowledge",
+    "RAG",
+    "Agents",
+    "Triggers"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "feature.agent-knowledge.auto-ingest",
+      "version": "1.0.0",
+      "label": "Agent knowledge — auto-ingest a triggered document",
+      "description": "Ingests a document into the KB collection bound to an agent. The node reads { agentId, collectionId, title, text } from the run inputs the trigger delivers, so the chain declares no parameters of its own — exactly the shape the retired in-tree definition had.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "ingest",
+            "typeId": "feature.agent-knowledge.nodes.ingest"
+          }
+        ]
+      }
+    }
+  ]
+}

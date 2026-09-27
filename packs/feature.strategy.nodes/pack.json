@@ -1,7 +1,7 @@
 {
   "name": "feature.strategy.nodes",
-  "version": "1.0.0",
-  "description": "Strategy feature node pack (ADR 0080 / ADR 0079 / ADR 0014) — read nodes over the ctx.features.strategy surface (list, get, context, health) + a create-board-memo write node that persists an agent-authored board memo as a Document (ctx.features.documents). Lets a workflow — or the Strategy Analyst agent — read the portfolio + its health and draft a board-ready memo. The strategy surface stays READ-ONLY: the memo write lands in Documents, never in Strategy.",
+  "version": "1.3.0",
+  "description": "Strategy feature node pack — read nodes over the ctx.features.strategy surface (list, get, context, health, check-ins, stale KRs) + a create-board-memo write node that persists an agent-authored board memo as a Document (ctx.features.documents) + the measurement loop: check-in (STRUCTURALLY a proposal from a run — a human confirms in the app), list-check-ins, list-stale-krs (the cadence work list), and sync-metrics (confirmed writes ONLY for KRs whose measure.source a human configured; honest synced/skipped matrix). Strategy CRUD stays human-only.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "strategy", "okr", "portfolio", "board", "memo"],
@@ -45,12 +45,57 @@
     },
     {
       "typeId": "feature.strategy.nodes.create-board-memo",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Strategy: Create Board Memo",
       "description": "Persists an agent-authored board memo (markdown) as a Document of kind board-update via ctx.features.documents. Degrades to returning the markdown inline when the documents feature is OFF. The strategy surface is never written.",
       "category": "integration",
       "role": "action",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.strategy.nodes.check-in",
+      "version": "1.0.0",
+      "label": "Strategy: Check In on a Key Result",
+      "description": "Records a check-in (value and/or note) for a key result (ADR 0231). From a run this is STRUCTURALLY a proposal — it lands status 'proposed' for a human to confirm in the app; mode 'sync' (the metric-sync chain) writes confirmed ONLY against a KR whose measure.source a human configured (refused fail-closed otherwise).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.strategy.nodes.list-check-ins",
+      "version": "1.0.0",
+      "label": "Strategy: List Check-ins",
+      "description": "Lists a shared strategy's check-ins, newest first (optionally one key result) — the measurement trail behind the progress rollup (ADR 0231).",
+      "category": "integration",
+      "role": "action",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.strategy.nodes.list-stale-krs",
+      "version": "1.0.0",
+      "label": "Strategy: List Stale Key Results",
+      "description": "Measured key results with no confirmed check-in inside the staleness window (default 14 days) across ACTIVE shared strategies — the weekly cadence chain's work list (ADR 0231 §C2).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.strategy.nodes.record-decision",
+      "version": "1.0.0",
+      "label": "Strategy: Record a Decision (draft)",
+      "description": "Persists an agent-DRAFTED decision record (markdown) as a decision-record Document via ctx.features.documents (ADR 0233). No strategy link is written — links are canonical human writes; a human links the record via POST /strategy/:id/decisions. Degrades to inline markdown when documents is OFF.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.strategy.nodes.sync-metrics",
+      "version": "1.0.0",
+      "label": "Strategy: Sync Sourced Metrics",
+      "description": "Syncs every sourced key result from its configured data owner (crm-deal-total, analytics-conversions, commerce-revenue; bigquery composes as a chain upstream) through the one check-in path (ADR 0231 §C3). Returns the synced/skipped matrix — the run output IS the sync-health view.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

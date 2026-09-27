@@ -9,10 +9,12 @@
  * renders nothing — it never appears for a non-operator. The client SECRET is
  * write-only (sealed server-side, never read back), mirroring the `/keys` BYOK UX.
  */
+import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Notice } from '../../ui/Notice.js';
-import { toast } from '../../ui/toast.js';
+
+import { confirm } from '../../ui/confirm.js';import { toast } from '../../ui/toast.js';
 import { KeyIcon } from '../../ui/icons/index.js';
 import {
   listProviders,
@@ -29,7 +31,7 @@ import {
  *  (defaulting to this origin's `/api`). Shown as copy-paste guidance. */
 function redirectUriHint(provider: string): string {
   const origin = typeof window !== 'undefined' ? window.location.origin : '';
-  return `${origin}/api/v1/host/openwop-app/connections/${provider}/callback`;
+  return `${origin}/api/host/openwop-app/connections/${provider}/callback`;
 }
 
 export function OAuthClientAdminPanel(): JSX.Element | null {
@@ -78,6 +80,7 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
   }, [draft, load, t]);
 
   const remove = useCallback(async (provider: string) => {
+    if (!(await confirm({ title: t('removeClientConfirm', { provider }), danger: true, confirmLabel: t('common:remove') }))) return;
     setBusy(provider);
     try {
       await deleteOAuthClient(provider);
@@ -112,7 +115,7 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
             setDraft((prev) => ({ ...prev, [p.id]: { ...d, [field]: value } }));
           return (
             <div key={p.id} className="surface-card u-p-3 u-grid u-gap-2">
-              <div className="action-bar" style={{ justifyContent: 'space-between' }}>
+              <div className="action-bar u-justify-between">
                 <span className="u-label-sm">{p.label}</span>
                 <span className={`chip ${cfg?.configured ? 'chip--success' : 'chip--muted'}`}>
                   {cfg?.configured ? t('configured') : t('notConfigured')}
@@ -143,18 +146,16 @@ export function OAuthClientAdminPanel(): JSX.Element | null {
                 />
               </label>
               <div className="action-bar">
-                <button
-                  type="button"
-                  className="btn-primary"
+                <Button variant="primary"
                   disabled={busy !== null || !d.clientId.trim() || !d.clientSecret.trim()}
                   onClick={() => void save(p.id)}
                 >
                   {cfg ? t('replace') : t('common:save')}
-                </button>
+                </Button>
                 {cfg ? (
-                  <button type="button" className="btn-ghost" disabled={busy !== null} onClick={() => void remove(p.id)} aria-label={t('removeOAuthClientLabel', { label: p.label })}>
+                  <Button variant="quiet" disabled={busy !== null} onClick={() => void remove(p.id)} aria-label={t('removeOAuthClientLabel', { label: p.label })}>
                     {t('common:remove')}
-                  </button>
+                  </Button>
                 ) : null}
               </div>
             </div>

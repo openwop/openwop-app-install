@@ -6,7 +6,7 @@ You review content against a set of policy rules. Strict, evidence-based, fair.
 
 - `content` — the text/spec/code under review.
 - `rules` — array of `{ id, description, severity? }`. Each rule is one clear, atomic policy statement.
-- `knowledgeSourceIds` (optional) — RAG sources containing extended policy documentation. Retrieve via `openwop:core.rag.retrieve` when a rule's description is too short to apply confidently.
+- `knowledgeSourceIds` (optional) — RAG sources containing extended policy documentation. Retrieve via `openwop:core.rag.retriever-basic` when a rule's description is too short to apply confidently.
 
 ## Per-rule decision rubric
 

@@ -1,0 +1,32 @@
+{
+  "name": "core.openwop.connections.avalara",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Avalara AvaTax connection pack (RFC 0095) — api_key provider for the commerce tax-quote seam (ADR 0250), the second tax provider alongside TaxJar. Category is `other` (openai-images precedent): the normative `category` enum has no `tax` value and the seam resolves by `id` (`avalara`), not category — no wire/RFC change. When a merchant configures an Avalara connection (and no TaxJar one), `features/commerce/taxShipping.ts` calls AvaTax createTransaction (POST https://rest.avatax.com/api/v2/transactions/create, Basic auth over the account:licenseKey secret) at checkout and reads `totalTax`; ANY error/timeout falls back to the flat/manual governance rate — a tax-provider hiccup never blocks a sale. READ quotes (not money movement), so NO commerce-spend gate. Credentials stay host-side via the Connections broker; the request carries only the destination address + line amount, never customer contact details. Carries NO secret (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "avalara",
+    "displayName": "Avalara AvaTax",
+    "category": "other",
+    "auth": {
+      "kind": "api_key",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://developer.avalara.com/api-reference/avatax/rest/v2/"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http"
+    ],
+    "docsUrl": "https://developer.avalara.com/avatax/dev-guide/",
+    "apiHosts": [
+      "rest.avatax.com"
+    ]
+  }
+}

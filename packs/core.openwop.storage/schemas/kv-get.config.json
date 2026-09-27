@@ -1,11 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.storage/1.0.0/kv-get.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.storage/1.1.0/kv-get.config.json",
   "title": "KvGetConfig",
   "type": "object",
   "properties": {
     "namespace": {
       "type": "string"
+    },
+    "key": {
+      "type": "string",
+      "description": "KV key. `packs/core.openwop.storage/index.mjs` spreads `{...ctx.config, ...ctx.inputs}` into the host storage call, so this IS honoured from config \u2014 the schema simply never declared it. Declared per ADR 0525 (GRD-8)."
     }
   },
   "additionalProperties": false

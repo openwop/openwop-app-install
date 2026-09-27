@@ -209,7 +209,7 @@ export async function adsMetricsImport(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'ads.metrics.import': adsMetricsImport,
 };
 

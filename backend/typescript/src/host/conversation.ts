@@ -9,6 +9,8 @@
  * event stream on replay is idempotent (RFC 0005 §B/§C/§G).
  */
 
+import { partsFromTurnContent } from './a2aCodec10.js';
+
 /** RFC 0002 §A1 AgentRef projection carried on `role: 'agent'` turns. */
 export interface ConversationTurnAgent {
   agentId: string;
@@ -47,6 +49,11 @@ export interface ConversationTurn {
   speakerId?: string;
   /** 0-based monotonic index within the conversation. */
   turnIndex: number;
+  /** RFC 0205 §B.5 (ADR 0746) — `content` as A2A `Part`s; PRESENCE marks the turn
+   *  A2A-shaped. Derived from `content` at build time (never hand-set), absent when
+   *  the content has no honest Part projection (media) — a turn without it stays
+   *  valid on read, replay and fork (§B.7). `content` itself is unchanged (§B.6). */
+  parts?: Record<string, unknown>[];
 }
 
 /** Deterministic conversation id for a gate node (RFC 0005 §B —
@@ -74,10 +81,12 @@ export function makeTurn(input: {
   agent?: ConversationTurnAgent | undefined;
   speakerId?: string | undefined;
 }): ConversationTurn {
+  const parts = partsFromTurnContent(input.content);
   return {
     messageId: turnMessageId(input.conversationId, input.turnIndex, input.role),
     from: input.from,
     content: input.content,
+    ...(parts !== undefined ? { parts } : {}),
     ts: input.ts,
     role: input.role,
     turnIndex: input.turnIndex,

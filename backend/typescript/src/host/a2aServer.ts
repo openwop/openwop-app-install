@@ -25,8 +25,10 @@
 
 import { runAgentDispatch, AgentNotFoundError } from './agentDispatch.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
+import { classifyA2aOutcome, recordA2aRequest } from '../observability/metricSeams.js';
 import {
   getA2aTask,
+  getA2aTaskFor,
   upsertA2aTask,
   setA2aTaskPushConfig,
   projectTaskRecordToA2aTask,
@@ -49,7 +51,11 @@ export interface A2aJsonRpcResponse {
   jsonrpc: '2.0';
   id: string | number;
   result?: unknown;
-  error?: { code: number; message: string };
+  /** `data` carries the upstream `reason` (and, for a version refusal, the
+   *  supported list) — the closed vocabulary §D.7 lets across, never a raw
+   *  message body. The 1.0 codec emits the A2A 1.0.1 §9.5 `Any[]` of
+   *  `google.rpc.ErrorInfo` (ADR 0744); the 0.3 codec keeps its object. */
+  error?: { code: number; message: string; data?: Record<string, unknown> | ReadonlyArray<Record<string, unknown>> };
 }
 
 export interface A2aServerOptions {
@@ -64,6 +70,17 @@ export interface A2aServerOptions {
    * When `false`/absent the handler is the synchronous core (today's behavior).
    */
   durableTasks?: boolean;
+  /**
+   * ADR 0552 P2 — the tenant of record for tasks this codec opens.
+   *
+   * The 0.3 profile predates any tenant binding on the task record, and its
+   * task ids are derived (`a2a:<agentId>`) rather than run ids, so records
+   * written before P2 have none. Stamping it going forward means a task opened
+   * at 0.3 today is scoped like a 1.0 one; the READ side stays lenient for the
+   * unbound rows only (`readableBy(..., 'legacy')`), so no existing peer loses
+   * access to a task it already holds.
+   */
+  tenantId?: string;
 }
 
 function ok(id: string | number, result: unknown): A2aJsonRpcResponse {
@@ -87,6 +104,11 @@ function taskIdOf(params: Record<string, unknown> | undefined): string | undefin
 /** Whether a manifest agent is registered (so a durable Task is opened only for
  *  a real agent — an unknown agent is a request error with no Task created). */
 function agentExists(agentId: string): boolean {
+  // ADR 0379 P2 — deliberately tenant-less: only PACK agents (globally keyed)
+  // resolve here. Correction (grade-pass): pre-#1954 the bare-keyed registry
+  // DID let a2a peers dispatch any tenant's user agent — a cross-tenant hole
+  // this closes, intentionally. The agent card advertises pack agents only
+  // (synthesizeAgentCard) so the wire claim matches dispatchability.
   return getAgentRegistry().has(agentId);
 }
 
@@ -126,6 +148,30 @@ export async function handleA2aRequest(
   req: A2aJsonRpcRequest,
   opts: A2aServerOptions,
 ): Promise<A2aJsonRpcResponse> {
+  // ADR 0556 P1 — one counter for every served request, wrapped around the
+  // dispatcher rather than sprinkled through it. `dispatchA2aRequest` has ~20
+  // returns across five methods; instrumenting each is how a new branch ships
+  // uncounted, and an outcome counter with a silent branch is worse than none
+  // because the gap looks like an absence of errors.
+  //
+  // A THROW is counted as `internal_error` and rethrown: the route turns it
+  // into a -32603 body, so not counting it here would leave the host's own
+  // 500-equivalent invisible to the only metric that reports A2A health.
+  let response: A2aJsonRpcResponse;
+  try {
+    response = await dispatchA2aRequest(req, opts);
+  } catch (err) {
+    recordA2aRequest(req?.method, 'internal_error');
+    throw err;
+  }
+  recordA2aRequest(req?.method, classifyA2aOutcome(response.error?.code));
+  return response;
+}
+
+async function dispatchA2aRequest(
+  req: A2aJsonRpcRequest,
+  opts: A2aServerOptions,
+): Promise<A2aJsonRpcResponse> {
   if (req.jsonrpc !== '2.0' || typeof req.method !== 'string') {
     return rpcError(req?.id ?? 0, -32600, 'invalid request');
   }
@@ -153,6 +199,10 @@ export async function handleA2aRequest(
       const carry = {
         ...(contextId ? { contextId } : existing?.contextId ? { contextId: existing.contextId } : {}),
         ...(existing?.pushConfig ? { pushConfig: existing.pushConfig } : {}),
+        // ADR 0552 P2 — bind the tenant of record on every record this codec
+        // writes, including a resume into an unbound pre-P2 task (which is how
+        // the legacy rows finish migrating without a migration).
+        ...(opts.tenantId ? { tenantId: opts.tenantId, protocolVersion: '0.3' } : {}),
       };
 
       // Durable lifecycle: persist `working` for the turn, so a caller that
@@ -226,7 +276,10 @@ export async function handleA2aRequest(
       }
       const taskId = taskIdOf(req.params);
       if (!taskId) return rpcError(req.id, -32602, 'params.id is required');
-      const rec = await getA2aTask(taskId);
+      // §E — a task bound to another tenant answers exactly as a missing one
+      // does. `legacy` additionally admits the pre-P2 unbound rows this codec's
+      // own peers created.
+      const rec = await getA2aTaskFor(taskId, opts.tenantId ?? 'default', 'legacy');
       if (!rec) return rpcError(req.id, -32001, `task not found: ${taskId}`);
       return ok(req.id, projectTaskRecordToA2aTask(rec));
     }
@@ -237,7 +290,7 @@ export async function handleA2aRequest(
       }
       const taskId = taskIdOf(req.params);
       if (!taskId) return rpcError(req.id, -32602, 'params.id is required');
-      const rec = await getA2aTask(taskId);
+      const rec = await getA2aTaskFor(taskId, opts.tenantId ?? 'default', 'legacy');
       if (!rec) return rpcError(req.id, -32001, `task not found: ${taskId}`);
       // Read-only re-attachment (RFC 0100 §3): re-deliver the current state as a
       // `TaskStatusUpdateEvent` from the current state forward, WITHOUT
@@ -259,6 +312,11 @@ export async function handleA2aRequest(
         | undefined;
       const url = typeof cfg?.url === 'string' ? cfg.url : undefined;
       if (!url) return rpcError(req.id, -32602, 'params.pushNotificationConfig.url is required');
+      // §E — authorize the task before touching the push store, so a config
+      // cannot be attached to (or used to probe for) another tenant's task.
+      if (!(await getA2aTaskFor(taskId, opts.tenantId ?? 'default', 'legacy'))) {
+        return rpcError(req.id, -32001, `task not found: ${taskId}`);
+      }
       try {
         const rec = await setA2aTaskPushConfig(taskId, {
           url,

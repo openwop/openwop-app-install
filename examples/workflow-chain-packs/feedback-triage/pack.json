@@ -1,0 +1,215 @@
+{
+  "name": "core.openwop.workflows.feedback-triage",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "Feedback-triage chains (RFC 0013): turn raw inbound feedback into classified, routed, actionable items. A form submission is classified and (on approval) filed as a follow-up task; a batch is themed into a weekly digest. Replay-deterministic.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "Feedback triage"
+  ],
+  "chains": [
+    {
+      "chainId": "feedback-triage.classify-and-route",
+      "version": "1.1.0",
+      "label": "Feedback → Classify → Task",
+      "description": "Every feedback form submission is classified (theme, sentiment, severity) by AI; a human confirms, and a CRM follow-up task is filed with the classification.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "default": "",
+            "description": "Org the follow-up task belongs to."
+          },
+          "theme": {
+            "type": "string",
+            "default": "review",
+            "description": "Default theme label for the task title."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "form",
+            "typeId": "core.trigger.form",
+            "name": "Feedback submitted",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "classify",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Classify feedback",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Classify this product feedback: theme (bug / feature-request / usability / pricing / praise / other), sentiment (positive / neutral / negative), severity (low / normal / high). Return a one-line rationale. Do not invent details beyond the text.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Confirm routing",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Confirm the classification before filing a task",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no task filed",
+            "position": {
+              "x": 840,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "task",
+            "typeId": "feature.crm.nodes.create-task",
+            "name": "File follow-up task",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {
+              "orgId": "{{params.orgId}}",
+              "title": "Feedback follow-up: {{params.theme}}"
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "form",
+            "to": "classify"
+          },
+          {
+            "from": "classify.content",
+            "to": "gate.artifact"
+          },
+          {
+            "from": "gate",
+            "to": "task",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "gate",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    },
+    {
+      "chainId": "feedback-triage.weekly-themes",
+      "version": "1.0.0",
+      "label": "Weekly Feedback → Theme Digest",
+      "description": "A scheduled roll-up that clusters the week's feedback into the top recurring themes with representative quotes, then posts the digest as an in-app notification.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scheduleCron"],
+        "properties": {
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "cron",
+            "typeId": "core.trigger.schedule",
+            "name": "Weekly",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "cron": "{{params.scheduleCron}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "theme",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Cluster themes",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "You are a product analyst. Cluster this week's feedback into the top 3-5 recurring themes. For each: a title, a one-line summary, an approximate count, and one representative verbatim quote. Rank by volume. Ground every theme in the provided items.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.notifications.nodes.notify",
+            "name": "Post digest",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": { "audience": "tenant" },
+            "inputs": { "title": "Weekly Feedback → Theme Digest" }
+          }
+        ],
+        "edges": [
+          {
+            "from": "cron",
+            "to": "theme"
+          },
+          {
+            "from": "theme",
+            "to": "notify"
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    }
+  ]
+}

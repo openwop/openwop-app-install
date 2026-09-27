@@ -59,8 +59,24 @@ describe('composeAgentKnowledgeContext', () => {
     expect(await composeAgentKnowledgeContext(retrieverOf([]), 'q')).toBe('');
   });
 
-  it('swallows a retriever error (best-effort)', async () => {
+  /**
+   * CORRECTED 2026-08-19 (WF-AKM-6 / ADR 0587 §4). This case was titled
+   * "swallows a retriever error (best-effort)" and asserted `=== ''` — it PINNED
+   * THE DEFECT as expected behaviour. Silence was never the requirement;
+   * best-effort was. A faulted KB backend producing a turn byte-identical to
+   * "this agent has nothing bound", with no log line either, is the exact lie
+   * `service.ts` names in its own words ("A failed read is not an empty one") and
+   * the exact reason ADR 0583 built `failedSources`.
+   *
+   * The best-effort guarantee is UNCHANGED and is still asserted: the composition
+   * does not throw, and the turn survives. What changed is that the model is told.
+   */
+  it('reports a retriever error to the model instead of swallowing it (still best-effort)', async () => {
     const throwing: AgentKnowledgeRetrieve = async () => { throw new Error('backend down'); };
-    expect(await composeAgentKnowledgeContext(throwing, 'q')).toBe('');
+    const block = await composeAgentKnowledgeContext(throwing, 'q');
+    expect(block).toContain('DEGRADED'); // it is stated…
+    expect(block).toContain('do NOT tell the user you have nothing on record');
+    // …and the fence still holds: the notice is not presented as citable knowledge.
+    expect(block).not.toContain('Relevant knowledge for this agent');
   });
 });

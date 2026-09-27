@@ -16,7 +16,11 @@
  */
 
 /** Interrupt kinds the executor's NodeOutcome accepts (executor/types.ts). */
-export type SuspendKind = 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation';
+export type SuspendKind = 'approval' | 'clarification' | 'refinement' | 'cancellation' | 'external-event' | 'conversation' | 'timer' | 'tour-step' | 'walkthrough-step'
+  // RFC 0199 §C — HOST-raised only (`host/credentialGate.ts`). Deliberately absent
+  // from `mapSuspendKind`: a pack asking for `credential` gets `external-event`,
+  // so no pack can send a user to a connect URL it chose.
+  | 'credential';
 
 /** Map a pack `reason` / spec `kind` to the NodeOutcome kind enum. Unknown
  *  values fall through to `external-event` — the documented escape hatch
@@ -26,6 +30,13 @@ export function mapSuspendKind(reason: unknown): SuspendKind {
     case 'approval':
     case 'low-confidence':
       return 'approval';
+    // ADR 0267 / CDP-E — a self-advancing timed wait. A `duration`/`until` suspend
+    // becomes a `timer` interrupt whose frozen deadline (from `createdAt` + the
+    // persisted `seconds`/`timestamp`) a sweep resolves by RESUMING the run.
+    case 'duration':
+    case 'until':
+    case 'timer':
+      return 'timer';
     case 'clarification':
     case 'conversation-input':
       return 'clarification';

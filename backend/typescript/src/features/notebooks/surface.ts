@@ -24,7 +24,7 @@
  */
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
-import { type FeatureSurface, surfaceStr, surfaceOptStr } from '../../host/featureSurfaces.js';
+import { type FeatureSurface, surfaceStr, surfaceOptCount } from '../../host/featureSurfaces.js';
 import { getProject, projectSubject } from '../projects/projectsService.js';
 import { composeKnowledgeForSubject } from '../../host/agentKnowledgeComposition.js';
 import {
@@ -153,7 +153,15 @@ export function buildNotebooksSurface(scope: BundleScope): FeatureSurface {
       const text = surfaceStr(args.text);
       if (text.trim().length === 0) return { ingested: false };
       const title = surfaceStr(args.title) || 'Transcribed source';
-      const source = await addSource(tenantId, nb.id, 'workflow-run', { title, text });
+      // ADR 0617 D1a / ADR 0643 D3 — the run's origin rides the `document.ingested`
+      // event, so a binding on this run's own workflow is not re-triggered by it.
+      const source = await addSource(tenantId, nb.id, 'workflow-run', { title, text }, {
+        origin: {
+          ...(scope.runId ? { runId: scope.runId } : {}),
+          ...(scope.workflowId ? { workflowId: scope.workflowId } : {}),
+          ...(scope.chainId ? { chainId: scope.chainId } : {}),
+        },
+      });
       return { ingested: true, sourceId: source.documentId, title: source.title };
     },
 
@@ -163,13 +171,20 @@ export function buildNotebooksSurface(scope: BundleScope): FeatureSurface {
      * method (a subjectless run can't write a member-scoped notebook). No-op
      * (`{ created:false }`) for a missing / private / non-org-visible notebook or
      * empty content. Reached only through the HITL-approved MCP write workflow.
+     *
+     * ADR 0601 — the content origin is HARD-CODED `'third-party'` and is not
+     * derived from `args`. This lane's text is `params.arguments` from an external
+     * MCP client, which ADR 0087 §73 declares UNTRUSTED; there is no human
+     * authorship anywhere on it (the HITL card approves the ACT, and does not even
+     * show the approver the content). Letting the caller name its own trust would
+     * hand the attacker the boundary. Not a knob, by construction.
      */
     addNote: async (args) => {
       const nb = await resolveOrgVisibleNotebook(tenantId, surfaceStr(args.notebookId));
       if (!nb) return { created: false };
       const content = surfaceStr(args.content);
       if (content.trim().length === 0) return { created: false };
-      await addNote(tenantId, nb.id, content);
+      await addNote(tenantId, nb.id, content, 'third-party');
       return { created: true };
     },
 
@@ -188,7 +203,13 @@ export function buildNotebooksSurface(scope: BundleScope): FeatureSurface {
     searchNotebook: async (args) => {
       const nb = await resolveOrgVisibleNotebook(tenantId, surfaceStr(args.notebookId));
       if (!nb) return { hits: [], citations: [] };
-      const { hits, citations } = await searchNotebook(tenantId, nb.id, surfaceStr(args.query), surfaceOptStr(args.topK));
+      // ADR 0602 / `NBWF-1`: `surfaceOptCount`, NOT `surfaceOptStr`. This line
+      // used to read `surfaceOptStr(args.topK)` — a `string | undefined` coercion
+      // on a COUNT — so every caller's `topK` (including a well-typed integer from
+      // the MCP lane, which Ajv had already validated) collapsed to `undefined`
+      // and `kbService.clampTopK` silently substituted its own default. The sibling
+      // `ask` below had the correct check hand-written; both now share one rule.
+      const { hits, citations } = await searchNotebook(tenantId, nb.id, surfaceStr(args.query), surfaceOptCount(args.topK));
       return { hits, citations };
     },
 
@@ -212,7 +233,7 @@ export function buildNotebooksSurface(scope: BundleScope): FeatureSurface {
       const nb = await resolveOrgVisibleNotebook(tenantId, surfaceStr(args.notebookId));
       if (!nb) return { augmentedPrompt: '', citations: [], contexts: [] };
       const query = surfaceStr(args.query);
-      const topK = typeof args.topK === 'number' && args.topK > 0 ? Math.floor(args.topK) : undefined;
+      const topK = surfaceOptCount(args.topK); // ADR 0602 — the same one rule as `searchNotebook`
       const augmentedPrompt = await composeKnowledgeForSubject(
         tenantId,
         projectSubject(nb.id),

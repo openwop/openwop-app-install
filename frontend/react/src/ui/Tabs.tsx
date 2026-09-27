@@ -76,7 +76,20 @@ export function Tabs<T extends string = string>({ items, value, onChange, label,
 }
 
 /** The labelled region for the active tab. Pair `idBase` + the active `tabId`
- *  with the matching `<Tabs idBase>` so the panel is `aria-labelledby` its tab. */
+ *  with the matching `<Tabs idBase>` so the panel is `aria-labelledby` its tab.
+ *
+ *  `CSCU-2` — the panel carries `tabIndex={0}`, per the WAI-ARIA tabs pattern: a panel
+ *  whose content holds no focusable element is otherwise UNREACHABLE by keyboard, so a
+ *  read-only pane (a chart, a table of text, an empty state) could be seen and never
+ *  reached or scrolled. Applied unconditionally rather than "only when the panel has no
+ *  focusable child", which cannot be known from here and is what the APG's own examples
+ *  do; the cost is one extra tab stop per console.
+ *
+ *  The other half of the filed row — moving focus INTO the panel when a tab is clicked —
+ *  is deliberately NOT done. This tablist activates on arrow-key focus (roving tabindex),
+ *  so focus belongs on the selected tab; yanking it into the panel on click would make
+ *  mouse and keyboard activation disagree and strand a user who clicked a tab meaning to
+ *  arrow on to the next one. */
 export function TabPanel({
   idBase = 'tabs',
   tabId,
@@ -87,7 +100,7 @@ export function TabPanel({
   children: ReactNode;
 }): JSX.Element {
   return (
-    <div id={`${idBase}-panel`} role="tabpanel" aria-labelledby={`${idBase}-tab-${tabId}`}>
+    <div id={`${idBase}-panel`} role="tabpanel" aria-labelledby={`${idBase}-tab-${tabId}`} tabIndex={0}>
       {children}
     </div>
   );

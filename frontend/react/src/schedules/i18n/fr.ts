@@ -14,10 +14,10 @@ export const messages = {
   statusPaused: 'En pause',
 
   // Row meta
-  runsCadence: 'S\'exécute {{cadence}}',
-  runsCadenceWithTz: 'S\'exécute {{cadence}} · {{timezone}}',
+  runsCadence: 'S’exécute {{cadence}}',
+  runsCadenceWithTz: 'S’exécute {{cadence}} · {{timezone}}',
   lastRun: 'Dernière exécution {{when}}',
-  viewRun: 'voir l\'exécution',
+  viewRun: 'voir l’exécution',
 
   // Cadence preset labels (mirrors CADENCE_PRESETS by key)
   cadenceHourly: 'Toutes les heures',
@@ -34,7 +34,7 @@ export const messages = {
   // Form fields / selects
   workflowLabel: 'Workflow',
   cadenceLabel: 'Cadence',
-  assignWorkflowFirst: 'Assignez d\'abord un workflow',
+  assignWorkflowFirst: 'Assignez d’abord un workflow',
 
   // Create form
   createHeading: 'Créer une planification',
@@ -46,4 +46,8 @@ export const messages = {
   // Run-now notices
   firedWithRun: 'Déclenchée — ',
   firedNoWorkflow: 'Déclenchée (aucun workflow associé).',
+
+  // ADR 0313 D3 — pastilles de planification silencieuse
+  wontFire: 'Ne se déclenchera pas — cadence illisible',
+  oneShotDone: 'Terminée (ponctuelle)',
 } as const;

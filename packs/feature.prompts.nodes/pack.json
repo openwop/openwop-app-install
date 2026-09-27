@@ -1,0 +1,51 @@
+{
+  "name": "feature.prompts.nodes",
+  "version": "1.1.0",
+  "description": "Prompts feature node pack \u2014 reads over ctx.features.prompts (ADR 0116 P4): list the prompt library, get one entry, and render an entry's template with variable bindings so a workflow can compose a governed prompt. Tenant+org-guarded. role:action (recorded).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "prompts",
+    "library",
+    "templates"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.prompts.nodes.list-library",
+      "version": "1.1.0",
+      "label": "Prompts: List Library",
+      "description": "Lists the org prompt library over ctx.features.prompts.listLibrary. Inputs: { orgId }. Output: { entries }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.prompts.nodes.get-entry",
+      "version": "1.1.0",
+      "label": "Prompts: Get Entry",
+      "description": "Reads one library entry over ctx.features.prompts.getEntry. Inputs: { orgId, entryId }. Output: { entry|null }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.prompts.nodes.render-entry",
+      "version": "1.1.0",
+      "label": "Prompts: Render Entry",
+      "description": "Renders an entry's referenced template with {{var}} bindings over ctx.features.prompts.renderEntry. Inputs: { orgId, entryId, variables }. Output: { composed, templateId }.",
+      "category": "integration",
+      "role": "read",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

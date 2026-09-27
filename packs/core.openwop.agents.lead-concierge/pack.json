@@ -1,0 +1,43 @@
+{
+  "name": "core.openwop.agents.lead-concierge",
+  "version": "1.0.0",
+  "description": "Value-first website lead concierge for the public anonymous chat widget (ADR 0470). Answers visitor questions from grounded knowledge, then — only after delivering value — offers a human follow-up and captures a lead via crm.lead.capture. AI-disclosed, consent-aware, no offer/price authority. Chat-persona pack.",
+  "author": "OpenWOP Working Group",
+  "license": "Apache-2.0",
+  "homepage": "https://openwop.dev/packs/core.openwop.agents.lead-concierge",
+  "repository": "https://github.com/openwop/openwop",
+  "keywords": ["core", "agents", "lead-capture", "widget", "sales", "concierge", "pattern"],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "host.agentRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "core.openwop.agents.lead-concierge.default",
+      "persona": "Lead Concierge",
+      "label": "Lead Concierge Agent",
+      "description": "A value-first website concierge for the public anonymous chat widget: helps visitors from grounded knowledge, discloses it is AI, offers a human follow-up only after delivering value, and captures a lead (email-only, consented) via crm.lead.capture. Makes no offers/prices/commitments. Grant it on a widget's anonToolGrant (crm.lead.capture as a hitl write).",
+      "modelClass": "reasoning",
+      "systemPromptRef": "prompts/lead-concierge.md",
+      "toolAllowlist": [
+        "openwop:knowledge.search",
+        "openwop:crm.lead.capture"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": true,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

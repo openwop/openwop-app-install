@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/persist-segment.input.json",
+  "title": "CrmPersistSegmentInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) — chain-authored config and DAG-forwarded inputs are both legal sources, so nothing is `required` here; the SURFACE refuses a missing key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Segment name."
+    },
+    "filters": {
+      "type": "array",
+      "description": "The draft filter set (ADR 0265 CDP-C). Read from `ctx.inputs.filters` only.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    },
+    "segmentId": {
+      "type": "string",
+      "description": "Explicit `seg:`-prefixed id (ADR 0162). Omitted, the node derives `seg:${runId}:${nodeId}` — a PER-RUN dedupe key (a retried node converges), not a cross-run fork guard; the `side-effect` classification is the guard.",
+      "minLength": 1,
+      "maxLength": 200
+    }
+  },
+  "additionalProperties": true
+}

@@ -35,7 +35,7 @@ beforeAll(async () => {
   const app = await createApp({
     port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(0, res); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
 });
 
 afterAll(async () => {
@@ -129,6 +129,13 @@ describe('ADR 0049 — taskAssign honors notifyAssignee', () => {
     expect(assigned).toHaveLength(1);
     expect((assigned[0].metadata as { cardId?: string }).cardId).toBe(card.id);
     expect(assigned[0].status).toBe('unread');
+
+    // A fresh host surface (the restart/multi-instance shape) gets the durable
+    // receipt's original result and cannot create another addressed notice.
+    const retry = createKanbanSurface({ tenantId } as BundleScope);
+    await retry.taskAssign({ taskId: card.id, assigneeId: 'userA', notifyAssignee: true, idempotencyKey: 'k1' });
+    expect((await storage().listNotifications({ tenantId, recipientUserId: 'userA' }))
+      .filter((n) => n.type === 'task.assigned')).toHaveLength(1);
 
     // Reassign to B → A's item is withdrawn (archived), B gets a fresh one.
     await surface.taskAssign({ taskId: card.id, assigneeId: 'userB', notifyAssignee: true, idempotencyKey: 'k2' });

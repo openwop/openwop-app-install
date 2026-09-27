@@ -1,0 +1,60 @@
+{
+  "name": "feature.campaign-journeys.nodes",
+  "version": "1.3.0",
+  "kind": "nodes",
+  "description": "Campaign Journeys guard verbs — `enroll` (idempotent one-run-per-journey-per-contact guard; a re-fired trigger fails with already_enrolled instead of double-sending) and `eligibility` (the consent + suppression + has-email composite every send step passes first; outputs the contact's email for the downstream send). journey-depth read verbs: `engagement` (opened/clicked → EdgeCondition branching), `frequency-gate` (per-contact send-count cap over the ledger), `segment-members` (capped segment fan-out source for core.dispatch). Over ctx.features['campaign-journeys']; contact resolves from inputs or the triggering event payload.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.campaign-journeys.nodes.enroll",
+      "version": "1.0.0",
+      "role": "action",
+      "label": "Journey Enrollment Guard",
+      "description": "Idempotent enrollment: succeeds once per (journeyId, contactId); a repeat fails with `already_enrolled` so event redelivery can never double-send. Inputs: { journeyId, contactId? (else trigger payload) }."
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.eligibility",
+      "version": "1.0.0",
+      "role": "read",
+      "label": "Journey Eligibility Check",
+      "description": "Consent + suppression + has-email composite. Ineligible fails with the reason (consent | suppressed | no_email | contact_not_found); eligible outputs { email, name } for the send step. Inputs: { contactId? (else trigger payload) }."
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.engagement",
+      "version": "1.0.0",
+      "role": "read",
+      "label": "Journey Engagement Check",
+      "description": "ADR 0243 — did the contact open/click? Outputs { opened, clicked, openCount, clickCount } for an EdgeCondition ({path:'opened', op:'truthy'}) to branch the next send. LIVE read. Inputs: { contactId? (else trigger payload), campaignId? }."
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.frequency-gate",
+      "version": "1.0.0",
+      "role": "read",
+      "label": "Journey Frequency Gate",
+      "description": "ADR 0243 — per-contact send-count cap over the email ledger. Outputs { withinCap, sentCount }; an EdgeCondition ({path:'withinCap', op:'truthy'}) gates the send so a capped contact is skipped. Inputs: { contactId? (else trigger payload), windowDays? (30), maxSends? (1) }."
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.segment-members",
+      "version": "1.0.0",
+      "role": "read",
+      "label": "Journey Segment Members",
+      "description": "ADR 0243 — capped segment fan-out source. Outputs { contactIds, total, truncated } for a downstream core.dispatch (RFC 0118) node to fan out over (each → a per-member journey child run). Capped at 5000 (truncated surfaces the drop). Inputs: { segmentId }."
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.segment-winback-plan",
+      "version": "1.0.0",
+      "role": "pure",
+      "label": "Segment Winback Plan (supervisor)",
+      "description": "ADR 0255 / RFC 0126 — the data-driven segment-winback supervisor. Projects the upstream segment-members `contactIds` into a `next-worker` OrchestratorDecision that fans ONE `childWorkflowId` out over N contacts, each child receiving its own `contactId` via RFC 0126 `nextWorkerInputs` (+ shared per-child params forwarded verbatim). Output { decisions, agentId, dispatched } mirrors core.orchestrator.supervisor so a downstream core.dispatch (fanOutPolicy:'parallel', perItemInput) consumes it. Pure + deterministic (replay-stable); empty segment → clean terminate. Inputs: { contactIds, childWorkflowId, ...sharedChildParams }."
+    },
+    {
+      "typeId": "feature.campaign-journeys.nodes.split",
+      "version": "1.0.0",
+      "role": "pure",
+      "label": "Journey Experiment/Holdout Split",
+      "description": "ADR 0267 / CDP-E — deterministically buckets the contact into control/treatment (via the shared variantAssignment primitive, keyed on contactId → replay-stable). Outputs { arm, control, treatment, bucket } so an EdgeCondition ({path:'control', op:'truthy'}) routes the two arms for a holdout experiment. Inputs: { contactId? (else trigger payload), experimentId?, holdoutPct? (10) }."
+    }
+  ]
+}

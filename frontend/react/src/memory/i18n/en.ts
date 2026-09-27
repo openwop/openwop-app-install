@@ -21,6 +21,11 @@ export const messages = {
   emptyBodyDefault: 'Add facts and preferences here; they are recalled when relevant.',
   externalUnverified: 'External · unverified',
   externalUnverifiedTitle: 'Imported from an external source — treated as untrusted (ADR 0038 §C).',
+  autoLearned: 'Auto-learned',
+  autoLearnedTitle: 'Your assistant inferred this from a conversation — it is not something you typed, so it is treated as unverified.',
+  learnedOn: 'Learned {{date}}',
+  recallOnlyDisclosure_one: '{{n}} more thing was remembered from a conversation and is not listed here. Your assistant can still recall it; it is not editable from this list.',
+  recallOnlyDisclosure_other: '{{n}} more things were remembered from conversations and are not listed here. Your assistant can still recall them; they are not editable from this list.',
   removeMemory: 'Remove memory',
   // MemoryInspectorPage — header
   eyebrow: 'Memory',
@@ -66,8 +71,14 @@ export const messages = {
   emptyNoMatchTitle: 'No matching memory entries',
   emptyNoEntriesTitle: 'No memory entries yet',
   emptyNoMatchBody: 'No entries match the current search or tag filter. Clear the filters to see the full ledger.',
+  clearFilters: 'Clear filters',
   emptyNoEntriesBody: 'Entries are written host-internally — the executor writes a run-summary on completion. Run a workflow to populate the ledger.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry returned {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry returned {{status}}',
+  removeMemoryConfirmBody: 'Remove this memory? The agent will no longer recall it.',
+  storedUnknown: "Stored memories: unknown",
+  loadFailedTitle: "Could not load these memories",
+  loadFailedBody: "This is a failed read, not an empty memory — anything stored is still there.",
+  retry: "Try again",
 } as const;

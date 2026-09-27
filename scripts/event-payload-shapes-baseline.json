@@ -1,0 +1,18 @@
+{
+  "_comment": [
+    "ADR 0722 A.4 — the SET of `<type> :: <error-shape>` pairs observed over WIRE-seam violations, shrink-only.",
+    "A pair that is NEW fails the gate: that is a corpus tightening (or a new emit) landing inside an",
+    "already-admitted type, which the type-level ratchet is structurally blind to. The values are sample",
+    "counts and are INFORMATIONAL ONLY — they move with vitest worker distribution (one sample per",
+    "(type, key-set) per worker), so a gate on them reds on unrelated diffs (measured 188 → 191, 2026-09-17).",
+    "Regenerate with `node scripts/audit-event-payloads.mjs --ratchet --write-shapes` after a FIX, never after a bump."
+  ],
+  "measured": "2026-09-18",
+  "shapes": {
+    "approval.overridden :: / must have required property 'X'": 1,
+    "runOrchestrator.decided :: /F must NOT have additional properties": 13,
+    "runOrchestrator.decided :: /F must have required property 'X'": 4,
+    "runOrchestrator.decided :: /F must match exactly one schema in oneOf": 2,
+    "runOrchestrator.decided :: /F/kind must be equal to constant": 6
+  }
+}

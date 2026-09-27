@@ -9,13 +9,14 @@
  *
  * `ui/` cohesion: surface-card / chip / StateCard / Notice / ClockIcon; tokens only.
  */
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { Link } from 'react-router-dom';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
-import { ClockIcon } from '../ui/icons/index.js';
+import { AlertIcon, ClockIcon } from '../ui/icons/index.js';
 import { CADENCE_PRESETS } from '../agents/scheduleClient.js';
 import { workflowName } from '../agents/roleTemplates.js';
 import { useFormat } from '../i18n/useFormat.js';
@@ -55,6 +56,11 @@ function cadenceKey(cronExpr: string): string {
   return CADENCE_PRESETS.find((p) => p.cronExpr === cronExpr)?.key ?? CADENCE_PRESETS[0]!.key;
 }
 
+/** The backend's one-shot sentinel (`ONE_SHOT_CRON`, ADR 0309) — a spent
+ *  one-shot (no `nextFireAt`, has `lastRunAt`) reads "Completed", not
+ *  "won't fire". */
+const ONE_SHOT_CRON = 'once';
+
 /** A schedule as the panel renders it — normalized across the three backends. */
 export interface SubjectScheduleRow {
   jobId: string;
@@ -64,6 +70,37 @@ export interface SubjectScheduleRow {
   enabled: boolean;
   lastRunAt?: string;
   lastRunId?: string;
+  /** GEN-PRJ-1 — a fire that consumed its slot and produced NO run. The daemon
+   *  records these (`recordJobSkipped`); a row type without a slot for them
+   *  regenerated the dead-schedule blindness the assistant lane fixed (ADR 0491
+   *  "log the SURFACING") on every consumer of this panel. ABSENT ⇒ nothing to
+   *  say (older backends simply show no line). */
+  lastSkippedAt?: string;
+  /** Wire value — validated against the known reasons at render time. */
+  lastSkipReason?: string;
+  /** Epoch-ms of the next computed fire; ABSENT ⇒ won't fire (unparseable
+   *  cadence, ADR 0313 D3) or a spent one-shot. Surfaces omitting it (older
+   *  backends) simply show no chip. */
+  nextFireAt?: number;
+}
+
+/** GEN-PRJ-1 — reason code → catalog key (REUSES the assistant lane's copy).
+ *  A `Record` so a new reason code on the wire is a compile-time prompt here;
+ *  the runtime arm below covers the wire (an unknown code must neither
+ *  fabricate a diagnosis nor go silent — the WF-COS-4 round-2 lesson). */
+const SKIP_REASON_KEY: Record<'budget' | 'workflow-unresolved' | 'dispatch-error', string> = {
+  budget: 'agents:recurringSkipBudget',
+  'workflow-unresolved': 'agents:recurringSkipUnresolved',
+  'dispatch-error': 'agents:recurringSkipDispatch',
+};
+function skipReasonKey(reason: string | undefined): string {
+  if (reason !== undefined && Object.prototype.hasOwnProperty.call(SKIP_REASON_KEY, reason)) {
+    return SKIP_REASON_KEY[reason as keyof typeof SKIP_REASON_KEY];
+  }
+  // Adversarial-review F6 — absent ≠ unrecognized: an unmapped wire value means
+  // a reason WAS recorded; saying "no reason was recorded" would assert absence
+  // where the truth is "recorded but not understood".
+  return reason === undefined ? 'agents:recurringSkipUnknown' : 'agents:recurringSkipUnrecognized';
 }
 
 /** The subject-agnostic operations the panel drives. */
@@ -87,8 +124,14 @@ export interface SubjectSchedulesCopy {
 
 export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = false }: { client: SubjectSchedulesClient; workflows: string[]; copy: SubjectSchedulesCopy; readOnly?: boolean }): JSX.Element {
   const { t } = useTranslation('schedules');
+  const { t: tc } = useTranslation('common');
   const f = useFormat();
-  const [jobs, setJobs] = useState<SubjectScheduleRow[]>([]);
+  // `null` = not read yet. This was `[]`, which is also what a successful empty read
+  // returns, so "No schedules yet" rendered on the very first paint — before the list
+  // had been asked for — and again if the read failed. Shared by three subjects
+  // (projects, profiles, agents), so both defects were shipped three times.
+  const [jobs, setJobs] = useState<SubjectScheduleRow[] | null>(null);
+  const [jobsFailed, setJobsFailed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<React.ReactNode>(null);
   const [wfId, setWfId] = useState(workflows[0] ?? '');
@@ -98,8 +141,9 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
   const [editCadence, setEditCadence] = useState(CADENCE_PRESETS[0]!.key);
 
   const refresh = useCallback(async () => {
+    setJobsFailed(false);
     try { setJobs(await client.list()); }
-    catch (err) { setError(err instanceof Error ? err.message : String(err)); }
+    catch (err) { setJobs([]); setJobsFailed(true); setError(err instanceof Error ? err.message : String(err)); }
   }, [client]);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -154,7 +198,14 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
       {error ? <Notice variant="error">{error}</Notice> : null}
       {notice ? <Notice variant="success">{notice}</Notice> : null}
 
-      {jobs.length === 0 ? (
+      {jobs === null ? (
+        <StateCard icon={<ClockIcon />} title={tc('loading')} loading />
+      ) : jobsFailed ? (
+        // Above the empty branch: below it, `[]` selects the instruction first and this
+        // is decorative. The error Notice at the top says WHAT failed; this stops the
+        // page also asserting there is nothing scheduled.
+        <StateCard announce icon={<ClockIcon />} title={tc('loadFailedTitle')} body={tc('loadFailedBody')} />
+      ) : jobs.length === 0 ? (
         <StateCard icon={<ClockIcon />} title={t('noSchedulesTitle')} body={noWorkflows ? copy.noWorkflowsHint : copy.emptyBody} />
       ) : (
         <ul className="u-list-none u-m-0 u-p-0 u-flex u-flex-col u-gap-1-5 u-mb-4">
@@ -165,6 +216,14 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                   <div className="u-fw-600 u-fs-14 u-flex u-items-center u-gap-1-5">
                     {job.workflowId ? workflowName(job.workflowId) : t('noWorkflow')}
                     <span className={`chip ${job.enabled ? 'chip--success' : 'chip--muted'}`}>{job.enabled ? t('statusActive') : t('statusPaused')}</span>
+                    {/* ADR 0313 D3 — a silent schedule must SAY it's silent: an
+                        enabled row with no computed next fire either spent its
+                        one-shot (done) or its cadence didn't parse (inert). */}
+                    {job.enabled && job.nextFireAt === undefined ? (
+                      job.cronExpr === ONE_SHOT_CRON && job.lastRunAt
+                        ? <span className="chip chip--muted">{t('oneShotDone')}</span>
+                        : <span className="chip chip--warning"><AlertIcon size={11} aria-hidden /> {t('wontFire')}</span>
+                    ) : null}
                   </div>
                   <div className="muted u-fs-12">
                     {job.timezone
@@ -176,13 +235,22 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                       ? <>{t('lastRun', { when: f.relativeTime(job.lastRunAt) })}{job.lastRunId ? <> · <Link to={`/runs/${job.lastRunId}`}>{t('viewRun')}</Link></> : null}</>
                       : t('notRunYet')}
                   </div>
+                  {/* GEN-PRJ-1 — a fire that consumed its slot and produced NO
+                      run. Without this line a typo'd workflow id read as a
+                      healthy schedule forever ("Not run yet", nextFireAt
+                      advancing) on all three consumers of this panel. */}
+                  {job.lastSkippedAt ? (
+                    <div className="u-fs-12 u-text-warning">
+                      {t('agents:recurringSkipped', { when: f.relativeTime(job.lastSkippedAt), reason: t(skipReasonKey(job.lastSkipReason)) })}
+                    </div>
+                  ) : null}
                 </div>
                 {readOnly ? null : (
                   <div className="action-bar u-gap-1">
-                    <button type="button" className="secondary btn-sm" onClick={() => (editing === job.jobId ? setEditing(null) : startEdit(job))}>{editing === job.jobId ? t('common:cancel') : t('common:edit')}</button>
-                    <button type="button" className="secondary btn-sm" onClick={() => void onToggle(job)}>{job.enabled ? t('pause') : t('resume')}</button>
-                    {client.trigger ? <button type="button" className="secondary btn-sm" onClick={() => void onRunNow(job)}>{t('runNow')}</button> : null}
-                    <button type="button" className="secondary btn-sm" onClick={() => void onDelete(job)}>{t('common:delete')}</button>
+                    <Button variant="secondary" size="sm" onClick={() => (editing === job.jobId ? setEditing(null) : startEdit(job))}>{editing === job.jobId ? t('common:cancel') : t('common:edit')}</Button>
+                    <Button variant="secondary" size="sm" onClick={() => void onToggle(job)}>{job.enabled ? t('pause') : t('resume')}</Button>
+                    {client.trigger ? <Button variant="secondary" size="sm" onClick={() => void onRunNow(job)}>{t('runNow')}</Button> : null}
+                    <Button variant="secondary" size="sm" onClick={() => void onDelete(job)}>{t('common:delete')}</Button>
                   </div>
                 )}
               </div>
@@ -196,7 +264,7 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
                   <select value={editCadence} onChange={(e) => setEditCadence(e.target.value)} aria-label={t('cadenceLabel')}>
                     {CADENCE_PRESETS.map((p) => <option key={p.key} value={p.key}>{cadenceKeyLabel(p.key)}</option>)}
                   </select>
-                  <button type="button" className="primary btn-sm" disabled={!editWf} onClick={() => void onSaveEdit(job)}>{t('saveChanges')}</button>
+                  <Button variant="primary" size="sm" disabled={!editWf} onClick={() => void onSaveEdit(job)}>{t('saveChanges')}</Button>
                 </div>
               ) : null}
             </li>
@@ -214,11 +282,11 @@ export function SubjectSchedulesPanel({ client, workflows, copy, readOnly = fals
             <select value={cadence} onChange={(e) => setCadence(e.target.value)} aria-label={t('cadenceLabel')}>
               {CADENCE_PRESETS.map((p) => <option key={p.key} value={p.key}>{cadenceKeyLabel(p.key)}</option>)}
             </select>
-            <button type="button" className="primary" disabled={!wfId} onClick={() => void onCreate()}>{t('createButton')}</button>
+            <Button variant="primary" disabled={!wfId} onClick={() => void onCreate()}>{t('createButton')}</Button>
           </div>
           <p className="muted u-fs-12 u-mb-0">{copy.helper}</p>
         </div>
-      ) : jobs.length > 0 ? (
+      ) : (jobs?.length ?? 0) > 0 ? (
         // The subject has existing schedules but no assignable workflows left.
         <div className="agentsched-create"><p className="muted u-fs-12 u-mb-0">{copy.noWorkflowsHint}</p></div>
       ) : null}

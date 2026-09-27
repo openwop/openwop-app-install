@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/create-company.output.json",
+  "title": "CrmCreateCompanyOutput",
+  "description": "The created (or original, on an explicit existing id) org-scoped company. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
+  "type": "object",
+  "required": [
+    "success",
+    "company"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "company": {
+      "type": "object",
+      "required": [
+        "companyId"
+      ],
+      "properties": {
+        "companyId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "The company row as the surface projects it (host bookkeeping columns `tenantId`/`orgId`/`createdBy`/`updatedBy` stripped)."
+    }
+  },
+  "additionalProperties": false
+}

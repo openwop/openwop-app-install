@@ -4,26 +4,28 @@
  * normative response shape, ANONYMOUSLY (public path), locale-negotiated over
  * the HOST-advertised set (capabilities.content), published-only. The seeded
  * home hero carries es/pt-BR overlays, so negotiation returns real translated
- * content + an honest Content-Language; a supported-but-unauthored locale (fr)
- * negotiates to fr yet falls back to base per-section.
+ * content + an honest Content-Language; a supported-but-unauthored locale (it)
+ * negotiates to it yet falls back to base per-section. (It was `fr` until the
+ * seed gained a French overlay — the test is about the fallback, not the locale.)
  */
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
+import { DEFAULT_HERO_HEADINGS } from '../src/host/systemSite.js';
 
 let BASE: string;
 let server: http.Server;
 
 // pt-BR / es hero overlays seeded in host/systemSite.ts (assert real merge).
-const PT_HEADING = 'Colegas de IA que fazem trabalho de verdade — e continuam sendo seus.';
-const ES_HEADING = 'Compañeros de IA que hacen trabajo real — y siguen siendo tuyos.';
-const EN_HEADING = 'AI coworkers that do real work — and stay yours.';
+const PT_HEADING = DEFAULT_HERO_HEADINGS['pt-BR'];
+const ES_HEADING = DEFAULT_HERO_HEADINGS.es;
+const EN_HEADING = DEFAULT_HERO_HEADINGS.en;
 
 interface Delivery {
   version: string; locale: string; slug: string;
   page: { name: string };
-  sections: Array<{ sectionId: string; sectionType: string; data: Record<string, unknown>; order: number }>;
+  sections: Array<{ sectionId: string; sectionType: string; data: Record<string, unknown> }>;
 }
 const get = async (al?: string): Promise<{ status: number; cl: string | null; body: Delivery }> => {
   const res = await fetch(`${BASE}/v1/content/pages/home`, al ? { headers: { 'accept-language': al } } : {});
@@ -36,9 +38,9 @@ beforeAll(async () => {
   process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
   // Operator-configure the host content locales (drives capabilities + the
   // negotiation set the projection honors).
-  process.env.OPENWOP_I18N_LOCALES = 'en,es,pt-BR,fr';
+  process.env.OPENWOP_I18N_LOCALES = 'en,es,pt-BR,fr,it';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_I18N_LOCALES;
@@ -55,7 +57,8 @@ describe('GET /v1/content/pages/:slug — normative delivery (RFC 0103)', () => 
     expect(heroHeading(r.body)).toBe(EN_HEADING);
     for (const s of r.body.sections) {
       expect(typeof s.sectionType).toBe('string');
-      expect(typeof s.order).toBe('number');
+      // ADR 0748 — `order` is NOT in the closed response schema; array order IS render order.
+      expect((s as Record<string, unknown>).order).toBeUndefined();
       expect((s as Record<string, unknown>).localizations).toBeUndefined(); // never leak overlays
     }
   });
@@ -72,10 +75,16 @@ describe('GET /v1/content/pages/:slug — normative delivery (RFC 0103)', () => 
     expect(heroHeading(r.body)).toBe(ES_HEADING);
   });
 
-  it('a supported-but-unauthored locale (fr) negotiates to fr yet falls back to base per-section', async () => {
+  it('negotiates fr → the French overlay in the seed', async () => {
     const r = await get('fr');
-    expect(r.cl).toBe('fr');               // fr is advertised/supported → honest negotiated locale
-    expect(heroHeading(r.body)).toBe(EN_HEADING); // no fr overlay → sparse fallback to base
+    expect(r.cl).toBe('fr');
+    expect(heroHeading(r.body)).toBe(DEFAULT_HERO_HEADINGS.fr);
+  });
+
+  it('a supported-but-unauthored locale (it) negotiates to it yet falls back to base per-section', async () => {
+    const r = await get('it');
+    expect(r.cl).toBe('it');               // it is advertised/supported → honest negotiated locale
+    expect(heroHeading(r.body)).toBe(EN_HEADING); // no it overlay → sparse fallback to base
   });
 
   it('an unsupported locale falls back to base; malformed never 400s', async () => {
@@ -101,5 +110,51 @@ describe('GET /v1/content/pages/:slug — normative delivery (RFC 0103)', () => 
     expect(content?.baseLocale).toBe(i18n?.defaultLocale);            // §A: content.baseLocale == i18n.defaultLocale
     expect(content?.supportedLocales).not.toContain(content?.baseLocale); // §A: base ∉ content.supported
     for (const l of content?.supportedLocales ?? []) expect(i18n?.supportedLocales).toContain(l); // §A: content ⊆ i18n
+  });
+});
+
+// ── ADR 0592 §9 (CMSL-6) — the three missing assertions on the ONE publicly
+// CACHEABLE negotiated response.
+describe('ADR 0592 §9 — public-lane cache/withholding honesty (CMSL-6)', () => {
+  it('sets Vary: Accept-Language beside the public Cache-Control (a dropped Vary = cross-language CDN cache poisoning)', async () => {
+    const res = await fetch(`${BASE}/v1/content/pages/home`, { headers: { 'accept-language': 'es' } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('vary')).toMatch(/Accept-Language/i);
+    expect(res.headers.get('cache-control')).toMatch(/public/);
+  });
+
+  it('i18n-UNSET: the route stays live and serves base-only with Content-Language = base', async () => {
+    const saved = process.env.OPENWOP_I18N_LOCALES;
+    delete process.env.OPENWOP_I18N_LOCALES;
+    try {
+      const r = await get('pt-BR');
+      expect(r.status).toBe(200);
+      expect(r.cl).toBe('en');                       // nothing advertised → base
+      expect(heroHeading(r.body)).toBe(EN_HEADING);  // no overlay served
+    } finally {
+      process.env.OPENWOP_I18N_LOCALES = saved;
+    }
+  });
+
+  it('per-locale WITHHOLDING applies on the public lane (a withheld locale falls back to base, no leakage)', async () => {
+    const { SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG } = await import('../src/host/systemSite.js');
+    const { getPublishedBySlug, setLocalePublishState } = await import('../src/features/cms/cmsService.js');
+    const { updateContentLanguageSettings } = await import('../src/host/contentLocales.js');
+    const hit = await getPublishedBySlug(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, 'home');
+    expect(hit).toBeTruthy();
+    // The system org needs stored settings for the withhold write to validate.
+    await updateContentLanguageSettings(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, { supportedLocales: ['es', 'pt-BR'] }, 'test');
+    await setLocalePublishState(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, hit!.page.pageId, 'pt-BR', 'draft', 'test');
+    try {
+      const withheld = await get('pt-BR');
+      expect(withheld.cl).toBe('en');                       // removed from the negotiable set
+      expect(heroHeading(withheld.body)).toBe(EN_HEADING);  // overlay stripped BEFORE fallback
+      // The sibling locale is unaffected.
+      const es = await get('es');
+      expect(es.cl).toBe('es');
+      expect(heroHeading(es.body)).toBe(ES_HEADING);
+    } finally {
+      await setLocalePublishState(SYSTEM_SITE_TENANT, SYSTEM_SITE_ORG, hit!.page.pageId, 'pt-BR', 'published', 'test');
+    }
   });
 });

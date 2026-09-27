@@ -15,9 +15,6 @@ export const messages = {
   lede: 'Forme un consejo de agentes asesores — luego convóquelo en el chat de IA escribiendo su @@handle.',
 
   // Convene hint (rich)
-  conveneHint: 'Para convocar un consejo, abra el chat de IA y escriba su <1>@@handle</1> (p. ej. <3>@@timeless ¿qué deberíamos priorizar?</3>). Cada asesor se une a los Agentes activos del chat y el consejo aporta su opinión allí.',
-
-  // Board list
   boardsEmptyTitle: 'Aún no hay consejos',
   boardsEmptyBody: 'Cree su primer consejo asesor arriba.',
 
@@ -39,7 +36,7 @@ export const messages = {
   // Strategy context picker (ADR 0076 Phase 5)
   strategyContextLabel: 'Contexto de estrategia',
   planningContextLabel: 'Contexto de planificación',
-  planningContextHint: 'Da a los asesores tus estrategias y proyectos como contexto de planificación — sus objetivos, estado e hitos. Para búsqueda profunda de documentos, usa los interruptores de «Conocimiento compartido» en una tarjeta de consejo.',
+  planningContextHint: 'Da a los asesores tus estrategias y proyectos como contexto de planificación — una instantánea de objetivos, estado e hitos tomada al abrir o convocar el chat del consejo. Para búsqueda de documentos en vivo en cada turno, usa la sección «Conocimiento compartido» al editar un consejo.',
   projectContextLabel: 'Contexto de proyecto',
   projectContextCount_one: '{{count}} proyecto',
   projectContextCount_other: '{{count}} proyectos',
@@ -54,7 +51,14 @@ export const messages = {
   boardNamePlaceholder: 'Consejo de fundadores',
   organizationLabel: 'Organización',
   visibilityLabel: 'Visibilidad',
-  visibilityPrivate: 'Privado (solo yo)',
+  // ADR 0665 D3 — was "Private (only me)", which the access rule does not deliver:
+  // `resolveBoardAccess` grants an org `workspace:write` holder authority over the
+  // board SUBJECT regardless of visibility — the documented cross-feature
+  // "visibility is not authority" rule (ADR 0054 D5), which projects implement
+  // identically. The rule is unchanged; the promise now matches it, in the wording
+  // `features/projects/i18n` already ships for the same rule.
+  visibilityPrivate: 'Privado',
+  visibilityPrivateHelp: 'Solo tú y quienes tengan permiso de escritura en el espacio de trabajo pueden ver este consejo: sus asesores y la transcripción de la sala.',
   visibilityShared: 'Compartido (espacio de trabajo)',
   personaKindLabel: 'Tipo de persona',
   advisorsLabel: 'Asesores',
@@ -62,6 +66,10 @@ export const messages = {
   createBoard: 'Crear consejo',
   editBoard: 'Editar consejo',
   saveChanges: 'Guardar cambios',
+  openingChatAction: 'Abriendo…',
+  openChatAction: 'Abrir chat',
+  openBoardChatLabel: 'Abrir el chat del consejo {{name}}',
+  openChatError: 'No se pudo abrir el chat del consejo.',
   editAction: 'Editar',
   cloneAction: 'Clonar',
   editBoardLabel: 'Editar {{name}}',
@@ -73,11 +81,23 @@ export const messages = {
   personaFictional: 'Personajes ficticios',
   personaOriginal: 'Personas originales',
   personaLiving: 'Individuos vivos (requiere reconocimiento)',
-  sharedKnowledgeLabel: 'Conocimiento compartido:',
+  sharedKnowledgeLabel: 'Conocimiento compartido',
+  sharedKnowledgeHint: 'Da a cada asesor de este consejo acceso de recuperación a estas bases de conocimiento — se consultan en vivo en cada turno, así las respuestas siguen el contenido más reciente.',
+  sharedKnowledgeLoadFailed: 'No se pudo cargar la configuración de conocimiento compartido. Vuelve a abrir el consejo para intentarlo de nuevo.',
   sharedKnowledgeOnTitle: 'Todos los asesores pueden recuperar {{kind}} — haz clic para dejar de compartir',
   sharedKnowledgeOffTitle: 'Dar a todos los asesores acceso a {{kind}}',
   sharedKnowledgeEmptyTitle: 'Aún no hay {{kind}} para compartir — añade conocimiento a un proyecto para compartirlo con este consejo',
   sharedKind_strategy: 'KB de Estrategia',
   'sharedKind_priority-matrix': 'KB de Matriz de Prioridades',
   sharedKind_project: 'KBs de proyectos',
+  'sharedKind_team-portfolio': 'KB de portafolio del equipo',
+  contextLoadFailed: "No se pudieron cargar las estrategias ni los proyectos, así que ahora no se puede adjuntar contexto de planificación a este consejo. El contexto ya guardado no se modifica.",
+  dialogErrorAnnounce: "No se guardó. El motivo aparece en el diálogo.",
+  deleteErrorAnnounce: "No se eliminó. El motivo aparece en el diálogo.",
+  moderatorLabel: "Presidente (sintetiza)",
+  moderatorHint: "El presidente resume al final. Si no se define, el primer asesor que habla también escribe la recomendación: una parte juzgando la disputa.",
+  moderatorNone: "Sin presidente — el primer asesor sintetiza",
+  moderatorOutOfCohort: "{{persona}} — preside, fuera de este grupo",
+  boardContextStaleBody: "No pudimos actualizar el registro guardado de los planes que recibió esta sala, así que ese registro está desfasado. Tus asesores siguen fundamentados en los planes que puedes leer, comprobados en cada turno.",
+  boardContextStaleOpen: "Abrir la sala de todos modos",
 } as const;

@@ -1,0 +1,94 @@
+{
+  "name": "core.openwop.workflows.podcasts",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; outputRoles restored at registration.",
+  "keywords": [
+    "podcasts"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "podcasts.generate",
+      "version": "1.0.0",
+      "label": "podcasts.generate",
+      "description": "podcasts.generate workflow.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "episodeId"
+        ],
+        "properties": {
+          "episodeId": {
+            "type": "string",
+            "description": "The podcast episode tracking record to generate."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "select",
+            "typeId": "feature.podcasts.nodes.select-content",
+            "inputs": {
+              "episodeId": "{{params.episodeId}}"
+            }
+          },
+          {
+            "id": "outline",
+            "typeId": "feature.podcasts.nodes.outline",
+            "inputs": {
+              "episodeId": "{{params.episodeId}}"
+            }
+          },
+          {
+            "id": "transcript",
+            "typeId": "feature.podcasts.nodes.transcript",
+            "inputs": {
+              "episodeId": "{{params.episodeId}}"
+            }
+          },
+          {
+            "id": "synthesize",
+            "typeId": "feature.podcasts.nodes.synthesize",
+            "inputs": {
+              "episodeId": "{{params.episodeId}}"
+            }
+          },
+          {
+            "id": "mix",
+            "typeId": "feature.podcasts.nodes.mix",
+            "inputs": {
+              "episodeId": "{{params.episodeId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "select.context",
+            "to": "outline.context",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "outline.outline",
+            "to": "transcript.outline",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "transcript.turns",
+            "to": "synthesize.turns",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "synthesize.clips",
+            "to": "mix.clips",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,8 +1,10 @@
 import type { Express } from 'express';
+import { hostWebSearchKeyStatus } from '../host/webResearchSurface.js';
 import { createLogger } from '../observability/logger.js';
 import { getManagedProviderStatuses } from '../providers/managedProvider.js';
 import { sessionSecretConfigError, apiKeyConfigError } from '../middleware/auth.js';
 import { APP_VERSION } from '../version.js';
+import { buildInfo } from '../host/buildInfo.js';
 import type { Storage } from '../storage/storage.js';
 
 const log = createLogger('routes.health');
@@ -67,6 +69,12 @@ export function registerHealthRoutes(app: Express, deps: { storage?: Storage } =
       log.error('readiness check failed', {
         error: err instanceof Error ? err.message : String(err),
       });
+      // openwop-envelope-exempt: /readiness returns a readiness REPORT, not an
+      // error envelope — the 200 and the 503 emit the SAME document
+      // (`status` / `version` / `build` / `checks`), and `scripts/verify-deploy.sh`
+      // + DEPLOY-SMOKE read `build.commit` off it on both. Reshaping it into
+      // `{ error, message, details }` would break deploy verification to satisfy
+      // a schema that was never describing this body (H27-b).
       res.status(503).json({ status: 'degraded', error: 'readiness_check_failed' });
       return;
     }
@@ -90,16 +98,39 @@ export function registerHealthRoutes(app: Express, deps: { storage?: Storage } =
     if (storageError) {
       log.error('readiness degraded — storage probe failed', { error: storageError });
     }
+    // Web-search configuration — REPORTED, never gating. An operator setting the
+    // Vault key had no way to confirm it landed except running a workflow and
+    // reading `engine: 'demo'` off a run event; this is the same "make it a
+    // deploy-time signal" move the managed-provider block above documents.
+    //
+    // Deliberately does NOT affect `ready`: search is optional. A host running
+    // non-research workflows is genuinely healthy without it, and 503-ing here
+    // would be the dishonest inverse of the problem being fixed.
+    let webSearch: Awaited<ReturnType<typeof hostWebSearchKeyStatus>> = { configured: false, source: null };
+    try {
+      webSearch = await hostWebSearchKeyStatus();
+    } catch (err) {
+      log.warn('web-search status probe failed', { error: err instanceof Error ? err.message : String(err) });
+    }
+
     const ready = unconfigured.length === 0 && !configError && !storageError;
     res.status(ready ? 200 : 503).json({
       status: ready ? 'ready' : 'degraded',
       // ADR 0052 §D4 — version-verify a deploy: the smoke test asserts this
       // matches the version it just shipped.
       version: APP_VERSION,
+      // ADR 0518 — the COMMIT, which `version` cannot substitute for: APP_VERSION
+      // is hand-maintained and has not moved in the app's lifetime, so it cannot
+      // tell two deploys apart. This can, which is what makes "is prod running
+      // what I merged?" a single curl. `stamped:false` means the deploy omitted
+      // the stamp — reported honestly rather than guessed.
+      build: buildInfo(),
       checks: {
         managedProviders,
         config: configError ? { ok: false, error: configError } : { ok: true },
         storage: deps.storage ? (storageError ? { ok: false, error: storageError } : { ok: true }) : { ok: true, skipped: true },
+        // Informational — see the note above; never gates `ready`.
+        webSearch,
       },
     });
   });

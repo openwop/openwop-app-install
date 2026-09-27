@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.document-author",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Office-document authoring agent — produces PDF / Word / Excel / PowerPoint deliverables from briefs. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -26,17 +26,10 @@
       "agentId": "core.openwop.agents.document-author.default",
       "persona": "Document Author",
       "label": "Document Author Agent",
-      "description": "Authors PDF / Word / Excel / PowerPoint documents from natural-language briefs. Plans structure, writes content, invokes core.openwop.files PDF/archive primitives to materialize the deliverable. Mirrors Anthropic's top official Office-document skills (PowerPoint/Excel/Word/PDF).",
+      "description": "Authors PDF / Word / Excel / PowerPoint documents from natural-language briefs. Plans structure and writes the content; the enclosing workflow's core.files PDF/archive nodes materialize the deliverable from what it returns. Mirrors Anthropic's top official Office-document skills (PowerPoint/Excel/Word/PDF).",
       "modelClass": "writing",
       "systemPromptRef": "prompts/document-author.md",
-      "toolAllowlist": [
-        "openwop:core.files.write",
-        "openwop:core.files.read",
-        "openwop:core.files.pdf-extract-text",
-        "openwop:core.files.pdf-split",
-        "openwop:core.files.pdf-merge",
-        "openwop:core.files.archive-create"
-      ],
+      "toolAllowlist": [],
       "memoryShape": {
         "scratchpad": true,
         "conversation": false,

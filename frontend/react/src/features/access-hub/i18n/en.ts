@@ -7,6 +7,7 @@ export const messages = {
   eyebrow: 'Access & data',
   title: 'Access',
   lede: 'Manage credentials, connections, and who can do what — all in one place.',
+  anonSignInPrompt: 'You\'re in an anonymous demo session — connections and keys you add here reset after 24 hours. Sign in to keep them.',
 
   // Scope pill
   scopeLabel: 'Scope',
@@ -15,6 +16,7 @@ export const messages = {
 
   // Tablist
   tablistLabel: 'Access sections',
+  panelRegion: '{{panel}} access panel',
 
   // Tab labels (keyed by the route id = path last segment)
   tab_keys: 'Keys',

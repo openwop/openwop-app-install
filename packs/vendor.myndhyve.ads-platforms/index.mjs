@@ -1528,7 +1528,7 @@ export async function platformSpecs(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'ads.platform.specs': platformSpecs,
 };
 

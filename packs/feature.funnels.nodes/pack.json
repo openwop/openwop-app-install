@@ -1,0 +1,57 @@
+{
+  "name": "feature.funnels.nodes",
+  "version": "1.0.0",
+  "description": "Funnels feature node pack (Funnel A chat-drivability) — nodes over the ctx.features.funnels surface. Reads: `list` / `get` / `step-stats` (per-step views/completions/revenue totals). Writes: `create` and `set-steps` author DRAFT state only — publishing a funnel changes a PUBLIC surface, so it is never exposed to agents ('agent proposes, human disposes'; the promotions firewall). All role:'action' (recorded → replay-safe).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "funnels", "marketing", "conversion", "landing-pages"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.funnels.nodes.list",
+      "version": "1.0.0",
+      "label": "Funnels List",
+      "description": "Lists the org's funnels (any status) over ctx.features.funnels. Inputs: orgId.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.get",
+      "version": "1.0.0",
+      "label": "Funnel Get",
+      "description": "Reads one funnel (steps, status, slug). Inputs: orgId, funnelId.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.create",
+      "version": "1.0.0",
+      "label": "Funnel Create (draft)",
+      "description": "Authors a funnel — agent-authored ⇒ DRAFT; a human publishes in the Funnels page (public-surface change, never auto-live). Inputs: orgId, name, slug?, steps?:[{kind,pageId,name?,routing?}].",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.set-steps",
+      "version": "1.0.0",
+      "label": "Funnel Set Steps (draft edit)",
+      "description": "Replaces a funnel's step list (pages validated against the workspace CMS; running step experiments are preserved by stepId). Inputs: orgId, funnelId, steps.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.funnels.nodes.step-stats",
+      "version": "1.0.0",
+      "label": "Funnel Step Stats",
+      "description": "Per-step totals (views/completions/revenue/orders) from the derived rollups — the planning read for optimization proposals. Inputs: orgId, funnelId.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

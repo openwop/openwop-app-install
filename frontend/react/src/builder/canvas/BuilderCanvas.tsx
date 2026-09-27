@@ -12,40 +12,40 @@
  *   BaseNode paints execution state.
  */
 
+import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Background,
   BackgroundVariant,
-  Controls,
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
   applyNodeChanges,
+  useViewport,
   type Connection,
   type Edge,
   type Node,
   type NodeChange,
   type EdgeChange,
   useReactFlow,
+  type FinalConnectionState,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useBuilderStore } from '../store/builderStore.js';
-import { catalogEntry } from '../palette/catalogRegistry.js';
+import { catalogEntry, useCatalog } from '../palette/catalogRegistry.js';
 import { isPortCompatible } from './portCompatibility.js';
+import type { PortType } from '../schema/workflow.js';
 import { BaseNode } from './nodes/BaseNode.js';
 import { Notice } from '../../ui/Notice.js';
-import { InfoIcon } from '../../ui/icons/index.js';
+import { InfoIcon, XIcon } from '../../ui/icons/index.js';
 import { useTranslation } from 'react-i18next';
+import { ZoomCluster } from '../../canvas/ZoomCluster.js';
+import { usePublishViewportHandle } from '../../canvas/viewportHandle.js';
 
 const NODE_TYPES = { builder: BaseNode };
 export const PALETTE_MIME = 'application/openwop-node-kind';
-
-// In-canvas copy/paste clipboard — module-level so it survives across
-// builder mounts (paste into a different workflow works). Holds each
-// copied node's kind/name/config plus its offset (dx/dy) from the
-// selection's top-left, so a multi-node paste preserves relative layout.
-type ClipboardEntry = { kind: string; name: string; config: Record<string, unknown>; dx: number; dy: number };
-let nodeClipboard: ClipboardEntry[] | null = null;
+// Copy/paste/duplicate moved to builder/nodeClipboard.ts (CV-2 — driven by
+// the shell's shortcut registry, not an ad-hoc keydown listener here).
 
 export function BuilderCanvas() {
   return (
@@ -64,6 +64,10 @@ function BuilderCanvasInner() {
   const builderEdges = useBuilderStore((s) => s.edges);
   const selectedNodeIds = useBuilderStore((s) => s.selectedNodeIds);
   const overlay = useBuilderStore((s) => s.overlay);
+  const debugSession = useBuilderStore((s) => s.debugSession);
+  const failureHeat = useBuilderStore((s) => s.failureHeat);
+  const failureHeatMode = useBuilderStore((s) => s.failureHeatMode);
+  const collabPeers = useBuilderStore((s) => s.collabPeers);
   const addNode = useBuilderStore((s) => s.addNode);
   const moveNodes = useBuilderStore((s) => s.moveNodes);
   const removeNodes = useBuilderStore((s) => s.removeNodes);
@@ -72,55 +76,115 @@ function BuilderCanvasInner() {
   const setSelection = useBuilderStore((s) => s.setSelection);
   const selectedSet = useMemo(() => new Set(selectedNodeIds), [selectedNodeIds]);
 
-  // Canvas keyboard shortcuts: ⌘/Ctrl+D duplicate, ⌘/Ctrl+C copy,
-  // ⌘/Ctrl+V paste the selected node. (Delete/Backspace is handled by
-  // xyflow's built-in node-removal → onNodesChange 'remove'.) Reads the
-  // store via getState() to avoid stale-closure deps; runs once.
+  // §7.3 / CV-3 residue — the shared ZoomCluster replaces xyflow <Controls>;
+  // zoom math delegates to xyflow's own viewport (one owner per surface).
+  const { zoom } = useViewport();
+  const rf = useReactFlow();
+  const zoomHandle = useMemo(() => ({
+    fit: () => void rf.fitView(),
+    zoomToPercent: (pct: number) => void rf.zoomTo(pct / 100),
+  }), [rf]);
+  usePublishViewportHandle(zoomHandle);
+
+  // §7.4 / CV-5 — keyboard-connect parity (the GraphSurface pattern on
+  // xyflow): arm a source from the selected node's chrome; every node with a
+  // type-compatible input then offers "Connect to" (validated port pair).
+  const [connectFrom, setConnectFrom] = useState<string | null>(null);
+  /** First type-compatible (output, input) port pair from source → target. */
+  const compatiblePair = useCallback((sourceId: string, targetId: string): { sourcePort: string; targetPort: string } | null => {
+    if (sourceId === targetId) return null;
+    const sourceNode = builderNodes.find((n) => n.id === sourceId);
+    const targetNode = builderNodes.find((n) => n.id === targetId);
+    const sourceEntry = sourceNode ? catalogEntry(sourceNode.kind) : undefined;
+    const targetEntry = targetNode ? catalogEntry(targetNode.kind) : undefined;
+    if (!sourceEntry || !targetEntry) return null;
+    for (const out of sourceEntry.outputs) {
+      for (const inp of targetEntry.inputs) {
+        if (isPortCompatible(out.type, inp.type)) return { sourcePort: out.name, targetPort: inp.name };
+      }
+    }
+    return null;
+  }, [builderNodes]);
+  const connectTo = useCallback((targetId: string) => {
+    if (!connectFrom) return;
+    const pair = compatiblePair(connectFrom, targetId);
+    if (!pair) return;
+    addEdge({ source: connectFrom, sourcePort: pair.sourcePort, target: targetId, targetPort: pair.targetPort });
+    setConnectFrom(null);
+  }, [connectFrom, compatiblePair, addEdge]);
+
+  // §7.4 / CV-10 — link-drag-search (the Blueprints/Blender/n8n convergent
+  // gesture): dropping a connection on EMPTY canvas opens a picker at the
+  // drop point, filtered to kinds with an input compatible with the dragged
+  // output port; picking one creates + auto-wires the node.
+  const catalog = useCatalog();
+  const [dropPicker, setDropPicker] = useState<{
+    x: number; y: number; flow: { x: number; y: number };
+    sourceId: string; sourcePort: string; sourceType: PortType; query: string;
+  } | null>(null);
+  const onConnectEnd = useCallback((event: MouseEvent | TouchEvent, state: FinalConnectionState) => {
+    if (state.isValid) return; // a real connection landed on a handle
+    if (!state.fromNode || !state.fromHandle || state.fromHandle.type !== 'source') return;
+    const targetEl = event.target instanceof HTMLElement ? event.target : null;
+    if (!targetEl?.classList.contains('react-flow__pane')) return; // only empty canvas
+    const client = 'changedTouches' in event ? event.changedTouches[0] : event;
+    if (!client) return;
+    const sourceNode = useBuilderStore.getState().nodes.find((n) => n.id === state.fromNode?.id);
+    const sourceEntry = sourceNode ? catalogEntry(sourceNode.kind) : undefined;
+    const portName = state.fromHandle.id ?? sourceEntry?.outputs[0]?.name ?? '';
+    const sourceType = sourceEntry?.outputs.find((p) => p.name === portName)?.type;
+    if (!sourceType) return;
+    const wrap = wrapperRef.current?.getBoundingClientRect();
+    setDropPicker({
+      x: client.clientX - (wrap?.left ?? 0),
+      y: client.clientY - (wrap?.top ?? 0),
+      flow: screenToFlowPosition({ x: client.clientX, y: client.clientY }),
+      sourceId: state.fromNode.id,
+      sourcePort: portName,
+      sourceType,
+      query: '',
+    });
+  }, [screenToFlowPosition]);
+  const pickerMatches = useMemo(() => {
+    if (!dropPicker) return [];
+    const q = dropPicker.query.trim().toLowerCase();
+    return catalog.filter((e) => {
+      if (e.clientOnly) return false;
+      const inp = e.inputs.find((p) => isPortCompatible(dropPicker.sourceType, p.type));
+      if (!inp) return false;
+      return !q || e.label.toLowerCase().includes(q) || e.kind.toLowerCase().includes(q);
+    });
+  }, [catalog, dropPicker]);
+  // No silent caps (§7 canon / DESIGN.md "no silent truncation"): show 12,
+  // SAY how many more the search would reveal.
+  const pickerKinds = pickerMatches.slice(0, 12);
+  const pickerOverflow = pickerMatches.length - pickerKinds.length;
+  // Grade-pass CVP-2 — outside-pointerdown dismisses the drop picker (Esc +
+  // Cancel already exist; this is the pointer parity path). Capture phase so
+  // a click that starts a canvas gesture also closes it.
+  const dropPickerRef = useRef<HTMLDivElement | null>(null);
+  const dropPickerOpen = dropPicker != null;
   useEffect(() => {
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const t = e.target as HTMLElement | null;
-      // Don't hijack copy/paste while the user is typing in a field
-      // (inline node title, inspector inputs, etc.).
-      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) {
-        return;
-      }
-      const key = e.key.toLowerCase();
-      if (key !== 'c' && key !== 'v' && key !== 'd') return;
-      const st = useBuilderStore.getState();
-      const ids = st.selectedNodeIds;
-      const primary = st.selectedNodeId ? st.nodes.find((n) => n.id === st.selectedNodeId) ?? null : null;
-      const OFFSET = 32;
-      if (key === 'd' && ids.length > 0) {
-        e.preventDefault();
-        st.cloneNodes(ids); // group-aware duplicate (1+ nodes)
-      } else if (key === 'c' && ids.length > 0) {
-        e.preventDefault();
-        // Copy the whole selection, storing each node's offset from the
-        // selection's top-left so paste can reconstruct the layout.
-        const sel = st.nodes.filter((n) => ids.includes(n.id));
-        const minX = Math.min(...sel.map((n) => n.position.x));
-        const minY = Math.min(...sel.map((n) => n.position.y));
-        nodeClipboard = sel.map((n) => ({
-          kind: n.kind,
-          name: n.name,
-          config: { ...n.config },
-          dx: n.position.x - minX,
-          dy: n.position.y - minY,
-        }));
-      } else if (key === 'v' && nodeClipboard && nodeClipboard.length > 0) {
-        e.preventDefault();
-        // Anchor the paste near the primary node if one is selected, else a
-        // fixed spot. The whole group shifts together by `OFFSET`.
-        const anchor = primary
-          ? { x: primary.position.x + OFFSET, y: primary.position.y + OFFSET }
-          : { x: 160, y: 160 };
-        st.pasteNodes(nodeClipboard, anchor);
-      }
+    if (!dropPickerOpen) return undefined;
+    const onDown = (e: PointerEvent): void => {
+      const el = dropPickerRef.current;
+      if (el && e.target instanceof Node && !el.contains(e.target)) setDropPicker(null);
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+    window.addEventListener('pointerdown', onDown, true);
+    return () => window.removeEventListener('pointerdown', onDown, true);
+  }, [dropPickerOpen]);
+
+  const pickKind = useCallback((kind: string) => {
+    if (!dropPicker) return;
+    const st = useBuilderStore.getState();
+    const targetEntry = catalogEntry(kind);
+    const targetPort = targetEntry?.inputs.find((p) => isPortCompatible(dropPicker.sourceType, p.type))?.name;
+    // One gesture = ONE undo entry: the atomic create wires node + edge in a
+    // single history snapshot (addNode + addEdge cost two ⌘Z — CT-CV-3).
+    if (targetPort) st.addConnectedNode(kind, dropPicker.flow, { source: dropPicker.sourceId, sourcePort: dropPicker.sourcePort, targetPort });
+    else st.addNode(kind, dropPicker.flow);
+    setDropPicker(null);
+  }, [dropPicker]);
 
   // Measured node dimensions, captured from xyflow's `dimensions` changes (see
   // onNodesChange). We feed these back onto the controlled nodes as width/height
@@ -130,17 +194,55 @@ function BuilderCanvasInner() {
   // empty viewport box with no node blips.
   const [nodeDims, setNodeDims] = useState<Record<string, { width: number; height: number }>>({});
 
+  // ADR 0481 D5 — node id → peers whose selection includes it (quiet markers;
+  // order follows the stable clientId sort from the presence hook).
+  const peersByNode = useMemo(() => {
+    if (!collabPeers || collabPeers.length === 0) return null;
+    // clientId rides along (ux-H3): it is the stable per-SESSION identity the
+    // marker list keys on — two peers can share a display name.
+    const map = new Map<string, { clientId: number; name: string; color: string }[]>();
+    for (const p of collabPeers) {
+      for (const id of p.selectedNodeIds) {
+        const arr = map.get(id) ?? [];
+        arr.push({ clientId: p.clientId, name: p.name, color: p.color });
+        map.set(id, arr);
+      }
+    }
+    return map;
+  }, [collabPeers]);
+
   const rfNodes: Node[] = useMemo(
     () =>
       builderNodes.map((n) => ({
         id: n.id,
         type: 'builder',
         position: n.position,
-        data: { kind: n.kind, name: n.name, runStatus: overlay?.nodeStatus[n.id] },
+        data: {
+          kind: n.kind,
+          name: n.name,
+          runStatus: overlay?.nodeStatus[n.id],
+          // ADR 0475 — the debug-pin badge (a pinned node is visibly pinned).
+          pinned: debugSession?.pins[n.id] !== undefined,
+          // ADR 0476 — failure-heatmap count for this node (undefined = off/none).
+          // ADR 0482 §6 — the same slice in 'cost' mode paints per-node USD
+          // (the latest terminal run's costByNode stamp) instead of counts.
+          failureCount: failureHeatMode === 'failures' ? failureHeat?.[n.id] : undefined,
+          costUsd: failureHeatMode === 'cost' ? failureHeat?.[n.id] : undefined,
+          // ADR 0481 D5 — live-session peers with this node selected.
+          peers: peersByNode?.get(n.id),
+          // §7.4 / CV-5 — the keyboard-connect affordance state.
+          connect: {
+            armed: connectFrom != null,
+            isSource: connectFrom === n.id,
+            canTarget: connectFrom != null && connectFrom !== n.id && compatiblePair(connectFrom, n.id) != null,
+            onArm: () => setConnectFrom(n.id),
+            onTarget: () => connectTo(n.id),
+          },
+        },
         selected: selectedSet.has(n.id),
         ...((d) => (d ? { width: d.width, height: d.height } : {}))(nodeDims[n.id]),
       })),
-    [builderNodes, selectedSet, overlay, nodeDims],
+    [builderNodes, selectedSet, overlay, debugSession, failureHeat, failureHeatMode, peersByNode, nodeDims, connectFrom, compatiblePair, connectTo],
   );
 
   const rfEdges: Edge[] = useMemo(
@@ -313,6 +415,17 @@ function BuilderCanvasInner() {
       <span className="builder-canvas-help" title={t('canvasShortcuts')}>
         <InfoIcon size={13} aria-hidden /> {t('canvasKeyboardShortcuts')}
       </span>
+      {/* E.1 — selected-node affordance for the BLD-1 keyboard-connect path:
+          scrolls + focuses the Inspector's Connections form (store nonce). */}
+      {selectedNodeIds.length === 1 && (
+        <button
+          type="button"
+          className="builder-canvas-help builder-canvas-connect"
+          onClick={() => useBuilderStore.getState().requestConnectionsFocus()}
+        >
+          {t('canvasConnectHint')}
+        </button>
+      )}
       <ReactFlow
         nodes={rfNodes}
         edges={rfEdges}
@@ -322,6 +435,7 @@ function BuilderCanvasInner() {
         onEdgeClick={onEdgeClick}
         onPaneClick={onPaneClick}
         onConnect={onConnect}
+        onConnectEnd={onConnectEnd}
         isValidConnection={isValidConnection}
         fitView
         snapToGrid
@@ -329,7 +443,6 @@ function BuilderCanvasInner() {
         proOptions={{ hideAttribution: true }}
       >
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
-        <Controls position="bottom-right" />
         <MiniMap
           pannable
           zoomable
@@ -340,6 +453,64 @@ function BuilderCanvasInner() {
           nodeBorderRadius={2}
         />
       </ReactFlow>
+      {/* §7.3 / CV-3 — the ONE shared zoom cluster (replaces xyflow Controls);
+          zoom math stays xyflow's (rf.zoomIn/zoomTo/fitView). */}
+      <ZoomCluster
+        percent={Math.round(zoom * 100)}
+        zoomIn={() => void rf.zoomIn()}
+        zoomOut={() => void rf.zoomOut()}
+        zoomToPercent={(pct) => void rf.zoomTo(pct / 100)}
+        onFit={() => void rf.fitView()}
+        zoomInDisabled={zoom >= 2}
+        zoomOutDisabled={zoom <= 0.5}
+      />
+      {/* §7.4 / CV-10 — the link-drag-search picker at the drop point. */}
+      {dropPicker ? (
+        // Esc-on-container is the APG dialog dismissal pattern; the rule's
+        // non-interactive list predates role="dialog" keyboard handling.
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+        <div
+          ref={dropPickerRef}
+          className="builder-drop-picker"
+          role="dialog"
+          aria-label={t('dropPickerLabel')}
+          style={{ left: Math.min(dropPicker.x, (wrapperRef.current?.clientWidth ?? 600) - 280), top: Math.min(dropPicker.y, (wrapperRef.current?.clientHeight ?? 400) - 240) }}
+          onKeyDown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); setDropPicker(null); } }}
+        >
+          <input
+            autoFocus
+            type="search"
+            className="ui-input builder-drop-picker__search"
+            placeholder={t('dropPickerSearch')}
+            aria-label={t('dropPickerSearch')}
+            value={dropPicker.query}
+            onChange={(e) => setDropPicker((p) => (p ? { ...p, query: e.target.value } : p))}
+          />
+          <ul className="builder-drop-picker__list">
+            {pickerKinds.length === 0 ? <li className="builder-drop-picker__empty">{t('dropPickerEmpty')}</li> : null}
+            {pickerKinds.map((e) => (
+              <li key={e.kind}>
+                <button type="button" className="builder-drop-picker__item" onClick={() => pickKind(e.kind)}>
+                  <span className="builder-node-badge" style={{ background: e.accent }}>{e.badge}</span>
+                  <span>{e.label}</span>
+                </button>
+              </li>
+            ))}
+            {pickerOverflow > 0 ? <li className="builder-drop-picker__empty">{t('dropPickerMore', { count: pickerOverflow })}</li> : null}
+          </ul>
+          <Button variant="quiet" size="sm" onClick={() => setDropPicker(null)}>{t('cancelConnect')}</Button>
+        </div>
+      ) : null}
+      {/* §7.4 / CV-5 — the armed-connect status bar (the GraphSurface
+          pattern): announces the armed source, offers cancel. */}
+      {connectFrom ? (
+        <div className="builder-connect-bar" role="status">
+          <span>{t('connectArmed', { name: builderNodes.find((n) => n.id === connectFrom)?.name ?? connectFrom })}</span>
+          <Button variant="quiet" size="sm" onClick={() => setConnectFrom(null)}>
+            <XIcon size={13} aria-hidden /> {t('cancelConnect')}
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }

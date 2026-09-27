@@ -26,7 +26,8 @@
 import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
 import { callerSubject, tenantOf, personalTenantOf, isDurableCaller } from '../host/requestSubject.js';
-import { issueSubjectSession, issueUserSession } from '../middleware/auth.js';
+import { clearSessionCookie, issueSubjectSession, issueUserSession } from '../middleware/auth.js';
+import { setActiveWorkspace } from '../host/activeWorkspacePref.js';
 import {
   createWorkspace,
   ensurePersonalWorkspace,
@@ -36,6 +37,7 @@ import {
 } from '../host/accessControlService.js';
 import { ensurePersonalBoard } from '../host/kanbanService.js';
 import { resolveCallerUser } from '../features/users/usersGuards.js';
+import { getUser, sessionEpochOf } from '../features/users/usersService.js';
 import { createLogger } from '../observability/logger.js';
 
 const wsLog = createLogger('routes.workspaces');
@@ -158,11 +160,47 @@ export function registerWorkspaceTenancyRoutes(app: Express): void {
       // Re-issue the session bound to the target as the ACTIVE workspace, with
       // the caller's INTRINSIC personal tenant preserved (so the implicit
       // personal-owner check keeps pointing at the right tenant after the switch).
-      const userId = (req as { userId?: string }).userId;
+      // ADR 0434 Phase 4 — persist the choice server-side so it follows the
+      // subject to their other devices. Before this the switch wrote ONLY a
+      // cookie, so the active workspace was device-local and machine B silently
+      // showed the personal tenant. Best-effort and awaited: a storage failure
+      // must not fail the switch, which has already been authorized above.
+      await setActiveWorkspace(subject, target);
+
+      const userId = req.userId;
+      // ADR 0621 D2 (review SHOULD-2): the re-mint carries the epoch the
+      // middleware VALIDATED on this request (`req.sessionEpoch`), never a fresh
+      // row read — a bump landing between validation and this route would be
+      // stamped onto the new cookie and survive the revoke. The row is still
+      // read for the disable check (the USERS-1 mint-site class), and if its
+      // epoch has moved past the validated one the switch is refused as the
+      // revoke it is, cookie cleared. A bound user with no validated epoch is a
+      // wiring bug, not a `0` (that fallback was the fail-open shape).
+      const validatedEpoch = req.sessionEpoch;
       if (userId) {
-        issueUserSession(res, { userId, tenantId: target, personalTenant: personal });
+        if (validatedEpoch === undefined) {
+          throw new OpenwopError('internal_error', 'Bound session reached the workspace switch without a validated session epoch.', 500, { userId });
+        }
+        const durable = await getUser(userId);
+        if (!durable) {
+          clearSessionCookie(res);
+          throw new OpenwopError('account_erased', 'This account no longer exists. Sign in again.', 401, { userId });
+        }
+        if (durable.status !== 'active') {
+          clearSessionCookie(res);
+          throw new OpenwopError('account_disabled', 'This account is disabled.', 401, { userId });
+        }
+        if (sessionEpochOf(durable) !== validatedEpoch) {
+          clearSessionCookie(res);
+          throw new OpenwopError('session_revoked', 'This session was signed out. Sign in again.', 401, { userId });
+        }
+        // ADR 0389 P1: carry the second-factor mark across the switch — a
+        // re-issue that dropped it would silently demote an MFA session.
+        issueUserSession(res, { userId, tenantId: target, personalTenant: personal, mfa: req.mfaVerified, epoch: validatedEpoch });
       } else {
-        issueSubjectSession(res, { subject, tenantId: target, personalTenant: personal });
+        // The unbound lane carries the canonical row's epoch the middleware
+        // validated (absent when no row was ever bound — nothing to revoke).
+        issueSubjectSession(res, { subject, tenantId: target, personalTenant: personal, mfa: req.mfaVerified, ...(validatedEpoch !== undefined ? { epoch: validatedEpoch } : {}) });
       }
       res.json({ ok: true, active: target });
     } catch (err) {

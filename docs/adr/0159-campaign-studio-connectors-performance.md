@@ -3,6 +3,8 @@
 | Field | Value |
 |---|---|
 | **Status** | implemented (Phases 1–3, 2026-06-27) |
+
+> **Correction (2026-07-03, ADR 0215):** the day-1 honest-off `ads.sync` posture is superseded for **meta/google** — the live metrics readers (ADR 0167/0186) now feed a date-scoped daily sync (`docs/adr/0215-campaign-live-metrics-sync.md`). The honest-off stance stands for the platforms without a reader.
 | **Date** | 2026-06-27 |
 | **Feature id / toggle** | `campaign-connectors` (OFF, bucket `tenant`, category `Marketing`) |
 | **Packs** | RFC 0095 connection packs (`core.openwop.connections.{google,meta,linkedin}-ads`) + `feature.campaign-connectors.nodes` |

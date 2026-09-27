@@ -11,6 +11,7 @@
  *
  * @see docs/adr/0132-per-conversation-capability-scope.md
  */
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
@@ -92,12 +93,12 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
                 <li key={a.toolName} className="u-flex u-items-center u-justify-between u-gap-2">
                   <code className="u-fs-12">{a.toolName}</code>
                   <span className="u-flex u-gap-1">
-                    <button type="button" className="u-fs-11" disabled={deciding} onClick={() => void decide(a.toolName, 'approved')} aria-label={t('approveAria', { tool: a.toolName })}>
+                    <Button variant="primary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a.toolName, 'approved')} aria-label={t('approveAria', { tool: a.toolName })}>
                       <CheckIcon size={12} /> {t('approve')}
-                    </button>
-                    <button type="button" className="secondary u-fs-11" disabled={deciding} onClick={() => void decide(a.toolName, 'denied')} aria-label={t('denyAria', { tool: a.toolName })}>
+                    </Button>
+                    <Button variant="secondary" className="u-fs-11" disabled={deciding} onClick={() => void decide(a.toolName, 'denied')} aria-label={t('denyAria', { tool: a.toolName })}>
                       {t('deny')}
-                    </button>
+                    </Button>
                   </span>
                 </li>
               ))}
@@ -109,7 +110,7 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
       <section aria-labelledby="ct-scope-h" className="u-mt-3">
         <h3 id="ct-scope-h" className="u-fs-13">{t('scopeHeading')}</h3>
         <fieldset className="u-border-0 u-p-0 u-m-0">
-          <legend className="u-sr-only">{t('modeLegend')}</legend>
+          <legend className="sr-only">{t('modeLegend')}</legend>
           <label className="u-flex u-items-center u-gap-1 u-fs-12">
             <input type="radio" name="ct-mode" checked={mode === 'agent-default'} onChange={() => setMode('agent-default')} />
             {t('modeDefault')}
@@ -134,10 +135,10 @@ export default function CapabilityScopePanel({ sessionId, onClose }: { sessionId
       </section>
 
       <div className="action-bar u-mt-3">
-        <button type="button" className="secondary" onClick={onClose}>{t('close')}</button>
-        <button type="button" onClick={() => void save()} disabled={saving}>
+        <Button variant="secondary" onClick={onClose}>{t('close')}</Button>
+        <Button variant="primary" onClick={() => void save()} disabled={saving}>
           {saving ? t('saving') : t('save')}
-        </button>
+        </Button>
       </div>
     </Modal>
   );
@@ -165,7 +166,7 @@ function ToolListEditor({ label, tools, onAdd, onRemove, addPlaceholder, removeA
           onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
           placeholder={addPlaceholder} className="u-fs-11" aria-label={addPlaceholder}
         />
-        <button type="button" className="secondary u-fs-11" onClick={submit} aria-label={addPlaceholder}><PlusIcon size={12} /></button>
+        <Button variant="secondary" className="u-fs-11" onClick={submit} aria-label={addPlaceholder}><PlusIcon size={12} /></Button>
       </div>
     </div>
   );

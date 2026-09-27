@@ -55,12 +55,17 @@ export function registerPortabilityRoutes(deps: RouteDeps): void {
       }
     };
 
-  // Export — refs-only bundle (no secret values).
+  // Export — refs-only bundle of the tenant's REAL entities (no secret values).
   app.get(
     '/v1/host/openwop-app/export',
     wrap(async (req, res) => {
       const kinds = typeof req.query.kinds === 'string' ? req.query.kinds.split(',').map((k) => k.trim()).filter(Boolean) : undefined;
-      res.json(buildExportBundle(tenantOf(req), kinds));
+      // ADR 0608 R2 (`CPC-13`) — pass the acting subject so the membership-scoped
+      // slices (schedule) drop rows the caller cannot READ, matching the
+      // `GET /scheduler/jobs` door. The broad export-authz gap on the OTHER kinds
+      // (roster / prompts / connection refs / org-chart leaking on tenant
+      // co-residency alone) is tracked as `CPC-16`, not closed here.
+      res.json(await buildExportBundle(tenantOf(req), kinds, callerSubject(req) ?? null));
     }),
   );
 
@@ -89,7 +94,8 @@ export function registerPortabilityRoutes(deps: RouteDeps): void {
         as422(err);
       }
       await assertCanImport(req);
-      res.json(applyImport(bundle));
+      const actor = callerSubject(req) ?? 'import';
+      res.json(await applyImport(tenantOf(req), actor, bundle));
     }),
   );
 }

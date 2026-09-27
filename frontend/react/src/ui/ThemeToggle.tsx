@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { brand } from '../brand/brand.js';
@@ -49,16 +50,15 @@ export function ThemeToggle(): JSX.Element {
       {OPTIONS.map(({ value, labelKey, Icon }) => {
         const label = t(labelKey);
         return (
-        <button
+        <Button variant="primary"
           key={value}
-          type="button"
           aria-pressed={theme === value}
           aria-label={label}
           title={label}
           onClick={() => setTheme(value)}
         >
           <Icon size={14} />
-        </button>
+        </Button>
         );
       })}
     </div>

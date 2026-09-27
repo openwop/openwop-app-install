@@ -108,7 +108,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -140,11 +140,65 @@ async function enableToggle(on: boolean) {
 describe('knowledge-sync routes — gating (ADR 0107 Phase 2)', () => {
   beforeEach(() => enableToggle(true));
 
-  it('404s every route while the toggle is OFF', async () => {
+  /**
+   * ADR 0681 D1 — this test's NAME asserts the whole route population; its body used to walk
+   * TWO of eight (`GET /` and `POST /`). Measuring every request made inside an
+   * `enableToggle(false)` window across the whole file, feature-wide coverage was 3 of 8
+   * (`/browse` is covered by the next test) — so FIVE routes had no toggle-gate coverage, four
+   * of them mutating or destructive: `DELETE /:id`, `POST /:id/{pause,resume}`, `PATCH /:id`,
+   * and `POST /:id/sync`, which triggers a real sync pass and its spend.
+   *
+   * The table is now the assertion. A route added to `routes.ts` without a row here fails the
+   * count leg below rather than silently shrinking the proportion the name claims.
+   */
+  // The call must be typed by what the client ACTUALLY returns — the leg below reads
+  // `res.body.message` to tell a toggle-off 404 from a not-found 404, and a hand-written
+  // `{ status: number }` made that a type error. (Shipped red in ADR 0681: I typechecked
+  // BEFORE adding that assertion and never re-ran it; vitest passes because it does not
+  // typecheck. Derive the type instead of restating it.)
+  type RouteCall = (c: ReturnType<typeof client>, orgId: string) => Promise<Awaited<ReturnType<ReturnType<typeof client>['get']>>>;
+  const TOGGLE_GATED_ROUTES: ReadonlyArray<{ label: string; call: RouteCall }> = [
+    { label: 'POST   /',                 call: (c, orgId) => c.post(KS, { orgId }) },
+    { label: 'GET    /',                 call: (c, orgId) => c.get(`${KS}?orgId=${orgId}`) },
+    { label: 'GET    /browse',           call: (c, orgId) => c.get(`${KS}/browse?orgId=${orgId}&connectionId=c`) },
+    { label: 'GET    /:id',              call: (c, orgId) => c.get(`${KS}/ks-1?orgId=${orgId}`) },
+    { label: 'DELETE /:id',              call: (c, orgId) => c.del(`${KS}/ks-1?orgId=${orgId}`) },
+    { label: 'POST   /:id/pause',        call: (c, orgId) => c.post(`${KS}/ks-1/pause`, { orgId }) },
+    { label: 'POST   /:id/resume',       call: (c, orgId) => c.post(`${KS}/ks-1/resume`, { orgId }) },
+    { label: 'PATCH  /:id',              call: (c, orgId) => c.patch(`${KS}/ks-1`, { orgId, cadence: 'daily' }) },
+    { label: 'POST   /:id/sync',         call: (c, orgId) => c.post(`${KS}/ks-1/sync`, { orgId }) },
+  ];
+
+  it('404s EVERY route while the toggle is OFF — all of them, not the two the name used to cover', async () => {
     await enableToggle(false);
     const { c, orgId } = await ownerWithOrg('ks-off');
-    expect((await c.get(`${KS}?orgId=${orgId}`)).status).toBe(404);
-    expect((await c.post(KS, { orgId })).status).toBe(404);
+    for (const { label, call } of TOGGLE_GATED_ROUTES) {
+      const res = await call(c, orgId);
+      expect(res.status, `${label} must 404 while the toggle is OFF`).toBe(404);
+      // NON-VACUITY (this leg was vacuous when first written, and a sabotage caught it):
+      // asserting 404 alone cannot tell "404 because the toggle is off" from "404 because
+      // `ks-1` does not exist" — removing `requireFeatureEnabled` from POST /:id/sync left the
+      // whole file GREEN. Both paths throw `not_found`, so the status and the code are both
+      // useless here; what separates them is the toggle-off message, which names the feature
+      // (`featureRoute.ts:41` — "<label> is not enabled for this tenant.").
+      expect(
+        String(res.body?.message ?? ''),
+        `${label} must 404 because the TOGGLE is off, not because the resource is missing`,
+      ).toMatch(/is not enabled for this tenant/i);
+    }
+  });
+
+  it('the table above covers every route the feature registers — a new route cannot shrink the claim silently', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync(new URL('../src/features/knowledge-sync/routes.ts', import.meta.url), 'utf8');
+    // `POST /:id/:action` is registered in a `for (const action of ['pause','resume'])` loop, so
+    // the source shows ONE registration for TWO routes; the table lists both.
+    const registrations = [...src.matchAll(/^\s*app\.(get|post|put|patch|delete)\(/gm)].length;
+    expect(registrations, 'app.<verb>( registrations in routes.ts').toBe(8);
+    expect(TOGGLE_GATED_ROUTES.length, 'the table expands the pause/resume loop into its two routes').toBe(registrations + 1);
+    // Honest limit (ADR 0681 Open Question): this reads the registrations out of the SOURCE
+    // TEXT, not a runtime route table — weaker than enumerating the router, and stated rather
+    // than hidden. It still fails on an unlisted new route, which is what it is for.
   });
 
   it('rejects a create with no orgId (400) and a non-existent connection (404)', async () => {

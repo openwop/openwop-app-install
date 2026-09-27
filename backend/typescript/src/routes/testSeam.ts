@@ -35,12 +35,18 @@
  *                                   sql-parametric-only, fs-path-traversal
  */
 
+import { armIdempotencyHold } from '../host/idempotencyHold.js';
+import { registerCredentialLaneSeams } from './credentialLaneSeams.js';
+import { registerOAuthConformanceSeams } from '../features/connections/oauthConformanceSeams.js';
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { Express, Response } from 'express';
+import type { Express, Response, RequestHandler } from 'express';
 import { buildHostSurfaceBundle, resolvePresignToken } from '../host/inMemorySurfaces.js';
 import type { HostSurfaceBundle, SurfaceArgs, SurfaceFn } from '../host/inMemorySurfaces.js';
 import { acceptEnvelope, type AcceptOptions } from '../host/envelopeAcceptor.js';
 import { getEventLog } from '../executor/eventLog.js';
+import { admitA2uiSurface } from '../host/a2uiSurfaceAdmission.js';
+import { fromWireRunId, fromWireTenant } from '../host/v2Ids.js';
+import { vendorTwin } from '../middleware/protocolVersion.js';
 import { randomUUID as a2uiRandomUUID } from 'node:crypto';
 import { cacheableAnthropicSystem, type AnthropicSystemBlock } from '../providers/promptCaching.js';
 
@@ -66,14 +72,22 @@ import {
   snapshotCapabilityOverlay,
   resolveCapabilityFlag,
 } from '../host/capabilityOverlay.js';
-import { computeLLMCacheKey } from '../providers/llmCacheKey.js';
+import {
+  semanticRequestDigestV2,
+  SEMANTIC_REQUEST_RECIPE_V2,
+  type SemanticRequestV2Input,
+} from '../providers/llmCacheKey.js';
 import { evaluateToolHook, type ToolHookRequest } from '../host/toolHooks.js';
+import { makeConnectionSafeFetch } from '../host/connectionInjection.js';
+import { isDeniedWebhookHost } from '../host/webhookEgressGuard.js';
 import { singleTick, missedWindow } from '../host/schedulingService.js';
 import { runAgentLoop, type AgentLoopRequest } from '../host/agentLoop.js';
 import { execGuardedSandboxVm, type SandboxDispatch } from '../host/sandbox.js';
 import { OpenwopError } from '../types.js';
 import { assertReachableUrl } from './webhooks.js';
 import { createLogger } from '../observability/logger.js';
+import { requireNonAnonymousPrincipal } from '../middleware/auth.js';
+import { sendError } from '../middleware/errorEnvelope.js';
 
 const log = createLogger('routes.testSeam');
 
@@ -207,9 +221,11 @@ async function handleWebhookSeam(storage: Storage, body: SeamBody, res: Response
       return;
     }
     const message = err instanceof Error ? err.message : String(err);
-    res.status(400).json({ error: { code: 'internal_error', message } });
+    sendError(res, 400, 'internal_error', message);
   }
 }
+
+const A2UI_TERMINAL_RUN_STATUSES: ReadonlySet<string> = new Set(['completed', 'failed', 'cancelled']);
 
 export function registerTestSeamRoutes(app: Express, deps: { storage: Storage }): void {
   if (process.env.OPENWOP_TEST_SEAM_ENABLED !== 'true') {
@@ -217,6 +233,60 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     return;
   }
   log.warn('test seam ENABLED — /v1/host/openwop-app/test/surface is reachable. NEVER enable in production.');
+
+  // `host-sample-test-seams.md` §"Production safety" — an ENABLED seam MUST
+  // require an authenticated, non-anonymous principal.
+  //
+  // This is not belt-and-braces on top of the env gate; it closes a hole the
+  // env gate never covered. MEASURED 2026-08-15 against the live deployment:
+  //   GET …/test/mock-ai/last-dispatch-budget?nodeId=probe  ->  200 {"maxTokens":null}
+  // with no credentials, because `authMiddleware` SUCCEEDS anonymously
+  // (`mintAnonSession`) and the seam prefix is not public. So the seam was
+  // reachable by any stranger, and `POST …/test/mock-ai/program` — which stages
+  // a deliberate replay divergence keyed by a `nodeId` published in the chain
+  // packs — was reachable with it.
+  //
+  // Both spellings are guarded: the `/v1/host/sample` legacy alias below
+  // rewrites onto this prefix, and guarding only the product spelling would
+  // leave the alias as an unauthenticated door onto the same handlers.
+  // ONE exemption, and it is the credential-establishing endpoint: a guard that
+  // covered `test/login` would be circular — the route that hands out a
+  // non-anonymous identity cannot itself demand one, and every seam test would
+  // be locked out of the door it needs to open first. (Measured: guarding the
+  // bare prefix reds 17 tests across 4 files, all of them at `test/login`.)
+  //
+  // The exemption is safe ONLY because `test/login` rides a genuinely SEPARATE
+  // switch — `OPENWOP_TEST_AUTH_ENABLED`, checked in `authTestSeam.ts`, and
+  // VERIFIED unset on the live deployment while `OPENWOP_TEST_SEAM_ENABLED` was
+  // true. So a stranger reaching this seam in production cannot mint themselves
+  // a principal through it. If the two switches are ever merged, this exemption
+  // becomes the hole and the whole gate is worthless — which is exactly the
+  // "two controls reading one switch are not two layers" clause, pointed at the
+  // fix rather than at the defect.
+  //
+  // Spelled as an explicit path set rather than relying on registration order:
+  // `app.use` prefix middleware only runs for routes registered AFTER it, so an
+  // ordering-based exemption would silently change meaning if the route table
+  // were reordered. `test/login` is `authTestSeam.ts`'s only route.
+  // Matched on `originalUrl`, NOT `req.path`. Inside `app.use(prefix, mw)`
+  // Express rewrites the url relative to the mount, so `req.path` here is
+  // `/login` under one mount and `/test/login` under the other — an exemption
+  // written against it is silently mount-dependent. `originalUrl` is the one
+  // spelling that means the same thing from both mounts. (Learned by the gate:
+  // the `req.path` version matched neither and reds stayed at 17.)
+  const SEAM_AUTH_EXEMPT = new Set([
+    '/v1/host/openwop-app/test/login',
+    '/v1/host/sample/test/login',
+  ]);
+  const seamAuth = requireNonAnonymousPrincipal('the openwop-app test seam');
+  const guardSeam: RequestHandler = (req, res, next) => {
+    const path = (req.originalUrl ?? '').split('?')[0] ?? '';
+    if (SEAM_AUTH_EXEMPT.has(path)) { next(); return; }
+    seamAuth(req, res, next);
+  };
+  app.use('/v1/host/openwop-app/test', guardSeam);
+  app.use('/v1/host/sample', guardSeam);
+
 
   // Conformance back-compat: the pinned `@openwop/openwop-conformance` suite calls the
   // reference host under the legacy `/v1/host/sample/*` vendor alias and FAILS (or
@@ -235,6 +305,30 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     next();
   });
 
+  // RFC 0199 (ADR 0753 D12) — seams-v2 `oauth/authorize-start` + `oauth/expire-refresh`.
+  // Reached from `/conformance/seams/sample/oauth/*` (alias) → `/v1/host/sample/oauth/*`
+  // (guarded above) → the LEGACY rewrite just above, so they MUST be registered
+  // after it (an earlier route is matched against the un-rewritten url and never
+  // fires). The handlers ALSO carry `seamAuth`, because their rewritten address
+  // is outside `/test` and a direct call must not skip the non-anonymous gate.
+  registerOAuthConformanceSeams(app, seamAuth);
+  // RFC 0170 §B.3 `mintLaneCredential` / `revokeLaneCredential` (api-key lane) —
+  // same placement rule (after the rewrite), same guard.
+  registerCredentialLaneSeams(app, seamAuth);
+  // RFC 0213 §B `armIdempotencyHold` — arms a single-use hold; the hold itself
+  // lives in the production POST /runs claim path (host/idempotencyHold.ts).
+  app.post(vendorTwin('/test/idempotency/hold'), seamAuth, (req, res) => {
+    const body = (req.body ?? {}) as { key?: unknown; holdMs?: unknown };
+    const extra = Object.keys(body).filter((k) => k !== 'key' && k !== 'holdMs');
+    if (typeof body.key !== 'string' || !/^[A-Za-z0-9._~-]{22,128}$/.test(body.key)
+      || typeof body.holdMs !== 'number' || !Number.isInteger(body.holdMs) || body.holdMs < 1 || body.holdMs > 10_000 || extra.length > 0) {
+      sendError(res, 400, 'validation_error', 'body MUST be { key: ^[A-Za-z0-9._~-]{22,128}$, holdMs: integer 1..10000 }.');
+      return;
+    }
+    armIdempotencyHold((req as { tenantId?: string }).tenantId ?? 'default', body.key, body.holdMs);
+    res.status(201).json({ key: body.key, holdMs: body.holdMs });
+  });
+
   // RFC 0114 §15 — A2UI surface emit seam (the non-vacuous delta witness driver).
   // Emits a `ui.a2ui-surface` as a REAL run event through the REAL closed-catalog
   // gate (`acceptEnvelope`), so the conformance suite / steward can drive a
@@ -244,16 +338,22 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   // surface receives — proving the no-code-exec boundary holds at emit. Gated to
   // OPENWOP_TEST_SEAM_ENABLED (never production).
   app.post('/v1/host/openwop-app/a2ui/emit-surface', async (req, res) => {
-    const body = (req.body ?? {}) as { runId?: unknown; surface?: unknown; catalogVersion?: unknown; contentTrust?: unknown };
+    const body = (req.body ?? {}) as { runId?: unknown; surface?: unknown; contentTrust?: unknown };
     if (typeof body.runId !== 'string' || body.runId.length === 0) {
       res.status(400).json({ error: 'invalid_argument', message: 'runId required' });
       return;
     }
-    if (body.surface === undefined || body.surface === null) {
+    if (body.surface === undefined || body.surface === null || typeof body.surface !== 'object') {
       res.status(400).json({ error: 'invalid_argument', message: 'surface required' });
       return;
     }
-    const catalogVersion = typeof body.catalogVersion === 'string' ? body.catalogVersion : '0.9.1';
+    // Per host-sample-test-seams.md §15, `surface` is the FULL `ui.a2ui-surface`
+    // payload (`{ catalogVersion, surface, reasoning? }`) — NOT the inner surface
+    // object. This seam previously re-wrapped it (payload.surface = the wrapper),
+    // so every spec-shaped request 422'd against the catalog schema; the host's
+    // own e2e test had pinned the wrong shape, which is why it stayed green.
+    const payload = body.surface as { catalogVersion?: unknown; surface?: unknown };
+    const catalogVersion = typeof payload.catalogVersion === 'string' ? payload.catalogVersion : '0.9.1';
     // Validate the surface through the REAL ui.a2ui-surface envelope gate (closed
     // catalog + contentTrust). Reject (422) exactly as a full surface would be —
     // this is the emit-side half of the fail-closed security invariant.
@@ -262,7 +362,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       schemaVersion: 1,
       envelopeId: a2uiRandomUUID(),
       correlationId: a2uiRandomUUID(),
-      payload: { catalogVersion, surface: body.surface },
+      payload: { ...payload, catalogVersion },
       meta: {
         source: 'ai-generation' as const,
         ts: new Date().toISOString(),
@@ -271,10 +371,14 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     };
     const outcome = acceptEnvelope(envelope);
     if (outcome.status !== 'accepted') {
-      res.status(422).json({
-        error: 'a2ui_surface_invalid',
+      // H27-b — `reason` was a NEW TOP-LEVEL key, which the envelope forbids.
+      // The validator's own `details` is an ARRAY, and `details` on the envelope
+      // is typed as an OBJECT, so it rides a named key rather than being spread:
+      // an array at `details` would have been a second schema violation swapped
+      // in for the first.
+      sendError(res, 422, 'a2ui_surface_invalid', 'The a2ui surface envelope was not accepted.', {
         reason: outcome.reason,
-        ...(outcome.status === 'invalid' ? { details: outcome.details } : {}),
+        ...(outcome.status === 'invalid' ? { validation: outcome.details } : {}),
       });
       return;
     }
@@ -283,9 +387,59 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     const rec = await getEventLog().append({
       runId: body.runId,
       type: 'ui.a2ui-surface',
-      payload: { catalogVersion, surface: body.surface },
+      payload: { ...payload, catalogVersion },
     });
     res.status(201).json({ eventId: rec.eventId, sequence: rec.sequence, surfaceRef: rec.eventId, catalogVersion });
+  });
+
+  // RFC 0209 — `emitA2uiSurface` (api/seams-v2.yaml), the MAJOR-2 witness driver.
+  // A different contract from the v1 seam above (`{runId, envelope}`, the whole
+  // envelope, its `schemaVersion` choosing the branch), so a different route
+  // rather than a body sniff; `conformanceSeams.ts` aliases the v2 address here.
+  // It supplies the envelope ONLY: `admitA2uiSurface` is the production
+  // admission path (catalog → branch → cross-field → fold guard → record), so
+  // the seam witnesses the host, not itself. Gated to OPENWOP_TEST_SEAM_ENABLED.
+  // Registered through `vendorTwin` (ADR 0654): the canonical address is the
+  // version-agnostic vendor path, reached on its `/v1` twin through the overlap.
+  app.post(vendorTwin('/a2ui/v2/emit-surface'), async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as { runId?: unknown; envelope?: unknown };
+      if (typeof body.runId !== 'string' || body.runId.length === 0 || body.envelope === null || typeof body.envelope !== 'object') {
+        sendError(res, 400, 'validation_error', 'runId and envelope are required.');
+        return;
+      }
+      // The seam space carries no tenant context (`req.tenantId` is unset on
+      // these paths, so `loadOwnedRun` would refuse every run; the space is
+      // env-gated and never mounted in production). A major-2 caller names the
+      // run by its tenant-bound wire id (`<tenant>/<opaque>`, identity.md §5):
+      // decode it and hold the run to the tenant it names. A bare id is the v1
+      // spelling and — like the v1 emit seam — is checked for existence only.
+      const slash = body.runId.indexOf('/');
+      if (slash === 0) throw new OpenwopError('run_not_found', `run ${body.runId} not found`, 404);
+      const wireTenant = slash > 0 ? fromWireTenant(body.runId.slice(0, slash)) : null;
+      // `fromWireRunId` enforces the `<tenant>/<opaque>` grammar; the tenant it
+      // names is then checked against the STORED run's tenant below.
+      const resolved = fromWireRunId(body.runId, wireTenant ?? '');
+      const run = resolved.ok ? await deps.storage.getRun(resolved.runId) : null;
+      if (!run || !resolved.ok || (wireTenant !== null && run.tenantId !== wireTenant)) {
+        throw new OpenwopError('run_not_found', `run ${body.runId} not found`, 404);
+      }
+      const runId = resolved.runId;
+      if (A2UI_TERMINAL_RUN_STATUSES.has(run.status)) {
+        sendError(res, 409, 'run_terminal', `run ${body.runId} is ${run.status}; a surface cannot be admitted into a terminal run.`);
+        return;
+      }
+      const out = await admitA2uiSurface(runId, body.envelope, {
+        ...((run.metadata as { trustBoundary?: unknown } | undefined)?.trustBoundary === 'untrusted' ? { runTrustBoundary: 'untrusted' as const } : {}),
+      });
+      if (out.status === 'refused') {
+        sendError(res, 422, out.code, out.reason, out.details ? { validation: out.details } : undefined);
+        return;
+      }
+      res.status(201).json({ sequence: out.sequence });
+    } catch (err) {
+      next(err);
+    }
   });
 
   // RFC 0116 — prompt-prefix cache witness driver. Drives the REAL prefix
@@ -381,7 +535,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       const code = (err as { code?: string })?.code;
       const message = err instanceof Error ? err.message : String(err);
       // Map host-side error codes to 4xx for the conformance suite.
-      res.status(400).json({ error: { code: code ?? 'internal_error', message } });
+      sendError(res, 400, code ?? 'internal_error', message);
     }
   });
 
@@ -392,7 +546,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.post('/v1/host/openwop-app/fs/read', async (req, res) => {
     const body = (req.body ?? {}) as { path?: string; tenantId?: string };
     if (typeof body.path !== 'string' || body.path.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'path required' } });
+      sendError(res, 400, 'invalid_argument', 'path required');
       return;
     }
     const tenant = body.tenantId ?? 'tenant-a';
@@ -403,7 +557,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     } catch (err) {
       const code = (err as { code?: string })?.code;
       const message = err instanceof Error ? err.message : String(err);
-      res.status(400).json({ error: { code: code ?? 'internal_error', message } });
+      sendError(res, 400, code ?? 'internal_error', message);
     }
   });
 
@@ -471,7 +625,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       boundInterruptKind?: string;
     };
     if (body.envelope === undefined) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'envelope required' } });
+      sendError(res, 400, 'invalid_argument', 'envelope required');
       return;
     }
 
@@ -635,10 +789,119 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   // E.1 — event-log query seam. Returns the test-only run event log
   // populated by `envelope/accept` with `projectTo`. Supports filtering
   // by type / causationId / correlationId (= causationId) / nodeId.
-  app.get('/v1/host/openwop-app/test/runs/:runId/events', (req, res) => {
+  // RFC 0076 §B — inline safe-fetch evaluation seam
+  // (`POST /v1/host/sample/http/safe-fetch` via the LEGACY rewrite above;
+  // host-sample-test-seams.md §"Open seams"). Evaluates ONE candidate egress
+  // through the SAME production guard chain `ctx.http.safeFetch` uses
+  // (host/connectionInjection.ts — string precheck, upgrade refusal, pinned-
+  // resolution dispatcher) and echoes `{ outcome, blocked?, status? }`.
+  // `simulateRebindTo` models the DNS-rebinding case the suite cannot drive
+  // with real DNS: the seam runs the SAME denied-range predicate the pinned
+  // connector applies to the actual resolution at connect time
+  // (webhookEgressGuard.guardedLookup), so the assertion exercises the real
+  // policy, not a parallel one.
+  const seamSafeFetchRun = async (): Promise<string> => {
+    const runId = `run-safefetch-${randomUUID()}`;
+    const now = new Date().toISOString();
+    await deps.storage.insertRun({
+      runId,
+      workflowId: 'conformance-safe-fetch-seam',
+      tenantId: 'conformance-seam',
+      status: 'running',
+      inputs: null,
+      metadata: {},
+      configurable: {},
+      createdAt: now,
+      updatedAt: now,
+    });
+    return runId;
+  };
+  type SeamFetchBody = { url?: unknown; init?: unknown; simulateRebindTo?: unknown };
+  const evalSafeFetch = async (
+    body: SeamFetchBody,
+  ): Promise<{ status: number; json: Record<string, unknown>; runId?: string }> => {
+    if (typeof body.url !== 'string' || body.url.length === 0) {
+      return { status: 400, json: { error: 'invalid_argument', message: 'url required' } };
+    }
+    if (body.simulateRebindTo !== undefined && typeof body.simulateRebindTo !== 'string') {
+      return { status: 400, json: { error: 'invalid_argument', message: 'simulateRebindTo MUST be a string' } };
+    }
+    const runId = await seamSafeFetchRun();
+    // Rebind simulation: the pinned connector rejects a connection whose
+    // RESOLVED address lands in a denied range. The seam applies the identical
+    // predicate to the injected "resolution".
+    if (typeof body.simulateRebindTo === 'string' && isDeniedWebhookHost(body.simulateRebindTo)) {
+      return { status: 200, json: { outcome: 'blocked', blocked: 'ssrf' }, runId };
+    }
+    const sf = makeConnectionSafeFetch({
+      storage: deps.storage,
+      tenantId: 'conformance-seam',
+      runId,
+      allowedProviders: [], // pure guarded fetch — no credential injection
+    });
+    const init = (body.init && typeof body.init === 'object' ? body.init : {}) as Record<string, unknown>;
+    try {
+      const res = await sf(body.url, init);
+      // Drain + discard so the seam never buffers a body it echoes nowhere.
+      await res.body?.cancel();
+      return { status: 200, json: { outcome: 'fetched', status: res.status }, runId };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.includes('upgrade refused')) {
+        return { status: 200, json: { outcome: 'blocked', blocked: 'upgrade' }, runId };
+      }
+      const cause = (err as { cause?: { code?: string } }).cause;
+      if (
+        message.includes('destination blocked')
+        || cause?.code === 'OPENWOP_WEBHOOK_EGRESS_DENIED'
+        || (err as { code?: string }).code === 'OPENWOP_WEBHOOK_EGRESS_DENIED'
+      ) {
+        return { status: 200, json: { outcome: 'blocked', blocked: 'ssrf' }, runId };
+      }
+      // A genuine network failure (no egress in this environment) is NOT a
+      // policy outcome — report it as such so the suite's success-path legs
+      // soft-skip instead of reading a false `blocked`.
+      return { status: 502, json: { error: 'egress_failed', message } };
+    }
+  };
+  app.post('/v1/host/openwop-app/http/safe-fetch', async (req, res) => {
+    const out = await evalSafeFetch((req.body ?? {}) as SeamFetchBody);
+    // §host.http leg 4: on a completed fetch with toolHooks.prePostEvents +
+    // safeFetch co-advertised, the suite reads the audit pair INLINE from the
+    // seam response. The pair was already emitted DURABLY by the production
+    // ctx.http.safeFetch (host/connectionInjection.ts); echo it here by reading
+    // it back from the run event log so the inline contract and the durable
+    // record are the same events, not a parallel echo.
+    if (out.runId && out.json.outcome === 'fetched') {
+      const events = await deps.storage.listEvents(out.runId);
+      const toolCalled = events.find((e) => e.type === 'agent.toolCalled')?.payload;
+      const toolReturned = events.find((e) => e.type === 'agent.toolReturned')?.payload;
+      if (toolCalled && toolReturned) {
+        out.json = { ...out.json, toolCalled, toolReturned };
+      }
+    }
+    res.status(out.status).json(out.json);
+  });
+
+  // RFC 0076 §B live-audit seam (`POST /v1/host/sample/http/safe-fetch-run`):
+  // the SAME evaluation, but the caller gets the backing `runId` so it can
+  // assert the durable `agent.toolCalled`/`agent.toolReturned` pair the
+  // production `ctx.http.safeFetch` appended to the run event log — closing
+  // the seam-vs-production gap `safefetch-live-audit.test.ts` targets.
+  app.post('/v1/host/openwop-app/http/safe-fetch-run', async (req, res) => {
+    const out = await evalSafeFetch((req.body ?? {}) as SeamFetchBody);
+    if (!out.runId) {
+      res.status(out.status).json(out.json);
+      return;
+    }
+    const outcome = out.json.outcome ?? 'error';
+    res.status(200).json({ runId: out.runId, outcome });
+  });
+
+  app.get('/v1/host/openwop-app/test/runs/:runId/events', async (req, res) => {
     const runId = req.params.runId;
     if (!runId) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'runId required' } });
+      sendError(res, 400, 'invalid_argument', 'runId required');
       return;
     }
     const filter: { type?: string; correlationId?: string; causationId?: string; nodeId?: string } = {};
@@ -647,7 +910,22 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     if (typeof q.correlationId === 'string') filter.correlationId = q.correlationId;
     if (typeof q.causationId === 'string') filter.causationId = q.causationId;
     if (typeof q.nodeId === 'string') filter.nodeId = q.nodeId;
-    res.status(200).json({ events: listTestEvents(runId, filter) });
+    const inMemory = listTestEvents(runId, filter);
+    if (inMemory.length > 0) {
+      res.status(200).json({ events: inMemory });
+      return;
+    }
+    // Durable fallback: when the seam's in-memory projection has nothing for
+    // this run, read the REAL run event log (storage) so scenarios that drive
+    // production paths (e.g. safe-fetch-run's audit pair) assert against the
+    // durable record — not a parallel echo. Same filter semantics.
+    const durable = await deps.storage.listEvents(runId);
+    const filtered = durable.filter((e) =>
+      (filter.type === undefined || e.type === filter.type)
+      && (filter.nodeId === undefined || e.nodeId === filter.nodeId)
+      && (filter.causationId === undefined || e.causationId === filter.causationId),
+    );
+    res.status(200).json({ events: filtered });
   });
 
   // Variable mutation seam — mutates a run's variable bag mid-run.
@@ -666,12 +944,12 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.post('/v1/host/openwop-app/test/runs/:runId/variables', (req, res) => {
     const runId = req.params.runId;
     if (!runId) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'runId required' } });
+      sendError(res, 400, 'invalid_argument', 'runId required');
       return;
     }
     const body = (req.body ?? {}) as { variables?: unknown };
     if (!body.variables || typeof body.variables !== 'object' || Array.isArray(body.variables)) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'variables MUST be an object' } });
+      sendError(res, 400, 'invalid_argument', 'variables MUST be an object');
       return;
     }
     for (const [name, value] of Object.entries(body.variables as Record<string, unknown>)) {
@@ -682,7 +960,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.get('/v1/host/openwop-app/test/runs/:runId/variables', (req, res) => {
     const runId = req.params.runId;
     if (!runId) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'runId required' } });
+      sendError(res, 400, 'invalid_argument', 'runId required');
       return;
     }
     res.status(200).json({ variables: snapshotRunVariables(runId) ?? {} });
@@ -706,7 +984,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.post('/v1/host/openwop-app/test/llm-prompt-wrap', (req, res) => {
     const body = (req.body ?? {}) as Partial<PromptWrapInput> & { payload?: unknown };
     if (!('payload' in body)) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'payload required' } });
+      sendError(res, 400, 'invalid_argument', 'payload required');
       return;
     }
     const input: PromptWrapInput = { payload: body.payload };
@@ -759,7 +1037,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.post('/v1/host/openwop-app/test/debug-bundle/export', (req, res) => {
     const body = (req.body ?? {}) as { runId?: string };
     if (typeof body.runId !== 'string' || body.runId.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'runId required' } });
+      sendError(res, 400, 'invalid_argument', 'runId required');
       return;
     }
     res.status(200).json({
@@ -780,15 +1058,15 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     const token = decodeURIComponent(req.params.token ?? '');
     const result = resolvePresignToken(token);
     if (!result.ok && result.reason === 'not_found') {
-      res.status(404).json({ error: { code: 'blob_presign_not_found', message: 'unknown presign token' } });
+      sendError(res, 404, 'blob_presign_not_found', 'unknown presign token');
       return;
     }
     if (!result.ok && result.reason === 'expired') {
-      res.status(403).json({ error: { code: 'blob_presign_expired', message: 'presign token past its TTL' } });
+      sendError(res, 403, 'blob_presign_expired', 'presign token past its TTL');
       return;
     }
     if (!result.ok) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'unexpected presign result' } });
+      sendError(res, 400, 'invalid_argument', 'unexpected presign result');
       return;
     }
     const { entry } = result;
@@ -805,12 +1083,17 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.post('/v1/host/openwop-app/test/emit-provider-usage', async (req, res) => {
     const body = (req.body ?? {}) as { runId?: string; payload?: Record<string, unknown>; correlationId?: string; nodeId?: string };
     if (typeof body.runId !== 'string' || body.runId.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'runId required' } });
+      sendError(res, 400, 'invalid_argument', 'runId required');
       return;
     }
     const payload = body.payload;
     if (!payload || typeof payload !== 'object' || typeof payload.provider !== 'string' || typeof payload.model !== 'string' || typeof payload.inputTokens !== 'number' || typeof payload.outputTokens !== 'number') {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'payload MUST be { provider, model, inputTokens, outputTokens } per RFC 0026 §A' } });
+      sendError(
+        res,
+        400,
+        'invalid_argument',
+        'payload MUST be { provider, model, inputTokens, outputTokens } per RFC 0026 §A',
+      );
       return;
     }
     // Defense-in-depth: refuse payloads that look like they could carry a
@@ -820,7 +1103,12 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     // seam layer; downstream emitters MUST sanitize further per RFC 0026 §D.
     const serialized = JSON.stringify(payload);
     if (serialized.includes('credentialRef') || serialized.includes('"secret:')) {
-      res.status(400).json({ error: { code: 'provider_usage_credential_leak', message: 'payload contains credentialRef-shaped content; RFC 0026 §D + SECURITY/invariants.yaml provider-usage-no-credential-leak' } });
+      sendError(
+        res,
+        400,
+        'provider_usage_credential_leak',
+        'payload contains credentialRef-shaped content; RFC 0026 §D + SECURITY/invariants.yaml provider-usage-no-credential-leak',
+      );
       return;
     }
     // Project to the test event log via the projection seam's append helper.
@@ -867,20 +1155,20 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       'envelope.recovery.applied',
     ]);
     if (typeof body.runId !== 'string' || body.runId.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'runId required' } });
+      sendError(res, 400, 'invalid_argument', 'runId required');
       return;
     }
     if (typeof body.type !== 'string' || !RFC_0032_EVENTS.has(body.type)) {
-      res.status(400).json({
-        error: {
-          code: 'invalid_argument',
-          message: `type MUST be one of the 6 RFC 0032 envelope-reliability events; got: ${String(body.type)}`,
-        },
-      });
+      sendError(
+        res,
+        400,
+        'invalid_argument',
+        `type MUST be one of the 6 RFC 0032 envelope-reliability events; got: ${String(body.type)}`,
+      );
       return;
     }
     if (!body.payload || typeof body.payload !== 'object') {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'payload required (object)' } });
+      sendError(res, 400, 'invalid_argument', 'payload required (object)');
       return;
     }
     // Per-type required-field check. Canonical source: the `required[]`
@@ -908,12 +1196,12 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     const required = requiredFields[body.type] ?? [];
     for (const field of required) {
       if (!(field in body.payload)) {
-        res.status(400).json({
-          error: {
-            code: 'invalid_argument',
-            message: `payload MUST include required field "${field}" for event type "${body.type}"`,
-          },
-        });
+        sendError(
+          res,
+          400,
+          'invalid_argument',
+          `payload MUST include required field "${field}" for event type "${body.type}"`,
+        );
         return;
       }
     }
@@ -924,12 +1212,12 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     // `envelope-refusal-no-prompt-leak` + `envelope-recovery-no-content-leak`.
     const serialized = JSON.stringify(body.payload);
     if (serialized.includes('"credentialRef"') || serialized.includes('secret-canary-')) {
-      res.status(400).json({
-        error: {
-          code: 'envelope_reliability_credential_leak',
-          message: 'payload contains credentialRef-shaped content; redact BEFORE emission per RFC 0032 §G + SECURITY/invariants.yaml envelope-refusal-no-prompt-leak',
-        },
-      });
+      sendError(
+        res,
+        400,
+        'envelope_reliability_credential_leak',
+        'payload contains credentialRef-shaped content; redact BEFORE emission per RFC 0032 §G + SECURITY/invariants.yaml envelope-refusal-no-prompt-leak',
+      );
       return;
     }
     if (body.type === 'envelope.recovery.applied') {
@@ -941,12 +1229,12 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       const allowedKeys = new Set(['nodeId', 'path', 'byteOffset']);
       for (const key of Object.keys(body.payload)) {
         if (!allowedKeys.has(key)) {
-          res.status(400).json({
-            error: {
-              code: 'envelope_recovery_content_leak',
-              message: `envelope.recovery.applied payload MUST NOT carry "${key}" — only {nodeId, path, byteOffset?} are emitted (RFC 0032 §B.6 + SECURITY envelope-recovery-no-content-leak)`,
-            },
-          });
+          sendError(
+            res,
+            400,
+            'envelope_recovery_content_leak',
+            `envelope.recovery.applied payload MUST NOT carry "${key}" — only {nodeId, path, byteOffset?} are emitted (RFC 0032 §B.6 + SECURITY envelope-recovery-no-content-leak)`,
+          );
           return;
         }
       }
@@ -989,7 +1277,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       nodeId?: string;
     };
     if (typeof body.activeProvider !== 'string' || typeof body.activeModel !== 'string') {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'activeProvider + activeModel required' } });
+      sendError(res, 400, 'invalid_argument', 'activeProvider + activeModel required');
       return;
     }
     const requiredCaps = Array.isArray(body.module?.requiredModelCapabilities)
@@ -1039,15 +1327,27 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
 
   // LLM cache-key recipe seam — replay.md §"LLM cache-key recipe".
   // POST /v1/host/openwop-app/test/llm-cache-key
-  // Body: an LLMCacheKeyInput-shaped object (extra fields ignored per §A).
-  // Response: { cacheKey: <lowercase-hex SHA-256> }
+  // Body: a semantic-request-shaped object (extra fields ignored per §A).
+  // Response: { cacheKey: <lowercase-hex SHA-256>, recipe }
+  //
+  // ADR 0549 P3 — this emits the RFC 0150 §C **v2** digest, matching what
+  // `callAI` actually computes. It emitted v1 until P3, while
+  // `capabilities.multiAgent.executionModel.replayDeterminism.llmCacheKeyRecipe`
+  // advertised `spec-rfc-0041` — i.e. "the spec-canonical recipe". The canonical
+  // recipe became v2 when `replay.md` did, so the advertisement had gone stale
+  // rather than wrong-by-construction: implementing v2 is what makes it honest
+  // again. `recipe` is echoed so a probe can see WHICH recipe answered instead
+  // of inferring it from a hash.
   app.post('/v1/host/openwop-app/test/llm-cache-key', (req, res) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
     if (typeof body.provider !== 'string' || typeof body.model !== 'string' || !Array.isArray(body.messages)) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'provider + model + messages[] required per replay.md §A' } });
+      sendError(res, 400, 'invalid_argument', 'provider + model + messages[] required per replay.md §A');
       return;
     }
-    res.status(200).json({ cacheKey: computeLLMCacheKey(body) });
+    res.status(200).json({
+      cacheKey: semanticRequestDigestV2(body as unknown as SemanticRequestV2Input),
+      recipe: SEMANTIC_REQUEST_RECIPE_V2,
+    });
   });
 
   // Capability-toggle test seam (RFC 0022 §C refusal-case tests).
@@ -1065,14 +1365,14 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       return;
     }
     if (typeof body.name !== 'string' || body.name.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'name required when reset:false' } });
+      sendError(res, 400, 'invalid_argument', 'name required when reset:false');
       return;
     }
     let value: boolean | undefined;
     if (body.value === null) value = undefined;
     else if (typeof body.value === 'boolean') value = body.value;
     else {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'value MUST be boolean | null' } });
+      sendError(res, 400, 'invalid_argument', 'value MUST be boolean | null');
       return;
     }
     setCapabilityOverlay(body.name, value);
@@ -1081,18 +1381,22 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
 
   // RFC 0064 — tool-hooks invoke seam. Drives the conformance scenarios
   // tool-hooks-{content-free, authorization-fail-closed, rate-limit,
-  // secret-redaction} against the host's `evaluateToolHook()` evaluator.
-  // The seam stands in for a live MCP `tools/call`: it runs the same
+  // secret-redaction, failure-honesty} against the host's `evaluateToolHook()`
+  // evaluator. The seam stands in for a live MCP `tools/call`: it runs the same
   // pre/post hook pair (argsHash + per-tool authz + rate limit) and returns
   // the additive `agent.toolCalled` / `agent.toolReturned` fields the host
   // would emit. Per-tool authorization is fail-closed (RFC 0049 `forbidden`).
+  // §F failure-honesty: `simulateToolError` yields a ran-and-threw failure
+  // (`status:'error'` + populated `error` + non-negative `durationMs`).
   //
-  //   POST /v1/host/openwop-app/toolhooks/invoke
+  //   POST /v1/host/sample/toolhooks/invoke   (canonical conformance path)
+  //   POST /v1/host/openwop-app/toolhooks/invoke   (vendor alias)
   //   Body: { principal, toolName, requiredScopes?, grantedScopes?, args?,
-  //           transport?, simulateRateLimitExhausted? }
+  //           transport?, simulateRateLimitExhausted?, simulateToolError? }
   //   Response: { toolCalled, toolReturned } (+ { error: { code } } on
-  //             forbidden/rate_limited; HTTP 403/429 respectively).
-  app.post('/v1/host/openwop-app/toolhooks/invoke', (req, res) => {
+  //             forbidden/rate_limited; HTTP 403/429 respectively). A §F
+  //             ran-and-threw error is HTTP 200 with the error in toolReturned.
+  const toolhooksInvokeHandler: RequestHandler = (req, res) => {
     const body = (req.body ?? {}) as {
       principal?: unknown;
       toolName?: unknown;
@@ -1101,13 +1405,14 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       args?: unknown;
       transport?: unknown;
       simulateRateLimitExhausted?: unknown;
+      simulateToolError?: unknown;
     };
     if (typeof body.principal !== 'string' || body.principal.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'principal required' } });
+      sendError(res, 400, 'invalid_argument', 'principal required');
       return;
     }
     if (typeof body.toolName !== 'string' || body.toolName.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'toolName required' } });
+      sendError(res, 400, 'invalid_argument', 'toolName required');
       return;
     }
     const hookReq: ToolHookRequest = { principal: body.principal, toolName: body.toolName };
@@ -1122,11 +1427,14 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       hookReq.transport = body.transport;
     }
     if (body.simulateRateLimitExhausted === true) hookReq.simulateRateLimitExhausted = true;
+    if (body.simulateToolError === true) hookReq.simulateToolError = true;
 
     const started = Date.now();
     const result = evaluateToolHook(hookReq);
-    // Report the real (tiny) measured duration for an executed call.
-    if (result.toolReturned.status === 'ok') {
+    // RFC 0064 §F — report the real (tiny) measured duration for a call that
+    // actually RAN: a success OR a ran-and-threw error. A gate refusal
+    // (`forbidden`/`rate_limited`) never ran, so it keeps `durationMs` absent.
+    if (result.toolReturned.status === 'ok' || result.toolReturned.status === 'error') {
       result.toolReturned.durationMs = Math.max(0, Date.now() - started);
     }
     res.status(result.httpStatus).json({
@@ -1134,7 +1442,15 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       toolReturned: result.toolReturned,
       ...(result.errorCode ? { error: { code: result.errorCode } } : {}),
     });
-  });
+  };
+  // RFC 0064 §F — the conformance suite drives the tool-hooks seam through the
+  // CANONICAL `/v1/host/sample/*` namespace (host-sample-test-seams.md) — the same
+  // path the other `tool-hooks-*` scenarios use. Serve it there so the §F
+  // `tool-hooks-failure-honesty` scenario WITNESSES this host instead of 404 →
+  // soft-skip (which would leave WFAU-4 an unwitnessed wire claim). The vendor
+  // `/v1/host/openwop-app/*` alias stays for back-compat; both share one handler.
+  app.post('/v1/host/sample/toolhooks/invoke', toolhooksInvokeHandler);
+  app.post('/v1/host/openwop-app/toolhooks/invoke', toolhooksInvokeHandler);
 
   // RFC 0052 — scheduling tick seam. Advances the deterministic scheduler
   // clock and reports the runs a cron schedule produced. Drives
@@ -1200,16 +1516,43 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.post('/v1/host/openwop-app/test/mock-ai/program', async (req, res) => {
     const body = (req.body ?? {}) as { nodeId?: unknown; program?: unknown };
     if (typeof body.nodeId !== 'string' || body.nodeId.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'nodeId required' } });
+      sendError(res, 400, 'invalid_argument', 'nodeId required');
       return;
     }
     if (!Array.isArray(body.program)) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'program MUST be MockBehavior[]' } });
+      sendError(res, 400, 'invalid_argument', 'program MUST be MockBehavior[]');
       return;
     }
     const { programMock } = await import('../providers/dispatchMock.js');
     programMock(body.nodeId, body.program as Array<Record<string, unknown>>);
     res.status(200).json({ ok: true, count: body.program.length });
+  });
+
+  // THE RESET HALF OF THE PROGRAM SEAM, and it did not exist until 2026-09-16.
+  //
+  // `resetMockPrograms` has been in `dispatchMock.ts` since the mock landed, with
+  // a header claiming it was "called between conformance scenarios". Nothing
+  // called it from here — only backend unit tests, in-process. So the store SEEDED
+  // through the route above was, for the out-of-process conformance suite,
+  // write-only: programmable and unwipeable.
+  //
+  // The cost was a cross-scenario state leak. An undrained truncation program
+  // (several scenarios seed `finishReason: 'length'` deliberately) stays pending
+  // on its nodeId for the rest of the host process; a later scenario that
+  // dispatches on a colliding nodeId consumes it and fails
+  // `envelope_truncation_unrecoverable` with nothing in its own diff to explain
+  // it. `replay-observable-sequence-determinism` did exactly that — red in-suite,
+  // green alone, five runs, one of the reds at load1 3.4 on an idle box.
+  //
+  // Idempotent and unconditional: wiping an already-empty store is the expected
+  // call in the common case, so this reports what it cleared rather than
+  // erroring on "nothing to do" — a reset that failed when there was nothing to
+  // reset would train callers to ignore its result.
+  app.post('/v1/host/openwop-app/test/mock-ai/reset', async (_req, res) => {
+    const { resetMockPrograms, mockProgramCount } = await import('../providers/dispatchMock.js');
+    const cleared = mockProgramCount();
+    resetMockPrograms();
+    res.status(200).json({ ok: true, cleared });
   });
 
   // RFC 0033 §B — last-dispatch-budget introspection seam. Returns the
@@ -1219,7 +1562,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
   app.get('/v1/host/openwop-app/test/mock-ai/last-dispatch-budget', async (req, res) => {
     const q = req.query as Record<string, string | undefined>;
     if (typeof q.nodeId !== 'string' || q.nodeId.length === 0) {
-      res.status(400).json({ error: { code: 'invalid_argument', message: 'nodeId query param required' } });
+      sendError(res, 400, 'invalid_argument', 'nodeId query param required');
       return;
     }
     const { lastReceivedMaxTokens } = await import('../providers/dispatchMock.js');
@@ -1248,9 +1591,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       nodeId?: string;
     };
     if (typeof body.templateId !== 'string' || body.templateId.length === 0) {
-      res.status(400).json({
-        error: { code: 'invalid_argument', message: 'templateId required' },
-      });
+      sendError(res, 400, 'invalid_argument', 'templateId required');
       return;
     }
     try {
@@ -1269,7 +1610,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
       // `prompt_variable_unresolved` / generic faults.
       const code = message.split(':')[0]?.trim() || 'internal_error';
       const status = code === 'template_not_found' ? 404 : 400;
-      res.status(status).json({ error: { code, message } });
+      sendError(res, status, code, message);
     }
   });
 
@@ -1317,15 +1658,11 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     };
     const kinds: readonly PromptKind[] = ['system', 'user', 'few-shot', 'schema-hint'];
     if (typeof body.kind !== 'string' || !(kinds as readonly string[]).includes(body.kind)) {
-      res.status(400).json({
-        error: { code: 'invalid_argument', message: 'kind MUST be one of system|user|few-shot|schema-hint' },
-      });
+      sendError(res, 400, 'invalid_argument', 'kind MUST be one of system|user|few-shot|schema-hint');
       return;
     }
     if (!body.node || typeof body.node.nodeId !== 'string' || body.node.nodeId === '') {
-      res.status(400).json({
-        error: { code: 'invalid_argument', message: 'node.nodeId required' },
-      });
+      sendError(res, 400, 'invalid_argument', 'node.nodeId required');
       return;
     }
     try {
@@ -1361,7 +1698,7 @@ export function registerTestSeamRoutes(app: Express, deps: { storage: Storage })
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const code = message.split(':')[0]?.trim() || 'internal_error';
-      res.status(400).json({ error: { code, message } });
+      sendError(res, 400, code, message);
     }
   });
 

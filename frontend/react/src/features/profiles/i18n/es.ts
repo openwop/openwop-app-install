@@ -6,12 +6,20 @@
  * duplicated. Plural keys use i18next `_one`/`_other` suffixes.
  */
 export const messages = {
+  directoryFailedTitle: 'No se ha podido cargar el directorio del equipo',
+  directoryFailedBody: 'Es una lectura fallida, no un directorio vacío: no significa que tus compañeros no tengan perfiles.',
+  directoryRetry: 'Reintentar',
   // ── My Profile page chrome ────────────────────────────────────────────
   eyebrow: 'Plataforma',
   title: 'Mi perfil',
   lede: 'Tu perfil de autoservicio. Visible para tu equipo en el directorio.',
-  loadProfileFailed: 'No se pudo cargar tu perfil.',
-  loadBoardFailed: 'No se pudo cargar tu tablero.',
+  profileFailedTitle: 'No se ha podido cargar tu perfil',
+  profileFailedBody: 'Es una lectura fallida: tu perfil sigue intacto en el servidor.',
+  boardFailedTitle: 'No se ha podido cargar tu tablero',
+  boardFailedBody: 'Es una lectura fallida, no un tablero vacío.',
+  activityFailedTitle: 'No se ha podido cargar tu actividad',
+  activityFailedBody: 'Es una lectura fallida, no un historial vacío: no significa que no tengas actividad.',
+  retry: 'Reintentar',
 
   // Tabs
   tabProfile: 'Perfil',
@@ -31,11 +39,28 @@ export const messages = {
   emailUnverified: 'Correo electrónico sin verificar',
   completenessLabel: 'Completitud del perfil: {{percent}}',
   upload: 'Subir',
+  uploading: 'Subiendo…',
+
+  // Portfolio (PROF-UX-4)
+  portfolioTitle: 'Portafolio',
+  portfolioHint: 'Imágenes de tu trabajo que se muestran en tu tarjeta del directorio del equipo.',
+  portfolioEmpty: 'Aún no hay imágenes en el portafolio. Añade una para mostrar tu trabajo.',
+  addPortfolioImage: 'Añadir imagen',
+  removePortfolioImageN: 'Eliminar la imagen {{index}} del portafolio',
+  portfolioImageAlt: 'Imagen del portafolio',
+  portfolioImageUnavailable: 'Imagen no disponible',
+  portfolioAdded: 'Imagen añadida al portafolio.',
+  portfolioAddFailed: 'No se pudo añadir la imagen al portafolio.',
+  portfolioRemoved: 'Imagen eliminada del portafolio.',
+  portfolioRemoveFailed: 'No se pudo eliminar la imagen del portafolio.',
 
   // Details fields
   details: 'Detalles',
   yourName: 'Tu nombre',
   yourNamePlaceholder: 'p. ej. Jordan Rivera',
+  preferredNameLabel: 'Nombre preferido',
+  preferredNamePlaceholder: 'p. ej. David',
+  preferredNameHint: 'Cómo deben llamarte los agentes. Por defecto, tu nombre de pila.',
   jobTitleLabel: 'Puesto',
   jobTitlePlaceholder: 'Ingeniero de plantilla',
   departmentLabel: 'Departamento',
@@ -58,6 +83,13 @@ export const messages = {
   skills: 'Aptitudes',
   skillsHint: 'Las recomendaciones de tus compañeros se conservan cuando editas una aptitud que mantienes.',
   skillPlaceholder: 'Aptitud',
+  skillNameAria: 'Nombre de la aptitud',
+  proficiencyAria: 'Nivel de competencia (1–5)',
+  proficiencyLevel1: '1 — Principiante',
+  proficiencyLevel2: '2 — En desarrollo',
+  proficiencyLevel3: '3 — Competente',
+  proficiencyLevel4: '4 — Avanzado',
+  proficiencyLevel5: '5 — Experto',
   removeSkillLabel: 'Eliminar la aptitud {{name}}',
   endorsedCount: '{{count}} recomendaciones',
   addSkill: 'Añadir aptitud',
@@ -65,7 +97,6 @@ export const messages = {
 
   // Board intro (rich — numbered <0><1><2> are <strong> spans)
   boardIntro: '<0>Tu tablero.</0> El trabajo nuevo llega a <1>Por hacer</1>. <2>Arrastra una tarjeta</2> entre carriles para hacerla avanzar; soltar una tarjeta en un carril de disparo ejecuta su flujo de trabajo en tu nombre.',
-  loadingBoard: 'Cargando tu tablero…',
 
   // ── Toasts (My Profile) ───────────────────────────────────────────────
   hoursRangeError: 'Horas / semana debe ser un número entre 0 y 168.',
@@ -80,7 +111,6 @@ export const messages = {
   avatarRemoveFailed: 'No se pudo eliminar el avatar.',
 
   // ── Activity tab ──────────────────────────────────────────────────────
-  loadingActivity: 'Cargando actividad…',
   noActivityTitle: 'Aún no hay actividad',
   noActivityBody: 'Ejecuta un flujo de trabajo desde Mi tablero o una programación, y tu actividad —con resultados y marcas de tiempo— aparecerá aquí.',
   sourceHeartbeat: 'recogió una tarea',
@@ -134,6 +164,10 @@ export const messages = {
   // Toolbar
   searchPlaceholder: 'Buscar por nombre, rol, aptitud…',
   searchAriaLabel: 'Buscar en el directorio del equipo',
+  filterGroup: 'Filtrar el directorio del equipo',
+  filterDepartmentAria: 'Filtrar por departamento',
+  allDepartments: 'Todos los departamentos',
+  clearFilters: 'Borrar filtros',
   countFiltered: '{{shown}} de {{total}}',
   countPeople_one: 'persona',
   countPeople_other: 'personas',
@@ -143,6 +177,7 @@ export const messages = {
   noProfilesBody: 'Los perfiles aparecen aquí a medida que tus compañeros los completan.',
   noMatchesTitle: 'Sin coincidencias',
   noMatchesBody: 'Nadie coincide con «{{query}}». Prueba con otro nombre, rol o aptitud.',
+  noMatchesBodyGeneric: 'Nadie coincide con los filtros actuales.',
 
   // Availability labels
   availabilityAvailable: 'Disponible',
@@ -159,10 +194,23 @@ export const messages = {
 
   // Skill endorse affordance
   cannotEndorseOwn: 'No puedes recomendar tu propia aptitud',
+  endorseIdentityUnknown: 'Recomendar no está disponible: no pudimos confirmar cuál es tu perfil',
   removeEndorsement: 'Eliminar tu recomendación',
   endorseSkill: 'Recomendar esta aptitud',
 
   // Self footer
   completenessAria: 'Completitud de tu perfil',
   editProfile: 'Editar perfil',
+  actionFailed: 'Algo salió mal. Inténtalo de nuevo.',
+
+  // ── Feature loop 2026-09 it.3 (PROF-UX-8 / 13 / 14 / 15) ─────────────
+  profileTabsAria: 'Secciones del perfil',
+  portfolioMustBeImage: 'La imagen del portafolio debe ser una imagen.',
+  imageTooLarge: 'Esa imagen es demasiado grande (máx. {{mib}} MiB).',
+  workflowAssigned: 'Flujo de trabajo asignado.',
+  workflowUnassigned: 'Flujo de trabajo desasignado.',
+  completenessNext: 'Siguiente: añade {{items}}',
+  fieldAvatar: 'Avatar',
+  fieldEquipment: 'Equipo',
+  fieldInterests: 'Intereses',
 } as const;

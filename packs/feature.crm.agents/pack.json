@@ -1,0 +1,52 @@
+{
+  "name": "feature.crm.agents",
+  "version": "1.1.1",
+  "description": "CRM feature agent pack — a manifest agent whose tools are feature.crm.nodes over the ctx.features.crm surface. Reads companies/deals/tasks, logs activity, and drafts follow-up tasks; tool-allowlisted to reads PLUS the two assistive-tier writes only (log-activity, create-task). Stage moves, record creation (contacts/companies/deals), and lead conversion are deliberately NOT in the allowlist — those are governed writes that ride the crm-ops chain pack behind a core.chat.approvalGate, not a direct agent tool call (rationale: risky/high-blast-radius CRM writes stay human-gated). Mirrors feature.csm.agents. v1.1.0 adds the ADR 0265 CDP-C **segment-author** persona — drafts/validates/persists customer segments via the closed-world segment-vocabulary/validate-segment/persist-segment nodes (the workflow-author draft→validate→persist pattern), through the shared chat.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "crm", "sales", "agent"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.crm.agents.sales-ops",
+      "persona": "Sales Ops",
+      "label": "Sales Ops Agent",
+      "description": "Answers questions about companies/deals/tasks and does light assistive CRM upkeep — logging an activity note or drafting a follow-up task — grounded in the org's CRM data via feature.crm.nodes over ctx.features.crm. Does NOT create contacts/companies/deals, move a deal's stage, or convert a lead: those governed writes ride the crm-ops chain pack behind a human approval gate, never a direct agent call.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/sales-ops.md",
+      "toolAllowlist": [
+        "openwop:feature.crm.nodes.list-companies",
+        "openwop:feature.crm.nodes.get-company",
+        "openwop:feature.crm.nodes.list-deals",
+        "openwop:feature.crm.nodes.get-deal",
+        "openwop:feature.crm.nodes.list-tasks",
+        "openwop:feature.crm.nodes.log-activity",
+        "openwop:feature.crm.nodes.create-task"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    },
+    {
+      "agentId": "feature.crm.agents.segment-author",
+      "persona": "Segment Author",
+      "label": "Segment Author Agent",
+      "description": "ADR 0265 CDP-C — drafts customer segments from natural language, grounded CLOSED-WORLD in the org's real filter vocabulary (segment-vocabulary), validates every draft (validate-segment), previews reach (list-segment-members), and persists ONLY a validated segment the user confirms (persist-segment). Mirrors the workflow-author draft→validate→persist pattern; runs through the shared chat (EmbeddedChatPanel, ADR 0073), never a second panel. A saved segment is an inert filter until wired to activation (journeys/reverse-ETL), which is separately consent-gated (the CDP Gate-0 order).",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/segment-author.md",
+      "toolAllowlist": [
+        "openwop:schema.lookup",
+        "openwop:feature.crm.nodes.segment-vocabulary",
+        "openwop:feature.crm.nodes.validate-segment",
+        "openwop:feature.crm.nodes.list-segment-members",
+        "openwop:feature.crm.nodes.persist-segment"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

@@ -17,7 +17,11 @@ import { uploadAndWaitActive, deleteGeminiFile } from './geminiFileApi.js';
 // (untrusted), so it rides the same SSRF egress guard the webhook/connector paths use.
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from '../host/webhookEgressGuard.js';
 import { contextEconomy } from '../host/contextEconomy.js';
+import { createLogger } from '../observability/logger.js';
+import { isLoopbackHttpUrl } from '../aiProviders/copilotSubscription.js';
 import { cacheableAnthropicSystem, extractAnthropicCacheTokens } from './promptCaching.js';
+
+const log = createLogger('providers.dispatch');
 
 /** Decoded audio above this (≈15 MiB) goes through the Gemini File API rather than inline
  *  (keeps the inline request under Gemini's ~20 MiB limit). ADR 0111. */
@@ -27,7 +31,7 @@ const GEMINI_INLINE_AUDIO_LIMIT = 15 * 1024 * 1024;
 const GEMINI_MAX_AUDIO_BYTES = 200 * 1024 * 1024;
 const decodedBytesOf = (b64: string): number => Math.floor((b64.length * 3) / 4);
 
-export type ProviderId = 'anthropic' | 'openai' | 'google' | 'minimax' | 'compat' | 'mock';
+export type ProviderId = 'anthropic' | 'openai' | 'google' | 'minimax' | 'compat' | 'copilot' | 'mock';
 
 /** A single piece of content within a message. Mirrors the FE shape
  *  in src/chat/types.ts. `image`/`file` parts carry inline `dataBase64`
@@ -107,9 +111,15 @@ export interface DispatchResult {
   usage?: {
     inputTokens?: number;
     outputTokens?: number;
-    /** ADR 0148 A2 — Anthropic prompt-cache token split for THIS call (0/absent
-     *  when caching is off). Internal observability only — these never reach the
-     *  OpenWOP wire; the only wire touch is `providerUsage.cacheHit`. */
+    /** ADR 0148 A2 — prompt-cache token split for THIS call (0/absent when
+     *  caching is off). On the BYOK/aiProvidersHost path the emit site forwards
+     *  this to the RFC 0026/0116 `provider.usage` event (`cacheHit` +
+     *  `cacheReadTokens`) — both RFC-accepted fields, so this is honest usage
+     *  reporting, not an un-gated advert. NOTE the cross-provider semantics
+     *  differ: Anthropic's `cache_read_input_tokens` is DISJOINT from
+     *  `inputTokens`; OpenAI/MiniMax's `cached_tokens` is a SUBSET of
+     *  `prompt_tokens`. A consumer MUST NOT blindly sum `inputTokens +
+     *  cacheReadTokens` across providers. */
     cachedReadTokens?: number;
     cacheWriteTokens?: number;
   };
@@ -177,12 +187,13 @@ export async function dispatchChat(reqIn: DispatchRequest): Promise<DispatchResu
       return dispatchMiniMax(req);
     case 'compat':
       return dispatchCompat(req);
+    case 'copilot':
+      return dispatchCopilotSidecar(req);
     case 'mock':
-      // Conformance-only provider — see `dispatchMock.ts`. Production
-      // deployments MUST NOT route real tenants here; the mock provider
-      // is reachable only when the calling node passed `provider: 'mock'`
-      // (which the workflow-engine sample only allows for fixtures
-      // running under `OPENWOP_TEST_SEAM_ENABLED=true`).
+      // Conformance-only provider — see `dispatchMock.ts`. Reachable when a node
+      // passed `provider: 'mock'`. In the enterprise (auth) posture this is
+      // rejected upstream by `assertProviderSupported` (aiProvidersHost.ts,
+      // LEAK-4); demo/dev/conformance still route here so the fixtures run.
       return dispatchMock(req);
     default: {
       const exhaustive: never = req.provider;
@@ -297,6 +308,10 @@ async function dispatchAnthropic(req: DispatchRequest): Promise<DispatchResult> 
   const cachedSystem = cacheableAnthropicSystem(
     systemMessage ? contentToText(systemMessage.content, 'Anthropic') : undefined,
     contextEconomy().providerCache,
+    // CEC-2 / RFC 0116 §43 — forward the (tenant, cachePrefixId) scope so the
+    // plain-chat path namespaces its cached prefix per tenant too (the tools
+    // path already does). Without this the host-set scope is silently dropped.
+    req.cachePrefixScope,
   );
 
   const res = await fetchWith429Retry(() => fetch('https://api.anthropic.com/v1/messages', {
@@ -452,6 +467,7 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
 
   let completion = '';
   let inputTokens: number | undefined;
+  let cachedReadTokens: number | undefined;
   let outputTokens: number | undefined;
   let finishReason: string | undefined;
   // OpenAI's structured-output safety-filter surfaces refusals via
@@ -473,7 +489,7 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
     try {
       const data = JSON.parse(event.data) as {
         choices?: Array<{ delta?: { content?: string; refusal?: string }; finish_reason?: string | null }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
+        usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
       };
       const choice = data.choices?.[0];
       const rawDelta = choice?.delta?.content;
@@ -494,6 +510,8 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
       if (data.usage) {
         inputTokens = data.usage.prompt_tokens;
         outputTokens = data.usage.completion_tokens;
+        // ADR 0148 A2 (OQ#3) — OpenAI-compatible automatic prefix-cache hits.
+        if (data.usage.prompt_tokens_details?.cached_tokens != null) cachedReadTokens = data.usage.prompt_tokens_details.cached_tokens;
       }
     } catch {
       /* skip malformed chunk */
@@ -526,7 +544,7 @@ async function dispatchOpenAI(req: DispatchRequest): Promise<DispatchResult> {
     provider: 'openai',
     model: req.model,
     completion,
-    usage: { inputTokens, outputTokens },
+    usage: { inputTokens, outputTokens, ...(cachedReadTokens != null ? { cachedReadTokens } : {}) },
     ...(finishReason ? { finishReason } : {}),
     ...(refusal ? { refusal } : {}),
   };
@@ -590,10 +608,20 @@ async function dispatchOpenAICompatible(
   if (!res.ok) {
     throw await providerHttpError(opts.providerId, res);
   }
+  // ADR 0756 follow-up — an OpenAI-compatible server may ignore `stream: true` and
+  // answer ONE complete `application/json` chat.completion (the ADR 0182 at-own-risk
+  // shim is turn-atomic by design). Reading that body as SSE yields no events and an
+  // empty completion, so branch on the declared content type. A missing or unknown
+  // type stays on the SSE path, which every streaming provider takes today.
+  const contentType = (res.headers.get('content-type') ?? '').toLowerCase();
+  if (contentType.startsWith('application/json')) {
+    return completeOpenAICompatibleJson(req, opts.providerId, res);
+  }
   if (!res.body) throw new Error(`${opts.providerId}_no_response_body`);
 
   let completion = '';
   let inputTokens: number | undefined;
+  let cachedReadTokens: number | undefined;
   let outputTokens: number | undefined;
   let finishReason: string | undefined;
   const splitter = new ThinkBlockSplitter();
@@ -603,7 +631,7 @@ async function dispatchOpenAICompatible(
     try {
       const data = JSON.parse(event.data) as {
         choices?: Array<{ delta?: { content?: string }; finish_reason?: string | null }>;
-        usage?: { prompt_tokens?: number; completion_tokens?: number };
+        usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
       };
       const choice = data.choices?.[0];
       const rawDelta = choice?.delta?.content;
@@ -624,6 +652,8 @@ async function dispatchOpenAICompatible(
       if (data.usage) {
         inputTokens = data.usage.prompt_tokens;
         outputTokens = data.usage.completion_tokens;
+        // ADR 0148 A2 (OQ#3) — OpenAI-compatible automatic prefix-cache hits.
+        if (data.usage.prompt_tokens_details?.cached_tokens != null) cachedReadTokens = data.usage.prompt_tokens_details.cached_tokens;
       }
     } catch {
       /* skip malformed chunk */
@@ -649,7 +679,73 @@ async function dispatchOpenAICompatible(
     provider: opts.providerId,
     model: req.model,
     completion,
-    usage: { inputTokens, outputTokens },
+    usage: { inputTokens, outputTokens, ...(cachedReadTokens != null ? { cachedReadTokens } : {}) },
+    ...(finishReason ? { finishReason } : {}),
+    ...(refusal ? { refusal } : {}),
+  };
+}
+
+/** Upper bound on a non-stream OpenAI-compatible completion body (ADR 0756 follow-up). */
+const OPENAI_COMPAT_JSON_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * One non-stream `chat.completion` → the same DispatchResult the SSE path builds:
+ * the content runs through the ThinkBlockSplitter and is emitted as a single
+ * delta, and finish_reason / usage / cached tokens / refusal are carried exactly
+ * as the stream path carries them. The body is bounded — a completion larger than
+ * the cap is refused, never truncated.
+ */
+async function completeOpenAICompatibleJson(
+  req: DispatchRequest,
+  providerId: ProviderId,
+  res: Response | Awaited<ReturnType<typeof undiciFetch>>,
+): Promise<DispatchResult> {
+  const declared = Number(res.headers.get('content-length') ?? '');
+  if (Number.isFinite(declared) && declared > OPENAI_COMPAT_JSON_MAX_BYTES) {
+    throw new Error(`${providerId}_response_too_large`);
+  }
+  const raw = await res.text();
+  if (Buffer.byteLength(raw) > OPENAI_COMPAT_JSON_MAX_BYTES) throw new Error(`${providerId}_response_too_large`);
+  let data: {
+    choices?: Array<{ message?: { content?: string | null; refusal?: string | null }; finish_reason?: string | null }>;
+    usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
+  };
+  try {
+    data = JSON.parse(raw) as typeof data;
+  } catch {
+    throw new Error(`${providerId}_malformed_json_completion`);
+  }
+  const choice = data.choices?.[0];
+  const splitter = new ThinkBlockSplitter();
+  let completion = '';
+  const emit = async (part: { visible: string; reasoningDelta?: string; closedBlocks?: readonly string[] }): Promise<void> => {
+    if (part.visible) {
+      completion += part.visible;
+      await req.onDelta?.(part.visible);
+    }
+    if (part.reasoningDelta) await req.onReasoningDelta?.(part.reasoningDelta);
+    for (const block of part.closedBlocks ?? []) await req.onReasoningBlock?.(block);
+  };
+  const content = choice?.message?.content;
+  if (typeof content === 'string' && content.length > 0) await emit(splitter.push(content));
+  await emit(splitter.flush());
+  const finishReason = choice?.finish_reason ?? undefined;
+  const refusal = parseRefusal({
+    choices: [{
+      message: { content: completion, ...(choice?.message?.refusal ? { refusal: choice.message.refusal } : {}) },
+      finish_reason: finishReason,
+    }],
+  }) ?? undefined;
+  const cachedReadTokens = data.usage?.prompt_tokens_details?.cached_tokens;
+  return {
+    provider: providerId,
+    model: req.model,
+    completion,
+    usage: {
+      inputTokens: data.usage?.prompt_tokens,
+      outputTokens: data.usage?.completion_tokens,
+      ...(cachedReadTokens != null ? { cachedReadTokens } : {}),
+    },
     ...(finishReason ? { finishReason } : {}),
     ...(refusal ? { refusal } : {}),
   };
@@ -680,6 +776,28 @@ async function dispatchMiniMax(req: DispatchRequest): Promise<DispatchResult> {
  *      cannot leak via an error message / log / run event. Provider HTTP errors
  *      carry the remote's response body (not our URL), so they pass through.
  */
+/**
+ * ADR 0757 — GitHub Copilot (the RFC 0121 cleared `subscription` provider) via
+ * the co-located LOOPBACK sidecar (`clients/copilot-provider`), which runs the
+ * turn through GitHub's official Copilot SDK. `req.apiKey` is the USER's GitHub
+ * OAuth token, so the base URL is refused unless it is loopback — by
+ * construction the token can reach only the sidecar on this machine, never an
+ * arbitrary host (architect CRITICAL-1). This host makes no Copilot HTTP call of
+ * its own (RFC 0121 gap G2: an official-client harness only).
+ */
+async function dispatchCopilotSidecar(req: DispatchRequest): Promise<DispatchResult> {
+  if (!req.baseUrl || !isLoopbackHttpUrl(req.baseUrl)) throw new Error('copilot_endpoint_not_loopback');
+  try {
+    return await dispatchOpenAICompatible(req, { baseUrl: req.baseUrl, providerId: 'copilot', label: 'copilot' });
+  } catch (e) {
+    // The sidecar's own error bodies carry no credential; a raw transport error
+    // is replaced with a fixed code rather than echoed.
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/^copilot_\d{3}:/.test(msg) || msg === 'copilot_no_response_body') throw e;
+    throw new Error('copilot_transport_error');
+  }
+}
+
 async function dispatchCompat(req: DispatchRequest): Promise<DispatchResult> {
   if (!req.baseUrl) throw new Error('compat_no_base_url');
   let host: string;
@@ -706,7 +824,7 @@ async function dispatchCompat(req: DispatchRequest): Promise<DispatchResult> {
     // (`compat_<status>: <remote body>`) + our own location-free guards carry no
     // URL, so those pass through unchanged.
     const msg = e instanceof Error ? e.message : String(e);
-    if (/^compat_\d{3}:/.test(msg) || /^compat_(no_response_body|no_base_url|invalid_base_url|insecure_endpoint|endpoint_blocked)$/.test(msg)) {
+    if (/^compat_\d{3}:/.test(msg) || /^compat_(no_response_body|no_base_url|invalid_base_url|insecure_endpoint|endpoint_blocked|response_too_large|malformed_json_completion)$/.test(msg)) {
       throw e;
     }
     throw new Error('compat_transport_error');
@@ -747,6 +865,20 @@ async function resolveLargeAudioForGemini(messages: readonly ChatMessage[], apiK
   return { messages: out, uploadedFileNames };
 }
 
+/** One Gemini thinkingConfig shape on the dispatchGoogle ladder (see there). */
+type GoogleThinkingShape = 'budget0' | 'levelMinimal' | 'includeThoughts' | 'none';
+const GOOGLE_THINKING_MEMO_MAX = 256;
+/** Per-process memo: `${model}|on|off` → the ladder rung Google last accepted.
+ *  Not durable and not part of any replay key — it only skips round trips a
+ *  model is already known to reject. Bounded: model ids can be caller-supplied. */
+const googleThinkingShapeMemo = new Map<string, GoogleThinkingShape>();
+function rememberGoogleThinkingShape(key: string, shape: GoogleThinkingShape): void {
+  if (!googleThinkingShapeMemo.has(key) && googleThinkingShapeMemo.size >= GOOGLE_THINKING_MEMO_MAX) googleThinkingShapeMemo.clear();
+  googleThinkingShapeMemo.set(key, shape);
+}
+/** Test seam: forget every memoised shape. */
+export function resetGoogleThinkingShapeMemoForTests(): void { googleThinkingShapeMemo.clear(); }
+
 async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
   // Gemini's wire shape: system prompt is a top-level `systemInstruction`
   // field (not in messages[]), and the assistant role is `model` not
@@ -782,30 +914,78 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
     /gemini-3[.-]/.test(req.model);
   const thinkingEnabled = isReasoningModel && (req.reasoningVerbosity ?? 'off') !== 'off';
 
-  const res = await fetchWith429Retry(() => fetch(url, {
+  // Gemini 3.x models disagree about thinking parameters. MEASURED 2026-09-16
+  // (ADR 0706 Phase 2, one key, same request): gemini-3-flash-preview,
+  // 3.1-flash-lite and 3.6-flash accept `thinkingBudget: 0`; gemini-3.5-flash-lite
+  // rejects it with 400 INVALID_ARGUMENT yet accepts `thinkingLevel: 'minimal'`;
+  // 3.7-flash and 3.8-flash reject `thinkingLevel: 'minimal'`. No single
+  // parameter works across the family, and a static per-model table would rot
+  // with every release. Before this, every call to a catalog model
+  // (gemini-3.5-flash-lite) failed for every feature.
+  //
+  // So the request walks a LADDER of shapes, advancing ONLY when Google answers
+  // 400 INVALID_ARGUMENT to a request that carried a thinkingConfig:
+  //   thinking off: thinkingBudget:0 → thinkingLevel:'minimal' → no thinkingConfig
+  //   thinking on:  includeThoughts  → no thinkingConfig (reasoning traces are then
+  //                 NOT streamed for that model — the call still succeeds)
+  // `minimal` sits before "no config" on purpose (review of #3894): with no
+  // thinkingConfig the model thinks at its own default and can spend a
+  // caller-capped maxOutputTokens on thought, returning empty text with
+  // finishReason MAX_TOKENS. The last rung never raises the caller's cap; that
+  // finishReason is returned verbatim, and the AI adapter's RFC 0032/0033
+  // reliability loop (aiProvidersHost — normalizeFinishReason → 'length') is the
+  // ONE owner that types it and retries with a doubled budget. The dispatcher
+  // does not grow a second classifier.
+  //
+  // The rung that worked is memoised per process (bounded), so a model that
+  // rejects the first shape pays the extra round trip and the warn once, not on
+  // every call.
+  //
+  // Known cost: Google's 400 does not say WHICH argument was invalid, so an
+  // INVALID_ARGUMENT unrelated to thinking (a bad schema, an unsupported part)
+  // walks every rung before it surfaces — up to three unbilled 400 round trips of
+  // latency, and nothing is memoised on that path.
+  const ladder: GoogleThinkingShape[] = !isReasoningModel
+    ? ['none']
+    : thinkingEnabled ? ['includeThoughts', 'none'] : ['budget0', 'levelMinimal', 'none'];
+  const memoKey = `${req.model}|${thinkingEnabled ? 'on' : 'off'}`;
+  const buildBody = (shape: GoogleThinkingShape): string => JSON.stringify({
+        contents: conversation.map((m) => ({
+          role: m.role === 'assistant' ? 'model' : m.role,
+          parts: contentToGeminiParts(m.content),
+        })),
+        ...(systemMessage ? { systemInstruction: { parts: contentToGeminiParts(systemMessage.content) } } : {}),
+        // Native web search via Google's grounding tool. Each grounded
+        // response is billed as a "grounded response" (~$35/1k) per
+        // ai.google.dev/gemini-api/docs/pricing.
+        ...(req.webSearch ? { tools: [{ googleSearch: {} }] } : {}),
+        generationConfig: {
+          maxOutputTokens: req.maxTokens ?? ((thinkingEnabled || (shape === 'none' && isReasoningModel)) ? 8192 : 4096),
+          ...(shape === 'budget0' ? { thinkingConfig: { thinkingBudget: 0 } }
+            : shape === 'levelMinimal' ? { thinkingConfig: { thinkingLevel: 'minimal' } }
+              : shape === 'includeThoughts' ? { thinkingConfig: { includeThoughts: true } }
+                : {}),
+        },
+      });
+  const send = (shape: GoogleThinkingShape): Promise<Response> => fetchWith429Retry(() => fetch(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': req.apiKey },
-    body: JSON.stringify({
-      contents: conversation.map((m) => ({
-        role: m.role === 'assistant' ? 'model' : m.role,
-        parts: contentToGeminiParts(m.content),
-      })),
-      ...(systemMessage ? { systemInstruction: { parts: contentToGeminiParts(systemMessage.content) } } : {}),
-      // Native web search via Google's grounding tool. Each grounded
-      // response is billed as a "grounded response" (~$35/1k) per
-      // ai.google.dev/gemini-api/docs/pricing.
-      ...(req.webSearch ? { tools: [{ googleSearch: {} }] } : {}),
-      generationConfig: {
-        maxOutputTokens: req.maxTokens ?? (thinkingEnabled ? 8192 : 4096),
-        ...(isReasoningModel && !thinkingEnabled
-          ? { thinkingConfig: { thinkingBudget: 0 } }
-          : thinkingEnabled
-            ? { thinkingConfig: { includeThoughts: true } }
-            : {}),
-      },
-    }),
+    body: buildBody(shape),
     ...(req.signal ? { signal: req.signal } : {}),
   }), req.signal);
+  const memoShape = googleThinkingShapeMemo.get(memoKey);
+  let rung = memoShape ? Math.max(0, ladder.indexOf(memoShape)) : 0;
+  let res = await send(ladder[rung]!);
+  while (!res.ok && res.status === 400 && ladder[rung] !== 'none') {
+    const errText = await res.text().catch(() => '');
+    if (!/INVALID_ARGUMENT/.test(errText) || rung + 1 >= ladder.length) {
+      throw new Error(`google_400: ${errText.slice(0, ERR_BODY_MAX)}`);
+    }
+    rung += 1;
+    log.warn('google_thinking_config_rejected_trying_next_shape', { model: req.model, next: ladder[rung] });
+    res = await send(ladder[rung]!);
+  }
+  if (res.ok && rung > 0) rememberGoogleThinkingShape(memoKey, ladder[rung]!);
   if (!res.ok) {
     throw await providerHttpError('google', res);
   }
@@ -910,8 +1090,13 @@ async function dispatchGoogle(req: DispatchRequest): Promise<DispatchResult> {
   // Diagnostic: when we parsed zero chunks OR got chunks but zero text,
   // log the response shape so the next debug iteration knows what to fix.
   if (chunkCount === 0 || completion.length === 0) {
-    // eslint-disable-next-line no-console
-    console.warn('[dispatch.google] empty/short response — diagnostic dump:', {
+    // ADR 0733 — was `console.warn`, which BYPASSES the logger sink entirely: neither
+    // the secret scrub nor the PII mask ran, and `lastRawChunkPreview` is 500 bytes of
+    // RAW MODEL OUTPUT — precisely where a user's pasted personal data lives. The
+    // `eslint-disable-next-line no-console` that used to sit here was decorative: the
+    // backend has no ESLint at all (`package.json` defines `"lint": "tsc --noEmit"`),
+    // so nothing was suppressed and nothing stops the next bypass either.
+    log.warn('dispatch_google_empty_or_short_response', {
       model: req.model,
       chunkCount,
       completionLength: completion.length,
@@ -1141,4 +1326,109 @@ function parseSseMessage(raw: string): SseEvent | null {
   }
   if (dataParts.length === 0) return null;
   return { event, data: dataParts.join('\n') };
+}
+
+// ── Embeddings (ADR 0351 Phase 1) ────────────────────────────────────
+// A sibling of dispatchChat for the two BYOK providers with embeddings APIs.
+// Both accept a requested output dimensionality (OpenAI `dimensions`, Google
+// `outputDimensionality` — Matryoshka-style truncation), which the KB uses to
+// match the deployment's fixed vector-store width (pgvector columns are
+// fixed-width — see host/vector/pgVectorVector.ts).
+
+export interface EmbeddingsRequest {
+  provider: string;
+  model: string;
+  apiKey: string;
+  texts: readonly string[];
+  /** Requested vector width — MUST match the vector store's configured dims. */
+  dimensions: number;
+  signal?: AbortSignal;
+}
+export interface EmbeddingsResult { vectors: number[][]; model: string }
+
+/** L2-normalize in place (dimension-truncating APIs return unnormalized tails). */
+function l2Normalize(v: number[]): number[] {
+  let n = 0;
+  for (const x of v) n += x * x;
+  n = Math.sqrt(n);
+  if (n === 0) return v;
+  for (let i = 0; i < v.length; i++) v[i] = v[i]! / n;
+  return v;
+}
+
+async function dispatchOpenAIEmbeddings(req: EmbeddingsRequest): Promise<EmbeddingsResult> {
+  const res = await fetchWith429Retry(() => fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${req.apiKey}` },
+    body: JSON.stringify({ model: req.model, input: req.texts, dimensions: req.dimensions }),
+    ...(req.signal ? { signal: req.signal } : {}),
+  }), req.signal);
+  if (!res.ok) throw await providerHttpError('openai', res);
+  const body = await res.json() as { data?: Array<{ index: number; embedding: number[] }> };
+  const rows = (body.data ?? []).slice().sort((a, b) => a.index - b.index);
+  if (rows.length !== req.texts.length) throw new Error(`openai_embeddings_count_mismatch: got ${rows.length}, want ${req.texts.length}`);
+  return { vectors: rows.map((r) => l2Normalize(r.embedding)), model: req.model };
+}
+
+async function dispatchGoogleEmbeddings(req: EmbeddingsRequest): Promise<EmbeddingsResult> {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(req.model)}:batchEmbedContents`;
+  const res = await fetchWith429Retry(() => fetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': req.apiKey },
+    body: JSON.stringify({
+      requests: req.texts.map((text) => ({
+        model: `models/${req.model}`,
+        content: { parts: [{ text }] },
+        outputDimensionality: req.dimensions,
+      })),
+    }),
+    ...(req.signal ? { signal: req.signal } : {}),
+  }), req.signal);
+  if (!res.ok) throw await providerHttpError('google', res);
+  const body = await res.json() as { embeddings?: Array<{ values: number[] }> };
+  const rows = body.embeddings ?? [];
+  if (rows.length !== req.texts.length) throw new Error(`google_embeddings_count_mismatch: got ${rows.length}, want ${req.texts.length}`);
+  return { vectors: rows.map((r) => l2Normalize(r.values)), model: req.model };
+}
+
+/** Providers with a real embeddings API (anthropic/minimax have none). */
+export const EMBEDDINGS_PROVIDERS: readonly string[] = ['openai', 'google', 'cohere'];
+
+/** ADR 0398 P3 — Cohere embeddings (`/v1/embed`). v3 models REQUIRE `input_type`; we
+ *  index with `search_document` (the embedder is used for both indexing + querying, and a
+ *  single input_type keeps one namespace comparable — a query-type refinement is a future
+ *  follow-up). v3 has no native `dimensions` param, so we truncate the (Matryoshka-trained)
+ *  vector to the requested width and RE-normalize — one namespace = one width, like the
+ *  other providers. */
+async function dispatchCohereEmbeddings(req: EmbeddingsRequest): Promise<EmbeddingsResult> {
+  const res = await fetchWith429Retry(() => fetch('https://api.cohere.com/v1/embed', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${req.apiKey}` },
+    body: JSON.stringify({ model: req.model, texts: req.texts, input_type: 'search_document', embedding_types: ['float'], truncate: 'END' }),
+    ...(req.signal ? { signal: req.signal } : {}),
+  }), req.signal);
+  if (!res.ok) throw await providerHttpError('cohere', res);
+  const body = await res.json() as { embeddings?: { float?: number[][] } | number[][] };
+  const raw = Array.isArray(body.embeddings) ? body.embeddings : body.embeddings?.float;
+  if (!raw || raw.length !== req.texts.length) throw new Error(`cohere_embeddings_count_mismatch: got ${raw?.length ?? 0}, want ${req.texts.length}`);
+  // Fail CLOSED if the model's native width is NARROWER than the namespace requires — we can
+  // truncate a wider vector but never pad a shorter one into a fixed-width store (a silent
+  // dimension mismatch would corrupt similarity). A wider request than the model can serve is
+  // a config error, not a runtime fallback.
+  const nativeWidth = raw[0]?.length ?? 0;
+  if (nativeWidth < req.dimensions) throw new Error(`cohere_embeddings_dim_too_small: model '${req.model}' returns ${nativeWidth}-d, namespace needs ${req.dimensions}-d.`);
+  // Truncate to the requested width (Matryoshka head), then L2-normalize.
+  return { vectors: raw.map((v) => l2Normalize(v.length > req.dimensions ? v.slice(0, req.dimensions) : v)), model: req.model };
+}
+
+export async function dispatchEmbeddings(reqIn: EmbeddingsRequest): Promise<EmbeddingsResult> {
+  if (reqIn.texts.length === 0) return { vectors: [], model: reqIn.model };
+  const req: EmbeddingsRequest = reqIn.signal ? reqIn : { ...reqIn, signal: AbortSignal.timeout(DEFAULT_DISPATCH_TIMEOUT_MS) };
+  switch (req.provider) {
+    case 'openai': return dispatchOpenAIEmbeddings(req);
+    case 'google': return dispatchGoogleEmbeddings(req);
+    case 'cohere': return dispatchCohereEmbeddings(req);
+    default:
+      throw new Error(`embeddings_unsupported_provider: ${req.provider} has no embeddings API (supported: ${EMBEDDINGS_PROVIDERS.join(', ')}).`);
+  }
 }

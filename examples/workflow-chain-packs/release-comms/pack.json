@@ -1,0 +1,220 @@
+{
+  "name": "core.openwop.workflows.release-comms",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "Release-comms chains (RFC 0013): ship-day communications — customer-facing release notes from a raw changelog, and an internal launch announcement. Every external/team send is human-gated. Replay-deterministic.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "Release comms"
+  ],
+  "chains": [
+    {
+      "chainId": "release.notes-from-changelog",
+      "version": "1.0.0",
+      "label": "Changelog → Customer Release Notes",
+      "description": "Turns a raw changelog into friendly, customer-facing release notes grouped by theme — reviewed by a human before it's treated as published copy.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["triggerEventName"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "default": "our product",
+            "description": "Product name."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Release cut",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "notes",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Write release notes",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Rewrite this raw changelog into customer-facing release notes for {{params.product}}: group changes into New / Improved / Fixed, lead each with the user benefit (not the implementation), and drop internal-only entries. Warm and concise.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Review release notes",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the release notes before publishing"
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "notes"
+          },
+          {
+            "from": "notes",
+            "to": "gate"
+          }
+        ]
+      },
+      "outputs": {
+        "notes": {
+          "type": "string",
+          "description": "The reviewed release notes."
+        }
+      }
+    },
+    {
+      "chainId": "release.internal-announce",
+      "version": "1.1.0",
+      "label": "Release → Internal Launch Note",
+      "description": "Drafts a crisp internal launch announcement (what shipped, who it's for, talking points) and posts it to the team channel after a human approves.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["triggerEventName", "slackChannel"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "default": "our product",
+            "description": "Product name."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." },
+          "slackChannel": { "type": "string", "description": "Slack channel these messages post to (e.g. `#ops`)." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Release ready",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "draft",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Draft announcement",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Write a crisp internal launch note for {{params.product}}: what shipped (2-3 lines), who it's for, 3 talking points for GTM/support, and where to learn more. Confident, factual, no hype.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Review announcement",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the internal announcement before posting",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — not posted",
+            "position": {
+              "x": 840,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "slack",
+            "typeId": "core.openwop.integration.slack-message",
+            "name": "Post to channel",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {
+              "channel": "{{params.slackChannel}}"
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "draft"
+          },
+          {
+            "from": "draft.content",
+            "to": "gate.artifact"
+          },
+          {
+            "from": "gate.artifact",
+            "to": "slack.text",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "gate",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    }
+  ]
+}

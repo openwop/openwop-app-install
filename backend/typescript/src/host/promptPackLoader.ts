@@ -27,7 +27,7 @@
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
-import { createPublicKey, verify } from 'node:crypto';
+import { verifySelfAttested } from './packSignature.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Ajv2020, { type ValidateFunction } from 'ajv/dist/2020.js';
@@ -35,6 +35,7 @@ import addFormats from 'ajv-formats';
 import { installPackTemplates, type PromptTemplate } from './promptStore.js';
 import { createLogger } from '../observability/logger.js';
 import { locateRepoSchemasDir } from './_repoPath.js';
+import { isParkedPackDirName } from '../bootstrap/mountLocalPacks.js';
 
 const log = createLogger('prompt-pack-loader');
 
@@ -125,6 +126,7 @@ export function loadPromptPacks(opts: {
       continue;
     }
     for (const entry of entries) {
+      if (isParkedPackDirName(entry)) continue;
       const packDir = join(root, entry);
       let stat;
       try {
@@ -216,26 +218,10 @@ function verifyManifestSignature(
   packDir: string,
   manifest: PromptPackManifest,
 ): 'verified' | 'skipped' | 'failed' {
-  if (!manifest.signing) return 'skipped';
-  const { publicKeyRef, signatureRef } = manifest.signing;
-  if (!publicKeyRef || !signatureRef) return 'failed';
-  const pubKeyPath = join(packDir, publicKeyRef);
-  const sigPath = join(packDir, signatureRef);
-  if (!existsSync(pubKeyPath) || !existsSync(sigPath)) return 'failed';
-
-  try {
-    const pubKeyPem = readFileSync(pubKeyPath, 'utf8');
-    const signature = readFileSync(sigPath);
-    const manifestBytes = readFileSync(join(packDir, 'pack.json'));
-    const publicKey = createPublicKey({ key: pubKeyPem, format: 'pem' });
-    return verify(null, manifestBytes, publicKey, signature) ? 'verified' : 'failed';
-  } catch (err) {
-    log.warn('prompt_pack_signature_verify_error', {
-      packName: manifest.name,
-      err: err instanceof Error ? err.message : String(err),
-    });
-    return 'failed';
-  }
+  // ADR 0367 Phase 1 — delegates to the ONE shared verifier. These are the
+  // SELF-ATTESTED semantics (pack-supplied key: integrity, not identity) —
+  // status/logging only, never a trust decision.
+  return verifySelfAttested(packDir, manifest.signing, manifest.name);
 }
 
 /** Convenience helper: default pack roots for the workflow-engine

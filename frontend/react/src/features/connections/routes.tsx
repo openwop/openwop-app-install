@@ -6,6 +6,9 @@
  * and carries no `featureId` gate.
  */
 import { lazy } from 'react';
+
+// P4 continuation — this page's walkthrough spotlight (lazy chunk, boot-eager trigger).
+void import('../../walkthroughs/pageSpotlight.js').then((m) => m.registerPageSpotlight('connections.page.view', '/connections', 'connections.page'));
 import type { FeatureRoute } from '../../chrome/featureTypes.js';
 import type { FrontendFeature } from '../registry.js';
 
@@ -15,7 +18,7 @@ const routes: FeatureRoute[] = [
   {
     path: '/connections',
     element: <ConnectionsPage />,
-    tier: 'admin',
+    tier: 'admin', archetype: 'admin',
     // ADR 0144 §Correction (2026-06-26) — reached only via the always-on Access
     // Hub; no standalone nav. Route + hubTab stay (the hub renders the element).
     hubTab: { group: 'credentials', order: 1, scopes: ['workspace', 'personal'] },

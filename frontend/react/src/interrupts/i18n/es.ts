@@ -3,21 +3,23 @@
  * (approval, clarification, refinement, cancellation) and the shared renderer.
  */
 export const messages = {
-  // RenderInterrupt fallback
-  unknownKindPrefix: 'Tipo de interrupción desconocido',
-  unknownKindMid: '— amplíe',
-  unknownKindTail: 'en',
+  // ADR 0755 D3 — the resume token is projected only to an approvals:respond holder.
+  noRespondPermission: 'Puede ver este paso, pero no tiene permiso para responderlo.',
+  // RenderInterrupt fallback — neutral copy; never instructs users to edit source (DEMO-14)
+  unknownKindBody: 'Este paso no se puede mostrar aquí ({{kind}}). Pida a su administrador que actualice la aplicación.',
 
   // Approval card
   approvalRequired: 'Aprobación requerida',
   approvalDefaultPrompt: 'Apruebe para continuar.',
   commentLabel: 'Comentario (opcional)',
   commentPlaceholder: 'Visible en el registro de auditoría',
-  actionApprove: 'aprobar',
-  actionReject: 'rechazar',
-  actionRequestChanges: 'solicitar-cambios',
-  actionDefer: 'aplazar',
-  actionEscalate: 'escalar',
+  actionApprove: 'Aprobar',
+  actionReject: 'Rechazar',
+  rejectConfirmTitle: '¿Rechazar esto y hacer fallar la ejecución?',
+  rejectConfirmBody: 'Rechazar termina la ejecución aquí. Lo que ya se gastó —una consulta, una llamada al modelo, tu revisión— no se recupera, y no se puede deshacer el rechazo.',
+  actionRequestChanges: 'Solicitar cambios',
+  actionDefer: 'Aplazar',
+  actionEscalate: 'Escalar',
   resolvedElsewhere: 'Esta revisión se acaba de resolver en otro lugar.',
 
   // Clarification dialog

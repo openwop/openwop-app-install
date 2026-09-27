@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.web-search",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Spec-canonical web-search pack. A single capability-advertised search node that routes through the host's `host.webSearch` adapter (search API + scraping policy + rate-limit + cache layer). When the host does not advertise the surface — as in the OpenWOP demo backend — the node returns a deterministic fixture result so replay determinism holds. This is a PROTOCOL-LAYER node pack (capability-advertised), NOT a host-side exec tool.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",

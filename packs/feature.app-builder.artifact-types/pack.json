@@ -1,0 +1,170 @@
+{
+  "name": "feature.app-builder.artifact-types",
+  "version": "1.1.1",
+  "kind": "artifact-type",
+  "description": "Typed artifacts the App Builder design pipeline emits (ADR 0346 4c). Registers exactly the two types with live producers: app.research (the design chain's research node emits it as a typed secondary deliverable) and app.audit (the chain-configured capture node). Per ADR 0346 4d a type registers together WITH its producer — a registered type with no producer is a dead type, so nothing else (no app.prd / app.plan) is declared here until its producer ships.",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "artifactTypes": [
+    {
+      "artifactTypeId": "app.research",
+      "title": "Product research",
+      "export": [
+        "json"
+      ],
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": [
+          "personas"
+        ],
+        "properties": {
+          "personas": {
+            "type": "array",
+            "maxItems": 6,
+            "items": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "maxLength": 120
+                },
+                "role": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "goals": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 300
+                  }
+                },
+                "frustrations": {
+                  "type": "array",
+                  "maxItems": 8,
+                  "items": {
+                    "type": "string",
+                    "maxLength": 300
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "brand": {
+            "type": "object",
+            "properties": {
+              "tone": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "voice": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "personality": {
+                "type": "array",
+                "maxItems": 10,
+                "items": {
+                  "type": "string",
+                  "maxLength": 80
+                }
+              }
+            },
+            "additionalProperties": false
+          },
+          "visualDirection": {
+            "type": "object",
+            "properties": {
+              "style": {
+                "type": "string",
+                "maxLength": 300
+              },
+              "themePrimary": {
+                "type": "string",
+                "pattern": "^#[0-9a-fA-F]{6}$"
+              },
+              "themeSecondary": {
+                "type": "string",
+                "pattern": "^#[0-9a-fA-F]{6}$"
+              },
+              "imagery": {
+                "type": "string",
+                "maxLength": 300
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "artifactTypeId": "app.audit",
+      "title": "Quality audit",
+      "export": [
+        "json"
+      ],
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": [
+          "score",
+          "findings"
+        ],
+        "properties": {
+          "score": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "findings": {
+            "type": "array",
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "required": [
+                "code",
+                "message"
+              ],
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "maxLength": 60
+                },
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "error",
+                    "warning",
+                    "info"
+                  ]
+                },
+                "screenId": {
+                  "type": "string",
+                  "maxLength": 80
+                },
+                "message": {
+                  "type": "string",
+                  "maxLength": 400
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "summary": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ]
+}

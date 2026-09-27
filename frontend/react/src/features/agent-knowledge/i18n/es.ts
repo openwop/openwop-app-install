@@ -23,6 +23,7 @@ export const messages = {
   documentsTitle: 'Documentos',
   documentsHint: 'Colecciones de conocimiento vinculadas — fragmentadas, incrustadas y citadas al recuperarlas.',
   documentsCreateOrgFirst: 'Cree primero una organización para alojar los documentos de este agente.',
+  documentsOrgsFailed: 'No se pudieron cargar tus organizaciones, así que no sabemos cuáles existen. Nada de esto significa que debas crear una.',
   organizationLabel: 'Organización',
   newCollectionNameLabel: 'Nombre de la nueva colección',
   newCollectionNamePlaceholder: 'Manual de la cuenta',
@@ -55,7 +56,10 @@ export const messages = {
 
   // Notes section
   notesTitle: 'Notas y datos',
-  notesHint: 'Privadas de este agente; se recuerdan automáticamente en cada turno (no se citan).',
+  notesHint: 'Se recuerda automáticamente en cada turno (sin cita). Visible para cualquiera que pueda usar este agente.',
+  // ADR 0664 D2 — the grant is real and intended; the disclosure was missing.
+  audienceDisclosure: 'Cualquier persona que pueda usar a {{persona}} podrá recuperar lo que añadas aquí, incluidas personas que no pertenecen al proyecto del que proviene una colección. Ese acceso no termina cuando termina el tuyo.',
+  audienceBoundWarning: 'Esta colección está restringida a los miembros de su proyecto, pero {{persona}} está disponible para todo el espacio de trabajo. Vincularla aquí hace que su contenido sea recuperable por cualquiera que pueda usar este agente.',
   allowCuratedNotes: 'Permitir notas curadas para este agente',
   enabled: 'activadas',
   disabled: 'desactivadas',
@@ -81,4 +85,10 @@ export const messages = {
   memoryCuratedOff: 'Los recuerdos curados están desactivados para este agente. <1>Actívelos</1> para añadir datos que recordará.',
   memoryAddPlaceholder: 'El director financiero prefiere las actualizaciones de estado los viernes.',
   memoryEmptyBody: 'Añada datos que {{persona}} debería recordar; se recuerdan cuando son relevantes.',
+  // KB-UX-3 / ADR 0583 — una fuente que FALLÓ se nombra, nunca se confunde con «sin coincidencias».
+  retrievePartial: 'Parte de este conocimiento no se pudo buscar, así que esta respuesta está incompleta.',
+  retrievePartialSources: 'Sin buscar: {{sources}}',
+  retrieveSource_kb: 'documentos',
+  retrieveSource_memory: 'notas',
+  errorAnnounce: 'El panel de conocimiento del agente informó de un problema; los detalles están en pantalla.',
 } as const;

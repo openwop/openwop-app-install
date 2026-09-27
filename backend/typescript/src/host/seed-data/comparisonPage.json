@@ -1,0 +1,51 @@
+{
+  "title": "How OpenWOP compares",
+  "slug": "compare",
+  "hero": {
+    "eyebrow": "Comparison",
+    "heading": "How OpenWOP compares on workflow orchestration",
+    "subheading": "A capability matrix across the 2026 orchestration landscape — prosumer automation, durable execution, data pipelines, AI-agent builders, and enterprise BPM.",
+    "ctaLabel": "Open the app",
+    "ctaUrl": "/",
+    "ctaLabel2": "See all features",
+    "ctaUrl2": "/p/features"
+  },
+  "intro": {
+    "eyebrow": "What this is",
+    "heading": "Capabilities, not scores",
+    "body": "This page maps concrete orchestration capabilities against representative products in each category. We mark competitors by whether a capability **ships today** — not by a quality rating or ranking. Where we lead, it is usually on the axes the whole field is still weak on: replay and fork-from-any-step, running without a determinism tax, evaluation-gated publishing, per-run cost attribution, and a real human-in-the-loop ladder."
+  },
+  "matrix": {
+    "eyebrow": "Capability matrix",
+    "heading": "Orchestration capabilities, side by side",
+    "lede": "One representative product per category. Presence of a capability, as of mid-2026, from public vendor documentation.",
+    "columns": ["OpenWOP", "n8n", "Zapier", "Temporal", "LangGraph", "Camunda"],
+    "highlightColumn": 0,
+    "rows": [
+      { "label": "Published runs pin their version", "cells": ["✓", "✓", "✓", "✓", "~", "✓"] },
+      { "label": "Replay + fork from any step", "cells": ["✓", "✗", "✗", "✓", "✓", "✗"] },
+      { "label": "No determinism tax (author freely)", "cells": ["✓", "✓", "✓", "✗", "~", "✓"] },
+      { "label": "Debug on real production data", "cells": ["✓", "✓", "~", "~", "✓", "~"] },
+      { "label": "Evaluations gate publishing", "cells": ["✓", "~", "✗", "✗", "~", "~"] },
+      { "label": "Per-run / per-node cost attribution", "cells": ["✓", "~", "~", "✗", "~", "✗"] },
+      { "label": "HITL: quorum + delegation + SLA", "cells": ["✓", "~", "~", "~", "~", "✓"] },
+      { "label": "AI authoring behind review/approve rails", "cells": ["✓", "~", "~", "✗", "~", "~"] },
+      { "label": "Real-time multiplayer builder", "cells": ["~", "✗", "✗", "✗", "✗", "✓"] },
+      { "label": "Fleet insights / failure hotspots", "cells": ["✓", "✓", "~", "~", "✓", "✓"] }
+    ],
+    "legend": "✓ ships this capability · ~ partial, or leaders-only · ✗ not shipped",
+    "note": "Capability presence as of mid-2026, compiled from public vendor documentation; products are representative of their category, not exhaustive. Cells reflect a shipped capability, not an endorsement or a quality score. OpenWOP's real-time multiplayer builder is available behind an operator toggle, so it is marked partial. Corrections welcome — this is a living comparison, not a benchmark."
+  },
+  "outro": {
+    "eyebrow": "The through-line",
+    "heading": "Runs you can trust, on data you can see",
+    "body": "Every OpenWOP workflow — whether a chain of nodes or a stack of todos — runs on one executor whose runs pin their version, replay deterministically, and fork from any step. That is what lets AI authoring, cost budgets, and a human-in-the-loop ladder ride on top without a determinism tax. The comparison above is a snapshot; the moat is the substrate underneath it."
+  },
+  "cta": {
+    "eyebrow": "Try it",
+    "heading": "Run a workflow that pins, replays, and forks",
+    "subheading": "Start a chat, build a chain, and watch every run stay debuggable.",
+    "label": "Open the app",
+    "url": "/"
+  }
+}

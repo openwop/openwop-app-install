@@ -1,0 +1,56 @@
+{
+  "name": "feature.computer-use.nodes",
+  "version": "1.0.1",
+  "description": "Computer-use browser-agent nodes (ADR 0418) over ctx.features['computer-use']: `task` starts/resumes a provider-hosted browser session and runs the risk-tiered loop until completion or a commit-class action halts it awaiting approval; compose core.approvalGate then `decide` to record the human verdict and resume; `status` reads the session. Fail-closed origin allowlist, per-tenant daily session budget, recorded trajectories (replay never re-drives a browser). role:action.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "computer-use",
+    "browser-agent",
+    "automation",
+    "hitl"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.computer-use.nodes.task",
+      "version": "1.0.0",
+      "label": "Computer Use: Run Task",
+      "description": "Starts (or resumes — submit-once on identical inputs) a browser-agent session and advances the risk-tiered loop: observe/interact actions auto-approve and record; a commit-class action (submit/download/new-origin/credential) halts with state `awaiting_approval` for the approval-gate chain. Inputs: { orgId, task, startUrl, allowedOrigins[] (https, fail-closed) }. Output: { session: { sessionId, status, steps, pendingAction?, resultSummary?, error? } }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.computer-use.nodes.decide",
+      "version": "1.0.0",
+      "label": "Computer Use: Decide Pending Action",
+      "description": "Records the human verdict on a session's pending commit-class action (compose AFTER core.approvalGate — this node trusts the recorded gate outcome) and resumes (approve) or ends the session (deny). Inputs: { sessionId, approve }. Output: { session }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.computer-use.nodes.status",
+      "version": "1.0.0",
+      "label": "Computer Use: Session Status",
+      "description": "Reads a session's recorded state (status, step count, pending action, result). Inputs: { sessionId }. Output: { session | null }. Tenant-guarded read.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

@@ -45,13 +45,17 @@ import {
   deleteJob,
   updateJob,
   markJobFired,
+  advanceJobSlot,
+  recordJobSkipped,
   singleTick,
   currentTick,
+  scheduleSubject,
   type ScheduledJob,
 } from '../host/schedulingService.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { startWorkflowRun } from '../host/runStarter.js';
 import { callerSubject, personalTenantOf, isDurableCaller } from '../host/requestSubject.js';
+import { resolveSubjectAccess, levelSatisfies, type AccessLevel } from '../host/subjectAccess.js';
 
 interface Deps {
   storage: Storage;
@@ -62,15 +66,65 @@ function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
 }
 
-/** ADR 0025 — a caller reaches a job when it belongs to the active workspace OR
- *  the caller is its personal owner (so a user's personal-tenant schedule is
- *  reachable/mutable from any active workspace, mirroring `authorizeBoard`).
- *  Fail-closed: a job the caller neither tenant-owns nor personally owns is a
- *  uniform 404 to the handler. */
-function jobAccessible(req: Request, job: ScheduledJob): boolean {
-  if (job.tenantId === tenantOf(req)) return true;
-  const subject = callerSubject(req);
-  return !!job.ownerUserId && !!subject && job.ownerUserId === subject;
+/**
+ * ADR 0608 (`CPC-1`) — the per-request job gate.
+ *
+ * A `ScheduledJob` can be owned by a SUBJECT (`ownerSubject`, ADR 0046) whose
+ * read visibility is membership-scoped — today a `kind:'project'` subject with
+ * `visibility:'private'`. This door used to answer `job.tenantId === tenantOf(req)`
+ * and stop there, so a co-tenant with ZERO org scopes could list a private
+ * project's job, re-point its `workflowId`, fire it and delete it: a private-read
+ * leak AND a `requireProject('workspace:write')` bypass, measured live.
+ *
+ * The rule is now the SAME one `routes/kanban.ts:107-141` applies to a board —
+ * resolve the owner through the ADR 0054 D5 `subjectAccess` seam and honour the
+ * level it returns; only when NO resolver applies (`null` — an agent- or
+ * user-owned job, ADR 0025) does the legacy tenant/personal rule run. Read is
+ * required to LIST a job, WRITE to patch / trigger / delete it. Fail-closed:
+ * everything unreachable is a uniform 404, never a 403 (no existence oracle).
+ *
+ * The gate is created ONCE per request and memoizes per owning subject, so a
+ * list of N jobs sharing one project costs ONE access resolution rather than N
+ * (`getProject` + a full `resolveEffectiveAccess` scan) — the `host_ext_kv`
+ * prefix-scan class this fix must not introduce while closing a leak.
+ */
+type JobGate = (job: ScheduledJob, need: 'read' | 'write') => Promise<boolean>;
+
+function jobGateFor(req: Request): JobGate {
+  const caller = callerSubject(req);
+  const activeTenant = tenantOf(req);
+  const memo = new Map<string, Promise<AccessLevel | null>>();
+  return async (job, need) => {
+    const subject = scheduleSubject(job);
+    let level: AccessLevel | null = null;
+    if (subject) {
+      const key = JSON.stringify([job.tenantId, subject.kind, subject.id]);
+      let pending = memo.get(key);
+      if (pending === undefined) {
+        pending = resolveSubjectAccess(job.tenantId, subject, caller);
+        memo.set(key, pending);
+      }
+      level = await pending;
+    }
+    if (level !== null) return levelSatisfies(level, need);
+    // ADR 0025 (unchanged) — a job with no membership-scoped owner belongs to the
+    // active workspace OR to the caller personally (so a user's personal-tenant
+    // schedule stays reachable from any active workspace, mirroring
+    // `authorizeBoard`). RESIDUAL, stated: this arm is reached whenever the seam
+    // has no resolver for the owner's kind, so a project-owned job would fall back
+    // to the tenant rule if the projects feature ever failed to register. Projects
+    // is always-on (no toggle) and kanban carries the identical shape; making the
+    // seam structurally authoritative is `CPC-8`.
+    if (job.tenantId === activeTenant) return true;
+    return !!job.ownerUserId && !!caller && job.ownerUserId === caller;
+  };
+}
+
+/** Drop jobs the caller cannot READ. Bounded list (per-tenant job store). */
+async function filterReadableJobs(gate: JobGate, jobs: ScheduledJob[]): Promise<ScheduledJob[]> {
+  const out: ScheduledJob[] = [];
+  for (const job of jobs) if (await gate(job, 'read')) out.push(job);
+  return out;
 }
 
 export function registerSchedulerRoutes(app: Express, deps: Deps): void {
@@ -92,7 +146,10 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       const tenantId = tenantOf(req);
       const rosterId = typeof req.query.rosterId === 'string' ? req.query.rosterId : undefined;
       const jobs = rosterId ? await listJobsByRoster(tenantId, rosterId) : await listJobs(tenantId);
-      res.json({ jobs });
+      // ADR 0608 (`CPC-1`) — the list is the READ door. A tenant-only filter here
+      // published a `private` project's schedule (cron, workflowId, owner) to any
+      // co-tenant; the subject gate drops what the caller cannot read.
+      res.json({ jobs: await filterReadableJobs(jobGateFor(req), jobs) });
     } catch (err) {
       next(err);
     }
@@ -173,8 +230,8 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
             field: 'rosterId',
           });
         }
-        const entry = await getRosterEntry(body.rosterId);
-        if (!entry || entry.tenantId !== tenantId) {
+        const entry = await getRosterEntry(tenantId, body.rosterId);
+        if (!entry) {
           throw new OpenwopError('validation_error', 'Field `rosterId` does not name a roster entry in this tenant.', 400, {
             field: 'rosterId',
           });
@@ -218,11 +275,14 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
       if (!result.ok) {
         // RFC 0052 §B.3 — schedule_horizon_exceeded is a scheduling-specific
         // code not in the normative OpenwopErrorCode union; return it inline
-        // with the canonical { error, message } envelope shape and a 400.
-        res.status(400).json({
+        // with the canonical { error, message } envelope shape. jobid_conflict
+        // (ADR 0379 P2) → 409, message deliberately unspecific (no cross-tenant
+        // existence oracle).
+        const conflict = result.error.code === 'jobid_conflict';
+        res.status(conflict ? 409 : 400).json({
           error: result.error.code,
           message: result.error.message,
-          details: { maxFutureHorizon: 'P30D' },
+          ...(conflict ? {} : { details: { maxFutureHorizon: 'P30D' } }),
         });
         return;
       }
@@ -235,7 +295,9 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
   app.patch('/v1/host/openwop-app/scheduler/jobs/:jobId', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
-      if (!job || !jobAccessible(req, job)) {
+      // ADR 0608 (`CPC-1`) — a patch can re-point `workflowId`; it needs WRITE on
+      // the owning subject, not mere tenant co-residency.
+      if (!job || !(await jobGateFor(req)(job, 'write'))) {
         throw new OpenwopError('not_found', `Scheduled job ${req.params.jobId} not found.`, 404, {
           jobId: req.params.jobId,
         });
@@ -291,7 +353,8 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
   app.delete('/v1/host/openwop-app/scheduler/jobs/:jobId', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
-      if (!job || !jobAccessible(req, job)) {
+      // ADR 0608 (`CPC-1`) — destroying another team's automation needs WRITE.
+      if (!job || !(await jobGateFor(req)(job, 'write'))) {
         throw new OpenwopError(
           'not_found',
           `Scheduled job ${req.params.jobId} not found.`,
@@ -311,7 +374,9 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
   app.post('/v1/host/openwop-app/scheduler/jobs/:jobId/trigger', async (req, res, next) => {
     try {
       const job = await getJob(req.params.jobId);
-      if (!job || !jobAccessible(req, job)) {
+      // ADR 0608 (`CPC-1`) — a trigger STARTS A REAL RUN against the job's tenant;
+      // it needs WRITE on the owning subject.
+      if (!job || !(await jobGateFor(req)(job, 'write'))) {
         throw new OpenwopError(
           'not_found',
           `Scheduled job ${req.params.jobId} not found.`,
@@ -339,7 +404,24 @@ export function registerSchedulerRoutes(app: Express, deps: Deps): void {
           metadata: { schedule },
         });
       }
-      await markJobFired(req.params.jobId, tick, runId ?? undefined);
+      // WF-COS-4 (round 2) — the SAME stale pair the daemon lane now avoids.
+      // `markJobFired` stamps `lastRunAt = now` UNCONDITIONALLY, and `lastRunId`
+      // only when a runId is supplied. That is honest for the no-workflow-bound
+      // shape — `result.runsFired > 0` IS the fire event, and `test/
+      // scheduler-route.test.ts` pins it — but a job that IS bound to a workflow
+      // whose `startWorkflowRun` returns `null` (the same condition the daemon
+      // labels `workflow-unresolved`) reached that line too, leaving
+      // `lastRunAt = now` beside the PREVIOUS fire's `lastRunId`. Two clicks
+      // away: SubjectSchedulesPanel's "Run now" posts here, and the same row
+      // renders `Last run {when}` as a link to `/runs/{lastRunId}` — "last run:
+      // just now, linking to a run that never happened", which is exactly the
+      // defect this commit exists to end. Split the two facts the same way.
+      if (result.runsFired > 0 && job.workflowId && !runId) {
+        await advanceJobSlot(req.params.jobId, tick);
+        await recordJobSkipped(req.params.jobId, 'workflow-unresolved');
+      } else {
+        await markJobFired(req.params.jobId, tick, runId ?? undefined);
+      }
       res.status(200).json({
         jobId: req.params.jobId,
         runsFired: result.runsFired,

@@ -9,6 +9,9 @@
  * timeline.
  */
 
+import { Button } from '../ui/Button.js';
+import { Modal } from '../ui/Modal.js';
+import { Notice } from '../ui/Notice.js';
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -25,6 +28,9 @@ interface Props {
   open: boolean;
   onClose(): void;
 }
+
+/** DTU-2 — how long a burst must settle before the polite status re-announces. */
+const CAPTURE_STATUS_MS = 1500;
 
 export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
   const { t } = useTranslation('devtools');
@@ -57,6 +63,17 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
     });
   }, [entries, filter, search]);
 
+  // DTU-2 — throttle the announced count so a burst of captures produces ONE
+  // announcement, not twenty. `null` until the first tick so an empty panel
+  // announces nothing at all (a live region that renders WITH content announces
+  // nothing anyway — the value must CHANGE, which is what this effect gives it).
+  const [announcedCount, setAnnouncedCount] = useState<number | null>(null);
+  useEffect(() => {
+    if (!open) { setAnnouncedCount(null); return; }
+    const id = setTimeout(() => setAnnouncedCount(entries.length), CAPTURE_STATUS_MS);
+    return () => clearTimeout(id);
+  }, [open, entries.length]);
+
   if (!open) return null;
 
   const counts = {
@@ -67,31 +84,41 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
   };
 
   return (
-    <>
-      <div className="netpanel-backdrop" onClick={onClose} role="presentation" />
-      <aside
-        className="netpanel"
-        role="dialog"
-        aria-modal="true"
-        aria-label={t('inspectorLabel')}
-      >
+    // ui/Modal composition (XC-7): inherits trap/Escape/restore/aria-modal.
+    <Modal
+      onClose={onClose}
+      label={t('inspectorLabel')}
+      scrimClassName="netpanel-backdrop"
+      className="netpanel"
+    >
+      <>
         <header className="netpanel-head">
           <div className="netpanel-head-title">
             <strong>{t('network')}</strong>
             <span className="muted">{t('callCount', { count: counts.total })}</span>
+            {/* DTU-2 — perception of a STREAMING list without a firehose. The filed row
+                asked for `aria-live` on the capture list itself; that would announce every
+                captured request, which on a network inspector is hostile (a single page
+                load is 20+ calls). A screen-reader user needs to know activity is
+                happening, not to hear each entry — so this is a THROTTLED polite summary
+                (at most one announcement per `CAPTURE_STATUS_MS`), and the list stays
+                silent. */}
+            <span className="visually-hidden" role="status">
+              {announcedCount === null ? '' : t('captureStatus', { count: announcedCount })}
+            </span>
           </div>
           <div className="netpanel-head-actions">
-            <button className="secondary" onClick={clearNetworkEntries} title={t('clearTitle')}>
+            <Button variant="secondary" onClick={clearNetworkEntries} title={t('clearTitle')}>
               {t('clear')}
-            </button>
-            <button className="secondary" onClick={onClose} aria-label={t('closePanel')}>
+            </Button>
+            <Button variant="secondary" onClick={onClose} aria-label={t('closePanel')}>
               <XIcon size={14} />
-            </button>
+            </Button>
           </div>
         </header>
 
         <div className="netpanel-toolbar">
-          <select value={filter} onChange={(e) => setFilter(e.target.value as FilterKind)}>
+          <select aria-label={t('filterKindLabel')} value={filter} onChange={(e) => setFilter(e.target.value as FilterKind)}>
             <option value="all">{t('filterAll', { count: counts.total })}</option>
             <option value="rest">{t('filterRest', { count: counts.rest })}</option>
             <option value="sse">{t('filterSse', { count: counts.sse })}</option>
@@ -99,11 +126,26 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
           </select>
           <input
             type="search"
+            aria-label={t('filterByPath')}
             placeholder={t('filterByPath')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
+
+        {/* DTU-1 — column context. The list is a CSS-grid of disclosure buttons, not a
+            table, and labelling it `role="table"` would promise row/column navigation the
+            markup does not implement. Sighted users get a real header strip; screen-reader
+            users get the same context from each row's composed `aria-label` (below), which
+            is what the missing column headers actually cost them. */}
+        {filtered.length > 0 && (
+          <div className="netpanel-cols" aria-hidden="true">
+            <span>{t('colMethod')}</span>
+            <span>{t('colStatus')}</span>
+            <span>{t('colPath')}</span>
+            <span>{t('colDuration')}</span>
+          </div>
+        )}
 
         <div className="netpanel-list">
           {filtered.length === 0 ? (
@@ -127,8 +169,8 @@ export function NetworkPanel({ open, onClose }: Props): JSX.Element | null {
         <footer className="netpanel-foot muted">
           {t('bufferNote')}
         </footer>
-      </aside>
-    </>
+      </>
+    </Modal>
   );
 }
 
@@ -156,6 +198,17 @@ function NetworkRow({
         className="netpanel-row-head"
         onClick={onToggle}
         aria-expanded={expanded}
+        // DTU-1 — without this the accessible name is the bare concatenation
+        // "GET 200 /api/foo 34ms" with no field context, and a pending row reads as a
+        // lone ellipsis. Naming the fields is what the absent column headers owed.
+        aria-label={t('rowLabel', {
+          method: entry.method,
+          status: entry.error ? t('errShort') : entry.status ?? t('statusPending'),
+          path: entry.path,
+          duration: entry.durationMs !== undefined
+            ? formatNumber(entry.durationMs, { style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' })
+            : entry.unfinishedAtReload ? t('durationUnknownReload') : t('durationPending'),
+        })}
       >
         <span className="netpanel-row-method">{entry.method}</span>
         <span className={`netpanel-row-status ${statusCls}`}>
@@ -166,13 +219,13 @@ function NetworkRow({
           {entry.kind === 'sse' && <span className="netpanel-row-sse">SSE</span>}
           {entry.durationMs !== undefined
             ? formatNumber(entry.durationMs, { style: 'unit', unit: 'millisecond', unitDisplay: 'narrow' })
-            : '…'}
+            : entry.unfinishedAtReload ? '—' : '…'}
         </span>
       </button>
       {expanded && (
         <div className="netpanel-row-body">
           {entry.error && (
-            <div className="alert error u-mb-1-5">{entry.error}</div>
+            <div className="u-mb-1-5"><Notice variant="error">{entry.error}</Notice></div>
           )}
           <Field label={t('urlLabel')} value={entry.url} mono />
           <Field
@@ -190,7 +243,11 @@ function NetworkRow({
           )}
           {entry.sseEvents && entry.sseEvents.length > 0 && (
             <div className="netpanel-field">
-              <div className="netpanel-field-label">{t('sseEventsLabel', { count: entry.sseEvents.length })}</div>
+              <div className="netpanel-field-label">
+                {entry.sseEventsDropped
+                  ? t('sseEventsSavedLabel', { count: entry.sseEvents.length, total: entry.sseEvents.length + entry.sseEventsDropped })
+                  : t(entry.sseEventsTruncated ? 'sseEventsTruncatedLabel' : 'sseEventsLabel', { count: entry.sseEvents.length })}
+              </div>
               <ol className="netpanel-sse-list">
                 {entry.sseEvents.map((ev, i) => (
                   <li key={i}>

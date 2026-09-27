@@ -21,6 +21,8 @@ import { join } from 'node:path';
 import { openStorage } from '../src/storage/index.js';
 import { setEventLogBackend } from '../src/executor/eventLog.js';
 import { initInMemorySurfaces } from '../src/host/inMemorySurfaces.js';
+import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
+import { activateAgentCapability } from '../src/host/agentProfileService.js';
 import { getAgentRegistry, type ResolvedAgentManifest } from '../src/executor/agentRegistry.js';
 import {
   handleConversationResolve,
@@ -39,6 +41,8 @@ import type { NodeContext } from '../src/executor/types.js';
 const storage: Storage = await openStorage('memory://');
 setEventLogBackend(storage);
 initInMemorySurfaces({ dataDir: mkdtempSync(join(tmpdir(), 'openwop-deepinv-')) });
+// ADR 0373 — the agentProfile capability store rides host_ext_kv.
+initHostExtPersistence(storage);
 
 const TENANT = 't-deepinv';
 const policyStub = (() => undefined) as unknown as ProviderPolicyResolver;
@@ -89,14 +93,42 @@ describe('conversationDeepInvestigationEligible (the opt-in gate)', () => {
   const agent = (p: Partial<ResolvedAgentManifest>): ResolvedAgentManifest =>
     ({ agentId: 'a', persona: 'P', toolAllowlist: ['openwop:ai.research.web'], ...p } as unknown as ResolvedAgentManifest);
 
+  // The original ADR 0089 truth table — now pinned with `deepActivated: false`,
+  // i.e. these prove the VESTIGIAL manifest path still works (ADR 0373 §2).
   it('true only for a tool-bearing agent that DECLARED investigationDepth:deep', () => {
-    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({ investigationDepth: 'deep' }))).toBe(true);
+    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({ investigationDepth: 'deep' }), false)).toBe(true);
   });
   it('false when the agent did NOT opt in (default off)', () => {
-    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({}))).toBe(false);
+    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({}), false)).toBe(false);
   });
-  it('false when opted in but the agent is not tool-bearing', () => {
-    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({ investigationDepth: 'deep', toolAllowlist: [] }))).toBe(false);
+  it('TRUE for an opted-in agent with an empty manifest — the ADR 0315 baseline makes every agent tool-bearing', () => {
+    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({ investigationDepth: 'deep', toolAllowlist: [] }), false)).toBe(true);
+  });
+  it('still false on a provider with no tool-calling path, baseline or not', () => {
+    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'byok:k', provider: 'mock' }), agent({ investigationDepth: 'deep', toolAllowlist: [] }), false)).toBe(false);
+  });
+
+  // ── ADR 0373 — the host-ext capability is the PRIMARY activation source. ──
+  it('TRUE when the profile capability is activated, with NO manifest field', () => {
+    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({}), true)).toBe(true);
+  });
+  it('FALSE when neither the capability nor the manifest field is present', () => {
+    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'managed:openwop-free' }), agent({}), false)).toBe(false);
+  });
+  it('the capability does NOT bypass tool-bearing eligibility (non-tool provider stays false)', () => {
+    expect(conversationDeepInvestigationEligible(run({ credentialRef: 'byok:k', provider: 'mock' }), agent({}), true)).toBe(false);
+  });
+  it('honors the per-exchange model override when judging eligibility (the pre-0373 bug)', () => {
+    // run.inputs says a NON-tool-calling provider; the exchange override moves
+    // this turn onto a tool-calling one. Eligibility must judge the EFFECTIVE
+    // provider — the same one the dispatch will hand the nested run.
+    expect(
+      conversationDeepInvestigationEligible(
+        run({ credentialRef: 'byok:k', provider: 'mock', model: 'mock-1' }), agent({}), true,
+        { provider: 'anthropic', model: 'claude-sonnet-5' },
+      ),
+      'an override onto a tool-calling provider must make a capable agent eligible',
+    ).toBe(true);
   });
 });
 
@@ -135,8 +167,11 @@ describe('handleConversationResolve — Option B dispatch routing', () => {
 
   it('(b) a non-opted-in tool agent still uses the INLINE path unchanged', async () => {
     const runId = 'r-inline-1';
-    // provider:mock ⇒ the inline single-completion path runs (no tool loop, no key).
-    const interrupt = await seedConversation(runId, { provider: 'mock', model: 'mock-1' });
+    // byok + provider:mock (no native tool-calling) ⇒ the inline single-completion
+    // path runs. (ADR 0315: the managed DEFAULT now always takes the tool loop —
+    // the baseline makes every agent tool-bearing — so pinning the inline
+    // mechanics requires a non-tool-calling provider ref.)
+    const interrupt = await seedConversation(runId, { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' });
     resetMockPrograms();
     programMock('', [{ content: 'Inline reply.' }]); // the conversation mock path keys by nodeId ''
     const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
@@ -233,5 +268,194 @@ describe('agentRunnerNode — enters the GATED dispatch owner (no second path)',
     expect(agentMentionConfigurable('byok:user:anthropic')).toEqual({ credentialRefs: ['byok:user:anthropic'] });
     expect(agentMentionConfigurable('managed:openwop-free')).toEqual({});
     expect(agentMentionConfigurable(undefined)).toEqual({});
+  });
+});
+
+/**
+ * XCH-GRP-3 — the per-room deep-run budget. A deep @mention is human-ELECTED
+ * (so it stays the endorsed exception to the #1831 group opt-out), but it
+ * dispatches a whole tool-running run, so a mention-storm in ONE room is
+ * budgeted. Over budget DEGRADES to the inline turn + an honest notice — it
+ * never fails the turn (the #1829 precedent).
+ */
+describe('deep-investigation budget degrade (XCH-GRP-3)', () => {
+  beforeAll(() => { registerAgent('test.deep-budgeted', { investigationDepth: 'deep' }); });
+
+  it('dispatches while in budget, then DEGRADES to inline with an honest notice', async () => {
+    process.env.OPENWOP_DEEP_RUN_LIMIT_PER_ROOM = '1';
+    try {
+      const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
+        .mockResolvedValue('nested-run-budget-1');
+
+      // ONE room, two @mentions — the conversationId is the budget's bucket.
+      const interrupt = await seedConversation('r-budget-1', { credentialRef: 'managed:openwop-free' });
+
+      // 1st @mention in this room: in budget ⇒ the nested run dispatches.
+      const first = await handleConversationResolve(
+        storage, interrupt,
+        { operation: 'exchange', turn: { to: 'test.deep-budgeted', content: 'Investigate one.' } },
+        async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+      );
+      expect(startAgentMentionRun).toHaveBeenCalledTimes(1);
+      expect(first.notice).toBeUndefined();
+
+      // 2nd @mention in the SAME room: over budget. The turn still SUCCEEDS —
+      // no throw — and no second run is dispatched.
+      resetMockPrograms();
+      programMock('', [{ content: 'Direct answer instead.' }]);
+      const second = await handleConversationResolve(
+        storage, interrupt,
+        { operation: 'exchange', turn: { to: 'test.deep-budgeted', content: 'Investigate two.' } },
+        async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+      );
+      expect(startAgentMentionRun, 'over budget ⇒ no second nested run').toHaveBeenCalledTimes(1);
+      expect(second.notice, 'the degrade must be surfaced, never silent').toEqual({
+        code: 'deep_run_budget_exceeded', limit: 1,
+      });
+    } finally {
+      delete process.env.OPENWOP_DEEP_RUN_LIMIT_PER_ROOM;
+    }
+  });
+
+  it('a DIFFERENT room is unaffected by a room that spent its budget', async () => {
+    process.env.OPENWOP_DEEP_RUN_LIMIT_PER_ROOM = '1';
+    try {
+      const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
+        .mockResolvedValue('nested-run-budget-2');
+      for (const rid of ['r-budget-room-a', 'r-budget-room-b']) {
+        await handleConversationResolve(
+          storage, await seedConversation(rid, { credentialRef: 'managed:openwop-free' }),
+          { operation: 'exchange', turn: { to: 'test.deep-budgeted', content: 'Investigate.' } },
+          async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+        );
+      }
+      expect(startAgentMentionRun, 'each room gets its own budget').toHaveBeenCalledTimes(2);
+    } finally {
+      delete process.env.OPENWOP_DEEP_RUN_LIMIT_PER_ROOM;
+    }
+  });
+
+  it('limit <= 0 ⇒ unlimited: the budget never degrades the deep path', async () => {
+    process.env.OPENWOP_DEEP_RUN_LIMIT_PER_ROOM = '0';
+    try {
+      const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
+        .mockResolvedValue('nested-run-unlimited');
+      const interrupt = await seedConversation('r-budget-unlimited', { credentialRef: 'managed:openwop-free' });
+      for (const n of [1, 2, 3]) {
+        const res = await handleConversationResolve(
+          storage, interrupt,
+          { operation: 'exchange', turn: { to: 'test.deep-budgeted', content: `Investigate ${n}.` } },
+          async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+        );
+        expect(res.notice).toBeUndefined();
+      }
+      expect(startAgentMentionRun).toHaveBeenCalledTimes(3);
+    } finally {
+      delete process.env.OPENWOP_DEEP_RUN_LIMIT_PER_ROOM;
+    }
+  });
+});
+
+/**
+ * ADR 0373 — ACTIVATION. The capability is what makes the deep path reachable at
+ * all: before this, `investigationDepth` was dropped by the pack loader and
+ * forbidden by the SPEC agent-manifest schema, so no shipped agent could opt in.
+ * Activation now rides the existing `AgentProfile.capabilities` seam
+ * (ARCHITECTURE.md "Agent config + capability activation").
+ */
+describe('ADR 0373 — deep investigation activates via the agentProfile capability', () => {
+  beforeAll(() => {
+    // NO manifest `investigationDepth` — activation must come from the profile
+    // alone, which is the whole point of the ADR.
+    registerAgent('test.capability-agent', { toolAllowlist: [] });
+  });
+
+  it('a plain agent takes the INLINE path until the capability is activated, then dispatches the nested run', async () => {
+    const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
+      .mockResolvedValue('nested-capability-run');
+
+    // BEFORE activation: no profile capability ⇒ inline (no nested dispatch).
+    resetMockPrograms();
+    programMock('', [{ content: 'Inline reply.' }]);
+    await handleConversationResolve(
+      storage, await seedConversation('r-cap-before', { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' }),
+      { operation: 'exchange', turn: { to: 'test.capability-agent', content: 'Look into this.' } },
+      async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+    );
+    expect(startAgentMentionRun, 'not activated ⇒ no nested run').not.toHaveBeenCalled();
+
+    // ACTIVATE via the real host-ext seam — keyed by the agent's own id (a pack
+    // agent has no roster entry, and AgentProfile.profileId accepts an agentId).
+    await activateAgentCapability(TENANT, 'test.capability-agent', 'deep-investigation', {
+      roleKey: 'researcher', autonomy: { level: 'review', specLevel: 'draft-only' },
+    });
+
+    // AFTER activation: the SAME @mention now dispatches the nested run.
+    const after = await handleConversationResolve(
+      storage, await seedConversation('r-cap-after', { credentialRef: 'managed:openwop-free' }),
+      { operation: 'exchange', turn: { to: 'test.capability-agent', content: 'Look into this.' } },
+      async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+    );
+    expect(startAgentMentionRun, 'activated ⇒ the nested run dispatches').toHaveBeenCalledTimes(1);
+    expect(after.turns.at(-1)?.content).toMatchObject({ kind: 'workflow_run', runId: 'nested-capability-run' });
+  });
+
+  it('the capability is TENANT-scoped — another tenant\'s activation does not leak', async () => {
+    await activateAgentCapability('t-other', 'test.tenant-scoped-agent', 'deep-investigation', {
+      roleKey: 'researcher', autonomy: { level: 'review', specLevel: 'draft-only' },
+    });
+    registerAgent('test.tenant-scoped-agent', { toolAllowlist: [] });
+    const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
+      .mockResolvedValue('should-not-happen');
+    resetMockPrograms();
+    programMock('', [{ content: 'Inline reply.' }]);
+    await handleConversationResolve(
+      storage, await seedConversation('r-cap-tenant', { provider: 'mock', model: 'mock-1', credentialRef: 'byok:mock' }),
+      { operation: 'exchange', turn: { to: 'test.tenant-scoped-agent', content: 'Look into this.' } },
+      async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+    );
+    expect(startAgentMentionRun, "another tenant's grant must not activate ours").not.toHaveBeenCalled();
+  });
+
+  it('the MANAGED tier hands the nested run NO provider/model — the resolver\'s "unknown" sentinel must not leak', async () => {
+    // effectiveModelTarget defaults model to the string 'unknown' when run.inputs
+    // has none (applyRoute.ts:77). It is truthy, so a naive spread would pass
+    // `model: 'unknown'` to the nested run and break preferManaged on the managed
+    // tier — the exact regression the ADR 0373 code-review caught.
+    registerAgent('test.managed-agent', { toolAllowlist: [] });
+    await activateAgentCapability(TENANT, 'test.managed-agent', 'deep-investigation', {
+      roleKey: 'researcher', autonomy: { level: 'review', specLevel: 'draft-only' },
+    });
+    const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
+      .mockResolvedValue('nested-managed-run');
+    await handleConversationResolve(
+      storage, await seedConversation('r-cap-managed', { credentialRef: 'managed:openwop-free' }),
+      { operation: 'exchange', turn: { to: 'test.managed-agent', content: 'Investigate.' } },
+      async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+    );
+    expect(startAgentMentionRun).toHaveBeenCalledTimes(1);
+    const passed = startAgentMentionRun.mock.calls[0]![0];
+    expect(passed.model, "the 'unknown' sentinel must never reach the nested run").toBeUndefined();
+    expect(passed.provider, 'managed tier has no provider ⇒ preferManaged must stay true').toBeUndefined();
+  });
+
+  it('the dispatch hands the nested run the OVERRIDE-resolved model, not run.inputs raw (the pre-0373 bug)', async () => {
+    registerAgent('test.override-agent', { toolAllowlist: [] });
+    await activateAgentCapability(TENANT, 'test.override-agent', 'deep-investigation', {
+      roleKey: 'researcher', autonomy: { level: 'review', specLevel: 'draft-only' },
+    });
+    const startAgentMentionRun = vi.fn<NonNullable<ConversationHostDeps['startAgentMentionRun']>>()
+      .mockResolvedValue('nested-override-run');
+
+    // run.inputs pins one BYOK model; the per-exchange override picks another.
+    // `agentRunnerNode.resolveParams` takes provider/model VERBATIM, so what the
+    // exchange hands over IS the nested run's model — it must be the override's.
+    await handleConversationResolve(
+      storage, await seedConversation('r-cap-override', { provider: 'anthropic', model: 'claude-old', credentialRef: 'byok:anthropic' }),
+      { operation: 'exchange', turn: { to: 'test.override-agent', content: 'Investigate.' }, model: 'claude-sonnet-5', provider: 'anthropic' },
+      async () => {}, { policyResolver: policyStub, startAgentMentionRun },
+    );
+    expect(startAgentMentionRun).toHaveBeenCalledTimes(1);
+    expect(startAgentMentionRun.mock.calls[0]![0]).toMatchObject({ provider: 'anthropic', model: 'claude-sonnet-5' });
   });
 });

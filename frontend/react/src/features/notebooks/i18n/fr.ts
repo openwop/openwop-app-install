@@ -2,31 +2,14 @@
  * `notebooks` namespace (fr) — Research Notebooks (ADR 0084).
  */
 export const messages = {
-  // Page chrome
-  eyebrow: 'Recherche',
-  title: 'Carnets',
-  lede: 'Carnets de recherche ancrés — rassemblez des sources, prenez des notes et posez des questions fondées sur celles-ci.',
-  workspaceLede: 'Sources, notes et une question ancrée dans ce carnet.',
-
-  // Gating
-  notEnabledTitle: 'Les Carnets ne sont pas activés',
-  notEnabledBody: 'Demandez à un administrateur d’activer la fonctionnalité Carnets de recherche dans Admin → Feature toggles.',
-
-  // Chooser
-  nameLabel: 'Nom du carnet',
-  namePlaceholder: 'Étude de marché',
-  orgLabel: 'Organisation',
-  createNotebook: 'Créer un carnet',
-  created: 'Carnet créé.',
-  createFailed: 'Échec de la création du carnet.',
+  // Textes d’erreur — partagés par les panneaux ci-dessous.
   loadFailed: 'Échec du chargement.',
-  deleteFailed: 'Échec de la suppression.',
-  open: 'Ouvrir',
-  deleteNotebookLabel: 'Supprimer {{name}}',
-  deleteNotebookConfirm: 'Supprimer « {{name}} » ? Cette action est irréversible.',
-  emptyTitle: 'Aucun carnet pour l’instant',
-  emptyBody: 'Créez votre premier carnet de recherche avec le formulaire ci-dessus — puis ajoutez des sources et posez des questions fondées sur celles-ci.',
-  backToList: 'Retour aux carnets',
+  // NBU-2 / NBU-5 (ADR 0601) — chaque panneau signale son propre échec de lecture.
+  retry: 'Réessayer',
+  sourcesFailedTitle: 'Impossible de charger vos sources',
+  notesFailedTitle: 'Impossible de charger vos notes',
+  transformationsFailedTitle: 'Impossible de charger vos transformations',
+  askFailedTitle: 'Impossible de lancer cette recherche',
 
   // Sources panel
   sourcesTitle: 'Sources',
@@ -44,7 +27,6 @@ export const messages = {
   uploading: 'Téléversement…',
   addFileHint: 'Téléversez un document — son texte est extrait et ajouté comme source.',
   addAudioHint: 'Téléversez un enregistrement : il est transcrit et ajouté comme source.',
-  addAudioBtn: 'Transcrire et ajouter',
   audioEnqueued: 'Transcription de votre enregistrement : la source apparaîtra bientôt.',
   audioFailed: 'Échec du démarrage de la transcription.',
   addYoutubeLabel: 'URL YouTube',
@@ -80,12 +62,29 @@ export const messages = {
   transforming: 'Transformation en cours…',
   transformLabel: 'Appliquer une transformation à {{title}}',
   transformHint: 'Appliquez un modèle de transformation — le résultat est enregistré comme un Document.',
+  transformUnavailable: 'Transformation indisponible',
+  transformUnavailableHint: 'Le catalogue de transformations n’a pas pu être chargé — ce carnet peut tout de même avoir des modèles.',
   transformStarted: 'Application de la transformation… le résultat apparaîtra dans Transformations.',
   transformFailed: 'Échec du démarrage de la transformation.',
   transformationsTitle: 'Transformations',
   transformationsNote: 'Les résultats des transformations sont enregistrés comme des Documents appartenant à ce carnet.',
   noTransformationsTitle: 'Aucune transformation pour l’instant',
   noTransformationsBody: 'Utilisez le menu Transformer sur une source pour générer un Résumé, des Concepts clés, et plus encore.',
+
+  // NBU-6 (ADR 0602) — un sondage qui abandonne LE DIT. Le registre est délibéré :
+  // « nous avons cessé de vérifier », jamais « il n'y a rien ».
+  stalledIngestTitle: 'Cette source se fait toujours attendre',
+  stalledIngestBody: 'Nous avons cessé de vérifier après une trentaine de secondes. La source est peut-être encore en cours de traitement — cela ne signifie pas qu’elle a échoué.',
+  stalledSummarizeTitle: 'Ce résumé se fait toujours attendre',
+  stalledSummarizeBody: 'Nous avons cessé de vérifier après une vingtaine de secondes. Le résumé est peut-être encore en cours de génération — cela ne signifie pas qu’il a échoué.',
+  stalledTransformTitle: 'Cette transformation se fait toujours attendre',
+  stalledTransformBody: 'Nous avons cessé de vérifier après une vingtaine de secondes. La transformation est peut-être encore en cours — cela ne signifie pas qu’elle a échoué.',
+  checkAgain: 'Vérifier à nouveau',
+  stalledRecheckedNothing_one: 'Vérifié {{count}} fois de plus — toujours rien de nouveau.',
+  stalledRecheckedNothing_other: 'Vérifié {{count}} fois de plus — toujours rien de nouveau.',
+  stalledRecheckFailed: "Nous n'avons pas pu vérifier à l'instant — la connexion a échoué. Ce n'est toujours pas un rapport d'échec.",
+  stalledRecheckLanded: 'C\'est arrivé — la liste est à jour.',
+  stalledViewRun: "Voir l'exécution",
   openInDocuments: 'Ouvrir dans Documents',
 
   // Notes panel

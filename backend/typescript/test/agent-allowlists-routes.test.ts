@@ -19,7 +19,7 @@ describe('agent-allowlists admin routes (sqlite memory app)', () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -49,10 +49,22 @@ describe('agent-allowlists admin routes (sqlite memory app)', () => {
     const target = list.body.agents[0]!;
     const enc = encodeURIComponent(target.agentId);
 
-    const before = await call<{ manifestAllowlist: string[]; override: unknown; effective: string[]; toolCatalog: string[] }>('GET', `${ADMIN}/agents/${enc}`);
+    const before = await call<{ manifestAllowlist: string[]; override: unknown; effective: string[]; baseline: string[]; toolCatalog: string[] }>('GET', `${ADMIN}/agents/${enc}`);
     expect(before.status).toBe(200);
     expect(before.body.override).toBeNull();
-    expect(before.body.effective).toEqual(target.manifestAllowlist);
+    // ADR 0315 — with no override, `effective` is manifest ∪ the default-on
+    // baseline (the same resolver the dispatch path uses), so the panel
+    // pre-checks the six default-on tools and a save can't strip them.
+    expect(before.body.baseline).toEqual([
+      'openwop:runs.diagnose', // ADR 0476 — read-only grounded failure context
+      'openwop:kanban.add-todo', 'openwop:documents.draft', 'openwop:email.draft',
+      'openwop:notifications.notify-me', 'openwop:tasks.schedule-followup',
+      'openwop:tasks.schedule-recurring', // chat-first-port A3
+      'openwop:ai.research.web',
+      'openwop:walkthroughs.register-draft', // ADR 0374 P3
+    ]);
+    expect(new Set(before.body.effective)).toEqual(new Set([...target.manifestAllowlist, ...before.body.baseline]));
+    for (const id of before.body.baseline) expect(before.body.effective).toContain(id);
     expect(before.body.toolCatalog.length).toBeGreaterThan(0);
     expect(before.body.toolCatalog.every((t) => t.startsWith('openwop:'))).toBe(true);
 
@@ -71,9 +83,10 @@ describe('agent-allowlists admin routes (sqlite memory app)', () => {
 
     // Clear → revert to manifest; clearing again → 404.
     expect((await call('DELETE', `${ADMIN}/agents/${enc}`)).status).toBe(204);
-    const reverted = await call<{ override: unknown; effective: string[] }>('GET', `${ADMIN}/agents/${enc}`);
+    const reverted = await call<{ override: unknown; effective: string[]; baseline: string[] }>('GET', `${ADMIN}/agents/${enc}`);
     expect(reverted.body.override).toBeNull();
-    expect(reverted.body.effective).toEqual(target.manifestAllowlist);
+    // Back to manifest ∪ baseline (clearing the override restores the default-on tools).
+    expect(new Set(reverted.body.effective)).toEqual(new Set([...target.manifestAllowlist, ...reverted.body.baseline]));
     expect((await call('DELETE', `${ADMIN}/agents/${enc}`)).status).toBe(404);
   });
 

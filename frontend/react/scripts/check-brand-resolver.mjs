@@ -18,7 +18,7 @@ const transpiled = ts.transpileModule(source, {
 });
 await writeFile(outfile, transpiled.outputText);
 
-const { resolveBrandFromEnv } = await import(pathToFileURL(outfile).href);
+const { resolveBrandFromEnv, BRAND_DEFAULTS } = await import(pathToFileURL(outfile).href);
 
 const legacy = resolveBrandFromEnv({
   VITE_BRAND_LOGO_SRC: '/legacy-logo.svg',
@@ -49,8 +49,11 @@ const blank = resolveBrandFromEnv({
   VITE_BRAND_APP_GATE_MODE: 'weird',
 });
 assert.equal(blank.markSrc, '/legacy-logo.svg');
-assert.equal(blank.defaultTheme, 'system');
-assert.equal(blank.appGate.mode, 'none');
+// Invalid env values fall back to the SHIPPED default (PracticeMatch ships
+// `light` + `sign-in`; upstream ships `system` + `none`) — assert against the
+// resolver's own defaults so a fork's identity does not break the guard.
+assert.equal(blank.defaultTheme, BRAND_DEFAULTS.defaultTheme);
+assert.equal(blank.appGate.mode, BRAND_DEFAULTS.appGate.mode);
 
 await rm(outdir, { recursive: true, force: true });
 

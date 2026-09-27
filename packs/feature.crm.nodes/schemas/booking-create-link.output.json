@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/booking-create-link.output.json",
+  "title": "CrmCreateBookingLinkOutput",
+  "description": "The created (or original, on an explicit existing id) booking link. The public slot-CLAIM is a visitor action, not this node. A refusal at the surface (tenant guard, link validation, cap, tombstone) is a TYPED node failure, never a success with an empty entity.",
+  "type": "object",
+  "required": [
+    "success",
+    "bookingLink"
+  ],
+  "properties": {
+    "success": {
+      "type": "boolean",
+      "const": true
+    },
+    "bookingLink": {
+      "type": "object",
+      "required": [
+        "bookingLinkId"
+      ],
+      "properties": {
+        "bookingLinkId": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true,
+      "description": "The bookingLink row as the surface projects it (host bookkeeping columns `tenantId`/`orgId`/`createdBy`/`updatedBy` stripped)."
+    }
+  },
+  "additionalProperties": false
+}

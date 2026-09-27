@@ -1,5 +1,5 @@
 /**
- * SEC-1 (CODEBASE-ASSESSMENT.md): the durable SAML replay cache backing
+ * SEC-1 (docs/steward/CODEBASE-ASSESSMENT.md): the durable SAML replay cache backing
  * node-saml's validateInResponseTo. A minted AuthnRequest id must be
  * single-use (consumed on validate) and expire, so a captured SAMLResponse
  * can't be replayed — and it must live in shared Storage, not process memory,

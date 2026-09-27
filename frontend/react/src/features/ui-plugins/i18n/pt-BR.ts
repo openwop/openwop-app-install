@@ -1,0 +1,50 @@
+/**
+ * `ui-plugins` — português (Brasil) (ADR 0300, RFC 0117/0119).
+ */
+export const messages = {
+  eyebrow: 'Desenvolvedor',
+  title: 'Plugins de UI',
+  lede: 'Carregue pacotes de plugins de front-end assinados e isolados (RFC 0117/0119).',
+
+  notEnabledTitle: 'Plugins de UI não está habilitado',
+  notEnabledBody: 'Peça a um administrador para habilitar Plugins de UI para este tenant.',
+
+  isolationLabel: 'Isolamento',
+  boundaryExplainer: 'Um plugin baixado roda em um iframe isolado de origem cruzada e fala com o host apenas por ui-plugin/1. Quatro garantias:',
+  legIsolation: 'Isolado — origem opaca (sem allow-same-origin).',
+  legEgress: 'Egresso negado — default-src \'none\', sem requisições de rede.',
+  legAllowlist: 'Limitado por lista — método não declarado → method_not_allowed.',
+  legNoByok: 'Sem BYOK — não existe método com credenciais.',
+
+  selfTestTitle: 'Autoteste do limite',
+  selfTestBlurb: 'As quatro garantias acima são afirmações. Isto verifica as três que são mecanicamente verificáveis, usando o mesmo sandbox e CSP com que um plugin real é montado.',
+  selfTestRun: 'Executar o autoteste',
+  selfTestRerun: 'Executar de novo',
+  selfTestFrameTitle: 'Sonda de isolamento (oculta)',
+  selfTestNoByokNote: 'O no-BYOK é AFIRMADO, não sondado: é a ausência de um método portador de credenciais numa lista fechada, o que uma sonda não consegue demonstrar. É mostrado sem marca de aprovação em vez de receber uma que não conquistou.',
+  outcome_pass: 'PASSOU',
+  outcome_fail: 'FALHOU',
+  outcome_running: 'verificando…',
+  outcome_asserted: 'afirmado',
+  outcome_inconclusive: 'sem resposta',
+  legForwarded: 'encaminhado ao host — NÃO recusado',
+  legNoResponse: 'sem resposta',
+  installedLabel: 'Plugins instalados',
+  noneTitle: 'Nenhum plugin instalado',
+  noneBody: 'Este host não serve pacotes de plugin de front-end.',
+
+  liveLabel: 'Plugin ao vivo',
+  liveExplainer: 'O visualizador de referência lê um artefato de demonstração por ui-plugin/1 e testemunha as quatro garantias.',
+  pluginLoading: 'Carregando plugin…',
+  pluginLoadFailed: 'Falha ao carregar o plugin',
+  listFailedLead: 'Não foi possível carregar a lista de plugins:',
+  listFailedTitle: 'Não foi possível carregar a lista de plugins',
+  isolationUnknown: 'Desconhecido — não informado',
+  witnessUnavailableTitle: 'A testemunha ao vivo não está aparecendo',
+  witnessListFailedBody: 'A lista de plugins não carregou, então não há nada para montar aqui. Isto NÃO é evidência de que o isolamento falhou — nem de que se manteve.',
+  witnessNoViewerBody: 'Este host não serve nenhum plugin visualizador de artefatos, então não há nada para montar. As quatro garantias acima ficam sem testemunha nesta página.',
+  witnessArtifactFailedBody: 'Não foi possível preparar o artefato de demonstração que o visualizador de referência lê, então o visualizador não foi montado:',
+  tierTrusted: 'Confiável (assinado)',
+  tierCommunity: 'Comunidade (sandbox)',
+  trustedLiveExplainer: 'Este plugin é assinado por uma chave fixada pelo operador e é executado no quadro principal com integração completa. A assinatura e a revogação são verificadas novamente a cada carregamento.',
+} as const;

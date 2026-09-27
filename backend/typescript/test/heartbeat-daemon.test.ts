@@ -23,7 +23,9 @@ import {
   type RosterEntry,
 } from '../src/host/rosterService.js';
 import { createBoard, createCard, __resetKanbanStore } from '../src/host/kanbanService.js';
-import { processDueHeartbeats } from '../src/host/heartbeatService.js';
+import { processDueHeartbeats, registerAgentTurnFallback } from '../src/host/heartbeatService.js';
+import { getApproval } from '../src/host/approvalService.js';
+import { claimApproval } from '../src/host/approvalDecision.js';
 
 // Fully typed against the narrowed StartRunDeps['hostSuite'] — no cast.
 const hostSuite: StartRunDeps['hostSuite'] = {
@@ -77,8 +79,23 @@ async function heartbeatRuns(rosterId: string) {
 }
 
 describe('heartbeatService — autonomous daemon', () => {
-  it('never auto-checks a member with no heartbeatIntervalMs (manual only)', async () => {
-    const entry = await makeAgentWithTask(); // no interval
+  it('ADR 0313 D1: an UNCONFIGURED member is auto-checked on the host default cadence', async () => {
+    const entry = await makeAgentWithTask(); // no interval -> host default applies
+    expect(await processDueHeartbeats(deps, listRosterTenants, NOW)).toBe(1);
+    expect(await heartbeatRuns(entry.rosterId)).toHaveLength(1);
+  });
+
+  it('ADR 0313 D1: OPENWOP_HEARTBEAT_DEFAULT_MS=0 restores the opt-in world (manual only)', async () => {
+    process.env.OPENWOP_HEARTBEAT_DEFAULT_MS = '0';
+    try {
+      const entry = await makeAgentWithTask(); // no interval
+      expect(await processDueHeartbeats(deps, listRosterTenants, NOW)).toBe(0);
+      expect(await heartbeatRuns(entry.rosterId)).toHaveLength(0);
+    } finally { delete process.env.OPENWOP_HEARTBEAT_DEFAULT_MS; }
+  });
+
+  it('ADR 0313 D1: explicit -1 is deliberately OFF even under the host default', async () => {
+    const entry = await makeAgentWithTask({ heartbeatIntervalMs: -1 });
     expect(await processDueHeartbeats(deps, listRosterTenants, NOW)).toBe(0);
     expect(await heartbeatRuns(entry.rosterId)).toHaveLength(0);
   });
@@ -104,7 +121,7 @@ describe('heartbeatService — autonomous daemon', () => {
     expect(await heartbeatRuns(entry.rosterId)).toHaveLength(0);
 
     // Re-enabling makes it eligible.
-    await updateRosterEntry(entry.rosterId, { enabled: true });
+    await updateRosterEntry(entry.tenantId, entry.rosterId, { enabled: true });
     expect(await processDueHeartbeats(deps, listRosterTenants, NOW)).toBe(1);
   });
 
@@ -116,5 +133,60 @@ describe('heartbeatService — autonomous daemon', () => {
     ]);
     expect(a + b).toBe(1);
     expect(await heartbeatRuns(entry.rosterId)).toHaveLength(1);
+  });
+});
+
+
+describe('ADR 0313 D2 — the bare-card fallback (always through the propose gate)', () => {
+  afterEach(() => registerAgentTurnFallback(null));
+
+  async function makeAgentWithBareCard(sourceConversationId?: string) {
+    const entry = await createRosterEntry({ tenantId: TENANT, persona: 'Bare Bob', agentRef: { agentId: 'host:bare-bob' }, workflows: [] });
+    const board = await createBoard({ tenantId: TENANT, name: 'Bob board', rosterId: entry.rosterId }); // NO trigger
+    const todo = board.columns.find((c) => c.id === 'todo')!;
+    await createCard({ boardId: board.id, columnId: todo.id, title: 'Summarize the incident log', description: 'Focus on the last 24h.', ...(sourceConversationId ? { sourceConversationId } : {}) });
+    return entry;
+  }
+
+  it('a bare card PROPOSES the agent-turn even for auto autonomy, freezing the task onto the approval', async () => {
+    registerAgentTurnFallback({ workflowId: 'openwop-app.scheduled-chat.turn', credentialRef: 'managed:openwop-free' });
+    const entry = await makeAgentWithBareCard('conv-bare-origin');
+    const res = await processDueHeartbeats(deps, listRosterTenants, NOW);
+    expect(res).toBe(1); // a proposal IS a pick — but it must NOT have started a run:
+    expect(await heartbeatRuns(entry.rosterId)).toHaveLength(0);
+    const approvals = (await import('../src/host/approvalService.js')).listApprovals;
+    const pending = (await approvals(TENANT, 'pending')).filter((a) => a.rosterId === entry.rosterId);
+    expect(pending).toHaveLength(1);
+    const a = pending[0]!;
+    expect(a.workflowId).toBe('openwop-app.scheduled-chat.turn');
+    expect(a.conversationId).toBe('conv-bare-origin'); // ADR 0311 chain intact
+    expect(a.configurable).toMatchObject({ agentId: 'host:bare-bob', credentialRef: 'managed:openwop-free', conversationId: 'conv-bare-origin' });
+    expect(String(a.configurable?.['task'])).toContain('Summarize the incident log');
+    expect(String(a.configurable?.['task'])).toContain('Focus on the last 24h.');
+  });
+
+  it('approving the fallback dispatches WITH the frozen configurable (agent-runner gets its variables)', async () => {
+    registerAgentTurnFallback({ workflowId: 'openwop-app.scheduled-chat.turn', credentialRef: 'managed:openwop-free' });
+    const entry = await makeAgentWithBareCard();
+    await processDueHeartbeats(deps, listRosterTenants, NOW);
+    const listApprovals = (await import('../src/host/approvalService.js')).listApprovals;
+    const a = (await listApprovals(TENANT, 'pending')).find((x) => x.rosterId === entry.rosterId)!;
+    const { createHostAdapterSuite } = await import('../src/host/index.js');
+    // Full suite for the decision path, but keep the harness's permissive catalog
+    // so the registered fallback workflow id resolves.
+    const decisionDeps = { storage, hostSuite: { ...createHostAdapterSuite({ storage }), workflowCatalog: hostSuite.workflowCatalog } };
+    const decided = await claimApproval(decisionDeps, { tenantId: TENANT, decidedBy: 'approver-1' }, a.approvalId);
+    expect(decided.status).toBe('approved');
+    const approved = (await getApproval(a.approvalId))!;
+    const run = await storage.getRun(approved.runId!);
+    expect(run?.configurable).toMatchObject({ agentId: 'host:bare-bob' });
+    expect(String((run?.configurable as Record<string, unknown>)?.['task'])).toContain('Summarize the incident log');
+  });
+
+  it('an UNREGISTERED fallback seam skips bare cards exactly as before (honest degradation)', async () => {
+    const entry = await makeAgentWithBareCard();
+    expect(await processDueHeartbeats(deps, listRosterTenants, NOW)).toBe(0);
+    const listApprovals = (await import('../src/host/approvalService.js')).listApprovals;
+    expect((await listApprovals(TENANT, 'pending')).filter((a) => a.rosterId === entry.rosterId)).toHaveLength(0);
   });
 });

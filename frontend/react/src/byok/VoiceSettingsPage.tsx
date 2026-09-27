@@ -13,10 +13,13 @@ import { listStoredRefs } from './lib/byokClient.js';
 export function VoiceSettingsPage(): JSX.Element {
   const { embedded } = useHub();
   const [refs, setRefs] = useState<readonly string[]>([]);
+  const [refsUnreadable, setRefsUnreadable] = useState(false);
   useEffect(() => {
     void listStoredRefs()
-      .then(setRefs)
-      .catch(() => setRefs([]));
+      .then((r) => { setRefsUnreadable(false); setRefs(r); })
+      // An empty list here would read as "no keys stored", which fires the
+      // ADR 0499 "your key is gone" alarm on a healthy binding.
+      .catch(() => { setRefsUnreadable(true); setRefs([]); });
   }, []);
   // This surface only exists as an Access Hub tab (ADR 0144). A direct visit to
   // `/access/voice` lands here un-embedded — bounce it into the hub so the card
@@ -24,7 +27,7 @@ export function VoiceSettingsPage(): JSX.Element {
   if (!embedded) return <Navigate to="/access?tab=voice" replace />;
   return (
     <section className="u-grid u-gap-4">
-      <RealtimeVoiceSettings storedRefs={refs} />
+      <RealtimeVoiceSettings storedRefs={refs} refsUnreadable={refsUnreadable} />
     </section>
   );
 }

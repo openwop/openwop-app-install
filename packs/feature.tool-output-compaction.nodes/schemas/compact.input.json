@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.tool-output-compaction.nodes/1.2.0/compact.input.json",
+  "title": "CompactInput",
+  "description": "ADR 0680 D1b — the closed world an authoring model reads. This schema exists so the enum lands BEFORE the refusal does: the Workflow Architect builds its catalog from the same node manifest (workflowAuthorService.ts), and nothing validates config on the authoring path, so refusing an unrecognised mode without publishing the legal values would fail a model that had no way to know them.",
+  "type": "object",
+  "properties": {
+    "input": {
+      "type": "string",
+      "description": "The tool-output string to compact. Non-JSON passes through untouched."
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["off", "lossless", "lossy"],
+      "default": "lossless",
+      "description": "off = return the bytes untouched (the guarantee a caller hashing, signing or diffing a payload needs). lossless = delete insignificant whitespace ONLY. lossy = additionally drop structurally-empty fields (disclosed as _emptied) and elide long arrays (disclosed as _elided)."
+    },
+    "head": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "lossy only — how many leading array elements to keep."
+    },
+    "tail": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "lossy only — how many trailing array elements to keep."
+    }
+  },
+  "required": ["input"],
+  "additionalProperties": false
+}

@@ -23,6 +23,10 @@ const obj = (props: Record<string, unknown>, required: string[]): Record<string,
 // AND in documents/surface.ts.)
 const rawText = { $schema: 'https://json-schema.org/draft/2020-12/schema', type: 'string' as const };
 
+/** ADR 0708 D2 — MUST equal `ChartRenderer.tsx`'s `SUPPORTED_CHART_TYPES`; the parity
+ *  test in `__tests__/promptCatalogParity.test.ts` fails if they drift. */
+const CHART_TYPES = ['bar', 'line'] as const;
+
 export const INTERACTIVE_ARTIFACT_TYPES: ArtifactType[] = [
   { artifactTypeId: 'interactive.html', title: 'Interactive HTML', registrationSource: 'host', export: ['html', 'raw'],
     schema: rawText },
@@ -31,7 +35,16 @@ export const INTERACTIVE_ARTIFACT_TYPES: ArtifactType[] = [
   { artifactTypeId: 'interactive.mermaid', title: 'Mermaid diagram', registrationSource: 'host', export: ['raw', 'svg'],
     schema: rawText },
   { artifactTypeId: 'interactive.chart', title: 'Chart', registrationSource: 'host', export: ['raw', 'json'],
-    schema: obj({ chartType: { type: 'string' }, data: { type: 'object' }, options: { type: 'object' } }, ['chartType', 'data']) },
+    // ADR 0708 D2 — the CLOSED WORLD belongs in the schema, so EVERY emitter is gated,
+    // not just the Visualizer prompt lane. This was `{ type: 'string' }`: any emitter
+    // could persist `chartType:"pie"` as a valid typed chart, and the user would get raw
+    // JSON where a chart was promised with nothing telling the model why.
+    //
+    // Kept in lockstep with `ChartRenderer.tsx`'s `SUPPORTED_CHART_TYPES` by
+    // `__tests__/promptCatalogParity.test.ts` — the frontend constant cannot be imported
+    // across workspaces, so the repo's existing parity-test convention is what stops the
+    // two from drifting (the same test already pins the prompt against the renderer).
+    schema: obj({ chartType: { type: 'string', enum: CHART_TYPES }, data: { type: 'object' }, options: { type: 'object' } }, ['chartType', 'data']) },
 ];
 
 export function registerInteractiveArtifactTypes(): void {

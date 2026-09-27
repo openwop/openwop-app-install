@@ -30,7 +30,7 @@ beforeAll(async () => {
   process.env.OPENWOP_A2A_DURABLE_TASKS = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor'));
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; A2A_URL = `${BASE}/v1/host/openwop-app/a2a`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; A2A_URL = `${BASE}/v1/host/openwop-app/a2a`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));
@@ -57,13 +57,48 @@ describe('ADR 0035 / RFC 0100 — durable A2A server over HTTP', () => {
     expect(a2a?.agentCardUrl).toMatch(/\/\.well-known\/agent-card\.json$/);
   });
 
-  it('GET /.well-known/agent-card.json serves a public v0.3 AgentCard (no credential)', async () => {
+  it('GET /.well-known/agent-card.json serves the public 0.3 AgentCard header-less while a2a-0.3-legacy is advertised (no credential)', async () => {
     // The agentCardUrl honesty bar: a plain GET — no Authorization header —
-    // resolves to a real A2A v0.3 card (protocolVersion + skills).
+    // resolves to a real A2A card with skills.
+    //
+    // WHICH card, ADR 0552 P2 CORRECTION (a2a-integration.md §C, decided
+    // 2026-08-16 / openwop#1028): the §B receiver rule — absent `A2A-Version`
+    // means 0.3 — reaches the card GET too, so while this host advertises
+    // `a2a-0.3-legacy` a header-less GET gets the 0.3 shape. P2 briefly served
+    // the 1.0 shape here, which breaks every 0.3 client that resolves the RPC
+    // endpoint from `card.url` NOW rather than at the legacy sunset.
     const res = await fetch(`${BASE}/.well-known/agent-card.json`);
     expect(res.status).toBe(200);
-    const card = await res.json() as { protocolVersion?: string; skills?: unknown[]; url?: string };
+    const card = await res.json() as { protocolVersion?: string; skills?: unknown[]; url?: string; supportedInterfaces?: unknown[] };
     expect(card.protocolVersion).toBe('0.3');
+    expect(typeof card.url).toBe('string');
+    expect(card.supportedInterfaces).toBeUndefined();
+    expect(Array.isArray(card.skills)).toBe(true);
+  });
+
+  it('GET /.well-known/agent-card.json with `A2A-Version: 1.0` serves the 1.0 card (a 1.0 client MUST send the header)', async () => {
+    // The 1.0 half of the same rule. `supportedInterfaces[]` and NO top-level
+    // `url`/`protocolVersion` — §C: "a card with both shapes is neither".
+    const res = await fetch(`${BASE}/.well-known/agent-card.json`, { headers: { 'A2A-Version': '1.0' } });
+    expect(res.status).toBe(200);
+    const card = await res.json() as { protocolVersion?: string; skills?: unknown[]; url?: string; supportedInterfaces?: unknown[] };
+    expect(card.protocolVersion).toBeUndefined();
+    expect(card.url).toBeUndefined();
+    expect(Array.isArray(card.supportedInterfaces)).toBe(true);
+    expect(Array.isArray(card.skills)).toBe(true);
+  });
+
+  it('GET /.well-known/agent-card.json with `A2A-Version: 0.3` still serves the legacy card', async () => {
+    // The compatibility half stated explicitly rather than inherited from the
+    // header-less default: a 0.3-era consumer that names its own era gets
+    // `url` + `protocolVersion` whatever the header-less default becomes at
+    // the legacy sunset (ADR 0552 P4).
+    const res = await fetch(`${BASE}/.well-known/agent-card.json`, { headers: { 'A2A-Version': '0.3' } });
+    expect(res.status).toBe(200);
+    const card = await res.json() as { protocolVersion?: string; skills?: unknown[]; url?: string; supportedInterfaces?: unknown[] };
+    expect(card.protocolVersion).toBe('0.3');
+    expect(typeof card.url).toBe('string');
+    expect(card.supportedInterfaces).toBeUndefined();
     expect(Array.isArray(card.skills)).toBe(true);
   });
 

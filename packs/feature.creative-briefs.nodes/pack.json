@@ -1,0 +1,87 @@
+{
+  "name": "feature.creative-briefs.nodes",
+  "version": "1.2.0",
+  "description": "Creative-briefs feature node pack — full ctx.features.creative-briefs surface: list/get reads, a create WRITE that calls the SAME service function the HTTP route calls (the CRM v1.4 write-node precedent), and the ADR 0399 ad-layout renderer: brief.render (one template) + brief.render-variants (template family fan-out), each a deterministic brief→composed-PNG projection stored as a hash-deduped Media asset with safe-zone warnings. Tenant+org-guarded; role:action (recorded, replay/fork-safe — the recorded mediaAssetId is read verbatim on replay). v1.2.0 adds generate-reel (ADR 0411 P3 — text-to-video via ctx.callVideoGenerator → durable Media asset → reel render; deterministic renderId for replay/fork idempotency).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "creative-briefs",
+    "briefs",
+    "creative"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.creative-briefs.nodes.create",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Create",
+      "description": "Creates a creative brief over ctx.features.creative-briefs.create (same service path as the HTTP route). Inputs: { orgId, title, assetType, sceneDescription?, composition?, cameraAngle?, lighting?, brandPalette?, messagingIntent?, platformSpec?, directions?, moodBoard?, campaignBriefId? }. Output: { brief }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.list",
+      "version": "1.0.0",
+      "label": "Creative Briefs: List",
+      "description": "Lists an org's creative briefs. Inputs: { orgId }. Output: { briefs }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.get",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Get",
+      "description": "Reads one brief. Inputs: { orgId, briefId }. Output: { found, brief? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.generate-reel",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Generate Reel",
+      "description": "ADR 0411 P3 — generates a REEL (text-to-video) from a brief and stores it as a reel render. Derives a text-to-video prompt from the brief's production fields (title/scene/composition/camera/lighting/messaging + direction), generates the video via ctx.callVideoGenerator (the async lane — host hides polling, honors cancel; NO 4th video generator), promotes the generated video (a host serve URL) to a durable Media asset (createAssetFromServeUrl — SSRF-safe, hash-deduped, capacity-gated), then stores a reel-marked CreativeRender whose mediaAssetId is the video. Deterministic renderId (crender:${runId}:${nodeId}) ⇒ re-run/:fork/replay converges, never duplicates. Inputs: { orgId, briefId, directionIndex?, aspectRatio?('9:16'|'16:9'|'1:1'), durationSeconds?, provider?, model?, credentialRef? }. Output: { render, mediaAssetId }. Fails typed: host_capability_missing (video not wired / no BYOK), not_found (brief), provider_* (generation), validation_error (render cap). role:action, recorded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.render",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Render Ad",
+      "description": "Renders a brief through one ad-layout template into a composed PNG stored as a Media asset (ADR 0399). Inputs: { orgId, briefId, templateId, directionIndex?, copy?{headline,body,cta}, layers?{background,product}, overrides?{<layerId>:{dx,dy,scale}}, brandId?, animate?{preset:'reveal',frames?,fps?} }. templateId is one of: meta.feed.1x1, meta.story.9x16, tiktok.9x16, linkedin.landscape.191x1, google.display.300x250, google.display.728x90, google.display.160x600, google.display.300x600, google.display.336x280, google.display.250x250, google.display.970x250, google.display.468x60, google.display.320x100, google.display.320x50 (read the live catalog via feature.creative-briefs.nodes.list-render-templates — never guess). animate produces an animated GIF (reveal preset — the foreground fades in; the static PNG is the default). Output: { render, mediaAssetId, warnings } — warnings (safe-zone overlaps, text rule, missing layers) are advisory and never block. Fails typed: not_found (brief/brand), validation_error (unknown template, bad directionIndex, render cap).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.render-variants",
+      "version": "1.0.0",
+      "label": "Creative Briefs: Render Ad Variants",
+      "description": "Fans one brief across a template family — one approve, N platform-correct creatives (ADR 0399 §3). Inputs: { orgId, briefId, templateIds: string[], ...same options as render }. Output: { renders[], failures[{templateId,error}] } — per-template failures are reported, not thrown (partial success is visible, never silent).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.creative-briefs.nodes.list-render-templates",
+      "version": "1.0.0",
+      "label": "Creative Briefs: List Render Templates",
+      "description": "Reads the live ad-layout template catalog (ids, platform, pixel dimensions, safe zones, layer slots) — the SSoT the render nodes validate against. Inputs: {}. Output: { templates }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

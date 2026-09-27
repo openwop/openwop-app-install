@@ -35,6 +35,7 @@ describe('connection injection at the egress seam (ADR 0024 §4 / Option C)', ()
   beforeAll(async () => {
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true'; // allow loopback egress + http injection in test
+    process.env.OPENWOP_SAFEFETCH_ALLOW_PRIVATE = 'true'; // safeFetch guard has its OWN flag now; injection round-trips a loopback echo
     const app = await createApp({ port: 18944, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     storage = app.locals.storage;
     await __resetConnectionsStore();
@@ -44,7 +45,7 @@ describe('connection injection at the egress seam (ADR 0024 §4 / Option C)', ()
       res.writeHead(200, { 'content-type': 'text/plain' });
       res.end('ok');
     });
-    await new Promise<void>((r) => echo.listen(0, r));
+    await new Promise<void>((r) => echo.listen(0, '127.0.0.1', r));
     port = (echo.address() as AddressInfo).port;
 
     // A test provider whose curated apiHost is the loopback echo server.
@@ -54,6 +55,8 @@ describe('connection injection at the egress seam (ADR 0024 §4 / Option C)', ()
 
   afterAll(async () => {
     await new Promise<void>((r) => echo.close(() => r()));
+    delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE;
+    delete process.env.OPENWOP_SAFEFETCH_ALLOW_PRIVATE;
   });
 
   function safeFetchFor(allowed: string[], actingUserId?: string): ReturnType<typeof makeConnectionSafeFetch> {
@@ -93,5 +96,18 @@ describe('connection injection at the egress seam (ADR 0024 §4 / Option C)', ()
     lastAuth = undefined;
     await drain(await safeFetchFor(['testapi'])(`http://127.0.0.1:${port}/`)); // no actingUserId
     expect(lastAuth).toBeUndefined(); // no user connection resolves
+  });
+
+  it('does NOT inject for an `adapterOnly` provider — the generic http node cannot reach a governed write (ADR 0292)', async () => {
+    // A write-scoped provider whose write is a GOVERNED action (like `bigquery-write`) is
+    // adapterOnly: reachable only via its host adapter's brokeredPost (approval-gated), NEVER
+    // the generic ctx.http.safeFetch. Same loopback apiHost + a valid connection as `testapi`
+    // (which DOES inject above) — the ONLY difference is `adapterOnly`, so non-injection proves
+    // the gate is un-bypassable.
+    registerProvider({ id: 'testapi-gated', label: 'Gated', kind: 'bearer', authFlow: 'none', reach: 'openapi', scopes: { read: [], write: [{ key: 'w', label: 'w', scopes: [] }] }, refreshable: false, defaultScopes: [], adapterOnly: true, consumerNodes: [], apiHosts: ['127.0.0.1'] });
+    await createSecretConnection({ tenantId: 'tinj', provider: 'testapi-gated', kind: 'bearer', secret: 'GATEDTOKEN', scope: 'user', userId: 'u1' });
+    lastAuth = undefined;
+    await drain(await safeFetchFor(['testapi-gated'], 'u1')(`http://127.0.0.1:${port}/insertAll`));
+    expect(lastAuth).toBeUndefined(); // adapterOnly ⇒ the generic safeFetch skips it
   });
 });

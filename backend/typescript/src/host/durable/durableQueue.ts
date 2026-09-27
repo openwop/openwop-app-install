@@ -85,6 +85,94 @@ export function createDurableQueue(scope: BundleScope): QueueSurface {
   };
 }
 
+// ── ADR 0395 Phase B — operator DLQ snapshot + replay over the DURABLE bus ──
+// Reads/writes the same `hostsurf:bus:` key scheme the surface uses. The
+// snapshot projects depth + reasons + ids ONLY (payloads may carry tenant
+// PII); replay deletes the DLQ row and re-publishes the ORIGINAL payload onto
+// the base subject with the scheme's own sequence counter. Superadmin-gated at
+// the route; the kvList prefix scan is a cold operator read, never a hot path.
+
+export interface DurableDlqSnapshotRow {
+  tenantId: string;
+  subject: string;
+  depth: number;
+  reasons: string[];
+  messageIds: string[];
+}
+
+export async function snapshotDurableDlqSubjects(tenantId?: string): Promise<DurableDlqSnapshotRow[]> {
+  const storage = requireDurableStorage();
+  const rows = await storage.kvList('hostsurf:bus:');
+  const grouped = new Map<string, { tenantId: string; subject: string; messages: BusMessage[] }>();
+  for (const row of rows) {
+    const parts = row.key.split(':'); // hostsurf:bus:<t>:<subject>:<seq>
+    if (parts.length < 5) continue;
+    const t = decodeURIComponent(parts[2]!);
+    const subject = decodeURIComponent(parts[3]!);
+    if (!subject.endsWith('.dlq')) continue;
+    if (tenantId !== undefined && t !== tenantId) continue;
+    let g = grouped.get(`${t}:${subject}`);
+    if (!g) { g = { tenantId: t, subject, messages: [] }; grouped.set(`${t}:${subject}`, g); }
+    try { g.messages.push(JSON.parse(row.value) as BusMessage); } catch { /* unreadable row — count only */ g.messages.push({ id: '(unreadable)', payload: null, subject, deliveryCount: 0 }); }
+  }
+  return [...grouped.values()].map((g) => {
+    const reasons = new Set<string>();
+    for (const m of g.messages) {
+      const p = m.payload as { deadLetterReason?: unknown } | null;
+      if (p && typeof p === 'object' && typeof p.deadLetterReason === 'string') reasons.add(p.deadLetterReason);
+      if (reasons.size >= 10) break;
+    }
+    return { tenantId: g.tenantId, subject: g.subject, depth: g.messages.length, reasons: [...reasons], messageIds: g.messages.slice(0, 50).map((m) => m.id) };
+  }).sort((a, b) => a.tenantId.localeCompare(b.tenantId) || a.subject.localeCompare(b.subject));
+}
+
+export async function replayDurableDlqMessage(tenantId: string, dlqSubject: string, messageId: string): Promise<{ replayed: boolean; reason?: 'not_found' | 'bad_subject' }> {
+  if (!dlqSubject.endsWith('.dlq')) return { replayed: false, reason: 'bad_subject' };
+  const storage = requireDurableStorage();
+  const t = enc(tenantId);
+  const prefix = `hostsurf:bus:${t}:${enc(dlqSubject)}:`;
+  const rows = await storage.kvList(prefix);
+  for (const row of rows) {
+    let msg: BusMessage;
+    try { msg = JSON.parse(row.value) as BusMessage; } catch { continue; }
+    if (msg.id !== messageId) continue;
+    // Delete-then-republish (the `claimHead` convention: kvDelete returning
+    // true IS the atomic claim — a concurrent consumer/replayer loses). A
+    // crash between the two loses the message like any broker redelivery
+    // window would; the depth change is visible — no silent duplication.
+    const removed = await storage.kvDelete(row.key);
+    if (!removed) return { replayed: false, reason: 'not_found' };
+    const base = dlqSubject.slice(0, -'.dlq'.length);
+    const payload = msg.payload as { original?: unknown } | null;
+    const original = payload && typeof payload === 'object' && 'original' in payload ? payload.original : msg.payload;
+    const seq = await nextSequence(`hostsurf:busseq:${t}:${enc(base)}`);
+    await storage.kvSet(`hostsurf:bus:${t}:${enc(base)}:${padSeq(seq)}`, JSON.stringify({ id: msg.id, payload: original, subject: base, deliveryCount: msg.deliveryCount + 1 }));
+    return { replayed: true };
+  }
+  return { replayed: false, reason: 'not_found' };
+}
+
+/**
+ * GRADE-DATA 2026-07-17 — tenant teardown for the DURABLE bus/queue keyspace:
+ * `hostsurf:*` rows embed enc(tenantId) as their third `:` segment but live
+ * OUTSIDE the `hostext:` prefix the ADR 0284 purge walks, so an account
+ * deletion left queued/in-flight/dead-lettered payloads (which may carry
+ * tenant PII) orphaned forever. Called from the account-delete purge.
+ */
+export async function purgeTenantDurableSurfaces(tenantId: string): Promise<number> {
+  const storage = requireDurableStorage();
+  const t = enc(tenantId);
+  let purged = 0;
+  const rows = await storage.kvList('hostsurf:');
+  for (const row of rows) {
+    const parts = row.key.split(':'); // hostsurf:<family>:<tenant>:…
+    if (parts.length >= 3 && parts[2] === t) {
+      if (await storage.kvDelete(row.key)) purged += 1;
+    }
+  }
+  return purged;
+}
+
 // ── host.messaging (queueBus) ───────────────────────────────────────
 export function createDurableQueueBus(scope: BundleScope): QueueBusSurface {
   const t = enc(scope.tenantId);

@@ -57,9 +57,10 @@ You write technical documentation. You write for developers — accurate, scanna
 
 ## Tool use
 
-- `openwop:core.rag.retrieve` — fetch grounding content when `knowledgeSourceIds` is set.
-- `openwop:core.files.fs-read` — read a file referenced in `sourceMaterial` to see its current shape.
-- `openwop:core.files.fs-write` — write the final doc when `outputPath` is set. ALWAYS the last tool call.
+- `openwop:core.rag.retriever-basic` — fetch grounding content when `knowledgeSourceIds` is set.
+
+Any file content you need is supplied inline in `sourceMaterial`. Return the finished
+document in your result; when `outputPath` is set the enclosing workflow writes it there.
 
 ## Output
 

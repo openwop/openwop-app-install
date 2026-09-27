@@ -17,6 +17,7 @@ import type { RunEventDoc } from '@openwop/openwop';
 import type { Annotation } from '../client/feedbackClient.js';
 import { formatDuration } from './format.js';
 import { formatNumber } from '../i18n/format.js';
+import { isInterruptResolvedEvent } from '../chat/lib/interruptResolvedEvent';
 
 /** Maps a run outcome value to its display key. */
 const OUTCOME_LABEL_KEYS: Record<string, string> = {
@@ -29,6 +30,14 @@ const OUTCOME_LABEL_KEYS: Record<string, string> = {
 interface Props {
   events: readonly RunEventDoc[];
   annotations?: readonly Annotation[];
+  /** RUN-R2-1 — the annotations READ failed (distinct from "none exist"). The
+   *  quality section says so instead of silently omitting itself. */
+  annotationsUnavailable?: boolean;
+  /** ADR 0600 §1 (`ISU-24`) — the EVENT read failed (distinct from "the run has
+   *  produced no events"). Without it this panel's `events.length === 0` branch
+   *  makes the panel vanish, and a vanished panel on a page that renders fine
+   *  reads as "there was nothing to measure". */
+  eventsUnavailable?: boolean;
 }
 
 const TERMINAL_TYPES = ['run.completed', 'run.failed', 'run.cancelled'];
@@ -37,7 +46,7 @@ function count(events: readonly RunEventDoc[], type: string): number {
   return events.reduce((n, e) => (e.type === type ? n + 1 : n), 0);
 }
 
-export function RunAnalyticsPanel({ events, annotations }: Props) {
+export function RunAnalyticsPanel({ events, annotations, annotationsUnavailable, eventsUnavailable }: Props) {
   const { t } = useTranslation('runs');
   const stats = useMemo(() => {
     if (events.length === 0) return null;
@@ -52,7 +61,7 @@ export function RunAnalyticsPanel({ events, annotations }: Props) {
 
     const outcome = terminal ? terminal.type.replace('run.', '') : 'running';
     const interruptsRaised = count(events, 'node.suspended');
-    const interruptsResolved = count(events, 'node.interrupt.resolved');
+    const interruptsResolved = events.filter((e) => isInterruptResolvedEvent(e.type)).length;
 
     return {
       outcome,
@@ -109,11 +118,14 @@ export function RunAnalyticsPanel({ events, annotations }: Props) {
     };
   }, [annotations]);
 
-  if (!stats && !quality) return null;
+  if (!stats && !quality && !eventsUnavailable) return null;
 
   return (
     <div className="card">
       <h2 className="u-mt-0">{t('runAnalytics')}</h2>
+      {eventsUnavailable && !stats ? (
+        <p className="muted u-fs-13 u-m-0">{t('runStatsUnavailable')}</p>
+      ) : null}
       {stats && (
         <dl className="run-stats">
           <Stat label={t('statOutcome')} value={t(OUTCOME_LABEL_KEYS[stats.outcome] ?? 'outcomeRunning')} tone={stats.outcome === 'failed' ? 'danger' : stats.outcome === 'cancelled' ? 'warn' : undefined} />
@@ -125,6 +137,12 @@ export function RunAnalyticsPanel({ events, annotations }: Props) {
           <Stat label={t('statResumes')} value={formatNumber(stats.resumes)} />
         </dl>
       )}
+      {annotationsUnavailable && !quality ? (
+        <>
+          <h3 className="runanalytics-quality-heading">{t('qualitySignals')}</h3>
+          <p className="muted u-fs-13 u-m-0">{t('qualitySignalsUnavailable')}</p>
+        </>
+      ) : null}
       {quality && (
         <>
           <h3 className="runanalytics-quality-heading">{t('qualitySignals')}</h3>

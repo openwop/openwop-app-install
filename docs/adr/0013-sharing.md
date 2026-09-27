@@ -4,8 +4,75 @@
 **Date:** 2026-06-09
 **Depends on:** ADR 0001 (feature-package architecture), ADR 0004 (Orgs),
 ADR 0006 (RBAC), ADR 0009 (CMS — a shareable resource), ADR 0011 (KB — a shareable resource)
-**Toggle:** `sharing` · **Surfaces:** authed `/v1/host/openwop-app/sharing/*`
+**Toggle:** ~~`sharing`~~ — **none; always-on since ADR 0434** (correction below)
+· **Surfaces:** authed `/v1/host/openwop-app/sharing/*`
 + **public (unauthed)** `/v1/host/openwop-app/shared/:token` (host-extension, non-normative)
+
+> **CORRECTION 2026-08-18 (SHARE-1 / SHARE-11).** This header declared
+> `**Toggle:** sharing` long after ADR 0434 removed that toggle, and
+> `features/sharing/feature.ts`, `FEATURES.md` and `middleware/auth.ts` each
+> asserted that "each resolver still applies its OWN feature's toggle" in its
+> place. That was true for five of twelve resource types. Seven —
+> `cms_page`, `kb_collection`, `document`, `conversation`, `prompt`,
+> `commerce_quote`, `commerce_order` — applied no toggle at all, so a tenant
+> that disabled the owning feature kept serving that content on the public
+> internet with no kill-switch anywhere.
+>
+> The gate now lives in ONE place (`owningFeatureEnabled`, driven by a
+> `toggleId` on each resolver, resolved against the **link's** tenant on every
+> public entry point and at mint). Its honest reach: **eight** types are
+> toggle-gated (`documents`, `commerce` ×2 join `creative-briefs`,
+> `app-builder`, `slides`, `crm` ×2). **Four cannot be** — `cms`, `kb` and
+> `prompts` graduated to always-on and the conversation store is core chat, so
+> none declares a toggle to consult; each records `toggleId: null` with its
+> reason in source. For those four, revocation, expiry and deleting the
+> resource are the only controls, and that is now said out loud instead of
+> being covered by a claim.
+
+> **FOLLOW-UP CORRECTION 2026-08-18 (R2 adversarial review of the same change).**
+> Four things the fix above got wrong or overstated, recorded here because each
+> was a claim, not just a bug.
+>
+> 1. **The gate reintroduced the lie it closed, on the owner's side.** Making
+>    eight types darkenable made a NEW state reachable — a link whose resolver
+>    now 404s while nothing about it looks dead. `listLinks` computed the gate
+>    boolean and then discarded it, so the management row rendered a green
+>    "Live" chip (titled with the raw `resourceId`, since the card lookup is
+>    skipped) for exactly those links. The boolean is now on the wire
+>    (`featureDisabled`), with its own `LinkStatus` member, chip and row copy,
+>    and it counts as NOT live. The public viewer's copy no longer names
+>    revocation as the sole cause of a dead link either — it cannot say which
+>    gate closed (that would make the resolve a token-validity oracle), so it
+>    stops asserting one.
+> 2. **The SHARE-2 erasure blast radius named the ONE category it does not
+>    touch.** Both the source comment and the PR body said erasure "breaks live
+>    booking-reschedule and e-sign tokens minted by the erased member". It does
+>    not: `eraseSubjectSharing` matches `createdBy === subjectKey`, and every
+>    capability token is minted by a SYSTEM actor (`system:crm-booking`,
+>    `system:crm-sign`, `system:commerce`). The only mint site that attributes a
+>    link to a human is the authed management route. So the real radius is every
+>    CONTENT link that person minted by hand — CMS page, KB collection,
+>    document, prompt, deck, app design, shared conversation — while the org's
+>    booking, e-signature and order-status tokens are UNAFFECTED. On a GDPR path
+>    in a change whose thesis is honest stated consequences, publishing the
+>    inverse of the actual behaviour is the worst kind of error, so it is
+>    corrected in source, in the PR body, and here.
+> 3. **SHARE-5 put two destructive decisions on a non-authoritative index.**
+>    `purgeLinksForResource` (a delete cascade) and `hasActiveLinkForResource`
+>    (a retention SURVIVE-condition) were moved onto `listForTenantIndexed`,
+>    whose contract is explicitly "delayed, not lost" — the same reason
+>    `purgeTenantRows` refuses it. A miss in the first leaves a permanent
+>    orphan; a miss in the second DELETES a canvas that still has a live public
+>    link. Both are back on the complete scan (the second keeps the indexed
+>    slice as a fast path and falls back, so it is never worse than the
+>    pre-SHARE-5 baseline). `eraseSubjectSharing` was reverted for the same
+>    reason. Only `listLinks` — a read whose miss is a row absent from a list —
+>    still rides the index.
+> 4. **`creative_brief` was counted in "11 of 12" on a route-level cascade.**
+>    `deleteBrief` itself did not purge, so the demo-clear seeder and the bulk
+>    delete orphaned every link they killed — the identical non-route-deleter
+>    defect WF-SHARE-3 fixed for canvases and documents. The cascade now sits on
+>    the delete owner, which is what the count claimed.
 
 ---
 

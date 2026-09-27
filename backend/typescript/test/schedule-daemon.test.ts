@@ -5,7 +5,7 @@
  *   - a job whose nextFireAt is in the future does not fire
  *   - a disabled job does not fire
  *   - MULTI-INSTANCE: two concurrent passes over the same due slot fire exactly
- *     once (claimIdempotency dedup)
+ *     once (claimOnce dedup)
  *   - MISSED-WINDOW: a long-stale job fires ONCE on recovery, not once per
  *     missed slot, and lands a future nextFireAt (RFC 0052 §B.4)
  *
@@ -134,16 +134,16 @@ describe('scheduleDaemon — wall-clock firing', () => {
     const now = Date.parse('2026-06-02T12:00:00Z');
     const stale = new Date(now - 20 * 60_000).toISOString(); // older than the 10m window
     const fresh = new Date(now).toISOString();
-    await storage.claimIdempotency('schedule-fire:j:1', stale);
-    await storage.claimIdempotency('schedule-fire:j:2', fresh);
-    await storage.claimIdempotency('other-key:keep', stale); // wrong prefix — untouched
+    await storage.claimOnce('schedule-fire:j:1', stale);
+    await storage.claimOnce('schedule-fire:j:2', fresh);
+    await storage.claimOnce('other-key:keep', stale); // wrong prefix — untouched
 
     expect(await pruneStaleScheduleClaims(deps, now)).toBe(1);
     // The stale schedule-fire key is gone (re-claimable); the fresh one and the
     // unrelated key remain (re-claim returns claimed:false).
-    expect((await storage.claimIdempotency('schedule-fire:j:1', fresh)).claimed).toBe(true);
-    expect((await storage.claimIdempotency('schedule-fire:j:2', fresh)).claimed).toBe(false);
-    expect((await storage.claimIdempotency('other-key:keep', fresh)).claimed).toBe(false);
+    expect((await storage.claimOnce('schedule-fire:j:1', fresh)).claimed).toBe(true);
+    expect((await storage.claimOnce('schedule-fire:j:2', fresh)).claimed).toBe(false);
+    expect((await storage.claimOnce('other-key:keep', fresh)).claimed).toBe(false);
   });
 
   it('missed-window: a long-stale job fires ONCE on recovery with a future slot', async () => {

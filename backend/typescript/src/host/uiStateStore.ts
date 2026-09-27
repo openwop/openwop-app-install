@@ -123,7 +123,3 @@ export async function deleteUiState(
   return store.delete(`${tenantId}:${subjectRef}:${resourceType}:${resourceId}:${key}`);
 }
 
-/** Test-only: clear the store. */
-export async function __clearUiState(): Promise<void> {
-  await store.__clear();
-}

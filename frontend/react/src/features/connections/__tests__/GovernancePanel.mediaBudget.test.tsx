@@ -15,10 +15,12 @@ import { GovernancePanel } from '../GovernancePanel.js';
 const POLICY = { policy: {}, defaults: { actionPolicy: 'approval-required', providerAllowlist: null }, actionKinds: ['email.send'] };
 const MEDIA = {
   date: '2026-06-22',
-  budgets: { ttsChars: 1000, sttBytes: 0 },
-  envDefaults: { ttsChars: 1000, sttBytes: 0 },
+  // Full current shape (ADR 0411 P2 added the governance VIDEO budget; the
+  // image budget arrived with ADR 0401) — the fixture mirrors the panel type.
+  budgets: { ttsChars: 1000, sttBytes: 0, images: 0, video: 0 },
+  envDefaults: { ttsChars: 1000, sttBytes: 0, images: 0, video: 0 },
   override: { ttsChars: 1000 },
-  usage: { ttsChars: 0, sttBytes: 0 },
+  usage: { ttsChars: 0, sttBytes: 0, images: 0, video: 0 },
 };
 
 let putBody: unknown = null;
@@ -55,7 +57,7 @@ describe('GovernancePanel media-budget override (ADR 0106)', () => {
     fireEvent.change(screen.getByLabelText('Text-to-speech budget (characters/day)'), { target: { value: '500' } });
     fireEvent.change(screen.getByLabelText('Transcription budget (bytes/day)'), { target: { value: '0' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save media budgets' }));
-    await waitFor(() => expect(putBody).toEqual({ ttsChars: 500, sttBytes: 0 }));
+    await waitFor(() => expect(putBody).toEqual({ ttsChars: 500, sttBytes: 0, images: null, videoJobs: null }));
   });
 
   it('a blank field CLEARS that override (null ⇒ falls back to env)', async () => {
@@ -63,6 +65,6 @@ describe('GovernancePanel media-budget override (ADR 0106)', () => {
     await waitFor(() => expect(screen.getByText('Media generation budgets')).toBeTruthy());
     fireEvent.change(screen.getByLabelText('Text-to-speech budget (characters/day)'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save media budgets' }));
-    await waitFor(() => expect(putBody).toEqual({ ttsChars: null, sttBytes: null }));
+    await waitFor(() => expect(putBody).toEqual({ ttsChars: null, sttBytes: null, images: null, videoJobs: null }));
   });
 });

@@ -15,7 +15,7 @@ Canonical ReAct (Reason + Act) loop agent. The "hello world" of openwop agents �
 
 Implements the ReAct prompting pattern (Yao et al., 2022): the agent alternates between **reasoning** ("what should I do next?") and **acting** (one tool call, or a final answer). Each iteration reads the prior observation back into the prompt context, then decides the next step.
 
-Default tool allowlist permits `openwop:core.http.fetch`. Workflows extend the allowlist at dispatch time via the `RunOptions.configurable.toolAllowlist` override (per RFC 0002 §F + host policy).
+Default tool allowlist permits `openwop:core.openwop.http.fetch`. Workflows extend the allowlist at dispatch time via the `RunOptions.configurable.toolAllowlist` override (per RFC 0002 §F + host policy).
 
 ## When to use it vs. when not to
 

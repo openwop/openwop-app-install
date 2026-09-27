@@ -21,8 +21,6 @@ import {
   WORKFLOW_TEMPLATES,
   WORKFLOW_TEMPLATE_CATEGORIES,
   getWorkflowTemplate,
-  listWorkflowTemplates,
-  listWorkflowTemplatesByCategory,
 } from '../src/host/workflowTemplates.js';
 import type { Storage } from '../src/storage/storage.js';
 import type { RunRecord } from '../src/types.js';
@@ -58,10 +56,9 @@ async function newRun(workflowId: string): Promise<RunRecord> {
 describe('workflow-template pack — catalog shape', () => {
   it('ships exactly 44 templates (11 categories × 4), one canonical list', () => {
     expect(WORKFLOW_TEMPLATES).toHaveLength(44);
-    expect(listWorkflowTemplates()).toBe(WORKFLOW_TEMPLATES);
     expect(WORKFLOW_TEMPLATE_CATEGORIES).toHaveLength(11);
     for (const category of WORKFLOW_TEMPLATE_CATEGORIES) {
-      expect(listWorkflowTemplatesByCategory(category)).toHaveLength(4);
+      expect(WORKFLOW_TEMPLATES.filter((t) => t.category === category)).toHaveLength(4);
     }
   });
 
@@ -116,7 +113,7 @@ describe('workflow-template pack — catalog shape', () => {
   });
 
   it('every approvals.* template carries a core.approvalGate', () => {
-    for (const t of listWorkflowTemplatesByCategory('approvals')) {
+    for (const t of WORKFLOW_TEMPLATES.filter((x) => x.category === 'approvals')) {
       expect(t.definition.nodes.some((n) => n.typeId === 'core.approvalGate')).toBe(true);
     }
   });

@@ -195,3 +195,38 @@ four findings, all resolved in the `fix/email-review` follow-up:
 | Verify | `tsc --noEmit` clean; full suite green apart from the known pre-existing pack/env failures. (Also migrated the merged `consent-route` + `analytics-route` tests to the ADR-0026 `/test/login` auth seam — they were broken on `main` by the auth refactor.) |
 | Frontend (Phase 4) | `frontend/react/src/features/email/` — `EmailPage` (org picker → templates editor → campaign builder [template + audience stage] → send + per-campaign stats + inline send log) + `emailClient.ts` + `routes.tsx`; appended to `FRONTEND_FEATURES`. `npm run build` gate green |
 | Follow-on | Phase 3 (real provider adapter, env-gated + honest 501) |
+
+## Correction note — Phase 3 shipped: REAL delivery via the brokered SendGrid spine (2026-07-03)
+
+The "real provider adapter" follow-on landed (branch `fix/purge-demo-leaks-to-aplus`,
+ADR 0195 Phase 2), architect-reviewed first. It composes EXISTING primitives — no
+parallel egress path, no wire change, no new RFC:
+
+- **Transport** — `features/email/brokeredProvider.ts` adapts the campaign
+  `EmailProvider` seam onto `host/emailAdapter.ts` (`ctx.email.send`, ADR 0024 §4
+  Phase 3): the acting route user's SendGrid `api_key` Connection resolved
+  per-request by the broker; adapter `{sent:false}` returns are CONVERTED to
+  throws so partial-failure stats stay correct.
+- **Sender identity** — an explicit per-org `email:settings.senderAddress`
+  (routes `GET/PUT …/settings`, UI field). A SendGrid verified sender is an
+  operator-owned property the host cannot introspect from an `api_key`
+  Connection — ADR 0193's "OpenWOP never silently sends as you," branch (a).
+  No hardcoded default.
+- **Honest-failure ordering** — no sender → `501 capability_not_provided`;
+  sender but no connection for the acting user → `409 credential_required`
+  (preflighted ONCE, not N per-recipient failures).
+- **Idempotent + resumable fan-out** — the append-only `sendLogs` double as the
+  sent-LEDGER (ADR 0193's double-send requirement): contacts with a `sent` log
+  are skipped; `resend:true` explicitly bypasses. Per-invocation batch cap
+  (default 50, the ~60s proxy budget); remaining/failed recipients ⇒ status
+  `'sending'` (retriable — a re-invoke retries ONLY unsent contacts); a clean
+  exhaustive pass ⇒ `'sent'`. Stats accumulate across continuations. Each send
+  carries `idempotencyKey: cmp:<campaignId>:<contactId>` (host ledger today;
+  native provider dedup when ADR 0193 Phase 1 adds SES).
+- **Tests** — `test/email-campaign-send.test.ts` (7): settings CRUD+validation,
+  501→409 ordering, route-level e2e against a mock SendGrid (render/from/Bearer
+  key), per-recipient failure stats, batch/continue, resend bypass,
+  fail-then-retry without double-delivery.
+
+ADR 0193 (multi-provider + provider-native send) remains Proposed and
+unblocked; campaigns inherit whatever the adapter's provider table supports.

@@ -191,6 +191,23 @@ export async function adsVideoGenerate(ctx) {
     totalTimeMs: result.totalTimeMs,
   });
 
+  // Library visibility (ADR 0083 §Amendment) — DEFERRED, not yet wired.
+  // This `asset:{url}` shape matches no host run-artifact producer detector, so a
+  // generated video would NOT appear in the Library. The correct fix is to mint a
+  // durable media asset host-side — `ctx.features.media.createAssetFromServeUrl({
+  // orgId, url: video.url, name, ... })` (the feature.campaign-channels
+  // render-concepts precedent) — and return the resulting `assetId`.
+  // NOT `serveUrl` (UX_UPGRADE-media R2 / MED2-R2): the serve route is
+  // auth-exempt and the token's TTL is ~a century, so a serve URL is a bearer
+  // credential, and node outputs are recorded in a run log the whole tenant can
+  // read with no org scoping. render-concepts used to return one and no longer
+  // does; this line named it as the precedent to copy, which is why it is
+  // corrected here rather than left for the implementer who follows it.
+  // It is deferred because: (a) this pack is orphaned (declared in no requiredPacks
+  // / chain / install bundle), (b) `createAssetFromServeUrl` only re-stores an
+  // existing HOST asset token, so it requires confirming `ctx.callVideoGenerator`
+  // returns a host serve URL — which needs a live video path to verify. Wire the
+  // mint here (idempotent per re-exec) when a video-generation feature adopts this pack.
   return {
     status: 'success',
     outputs: {
@@ -224,7 +241,7 @@ export async function adsVideoGenerate(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'ads.video.generate': adsVideoGenerate,
 };
 

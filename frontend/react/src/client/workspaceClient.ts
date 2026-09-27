@@ -1,6 +1,6 @@
 /**
  * Workspace (tenancy) host-extension client — ADR 0015. Wraps
- * /v1/host/openwop-app/{me/workspaces,workspaces,workspaces/:id/switch}: the B2B
+ * /host/openwop-app/{me/workspaces,workspaces,workspaces/:id/switch}: the B2B
  * "workspace = tenant" surface. A user lists the workspaces they can act in,
  * creates a shared one (becoming its owner), and switches the ACTIVE workspace
  * (re-binding the session — the RFC 0048 §D one-active-workspace model).
@@ -8,6 +8,7 @@
  * @see ../../../backend/typescript/src/routes/workspaces.ts
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
+import { rememberWireTenant } from './v2Wire.js';
 import { ApiError } from './requestJson.js';
 
 export interface WorkspaceSummary {
@@ -27,7 +28,7 @@ export interface MyWorkspaces {
   personal: string;
 }
 
-const base = `${config.baseUrl}/v1/host/openwop-app`;
+const base = `${config.baseUrl}/host/openwop-app`;
 const headers = (): Record<string, string> => authedHeaders();
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
@@ -63,5 +64,25 @@ export async function switchWorkspace(workspaceId: string): Promise<{ ok: boolea
     `${base}/workspaces/${encodeURIComponent(workspaceId)}/switch`,
     fetchOpts({ method: 'POST', headers: jsonHeaders() }),
   );
-  return asJson<{ ok: boolean; active: string }>(res, 'switchWorkspace');
+  const out = await asJson<{ ok: boolean; active: string }>(res, 'switchWorkspace');
+  rememberWireTenant(out.active); // the session is re-bound; so is every run id we send
+  return out;
+}
+
+/**
+ * Create a shared workspace AND enter it — the ONE behaviour, so the two entry
+ * points that offer it cannot drift.
+ *
+ * Creating without switching leaves the user looking at their old workspace
+ * wondering whether it worked, so the two calls are a single unit. The sidebar
+ * switcher and the Organizations page both call this rather than re-implementing
+ * the pair; a second copy is how one of them would quietly stop switching.
+ *
+ * The caller becomes the workspace's owner (`routes/workspaces.ts` seeds the
+ * owner member), so the switch that follows is always membership-valid.
+ */
+export async function createAndEnterWorkspace(name: string): Promise<WorkspaceSummary> {
+  const ws = await createWorkspace({ name });
+  await switchWorkspace(ws.workspaceId);
+  return ws;
 }

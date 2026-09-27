@@ -1,11 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/image-edit.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/image-edit.input.json",
   "title": "AiImageEditInput",
   "type": "object",
   "required": [
-    "imageBase64",
-    "prompt"
+    "imageBase64"
   ],
   "properties": {
     "imageBase64": {
@@ -15,6 +14,29 @@
       "type": "string"
     },
     "prompt": {
+      "type": "string"
+    },
+    "op": {
+      "type": "string",
+      "enum": [
+        "edit",
+        "inpaint",
+        "background-remove"
+      ],
+      "default": "edit",
+      "description": "edit = whole-image from prompt; inpaint = repaint the white mask region from prompt; background-remove = no prompt, transparent PNG."
+    },
+    "provider": {
+      "type": "string",
+      "description": "default replicate (the full-op-set vendor); openai supports edit/inpaint."
+    },
+    "model": {
+      "type": "string"
+    },
+    "credentialRef": {
+      "type": "string"
+    },
+    "mimeType": {
       "type": "string"
     }
   },

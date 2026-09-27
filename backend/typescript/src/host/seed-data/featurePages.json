@@ -3,34 +3,34 @@
   "title": "Features",
   "slug": "features",
   "hero": {
-    "eyebrow": "Everything OpenWOP can do",
-    "heading": "One place to put AI to work.",
-    "subheading": "Build AI agents and automated workflows that handle real tasks — then run, watch, and stay in control of all of it. New here? Start with the three essentials, and switch on the rest when you need them.",
+    "eyebrow": "Explore the platform",
+    "heading": "Start with the job. Add the tools that make it move.",
+    "subheading": "OpenWOP brings AI coworkers and repeatable workflows into one reviewable workspace. Begin with the core loop below, then search the catalog when a real task calls for something more.",
     "ctaLabel": "Try it free — no signup",
     "ctaUrl": "/chat",
     "ctaLabel2": "Read the open standard",
     "ctaUrl2": "https://openwop.dev"
   },
   "about": {
-    "eyebrow": "New here? Start with this",
-    "heading": "What is OpenWOP?",
-    "body": "OpenWOP is a place to put AI to work on real tasks — answering questions, drafting documents, updating records, and running multi-step jobs on a schedule.\n\nYou build two things: **agents** (AI coworkers, each with a job to do) and **workflows** (the steps they follow). Then you run them, watch every step, and decide what needs your sign-off. It's a working app *and* an open standard, so what you build stays yours — portable, not locked to one vendor. Everything below is built in; features marked **optional** are add-ons you can switch on when you need them."
+    "eyebrow": "The shortest tour",
+    "heading": "Three things make the rest click.",
+    "body": "Start in **Chat** with a real request. Give recurring work to **agents** — AI coworkers with a role and tools. Use **workflows** to turn that work into repeatable, visible steps.\n\nFrom there, OpenWOP lets you watch the run, decide where people need to approve it, and keep the record. It is a working app *and* an open standard, so what you build remains portable rather than locked to one vendor. Every card below links to the relevant surface; features marked **optional** are add-ons you can enable when the job needs them."
   },
   "howItWorks": {
     "eyebrow": "How it works",
-    "heading": "From a plain-language ask to work done.",
+    "heading": "From a request to a record you can inspect.",
     "steps": [
-      { "title": "Say what you need", "text": "Ask an agent in plain language, the way you'd message a colleague." },
-      { "title": "It does the work", "text": "The agent runs a workflow — steps you design on a visual canvas, or use ready-made." },
-      { "title": "Watch it happen", "text": "Follow every step live, and replay any run to see exactly what it did." },
-      { "title": "Stay in control", "text": "Approve anything sensitive before it runs. Your data and AI keys stay yours." }
+      { "title": "Frame the task", "text": "Ask in plain language, the way you would brief a colleague." },
+      { "title": "Choose the path", "text": "Use an agent, a ready-made workflow, or a visual flow you design yourself." },
+      { "title": "Follow the work", "text": "Watch the run, review the record, and replay from evidence instead of memory." },
+      { "title": "Decide what needs you", "text": "Put people at the approval points that matter. Your data and AI keys stay yours." }
     ]
   },
   "groups": [
     {
       "eyebrow": "Start here",
-      "heading": "The three essentials",
-      "lede": "New here? These three are the heart of it — everything else builds on them.",
+      "heading": "The core loop",
+      "lede": "Use these first. The rest of the catalog helps when your work needs more context, coordination, or control.",
       "features": [
         { "name": "Chat", "tagline": "Talk to your agents in plain language and start work from one place.", "appPath": "/chat", "icon": "chat" },
         { "name": "Agents", "tagline": "Named AI coworkers — each with its own job, schedule, and to-do board.", "appPath": "/agents", "icon": "bot" },
@@ -114,16 +114,16 @@
     }
   ],
   "stats": [
-    { "value": "Free", "label": "to try — no signup needed" },
-    { "value": "40+", "label": "features, built in and ready" },
+    { "value": "One loop", "label": "chat → workflow → reviewable run" },
     { "value": "Open", "label": "standard — no vendor lock-in" },
+    { "value": "Optional", "label": "add-ons when the job calls for them" },
     { "value": "Yours", "label": "data, agents & AI keys" }
   ],
   "cta": {
     "eyebrow": "Get started",
-    "heading": "See it for yourself.",
-    "subheading": "Explore the live app — no setup required — or read the open standard behind it.",
-    "label": "Open the live demo →",
+    "heading": "Start with one real task.",
+    "subheading": "Open the workspace, ask for something useful, and follow the work from request to record.",
+    "label": "Open the workspace →",
     "url": "/chat"
   }
 }

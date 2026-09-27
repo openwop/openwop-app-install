@@ -233,3 +233,11 @@ Three LOW findings from the consolidated `/code-review` were addressed:
 ## RFC verdict (Step 5)
 
 **Host-extension under `/v1/host/openwop-app/notebooks/*` → NO RFC.** Composes implemented ADRs (0011/0041/0042/0043/0046/0053/0054/0072) and rides Accepted RFCs (0005 chat, 0018 vector surface). The `ctx.notebooks` surface and envelopes are non-normative host extensions. **Companion features carry their own gates:** audio/video ingestion (ADR 0085, rides Accepted RFC 0091), podcasts (ADR 0086, blocked on **new RFC 0105** speech-synthesis), inbound MCP (ADR 0087, rides Accepted RFC 0020 + 0078).
+
+> **Correction (2026-07-09, routing):** the notebook chooser originally opened a
+> notebook as in-page `selected` state — no shareable URL, no back/forward. Each
+> notebook now lives at its own route, **`/notebooks/:notebookId`**
+> (`NotebookDetailPage`, the `/projects/:projectId` pattern from the ADR
+> 0079/0058 routing-correction wave); chooser cards are real links, and the
+> workspace's "Back to list" returns via navigation. The project-embedded
+> `ProjectSourcesPanel` is unchanged.

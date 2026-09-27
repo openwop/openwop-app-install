@@ -6,6 +6,7 @@
  * remain on the owning Documents surfaces).
  */
 
+import { Button } from '../../ui/Button.js';
 import { Suspense, useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
@@ -182,7 +183,7 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose }: Props): J
                 // (image inline; everything else as a download link), not markdown.
                 artifact.format.startsWith('image/')
                   ? <img className="artifact-workbench__media-img" src={shown.content} alt={artifact.title} />
-                  : <a className="secondary btn-sm" href={shown.content} target="_blank" rel="noreferrer">{t('artifactOpenFile', { name: artifact.title })}</a>
+                  : <a className="btn secondary btn-sm" href={shown.content} target="_blank" rel="noreferrer">{t('artifactOpenFile', { name: artifact.title })}</a>
               ) : shown?.content ? (
                 // ADR 0153 Phase 0 — the inline preview dispatches through the artifact-renderer
                 // registry (registerArtifactRenderer) rather than a hardcoded type chain: each
@@ -202,11 +203,11 @@ export function ArtifactWorkbench({ artifactId, revisionId, onClose }: Props): J
                         <div className="artifact-workbench__canvas-bar">
                           {editing ? (
                             <>
-                              <button type="button" className="secondary btn-sm" onClick={() => setDraft(shown.content ?? '')}>{t('artifactEditReset')}</button>
-                              <button type="button" className="secondary btn-sm" onClick={() => setEditing(false)}>{t('artifactEditDone')}</button>
+                              <Button variant="secondary" size="sm" onClick={() => setDraft(shown.content ?? '')}>{t('artifactEditReset')}</Button>
+                              <Button variant="secondary" size="sm" onClick={() => setEditing(false)}>{t('artifactEditDone')}</Button>
                             </>
                           ) : (
-                            <button type="button" className="secondary btn-sm" onClick={() => { const src = shown.content ?? ''; setDraft(src); setRenderSrc(src); setEditing(true); }}>{t('artifactEdit')}</button>
+                            <Button variant="secondary" size="sm" onClick={() => { const src = shown.content ?? ''; setDraft(src); setRenderSrc(src); setEditing(true); }}>{t('artifactEdit')}</Button>
                           )}
                         </div>
                       ) : null}

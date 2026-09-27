@@ -1,0 +1,52 @@
+{
+  "name": "feature.bi.nodes",
+  "version": "1.0.0",
+  "description": "BI feature node pack (ADR 0417) — governed-metric reads over ctx.features.bi: list the closed-world metric catalog, fetch the prompt-facing catalog projection, and run ONE metric with bounded params (metricId + groupBy/since/until/bucket — never a filter AST). run-metric additionally emits the result as an interactive.chart artifact envelope so the run/chat workbench renders the numbers. role:action (recorded) — replay reads the recorded result.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "bi",
+    "metrics",
+    "analytics",
+    "chart"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.bi.nodes.list-metrics",
+      "version": "1.0.0",
+      "label": "BI: List Metrics",
+      "description": "Lists the workspace's governed metric catalog over ctx.features.bi.listMetrics. Output: { metrics }. Tenant-guarded read.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.bi.nodes.get-catalog",
+      "version": "1.0.0",
+      "label": "BI: Get Catalog",
+      "description": "Fetches the prompt-facing metric catalog projection (metrics + closed vocabularies + promptMetricList) over ctx.features.bi.getCatalog — the ADR 0358 live-catalog feed for agent prompts. Output: { metrics, vocab, promptMetricList }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.bi.nodes.run-metric",
+      "version": "1.0.0",
+      "label": "BI: Run Metric",
+      "description": "Evaluates ONE governed metric with bounded params over ctx.features.bi.runMetric. Inputs: { metricId, orgId, groupBy?, since?, until?, bucket? }. Output: { result } plus an interactive.chart artifact envelope (bar for grouped, line for bucketed) when points exist. Never accepts a filter AST.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

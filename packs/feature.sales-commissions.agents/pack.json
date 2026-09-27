@@ -1,0 +1,30 @@
+{
+  "name": "feature.sales-commissions.agents",
+  "version": "1.0.1",
+  "description": "Sales Commissions agent pack — an advisory Commissions Analyst whose tools are the feature.sales-commissions.nodes READ nodes over ctx.features.commissions. It answers questions about commission plans and statements (subject-scoped) and PROPOSES plan changes — a human disposes. Tool-allowlisted to reads ONLY: computing or approving a statement are governed admin ops behind the host:commissions:manage HTTP routes, never a direct agent tool call (the CRM stance — payout-affecting writes stay human-gated). Driven through the ONE existing chat, scoped to this agent — no second chat panel.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "commissions", "sales", "incentive", "agent"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.sales-commissions.agents.commissions-analyst",
+      "persona": "Commissions Analyst",
+      "label": "Commissions Analyst Agent",
+      "description": "Reads an org's commission plans and statements (via feature.sales-commissions.nodes over ctx.features.commissions) to answer comp questions and explain how a rep's statement was computed. Proposes plan/accelerator changes; it never computes or approves a statement — those are human-gated admin ops.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/commissions-analyst.md",
+      "toolAllowlist": [
+        "openwop:sales-commissions.list-plans",
+        "openwop:sales-commissions.list-statements"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

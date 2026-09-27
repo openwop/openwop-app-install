@@ -8,7 +8,7 @@
 export const messages = {
   // Panel loading / chrome
   loadingKnowledge: 'Chargement des connaissances…',
-  intro: 'Donnez à {{persona}} ses propres connaissances : des <1>documents</1> qu\'il peut citer, et des <3>notes et faits</3> privés qu\'il rappelle à chaque tour. Configuration locale à l\'hôte — pas le manifeste de protocole de l\'agent.',
+  intro: 'Donnez à {{persona}} ses propres connaissances : des <1>documents</1> qu’il peut citer, et des <3>notes et faits</3> privés qu’il rappelle à chaque tour. Configuration locale à l’hôte — pas le manifeste de protocole de l’agent.',
 
   // Run notices (success)
   collectionCreated: 'Collection créée et liée.',
@@ -22,7 +22,8 @@ export const messages = {
   // Documents section
   documentsTitle: 'Documents',
   documentsHint: 'Collections de connaissances liées — découpées, intégrées et citées lors du rappel.',
-  documentsCreateOrgFirst: 'Créez d\'abord une organisation pour héberger les documents de cet agent.',
+  documentsCreateOrgFirst: 'Créez d’abord une organisation pour héberger les documents de cet agent.',
+  documentsOrgsFailed: 'Impossible de charger vos organisations : nous ne savons pas lesquelles existent. Rien ici ne signifie que vous devez en créer une.',
   organizationLabel: 'Organisation',
   newCollectionNameLabel: 'Nom de la nouvelle collection',
   newCollectionNamePlaceholder: 'Manuel de compte',
@@ -35,7 +36,7 @@ export const messages = {
   unbind: 'Dissocier',
   unbindConfirm: 'Dissocier "{{name}}" de cet agent ? La collection elle-même est conservée.',
   externalUnverified: 'Externe · non vérifié',
-  externalUnverifiedTitle: 'Importé depuis une source externe (par ex. Google Drive ou un déclencheur). Traité comme non fiable — cloisonné lorsque l\'agent le lit, jamais suivi comme instructions (ADR 0038 §C).',
+  externalUnverifiedTitle: 'Importé depuis une source externe (par ex. Google Drive ou un déclencheur). Traité comme non fiable — cloisonné lorsque l’agent le lit, jamais suivi comme instructions (ADR 0038 §C).',
   chunkCount_one: '· {{count}} segment',
   chunkCount_other: '· {{count}} segments',
   removeDocumentLabel: 'Supprimer {{title}}',
@@ -55,13 +56,16 @@ export const messages = {
 
   // Notes section
   notesTitle: 'Notes et faits',
-  notesHint: 'Privé à cet agent ; rappelé automatiquement à chaque tour (non cité).',
+  notesHint: 'Rappelé automatiquement à chaque tour (sans citation). Visible par quiconque peut utiliser cet agent.',
+  // ADR 0664 D2 — the grant is real and intended; the disclosure was missing.
+  audienceDisclosure: 'Toute personne pouvant utiliser {{persona}} peut récupérer ce que vous ajoutez ici, y compris des personnes qui ne font pas partie du projet dont provient une collection. Cet accès ne cesse pas lorsque le vôtre cesse.',
+  audienceBoundWarning: "Cette collection est réservée aux membres de son projet, mais {{persona}} est accessible à tout l'espace de travail. La lier ici rend son contenu récupérable par quiconque peut utiliser cet agent.",
   allowCuratedNotes: 'Autoriser les notes organisées pour cet agent',
   enabled: 'activé',
   disabled: 'désactivé',
-  notesStored_one: '{{count}} mémoire stockée — parcourez-les, ajoutez-en et supprimez-en dans l\'onglet <1>Mémoire</1>.',
-  notesStored_other: '{{count}} mémoires stockées — parcourez-les, ajoutez-en et supprimez-en dans l\'onglet <1>Mémoire</1>.',
-  notesEnablePrompt: 'Activez les notes organisées, puis ajoutez des faits privés que cet agent rappellera dans l\'onglet <1>Mémoire</1>.',
+  notesStored_one: '{{count}} mémoire stockée — parcourez-les, ajoutez-en et supprimez-en dans l’onglet <1>Mémoire</1>.',
+  notesStored_other: '{{count}} mémoires stockées — parcourez-les, ajoutez-en et supprimez-en dans l’onglet <1>Mémoire</1>.',
+  notesEnablePrompt: 'Activez les notes organisées, puis ajoutez des faits privés que cet agent rappellera dans l’onglet <1>Mémoire</1>.',
 
   // Retrieve preview
   retrieveTitle: 'Essayer une récupération',
@@ -71,14 +75,20 @@ export const messages = {
   retrieve: 'Récupérer',
   retrieveNoteChip: 'note',
   retrieveExternalChip: 'externe',
-  retrieveExternalTitle: 'Contenu externe non fiable — cloisonné lorsque l\'agent le lit (ADR 0038 §C).',
+  retrieveExternalTitle: 'Contenu externe non fiable — cloisonné lorsque l’agent le lit (ADR 0038 §C).',
   retrieveNoMatches: 'Aucun résultat — ajoutez des documents ou des notes ci-dessus.',
 
   // Memory tab (ADR 0041)
   memoryFailedToLoadSettings: 'Échec du chargement des paramètres de mémoire.',
-  memoryFailedToEnable: 'Échec de l\'activation des mémoires organisées.',
-  memoryIntro: 'La mémoire à long terme de {{persona}} — faits et préférences qu\'il rappelle lorsque c\'est pertinent. Durable ; privé à cet agent.',
-  memoryCuratedOff: 'Les mémoires organisées sont désactivées pour cet agent. <1>Activez-les</1> pour ajouter des faits qu\'il rappellera.',
+  memoryFailedToEnable: 'Échec de l’activation des mémoires organisées.',
+  memoryIntro: 'La mémoire à long terme de {{persona}} — faits et préférences qu’il rappelle lorsque c’est pertinent. Durable ; privé à cet agent.',
+  memoryCuratedOff: 'Les mémoires organisées sont désactivées pour cet agent. <1>Activez-les</1> pour ajouter des faits qu’il rappellera.',
   memoryAddPlaceholder: 'Le directeur financier préfère les mises à jour de statut le vendredi.',
-  memoryEmptyBody: 'Ajoutez des faits que {{persona}} devrait retenir ; ils sont rappelés lorsque c\'est pertinent.',
+  memoryEmptyBody: 'Ajoutez des faits que {{persona}} devrait retenir ; ils sont rappelés lorsque c’est pertinent.',
+  // KB-UX-3 / ADR 0583 — une source en ÉCHEC est nommée, jamais confondue avec « aucune correspondance ».
+  retrievePartial: 'Une partie de ces connaissances n’a pas pu être fouillée : cette réponse est incomplète.',
+  retrievePartialSources: 'Non fouillé : {{sources}}',
+  retrieveSource_kb: 'documents',
+  retrieveSource_memory: 'notes',
+  errorAnnounce: 'Le panneau de connaissances de l’agent a signalé un problème — le détail est affiché à l’écran.',
 } as const;

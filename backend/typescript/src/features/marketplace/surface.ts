@@ -23,6 +23,16 @@ function project(l: Listing): Record<string, unknown> {
     ...(l.description ? { description: l.description } : {}),
     category: l.category,
     installed: l.installed,
+    // MKT2-B2 — `installed` alone is a misleading half-answer: it means "has a
+    // registry install marker", and the packs mounted from the checkout have
+    // none while the executor runs them. Without `origin` a reader concludes
+    // they are missing and recommends installing them, which cannot succeed.
+    origin: l.origin,
+    // ADR 0660 D7 — `tombstoned` MUST survive the projection. `listListings()` sets
+    // it and BOTH model lanes dropped it, so the recommender recommends a pack the
+    // operator removed. Identical shape to the `origin` fix three lines above: a
+    // projection that silently narrows is how a model gets lied to.
+    ...(l.tombstoned ? { tombstoned: true } : {}),
     ...(l.requiredBy ? { requiredBy: l.requiredBy } : {}),
   };
 }

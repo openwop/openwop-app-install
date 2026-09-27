@@ -1,11 +1,11 @@
 /**
  * Agent-scoped scheduler client (host extension; RFC 0052 reference impl).
  *
- *   GET    /v1/host/openwop-app/scheduler/jobs[?rosterId=]      → { jobs }
- *   POST   /v1/host/openwop-app/scheduler/jobs                  → job
- *   PATCH  /v1/host/openwop-app/scheduler/jobs/:jobId           → job   (enable/disable)
- *   DELETE /v1/host/openwop-app/scheduler/jobs/:jobId
- *   POST   /v1/host/openwop-app/scheduler/jobs/:jobId/trigger   → { runsFired, runId? }
+ *   GET    /host/openwop-app/scheduler/jobs[?rosterId=]      → { jobs }
+ *   POST   /host/openwop-app/scheduler/jobs                  → job
+ *   PATCH  /host/openwop-app/scheduler/jobs/:jobId           → job   (enable/disable)
+ *   DELETE /host/openwop-app/scheduler/jobs/:jobId
+ *   POST   /host/openwop-app/scheduler/jobs/:jobId/trigger   → { runsFired, runId? }
  *
  * Tenant scoping is the backend's job; the client never sends a tenantId.
  */
@@ -27,12 +27,20 @@ export interface ScheduledJob {
   lastRunId?: string;
   /** ISO-8601 wall-clock time of the most recent fire. */
   lastRunAt?: string;
+  /** GEN-PRJ-1 — a fire that consumed its slot and produced NO run (the daemon's
+   *  `recordJobSkipped` record; reasons: budget / workflow-unresolved / dispatch-error). */
+  lastSkippedAt?: string;
+  lastSkipReason?: string;
+  /** Epoch-ms of the next computed fire. ABSENT ⇒ the schedule will not fire:
+   *  either the cron expression didn't parse (inert, ADR 0313 D3) or a
+   *  one-shot ('once') already spent itself. */
+  nextFireAt?: number;
   /** IANA timezone the cadence is expressed in (informational). */
   timezone?: string;
   createdAt?: string;
 }
 
-const base = `${config.baseUrl}/v1/host/openwop-app/scheduler/jobs`;
+const base = `${config.baseUrl}/host/openwop-app/scheduler/jobs`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 /** List jobs, optionally filtered to one roster member (the agent's tab). */

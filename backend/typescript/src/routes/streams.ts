@@ -22,7 +22,14 @@ import { getEventLog } from '../executor/eventLog.js';
 import { loadReadableRun } from '../host/runAccess.js';
 import { mintRunStreamToken } from '../host/runStreamToken.js';
 import { openSseChannel } from '../host/sseChannel.js';
+import { subscribeRunEventTicks } from '../host/runEventBus.js';
 import { projectA2uiDelivery, a2uiDeltaTransportEnabled, type A2uiDeltaState, type A2uiSurfacePayload } from '../host/a2uiSurfaceDelta.js';
+import { negotiatedMajor, v1, vendorTwin } from '../middleware/protocolVersion.js';
+import { projectV2RunIds } from '../host/v2Ids.js';
+import { projectRunSnapshot } from './runs.js';
+import { createLogger } from '../observability/logger.js';
+
+const log = createLogger('routes.streams');
 
 const VALID_MODES: readonly StreamMode[] = ['values', 'updates', 'messages', 'debug'];
 
@@ -40,7 +47,7 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
   // non-owner 404s on loadReadableRun and never gets a token (see
   // host/runStreamToken). Registered before the `/events` route; the extra path
   // segment keeps them distinct regardless of order.
-  app.get('/v1/runs/:runId/events/token', async (req, res, next) => {
+  app.get([v1('/runs/:runId/events/token'), vendorTwin('/runs/:runId/events/token')], async (req, res, next) => {
     try {
       await loadReadableRun(req, storage, req.params.runId);
       res.json({ streamToken: mintRunStreamToken(req.params.runId) });
@@ -49,13 +56,31 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/runs/:runId/events', async (req, res, next) => {
+  app.get(v1('/runs/:runId/events'), async (req, res, next) => {
     try {
       // Authorize the READ before anything streams: scope seam (RFC 0049) +
       // tenant ownership, the same gate the JSON poll / GET / debug-bundle use.
       // Without it the live event stream was the one run-read path with zero
       // authorization (architecture review #1).
       const run = await loadReadableRun(req, storage, req.params.runId);
+      // v2 charter P4-C — the contract this stream is being served under,
+      // captured ONCE here. The SSE lifetime outlives the request's async
+      // context (the gap fetch is scheduled from the appender), so it is passed
+      // to `listEvents` explicitly rather than read off the ambient store.
+      const contract = negotiatedMajor(req);
+      // identity.md §5 — every run id on the major-2 wire is tenant-bound, and
+      // this stream IS a wire. The `res.json` projection wrapper
+      // (`installV2ResponseHygiene`) never sees `res.write`, and the era seat
+      // below translates TYPES and projects the OWNER echo but not the run id —
+      // so a major-2 frame carried the bare storage id while the JSON poll of
+      // the same run carried `default/<id>`. Projected HERE, at the one choke
+      // every path (replay, live, gap, batch) funnels through, reading the
+      // tenant exactly as the wrapper does. Major 1: the record, untouched.
+      // Found from a peer host's live witness (myndhyve-1 `efcf`, 2026-09-05);
+      // no `v2-*` conformance scenario covers SSE, so 55/56 green hid it.
+      const wireTenant = (req as { tenantId?: string }).tenantId ?? 'default';
+      const onWire = (ev: EventRecord): EventRecord =>
+        contract === 2 ? (projectV2RunIds(ev, wireTenant) as EventRecord) : ev;
 
       // Stream-mode validation runs BEFORE content negotiation so that
       // bad streamMode values 400 regardless of Accept header. Otherwise
@@ -75,7 +100,7 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // "give me live updates."
       const acceptHeader = req.header('accept') ?? '';
       if (acceptHeader.includes('application/json') && !acceptHeader.includes('text/event-stream')) {
-        const allEvents = await storage.listEvents(run.runId, { fromSeq: 0, limit: 100_000 });
+        const allEvents = await storage.listEvents(run.runId, { fromSeq: -1, limit: 100_000, contract });
         const isComplete = ['completed', 'failed', 'cancelled'].includes(run.status);
         res.status(200).json({ events: allEvents, isComplete });
         return;
@@ -106,14 +131,20 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // Validate strictly — silently coercing malformed values to 0 would
       // mask broken clients that resume from the start every reconnect.
       const lastEventIdHeader = req.header('last-event-id');
-      let fromSeq = 0;
+      let fromSeq = -1;
       if (lastEventIdHeader != null) {
         if (!/^\d+$/.test(lastEventIdHeader)) {
+          // ADR 0744 — under major 2 `invalid_request` has no registry row (the
+          // negotiator vendor-prefixed it to `openwop-app.invalid_request`); the
+          // registered code for a malformed request field is `validation_error`
+          // with `details.field` naming it (openwop RFC 0213 §A draft). Major 1
+          // keeps the code its clients already read.
+          const v2 = negotiatedMajor(req) === 2;
           throw new OpenwopError(
-            'invalid_request',
+            v2 ? 'validation_error' : 'invalid_request',
             `Last-Event-ID header MUST be a non-negative integer; got "${lastEventIdHeader}"`,
             400,
-            { header: 'Last-Event-ID', value: lastEventIdHeader },
+            v2 ? { field: 'Last-Event-ID' } : { header: 'Last-Event-ID', value: lastEventIdHeader },
           );
         }
         fromSeq = Number(lastEventIdHeader);
@@ -145,14 +176,78 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         req.query.a2uiDelta === '1' && a2uiDeltaTransportEnabled() && bufferMs === 0;
       const a2uiState: A2uiDeltaState = {};
 
-      // Replay buffered events.
-      const buffered = await storage.listEvents(run.runId, { fromSeq, limit: 10_000 });
-      for (const ev of buffered) {
-        if (passesModeFilter(ev, modes)) {
-          if (bufferMs > 0) pendingBatch.push(ev);
-          else deliverEvent(res, ev, a2uiDelta, a2uiState);
+      // CS-WF-4 (ADR 0326) — one delivery WATERMARK merges three sources
+      // (durable replay, in-proc fanout, cross-instance ticks): an event is
+      // delivered at most once, in sequence order per source, regardless of
+      // which path saw it first.
+      let deliveredThrough = fromSeq;
+      let terminalSeen = false;
+      // ADR 0632 (bus finding `4024`) / `events.md` §Stream modes + §SSE frames:
+      // under major 2 a `values` stream carries ONE synthesized `state.snapshot`
+      // (`schemas/v2/run-snapshot.schema.json` — the same projection as the run
+      // GET) after each `updates`-tier transition, never the raw event, and a
+      // resumption (`Last-Event-ID`) MUST emit a snapshot FIRST. The row is
+      // re-read per frame (the connect-time `run` is stale by then) and the
+      // writes are serialized so frames keep log order; a terminal close waits
+      // for the chain so the final snapshot is not written after close. v1
+      // `values` (raw `node.completed`/`run.completed`) is untouched.
+      const valuesSnapshots = contract === 2 && modes.includes('values');
+      let snapshotChain: Promise<void> = Promise.resolve();
+      const queueSnapshot = (seq: number): void => {
+        snapshotChain = snapshotChain.then(async () => {
+          const fresh = await storage.getRun(run.runId);
+          if (res.writableEnded) return;
+          if (!fresh) throw new Error(`run ${run.runId} vanished between the event and its snapshot`);
+          const snap = projectV2RunIds(projectRunSnapshot(fresh), wireTenant);
+          res.write(`id: ${seq}\nevent: state.snapshot\ndata: ${JSON.stringify(snap)}\n\n`);
+        }).catch((err: unknown) => {
+          // MEASURED 2026-09-05 on production: this writer failed on EVERY run while
+          // the local witness stayed green, and the catch here was `() => undefined` —
+          // a `values` stream then delivered nothing but the keep-alive, which a
+          // consumer cannot tell from "no transition yet". A failed snapshot is an
+          // honest `error` frame + close, and a WARN naming the cause, never silence.
+          const message = err instanceof Error ? err.message : String(err);
+          log.warn('values_snapshot_failed', { runId: run.runId, seq, err: message, stack: err instanceof Error ? err.stack : undefined });
+          if (!res.writableEnded) {
+            res.write(`id: ${seq}\nevent: error\ndata: ${JSON.stringify({ error: 'openwop-app.snapshot_failed', message: 'the host could not project the run snapshot for this transition', details: { sequence: seq } })}\n\n`);
+            channel.close();
+          }
+        });
+      };
+      const deliverOnce = (ev: EventRecord): void => {
+        if (ev.sequence <= deliveredThrough) return;
+        deliveredThrough = ev.sequence;
+        if (valuesSnapshots) {
+          if (passesModeFilter(ev, ['updates'])) queueSnapshot(ev.sequence);
+          return;
         }
-      }
+        if (passesModeFilter(ev, modes)) {
+          const wire = onWire(ev);
+          if (bufferMs > 0) pendingBatch.push(wire);
+          else deliverEvent(res, wire, a2uiDelta, a2uiState);
+        }
+      };
+      // Terminal close applies to the LIVE paths only — exactly the pre-CS-WF-4
+      // semantics: REPLAY delivers past a terminal event (the a2ui emit-surface
+      // seam appends ui events AFTER run.completed; a replay must not truncate
+      // them), while a LIVE terminal flushes + ends the stream.
+      const closeIfTerminal = (ev: EventRecord): void => {
+        if (!TERMINAL_EVENT_TYPES.has(ev.type)) return;
+        terminalSeen = true;
+        if (bufferMs > 0) flushBatch();
+        if (valuesSnapshots) { void snapshotChain.then(() => channel.close()); return; }
+        channel.close();
+      };
+
+      // Replay buffered events.
+      // `events.md` §SSE frames: "In `values` mode resumption MUST emit a
+      // `state.snapshot` first." The frame's id is the resumption point itself —
+      // the snapshot reflects state through at least that sequence, and a
+      // consumer that reconnects with it again simply receives it again.
+      if (valuesSnapshots && lastEventIdHeader != null) queueSnapshot(fromSeq);
+
+      const buffered = await storage.listEvents(run.runId, { fromSeq, limit: 10_000, contract });
+      for (const ev of buffered) deliverOnce(ev);
 
       // Aggregation tick — only when bufferMs > 0. Flushes the batch
       // even if no events arrived this interval (the consumer counts
@@ -162,32 +257,60 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
         ? setInterval(() => { flushBatch(); }, bufferMs)
         : null;
 
-      // Subscribe to live events for the same run.
+      // CS-WF-4 — cross-instance path: a tick says durable now holds events up
+      // to `seq`; fetch the gap (fromSeq is exclusive = the watermark) and run
+      // it through the same once-guard. Serialized so overlapping ticks don't
+      // interleave fetches; best-effort (poll fallback remains). Declared
+      // BEFORE the in-proc subscriber, which also routes through it.
+      let tickFetch = Promise.resolve();
+      const scheduleGapFetch = (seq: number): void => {
+        if (terminalSeen || seq <= deliveredThrough) return;
+        tickFetch = tickFetch.then(async () => {
+          if (terminalSeen || seq <= deliveredThrough) return;
+          try {
+            const gap = await storage.listEvents(run.runId, { fromSeq: deliveredThrough, limit: 10_000, contract });
+            for (const ev of gap) { deliverOnce(ev); closeIfTerminal(ev); }
+          } catch { /* durable hiccup — the client's poll fallback covers it */ }
+        });
+      };
+
+      // Subscribe to live events for the same run — same-instance fast path.
+      // Post-merge architect finding (ADR 0326 review): an in-proc event may be
+      // NON-CONTIGUOUS with the watermark when ANOTHER instance appended the
+      // gap (concurrent appenders — the conversation-run case). Delivering it
+      // directly would advance the watermark past the gap and drop those
+      // events permanently. Contiguous ⇒ fast path; non-contiguous ⇒ treat it
+      // as a tick and let the serialized gap fetch deliver IN ORDER.
       const unsubscribe = getEventLog().subscribe((ev) => {
         if (ev.runId !== run.runId) return;
-        if (passesModeFilter(ev, modes)) {
-          if (bufferMs > 0) {
-            pendingBatch.push(ev);
-            // Terminal events force-flush the batch so consumers don't
-            // wait for the next tick to see run.completed.
-            if (TERMINAL_EVENT_TYPES.has(ev.type)) {
-              flushBatch();
-            }
-          } else {
-            deliverEvent(res, ev, a2uiDelta, a2uiState);
-          }
+        // v2 charter P4-C — the in-proc record carries the APPENDER's vocabulary
+        // (this host's native v1 spellings), not the reader's, because
+        // `appendEvent` returns what its caller handed it. Under major 2 that
+        // would put an untranslated name on the wire and make this the one read
+        // that bypasses the seat, which `persistence.md` §"The seat" exists to
+        // forbid — so a major-2 stream takes the fast path OUT and lets the
+        // serialized gap fetch deliver every frame through `listEvents`. The
+        // major-1 branch below is untouched: same bytes, same timing.
+        if (contract === 2) {
+          if (ev.sequence > deliveredThrough) scheduleGapFetch(ev.sequence);
+          return;
         }
-        // Close the stream once we've observed a terminal event — the channel
-        // clears the heartbeat + releases the cap slot and runs the teardown
-        // below (aggregation tick + subscription).
-        if (TERMINAL_EVENT_TYPES.has(ev.type)) channel.close();
+        if (ev.sequence === deliveredThrough + 1) {
+          deliverOnce(ev);
+          closeIfTerminal(ev);
+        } else if (ev.sequence > deliveredThrough) {
+          scheduleGapFetch(ev.sequence);
+        }
       });
+
+      const unsubTicks = await subscribeRunEventTicks(run.runId, scheduleGapFetch);
 
       // Route-specific teardown — run once by the channel on client disconnect
       // or channel.close().
       const routeTeardown = (): void => {
         if (aggTick) clearInterval(aggTick);
         unsubscribe();
+        void unsubTicks().catch(() => undefined); // CS-WF-4 — release the bus sub
       };
       channel.onClose(routeTeardown);
       // The replay `await` above is a window in which the client could have
@@ -195,8 +318,15 @@ export function registerStreamRoutes(app: Express, deps: Deps): void {
       // aggTick/subscription created since would otherwise leak).
       if (channel.closed) { routeTeardown(); return; }
 
-      // If the run is already terminal, flush + close.
+      // If the run is already terminal, flush + close — AFTER the snapshot chain.
+      // MEASURED 2026-09-05 on production: the `values` writer's first step awaits
+      // `storage.getRun`; with in-memory sqlite that resolves inside the
+      // `subscribeRunEventTicks` await above and the frames land before this
+      // close, with Postgres the round trip outlasts the gap and `res.end()` won
+      // every time — a 200, `: open`, and nothing else, for every terminal run.
+      // The local witness could not see it; the rc.54 origin bundle did.
       if (['completed', 'failed', 'cancelled'].includes(run.status)) {
+        if (valuesSnapshots) await snapshotChain;
         if (bufferMs > 0) flushBatch();
         channel.close();
       }

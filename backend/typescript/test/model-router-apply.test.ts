@@ -37,3 +37,27 @@ describe('applyExchangeOverride (ADR 0124 Phase 3 per-exchange switch)', () => {
     expect(applyExchangeOverride(base, { provider: 'openai' })).toEqual({ provider: 'openai', model: 'small' });
   });
 });
+
+// ADR 0610 D4 / MRC-2 — the READ-side guard (the defense-in-depth the write-time
+// allowlist pairs with). A run stamped BEFORE the allowlist shipped — or a tampered
+// / forked stamp — carries `modelRoute.provider` that dispatch reads VERBATIM. It
+// must NOT dispatch a non-routable provider; ignore the whole stamp → fall back to
+// the run's explicit provider/model. (The write gate blocks NEW bad stamps; this
+// guards LEGACY/forked ones — the case resolveModelRoute's stamp-time check misses.)
+describe('effectiveModelTarget — non-routable stamped provider is ignored (ADR 0610 D4)', () => {
+  it('drops a stamp naming an arbitrary vendor and falls back to the run target', () => {
+    // A legacy/tampered stamp → must be IGNORED, not dispatched verbatim.
+    expect(effectiveModelTarget('openai', 'gpt', { modelRoute: { provider: 'evil-exfil-vendor', model: 'x' } }))
+      .toEqual({ provider: 'openai', model: 'gpt' });
+    // `compat` (custom-endpoint) stamp → also ignored.
+    expect(effectiveModelTarget('openai', 'gpt', { modelRoute: { provider: 'compat', model: 'x' } }))
+      .toEqual({ provider: 'openai', model: 'gpt' });
+  });
+  it('still honors a ROUTABLE stamped provider (non-vacuous control)', () => {
+    expect(effectiveModelTarget('openai', 'gpt', { modelRoute: { provider: 'anthropic', model: 'claude' } }))
+      .toEqual({ provider: 'anthropic', model: 'claude' });
+    // a provider-less stamp still keeps the run's explicit provider (unchanged).
+    expect(effectiveModelTarget('openai', 'gpt', { modelRoute: { model: 'big' } }))
+      .toEqual({ provider: 'openai', model: 'big' });
+  });
+});

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/list-invitations.input.json",
+  "title": "OrgsListInvitationsInput",
+  "description": "Runtime `orgId` wins over config.",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string",
+      "maxLength": 200
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,0 +1,51 @@
+{
+  "name": "core.openwop.workflows.kb-reindex",
+  "version": "1.0.1",
+  "kind": "workflow-chain",
+  "description": "The workflow a KB collection's embedding-spec REINDEX (ADR 0398 P3 / ADR 0643 D1b) fires on cadence so the rebuild completes without a browser. One node drains ONE bounded slice — embed the next chunks into the staging namespace, cut over when the staging space is whole — and the host tears the per-collection scheduler job down the moment the job reaches a terminal status (the transient definition is archived while a recorded run replays against it). `orgId`/`collectionId` are supplied by the per-collection job the admin-gated `POST …/reindex` registers; do NOT bind this chain by hand — the surface refuses the node unless a running/paused job already exists AND the executing run is the host-minted `kb.reindex:<tenantId>:<orgId>:<collectionId>` workflow. This lane replaces the SPA's `for (i < 10000) drain()` loop as the DRIVER; the SPA loop stays as the interactive fast path, calling the same route. Resolves on hosts that ship the kb feature + node pack (the OpenWOP reference app).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": ["Knowledge"],
+  "chains": [
+    {
+      "chainId": "kb.reindex",
+      "version": "1.0.1",
+      "label": "KB Reindex",
+      "description": "Drain one slice of an in-progress KB reindex for a collection. Registered per collection by `POST …/collections/:id/reindex` and fired every 10 minutes until the rebuild completes, pauses out of daily embed budget (it resumes by itself on the next tick after the budget rolls over), fails, or is cancelled — then the scheduler job is removed and the transient definition is archived (deleted outright only if no run ever fired against it; ADR 0643 R3).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId", "collectionId"],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The org that owns the collection being reindexed. Supplied by the per-collection scheduler job registered at reindex start — never set this by hand."
+          },
+          "collectionId": {
+            "type": "string",
+            "description": "The KB collection being reindexed. Supplied by the per-collection scheduler job registered at reindex start — never set this by hand."
+          }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          {
+            "id": "drain",
+            "typeId": "feature.kb.nodes.reindex-drain",
+            "name": "Drain one reindex slice",
+            "position": { "x": 0, "y": 0 },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "collectionId": "{{params.collectionId}}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

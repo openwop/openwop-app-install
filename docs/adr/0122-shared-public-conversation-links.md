@@ -1,6 +1,6 @@
 # ADR 0122 — Shared public read-only conversation links
 
-**Status:** in-progress — **Phase 1 implemented** (2026-06-24): the `conversation` ShareResolver — ONE registry entry in the existing Sharing service (no new token recipe / public surface). `validate` (exists-in-tenant via `hostExtStorage().getChatSession`), `load` (read-only transcript snapshot via the ADR 0119 `transcriptToMarkdown` — no parallel renderer; composer-less, untrusted content inert), `card` (title + first line). Mint/resolve/revoke flow through the existing `/sharing/*` + `/shared/:token`. **Phase 2 (owner-only mint) implemented** (2026-06-24): a conversation is OWNER-scoped, so `createLink` now gates a `conversation` mint on `meta.ownerUserId === actor` — only the conversation owner may share it, not any tenant member with workspace:write (an unowned legacy conversation stays mintable). **Phase 3 (snapshot-up-to-marker) implemented** (2026-06-24): the share resolver now threads the link's mint time (`createdAt`) as a `snapshotAt` marker; the conversation `load`/`card` expose ONLY messages created at-or-before it — turns added to the live thread AFTER the link was minted stay private (the public link can't leak the conversation forward). Other resource resolvers ignore the marker (back-compat). The frontend public view (Phase 4) pending. **Date:** 2026-06-23
+**Status:** implemented — **§ Status-correction (2026-07-17, code-verified audit):** both follow-up-audit gaps below SHIPPED — the public `/shared/:token` viewer handles conversations (`features/sharing/SharedSharePage.tsx`, route in `App.tsx`) and the chat Share affordance mints owner-only links (`chat/ChatHeader.tsx` `onShare` → `useConversationActions.tsx` `createLink`, gated on sharing access). Original text retained below. Previously: in-progress — **Phase 1 implemented** (2026-06-24): the `conversation` ShareResolver — ONE registry entry in the existing Sharing service (no new token recipe / public surface). `validate` (exists-in-tenant via `hostExtStorage().getChatSession`), `load` (read-only transcript snapshot via the ADR 0119 `transcriptToMarkdown` — no parallel renderer; composer-less, untrusted content inert), `card` (title + first line). Mint/resolve/revoke flow through the existing `/sharing/*` + `/shared/:token`. **Phase 2 (owner-only mint) implemented** (2026-06-24): a conversation is OWNER-scoped, so `createLink` now gates a `conversation` mint on `meta.ownerUserId === actor` — only the conversation owner may share it, not any tenant member with workspace:write (an unowned legacy conversation stays mintable). **Phase 3 (snapshot-up-to-marker) implemented** (2026-06-24): the share resolver now threads the link's mint time (`createdAt`) as a `snapshotAt` marker; the conversation `load`/`card` expose ONLY messages created at-or-before it — turns added to the live thread AFTER the link was minted stay private (the public link can't leak the conversation forward). Other resource resolvers ignore the marker (back-compat). The frontend public view (Phase 4) pending. **Date:** 2026-06-23
 **Toggle:** `sharing` (rides the existing Sharing feature, ADR 0013) · default **OFF** · `bucketUnit: tenant`. No *new* toggle — a conversation share is a new **resolver type** in the existing Sharing registry, gated by the same `sharing` curtain.
 **Surface:** the existing authed `/v1/host/openwop-app/sharing/*` (mint/list/revoke) + the existing public `/v1/host/openwop-app/shared/:token` (resolve) — host-extension, non-normative. **No new route prefix.**
 **Depends on / composes (all implemented — this is one registry entry + one snapshot, not new infra):**
@@ -129,3 +129,42 @@ about mint/resolve plumbing, not the user-facing flow):
 **Boundary check:** single owner stays `features/sharing` (no second share system); the
 viewer is read-only + unauthenticated; the chat button is owner-only. (Closes OQ-2's
 read-only stance without a public-write surface.)
+
+---
+
+## Correction note — share-viewer discretion + snapshot honesty (2026-07-24, `docs/steward/UX_UPGRADE-sharing.md`)
+
+The public viewer had already been through a polish pass and graded well on
+looks, states and a11y. The gap this benchmark found was **discretion** — the one
+dimension a link-sharing surface cannot be casual about. Details in
+`docs/steward/UX_UPGRADE-sharing.md`.
+
+**SH-G3 — capability-token pages are now `noindex,nofollow`.** `robots.txt`
+serves `Allow: /` with no disallow for token surfaces, and the SPA set no robots
+meta, so a `/shared/:token` URL that leaked into a referrer header, a pasted
+forum post or a screenshot was indexable. The token being unguessable is exactly
+why an index entry would BE the breach. A new shared helper
+(`features/site/siteSeo.ts` → `applyUnlistedHead`) sets the meta and a real
+document title while the page is mounted and **undoes both on unmount** — a naive
+version would leave the entire SPA marked noindex for the rest of the session
+once a visitor followed one share link and navigated on. That undo is
+test-asserted.
+
+**SH-G1/SH-G2 — the viewer now says it is reading a SNAPSHOT.** `resolveShared`
+already loads the resource with `{ snapshotAt: link.createdAt }` and then threw
+that instant away, so a recipient reasonably assumed they were looking at
+something live. It now returns `snapshotAt` (and `expiresAt` when the owner set
+one) — data the token-holder is already authorized to see — and the viewer says
+"Snapshot from <date>" beside the read-only chip. When the server sends no
+instant, the page claims nothing rather than defaulting a date.
+
+**SH-G4 — one `ShareFrame` for all four resource types.** The conversation, quote,
+app-design and slide-deck branches each carried their own copy of the header and
+footer. That duplication is precisely why adding the snapshot line was risky: it
+would have landed in three of four by accident. Fixing it first made SH-G2 a
+one-line change, and the test parameterises across all four types.
+
+Follow-on, deliberately not done here: `/sign/:token` and the booking-manage URL
+are the SAME capability-token shape and still carry no `noindex`. The helper they
+need now exists; adopting it belongs in the `crm` feature's own pass with its own
+ADR note (ADR 0402), not as a drive-by edit from this one.

@@ -1,0 +1,122 @@
+{
+  "name": "core.openwop.workflows.knowledge",
+  "version": "1.2.2",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0190 Phase 2) — the internal Knowledge cluster: employee policy/HR Q&A grounded in your Knowledge Base, compliance review of documents against your policy corpus, and structured document summarization. Distinct from core.openwop.workflows.support: these serve EMPLOYEES over internal policy collections. Authored over shipped node typeIds (feature.kb.nodes.rag + core.ai.chatCompletion + core.flow.if + core.chat.approvalGate + core.openwop.integration.*). Populate the collections in the Knowledge feature — these chains READ the app KB. All tenant values are run parameters (replay-deterministic). EVERY delivery edge is PORT-QUALIFIED (ADR 0583) — a bare edge binds no named port at all. Every external send waits on a human approval gate AND ONLY FIRES ON AN APPROVAL — Slack takes its content BACK OFF THE GATE (`approveEscalation.artifact → escalate.text`, `{truthy approved}`), so it has NO unconditional incoming edge and every non-approving outcome folds it to `skipped`.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": ["Knowledge"],
+  "chains": [
+    {
+      "chainId": "knowledge.policy-qa",
+      "version": "1.2.1",
+      "label": "HR & Policy Q&A Agent",
+      "description": "Answer an employee's policy or HR question grounded ONLY in your internal policy docs (Knowledge Base), citing the specific policy sections. Covered questions are answered as a notification CARRYING THE ANSWER TEXT (`route.value → deliver.message`); questions your policies don't cover route to a human-approved escalation to your people team instead of guessing — the approver SEES the answer (`route.value → approveEscalation.artifact`) and the Slack escalation takes that same content BACK OFF THE GATE (`approveEscalation.artifact → escalate.text`, conditioned `{truthy approved}`). That is the whole gate: reject, time out, or ask for changes and `escalate`'s only upstream folds to `skipped`, so the uncovered-policy answer never reaches #people-ops. Add policy docs under Knowledge to ground it.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query", "orgId", "collectionId"],
+        "properties": {
+          "query": { "type": "string", "description": "The employee's policy/HR question." },
+          "orgId": { "type": "string", "description": "The org whose knowledge base is searched. Must be the same org the collection belongs to, or nothing is found." },
+          "collectionId": { "type": "string", "description": "The KB collection id to search (create via the Knowledge feature or knowledge-sync)." },
+          "escalationChannel": { "type": "string", "default": "#people-ops", "description": "Slack channel for questions the policy corpus does not cover." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "retrieve", "typeId": "feature.kb.nodes.rag", "name": "Retrieve policy passages", "position": { "x": 0, "y": 80 }, "config": {}, "inputs": { "query": "{{params.query}}", "orgId": "{{params.orgId}}", "collectionId": "{{params.collectionId}}" } },
+          { "id": "answer", "typeId": "core.ai.chatCompletion", "name": "Answer with section citations", "position": { "x": 280, "y": 80 }, "config": { "systemPrompt": "You are an internal HR/policy assistant answering an EMPLOYEE. Answer using ONLY the retrieved policy passages, citing the specific policy/section for every statement. Never speculate about policy. If the passages do not cover the question, say exactly that. End with 'COVERED: yes' or 'COVERED: no'. Question: {{params.query}}",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "route", "typeId": "core.flow.if", "name": "Covered by policy?", "position": { "x": 560, "y": 80 }, "config": { "predicate": { "path": "", "op": "contains", "value": "COVERED: yes" } }, "inputs": {} },
+          { "id": "approveEscalation", "typeId": "core.chat.approvalGate", "name": "Approve escalation", "position": { "x": 840, "y": 160 }, "config": { "title": "Approve escalating this uncovered policy question" }, "inputs": {} },
+          { "id": "escalate", "typeId": "core.openwop.integration.slack-message", "name": "Escalate to people team", "position": { "x": 1120, "y": 160 }, "config": { "channel": "{{params.escalationChannel}}" }, "inputs": {} },
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Deliver answer", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "HR & Policy Q&A Agent" } }
+        ],
+        "edges": [
+          { "from": "retrieve.augmentedPrompt", "to": "answer.prompt" },
+          { "from": "answer.content", "to": "route.value" },
+          { "from": "route.value", "to": "deliver.message", "condition": { "type": "equals", "left": "branch", "right": "then" } },
+          { "from": "route.value", "to": "approveEscalation.artifact", "condition": { "type": "equals", "left": "branch", "right": "else" } },
+          { "from": "approveEscalation.artifact", "to": "escalate.text", "condition": { "type": "truthy", "left": "approved" } }
+        ]
+      }
+    },
+    {
+      "chainId": "knowledge.compliance-review",
+      "version": "1.2.1",
+      "label": "Compliance Review vs Your Policies",
+      "description": "Check a document (contract clause, marketing copy, announcement) against your internal policies: retrieve the relevant ones from the Knowledge Base, flag every deviation with the policy it conflicts with, and route flagged documents to a human-approved compliance escalation. Clean documents notify you WITH the review text (`route.value → pass.message`); flagged ones show the reviewer the deviation list (`route.value → approveEscalation.artifact`) and Slack receives that list BACK OFF THE GATE (`approveEscalation.artifact → escalate.text`, conditioned `{truthy approved}`) — so a rejected, timed-out or sent-back review posts nothing to #compliance.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["documentText", "query", "orgId", "collectionId"],
+        "properties": {
+          "documentText": { "type": "string", "description": "The document text to review." },
+          "query": { "type": "string", "description": "What to search the policy library for — usually the document text itself, or a summary of it. Kept separate from the document being reviewed." },
+          "orgId": { "type": "string", "description": "The org whose knowledge base is searched. Must be the same org the collection belongs to, or nothing is found." },
+          "collectionId": { "type": "string", "description": "The KB collection id to search (create via the Knowledge feature or knowledge-sync)." },
+          "escalationChannel": { "type": "string", "default": "#compliance", "description": "Slack channel for flagged documents." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "retrieve", "typeId": "feature.kb.nodes.rag", "name": "Retrieve relevant policies", "position": { "x": 0, "y": 80 }, "config": {}, "inputs": { "query": "{{params.query}}", "orgId": "{{params.orgId}}", "collectionId": "{{params.collectionId}}" } },
+          { "id": "review", "typeId": "core.ai.chatCompletion", "name": "Review vs policies", "position": { "x": 280, "y": 80 }, "config": { "systemPrompt": "You are a compliance reviewer. Compare the document below against ONLY the retrieved policy passages. List every deviation as: the document statement, the policy it conflicts with (cite the section), and the risk. If nothing conflicts, say the document passes. End with 'FLAGS: <count>'. Document: {{params.documentText}}",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "route", "typeId": "core.flow.if", "name": "Any flags?", "position": { "x": 560, "y": 80 }, "config": { "predicate": { "path": "", "op": "contains", "value": "FLAGS: 0" } }, "inputs": {} },
+          { "id": "approveEscalation", "typeId": "core.chat.approvalGate", "name": "Approve escalation", "position": { "x": 840, "y": 160 }, "config": { "title": "Approve escalating this flagged document" }, "inputs": {} },
+          { "id": "escalate", "typeId": "core.openwop.integration.slack-message", "name": "Escalate to compliance", "position": { "x": 1120, "y": 160 }, "config": { "channel": "{{params.escalationChannel}}" }, "inputs": {} },
+          { "id": "pass", "typeId": "feature.notifications.nodes.notify", "name": "Notify: passes", "position": { "x": 840, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Compliance Review vs Your Policies" } }
+        ],
+        "edges": [
+          { "from": "retrieve.augmentedPrompt", "to": "review.prompt" },
+          { "from": "review.content", "to": "route.value" },
+          { "from": "route.value", "to": "pass.message", "condition": { "type": "equals", "left": "branch", "right": "then" } },
+          { "from": "route.value", "to": "approveEscalation.artifact", "condition": { "type": "equals", "left": "branch", "right": "else" } },
+          { "from": "approveEscalation.artifact", "to": "escalate.text", "condition": { "type": "truthy", "left": "approved" } }
+        ]
+      }
+    },
+    {
+      "chainId": "knowledge.doc-summarizer",
+      "version": "1.1.1",
+      "label": "Document Summarizer",
+      "description": "Turn a long document into a structured summary — purpose, key points, decisions/asks, and open questions — delivered as a notification whose BODY is the summary (`summarize.content → notify.message`). Paste the text (or pipe it from another workflow) and get the two-minute version.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["documentText"],
+        "properties": {
+          "documentText": { "type": "string", "description": "The document text to summarize." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          { "id": "summarize", "typeId": "core.ai.chatCompletion", "name": "Structured summary", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Summarize the document below into: Purpose (1 line) · Key points (bullets) · Decisions or asks · Open questions. Be faithful — do not add information. Document: {{params.documentText}}",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Deliver summary", "position": { "x": 280, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Document Summarizer" } }
+        ],
+        "edges": [
+          { "from": "summarize.content", "to": "notify.message" }
+        ]
+      }
+    }
+  ]
+}

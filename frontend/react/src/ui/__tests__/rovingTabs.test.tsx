@@ -4,9 +4,9 @@
  * `[role="tab"]` children (manual activation — focus only, no auto-select),
  * wrap at the ends, skip disabled tabs, and ignore non-nav keys.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
-import { handleTablistKeyDown } from '../rovingTabs.js';
+import { handleTablistKeyDown, handleRadiogroupKeyDown } from '../rovingTabs.js';
 
 function Tabs({ disabledMiddle = false }: { disabledMiddle?: boolean }): JSX.Element {
   return (
@@ -64,5 +64,55 @@ describe('handleTablistKeyDown', () => {
     tabs[0].focus();
     fireEvent.keyDown(tablist, { key: 'ArrowRight' }); // Two is disabled → lands on Three
     expect(document.activeElement).toBe(tabs[2]);
+  });
+});
+
+/**
+ * KTUX-8 — the radiogroup variant. Unlike a tablist it is SELECTION-FOLLOWS-
+ * FOCUS: an arrow moves focus AND selects (fires the radio's onClick). This
+ * pattern was duplicated in two hand-rolled star ratings (community + market),
+ * both with no arrow keys and 5 tab stops.
+ */
+function Radios({ onPick }: { onPick: (n: number) => void }): JSX.Element {
+  return (
+    <div role="radiogroup" onKeyDown={handleRadiogroupKeyDown}>
+      {[1, 2, 3].map((n) => (
+        <button key={n} type="button" role="radio" aria-checked={false} onClick={() => onPick(n)}>{n}</button>
+      ))}
+    </div>
+  );
+}
+
+describe('handleRadiogroupKeyDown', () => {
+  it('ArrowRight moves focus to the next radio AND selects it (selection follows focus)', () => {
+    const onPick = vi.fn();
+    render(<Radios onPick={onPick} />);
+    const group = screen.getByRole('radiogroup');
+    const radios = screen.getAllByRole('radio');
+    radios[0].focus();
+    fireEvent.keyDown(group, { key: 'ArrowRight' });
+    expect(document.activeElement).toBe(radios[1]);
+    expect(onPick).toHaveBeenCalledWith(2); // the tablist handler would NOT select
+  });
+
+  it('ArrowLeft from the first radio wraps to the last and selects it', () => {
+    const onPick = vi.fn();
+    render(<Radios onPick={onPick} />);
+    const group = screen.getByRole('radiogroup');
+    const radios = screen.getAllByRole('radio');
+    radios[0].focus();
+    fireEvent.keyDown(group, { key: 'ArrowLeft' });
+    expect(document.activeElement).toBe(radios[2]);
+    expect(onPick).toHaveBeenCalledWith(3);
+  });
+
+  it('ignores non-navigation keys and does not select', () => {
+    const onPick = vi.fn();
+    render(<Radios onPick={onPick} />);
+    const group = screen.getByRole('radiogroup');
+    const radios = screen.getAllByRole('radio');
+    radios[0].focus();
+    fireEvent.keyDown(group, { key: 'x' });
+    expect(onPick).not.toHaveBeenCalled();
   });
 });

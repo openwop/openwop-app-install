@@ -27,8 +27,8 @@ function Pane({ messages }: { messages: readonly ChatMessagePersisted[] }): JSX.
         : messages.map((m) => {
             const isUser = m.role === 'user';
             return (
-              <div key={m.messageId} style={{ ...MSG_BASE, alignSelf: isUser ? 'flex-end' : 'flex-start', background: isUser ? 'var(--color-accent)' : 'var(--color-surface-2)', color: isUser ? 'var(--color-on-scrim)' : 'var(--color-text)' }}>
-                <span className="u-fs-11" style={{ opacity: 0.7 }}>{m.role}</span>
+              <div key={m.messageId} style={{ ...MSG_BASE, alignSelf: isUser ? 'flex-end' : 'flex-start', background: isUser ? 'var(--clay-text)' : 'var(--paper-2)', color: isUser ? 'var(--color-on-scrim)' : 'var(--ink)' }}>
+                <span className="u-fs-11 u-o-70">{m.role}</span>
                 <div className="u-fs-12">{m.content}</div>
               </div>
             );
@@ -60,11 +60,11 @@ export function CompareView({ currentSessionId, onClose }: { currentSessionId: s
   }, [rightId]);
 
   const others = useMemo(() => sessions.filter((s) => s.sessionId !== currentSessionId), [sessions, currentSessionId]);
-  const col: CSSProperties = { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: '1px solid var(--color-border)' };
+  const col: CSSProperties = { flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0, borderRight: '1px solid var(--rule)' };
 
   return (
     <Modal label={t('compareTitle')} onClose={onClose} className="surface-card">
-      <div style={{ display: 'flex', height: '70vh', minHeight: 0 }}>
+      <div className="compareview-body">
         <div style={col}>
           <h3 className="u-fs-12 u-fw-600 u-p-2">{t('compareThis')}</h3>
           {left === null ? <StateCard loading title={t('artifactLoading')} /> : <Pane messages={left} />}

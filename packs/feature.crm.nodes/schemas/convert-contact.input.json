@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/convert-contact.input.json",
+  "title": "CrmConvertContactInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) — chain-authored config and DAG-forwarded inputs are both legal sources, so nothing is `required` here; the SURFACE refuses a missing key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "contactId": {
+      "type": "string",
+      "description": "The lead to convert. Falls back to `entityId`."
+    },
+    "entityId": {
+      "type": "string",
+      "description": "Trigger-payload alias for `contactId`."
+    },
+    "orgId": {
+      "type": "string",
+      "description": "The org the company + deal are created in."
+    },
+    "companyName": {
+      "type": "string",
+      "description": "Company name; defaults to the contact's `company`."
+    },
+    "pipelineId": {
+      "type": "string",
+      "description": "Target pipeline; defaults to the org's default pipeline."
+    },
+    "dealTitle": {
+      "type": "string",
+      "description": "Deal title; defaults to a derived title."
+    }
+  },
+  "additionalProperties": true
+}

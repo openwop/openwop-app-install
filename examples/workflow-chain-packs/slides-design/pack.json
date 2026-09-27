@@ -1,0 +1,42 @@
+{
+  "name": "core.openwop.workflows.slides-design",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "The slides design workflow (outline → gate → draft → deepen → notes → audit → review), migrated from the deprecated builtin `slides.design` (ADR 0472 P4). Explicit port dataflow + two HITL approval gates (ordering, not conditional). chainId keeps the original id so ignition + replay resolve unchanged; also a gallery-editable chain.",
+  "keywords": ["Slides", "AI"],
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "slides.design",
+      "version": "1.0.0",
+      "label": "Design a slide deck",
+      "description": "Outline → approve → draft → deepen → notes → audit → review.",
+      "parameters": {
+        "type": "object", "additionalProperties": false, "required": ["brief"],
+        "properties": { "brief": { "type": "string", "description": "What the deck should argue, to whom (audience, occasion, the ask)." } }
+      },
+      "dag": {
+        "nodes": [
+          { "id": "outline", "typeId": "feature.slides.nodes.outline", "name": "Outline", "config": { "provider": "anthropic", "model": "claude-sonnet-4-6" }, "inputs": { "brief": "{{params.brief}}" } },
+          { "id": "outlineGate", "typeId": "core.approvalGate", "name": "Review the deck outline", "config": { "title": "Review the deck outline", "prompt": "Approve the narrative before the deck is generated — each section slide is one planned slide; its speaker notes carry the intent and key points.", "requiredApprovals": 1 } },
+          { "id": "draft", "typeId": "feature.slides.nodes.draft", "name": "Draft", "config": { "provider": "anthropic", "model": "claude-sonnet-4-6" } },
+          { "id": "deepen", "typeId": "feature.slides.nodes.deepen", "name": "Deepen", "config": { "provider": "anthropic", "model": "claude-sonnet-4-6", "maxSlides": 3, "minBlocks": 3 } },
+          { "id": "notes", "typeId": "feature.slides.nodes.notes", "name": "Speaker notes", "config": { "provider": "anthropic", "model": "claude-sonnet-4-6" } },
+          { "id": "audit", "typeId": "feature.slides.nodes.audit", "name": "Audit" },
+          { "id": "review", "typeId": "core.approvalGate", "name": "Review the deck", "config": { "title": "Review the deck", "prompt": "Review the generated deck — accept it, or reject with what to change.", "requiredApprovals": 1 } }
+        ],
+        "edges": [
+          { "from": "outline", "to": "outlineGate.input", "triggerRule": "all_success" },
+          { "from": "outlineGate.action", "to": "draft.approval", "triggerRule": "all_success" },
+          { "from": "outline.outline", "to": "draft.outline", "triggerRule": "all_success" },
+          { "from": "draft.artifact", "to": "deepen.artifact", "triggerRule": "all_success" },
+          { "from": "deepen.artifact", "to": "notes.artifact", "triggerRule": "all_success" },
+          { "from": "notes.artifact", "to": "audit.artifact", "triggerRule": "all_success" },
+          { "from": "deepen.warning", "to": "audit.deepenWarning", "triggerRule": "all_success" },
+          { "from": "notes.warning", "to": "audit.notesWarning", "triggerRule": "all_success" },
+          { "from": "audit", "to": "review.input", "triggerRule": "all_success" }
+        ]
+      }
+    }
+  ]
+}

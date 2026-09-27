@@ -444,7 +444,7 @@ export async function briefExtract(ctx) {
 
 /* ─── default export ────────────────────────────────────── */
 
-const nodes = {
+export const nodes = {
   'ads.brief.extract': briefExtract,
   'ads.tracking.link': trackingLink,
 };

@@ -15,6 +15,10 @@ import { useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 
 interface ChartSpec { chartType: string; data: { labels?: unknown; datasets?: unknown }; options?: unknown }
+
+/** The renderer's ACTUAL closed world — the Visualizer agent prompt is pinned
+ *  to this list (XCH-IA-1, LLM-EXCHANGE-AUDIT Wave 3); others fall back raw. */
+export const SUPPORTED_CHART_TYPES: readonly string[] = ['bar', 'line'];
 interface Series { label: string; values: number[] }
 
 // IART-5: bound the SVG node count — a huge `data` array would otherwise mint an enormous
@@ -44,10 +48,22 @@ function parse(content: string): { chartType: string; labels: string[]; series: 
 
 const W = 480, H = 260, PAD = 32;
 
+/** Series ramp — the app's categorical accent tokens (DESIGN.md §3), cycled.
+ *  Token-only so both themes stay legible; hue-spaced so adjacent series
+ *  differ by hue, not just lightness (ART-1). */
+const SERIES_TOKENS = [
+  'var(--cat-flow)',
+  'var(--cat-data)',
+  'var(--cat-control)',
+  'var(--cat-ai)',
+  'var(--cat-integration)',
+] as const;
+const seriesColor = (i: number): string => SERIES_TOKENS[i % SERIES_TOKENS.length]!;
+
 export function ChartRenderer({ content }: { content: string }): JSX.Element {
   const { t } = useTranslation('chat');
   const chart = useMemo(() => parse(content), [content]);
-  if (!chart || (chart.chartType !== 'bar' && chart.chartType !== 'line')) {
+  if (!chart || !SUPPORTED_CHART_TYPES.includes(chart.chartType)) {
     // Unsupported/malformed → show the raw spec (inert, escaped by React).
     return <pre className="msgrender-code-pre"><code>{content}</code></pre>;
   }
@@ -60,26 +76,45 @@ export function ChartRenderer({ content }: { content: string }): JSX.Element {
 
   const ariaLabel = t('chartAria', { type: chart.chartType, series: chart.series.length, points: chart.labels.length });
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={ariaLabel} style={{ width: '100%', height: 'auto', maxHeight: '60vh' }}>
+    <figure className="chart-figure">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={ariaLabel} className="chartrender-img">
       {/* SVG 1.1 a11y: <title>/<desc> as the first children give AT a text alternative. */}
       <title>{ariaLabel}</title>
       <desc>{ariaLabel}</desc>
       {/* axes */}
-      <line x1={PAD} y1={PAD} x2={PAD} y2={H - PAD} stroke="var(--color-border)" />
-      <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="var(--color-border)" />
+      <line x1={PAD} y1={PAD} x2={PAD} y2={H - PAD} stroke="var(--rule)" />
+      <line x1={PAD} y1={H - PAD} x2={W - PAD} y2={H - PAD} stroke="var(--rule)" />
       {chart.chartType === 'bar'
-        ? chart.series[0]!.values.map((v, i) => {
-            const bw = plotW / (n * 1.5);
-            return <rect key={i} x={x(i) - bw / 2} y={y(v)} width={bw} height={Math.max(0, H - PAD - y(v))} fill="var(--color-accent)" />;
-          })
+        ? chart.series.map((s, si) =>
+            // ALL datasets render as grouped bars (the old branch silently
+            // dropped every series but the first — ART-1's data-honesty gap).
+            s.values.map((v, i) => {
+              const group = plotW / (n * 1.5);
+              const bw = group / chart.series.length;
+              const gx = x(i) - group / 2 + bw * si;
+              return <rect key={`${si}-${i}`} x={gx} y={y(v)} width={Math.max(1, bw - 1)} height={Math.max(0, H - PAD - y(v))} fill={seriesColor(si)} />;
+            }))
         : chart.series.map((s, si) => (
-            <polyline key={si} fill="none" stroke="var(--color-accent)" strokeWidth={2}
+            <polyline key={si} fill="none" stroke={seriesColor(si)} strokeWidth={2}
               points={s.values.map((v, i) => `${x(i)},${y(v)}`).join(' ')} />
           ))}
       {/* x labels (React-escaped) */}
       {chart.labels.map((l, i) => (
-        <text key={i} x={x(i)} y={H - PAD + 14} textAnchor="middle" fontSize={10} fill="var(--color-text)">{l}</text>
+        <text key={i} x={x(i)} y={H - PAD + 14} textAnchor="middle" fontSize={10} fill="var(--ink)">{l}</text>
       ))}
     </svg>
+    {/* Legend — only when there is something to disambiguate. Color swatch is
+        aria-hidden; the SERIES NAME is the accessible signal (never color-alone). */}
+    {chart.series.length > 1 && (
+      <figcaption className="chart-legend">
+        {chart.series.map((s, si) => (
+          <span key={si} className="chart-legend__item">
+            <span className="chart-legend__swatch" aria-hidden style={{ background: seriesColor(si) }} />
+            {s.label}
+          </span>
+        ))}
+      </figcaption>
+    )}
+    </figure>
   );
 }

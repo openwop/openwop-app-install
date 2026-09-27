@@ -20,6 +20,7 @@ import {
   markSuspended,
   popReady,
   releaseDownstream,
+  skipReasonFor,
   topologicalOrder,
 } from '../src/executor/scheduler.js';
 import type { WorkflowDefinition } from '../src/executor/types.js';
@@ -293,6 +294,154 @@ describe('releaseDownstream', () => {
   });
 });
 
+describe('edge conditions are control-flow, not just data-flow (ADR 0208)', () => {
+  // A conditioned edge is "a branch that fires only when the condition holds"
+  // (workflow-chain-packs.md §edges). A completed source whose edge condition
+  // is FALSE is a not-taken branch: the target must be SKIPPED, not run with
+  // empty inputs. Before ADR 0208 the executor evaluated the condition only for
+  // input contribution, so both branches of a router ran.
+  const router = (): WorkflowDefinition => ({
+    workflowId: 'router',
+    nodes: [
+      { nodeId: 'A', typeId: 't' },
+      { nodeId: 'major', typeId: 't' },
+      { nodeId: 'routine', typeId: 't' },
+    ],
+    edges: [
+      { edgeId: 'e1', sourceNodeId: 'A', targetNodeId: 'major', condition: { path: 'sev', op: 'eq', value: 'major' } },
+      { edgeId: 'e2', sourceNodeId: 'A', targetNodeId: 'routine', condition: { path: 'sev', op: 'neq', value: 'major' } },
+    ],
+  });
+
+  it('runs ONLY the matching branch; the other is skipped', () => {
+    const d = router();
+    const g = buildGraph(d);
+    const s = freshSnapshot(d);
+    markCompleted('A', { sev: 'routine' }, s);
+    releaseDownstream('A', g, s);
+    expect(s.nodeState.get('routine')).toBe('ready');
+    expect(s.nodeState.get('major')).toBe('skipped');
+  });
+
+  it('the OTHER value routes the OTHER way', () => {
+    const d = router();
+    const g = buildGraph(d);
+    const s = freshSnapshot(d);
+    markCompleted('A', { sev: 'major' }, s);
+    releaseDownstream('A', g, s);
+    expect(s.nodeState.get('major')).toBe('ready');
+    expect(s.nodeState.get('routine')).toBe('skipped');
+  });
+
+  it('a merge after a route fires on the taken branch (skipped sibling does not block all_success)', () => {
+    // A → {major→mNode, routine→rNode} → merge. Only one branch is taken; the
+    // merge (default all_success) must still run — the skipped sibling counts
+    // as terminal-not-failed, so `anyCompleted` on the taken branch releases it.
+    const d: WorkflowDefinition = {
+      workflowId: 'merge',
+      nodes: [
+        { nodeId: 'A', typeId: 't' },
+        { nodeId: 'mNode', typeId: 't' },
+        { nodeId: 'rNode', typeId: 't' },
+        { nodeId: 'merge', typeId: 't' },
+      ],
+      edges: [
+        { edgeId: 'e1', sourceNodeId: 'A', targetNodeId: 'mNode', condition: { path: 'sev', op: 'eq', value: 'major' } },
+        { edgeId: 'e2', sourceNodeId: 'A', targetNodeId: 'rNode', condition: { path: 'sev', op: 'neq', value: 'major' } },
+        { edgeId: 'e3', sourceNodeId: 'mNode', targetNodeId: 'merge' },
+        { edgeId: 'e4', sourceNodeId: 'rNode', targetNodeId: 'merge' },
+      ],
+    };
+    const g = buildGraph(d);
+    const s = freshSnapshot(d);
+    markCompleted('A', { sev: 'routine' }, s);
+    releaseDownstream('A', g, s);
+    expect(s.nodeState.get('mNode')).toBe('skipped');
+    expect(s.nodeState.get('rNode')).toBe('ready');
+    markCompleted('rNode', { ok: true }, s);
+    releaseDownstream('rNode', g, s);
+    expect(s.nodeState.get('merge')).toBe('ready');
+  });
+
+  // ECR-2 — the effective-`skipped` folding must compose with EVERY trigger
+  // rule, not just the default all_success. A conditioned edge whose condition
+  // is false makes the source read as `skipped` for that edge; each rule then
+  // applies its own semantics over the effective states.
+  const oneBranch = (rule: 'all_success' | 'any_success' | 'all_complete' | 'none_failed' | 'any_failed'): WorkflowDefinition => ({
+    workflowId: 'rule-cond',
+    nodes: [
+      { nodeId: 'A', typeId: 't' },
+      { nodeId: 'B', typeId: 't' },
+    ],
+    edges: [{ edgeId: 'e1', sourceNodeId: 'A', targetNodeId: 'B', triggerRule: rule, condition: { path: 'go', op: 'truthy' } }],
+  });
+  const run = (rule: Parameters<typeof oneBranch>[0], go: boolean) => {
+    const d = oneBranch(rule);
+    const g = buildGraph(d);
+    const s = freshSnapshot(d);
+    markCompleted('A', { go }, s);
+    releaseDownstream('A', g, s);
+    return s.nodeState.get('B');
+  };
+
+  it('a false condition folds to `skipped`; each rule then applies its own semantics', () => {
+    // Sole incoming edge inactive (condition false) → the source reads as
+    // `skipped` for that edge. Rules that require a COMPLETION cannot be
+    // satisfied → skip; rules that only require "all terminal, none failed"
+    // treat the condition-skip as an acceptable terminal → fire; any_failed
+    // needs a failure it never gets → skip. (This subtlety is why ECR-2 pins
+    // the full matrix, not just all_success.)
+    expect(run('all_success', false)).toBe('skipped'); // needs anyCompleted
+    expect(run('any_success', false)).toBe('skipped'); // needs anyCompleted
+    expect(run('any_failed', false)).toBe('skipped'); // needs a failure
+    expect(run('all_complete', false)).toBe('ready'); // terminal reached
+    expect(run('none_failed', false)).toBe('ready'); // terminal, none failed
+  });
+
+  it('a true condition fires the branch under every trigger rule', () => {
+    expect(run('all_success', true)).toBe('ready');
+    expect(run('any_success', true)).toBe('ready');
+    expect(run('none_failed', true)).toBe('ready');
+    expect(run('all_complete', true)).toBe('ready');
+    // any_failed needs a FAILURE, not a success — a completed+true branch is
+    // terminal-not-failed, so any_failed correctly skips it.
+    expect(run('any_failed', true)).toBe('skipped');
+  });
+
+  // ECR-4 — skip observability: releaseDownstream reports WHY a node skipped.
+  it('reports skip reason (condition vs upstream) via skipReasonFor + onSkip', () => {
+    const d: WorkflowDefinition = {
+      workflowId: 'skip-reason',
+      nodes: [
+        { nodeId: 'A', typeId: 't' },
+        { nodeId: 'cond', typeId: 't' },
+        { nodeId: 'fail', typeId: 't' },
+        { nodeId: 'down', typeId: 't' },
+      ],
+      edges: [
+        { edgeId: 'e1', sourceNodeId: 'A', targetNodeId: 'cond', condition: { path: 'go', op: 'truthy' } },
+        { edgeId: 'e2', sourceNodeId: 'A', targetNodeId: 'fail' },
+        { edgeId: 'e3', sourceNodeId: 'fail', targetNodeId: 'down' },
+      ],
+    };
+    const g = buildGraph(d);
+    const s = freshSnapshot(d);
+    const skips: Array<[string, string]> = [];
+    markCompleted('A', { go: false }, s);
+    releaseDownstream('A', g, s, (id, reason) => skips.push([id, reason]));
+    // `cond` skipped because its edge condition is false; `fail` ran (unconditioned).
+    expect(s.nodeState.get('cond')).toBe('skipped');
+    expect(skips).toContainEqual(['cond', 'condition']);
+    expect(skipReasonFor('cond', g, s)).toBe('condition');
+    // Now fail the unconditioned branch → `down` skips for an UPSTREAM reason.
+    markFailed('fail', { code: 'x', message: 'boom' }, s);
+    const upstreamSkips: Array<[string, string]> = [];
+    releaseDownstream('fail', g, s, (id, reason) => upstreamSkips.push([id, reason]));
+    expect(s.nodeState.get('down')).toBe('skipped');
+    expect(upstreamSkips).toContainEqual(['down', 'upstream']);
+  });
+});
+
 describe('inspectDisposition', () => {
   it('reports done:completed when all nodes complete', () => {
     const d = defOf(
@@ -363,5 +512,49 @@ describe('popReady — concurrency cap honored', () => {
     expect(snapshot.nodeState.get(batch1[0]!)).toBe('running');
     const batch2 = popReady(2, snapshot);
     expect(batch2).toHaveLength(1);
+  });
+});
+
+// ── Grade live-verify 2026-07-09: parallel edges between one (source,target)
+// pair are LEGAL (the input assembly delivers every edge) — raw-edge indegree
+// counting misreported them as a cycle, which broke the shipped ADR 0325
+// app-builder.design chain (deepen→audit carries artifact + warning). ──
+describe('topologicalOrder — parallel edges (one source→target pair, two ports)', () => {
+  it('orders a linear chain with a dual-port edge instead of reporting a cycle', async () => {
+    const { topologicalOrder, buildGraph } = await import('../src/executor/scheduler.js');
+    const def = {
+      workflowId: 'parallel-edge-test',
+      nodes: [{ nodeId: 'a' }, { nodeId: 'b' }, { nodeId: 'c' }],
+      edges: [
+        { edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'artifact', targetInput: 'artifact', triggerRule: 'all_success' },
+        { edgeId: 'e2', sourceNodeId: 'a', targetNodeId: 'b', sourceOutput: 'warning', targetInput: 'upstreamWarning', triggerRule: 'all_success' },
+        { edgeId: 'e3', sourceNodeId: 'b', targetNodeId: 'c', triggerRule: 'all_success' },
+      ],
+    } as never;
+    const order = topologicalOrder(def, buildGraph(def));
+    expect(order).toEqual(['a', 'b', 'c']);
+  });
+
+  it('the SHIPPED app-builder.design chain passes graph validation (the live-caught regression)', async () => {
+    const { topologicalOrder, buildGraph } = await import('../src/executor/scheduler.js');
+    // ADR 0346 4a — the builtin now expands from the workflows chain pack;
+    // node ids carry the expansion prefix, so assert by suffix order.
+    const { buildDesignWorkflowDefinition } = await import('../src/features/app-builder/designWorkflow.js');
+    const def = buildDesignWorkflowDefinition();
+    const order = topologicalOrder(def, buildGraph(def));
+    expect(order.map((id) => id.split('_').pop())).toEqual(['intake', 'clarify', 'prd', 'research', 'plan', 'render', 'deepen', 'audit', 'auditRecord', 'review']); // AI-08: intake+clarify prepended (DECIDE-3)
+  });
+
+  it('still detects a REAL cycle', async () => {
+    const { topologicalOrder, buildGraph } = await import('../src/executor/scheduler.js');
+    const def = {
+      workflowId: 'real-cycle',
+      nodes: [{ nodeId: 'a' }, { nodeId: 'b' }],
+      edges: [
+        { edgeId: 'e1', sourceNodeId: 'a', targetNodeId: 'b', triggerRule: 'all_success' },
+        { edgeId: 'e2', sourceNodeId: 'b', targetNodeId: 'a', triggerRule: 'all_success' },
+      ],
+    } as never;
+    expect(() => topologicalOrder(def, buildGraph(def))).toThrow(/cycle/);
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "feature.tool-output-compaction.nodes",
-  "version": "1.0.0",
-  "description": "Tool-output compaction node (ADR 0099) — an explicit mid-graph node that compacts a verbose JSON payload over the ctx.features['tool-output-compaction'] surface (one shared kernel). Structure-preserving by default; optional lossy array-elision. Pure + deterministic ⇒ recorded output is replay-safe.",
+  "version": "1.2.0",
+  "description": "Tool-output compaction node — an explicit mid-graph node that compacts a verbose JSON payload over the ctx.features['tool-output-compaction'] surface (one shared kernel). The default lossless mode DELETES INSIGNIFICANT WHITESPACE ONLY and changes no other byte; the optional lossy mode drops empty fields and elides long arrays, each disclosed in the payload (ADR 0604). Pure + deterministic ⇒ recorded output is replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "tool-output-compaction", "tokens", "compaction"],
@@ -9,10 +9,11 @@
   "nodes": [
     {
       "typeId": "feature.tool-output-compaction.nodes.compact",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Compact Tool Output",
-      "description": "Compacts a JSON string (minify + drop empty fields; optional lossy array-elision) to cut token spend before it reaches a model. Non-JSON passes through untouched. Over ctx.features['tool-output-compaction'].",
+      "description": "Compacts a JSON string to cut token spend before it reaches a model. The default lossless mode deletes insignificant whitespace ONLY — no field is added or removed and no other byte changes. The optional lossy mode additionally drops structurally-empty fields (disclosed as _emptied) and elides long arrays (disclosed as _elided). Non-JSON passes through untouched. Over ctx.features['tool-output-compaction'].",
       "category": "transform",
+      "inputSchemaRef": "schemas/compact.input.json",
       "role": "action",
       "capabilities": []
     }

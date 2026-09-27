@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/sign-request.input.json",
+  "title": "CrmSignRequestInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) — chain-authored config and DAG-forwarded inputs are both legal sources, so nothing is `required` here; the SURFACE refuses a missing key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "signRequestId": {
+      "type": "string",
+      "description": "Explicit `sign-request:`-prefixed id (ADR 0162). Omitted, the node derives `sign-request:${runId}:${nodeId}` — a PER-RUN dedupe key (a retried node converges), not a cross-run fork guard; the `side-effect` classification is the guard.",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "orgId": {
+      "type": "string",
+      "description": "Owning org."
+    },
+    "target": {
+      "type": "object",
+      "required": [
+        "kind",
+        "id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "commerce_quote",
+            "document"
+          ]
+        },
+        "id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "description": "What is signed; content-hashed (SHA-256) at request time."
+    },
+    "signers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "order": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

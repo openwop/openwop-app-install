@@ -10,6 +10,7 @@
  * `ui/` cohesion: surface-card / surface-form / SelectField / Notice / StateCard +
  * the `proj-*` tile/lineup primitives; tokens only.
  */
+import { Button } from '../../ui/Button.js';
 import { useEffect, useMemo, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -18,6 +19,7 @@ import { Notice } from '../../ui/Notice.js';
 import { SelectField } from '../../ui/Field.js';
 import { MessageSquareIcon, SparklesIcon, UserIcon, ZapIcon } from '../../ui/icons/index.js';
 import { listRoster, type RosterEntry } from '../../agents/rosterClient.js';
+import { loadErrorMessage } from '../../client/loadErrorMessage.js';
 import { ensureProjectChat, updateChatCadence, type Project, type TurnPolicy } from './projectsClient.js';
 
 export function ProjectChatTab({ project, canWrite, onSaved }: { project: Project; canWrite: boolean; onSaved: (p: Project) => void }): JSX.Element {
@@ -26,7 +28,13 @@ export function ProjectChatTab({ project, canWrite, onSaved }: { project: Projec
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [roster, setRoster] = useState<RosterEntry[]>([]);
-  useEffect(() => { void listRoster().then(setRoster).catch(() => undefined); }, []);
+  // The roster read resolves agent ids to persona NAMES. Swallowed, a failure left
+  // `roster` empty and the `?? rosterId` fallback below rendered every agent as its raw
+  // id — a label that looks like data. Worse, that fallback is IDENTICAL to the
+  // legitimate "this agent is not in the roster" case, so nothing on screen could tell
+  // "unknown agent" from "we never read the roster".
+  const [rosterFailed, setRosterFailed] = useState(false);
+  useEffect(() => { void listRoster().then((r) => { setRoster(r); setRosterFailed(false); }).catch(() => setRosterFailed(true)); }, []);
 
   const agentMembers = useMemo(() => (project.members ?? [])
     .filter((m) => m.ref.startsWith('agent:'))
@@ -41,7 +49,9 @@ export function ProjectChatTab({ project, canWrite, onSaved }: { project: Projec
     try {
       const { sessionId } = await ensureProjectChat(project.id);
       navigate(`/chat?conversation=${encodeURIComponent(sessionId)}`);
-    } catch (e) { setError(e instanceof Error ? e.message : t('openChatError')); setBusy(false); }
+    // PROJ-UX-1 — the localized classification, never the raw dev-string
+    // (`ensureProjectChat failed (403)`) this rendered in all four locales.
+    } catch (e) { setError(e instanceof Error ? loadErrorMessage(t, e) : t('openChatError')); setBusy(false); }
   };
 
   return (
@@ -56,6 +66,9 @@ export function ProjectChatTab({ project, canWrite, onSaved }: { project: Projec
         {agentMembers.length > 0 ? (
           <div className="u-flex u-flex-col u-gap-2">
             <span className="proj-eyebrow">{t('inTheRoom')}</span>
+            {/* Names below are raw ids, and say so rather than passing as personas. The
+                chat itself still works, so this warns without blocking. */}
+            {rosterFailed ? <Notice variant="warning" announce={t('rosterFailedNotice')}>{t('rosterFailedNotice')}</Notice> : null}
             <div className="proj-lineup">
               {people > 0 && (
                 <span className="u-flex u-items-center u-gap-2">
@@ -76,17 +89,28 @@ export function ProjectChatTab({ project, canWrite, onSaved }: { project: Projec
         )}
 
         {error ? <Notice variant="error">{error}</Notice> : null}
-        {/* Opening the chat reconciles the room's lineup (a write), so it's
-            write-gated (ADR 0063); a read-only member sees why instead of a 403. */}
-        {canWrite ? (
-          <div className="action-bar u-justify-start">
-            <button type="button" className="primary" disabled={busy} onClick={() => void open()}>
-              <MessageSquareIcon size={14} /> {busy ? t('opening') : t('openProjectChat')}
-            </button>
-          </div>
-        ) : (
-          <Notice variant="info"><Trans i18nKey="openChatNeedsWrite" ns="projects" components={{ 0: <code /> }} /></Notice>
-        )}
+        {/* ADR 0608 D8 (`CPC-4`) — CORRECTED 2026-08-24. This used to render only
+            `if (canWrite)`, with a notice telling a read-only member that "opening
+            the project chat needs edit access (workspace:write) in this project's
+            org". The SERVER gates `POST /:id/chat` on project READ and says so
+            in-line (`projects/routes.ts:418-422`), and ADR 0054 D3 is explicit that
+            a private project's chat is readable by its MEMBERS. So the copy stated
+            a rule the server does not enforce, and it locked out exactly the
+            population `visibility:'private'` + membership exists to serve — "the
+            shared room isn't shared", which is the defect ADR 0054's own D3
+            correction closed server-side, reintroduced on the client.
+
+            The old justification ("opening reconciles the lineup, a write") was the
+            frontend RE-DERIVING an authority rule, which is the one thing ADR 0063
+            exists to stop (`routes.ts:127`: "the FE never re-derives the rule").
+            The page the caller is already looking at required project read; so does
+            this button. The CADENCE EDITOR below stays `canWrite`-gated — that one
+            really is a write (`PATCH /projects/:id`). */}
+        <div className="action-bar u-justify-start">
+          <Button variant="primary" disabled={busy} onClick={() => void open()}>
+            <MessageSquareIcon size={14} /> {busy ? t('opening') : t('openProjectChat')}
+          </Button>
+        </div>
       </div>
 
       {agentMembers.length > 0 && canWrite ? <CadenceEditor project={project} agentMembers={agentMembers} onSaved={onSaved} /> : null}
@@ -117,7 +141,26 @@ function CadenceEditor({ project, agentMembers, onSaved }: { project: Project; a
         turnPolicy: { rounds, order, synthesize },
       });
       onSaved(updated); setSaved(true);
-    } catch (e) { setError(e instanceof Error ? e.message : t('cadenceSaveError')); }
+    } catch (e) {
+      // PROJ-UX-1 — the server's cadence refusals are TYPED (the client now
+      // carries `status` + the parsed envelope); each gets its own localized
+      // sentence instead of the raw `updateChatCadence failed (400)` that also
+      // discarded the reason.
+      // 422 = moderator not a project agent member (the D6 invariant);
+      // 404 with `details.moderatorRosterId` = moderator gone from the roster
+      //     (that detail rides ONLY the roster arm — adversarial-review F4: a
+      //     bare 404 is the PROJECT arm: deleted, or access revoked, and calling
+      //     that "moderator missing" sent the user hunting the wrong object);
+      // 400 = the cadence patch itself was rejected as invalid.
+      const err = e && typeof e === 'object' ? (e as { status?: unknown; body?: { details?: { moderatorRosterId?: unknown } } }) : undefined;
+      const status = err?.status;
+      setError(
+        status === 422 ? t('cadenceModeratorNotMember')
+          : status === 404 && err?.body?.details?.moderatorRosterId !== undefined ? t('cadenceModeratorMissing')
+            : status === 404 ? t('cadenceProjectGone')
+              : status === 400 ? t('cadenceRejected')
+                : e instanceof Error ? loadErrorMessage(t, e) : t('cadenceSaveError'));
+    }
     finally { setBusy(false); }
   };
 
@@ -128,7 +171,7 @@ function CadenceEditor({ project, agentMembers, onSaved }: { project: Project; a
         {t('cadenceHelp', { max: formatNumber(Math.min(8, agentMembers.length)) })}
       </p>
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {saved ? <Notice variant="success">{t('cadenceSaved')}</Notice> : null}
+      {saved ? <Notice variant="success" announce={t('cadenceSaved')}>{t('cadenceSaved')}</Notice> : null}
       <div className="surface-form">
         <SelectField label={t('moderatorLabel')} value={moderator} onChange={(e) => setModerator(e.target.value)}>
           <option value="">{t('moderatorNone')}</option>
@@ -140,12 +183,12 @@ function CadenceEditor({ project, agentMembers, onSaved }: { project: Project; a
         <SelectField label={t('orderLabel')} value={order} onChange={(e) => setOrder(e.target.value as TurnPolicy['order'])}>
           {ORDERS.map((o) => <option key={o} value={o}>{o === 'round-robin' ? t('orderRoundRobin') : t('orderDeclared')}</option>)}
         </SelectField>
-        <label className="u-flex u-items-center u-gap-1 u-fs-13" style={{ alignSelf: 'flex-end', paddingBottom: 'var(--space-2)' }}>
+        <label className="u-flex u-items-center u-gap-1 u-fs-13 proj-composer-side">
           <input type="checkbox" checked={synthesize} onChange={(e) => setSynthesize(e.target.checked)} /> {t('closingSynthesis')}
         </label>
       </div>
-      <div className="action-bar u-justify-end" style={{ borderTop: '1px solid var(--rule)', paddingTop: 'var(--space-3)' }}>
-        <button type="button" className="primary btn-sm" disabled={busy} onClick={() => void save()}>{busy ? t('common:saving') : t('saveCadence')}</button>
+      <div className="action-bar u-justify-end action-bar--divided">
+        <Button variant="primary" size="sm" disabled={busy} onClick={() => void save()}>{busy ? t('common:saving') : t('saveCadence')}</Button>
       </div>
     </div>
   );

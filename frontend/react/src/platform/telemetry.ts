@@ -12,6 +12,8 @@
  * `openwop.*` (reserved for protocol-tier OTel signals per observability.md).
  */
 
+import { measureWebVitals } from './measureWebVitals.js';
+
 export interface TelemetryContext {
   [key: string]: string | number | boolean | undefined;
 }
@@ -101,46 +103,15 @@ export const telemetry: Reporter = {
  * the APIs are unavailable. Call once at boot.
  */
 export function initWebVitals(): void {
-  if (typeof window === 'undefined' || typeof PerformanceObserver === 'undefined') return;
-
-  // TTFB from the navigation entry.
-  try {
-    const nav = performance.getEntriesByType('navigation')[0] as PerformanceNavigationTiming | undefined;
-    if (nav) telemetry.reportMetric('app.web_vital.ttfb', Math.round(nav.responseStart), { kind: 'ttfb' });
-  } catch { /* ignore */ }
-
-  const observe = (type: string, cb: (entries: PerformanceEntryList) => void): void => {
-    try {
-      const po = new PerformanceObserver((list) => cb(list.getEntries()));
-      // buffered: catch entries that fired before this observer attached.
-      po.observe({ type, buffered: true } as PerformanceObserverInit);
-    } catch { /* entry type unsupported in this browser */ }
-  };
-
-  // Largest Contentful Paint — keep the latest reported value.
-  let lcp = 0;
-  observe('largest-contentful-paint', (entries) => {
-    const last = entries[entries.length - 1];
-    if (last) lcp = last.startTime;
-  });
-
-  // Cumulative Layout Shift — sum shifts not caused by recent input.
-  let cls = 0;
-  observe('layout-shift', (entries) => {
-    for (const e of entries as unknown as Array<{ value: number; hadRecentInput: boolean }>) {
-      if (!e.hadRecentInput) cls += e.value;
+  // Reuse the shared measurement core (ADR 0018 CWV fold-in) so the SPA telemetry
+  // sink and the public-page beacon reporter share ONE observer. This sink emits
+  // the vendor-agnostic `app.web_vital.*` metrics; the beacon reporter is separate.
+  measureWebVitals((samples) => {
+    for (const s of samples) {
+      const value = s.metric === 'CLS' ? Math.round(s.value * 1000) / 1000 : Math.round(s.value);
+      telemetry.reportMetric(`app.web_vital.${s.metric.toLowerCase()}`, value, { kind: s.metric.toLowerCase() });
     }
   });
-
-  // Report final values when the page is hidden/unloaded (when vitals settle).
-  const flush = (): void => {
-    if (lcp > 0) telemetry.reportMetric('app.web_vital.lcp', Math.round(lcp), { kind: 'lcp' });
-    telemetry.reportMetric('app.web_vital.cls', Math.round(cls * 1000) / 1000, { kind: 'cls' });
-  };
-  let flushed = false;
-  const flushOnce = (): void => { if (!flushed) { flushed = true; flush(); } };
-  window.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushOnce(); }, { once: false });
-  window.addEventListener('pagehide', flushOnce, { once: true });
 }
 
 /** Record a route view + the time since the last view (route-load proxy). */

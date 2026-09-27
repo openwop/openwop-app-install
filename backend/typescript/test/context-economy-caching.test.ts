@@ -9,7 +9,7 @@ import {
   type AnthropicToolDef,
 } from '../src/providers/promptCaching.js';
 import { contextEconomy } from '../src/host/contextEconomy.js';
-import { computeLLMCacheKey } from '../src/providers/llmCacheKey.js';
+import { semanticRequestDigestV2 } from '../src/providers/llmCacheKey.js';
 
 const ENV_KEYS = [
   'OPENWOP_CONTEXT_ECONOMY',
@@ -112,7 +112,7 @@ describe('withAnthropicToolCache', () => {
 });
 
 describe('replay cache-key is invisible to prompt caching (architect must-fix #1)', () => {
-  it('computeLLMCacheKey is byte-identical whether caching is on or off', () => {
+  it('the semantic request digest is byte-identical whether caching is on or off', () => {
     // The cache key is computed over the LOGICAL recipe (messages/tools), never
     // the post-caching HTTP body. Inject cache_control on a COPY and confirm the
     // logical inputs — hence the key — are unchanged.
@@ -124,14 +124,14 @@ describe('replay cache-key is invisible to prompt caching (architect must-fix #1
       { name: 'a', description: 'A', parameters: { type: 'object' } },
       { name: 'b', description: 'B', parameters: { type: 'object' } },
     ];
-    const keyOff = computeLLMCacheKey({ provider: 'anthropic', model: 'claude-x', messages, tools });
+    const keyOff = semanticRequestDigestV2({ provider: 'anthropic', model: 'claude-x', messages, tools });
 
     // Simulate the dispatch path: build the cached body from the SAME inputs.
     const httpTools: AnthropicToolDef[] = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
     withAnthropicToolCache(httpTools, true);
     cacheableAnthropicSystem('stable system prompt', true);
 
-    const keyOn = computeLLMCacheKey({ provider: 'anthropic', model: 'claude-x', messages, tools });
+    const keyOn = semanticRequestDigestV2({ provider: 'anthropic', model: 'claude-x', messages, tools });
     expect(keyOn).toBe(keyOff);
   });
 });

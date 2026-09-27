@@ -13,7 +13,7 @@ import type { AccessRole, BuiltInRoleId, CustomRole } from '../client/accessClie
  * severity). Every such chip is the one neutral pill (`NEUTRAL_CHIP`, see
  * orgUi.ts); selected/unselected in a toggle is shown by opacity, not color.
  */
-export const ALL_ROLES: BuiltInRoleId[] = ['viewer', 'editor', 'admin', 'owner'];
+const ALL_ROLES: BuiltInRoleId[] = ['viewer', 'editor', 'admin', 'owner'];
 
 export const toggleStr = (set: Set<string>, id: string): Set<string> => {
   const next = new Set(set);

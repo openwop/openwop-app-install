@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/guardrails.output.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/guardrails.output.json",
   "title": "AiGuardrailsOutput",
   "type": "object",
   "required": [
@@ -12,6 +12,14 @@
     },
     "violations": {
       "type": "array"
+    },
+    "enforced": {
+      "type": "boolean",
+      "description": "true when ctx.guardrails actually evaluated the text; false when the host lacks the capability and the pass-through result is unenforced."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Why enforcement did not run (e.g. host_capability_missing)."
     }
   },
   "additionalProperties": false

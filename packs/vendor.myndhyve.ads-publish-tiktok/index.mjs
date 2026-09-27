@@ -384,7 +384,7 @@ export async function adsPublishTiktok(ctx) {
   }
 }
 
-const nodes = {
+export const nodes = {
   'ads.publish.tiktok': adsPublishTiktok,
 };
 

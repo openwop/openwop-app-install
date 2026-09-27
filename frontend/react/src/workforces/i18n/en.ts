@@ -20,6 +20,8 @@ export const messages = {
   noneTitle: 'No workforces yet',
   noneBody: 'Load example data to explore the example workforces with weeks of run history.',
   loadExampleData: 'Load example data',
+  noneBodyClean: 'Workforces appear here once your agents are running real work. Hire your first agent to get started.',
+  hireFirstAgent: 'Hire your first agent',
   // Key-figure filter band
   filterAriaLabel: 'What needs you — click to filter',
   figureWorkforces: 'Workforces',
@@ -123,6 +125,10 @@ export const messages = {
 
   // Trace search panel
   traceSearch: 'Trace search',
+  traceColSelect: 'Select for comparison',
+  traceSelectRun: 'Select run {{runId}} for comparison',
+  traceCompareSelected: 'Compare the two selected runs',
+  traceCompareHint: 'Select two runs to compare them side by side.',
   traceSearchHelp:
     'Search runs across the workforce by correlation id, batch id, run id, outcome, or status.',
   traceQueryAriaLabel: 'Trace query',
@@ -217,21 +223,22 @@ export const messages = {
 
   // Lifecycle / autonomy labels (DESIGN.md §5.3)
   statusShadowLabel: 'Shadow',
-  statusShadowGloss: 'Runs alongside humans, takes no real action',
   statusPilotingLabel: 'Piloting',
-  statusPilotingGloss: 'Acting on live work, with human review',
   statusProductionLabel: 'Production',
-  statusProductionGloss: 'Bounded-autonomous within policy, live',
-  autonomyReviewLabel: 'Review',
-  autonomyReviewGloss: 'Every decision waits for human approval',
+  autonomyReviewLabel: 'Supervised',
   autonomyGuidedLabel: 'Guided',
-  autonomyGuidedGloss: 'Acts, but routes key decisions for review',
-  autonomyAutoLabel: 'Auto',
-  autonomyAutoGloss: 'Bounded-autonomous within its policy',
+  autonomyAutoLabel: 'Autonomous',
   journeyShadowLabel: 'Watching',
   journeyShadowGloss: 'Watches your team work and learns — takes no real action yet.',
   journeyPilotingLabel: 'Assisting',
   journeyPilotingGloss: 'Acts on live work, with a human reviewing exceptions.',
   journeyProductionLabel: 'Running on its own',
   journeyProductionGloss: 'Runs autonomously within its policy guardrails.',
+
+  // §4.5 collection kit — name search
+  filterGroup: 'Filter workforces',
+  searchPlaceholder: 'Search workforces…',
+  searchAria: 'Search workforces by name',
+  signalsUnreadable: "{{count}} workforce(s) could not be fully checked — the approval, readiness and policy counts below cover only the ones we could read.",
+  overviewSignalsUnreadable: "This workforce could not be fully checked — approval, readiness and policy signals may be incomplete, so no all-clear is shown.",
 } as const;

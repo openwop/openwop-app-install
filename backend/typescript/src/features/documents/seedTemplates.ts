@@ -26,7 +26,7 @@ export interface SeedTemplate {
 
 const p = (required: string[], properties: TemplateParams['properties']): TemplateParams => ({ required, properties });
 
-export const SEED_TEMPLATES: readonly SeedTemplate[] = [
+const SEED_TEMPLATES: readonly SeedTemplate[] = [
   {
     catalogId: 'seed.sow',
     name: 'Statement of Work (SOW)',

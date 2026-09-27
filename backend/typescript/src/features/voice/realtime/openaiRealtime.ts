@@ -24,8 +24,9 @@ export const openaiRealtimeProvider: RealtimeProvider = {
     const model = input.model ?? DEFAULT_MODEL;
     const connectUrl = `${OPENAI_BASE}/v1/realtime/calls`;
 
-    // Deterministic mock under the test seam (no key/network).
-    if (process.env.OPENWOP_TEST_SEAM_ENABLED === 'true') {
+    // Deterministic mock under OPENWOP_VOICE_MOCK (no key/network). Deliberately NOT
+    // the conformance-seam flag, which prod keeps on (see geminiLive.ts header).
+    if (process.env.OPENWOP_VOICE_MOCK === 'true') {
       return {
         provider: 'openai-realtime', model, ...(input.voice ? { voice: input.voice } : {}),
         token: 'ek_test_openai', connect: { kind: 'webrtc', url: connectUrl },

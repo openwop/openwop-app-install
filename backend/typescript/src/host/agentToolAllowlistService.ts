@@ -52,6 +52,52 @@ const nowIso = (): string => new Date().toISOString();
  * none is set — the caller then falls back to the agent's manifest `toolAllowlist`.
  * Fail-closed cross-tenant. This is the hot-path read used at dispatch.
  */
+/** ADR 0315 — the DEFAULT-ON platform tool baseline: capabilities every agent
+ *  gets offered without a manifest entry or an ADR 0104 grant (maintainer
+ *  decision 2026-07-07 — these are platform capabilities, not per-agent
+ *  privileges). Offering only: the Capability Firewall + ADR 0102 execution
+ *  gate + each tool's own acting-user / toggle checks are unchanged, and ids
+ *  that don't resolve on this host are inert (the offering set is intersected
+ *  with the registered builtins downstream). */
+export const DEFAULT_ON_AGENT_TOOL_IDS: readonly string[] = [
+  // ADR 0476 — read-only grounded failure context; fail-empty without an
+  // acting user; tenant-bounded reads only (the loadReadableRun posture).
+  'openwop:runs.diagnose',
+  'openwop:kanban.add-todo',
+  'openwop:documents.draft',
+  'openwop:email.draft',
+  'openwop:notifications.notify-me',
+  'openwop:tasks.schedule-followup',
+  // chat-first-port A3 — the recurring sibling of schedule-followup. Same baseline
+  // criteria (platform capability, acting-user-gated, unforgeable conversation
+  // binding, bounded: safe-subset cadence + per-user active cap + per-fire horizon +
+  // the tenant autonomous-run budget); an agent that can honor "I'll follow up before
+  // your 3pm" should also honor "check in with me every morning" without an operator
+  // hand-grant. Confinement is unchanged — an ADR 0104 full-replace override still
+  // strips it (the kickbot participant-lane precedent).
+  'openwop:tasks.schedule-recurring',
+  'openwop:ai.research.web',
+  // ADR 0374 P3 (architect options-eval, Option A) — the Tour Author register.
+  // Same posture as documents.draft/email.draft above: produces a catalog-
+  // HIDDEN transient tour draft the user must run-and-promote (OQ5); no data
+  // mutation beyond a workflow draft the caller's tenant owns. A consistent
+  // extension of the existing 'draft a thing the user reviews' category, not a
+  // new privilege kind.
+  'openwop:walkthroughs.register-draft',
+];
+
+/** ADR 0315 — the ONE offering resolver every model-offering surface uses:
+ *  an ADR 0104 override stays authoritative (FULL-REPLACE — omitting a
+ *  baseline tool is the operator's revoke path); otherwise the manifest
+ *  allowlist unioned with the default-on baseline. */
+export function effectiveToolAllowlist(
+  manifestAllowlist: readonly string[] | undefined,
+  override: readonly string[] | undefined,
+): string[] {
+  if (override) return [...override];
+  return [...new Set([...(manifestAllowlist ?? []), ...DEFAULT_ON_AGENT_TOOL_IDS])];
+}
+
 export async function resolveAgentToolAllowlistOverride(tenantId: string, agentId: string): Promise<string[] | undefined> {
   const row = await overrides.get(keyOf(tenantId, agentId));
   if (!row || row.tenantId !== tenantId) return undefined;

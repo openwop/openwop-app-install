@@ -28,7 +28,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = '';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  server = await new Promise((res) => { const s = app.listen(0, () => res(s)); });
+  server = await new Promise((res) => { const s = app.listen(0, '127.0.0.1', () => res(s)); });
   PORT = (server.address() as AddressInfo).port;
 });
 afterAll(async () => {
@@ -51,6 +51,43 @@ describe('runtime workflow-chain pack install (ADR 0163 follow-on)', () => {
     const r = await install(await cookie(), { name: 'core.openwop.workflows.x', version: '1.0.0' });
     expect(r.status).toBe(403);
     expect(mockInstall).not.toHaveBeenCalled();
+  });
+
+  /**
+   * ADR 0660 D4 — born red. This lane carried NONE of the hardening its two siblings
+   * (`features/marketplace/routes.ts`, `packs/agentPackRegistry.ts`) have had for
+   * months: an unsafe name flowed into `join(packDir, name)` and then
+   * `rmSync(destDir, {recursive, force})`, and a pack an operator had tombstoned
+   * re-installed silently. Superadmin-gated, so an operator footgun and a tombstone
+   * bypass rather than a tenant-reachable hole — but the same "a defect closed on one
+   * lane survives on its sibling" shape found in four consecutive features of this loop.
+   */
+  it('refuses a traversal pack name BEFORE touching the filesystem (D4)', async () => {
+    process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN = 'true';
+    mockInstall.mockClear();
+    for (const name of ['../../etc', 'core/../../escape', '..']) {
+      const r = await install(await cookie(), { name, version: '1.0.0' });
+      expect(r.status, name).toBe(400);
+    }
+    expect(mockInstall, 'the installer is never reached, so no path is ever joined').not.toHaveBeenCalled();
+  });
+
+  it('refuses re-installing a pack the operator tombstoned (409), and allows it after restore (D4)', async () => {
+    process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN = 'true';
+    const { tombstonePack, restorePack } = await import('../src/host/packTombstones.js');
+    const name = 'core.openwop.workflows.market-intel';
+    mockInstall.mockClear();
+    await tombstonePack(name, 'test');
+    try {
+      const r = await install(await cookie(), { name, version: '1.0.0' });
+      expect(r.status).toBe(409);
+      expect(mockInstall).not.toHaveBeenCalled();
+    } finally {
+      await restorePack(name);
+    }
+    // CONTROL — the guard is not a blanket refusal.
+    mockInstall.mockResolvedValueOnce({ installed: true });
+    expect((await install(await cookie(), { name, version: '1.0.0' })).status).toBe(201);
   });
 
   it('validates that name + version are present', async () => {

@@ -22,6 +22,41 @@ export function optionalCleanString(raw: unknown, max: number): string | undefin
   return v.length > 0 ? v : undefined;
 }
 
+/**
+ * An OPAQUE REFERENCE token (media serve token, storage ref) — trimmed,
+ * charset-validated, capped, and NOT secret-scrubbed. `cleanString`'s
+ * secret-shape scrub redacts any bare `[A-Za-z0-9_-]{40,}` blob, but media
+ * serve tokens are 43-char base64url — running references through the free-TEXT
+ * scrub silently destroyed every saved CMS image token (gap-analysis Phase B
+ * discovery; ADR 0206). References are never rendered as text (they become
+ * `/assets/:token` URLs), so the scrub's paste-a-credential threat model does
+ * not apply; charset validation rejects anything that isn't token-shaped.
+ * Returns '' when invalid.
+ */
+export function cleanOpaqueToken(raw: unknown, max: number): string {
+  const v = String(raw ?? '').trim();
+  if (v.length === 0 || v.length > max) return '';
+  return /^[A-Za-z0-9_.:-]+$/.test(v) ? v : '';
+}
+
+/**
+ * PMX-1 (ADR 0590) — an outbound BEARER credential (RFC 6750 `token68`):
+ * trimmed, grammar-validated, capped, and NOT secret-scrubbed. Running a
+ * credential through `cleanString` destroys every production-shaped token
+ * (any bare `[A-Za-z0-9_-]{40,}` run → `[REDACTED:secret-shaped]`) while the
+ * save still reports success — the CMS-image-token class, on the credential
+ * lane itself. `cleanOpaqueToken` is the wrong instrument here too: its
+ * charset refuses the legal token68 characters `~ + / =` (plain base64 with
+ * padding). Grammar: `1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" )
+ * *"="`. Returns '' when invalid (caller refuses loudly, never stores a
+ * mangled credential).
+ */
+export function cleanBearerToken(raw: unknown, max: number): string {
+  const v = String(raw ?? '').trim();
+  if (v.length === 0 || v.length > max) return '';
+  return /^[A-Za-z0-9._~+/-]+=*$/.test(v) ? v : '';
+}
+
 /** A deduped, lowercased, bounded tag list (each tag cleaned + capped). */
 export function cleanTagList(raw: unknown, opts: { maxTags: number; maxLen: number }): string[] {
   if (!Array.isArray(raw)) return [];

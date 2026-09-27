@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { Button } from '../ui/Button.js';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
@@ -14,6 +15,7 @@ import { IconButton } from '../ui/IconButton.js';
 import { AutonomyMeter } from './AutonomyMeter.js';
 import { toast } from '../ui/toast.js';
 import { XIcon, CheckIcon, ClockIcon, MessageSquareIcon, AlertIcon, ArrowRightIcon } from '../ui/icons/index.js';
+import { useFocusTrap } from '../ui/useFocusTrap.js';
 import { ModalPortal } from '../ui/ModalPortal.js';
 
 /**
@@ -49,10 +51,13 @@ function cadence(ms: number | undefined, t: TFunction): string {
   return mins < 60 ? t('drawerCadenceMinutes', { minutes: mins }) : t('drawerCadenceHours', { hours: Math.round(mins / 60) });
 }
 
-export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, busy, onResolved, onChat }: {
+export function AgentDrawer({ view, approvals, approvalsUnavailable, tab, onTab, onClose, onCheckNow, busy, onResolved, onChat }: {
   view: AgentView;
   /** Pending approvals for THIS agent. */
   approvals: PendingApproval[];
+  /** AG-R2-1 — the approvals READ failed: "couldn't check" is a different
+   *  answer than "nothing waiting", and the peek must say which one it is. */
+  approvalsUnavailable?: boolean | undefined;
   tab: DrawerTab;
   onTab: (tab: DrawerTab) => void;
   onClose: () => void;
@@ -66,11 +71,12 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
   const sm = statusMeta(view.status);
   const theme = roleThemeForAgent(entry.agentRef?.agentId, entry.workflows, entry.roleKey);
   const [resolving, setResolving] = useState<string | null>(null);
-  const dialogRef = useRef<HTMLElement>(null);
+  // Focus trap + restore (XC-7/AGT-5): the drawer owns focus while open and
+  // returns it to the opener on close, same contract as ui/Modal.
+  const dialogRef = useFocusTrap<HTMLElement>(true);
 
-  // Esc closes; focus moves into the dialog when the drawer opens.
+  // Esc closes (window-level, so it works before focus moves).
   useEffect(() => {
-    dialogRef.current?.focus();
     const onKey = (e: KeyboardEvent): void => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -107,23 +113,15 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
 
   return (
     <ModalPortal>
+    {/* Scrim is PRESENTATIONAL (ARIA 1.2: an interactive role must not wrap the
+        dialog's focusable children — the old role="button" scrim did). Keyboard
+        dismiss is Escape; the target check keeps clicks inside the drawer from
+        closing it, same shape as ui/Modal. */}
+    {/* eslint-disable-next-line jsx-a11y/click-events-have-key-events */}
     <div
       className="agent-drawer-scrim"
-      role="button"
-      tabIndex={0}
-      aria-label={t('drawerClose')}
-      onClick={onClose}
-      onKeyDown={(e) => {
-        if (e.key === 'Escape' || e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          onClose();
-        }
-      }}
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      {/* role="dialog" is a window/structure role the a11y plugin treats as
-          non-interactive; the onClick only stops the click from bubbling to
-          the scrim so a click inside the drawer doesn't close it. */}
-      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events */}
       <aside
         ref={dialogRef}
         tabIndex={-1}
@@ -131,7 +129,6 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
         role="dialog"
         aria-modal="true"
         aria-label={t('drawerQuickLook', { persona: entry.persona })}
-        onClick={(e) => e.stopPropagation()}
       >
         <header className="agent-drawer-head">
           <AgentAvatar persona={entry.persona} avatarUrl={entry.avatarUrl} roleTheme={theme} size={44} showBadge={false} ring={statusRingColor(view.status)} />
@@ -143,12 +140,12 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
             <div className="agent-drawer-role">{entry.label ?? t('drawerRoleFallback')}</div>
           </div>
           <div className="action-bar agent-drawer-headactions">
-            <button type="button" className="secondary btn-sm" disabled={busy || !entry.enabled} onClick={onCheckNow}>
+            <Button variant="secondary" size="sm" disabled={busy || !entry.enabled} onClick={onCheckNow}>
               {busy ? t('drawerChecking') : t('drawerCheckNow')}
-            </button>
-            <button type="button" className="secondary btn-sm" onClick={onChat} title={t('drawerChatTitle', { persona: entry.persona })}>
+            </Button>
+            <Button variant="secondary" size="sm" onClick={onChat} title={t('drawerChatTitle', { persona: entry.persona })}>
               <MessageSquareIcon size={14} aria-hidden /> {t('drawerChat')}
-            </button>
+            </Button>
             <IconButton label={t('drawerCloseQuickLook')} icon={<XIcon size={16} />} onClick={onClose} />
           </div>
         </header>
@@ -172,6 +169,11 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
         <div className="agent-drawer-body">
           {tab === 'overview' ? (
             <div className="agent-drawer-overview">
+              {approvalsUnavailable ? (
+                <p className="muted u-fs-12 u-m-0">
+                  <AlertIcon size={12} aria-hidden /> {t('drawerApprovalsUnavailable')}
+                </p>
+              ) : null}
               {approvals.map((a) => (
                 <div className="agent-drawer-ask" key={a.approvalId}>
                   <div className="agent-drawer-ask-eyebrow">
@@ -180,12 +182,12 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
                   <div className="agent-drawer-ask-title">{a.cardTitle ?? a.proposal}</div>
                   <div className="agent-drawer-ask-detail">{t('drawerProposesToRun', { workflow: workflowName(a.workflowId) })}</div>
                   <div className="action-bar u-mt-2">
-                    <button type="button" className="btn-accent-solid btn-sm" disabled={resolving === a.approvalId} onClick={() => void approve(a)}>
+                    <Button variant="accent-solid" size="sm" disabled={resolving === a.approvalId} onClick={() => void approve(a)}>
                       <CheckIcon size={14} aria-hidden /> {t('drawerApproveResume')}
-                    </button>
-                    <button type="button" className="secondary btn-sm" disabled={resolving === a.approvalId} onClick={() => void sendBack(a)}>
+                    </Button>
+                    <Button variant="secondary" size="sm" disabled={resolving === a.approvalId} onClick={() => void sendBack(a)}>
                       {t('drawerSendBack')}
-                    </button>
+                    </Button>
                   </div>
                 </div>
               ))}
@@ -202,14 +204,14 @@ export function AgentDrawer({ view, approvals, tab, onTab, onClose, onCheckNow, 
                           : t('drawerBlockerFallback'))}
                   </div>
                   <div className="action-bar u-mt-2">
-                    <button type="button" className="primary btn-sm" onClick={() => onTab('board')}>{t('drawerOpenBoard')}</button>
+                    <Button variant="primary" size="sm" onClick={() => onTab('board')}>{t('drawerOpenBoard')}</Button>
                   </div>
                 </div>
               ) : null}
 
               <dl className="agent-drawer-facts">
                 <div><dt>{t('drawerAutonomy')}</dt><dd><AutonomyMeter autonomyLevel={entry.autonomyLevel} /></dd></div>
-                <div><dt>{t('drawerHeartbeat')}</dt><dd>{cadence(entry.heartbeatIntervalMs, t)}</dd></div>
+                <div><dt>{t('drawerHeartbeat')}</dt><dd>{cadence(entry.heartbeat?.effectiveIntervalMs ?? entry.heartbeatIntervalMs, t)}</dd></div>
                 <div><dt>{t('drawerLastCheck')}</dt><dd>{relativeTime(entry.lastHeartbeatAt) ?? t('drawerNever')}</dd></div>
                 <div><dt>{t('drawerPortfolio')}</dt><dd>{t('workflowCount', { count: entry.workflows.length })}</dd></div>
               </dl>

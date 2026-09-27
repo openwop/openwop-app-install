@@ -13,6 +13,7 @@ import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
+import { errorCodeOf } from './helpers/errorEnvelope.js';
 import { saveConfig, __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { voiceFeature } from '../src/features/voice/feature.js';
 import { OpenwopError } from '../src/types.js';
@@ -38,12 +39,14 @@ type CommitOk = { finalText: string; atMs: number; events: VoiceEvent[]; nextStr
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
-  process.env.OPENWOP_TEST_SEAM_ENABLED = 'true'; // deterministic transcription (no provider key)
+  process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
+  process.env.OPENWOP_VOICE_MOCK = 'true'; // deterministic transcription/TTS (no provider key) — voice mocks key on their own flag
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
+  delete process.env.OPENWOP_VOICE_MOCK;
   await __clearToggleStore();
   await new Promise<void>((res) => server.close(() => res()));
 });
@@ -100,7 +103,7 @@ describe('ADR 0138 P1 — live voice mode routes', () => {
     const open = await (await post(SESS, {})).json() as { session: { sessionId: string } };
     const cm = await post(`${SESS}/${open.session.sessionId}/commit`, {});
     expect(cm.status).toBe(400);
-    expect((await cm.json() as { error?: { code?: string } }).error?.code).toBe('invalid_request');
+    expect(errorCodeOf(await cm.json())).toBe('invalid_request');
   });
 
   it('404s append/commit on an unknown session (§F — collapses cross-tenant, no existence oracle)', async () => {
@@ -212,16 +215,53 @@ describe('ADR 0138 P2 — full-duplex: speak (TTS-out) + barge-in (§F)', () => 
       autonomy: { specLevel: 'draft-only' },
     });
     const open = await (await post(SESS, { agentId: 'voice-agent-nokey' })).json() as { session: { sessionId: string } };
-    // Drop the test seam for this case so /speak reaches the real provider-credential check
+    // Drop the voice mock for this case so /speak reaches the real provider-credential check
     // (it throws BEFORE any network — no managed key + no credentialRef).
-    delete process.env.OPENWOP_TEST_SEAM_ENABLED;
+    delete process.env.OPENWOP_VOICE_MOCK;
     try {
       const res = await post(`${SESS}/${open.session.sessionId}/speak`, { text: 'Booked.' });
       expect(res.status).toBe(400);
-      expect((await res.json() as { error?: { code?: string } }).error?.code).toBe('speech_synthesis_unsupported');
+      expect(errorCodeOf(await res.json())).toBe('speech_synthesis_unsupported');
     } finally {
-      process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
+      process.env.OPENWOP_VOICE_MOCK = 'true';
     }
+  });
+
+  it('ADR 0304 P1: a per-turn `agentId` speaks in THAT agent’s voice (board voice mode)', async () => {
+    await setVoice('on');
+    await upsertAgentProfile('default', 'advisor-ada', {
+      roleKey: 'worker',
+      configParameters: { voice: { voiceId: 'ada-voice' } },
+      autonomy: { specLevel: 'draft-only' },
+    });
+    await upsertAgentProfile('default', 'advisor-bo', {
+      roleKey: 'worker',
+      configParameters: { voice: { voiceId: 'bo-voice' } },
+      autonomy: { specLevel: 'draft-only' },
+    });
+    // One session (bound to the chair) voices two different advisors' turns.
+    const open = await (await post(SESS, { agentId: 'advisor-ada' })).json() as { session: { sessionId: string } };
+    const sid = open.session.sessionId;
+    const first = await post(`${SESS}/${sid}/speak`, { text: 'Round one.', agentId: 'advisor-ada' });
+    expect((await first.json() as { audio: { voiceId: string } }).audio.voiceId).toBe('ada-voice');
+    const second = await post(`${SESS}/${sid}/speak`, { text: 'Round two.', agentId: 'advisor-bo' });
+    expect((await second.json() as { audio: { voiceId: string } }).audio.voiceId).toBe('bo-voice');
+  });
+
+  it('ADR 0304 P1: W6 holds per speaker — a client voiceId cannot override the named speaker’s configured voice', async () => {
+    await setVoice('on');
+    const open = await (await post(SESS, {})).json() as { session: { sessionId: string } };
+    const res = await post(`${SESS}/${open.session.sessionId}/speak`, { text: 'Hi.', agentId: 'advisor-ada', voiceId: 'client-voice' });
+    expect(res.status).toBe(200);
+    expect((await res.json() as { audio: { voiceId: string } }).audio.voiceId).toBe('ada-voice');
+  });
+
+  it('ADR 0304 P1: an unknown per-turn agent falls back to the host default voice (no oracle, no 500)', async () => {
+    await setVoice('on');
+    const open = await (await post(SESS, {})).json() as { session: { sessionId: string } };
+    const res = await post(`${SESS}/${open.session.sessionId}/speak`, { text: 'Hi.', agentId: 'nobody-here' });
+    expect(res.status).toBe(200);
+    expect((await res.json() as { audio: { voiceId: string } }).audio.voiceId).toBe('default');
   });
 
   it('barge-in with no reply in flight is a clean no-op (still emits the lifecycle, cancels nothing)', async () => {

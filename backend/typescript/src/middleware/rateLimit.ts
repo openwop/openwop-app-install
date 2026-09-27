@@ -6,7 +6,7 @@
  * possible but the user-facing rate is bounded by Cloud Run's own
  * scale-up policy).
  *
- * SEC-3 (CODEBASE-ASSESSMENT.md): under multi-instance scale-out these
+ * SEC-3 (docs/steward/CODEBASE-ASSESSMENT.md): under multi-instance scale-out these
  * per-process counters are evadable (each instance has its own budget). A
  * correct fix needs SHARED state checked per request — but that is deliberately
  * NOT done here as a kv/SQL-CAS counter, because it would add a storage
@@ -19,8 +19,17 @@
  *
  * Three buckets, ordered from outermost to innermost:
  *
- *   1. Per-IP token bucket on EVERY request (default 60/min).
- *      Catches cookieless abuse + scrapers. Lower bound for noise.
+ *   1. Per-IP sliding windows on EVERY request — TWO of them (ADR 0640):
+ *      - READS  (GET / HEAD / OPTIONS): default 600/min, never below the
+ *        write budget. A feature-rich SPA page load fans out 20+ authenticated
+ *        reads; at the old single 60/min budget two navigations exhausted the
+ *        minute and the failure presented as a dozen unrelated features
+ *        breaking at once. MEASURED 2026-09-06 on a white-label deploy with
+ *        nine feature toggles on.
+ *      - WRITES (everything else): default 60/min. The expensive and
+ *        write-ish bursts this bucket exists to blunt.
+ *      Both keyed on the client IP, both evaluated before any handler work, so
+ *      an unauthenticated read flood still costs nothing past this middleware.
  *
  *   2. Per-session run quota on POST /v1/runs:
  *      - 10 runs/minute  (sliding window)
@@ -36,14 +45,24 @@
  *
  * Tunables via env (defaults shown):
  *   OPENWOP_RATELIMIT_DISABLED=true               disables all checks
- *   OPENWOP_RATELIMIT_IP_REQS_PER_MIN=60
+ *   OPENWOP_RATELIMIT_IP_REQS_PER_MIN=60         non-read (write-ish) requests
+ *   OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN=600   GET/HEAD/OPTIONS; floored at the
+ *                                                write budget so an operator who
+ *                                                raised the old single knob is
+ *                                                never LOWERED by the split
  *   OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN=10
  *   OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY=50
  *   OPENWOP_RATELIMIT_SESSION_CONCURRENT=5
  *   OPENWOP_RATELIMIT_IP_RUNS_PER_DAY=60
  *   OPENWOP_FORCE_RATE_LIMIT=true   conformance affordance — forces a tiny
- *                                   per-IP budget (3/min) so the harness can
- *                                   deterministically induce a canonical 429
+ *                                   per-IP budget (3/min, BOTH buckets) so the
+ *                                   harness can deterministically induce a
+ *                                   canonical 429. Under FORCE the discovery
+ *                                   exemption below is SUSPENDED: the suite's
+ *                                   `rate-limit-envelope` scenario bursts
+ *                                   GET /.well-known/openwop to observe the 429,
+ *                                   and #3679's exemption made that scenario
+ *                                   skip its own assertions on this host.
  *
  * Returns 429 + canonical `rate_limited` envelope per
  * spec/v1/capabilities.md §3 + a `Retry-After` header.
@@ -57,6 +76,8 @@ const log = createLogger('middleware.rateLimit');
 
 interface Limits {
   ipReqsPerMin: number;
+  /** ADR 0640 — GET/HEAD/OPTIONS budget, floored at `ipReqsPerMin`. */
+  ipReadReqsPerMin: number;
   sessionRunsPerMin: number;
   sessionRunsPerDay: number;
   sessionConcurrent: number;
@@ -70,11 +91,18 @@ interface Limits {
  *  canonical `details.scope` closed enum via `RATE_LIMIT_SCOPE`. */
 type RateLimitReason =
   | 'ip_request_rate'
+  | 'ip_read_rate'
   | 'session_runs_per_min'
   | 'session_runs_per_day'
   | 'session_concurrent'
   | 'ip_runs_per_day'
   | 'mcp_principal_rate';
+
+/** ADR 0395 — the operator system-health panel reads the EFFECTIVE limits
+ *  (config, not counters); read-only, superadmin-gated at the route. */
+export function snapshotRateLimits(): Limits {
+  return loadLimits();
+}
 
 function loadLimits(): Limits {
   const n = (k: string, dflt: number) => {
@@ -88,8 +116,13 @@ function loadLimits(): Limits {
   // (rate-limit-envelope.test.ts) without depending on real load timing. The
   // canonical `rate_limited` envelope is identical to a production 429.
   const forced = process.env.OPENWOP_FORCE_RATE_LIMIT === 'true';
+  const ipReqsPerMin = forced ? 3 : n('OPENWOP_RATELIMIT_IP_REQS_PER_MIN', 60);
   return {
-    ipReqsPerMin: forced ? 3 : n('OPENWOP_RATELIMIT_IP_REQS_PER_MIN', 60),
+    ipReqsPerMin,
+    // ADR 0640 — the read tier. Floored at the write budget: before the split
+    // the single knob covered reads too, so an operator who raised it (KickTodo
+    // ran =600 as a workaround) must not find reads LOWER after upgrading.
+    ipReadReqsPerMin: forced ? 3 : Math.max(n('OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN', 600), ipReqsPerMin),
     sessionRunsPerMin: n('OPENWOP_RATELIMIT_SESSION_RUNS_PER_MIN', 10),
     sessionRunsPerDay: n('OPENWOP_RATELIMIT_SESSION_RUNS_PER_DAY', 50),
     sessionConcurrent: n('OPENWOP_RATELIMIT_SESSION_CONCURRENT', 5),
@@ -110,6 +143,7 @@ function loadLimits(): Limits {
  */
 const RATE_LIMIT_SCOPE: Record<RateLimitReason, 'tenant' | 'route' | 'global' | 'key'> = {
   ip_request_rate: 'key',
+  ip_read_rate: 'key',
   ip_runs_per_day: 'key',
   session_runs_per_min: 'tenant',
   session_runs_per_day: 'tenant',
@@ -122,6 +156,8 @@ const RATE_LIMIT_SCOPE: Record<RateLimitReason, 'tenant' | 'route' | 'global' | 
 
 /** Sliding-window per-key request timestamps (ms). */
 const ipReqTimes = new Map<string, number[]>();
+/** ADR 0640 — the READ tier's window, keyed the same way. */
+const ipReadTimes = new Map<string, number[]>();
 /** MCP-1 — sliding-window per-principal `tools/call` timestamps (ms). */
 const mcpPrincipalReqTimes = new Map<string, number[]>();
 const sessionRunTimesMin = new Map<string, number[]>();
@@ -168,11 +204,22 @@ function isLoopbackSelf(req: Request): boolean {
  *   - run-event stream:    /v1/runs/<id>/events  (SSE mode only; its JSON
  *                          polling mode stays inside the budget via the
  *                          Accept gate below)
+ *   - channel message feed:/v1/host/openwop-app/channels/<id>/stream   (CS-CH-1)
+ *   - channel presence:    /v1/host/openwop-app/channels/<id>/presence (CS-CH-1)
+ *   - voice transcripts:   /v1/host/openwop-app/voice/realtime/messages/stream
+ * CS-CH-1 (conversation-stack audit): the channel + voice streams previously
+ * counted against the per-IP request bucket, so a tab holding a channel open
+ * burned budget and a reconnect storm self-perpetuated its own 429s — the
+ * exact feedback loop this exemption exists to prevent.
  */
 const SSE_STREAM_PATHS: readonly RegExp[] = [
   /^\/v1\/host\/openwop-app\/notifications\/stream$/,
   /^\/v1\/host\/openwop-app\/kanban\/boards\/[^/]+\/events$/,
   /^\/v1\/runs\/[^/]+\/events$/,
+  /^\/v1\/host\/openwop-app\/channels\/[^/]+\/stream$/,
+  /^\/v1\/host\/openwop-app\/channels\/[^/]+\/presence$/,
+  /^\/v1\/host\/openwop-app\/voice\/realtime\/messages\/stream$/,
+  /^\/v1\/host\/openwop-app\/present\/[^/]+\/events$/,
 ];
 
 /**
@@ -184,7 +231,36 @@ const SSE_STREAM_PATHS: readonly RegExp[] = [
  * (method=GET) ∧ (known stream path) ∧ (Accept: text/event-stream) so it neither
  * exempts the run-events JSON path nor lets the header bypass other routes.
  */
-function isLongLivedSseStream(req: Request): boolean {
+/** Test-only (GC-FRM-5) — is a path on the SSE exemption list? Pins that the
+ *  PUBLIC write surfaces (e.g. /public-forms/:id/submit) stay under the IP
+ *  budget while the stream paths stay exempt. */
+export function __isSseExemptPathForTests(path: string): boolean {
+  return SSE_STREAM_PATHS.some((re) => re.test(path));
+}
+
+/**
+ * True for an established long-lived SSE stream connection.
+ *
+ * EXPORTED for ADR 0556 P2: the latency objectives (A2/A3 in `docs/SLO.md`)
+ * must exclude streams, because an EventStream's "duration" is how long a
+ * browser tab stayed open — routinely minutes — and leaving those in makes a
+ * p95 request-latency objective report a number with no relationship to request
+ * latency, breaching permanently on a perfectly healthy host.
+ *
+ * The projection calls THIS PREDICATE rather than matching route templates
+ * against `SSE_STREAM_PATHS`, and the difference is not cosmetic:
+ * `/v1/runs/:runId/events` serves BOTH an SSE stream and a JSON polling mode
+ * (`routes/streams.ts` branches on `Accept`). A path/template test cannot tell
+ * them apart, so it would silently drop the JSON polling requests — real,
+ * short, latency-bearing traffic — out of the availability picture too. Only
+ * the request-level predicate, which is already `(GET) ∧ (known stream path) ∧
+ * (Accept: text/event-stream)`, gets that right.
+ *
+ * Sharing the predicate also means a NEW stream route is excluded from the SLO
+ * the moment it joins `SSE_STREAM_PATHS` — one list, one answer, nothing to
+ * keep in sync.
+ */
+export function isLongLivedSseStream(req: Request): boolean {
   if (req.method !== 'GET') return false;
   if (!(req.header('accept') ?? '').includes('text/event-stream')) return false;
   return SSE_STREAM_PATHS.some((re) => re.test(req.path));
@@ -262,6 +338,15 @@ export function enforceMcpPrincipalRateLimit(res: import('express').Response, pr
   return false;
 }
 
+
+/** `/.well-known/openwop` read — see the exemption in `ipRateLimitMiddleware`.
+ *  GET/HEAD only, exact path only: the method gate is what stops a caller
+ *  spending an unbounded budget by POSTing to the same URL. */
+function isDiscoveryRead(req: Request): boolean {
+  if (req.method !== 'GET' && req.method !== 'HEAD') return false;
+  return req.path === '/.well-known/openwop';
+}
+
 // ── Public middleware ──
 
 /** Global per-IP request bucket. Mount before route handlers. */
@@ -284,20 +369,55 @@ export function ipRateLimitMiddleware(): RequestHandler {
     // bucket (run-creation + per-day quotas are enforced elsewhere). See
     // isLongLivedSseStream for the path+Accept gate that prevents header bypass.
     if (isLongLivedSseStream(req)) { next(); return; }
+    // Discovery is exempt from the BURST bucket, for the same reason the SSE
+    // stream above is: charging it protects nothing and breaks the one read every
+    // consumer must make first.
+    //
+    // MEASURED, not assumed. Certifying this host from a single IP produced a v3
+    // bundle with 38 `blocked` rows; grouped by their own `detail`, **30 were
+    // "discovery unreachable"** — the conformance suite fetches
+    // `/.well-known/openwop` once per scenario and this 60/min bucket throttled
+    // it. Those rows are indistinguishable from conformance gaps to anyone
+    // reading the bundle, and `blocked` denies certification, so a throttled
+    // reader looked exactly like a non-conformant host.
+    //
+    // The document is public, side-effect-free, cacheable and identical for every
+    // caller. The bucket exists to blunt expensive and write-ish bursts; a
+    // capability handshake is neither.
+    //
+    // SCOPED TO GET/HEAD ON THE EXACT PATH. A path-only exemption would let a
+    // caller spend an unbounded budget by POSTing to the discovery URL, so the
+    // method gate is the security half, not tidiness — same shape as
+    // `isLongLivedSseStream`'s path+Accept gate directly above.
+    //
+    // ...except under OPENWOP_FORCE_RATE_LIMIT. That affordance exists so the
+    // conformance suite can INDUCE a 429 deterministically, and the scenario that
+    // does so (`rate-limit-envelope`) bursts this very path. With the exemption
+    // honoured under FORCE the scenario observes no 429 and skips its envelope
+    // assertions — a gate that cannot fail. MEASURED after #3679. (ADR 0640)
+    const forced = process.env.OPENWOP_FORCE_RATE_LIMIT === 'true';
+    if (!forced && isDiscoveryRead(req)) { next(); return; }
     const limits = loadLimits();
-    if (limits.ipReqsPerMin === 0) { next(); return; }
+    // ADR 0640 — two tiers, one key. Reads are cheap, already authenticated
+    // (this middleware sits after auth) and fan out 20+ per SPA page load; the
+    // write bucket keeps the tight budget the limiter was built for.
+    const isRead = req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS';
+    const limit = isRead ? limits.ipReadReqsPerMin : limits.ipReqsPerMin;
+    if (limit === 0) { next(); return; }
+    const store = isRead ? ipReadTimes : ipReqTimes;
+    const reason: RateLimitReason = isRead ? 'ip_read_rate' : 'ip_request_rate';
     const ip = clientIp(req);
     const now = Date.now();
-    const times = pruneWindow(ipReqTimes.get(ip) ?? [], 60_000, now);
-    if (times.length >= limits.ipReqsPerMin) {
+    const times = pruneWindow(store.get(ip) ?? [], 60_000, now);
+    if (times.length >= limit) {
       const oldest = times[0]!;
       const retryIn = (oldest + 60_000 - now) / 1000;
-      log.warn('ip rate limit hit', { ip, recentReqs: times.length, limit: limits.ipReqsPerMin });
-      rejectRateLimited(res, 'ip_request_rate', retryIn);
+      log.warn('ip rate limit hit', { ip, tier: isRead ? 'read' : 'write', recentReqs: times.length, limit });
+      rejectRateLimited(res, reason, retryIn);
       return;
     }
     times.push(now);
-    ipReqTimes.set(ip, times);
+    store.set(ip, times);
     next();
   };
 }
@@ -356,21 +476,28 @@ export function runQuotaMiddleware(): RequestHandler {
     // Express patches: spy on res.statusCode at response time.
     res.once('finish', () => {
       if (res.statusCode >= 400) return; // refused — don't charge
+      // ADR 0475 (review H3) — batch run creators (bulk redrive) charge one
+      // unit PER MINTED RUN via res.locals.runQuotaUnits; default 1. Without
+      // this, a 25-run redrive request cost the same quota as one run — a
+      // 25× side door around sessionRunsPerMin/Day.
+      const rawUnits = (res.locals as { runQuotaUnits?: unknown }).runQuotaUnits;
+      const units = typeof rawUnits === 'number' && Number.isFinite(rawUnits) && rawUnits >= 1
+        ? Math.floor(rawUnits) : 1;
       // Commit minute window
       if (isSession && limits.sessionRunsPerMin > 0) {
         const times = pruneWindow(sessionRunTimesMin.get(key) ?? [], 60_000, Date.now());
-        times.push(Date.now());
+        for (let i = 0; i < units; i += 1) times.push(Date.now());
         sessionRunTimesMin.set(key, times);
       }
       // Commit daily counter
       if (isSession && limits.sessionRunsPerDay > 0) {
         const bucket = sessionRunCountsDay.get(key);
-        if (bucket && bucket.day === today) bucket.count++;
-        else sessionRunCountsDay.set(key, { day: today, count: 1 });
+        if (bucket && bucket.day === today) bucket.count += units;
+        else sessionRunCountsDay.set(key, { day: today, count: units });
       } else if (!isSession && limits.ipRunsPerDay > 0) {
         const bucket = ipRunCountsDay.get(key);
-        if (bucket && bucket.day === today) bucket.count++;
-        else ipRunCountsDay.set(key, { day: today, count: 1 });
+        if (bucket && bucket.day === today) bucket.count += units;
+        else ipRunCountsDay.set(key, { day: today, count: units });
       }
       // Inflight tracking is wired explicitly via reserveConcurrentSlot
       // in the runs route — it ties to the actual runId AND auto-
@@ -421,6 +548,7 @@ export function reserveConcurrentSlot(req: Request, runId: string): () => void {
 
 export function _resetRateLimitState(): void {
   ipReqTimes.clear();
+  ipReadTimes.clear();
   mcpPrincipalReqTimes.clear();
   sessionRunTimesMin.clear();
   sessionRunCountsDay.clear();

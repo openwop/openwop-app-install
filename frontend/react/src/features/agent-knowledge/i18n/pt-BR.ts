@@ -23,6 +23,7 @@ export const messages = {
   documentsTitle: 'Documentos',
   documentsHint: 'Coleções de conhecimento vinculadas — fragmentadas, incorporadas e citadas quando recuperadas.',
   documentsCreateOrgFirst: 'Crie uma organização primeiro para guardar os documentos deste agente.',
+  documentsOrgsFailed: 'Não foi possível carregar suas organizações, então não sabemos quais existem. Nada aqui significa que você precisa criar uma.',
   organizationLabel: 'Organização',
   newCollectionNameLabel: 'Nome da nova coleção',
   newCollectionNamePlaceholder: 'Playbook da conta',
@@ -55,7 +56,10 @@ export const messages = {
 
   // Notes section
   notesTitle: 'Notas & fatos',
-  notesHint: 'Privado para este agente; recuperado automaticamente a cada turno (não citado).',
+  notesHint: 'Recuperado automaticamente a cada turno (sem citação). Visível para qualquer pessoa que possa usar este agente.',
+  // ADR 0664 D2 — the grant is real and intended; the disclosure was missing.
+  audienceDisclosure: 'Qualquer pessoa que possa usar {{persona}} pode recuperar o que você adicionar aqui, inclusive pessoas que não estão no projeto de onde veio uma coleção. Esse acesso não termina quando o seu termina.',
+  audienceBoundWarning: 'Esta coleção é restrita aos membros do seu projeto, mas {{persona}} está disponível para todo o workspace. Vinculá-la aqui torna o conteúdo recuperável por qualquer pessoa que possa usar este agente.',
   allowCuratedNotes: 'Permitir notas curadas para este agente',
   enabled: 'habilitado',
   disabled: 'desabilitado',
@@ -81,4 +85,10 @@ export const messages = {
   memoryCuratedOff: 'As memórias curadas estão desativadas para este agente. <1>Habilite-as</1> para adicionar fatos que ela recuperará.',
   memoryAddPlaceholder: 'O CFO prefere atualizações de status às sextas-feiras.',
   memoryEmptyBody: 'Adicione fatos que {{persona}} deve lembrar; eles são recuperados quando relevantes.',
+  // KB-UX-3 / ADR 0583 — uma fonte que FALHOU é nomeada, nunca confundida com “sem correspondências”.
+  retrievePartial: 'Parte deste conhecimento não pôde ser buscada, então esta resposta está incompleta.',
+  retrievePartialSources: 'Não buscado: {{sources}}',
+  retrieveSource_kb: 'documentos',
+  retrieveSource_memory: 'notas',
+  errorAnnounce: 'O painel de conhecimento do agente relatou um problema — os detalhes estão na tela.',
 } as const;

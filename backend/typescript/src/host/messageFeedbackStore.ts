@@ -15,10 +15,17 @@
  * Backed by the host-ext `DurableCollection`. NON-NORMATIVE.
  *
  * @see docs/adr/0071-chat-ui-state-and-feedback.md
+ *
+ * DISTINCT from `messageReactionsStore` (ADR 0195 D3b boundary ruling):
+ * feedback is a PRIVATE per-user AI-quality rating (never rendered to other
+ * members; feeds the ADR 0123 leaderboard); a reaction is PUBLIC social state
+ * (one row per (user, emoji), visible to the room). Neither feeds the other.
  */
 
 import { DurableCollection } from './hostExtPersistence.js';
 import { sanitizeFreeText } from '../byok/textRedaction.js';
+import { registerSubjectEraser } from './subjectErasure.js';
+import { subjectKeyForms } from './subjectErasureRedaction.js';
 
 export type FeedbackRating = 'up' | 'down' | 'neutral';
 const MAX_REASON_LEN = 1000;
@@ -98,7 +105,36 @@ export async function listMessageFeedbackForSession(tenantId: string, conversati
   return all.filter((f) => f.subjectRef === subjectRef);
 }
 
-/** Test-only: clear the store. */
-export async function __clearMessageFeedback(): Promise<void> {
-  await feedback.__clear();
+// ── ADR 0464 P2 — DSAR subject erasure ───────────────────────────────────────
+// A feedback row is a PRIVATE per-user rating authored by ONE subject (their
+// thumbs + free-text reason), keyed by their `user:<id>` subjectRef. It is that
+// subject's own data → a DSAR DELETES every feedback row they authored, tenant-
+// wide (other raters' rows on the same message stay). Tenant-scoped prefix scan;
+// idempotent.
+
+/** DSAR eraser — drop every feedback row authored by the subject, tenant-wide. */
+export async function eraseSubjectFeedback(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return;
+  const { forms } = subjectKeyForms(subjectKey);
+  for (const f of await feedback.listByPrefix(`${tenantId}:`)) {
+    if (forms.has(f.subjectRef)) await feedback.delete(`${f.tenantId}:${f.conversationId}:${f.messageId}:${f.subjectRef}`);
+  }
+}
+
+/** Register the message-feedback DSAR eraser (idempotent — the seam dedupes by
+ *  reference). Called from the host-erasers boot step (host/hostSubjectErasers.ts). */
+export function registerMessageFeedbackErasure(): void {
+  registerSubjectEraser(eraseSubjectFeedback);
+}
+
+/** ADR 0288 P2 — drop every feedback row for a DELETED conversation (called
+ *  directly by the chat delete route; host-owned sidecar, no seam needed).
+ *  Bounded prefix scan; idempotent. */
+export async function deleteFeedbackForConversation(tenantId: string, conversationId: string): Promise<number> {
+  let n = 0;
+  for (const f of await feedback.listByPrefix(`${tenantId}:${conversationId}:`)) {
+    await feedback.delete(`${f.tenantId}:${f.conversationId}:${f.messageId}:${f.subjectRef}`);
+    n += 1;
+  }
+  return n;
 }

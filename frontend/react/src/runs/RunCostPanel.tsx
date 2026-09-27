@@ -22,6 +22,50 @@ import { formatNumber } from '../i18n/format.js';
 
 interface Props {
   events: readonly RunEventDoc[];
+  /** ADR 0482 §6 — the terminal `costByNode` stamp off the run snapshot.
+   *  Absent for pre-stamp runs; the panel then falls back to aggregating the
+   *  already-loaded `provider.usage` events by nodeId (no extra fetch). */
+  costByNode?: Record<string, number> | undefined;
+}
+
+/** One row of the per-node cost table. `nodeId === '__other'` is the stamp's
+ *  top-8 remainder bucket (rendered with localized copy, never raw). */
+export interface NodeCostRow {
+  nodeId: string;
+  costUsd: number;
+}
+
+/**
+ * ADR 0482 §6 — per-node rows: the durable stamp when present (the terminal
+ * fold's top-8 + __other), else a client-side fold of the loaded
+ * `provider.usage` events by `nodeId` (pre-stamp runs / live runs). Pure —
+ * exported for tests.
+ */
+export function aggregateNodeCosts(
+  events: readonly RunEventDoc[],
+  costByNode?: Record<string, number>,
+): { rows: NodeCostRow[]; source: 'stamp' | 'events' } {
+  if (costByNode && Object.keys(costByNode).length > 0) {
+    const rows = Object.entries(costByNode)
+      .filter(([, v]) => typeof v === 'number' && Number.isFinite(v) && v > 0)
+      .map(([nodeId, costUsd]) => ({ nodeId, costUsd }))
+      // __other always sorts last; real nodes by spend, descending.
+      .sort((a, b) => (a.nodeId === '__other' ? 1 : b.nodeId === '__other' ? -1 : b.costUsd - a.costUsd));
+    return { rows, source: 'stamp' };
+  }
+  const byNode = new Map<string, number>();
+  for (const ev of events) {
+    if (ev.type !== 'provider.usage') continue;
+    const p = asRecord(ev.payload);
+    if (typeof p.costEstimateUsd !== 'number' || !Number.isFinite(p.costEstimateUsd)) continue;
+    const nodeId = typeof ev.nodeId === 'string' && ev.nodeId.length > 0 ? ev.nodeId : '__other';
+    byNode.set(nodeId, (byNode.get(nodeId) ?? 0) + p.costEstimateUsd);
+  }
+  const rows = [...byNode.entries()]
+    .filter(([, v]) => v > 0)
+    .map(([nodeId, costUsd]) => ({ nodeId, costUsd }))
+    .sort((a, b) => (a.nodeId === '__other' ? 1 : b.nodeId === '__other' ? -1 : b.costUsd - a.costUsd));
+  return { rows, source: 'events' };
 }
 
 interface Row {
@@ -116,11 +160,34 @@ function COST_COLUMNS(maxCost: number): DataColumn<Row>[] {
   ];
 }
 
-export function RunCostPanel({ events }: Props) {
+/** Columns for the per-node cost DataTable (ADR 0482 §6). Node ids render raw
+ *  (this page holds no definition fetch — the honest label is the id). */
+function NODE_COST_COLUMNS(maxCost: number): DataColumn<NodeCostRow>[] {
+  return [
+    {
+      key: 'node',
+      header: i18n.t('runs:costColNode'),
+      render: (r) => (r.nodeId === '__other'
+        ? <span className="muted">{i18n.t('runs:costNodeOther')}</span>
+        : <code>{r.nodeId}</code>),
+    },
+    { key: 'cost', header: i18n.t('runs:costColCost'), align: 'right', cellClassName: 'tabular-nums', render: (r) => formatUsd(r.costUsd) },
+    {
+      key: 'bar',
+      header: '',
+      width: '80px',
+      render: (r) => <span className="cost-bar" style={{ width: `${(r.costUsd / maxCost) * 100}%` }} />,
+    },
+  ];
+}
+
+export function RunCostPanel({ events, costByNode }: Props) {
   const { t } = useTranslation('runs');
   const { rows, total } = useMemo(() => aggregate(events), [events]);
-  if (rows.length === 0) return null;
+  const nodeCosts = useMemo(() => aggregateNodeCosts(events, costByNode), [events, costByNode]);
+  if (rows.length === 0 && nodeCosts.rows.length === 0) return null;
   const maxCost = Math.max(...rows.map((r) => r.costUsd), 1e-9);
+  const maxNodeCost = Math.max(...nodeCosts.rows.map((r) => r.costUsd), 1e-9);
 
   return (
     <div className="card">
@@ -134,12 +201,30 @@ export function RunCostPanel({ events }: Props) {
           })}
         </span>
       </div>
-      <DataTable<Row>
-        caption={t('costTableCaption')}
-        rows={rows}
-        rowKey={(r) => `${r.provider}::${r.model}`}
-        columns={COST_COLUMNS(maxCost)}
-      />
+      {rows.length > 0 && (
+        <DataTable<Row>
+          caption={t('costTableCaption')}
+          rows={rows}
+          rowKey={(r) => `${r.provider}::${r.model}`}
+          columns={COST_COLUMNS(maxCost)}
+        />
+      )}
+      {/* ADR 0482 §6 — where the money went, node by node. Stamp-sourced when
+          the terminal fold ran; else the honest client-side event fold. */}
+      {nodeCosts.rows.length > 0 && (
+        <>
+          <h3 className="u-mt-2">{t('costByNodeHeading')}</h3>
+          <DataTable<NodeCostRow>
+            caption={t('costByNodeCaption')}
+            rows={nodeCosts.rows}
+            rowKey={(r) => r.nodeId}
+            columns={NODE_COST_COLUMNS(maxNodeCost)}
+          />
+          <p className="muted u-fs-11 u-mt-1-5">
+            {nodeCosts.source === 'stamp' ? t('costByNodeStampNote') : t('costByNodeEventsNote')}
+          </p>
+        </>
+      )}
       <p className="muted u-fs-11 u-mt-1-5">
         {t('costAdvisoryPre')}<span title={t('costLocalRateTableTitle')}>*</span>{t('costAdvisoryPost')}
       </p>

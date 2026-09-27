@@ -34,7 +34,7 @@ export interface AutotitleParams {
   userText: string;
   replyText: string;
   storage: Storage;
-  /** Emit the non-normative `conversation.titled` host event so the FE rail/tab
+  /** Emit the non-normative `openwop-app.conversation.titled` host event so the FE rail/tab
    *  updates live. Caller owns the run-log binding; the feature stays decoupled. */
   onTitled: (title: string) => void;
   /** The LLM title generator (INJECTED — the call site provides the dispatch-backed
@@ -46,8 +46,11 @@ export interface AutotitleParams {
 /** Fire-and-forget. Never awaits into the caller, never throws — a failure leaves the
  *  placeholder title untouched (today's behavior). */
 export function maybeAutotitleOnFirstExchange(params: AutotitleParams): void {
+  // `warn`, not `debug`: the prod log level defaults to `info`, so a storage/toggle/CAS
+  // failure of a default-ON feature at `debug` was INVISIBLE — the same "silently never
+  // lands" mode ATC-2 made legible for the provider timeout (it.51). No PII: message only.
   void autotitleOnFirstExchange(params).catch((e) =>
-    log.debug('autotitle failed', { error: e instanceof Error ? e.message : String(e) }),
+    log.warn('autotitle_binding_failed', { error: e instanceof Error ? e.message : String(e) }),
   );
 }
 
@@ -72,14 +75,19 @@ export async function autotitleOnFirstExchange(params: AutotitleParams): Promise
 
   // TOCTOU re-check: a manual rename could have landed during the ~1–2s LLM call.
   // Re-read and skip if the session is no longer at its default placeholder, so a
-  // user rename mid-generation is never overwritten.
+  // user rename mid-generation is never overwritten. (Fast path — avoids the write.)
   const fresh = await storage.getChatSession(tenantId, chatSessionId);
   if (!fresh || (fresh.titleSource ?? 'default') !== 'default') return;
 
-  await storage.updateChatSession(tenantId, chatSessionId, {
-    title,
-    titleSource: 'auto',
-    updatedAt: new Date().toISOString(),
-  });
-  onTitled(title);
+  // ATC-3/4 — the re-read above still leaves a sub-ms TOCTOU + a concurrent
+  // double-write window; the CAS makes the check+write ATOMIC (write only if
+  // `title_source` is STILL 'default'). If a manual rename or another autotitle
+  // pass won the race, `won` is false and we must NOT announce a title we didn't set.
+  const won = await storage.casChatSessionTitle(
+    tenantId,
+    chatSessionId,
+    { title, titleSource: 'auto', updatedAt: new Date().toISOString() },
+    'default',
+  );
+  if (won) onTitled(title);
 }

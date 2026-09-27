@@ -33,7 +33,7 @@ class CardErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState
   override render(): ReactNode {
     if (this.state.error) {
       return (
-        <div className="alert error cardhost-alert">
+        <div role="alert" className="alert error cardhost-alert">
           {i18n.t('chat:cardCrashedPrefix')}<code>{this.props.cardType}</code>{i18n.t('chat:cardCrashedSuffix')} {this.state.error.message}
         </div>
       );

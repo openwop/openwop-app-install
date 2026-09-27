@@ -14,27 +14,18 @@
  * short-circuits the run and the caller sees the structured errors.
  */
 
-import type { WorkflowDefinition } from '../../executor/types.js';
+import { registerChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 
 export const WORKFLOW_AUTHOR_META_ID = 'openwop-app.workflow-author';
 
-export const DRAFT_NODE_TYPE_ID = 'feature.workflow-author.nodes.draft';
-export const VALIDATE_NODE_TYPE_ID = 'feature.workflow-author.nodes.validate';
-export const PERSIST_NODE_TYPE_ID = 'feature.workflow-author.nodes.persist';
-
-export const workflowAuthorMetaDefinition: WorkflowDefinition = {
-  workflowId: WORKFLOW_AUTHOR_META_ID,
-  nodes: [
-    { nodeId: 'draft', typeId: DRAFT_NODE_TYPE_ID, outputRole: 'secondary' },
-    { nodeId: 'validate', typeId: VALIDATE_NODE_TYPE_ID, outputRole: 'secondary' },
-    { nodeId: 'persist', typeId: PERSIST_NODE_TYPE_ID, outputRole: 'primary' },
-  ],
-  edges: [
-    { edgeId: 'e_draft_validate', sourceNodeId: 'draft', targetNodeId: 'validate' },
-    { edgeId: 'e_validate_persist', sourceNodeId: 'validate', targetNodeId: 'persist', triggerRule: 'all_success' },
-  ],
-  variables: [
-    { name: 'intent', type: 'string', description: 'The natural-language automation intent to author a workflow for.', required: true },
-  ],
-  metadata: { kind: 'meta-workflow', feature: 'workflow-author' },
-};
+export function registerWorkflowAuthorMetaWorkflow(): void {
+  registerChainBackedWorkflow(WORKFLOW_AUTHOR_META_ID, {
+    postProcess: (def) => {
+      for (const n of def.nodes) {
+        if (n.nodeId.endsWith('_draft') || n.nodeId === 'draft' || n.nodeId.endsWith('_validate') || n.nodeId === 'validate') n.outputRole = 'secondary';
+        else if (n.nodeId.endsWith('_persist') || n.nodeId === 'persist') n.outputRole = 'primary';
+        else if (n.outputRole !== undefined) delete n.outputRole;
+      }
+    },
+  });
+}

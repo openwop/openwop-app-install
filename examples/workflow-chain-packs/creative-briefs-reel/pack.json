@@ -1,0 +1,49 @@
+{
+  "name": "core.openwop.workflows.creative-briefs-reel",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Generate a text-to-video reel from a creative brief (migrated from the deprecated ADR 0411 builtin `openwop-app.creative-briefs-reel`, ADR 0472 Phase 2/4). A single `generate-reel` node — the boundary-clean reel path run through the workflow engine. chainId keeps the original id so the route ignition + replay resolve unchanged; the host registers it chain-backed AND it is a gallery-editable chain.",
+  "keywords": ["Creative", "Video"],
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "openwop-app.creative-briefs-reel",
+      "version": "1.0.0",
+      "label": "Generate a reel",
+      "description": "Turn a creative brief into a text-to-video reel.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId", "briefId"],
+        "properties": {
+          "orgId": { "type": "string", "description": "The org that owns the brief." },
+          "briefId": { "type": "string", "description": "The creative brief to generate a reel from." },
+          "directionIndex": { "type": "number", "description": "Which creative direction to base the reel on (its label seeds the prompt)." },
+          "aspectRatio": { "type": "string", "description": "Reel aspect ratio ('9:16' | '16:9' | '1:1'). Default 9:16." },
+          "durationSeconds": { "type": "number", "description": "Target reel length in seconds (provider-clamped)." },
+          "provider": { "type": "string", "description": "Video provider (default replicate; BYOK)." },
+          "credentialRef": { "type": "string", "description": "BYOK credential ref for the video provider." }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "reel",
+            "typeId": "feature.creative-briefs.nodes.generate-reel",
+            "name": "Generate reel",
+            "position": { "x": 0, "y": 0 },
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "briefId": "{{params.briefId}}",
+              "directionIndex": "{{params.directionIndex}}",
+              "aspectRatio": "{{params.aspectRatio}}",
+              "durationSeconds": "{{params.durationSeconds}}",
+              "provider": "{{params.provider}}",
+              "credentialRef": "{{params.credentialRef}}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

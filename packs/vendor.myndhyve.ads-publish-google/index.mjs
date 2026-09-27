@@ -437,7 +437,7 @@ export async function adsPublishGoogle(ctx) {
   }
 }
 
-const nodes = {
+export const nodes = {
   'ads.publish.google': adsPublishGoogle,
 };
 

@@ -7,10 +7,14 @@
  * @see docs/adr/0133-run-task-deck.md
  */
 import type { BackendFeature } from '../types.js';
+import { registerTaskDeckAgentTools } from './agentTools.js';
 import { registerTaskDeckRoutes } from './routes.js';
 
 export const taskDeckFeature: BackendFeature = {
   id: 'task-deck',
-  registerRoutes: (deps) => { registerTaskDeckRoutes(deps); },
+  registerRoutes: (deps) => {
+    registerTaskDeckRoutes(deps);
+    registerTaskDeckAgentTools(deps.storage); // XCH-HOLE-4 (Wave 4) — openwop:tasks.deck (ADR 0308 seam)
+  },
   // No toggleDefault → always-on (ADR 0010/0024 graduation; toggle removed, gates open).
 };

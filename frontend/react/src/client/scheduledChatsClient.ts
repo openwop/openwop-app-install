@@ -1,7 +1,9 @@
 /**
  * ADR 0125 Phase 3a — scheduled-agent-chats FE client. The data layer for the
- * scheduled-chats admin panel: list/create/delete recurring agent chats. Org-scoped.
- * A chat fires only when a turn-workflow is wired (ADR 0125 Phase 2).
+ * scheduled-chats admin OVERSIGHT panel: list / pause-resume / delete recurring agent
+ * chats. Org-scoped. Creation is chat-first (the `openwop:tasks.schedule-recurring`
+ * agent tool, chat-first-port A3) — the admin page is management-only, so there is no
+ * create client here.
  */
 import { authedHeaders, config, fetchOpts } from './config.js';
 
@@ -22,7 +24,7 @@ async function http<T>(path: string, init: RequestInit = {}): Promise<T> {
 export interface Org { orgId: string; name: string }
 
 export async function listOrgs(): Promise<Org[]> {
-  return (await http<{ orgs: Org[] }>('/v1/host/openwop-app/orgs')).orgs ?? [];
+  return (await http<{ orgs: Org[] }>('/host/openwop-app/orgs')).orgs ?? [];
 }
 
 export interface ScheduledChat {
@@ -38,14 +40,16 @@ export interface ScheduledChat {
   lastRunAt?: string;
 }
 
-const BASE = (orgId: string): string => `/v1/host/openwop-app/scheduled-chats/orgs/${encodeURIComponent(orgId)}/chats`;
+const BASE = (orgId: string): string => `/host/openwop-app/scheduled-chats/orgs/${encodeURIComponent(orgId)}/chats`;
 
 export async function listScheduledChats(orgId: string): Promise<ScheduledChat[]> {
   return (await http<{ chats: ScheduledChat[] }>(BASE(orgId))).chats ?? [];
 }
 
-export async function createScheduledChat(orgId: string, input: { agentId: string; prompt: string; conversationId: string; cronExpr: string; workflowId?: string }): Promise<ScheduledChat> {
-  return (await http<{ chat: ScheduledChat }>(BASE(orgId), { method: 'POST', body: JSON.stringify(input) })).chat;
+/** Pause (`enabled:false`) or resume (`enabled:true`) a scheduled chat — the row
+ *  survives, its scheduler job's `enabled` flips (mirrors the backend pause route). */
+export async function setScheduledChatEnabled(orgId: string, chatId: string, enabled: boolean): Promise<ScheduledChat> {
+  return (await http<{ chat: ScheduledChat }>(`${BASE(orgId)}/${encodeURIComponent(chatId)}/pause`, { method: 'POST', body: JSON.stringify({ enabled }) })).chat;
 }
 
 export async function deleteScheduledChat(orgId: string, chatId: string): Promise<void> {

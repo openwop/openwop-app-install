@@ -12,15 +12,15 @@
 import { describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
 import { applyMigrations } from '../src/storage/sqlite/schema.js';
+import { legacyDbAtVersion } from './_legacyDbFixture.js';
 
 describe('annotations table forward-fix (sqlite migration 23)', () => {
   it('creates the annotations table on a long-lived DB that was stuck without it', () => {
-    const db = new Database(':memory:');
-    // Reproduce the production state: schema pinned at v22, annotations absent.
-    db.exec(`
-      CREATE TABLE __schema_version (id INTEGER PRIMARY KEY, version INTEGER NOT NULL, applied_at TEXT NOT NULL);
-      INSERT INTO __schema_version (id, version, applied_at) VALUES (1, 22, '2026-06-06T00:00:00Z');
-    `);
+    // The production state: a REAL v22 database that is missing ONLY the
+    // annotations table (it was initialized before that declaration was added to
+    // the v1 block). Built from the real schema, not a hand-rolled subset, so a
+    // future migration touching any other table can't break this fixture.
+    const db = legacyDbAtVersion(22, { dropTables: ['annotations'] });
     const before = db
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='annotations'`)
       .get();

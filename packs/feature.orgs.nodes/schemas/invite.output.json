@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/invite.output.json",
+  "title": "OrgsInviteOutput",
+  "description": "Ids-only outcome. `delivery` is `sent` (the inviter's brokered email connection delivered the accept link) \u2014 a `skipped` delivery from a run is rolled back and surfaces as a TYPED failure (422 undeliverable / delivery_failed), never success over a zombie row. A refusal (no acting user, disabled actor, missing scope, foreign org, no OPENWOP_PUBLIC_BASE_URL) is a typed node failure. Never the email, never the token.",
+  "type": "object",
+  "required": [
+    "inviteId",
+    "orgId",
+    "delivery"
+  ],
+  "properties": {
+    "inviteId": {
+      "type": "string",
+      "description": "The minted invitation id (`inv:<uuid>`)."
+    },
+    "orgId": {
+      "type": "string",
+      "description": "The org invited into."
+    },
+    "delivery": {
+      "type": "string",
+      "enum": [
+        "sent",
+        "skipped"
+      ],
+      "description": "Delivery outcome (`sent` on the run lane; `skipped` is only reachable where the caller can hand the token out, which a run cannot)."
+    }
+  },
+  "additionalProperties": false
+}

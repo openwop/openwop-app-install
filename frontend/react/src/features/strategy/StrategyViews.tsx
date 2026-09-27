@@ -5,7 +5,19 @@
  * helpers below (`StrategyChips` + `strategySubLine`), so the grid and list views
  * never diverge (the `primaryAction`/`subLine` precedent on `/agents`). Composed
  * from existing primitives — no bespoke CSS.
+ *
+ * SPU-12 — that paragraph was FALSE for the Card, which re-inlined the whole chip
+ * set and rendered `{s.summary ? … : null}` instead of `strategySubLine`. The
+ * visible consequence: a strategy with no summary showed "No summary yet" in LIST
+ * view and a blank gap in GRID view — precisely the divergence the comment said
+ * was impossible. The latent one is worse: two chip sets that can now drift with
+ * nothing to catch it, under a docblock that keeps asserting they cannot.
+ *
+ * The Card's split layout is deliberate and is kept — health + status ride the
+ * title row — so `StrategyChips` takes `withLead`, and the two views share ONE
+ * implementation of every chip rather than the Card owning a second copy.
  */
+import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { FlagIcon } from '../../ui/icons/index.js';
@@ -37,14 +49,23 @@ export function strategySubLine(s: Strategy, t: TFunction): string {
  *  state, horizon, confidence, risk, objectives count. Shared by Card + Row so
  *  the two views carry identical metadata (rule 11). */
 export function StrategyChips({
-  s, health, kbEnabled, t,
-}: { s: Strategy; health: Map<string, StrategyHealthState>; kbEnabled: boolean; t: TFunction }): JSX.Element {
+  s, health, kbEnabled, parentTitle, withLead = true, t,
+}: { s: Strategy; health: Map<string, StrategyHealthState>; kbEnabled: boolean; parentTitle?: string;
+  /** `false` when the caller already renders health + status elsewhere (the
+   *  Card's title row). Everything else stays shared — see the docblock. */
+  withLead?: boolean; t: TFunction }): JSX.Element {
   const h = health.get(s.id);
   return (
     <>
-      {h ? <HealthChip state={h} t={t} /> : null}
-      <StatusChip status={s.status} t={t} />
+      {withLead && h ? <HealthChip state={h} t={t} /> : null}
+      {withLead ? <StatusChip status={s.status} t={t} /> : null}
+      {/* SGU-4 — a strategy awaiting activation approval is still `draft`, so the list
+          rendered it identically to one nobody has submitted. The detail page has shown
+          this chip since ADR 0230; the portfolio — where a reviewer actually scans for
+          work — did not, and the data was already on the row. */}
+      {s.activationPending ? <span className="chip chip--warning" title={t('activationPendingTitle')}>{t('activationPending')}</span> : null}
       <ScopeChip scope={s.scope} t={t} />
+      {parentTitle ? <span className="chip chip--accent">{t('partOf', { parent: parentTitle })}</span> : null}
       {s.scope === 'user'
         ? <span className="chip chip--muted" title={t('notIndexedTitle')}>{t('notIndexed')}</span>
         : (kbEnabled && s.status !== 'archived' ? <span className="chip chip--muted" title={t('indexedTitle')}><FlagIcon size={11} aria-hidden /> {t('indexedForAgents')}</span> : null)}
@@ -60,13 +81,19 @@ type CellProps = {
   s: Strategy;
   health: Map<string, StrategyHealthState>;
   kbEnabled: boolean;
-  onOpen: (id: string) => void;
+  /** ADR 0235 §D3 — the parent strategy's title when it is in the readable
+   *  list; absent ⇒ ungrouped (silent-ungroup posture). */
+  parentTitle?: string;
 };
 
-export function StrategyCard({ s, health, kbEnabled, onOpen }: CellProps): JSX.Element {
+/** Every strategy has its own URL (`/strategy/:strategyId`) — cells are real
+ *  links (cmd-click / middle-click / share), the ProjectViews precedent. */
+const strategyHref = (s: Strategy): string => `/strategy/${encodeURIComponent(s.id)}`;
+
+export function StrategyCard({ s, health, kbEnabled, parentTitle }: CellProps): JSX.Element {
   const { t } = useTranslation('strategy');
   return (
-    <button type="button" className="surface-card u-text-left" onClick={() => onOpen(s.id)}>
+    <Link to={strategyHref(s)} className="surface-card u-text-left">
       <div className="u-flex u-items-center u-justify-between u-gap-2">
         <h3 className="u-fs-14 u-fw-600 u-m-0">{s.title}</h3>
         <span className="u-flex u-gap-1 u-items-center">
@@ -74,39 +101,32 @@ export function StrategyCard({ s, health, kbEnabled, onOpen }: CellProps): JSX.E
           <StatusChip status={s.status} t={t} />
         </span>
       </div>
-      {s.summary ? <p className="muted u-fs-13 u-mt-2 u-mb-2">{s.summary}</p> : null}
+      <p className="muted u-fs-13 u-mt-2 u-mb-2">{strategySubLine(s, t)}</p>
       <div className="u-flex u-gap-2 u-flex-wrap u-mt-2">
-        <ScopeChip scope={s.scope} t={t} />
-        {s.scope === 'user'
-          ? <span className="chip chip--muted" title={t('notIndexedTitle')}>{t('notIndexed')}</span>
-          : (kbEnabled && s.status !== 'archived' ? <span className="chip chip--muted" title={t('indexedTitle')}><FlagIcon size={11} aria-hidden /> {t('indexedForAgents')}</span> : null)}
-        <span className="chip chip--muted">{t(`horizon_${s.planningHorizon}`)}</span>
-        {s.confidence ? <span className={`chip ${CONFIDENCE_CHIP[s.confidence]}`}>{t('confidenceLabel', { level: t(`level_${s.confidence}`) })}</span> : null}
-        {s.risk ? <span className={`chip ${RISK_CHIP[s.risk]}`}>{t('riskLabel', { level: t(`level_${s.risk}`) })}</span> : null}
-        <span className="chip chip--muted">{t('objectivesCount', { count: s.objectives.length })}</span>
+        <StrategyChips s={s} health={health} kbEnabled={kbEnabled} withLead={false} {...(parentTitle ? { parentTitle } : {})} t={t} />
       </div>
-    </button>
+    </Link>
   );
 }
 
-export function StrategyRow({ s, health, kbEnabled, onOpen }: CellProps): JSX.Element {
+export function StrategyRow({ s, health, kbEnabled, parentTitle }: CellProps): JSX.Element {
   const { t } = useTranslation('strategy');
+  const href = strategyHref(s);
   return (
     <div className="list-row">
-      <button type="button" className="list-row-id" title={t('openStrategy', { title: s.title })} onClick={() => onOpen(s.id)}>
-        <FlagIcon size={18} aria-hidden />
+      <Link to={href} className="list-row-id" title={t('openStrategy', { title: s.title })}>
         <span className="list-row-name-wrap">
           <span className="list-row-name-line">
             <span className="list-row-name">{s.title}</span>
           </span>
           <span className="list-row-sub">{strategySubLine(s, t)}</span>
         </span>
-      </button>
+      </Link>
       <div className="list-row-meta">
-        <StrategyChips s={s} health={health} kbEnabled={kbEnabled} t={t} />
+        <StrategyChips s={s} health={health} kbEnabled={kbEnabled} {...(parentTitle ? { parentTitle } : {})} t={t} />
       </div>
       <div className="list-row-actions action-bar">
-        <button type="button" className="secondary btn-sm" onClick={() => onOpen(s.id)}>{t('openStrategyAction')}</button>
+        <Link to={href} className="btn secondary btn-sm">{t('openStrategyAction')}</Link>
       </div>
     </div>
   );

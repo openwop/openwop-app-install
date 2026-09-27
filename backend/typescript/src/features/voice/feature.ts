@@ -38,7 +38,7 @@ export const voiceFeature: BackendFeature = {
     label: 'Voice mode',
     description:
       'Talk to the AI in a full-duplex spoken conversation on the existing chat: a live mic stream is transcribed in real time, the committed turn enters the conversation, and the agent speaks back (streaming TTS) with barge-in. Rides the ONE chat — no new panel or mic. OFF by default; tenant-bucketed (a continuous-ingress cost/abuse profile).',
-    category: 'Business Tools',
+    category: 'Chat',
     status: 'off',
     bucketUnit: 'tenant',
     salt: 'voice',

@@ -37,6 +37,7 @@ import { dirname, join } from 'node:path';
 import { createLogger } from '../observability/logger.js';
 import { locateRepoDir } from './_repoPath.js';
 import type { SandboxExecRequest, SandboxExecResult } from '../executor/types.js';
+import { classifySandboxError, recordSandboxExecution } from '../observability/metricSeams.js';
 
 // `WebAssembly` is a Node runtime global but not in this project's ES2022 lib (no DOM lib, by
 // design). Declare only the method we use; the compiled module is opaque here — produced by
@@ -167,6 +168,22 @@ parentPort.once('message', async (msg) => {
 
 /** Run one Python submission in a fresh CPython-WASI worker, host-terminated at the wall-clock cap. */
 export async function runWasiSandboxedCode(req: SandboxExecRequest): Promise<SandboxExecResult> {
+  // ADR 0556 P1 — metered inside the EXPORTED function so the reference
+  // `resolveSandboxExecutor` hands out is unchanged (the Phase-8 selector tests
+  // assert on it). `exitCode: 124` / `timedOut` is how this runtime reports a
+  // wall-clock kill; it resolves rather than throwing, so the throw path alone
+  // would miss every WASI timeout.
+  try {
+    const result = await runWasiSandbox(req);
+    recordSandboxExecution('wasi', result.timedOut ? 'timeout' : 'ok');
+    return result;
+  } catch (err_) {
+    recordSandboxExecution('wasi', classifySandboxError(err_));
+    throw err_;
+  }
+}
+
+async function runWasiSandbox(req: SandboxExecRequest): Promise<SandboxExecResult> {
   if (typeof req.code !== 'string' || req.code.length === 0) throw err('validation_error', '`code` is required.');
   if (req.code.length > MAX_CODE_BYTES) throw err('content_too_long', `code exceeds the ${MAX_CODE_BYTES}-byte cap.`);
   if (typeof req.stdin === 'string' && req.stdin.length > MAX_STDIN_BYTES) throw err('content_too_long', `stdin exceeds the ${MAX_STDIN_BYTES}-byte cap.`);

@@ -74,4 +74,23 @@ describe('subscribeChannelPresence reconnect (ADR 0126 hardening)', () => {
     unsub();
     expect(fetchMock.mock.calls.length).toBe(1); // 404 ⇒ no retry
   });
+
+  it('CS-CH-2 — does NOT reconnect on 403 (membership denial is terminal, not transient)', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 403, body: null } as unknown as Response));
+    vi.stubGlobal('fetch', fetchMock);
+    const unsub = subscribeChannelPresence('c1', () => {});
+    await new Promise((r) => setTimeout(r, 1300));
+    unsub();
+    expect(fetchMock.mock.calls.length).toBe(1); // 403 ⇒ no retry
+  });
+
+  it('CS-CH-1 — the stream connect declares Accept: text/event-stream (the rate-limiter SSE exemption gate)', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: false, status: 404, body: null } as unknown as Response));
+    vi.stubGlobal('fetch', fetchMock);
+    const unsub = subscribeChannelPresence('c1', () => {});
+    await new Promise((r) => setTimeout(r, 50));
+    unsub();
+    const headers = (fetchMock.mock.calls[0]?.[1] as { headers?: Record<string, string> } | undefined)?.headers ?? {};
+    expect(Object.entries(headers).some(([k, v]) => k.toLowerCase() === 'accept' && v.includes('text/event-stream'))).toBe(true);
+  });
 });

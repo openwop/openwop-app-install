@@ -24,11 +24,16 @@ export const messages = {
   channelsChip_one: '{{count}} channel rule',
   channelsChip_other: '{{count}} channel rules',
   lockedChip: 'Locked',
+  lockNoticeFull: 'This brand is locked. Only an org admin can save changes to it — anyone else will be refused when they try to save.',
+  lockNoticePartial: 'This brand restricts editing. Only its creator, a listed editor, or an org admin can save changes to it.',
   archivedChip: 'Archived',
 
   // Editor — sections
   editorCreateTitle: 'New brand',
   editorEditTitle: 'Edit brand',
+  auditTrail: "Change history",
+  auditLoadFailed: "The change history could not be loaded. This is a failed read, not an empty history.",
+  auditEmpty: "No guardrail changes recorded yet.",
   secIdentity: 'Identity',
   secVoice: 'Voice',
   secPhrases: 'Key phrases',
@@ -80,8 +85,31 @@ export const messages = {
 
   // Misc
   saveFailed: 'Could not save the brand.',
+  saveConflict: 'This brand changed since you opened it — close the editor, reload, and reapply your edits.',
   deleteConfirmTitle: 'Delete this brand?',
   deleteConfirmBody: 'Campaign assets that grounded against it will lose their brand reference. This cannot be undone.',
   noOrgTitle: 'No organization yet',
   noOrgBody: 'Create an organization first — a brand belongs to one.',
+  // §4.5 collection kit (DESIGN.md rule 13)
+  filterGroup: 'Filters',
+  filterBrandsPlaceholder: 'Search brands…',
+  filterBrandsAria: 'Search brands by name',
+  filterStatusLabel: 'Filter by status',
+  allStatuses: 'All statuses',
+  statusActive: 'Active',
+  noMatchTitle: 'No matches',
+  noMatchBody: 'Nothing matches the current filters.',
+  clearFilters: 'Clear filters',
+
+  // ADR 0399 OQ-1 — brand custom fonts for ad rendering
+  secAdFonts: 'Ad fonts',
+  adFontsLede: 'Upload a font for composed ad creatives (TTF/OTF). Requires that you hold redistribution rights.',
+  adFontRole_sans: 'Sans (headlines & body)',
+  adFontRole_serif: 'Serif',
+  adFontsAttest: 'I have the right to embed this font in exported creatives.',
+  adFontsAttestFirst: 'Confirm the license attestation before uploading.',
+  adFontsChoose: 'Choose a {{role}} font file',
+  adFontsRemove: 'Remove',
+  adFontsLoadFailed: 'Could not load brand fonts.',
+  adFontsUploadFailed: 'Font upload failed.',
 } as const;

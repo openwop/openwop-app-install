@@ -100,6 +100,15 @@ minimal "where is this used" signal a consumer (CMS, ADR 0009) increments when i
 references an asset. List supports `?collectionId=`, `?q=` (name substring), and
 `?tag=` filters. (Deep referenced-by graph is deferred until a consumer needs it.)
 
+> **Correction (2026-07-03, ADR 0206 D3):** the deferred referenced-by graph now
+> exists — `media:usage` rows reconciled by the CMS save path via
+> `syncUsageRefs`, read at `GET …/assets/:assetId/usage` — and **supersedes the
+> bare `usageCount` counter as the "used by" source of truth**. The `/use`
+> counter route remains for compatibility (no known callers). Also per ADR 0206
+> D4: consumers store serve tokens through `cleanOpaqueToken` (charset-validated,
+> NOT secret-scrubbed) — the free-text scrub was silently redacting 40+-char
+> serve tokens.
+
 ### Phase 3 — Frontend Media Library
 
 `/media` (lazy route, nav-gated on the `media` toggle): an org picker, a

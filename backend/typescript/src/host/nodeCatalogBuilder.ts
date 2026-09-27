@@ -18,6 +18,8 @@ import { resolveDefaultPackDir } from '../packs/registryInstaller.js';
 import { requiredHostSurfacesFor } from '../bootstrap/hostSurfaceMap.js';
 import { listHostSurfaces } from '../bootstrap/hostSurfaceRegistry.js';
 import type { WorkflowDefinition } from '../executor/types.js';
+import { isTombstoned } from './packTombstones.js';
+import { isParkedPackDirName } from '../bootstrap/mountLocalPacks.js';
 
 const MAX_SCHEMA_INLINE_BYTES = 8 * 1024;
 
@@ -102,6 +104,10 @@ export function buildNodeCatalog(): CatalogNode[] {
   const packDir = resolveDefaultPackDir();
   if (existsSync(packDir)) {
     for (const entry of readdirSync(packDir)) {
+      // ADR 0194 P4: a tombstoned pack is hidden from every authoring surface
+      // host-wide (its bytes stay for historical run resolution).
+      if (isTombstoned(entry)) continue;
+      if (isParkedPackDirName(entry)) continue;
       const manifestPath = join(packDir, entry, 'pack.json');
       if (!existsSync(manifestPath)) continue;
       let manifest: PackManifest;
@@ -154,6 +160,90 @@ export function buildNodeCatalog(): CatalogNode[] {
  * time. Reusable by any caller that wants to validate a definition against what
  * this host can run (the AI workflow-author, a builder pre-flight, a linter).
  */
+/** ADR 0473 Phase 2 — the typeId→role map for review risk badges (the pack
+ *  manifests' `role` taxonomy: pure / read / gate / action / side-effect /
+ *  streaming-output). `buildNodeCatalog()` is sync-FS-heavy (readdir + a
+ *  manifest read per pack + schema inlining), far too costly per review-list
+ *  request — this trims it to roles only behind a short-lived module cache.
+ *  A typeId with NO declared role is absent from the map; consumers project
+ *  it as `unclassified` and any policy treats it as side-effect (fail-closed). */
+const ROLE_MAP_TTL_MS = 60_000;
+let roleMapCache: { at: number; map: Map<string, string> } | null = null;
+let roleMapTestOverride: Map<string, string> | null = null;
+
+/** Test seam — the pack dir (`~/.openwop-packs`) is environment-dependent in
+ *  CI, so role-class behavior (ADR 0473 badges + the Phase 5 auto-approval
+ *  gate) pins against an injected map. Pass null to restore the real scan. */
+export function __setNodeRolesForTests(entries: Record<string, string> | null): void {
+  roleMapTestOverride = entries ? new Map(Object.entries(entries)) : null;
+  roleMapCache = null;
+}
+
+export function nodeRoleMap(): Map<string, string> {
+  if (roleMapTestOverride) return roleMapTestOverride;
+  if (roleMapCache && Date.now() - roleMapCache.at < ROLE_MAP_TTL_MS) return roleMapCache.map;
+  const map = new Map<string, string>();
+  // Manifest-only scan (review F6): roles live in pack.json — the full
+  // `buildNodeCatalog()` additionally inlines up to 3 schema files per node,
+  // all wasted work here and too heavy for a list-path cache refresh.
+  const packDir = resolveDefaultPackDir();
+  if (existsSync(packDir)) {
+    for (const entry of readdirSync(packDir)) {
+      if (isTombstoned(entry)) continue;
+      if (isParkedPackDirName(entry)) continue;
+      const manifestPath = join(packDir, entry, 'pack.json');
+      if (!existsSync(manifestPath)) continue;
+      let manifest: PackManifest;
+      try {
+        manifest = JSON.parse(readFileSync(manifestPath, 'utf-8')) as PackManifest;
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(manifest.nodes)) continue;
+      for (const n of manifest.nodes) {
+        if (typeof n.role === 'string' && n.role.length > 0) map.set(n.typeId, n.role);
+      }
+    }
+  }
+  roleMapCache = { at: Date.now(), map };
+  return map;
+}
+
+/**
+ * P2 — typeId → the config keys its `configSchema` declares REQUIRED.
+ *
+ * Same shape and same reasoning as `nodeRoleMap` above: a manifest + schema scan
+ * is far too heavy per expansion, so it sits behind the same short-lived module
+ * cache. Unlike the role map this DOES need the schema files (the `required`
+ * array lives there, not in pack.json), so it reads one extra file per node type
+ * that declares a `configSchemaRef`.
+ *
+ * A typeId absent from the map declares nothing required — consumers treat that
+ * as "no constraint", which is the right default for a pack that simply hasn't
+ * written a schema.
+ */
+const REQUIRED_CONFIG_TTL_MS = 60_000;
+let requiredConfigCache: { at: number; map: Map<string, string[]> } | null = null;
+
+export function requiredConfigKeyMap(): Map<string, string[]> {
+  if (requiredConfigCache && Date.now() - requiredConfigCache.at < REQUIRED_CONFIG_TTL_MS) return requiredConfigCache.map;
+  const map = new Map<string, string[]>();
+  for (const n of buildNodeCatalog()) {
+    const schema = n.configSchema as { required?: unknown } | undefined;
+    const required = schema?.required;
+    if (Array.isArray(required) && required.length > 0) {
+      map.set(n.typeId, required.filter((k): k is string => typeof k === 'string'));
+    }
+  }
+  requiredConfigCache = { at: Date.now(), map };
+  return map;
+}
+
+/** The `ExpandOptions.requiredConfigKeysFor` callback, catalog-backed. */
+export function requiredConfigKeysFor(typeId: string): readonly string[] {
+  return requiredConfigKeyMap().get(typeId) ?? [];
+}
+
 export function runnableNodeTypeIds(): Set<string> {
   return new Set(buildNodeCatalog().filter((n) => n.missingHostSurfaces.length === 0).map((n) => n.typeId));
 }

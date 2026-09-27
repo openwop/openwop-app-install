@@ -7,9 +7,12 @@
 import type { NodeModule } from './types.js';
 
 type NodePackResolver = (typeId: string) => Promise<NodeModule | null>;
+/** Sync twin of the pack resolver: does an installed pack DECLARE this typeId? */
+type NodePackIndexProbe = (typeId: string) => boolean;
 
 const inProcess = new Map<string, NodeModule>();
 let resolver: NodePackResolver | null = null;
+let indexProbe: NodePackIndexProbe | null = null;
 
 export function getNodeRegistry() {
   return {
@@ -40,12 +43,21 @@ export function getNodeRegistry() {
       }
       return null;
     },
+    /** Would `resolve(typeId)` find a module? In-process registration, or an
+     *  installed pack whose manifest declares it — the same two lanes
+     *  `resolve()` walks, answered without loading the pack. The conformance
+     *  fixture advert (`host/index.ts`) reads this so it can only offer a
+     *  fixture whose every node the executor would actually find. */
+    isResolvable(typeId: string): boolean {
+      return inProcess.has(typeId) || (indexProbe?.(typeId) ?? false);
+    },
     listTypeIds(): readonly string[] {
       return Array.from(inProcess.keys()).sort();
     },
   };
 }
 
-export function setNodePackResolver(fn: NodePackResolver): void {
+export function setNodePackResolver(fn: NodePackResolver, probe?: NodePackIndexProbe): void {
   resolver = fn;
+  indexProbe = probe ?? null;
 }

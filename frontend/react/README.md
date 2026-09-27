@@ -43,7 +43,7 @@ feature packages register via `src/features/registry.ts`.
 
 Workspace tier: `/` (chat home), `/agents*`, `/builder*`, `/boards`, `/inbox`,
 `/privacy`.
-Admin tier (rendered inside `AdminLayout`): `/admin`, `/mission`, `/runs*`,
+Admin tier (rendered inside `AdminLayout`): `/admin`, `/runs*` (incl. the "Active runs" tab; `/mission` redirects here),
 `/compare`, `/workforces*`, `/agents/templates*`, `/roster`, `/prompts`,
 `/memory`, `/capabilities`, `/cli`, `/orgs`, `/keys`, `/feature-toggles`,
 `/example-data`.

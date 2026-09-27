@@ -1,0 +1,21 @@
+{
+  "name": "feature.commerce-connect.nodes",
+  "version": "1.0.1",
+  "description": "Commerce Connect feature node pack (ADR 0385) — a READ-ONLY seller-stats node over the ctx.features['commerce-connect'] surface. Onboarding, purchase, refunds, and approval are deliberately NOT nodes: money movement + human gates stay privileged REST (the ADR 0022 'install is not a node' rule).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "commerce-connect", "marketplace", "stripe-connect", "seller"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.commerce-connect.nodes.seller-stats",
+      "version": "1.0.1",
+      "label": "Seller Stats",
+      "description": "Reads the run tenant's OWN seller account state, sales aggregates, and recent payouts over ctx.features['commerce-connect'].sellerStats. Read-only; tenant-scoped by the surface; empty when the tenant is not a seller.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

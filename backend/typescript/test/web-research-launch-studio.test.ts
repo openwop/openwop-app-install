@@ -29,12 +29,12 @@ beforeAll(async () => {
   // private egress for the test — same flag the webhook-egress tests use.
   process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   mock = http.createServer((_req, res) => {
     res.writeHead(200, { 'content-type': 'text/html' });
     res.end('<html><head><title>Test Page</title></head><body><script>ignore()</script><p>Hello readable world.</p></body></html>');
   });
-  await new Promise<void>((res) => mock.listen(0, res));
+  await new Promise<void>((res) => mock.listen(0, '127.0.0.1', res));
   mockUrl = `http://127.0.0.1:${(mock.address() as AddressInfo).port}/`;
 });
 afterAll(async () => {

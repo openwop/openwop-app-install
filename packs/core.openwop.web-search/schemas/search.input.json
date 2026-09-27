@@ -1,9 +1,11 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.web-search/1.0.0/search.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.web-search/1.1.0/search.input.json",
   "title": "WebSearchInput",
   "type": "object",
-  "required": ["query"],
+  "required": [
+    "query"
+  ],
   "properties": {
     "query": {
       "type": "string",
@@ -13,8 +15,24 @@
     },
     "siteFilter": {
       "type": "array",
-      "items": { "type": "string", "minLength": 1 },
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
       "description": "Optional domain allow-list. When set, results from other domains are filtered out (host MAY translate to an engine-specific `site:` operator)."
+    },
+    "suitability": {
+      "type": "string",
+      "enum": [
+        "answer-only",
+        "durable"
+      ],
+      "description": "ADR 0101 P4 licensing gate: `durable` means results will be STORED as evidence, so a provider licensed only for answer-display must not back the call. Read from config OR inputs (ADR 0502). Declared per ADR 0525 (GRD-8)."
+    },
+    "maxResults": {
+      "type": "number",
+      "minimum": 1,
+      "description": "Result cap (clamped to 50). Read from config OR inputs \u2014 the node was config-only until ADR 0525, so two chains asking for 8 here silently ran at the default 5."
     }
   },
   "additionalProperties": false

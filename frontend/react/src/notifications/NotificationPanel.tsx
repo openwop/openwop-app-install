@@ -14,36 +14,32 @@
  * to dig through Runs.
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Button } from '../ui/Button.js';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
-import type { TFunction } from 'i18next';
 import { Link } from 'react-router-dom';
 import { useNotificationStore } from './notificationStore.js';
+import { relativeLabel } from './relativeLabel.js';
+import { priorityChip } from './priorityChip.js';
 import { NotificationPreferencesPanel } from './NotificationPreferencesPanel.js';
-import { AlertIcon, CheckIcon, MessageSquareIcon, SettingsIcon, XIcon } from '../ui/icons/index.js';
-import { formatDateTime } from '../i18n/format.js';
-import type { Notification, NotificationType } from './types.js';
+import { InboxIcon, SettingsIcon, XIcon } from '../ui/icons/index.js';
+import { Modal } from '../ui/Modal.js';
+import { Notice } from '../ui/Notice.js';
+import { Skeleton } from '../ui/Skeleton.js';
+import { StateCard } from '../ui/StateCard.js';
+import type { Notification } from './types.js';
+import { notificationTypeIcon } from './notificationIcons.js';
+import { actionLabelKeyFor, isSafeActionUrl } from './actionLabels.js';
 
 type Tab = 'all' | 'unread' | 'archived';
 
-const TYPE_ICON: Record<string, React.ReactNode> = {
-  'workflow.approval_needed': <AlertIcon size={14} />,
-  'workflow.input_needed':    '?',
-  'workflow.failed':          '!',
-  'workflow.completed':       <CheckIcon size={14} />,
-  'system.alert':             'i',
-  // Comments feature (ADR 0021) — additive, fallback-protected; no core-union edit.
-  'comment.added':            <MessageSquareIcon size={14} />,
-  'comment.reply':            <MessageSquareIcon size={14} />,
-};
-
 const TYPE_COLOR: Record<string, string> = {
-  'workflow.approval_needed': 'var(--color-warning)',
-  'workflow.input_needed':    'var(--color-accent)',
+  'openwop-app.workflow.approval-needed': 'var(--color-warning)',
+  'workflow.input_needed':    'var(--clay-text)',
   'workflow.failed':          'var(--color-danger)',
   'workflow.completed':       'var(--color-success)',
-  'system.alert':             'var(--color-text-muted)',
+  'system.alert':             'var(--ink-3)',
 };
 
 export function NotificationPanel(): JSX.Element | null {
@@ -70,13 +66,7 @@ export function NotificationPanel(): JSX.Element | null {
   const syncPushStatus = useNotificationStore((s) => s.syncPushStatus);
 
   const [tab, setTab] = useState<Tab>('all');
-  // Track viewport width so the panel switches between right-side
-  // drawer and full-screen overlay below the mobile breakpoint —
-  // same pattern as WorkflowProgressPanel.
-  const isMobile = useIsMobile();
 
-  // Esc closes the panel when focus is inside.
-  const ref = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!panelOpen) return;
     // Refresh on open so a tab returning from background sees the
@@ -97,35 +87,19 @@ export function NotificationPanel(): JSX.Element | null {
   if (!panelOpen) return null;
 
   return (
-    <>
-      {/* Backdrop — click to dismiss, same affordance as a modal. The
-          panel itself stays mounted so opening/closing doesn't lose
-          scroll position or the active tab. */}
-      <div
-        onClick={closePanel}
-        aria-hidden="true"
-        className="notifpanel-backdrop"
-        style={{
-          background: isMobile ? 'var(--scrim-soft)' : 'transparent',
-        }}
-      />
-      {/* role="dialog" is a window/structure role, not a widget, so the
-          a11y plugin treats it as non-interactive — but an Escape-to-close
-          keydown on a dialog container is the correct, expected pattern. */}
-      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
-      <aside
-        ref={ref}
-        tabIndex={-1}
-        onKeyDown={(e) => { if (e.key === 'Escape') closePanel(); }}
-        role="dialog"
-        aria-labelledby="notification-panel-heading"
-        className="notifpanel-drawer"
-        style={{
-          width: isMobile ? '100%' : 400,
-        }}
-      >
+    // ui/Modal composition (XC-7/SHELL-1): the drawer inherits the canonical
+    // focus-trap + Escape + focus-restore + aria-modal + scrim contract; the
+    // drawer geometry (right-docked, full-height, mobile full-bleed) lives in
+    // .notifpanel-scrim/.notifpanel-drawer CSS instead of JS width math.
+    <Modal
+      onClose={closePanel}
+      label={t('panelHeading')}
+      scrimClassName="notifpanel-scrim"
+      className="notifpanel-drawer"
+    >
+      <>
         <header className="u-flex u-items-center u-justify-between u-pad-3-4 u-border-b">
-          <h2 id="notification-panel-heading" className="u-m-0 u-fs-18">
+          <h2 className="u-m-0 u-fs-18">
             {t('panelHeading')}
             {unreadCount > 0 && (
               <span className="notifpanel-unread-badge">
@@ -134,23 +108,21 @@ export function NotificationPanel(): JSX.Element | null {
             )}
           </h2>
           <div className="u-flex u-gap-1">
-            <button
-              type="button"
-              className="secondary u-fs-14"
+            <Button
+              variant="secondary" className="u-fs-14"
               onClick={openPreferences}
               aria-label={t('preferencesButtonLabel')}
               title={t('preferencesButtonLabel')}
             >
               <SettingsIcon size={16} />
-            </button>
-            <button
-              type="button"
-              className="secondary"
+            </Button>
+            <Button
+              variant="secondary"
               onClick={closePanel}
               aria-label={t('closePanelLabel')}
             >
               <XIcon size={16} />
-            </button>
+            </Button>
           </div>
         </header>
 
@@ -206,67 +178,65 @@ export function NotificationPanel(): JSX.Element | null {
         )}
 
         <div className="u-flex u-gap-2 u-pad-2-4 u-border-b">
-          <button
-            type="button"
-            className="secondary u-fs-12"
+          <Button
+            variant="secondary" className="u-fs-12"
             onClick={() => void markAllRead()}
             disabled={unreadCount === 0}
           >
             {t('markAllRead')}
-          </button>
-          <button
-            type="button"
-            className="secondary u-fs-12"
+          </Button>
+          <Button
+            variant="secondary" className="u-fs-12"
             onClick={() => void refresh()}
           >
             {t('refresh')}
-          </button>
+          </Button>
         </div>
 
-        <nav className="u-flex u-border-b">
+        <nav className="notifpanel-tabs">
           {([
-            ['all',      t('tabAll')],
-            ['unread',   t('tabUnread', { count: unreadCount })],
-            ['archived', t('tabArchived')],
-          ] as const).map(([key, label]) => (
+            ['all',      t('tabAll'),      undefined],
+            ['unread',   t('tabUnread'),   unreadCount],
+            ['archived', t('tabArchived'), undefined],
+          ] as const).map(([key, label, count]) => (
             <button
               key={key}
               type="button"
               onClick={() => setTab(key)}
               aria-pressed={tab === key}
               className="notifpanel-tab"
-              style={{
-                borderBottom: tab === key
-                  ? '2px solid var(--color-accent)'
-                  : '2px solid transparent',
-                fontWeight: tab === key ? 600 : 400,
-                color: tab === key ? 'var(--color-accent)' : 'inherit',
-              }}
             >
               {label}
+              {typeof count === 'number' && count > 0 && (
+                <span className="notifpanel-tab-count">{count}</span>
+              )}
             </button>
           ))}
         </nav>
 
         <div className="u-flex-1 u-overflow-y-auto">
           {error && (
-            <div className="alert error notifpanel-alert">
-              {error}
+            <div className="notifpanel-alert">
+              {/* R2 IB-SP-8 — localized; no endpoint paths in user copy. */}
+              <Notice variant="error">{t('inboxActionFailedBody')}</Notice>
             </div>
           )}
           {loading && filtered.length === 0 && (
-            <div className="muted notifpanel-empty">
-              {t('common:loading')}
+            <div className="notifpanel-empty" role="status" aria-label={t('common:loading')}>
+              <Skeleton width="70%" />
+              <Skeleton width="95%" />
+              <Skeleton width="85%" />
             </div>
           )}
           {!loading && filtered.length === 0 && (
-            <div className="muted notifpanel-empty">
-              {tab === 'unread'
+            <StateCard
+              icon={<InboxIcon size={24} />}
+              title={tab === 'unread'
                 ? t('emptyUnread')
                 : tab === 'archived'
                   ? t('emptyArchived')
                   : t('emptyAll')}
-            </div>
+            />
           )}
           {filtered.map((n) => (
             <NotificationRow
@@ -281,8 +251,8 @@ export function NotificationPanel(): JSX.Element | null {
         </div>
           </>
         )}
-      </aside>
-    </>
+      </>
+    </Modal>
   );
 }
 
@@ -303,46 +273,52 @@ function NotificationRow({
 }: NotificationRowProps): JSX.Element {
   const { t } = useTranslation('notifications');
   const isUnread = notification.status === 'unread';
-  const icon = TYPE_ICON[notification.type] ?? '•';
-  const color = TYPE_COLOR[notification.type] ?? 'var(--color-text-muted)';
+  const icon = notificationTypeIcon(notification.type);
+  const color = TYPE_COLOR[notification.type] ?? 'var(--ink-3)';
+  const body = (
+    <>
+      <div className="u-flex u-items-baseline u-justify-between u-gap-2">
+        <strong className="notifpanel-row-title">{notification.title}</strong>
+        <span className="muted u-fs-11 u-nowrap">
+          {relativeLabel(notification.createdAt, t)}
+        </span>
+        {/* R2 IB-SP-5 — urgency belongs on the GLANCE surface too. */}
+        {priorityChip(notification.priority, t)}
+      </div>
+      <div className="muted notifpanel-row-message">{notification.message}</div>
+    </>
+  );
   return (
-    <div
-      className="notifpanel-row"
-      style={{
-        background: isUnread ? 'color-mix(in oklch, var(--color-accent) 6%, transparent)' : 'transparent',
-        cursor: isUnread ? 'pointer' : 'default',
-      }}
-      role={isUnread ? 'button' : undefined}
-      tabIndex={isUnread ? 0 : undefined}
-      onClick={isUnread ? onMarkRead : undefined}
-      onKeyDown={isUnread ? (e) => {
-        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onMarkRead(); }
-      } : undefined}
-    >
+    // ARIA 1.2 (the ConversationsRail pattern): the mark-read action is a real
+    // <button> around the row BODY only; the action link + buttons are
+    // SIBLINGS, never interactive descendants of a role=button container.
+    <div className="notifpanel-row" data-unread={isUnread ? 'true' : undefined}>
       <span
         aria-hidden="true"
         className="notifpanel-row-icon"
-        style={{
-          background: `color-mix(in oklch, ${color} 15%, transparent)`,
-          color,
-        }}
+        style={{ '--notif-tone': color } as CSSProperties}
       >
         {icon}
       </span>
       <div className="u-flex-1 u-minw-0">
-        <div className="u-flex u-items-baseline u-justify-between u-gap-2">
-          <strong style={{ fontWeight: isUnread ? 600 : 400 }}>{notification.title}</strong>
-          <span className="muted u-fs-11 u-nowrap">
-            {relativeLabel(notification.createdAt, t)}
-          </span>
-        </div>
-        <div className="muted notifpanel-row-message">{notification.message}</div>
-        {notification.actionUrl && (
+        {isUnread ? (
+          <button
+            type="button"
+            className="notifpanel-row-open"
+            onClick={onMarkRead}
+            title={t('rowMarkRead')}
+          >
+            {body}
+          </button>
+        ) : (
+          body
+        )}
+        {isSafeActionUrl(notification.actionUrl) && (
           <div className="u-mt-1-5">
             <Link
               to={notification.actionUrl}
-              onClick={(e) => { e.stopPropagation(); onClose(); }}
-              className="u-fs-12"
+              onClick={onClose}
+              className="inline-link u-fs-12"
             >
               {t(actionLabelKeyFor(notification.type))} →
             </Link>
@@ -350,30 +326,27 @@ function NotificationRow({
         )}
         <div className="u-flex u-gap-2 u-mt-1-5">
           {isUnread && (
-            <button
-              type="button"
-              className="secondary u-fs-11"
-              onClick={(e) => { e.stopPropagation(); onMarkRead(); }}
+            <Button
+              variant="secondary" className="u-fs-11"
+              onClick={onMarkRead}
             >
               {t('rowMarkRead')}
-            </button>
+            </Button>
           )}
           {notification.status !== 'archived' && (
-            <button
-              type="button"
-              className="secondary u-fs-11"
-              onClick={(e) => { e.stopPropagation(); onArchive(); }}
+            <Button
+              variant="secondary" className="u-fs-11"
+              onClick={onArchive}
             >
               {t('rowArchive')}
-            </button>
+            </Button>
           )}
-          <button
-            type="button"
-            className="secondary u-fs-11 u-text-danger"
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+          <Button
+            variant="danger" className="u-fs-11"
+            onClick={onDelete}
           >
             {t('rowDelete')}
-          </button>
+          </Button>
         </div>
       </div>
     </div>
@@ -389,59 +362,22 @@ interface DesktopPermissionRowProps {
 
 function DesktopPermissionRow({ label, cta, onClick, tone = 'default' }: DesktopPermissionRowProps): JSX.Element {
   return (
-    <div
-      className="notifpanel-perm-row"
-      style={{
-        background: tone === 'muted'
-          ? 'transparent'
-          : 'color-mix(in oklch, var(--color-accent) 8%, transparent)',
-      }}
-    >
-      <span className="notifpanel-perm-label" style={{ color: tone === 'muted' ? 'var(--color-text-muted)' : 'inherit' }}>
+    <div className="notifpanel-perm-row" data-tone={tone}>
+      <span className="notifpanel-perm-label">
         {label}
       </span>
       {cta && onClick && (
-        <button
-          type="button"
-          className="secondary u-fs-12 u-nowrap"
+        <Button
+          variant="secondary" className="u-fs-12 u-nowrap"
           onClick={onClick}
         >
           {cta}
-        </button>
+        </Button>
       )}
     </div>
   );
 }
 
-/** Catalog key for a row's inline action link, by notification type. */
-function actionLabelKeyFor(type: NotificationType): string {
-  if (type === 'workflow.approval_needed' || type === 'workflow.input_needed') return 'actionOpenInbox';
-  if (type === 'workflow.failed' || type === 'workflow.completed') return 'actionViewRun';
-  return 'actionView';
-}
-
 /** Localized relative timestamp (`just now`, `5m ago`, …); falls back to a date past a week. */
-function relativeLabel(iso: string, t: TFunction<'notifications'>): string {
-  const then = new Date(iso).getTime();
-  const diffMs = Date.now() - then;
-  const m = Math.floor(diffMs / 60_000);
-  const h = Math.floor(diffMs / 3_600_000);
-  const d = Math.floor(diffMs / 86_400_000);
-  if (m < 1) return t('relativeJustNow');
-  if (m < 60) return t('relativeMinutes', { count: m });
-  if (h < 24) return t('relativeHours', { count: h });
-  if (d < 7) return t('relativeDays', { count: d });
-  return formatDateTime(iso, { dateStyle: 'medium' });
-}
+// R2 IB-SP-7 — relativeLabel moved to ./relativeLabel.ts (the ONE implementation).
 
-function useIsMobile(): boolean {
-  const [isMobile, setIsMobile] = useState(() =>
-    typeof window === 'undefined' ? false : window.innerWidth < 720,
-  );
-  useEffect(() => {
-    const onResize = () => setIsMobile(window.innerWidth < 720);
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, []);
-  return isMobile;
-}

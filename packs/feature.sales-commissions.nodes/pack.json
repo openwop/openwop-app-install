@@ -1,0 +1,48 @@
+{
+  "name": "feature.sales-commissions.nodes",
+  "version": "1.1.0",
+  "description": "Sales Commissions node pack — two READ nodes over the ctx.features.commissions surface: list commission plans, and list statements (subject-scoped to the run owner unless they hold host:commissions:manage). PLUS two GOVERNED WRITE nodes: compute-statement and approve-statement, which enforce the run OWNER's host:commissions:manage scope (system runs denied) and are kept OUT of the advisory agent's allowlist. NOTE (CFP-1 / D9): the app drives the governed statement approval through the SHARED reviews approval gate (kind: commission-statement), not a direct agent tool call — no built-in workflow ignites these nodes; they stay composable catalog entries for a builder-authored chain. All nodes are role:\"action\", tenant+org-guarded (CTI-1); tenantId comes from the run scope, never node args.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "commissions", "sales", "incentive", "crm"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.sales-commissions.nodes.list-plans",
+      "version": "1.0.0",
+      "label": "Commissions: List Plans",
+      "description": "Lists an org's commission plans over ctx.features.commissions.listPlans. Inputs: { orgId }. Output: { plans }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.sales-commissions.nodes.list-statements",
+      "version": "1.0.0",
+      "label": "Commissions: List Statements",
+      "description": "Lists commission statements over ctx.features.commissions.listStatements — SUBJECT-SCOPED to the run owner (a rep sees only their own) unless the owner holds host:commissions:manage. Inputs: { orgId, subjectId?, period?, planId? }. Output: { statements }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.sales-commissions.nodes.compute-statement",
+      "version": "1.0.0",
+      "label": "Commissions: Compute Statement",
+      "description": "GOVERNED WRITE (ADR 0280 P4) — computes (upserts a draft) a rep's commission statement for a period over ctx.features.commissions.computeStatement, composing territory attainment. Enforces host:commissions:manage against the RUN OWNER (system runs denied). Not in the advisory agent's allowlist. NOTE (CFP-1 / D9): no built-in workflow ignites this node — the app's actual governed approval rides the SHARED reviews approval gate (kind: commission-statement); this node stays a composable catalog entry. Inputs: { orgId, planId, subjectId, period }. Output: { success, statement }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.sales-commissions.nodes.approve-statement",
+      "version": "1.1.0",
+      "label": "Commissions: Submit Statement for Approval",
+      "description": "GOVERNED WRITE (ADR 0280 P4) — SUBMITS a draft commission statement for human review over ctx.features.commissions.approveStatement. It does NOT approve it: R2 COM2-M3 — applying the transition here let a chain approve every draft statement in an org with no review card and no second person, stamping an unattributable `run:<id>` as approver on a payout record. A human decides in the shared Reviews inbox (host:commissions:manage). Enforces host:commissions:manage against the run owner (system runs denied). Inputs: { orgId, statementId }. Output: { success, submittedForReview, review: { approvalId, status } } — the statement stays `draft` until a human approves it.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

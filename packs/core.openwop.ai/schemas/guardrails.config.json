@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/guardrails.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/guardrails.config.json",
   "title": "AiGuardrailsConfig",
   "type": "object",
   "properties": {
@@ -15,6 +15,10 @@
           "prompt-injection"
         ]
       }
+    },
+    "requireEnforcement": {
+      "type": "boolean",
+      "description": "When true, fail (HOST_CAPABILITY_MISSING) instead of returning an unenforced pass-through on hosts without ctx.guardrails."
     }
   },
   "additionalProperties": false

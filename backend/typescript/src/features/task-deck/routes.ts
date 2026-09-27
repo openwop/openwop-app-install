@@ -48,6 +48,41 @@ async function blockedMap(storage: Storage, runs: readonly RunRecord[]): Promise
   return out;
 }
 
+export function emptyTaskDeck(): TaskDeck {
+  return { buckets: { pending: [], running: [], blocked: [], delegated: [], completed: [], failed: [] } };
+}
+
+/** XCH-HOLE-4 (LLM-EXCHANGE-AUDIT Wave 4): the ONE owner of "the deck of runs
+ *  this user owns" — the HTTP route and the `openwop:tasks.deck` agent tool
+ *  both call THIS, so the IDOR ownership filter can never drift between them. */
+export async function buildOwnedTaskDeck(
+  storage: Storage,
+  tenantId: string,
+  userId: string,
+  conversationRunId?: string,
+): Promise<TaskDeck> {
+  // Fetch (bounded), newest-first BEFORE the cap so truncation drops the oldest,
+  // not arbitrary rows. Log a truncation so a bounded view is never silent.
+  const all = [...await storage.listRuns({ tenantId, limit: RUN_SCAN_LIMIT * 2 })]
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  const runs = all.slice(0, RUN_SCAN_LIMIT);
+  if (all.length > RUN_SCAN_LIMIT) {
+    log.info('task_deck_runs_truncated', { tenantId, total: all.length, shown: RUN_SCAN_LIMIT });
+  }
+
+  // Ownership filter (IDOR): the caller's own runs + the direct children of those.
+  const ownedRunIds = new Set(runs.filter((r) => r.metadata?.['actingUserId'] === userId).map((r) => r.runId));
+  let inScope = runs.filter((r) => ownedRunIds.has(r.runId) || (parentOf(r) !== undefined && ownedRunIds.has(parentOf(r)!)));
+
+  // Optional narrowing to one conversation/parent run + its children. Only takes
+  // effect within the already-owned set, so it cannot widen access.
+  if (conversationRunId) {
+    inScope = inScope.filter((r) => r.runId === conversationRunId || parentOf(r) === conversationRunId);
+  }
+
+  return taskDeckProjection(inScope, await blockedMap(storage, inScope));
+}
+
 export function registerTaskDeckRoutes(deps: RouteDeps): void {
   const { app, storage } = deps;
 
@@ -55,30 +90,9 @@ export function registerTaskDeckRoutes(deps: RouteDeps): void {
     try {
       const tenantId = tenantOf(req);
       const userId = actingUserOf(req);
-      const emptyDeck: TaskDeck = { buckets: { pending: [], running: [], blocked: [], delegated: [], completed: [], failed: [] } };
-      if (!userId) { res.json({ deck: emptyDeck }); return; } // anon → nothing owned
-
-      // Fetch (bounded), newest-first BEFORE the cap so truncation drops the oldest,
-      // not arbitrary rows. Log a truncation so a bounded view is never silent.
-      const all = [...await storage.listRuns({ tenantId, limit: RUN_SCAN_LIMIT * 2 })]
-        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-      const runs = all.slice(0, RUN_SCAN_LIMIT);
-      if (all.length > RUN_SCAN_LIMIT) {
-        log.info('task_deck_runs_truncated', { tenantId, total: all.length, shown: RUN_SCAN_LIMIT });
-      }
-
-      // Ownership filter (IDOR): the caller's own runs + the direct children of those.
-      const ownedRunIds = new Set(runs.filter((r) => r.metadata?.['actingUserId'] === userId).map((r) => r.runId));
-      let inScope = runs.filter((r) => ownedRunIds.has(r.runId) || (parentOf(r) !== undefined && ownedRunIds.has(parentOf(r)!)));
-
-      // Optional narrowing to one conversation/parent run + its children. Only takes
-      // effect within the already-owned set, so it cannot widen access.
+      if (!userId) { res.json({ deck: emptyTaskDeck() }); return; } // anon → nothing owned
       const conversationRunId = typeof req.query.conversationRunId === 'string' ? req.query.conversationRunId : undefined;
-      if (conversationRunId) {
-        inScope = inScope.filter((r) => r.runId === conversationRunId || parentOf(r) === conversationRunId);
-      }
-
-      const deck = taskDeckProjection(inScope, await blockedMap(storage, inScope));
+      const deck = await buildOwnedTaskDeck(storage, tenantId, userId, conversationRunId);
       res.json({ deck });
     } catch (err) { next(err); }
   });

@@ -16,14 +16,18 @@
 
 import type { BackendFeature } from '../types.js';
 import { setSubjectOrgResolver } from '../../host/subjectOrgScope.js';
-import { setSubjectAccessResolver } from '../../host/subjectAccess.js';
+import { registerSubjectAccessResolver } from '../../host/subjectAccess.js';
+import { registerProjectsAgentTools } from './agentTools.js';
 import { registerProjectsRoutes } from './routes.js';
-import { getProject, resolveProjectAccess } from './projectsService.js';
+import { getProject, resolveProjectAccess, registerProjectsErasure } from './projectsService.js';
 
 export const projectsFeature: BackendFeature = {
   id: 'projects',
   registerRoutes: (deps) => {
     registerProjectsRoutes(deps);
+    registerProjectsAgentTools(); // XCH-HOLE-2 (Wave 4) — openwop:projects.list (ADR 0308 seam)
+    registerProjectsErasure(); // D2 (chat-first port) — DSAR anonymizes a member's ref in place
+
     // ADR 0054 § Correction (2026-06-16) — the `project-collab` toggle is RETIRED;
     // the collaborative surfaces (members / visibility / chat) are now always-on.
     // WRITE stays org-scoped via `requireProject('workspace:write')` (membership
@@ -38,9 +42,10 @@ export const projectsFeature: BackendFeature = {
     );
     // Fill the subject→access seam so kanban gates a PROJECT board's surfaces on
     // the caller's RESOLVED access (org authority composed with the project's
-    // visibility + members, ADR 0054 D5). Non-project subjects → null (legacy gate).
-    setSubjectAccessResolver(async (tenantId, subject, caller) =>
-      subject.kind === 'project' ? resolveProjectAccess(tenantId, subject.id, caller) : null,
+    // visibility + members, ADR 0054 D5). Registered PER KIND (ADR 0278) — the
+    // seam dispatches on subject.kind, so other features' kinds can't collide.
+    registerSubjectAccessResolver('project', async (tenantId, subject, caller) =>
+      resolveProjectAccess(tenantId, subject.id, caller),
     );
   },
   // No `toggleDefault` — always-on. The collaborative surfaces (members /

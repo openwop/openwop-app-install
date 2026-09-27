@@ -1,0 +1,147 @@
+{
+  "name": "core.openwop.workflows.campaign-orchestration",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Campaign Studio orchestration spine (ADR 0158/RFC 0118), parallel channel fan-out shape — migrated from the deprecated builtin (ADR 0472 P4). chainId keeps the original id; the 5 channel children resolve by id at runtime via core.dispatch.",
+  "keywords": [
+    "Campaign"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "campaign-studio.campaign-orchestration",
+      "version": "1.0.0",
+      "label": "Campaign orchestration",
+      "description": "Validate the brief → messaging kernel → approve → generate all five channels in parallel → consistency check → finalize.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "briefId": {
+            "type": "string",
+            "description": "The confirmed campaign brief to orchestrate."
+          }
+        },
+        "required": [
+          "briefId"
+        ]
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "validate",
+            "typeId": "feature.campaign-brief.nodes.validate",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
+            }
+          },
+          {
+            "id": "kernel",
+            "typeId": "feature.campaign-brief.nodes.generate-kernel",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
+            }
+          },
+          {
+            "id": "kernel-approve",
+            "typeId": "core.approvalGate",
+            "config": {
+              "prompt": "Review the messaging kernel — the foundation every channel echoes.",
+              "title": "Approve the messaging kernel?"
+            }
+          },
+          {
+            "id": "channel-supervisor",
+            "typeId": "core.orchestrator.supervisor",
+            "config": {
+              "mockDispatchPlan": [
+                {
+                  "kind": "next-worker",
+                  "nextWorkerIds": [
+                    "campaign-studio.channel.landing-page",
+                    "campaign-studio.channel.ad-variants",
+                    "campaign-studio.channel.email-sequence",
+                    "campaign-studio.channel.creative-briefs",
+                    "campaign-studio.channel.social-posts"
+                  ]
+                },
+                {
+                  "kind": "terminate",
+                  "reason": "channels-dispatched"
+                }
+              ]
+            }
+          },
+          {
+            "id": "channel-dispatch",
+            "typeId": "core.dispatch",
+            "config": {
+              "workerDispatchModel": "child-run",
+              "fanOutPolicy": "parallel",
+              "joinPolicy": {
+                "mode": "wait-all",
+                "onChildFailure": "collect"
+              },
+              "inputMapping": {
+                "briefId": "briefId"
+              }
+            }
+          },
+          {
+            "id": "production-plan",
+            "typeId": "feature.production.nodes.plan-generate",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
+            }
+          },
+          {
+            "id": "consistency",
+            "typeId": "feature.campaign-orchestration.nodes.consistency-check",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
+            }
+          },
+          {
+            "id": "finalize",
+            "typeId": "feature.campaign-orchestration.nodes.finalize",
+            "inputs": {
+              "briefId": "{{params.briefId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "validate",
+            "to": "kernel"
+          },
+          {
+            "from": "kernel",
+            "to": "kernel-approve"
+          },
+          {
+            "from": "kernel-approve",
+            "to": "channel-supervisor"
+          },
+          {
+            "from": "channel-supervisor",
+            "to": "channel-dispatch"
+          },
+          {
+            "from": "channel-dispatch",
+            "to": "production-plan"
+          },
+          {
+            "from": "production-plan",
+            "to": "consistency"
+          },
+          {
+            "from": "consistency",
+            "to": "finalize"
+          }
+        ]
+      }
+    }
+  ]
+}

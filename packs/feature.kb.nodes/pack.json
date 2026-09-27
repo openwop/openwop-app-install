@@ -1,11 +1,18 @@
 {
   "name": "feature.kb.nodes",
-  "version": "1.1.0",
-  "description": "Knowledge Base feature node pack (ADR 0014 Phase 2) — workflow nodes over the `ctx.features.kb` surface shipped by the KB feature (ADR 0011). `search` retrieves chunks from one collection; `rag` retrieves + builds an augmented prompt + citations for an agent/callPrompt downstream. Action nodes — they read the tenant KB store (a side-effect), so their outputs are recorded and replay/fork read the recorded result.",
+  "version": "1.2.0",
+  "description": "Knowledge Base feature node pack \u2014 workflow nodes over the `ctx.features.kb` surface shipped by the KB feature. `search` retrieves chunks from one collection; `rag` retrieves + builds an augmented prompt + citations for an agent/callPrompt downstream; `list-collections` discovers a collectionId. Those three are role:\"action\" reads (recorded \u2192 replay/fork serve the recorded result). v1.2.0 (ADR 0643 D2) adds `reindex-drain`, the ONLY role:\"side-effect\" node here: it drives one bounded slice of an already-started embedding-spec reindex, and its terminal branch flips the collection's serving namespace and DELETES the old one \u2014 so the derived side-effect floor is what stops a `mode:'replay'` fork re-executing it. It is NOT a general-purpose verb: the surface refuses it unless a `running`/`paused` job already exists (only the `host:org:manage` REST door can create one) AND the executing run's workflowId is the host-minted `kb.reindex:<tenantId>:<orgId>:<collectionId>` \u2014 declaring the node in an arbitrary tenant chain is a typed refusal. v1.2.0 also gives ALL FOUR nodes ADR 0525 `$id` input/output schemas. Ingest is deliberately NOT on this surface: the media-extraction path is replay-unsafe by design and every ingest lane already has an owner.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "kb", "knowledge", "rag"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "kb",
+    "knowledge",
+    "rag"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.kb.nodes.search",
@@ -13,24 +20,48 @@
       "label": "KB Search",
       "description": "Semantic search within one KB collection via ctx.features.kb.search. Inputs: { orgId, collectionId, query, topK? }. Output: { results }.",
       "category": "integration",
-      "role": "action"
+      "role": "action",
+      "inputSchemaRef": "schemas/search.input.json",
+      "outputSchemaRef": "schemas/search.output.json"
     },
     {
       "typeId": "feature.kb.nodes.rag",
       "version": "1.0.0",
       "label": "KB RAG (retrieve + augment)",
-      "description": "Retrieve + assemble a grounded augmented prompt + citations via ctx.features.kb.rag. Inputs: { orgId, collectionId, query, topK? }. Output: { augmentedPrompt, citations, contexts } — feed augmentedPrompt to a downstream callPrompt/agent (generation is run-scoped).",
+      "description": "Retrieve + assemble a grounded augmented prompt + citations via ctx.features.kb.rag. Inputs: { orgId, collectionId, query, topK? }. Output: { augmentedPrompt, citations, contexts } \u2014 feed augmentedPrompt to a downstream callPrompt/agent (generation is run-scoped).",
       "category": "integration",
-      "role": "action"
+      "role": "action",
+      "inputSchemaRef": "schemas/rag.input.json",
+      "outputSchemaRef": "schemas/rag.output.json"
     },
     {
       "typeId": "feature.kb.nodes.list-collections",
       "version": "1.0.0",
       "label": "KB List Collections",
-      "description": "Lists an org's KB collections via ctx.features.kb.listCollections — discover a collectionId before search/rag. Inputs: { orgId }. Output: { collections }. Tenant-guarded.",
+      "description": "Lists an org's KB collections via ctx.features.kb.listCollections \u2014 discover a collectionId before search/rag. Inputs: { orgId }. Output: { collections }. Tenant-guarded.",
       "category": "integration",
-      "role": "action"
+      "role": "action",
+      "inputSchemaRef": "schemas/list-collections.input.json",
+      "outputSchemaRef": "schemas/list-collections.output.json"
+    },
+    {
+      "typeId": "feature.kb.nodes.reindex-drain",
+      "version": "1.0.0",
+      "label": "KB Reindex Drain",
+      "description": "Drives ONE bounded slice of an in-progress KB reindex via ctx.features.kb.reindexDrain \u2014 embed the next `maxChunks` into the staging namespace, then CUT OVER when the staging space is whole. Inputs: { orgId, collectionId, maxChunks? }. Output: { status, embeddedChunks, totalChunks, done, error? }. STRUCTURALLY scoped: the surface refuses unless a running/paused job already exists (created only by the admin-gated REST start) AND the run's workflowId is the host-minted `kb.reindex:<tenantId>:<orgId>:<collectionId>`. Never touches media extraction (replay-unsafe by design) \u2014 it re-embeds existing durable chunk text only.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "inputSchemaRef": "schemas/reindex-drain.input.json",
+      "outputSchemaRef": "schemas/reindex-drain.output.json"
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

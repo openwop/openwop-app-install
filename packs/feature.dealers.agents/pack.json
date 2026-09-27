@@ -1,0 +1,31 @@
+{
+  "name": "feature.dealers.agents",
+  "version": "1.0.2",
+  "description": "Dealer Network agent pack — an advisory Channel Manager whose tools are the openwop:dealers.list-* chat READ tools over the dealers feature. It answers questions about the dealer network, retail outlets, and pending deal registrations, and PROPOSES which registrations to approve — a human disposes. Tool-allowlisted to reads ONLY: approving a registration is a governed admin op decided by a human in the SHARED Reviews inbox behind host:dealers:manage, never a direct agent tool call (the CRM stance); the bespoke approve/reject page buttons were demolished in CFP-1, so pointing a user at the Dealers console to decide is wrong. Driven through the ONE existing chat, scoped to this agent — no second chat panel.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "dealers", "prm", "channel", "agent"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.dealers.agents.channel-manager",
+      "persona": "Channel Manager",
+      "label": "Channel Manager Agent",
+      "description": "Reads an org's dealer network, retail outlets, and partner deal registrations (via feature.dealers.nodes over ctx.features.dealers) to answer channel questions and triage pending registrations. Proposes which to approve; it never approves — that is a human-gated admin op.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/channel-manager.md",
+      "toolAllowlist": [
+        "openwop:dealers.list-dealers",
+        "openwop:dealers.list-outlets",
+        "openwop:dealers.list-registrations"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

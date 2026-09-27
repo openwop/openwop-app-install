@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.0/workflow.automate.config.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.kanban/1.0.1/workflow.automate.config.json",
   "title": "WorkflowAutomateConfig",
   "type": "object",
   "properties": {

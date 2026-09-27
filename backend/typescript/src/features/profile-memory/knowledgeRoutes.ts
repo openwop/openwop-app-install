@@ -27,7 +27,7 @@ import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
 import { requireString } from '../featureRoute.js';
-import { resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
+import { getOrg, resolveEffectiveAccess, type Scope } from '../../host/accessControlService.js';
 import {
   getProfileKnowledge,
   bindCollection,
@@ -39,8 +39,28 @@ import {
 } from './profileKnowledgeService.js';
 import { listAllTenantCollections } from '../kb/kbService.js';
 
-/** Per-org scope gate — the caller's scope IN that org (the KB IDOR guard). */
+/**
+ * Per-org scope gate — the caller's scope IN that org (the KB IDOR guard).
+ *
+ * RI-ORG-2 — `orgId` arrives from the REQUEST BODY (`orgOf` below), so the org's
+ * EXISTENCE in this tenant is asserted explicitly before authority is resolved.
+ * Authorization alone already fenced this: `resolveEffectiveAccess` needs a member
+ * row matching `(tenantId, orgId)`, and a foreign org has none ⇒ zero scopes ⇒ 403.
+ * But that fence has one hole — under `OPENWOP_DEMO_MODE` the caller's HOME tenant is
+ * single-principal, so the (ADR 0508 / GC-6-narrowed) de-facto-owner bypass still
+ * returns owner and a body-supplied foreign `orgId` would be accepted, keying a KB row
+ * `${tenantId}:${orgId}:` against an org that does not exist here — a dangling
+ * reference, contained to the caller's own tenant but wrong.
+ *
+ * Checking existence FIRST makes the guard correct independently of the demo flag's
+ * shape, rather than relying on a bypass staying narrow. Uniform 404 (not 403): a
+ * foreign org must be indistinguishable from an absent one.
+ */
 async function requireOrgScope(tenantId: string, subject: string, orgId: string, scope: Scope): Promise<void> {
+  const org = await getOrg(orgId);
+  if (!org || org.tenantId !== tenantId) {
+    throw new OpenwopError('not_found', 'Organization not found.', 404, { orgId });
+  }
   const access = await resolveEffectiveAccess(tenantId, { subject, orgId });
   if (!access.scopes.includes(scope)) {
     throw new OpenwopError('forbidden_scope', `Missing required scope: ${scope}`, 403, { requiredScope: scope, orgId });
@@ -75,7 +95,7 @@ export function registerProfileKnowledgeRoutes(deps: RouteDeps): void {
     try {
       const user = await resolveCallerUser(req);
       const collectionId = requireString((req.body ?? {})?.collectionId, 'collectionId');
-      const col = (await listAllTenantCollections(user.tenantId)).find((c) => c.collectionId === collectionId);
+      const col = (await listAllTenantCollections(user.tenantId, { subject: user.userId })).find((c) => c.collectionId === collectionId); // KBC-1 / ADR 0643 R3 Blocker 2 — the BIND door resolves the binder against the collection's subject
       if (!col) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId });
       await requireOrgScope(user.tenantId, user.userId, col.orgId, 'workspace:read');
       await bindCollection(user.tenantId, user.userId, collectionId);

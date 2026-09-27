@@ -40,6 +40,15 @@ interface CanonicalNode {
   name?: string;
   position?: { x?: number; y?: number };
   config?: Record<string, unknown>;
+  /** RFC 0065 advisory — read back so a round trip preserves it (ADR 0440 P1). */
+  outputRole?: 'primary' | 'secondary';
+  /** NOTIF-UX-3 — run-time input bindings; read back for the same reason. */
+  inputs?: Record<string, unknown>;
+  /** RFC 0151 §B (chain-reachable via RFC 0157) — the node's inverse action;
+   *  read back so a builder round trip cannot delete it. */
+  compensation?: Record<string, unknown>;
+  /** RFC 0151 §B UQ4 — "this effect has no inverse"; read back likewise. */
+  irreversibleEffect?: boolean;
 }
 
 interface CanonicalEdge {
@@ -58,10 +67,18 @@ interface CanonicalDefinition {
   workflowId?: string;
   id?: string;
   name?: string;
+  /** OpenWOP WorkflowDefinition carries the display name here (builder-authored
+   *  defs omit it — the name lives in the SavedWorkflow/ownership record); pack-
+   *  instantiated templates set `metadata.name` = the template label. */
+  metadata?: { name?: unknown };
   nodes?: CanonicalNode[];
   edges?: CanonicalEdge[];
   defaultInputs?: unknown;
+  /** RFC 0124 variable declarations — carried verbatim, NOT default inputs. */
   variables?: unknown;
+  configurableSchema?: unknown;
+  /** ADR 0197 — run-input form schema; round-trips into SavedWorkflow.inputSchema. */
+  inputSchema?: unknown;
 }
 
 const TRIGGER_RULES: ReadonlySet<string> = new Set<EdgeTriggerRule>([
@@ -88,6 +105,12 @@ export interface DeserializeResult {
   nodes: BuilderNode[];
   edges: BuilderEdge[];
   defaultInputs: string;
+  /** Pretty-printed JSON string, or '' when the definition has none. */
+  inputSchema: string;
+  /** RFC 0124 variable declarations, carried verbatim (see SavedWorkflow). */
+  variables?: unknown;
+  /** RFC 0124 bare-param aliases, carried verbatim. */
+  configurableSchema?: unknown;
 }
 
 // Simple grid layout for nodes that arrive without a position.
@@ -96,8 +119,19 @@ function autoPosition(index: number): { x: number; y: number } {
   return { x: (index % COLS) * 220, y: Math.floor(index / COLS) * 140 };
 }
 
+function normalizeInputSchema(def: CanonicalDefinition): string {
+  const v = def.inputSchema;
+  if (v && typeof v === 'object' && !Array.isArray(v)) return JSON.stringify(v, null, 2);
+  return '';
+}
+
 function normalizeDefaultInputs(def: CanonicalDefinition): string {
-  const candidate = def.defaultInputs ?? def.variables;
+  // §Correction 2026-08-03 — the `?? def.variables` fallback used to live here.
+  // `variables` is an ARRAY of RFC 0124 declarations, not a default-input object;
+  // stringifying it into the textarea labelled "Default inputs (JSON)" showed the
+  // author the wrong thing AND was the only place it survived, so a save dropped
+  // it. It now round-trips as `SavedWorkflow.variables`, which is what it is.
+  const candidate = def.defaultInputs;
   if (typeof candidate === 'string') return candidate;
   if (candidate && typeof candidate === 'object') {
     return JSON.stringify(candidate, null, 2);
@@ -138,6 +172,29 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
       name: n.name ?? entry.label,
       position: pos,
       config: n.config && typeof n.config === 'object' ? { ...n.config } : {},
+      // Same class as `outputRole` below, found 2026-08-03: the host persists
+      // `node.inputs` and the builder dropped it on every save.
+      ...(n.inputs && typeof n.inputs === 'object' && !Array.isArray(n.inputs)
+        ? { inputs: { ...n.inputs } }
+        : {}),
+      // ADR 0440 P1 — read the RFC 0065 advisory back. `BuilderNode` has always
+      // modelled `outputRole` and `serialize` has always emitted it, but import
+      // dropped it, so a builder round trip silently cleared the author's
+      // "this is the primary deliverable" hint.
+      ...(n.outputRole === 'primary' || n.outputRole === 'secondary' ? { outputRole: n.outputRole } : {}),
+      // NOTIF-UX-3 — same failure as `outputRole` above, one field over: without
+      // this the bindings never reach the builder, so saving destroys them.
+      ...(n.inputs && typeof n.inputs === 'object' && !Array.isArray(n.inputs)
+        ? { inputs: { ...n.inputs } }
+        : {}),
+      // RFC 0151 §B / RFC 0157 — read the inverse action back. `serialize` can
+      // only emit what the builder holds, so this half is what actually stops a
+      // save from deleting a chain-declared compensator.
+      ...(n.compensation && typeof n.compensation === 'object' && !Array.isArray(n.compensation)
+        ? { compensation: { ...n.compensation } }
+        : {}),
+      // RFC 0151 §B UQ4 — read "no inverse" back.
+      ...(typeof n.irreversibleEffect === 'boolean' ? { irreversibleEffect: n.irreversibleEffect } : {}),
     });
   });
 
@@ -169,10 +226,21 @@ export function fromCanonicalDefinition(input: unknown): DeserializeResult {
     return edge;
   });
 
+  // Prefer a top-level `name`, then the OpenWOP `metadata.name` (where pack-
+  // instantiated templates carry their label), and only then the import fallback
+  // — otherwise every backend-loaded template opened "Imported workflow".
+  const metaName = typeof def.metadata?.name === 'string' ? def.metadata.name : '';
+  const name = (typeof def.name === 'string' && def.name.trim())
+    ? def.name
+    : (metaName.trim() ? metaName : i18n.t('builder:importedWorkflow'));
+
   return {
-    name: typeof def.name === 'string' && def.name.trim() ? def.name : i18n.t('builder:importedWorkflow'),
+    name,
     nodes,
     edges,
     defaultInputs: normalizeDefaultInputs(def),
+    inputSchema: normalizeInputSchema(def),
+    ...(def.variables !== undefined ? { variables: def.variables } : {}),
+    ...(def.configurableSchema !== undefined ? { configurableSchema: def.configurableSchema } : {}),
   };
 }

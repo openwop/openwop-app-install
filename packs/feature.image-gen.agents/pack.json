@@ -1,7 +1,7 @@
 {
   "name": "feature.image-gen.agents",
-  "version": "1.0.0",
-  "description": "Image Generator agent (ADR 0115). Drives the text-to-image node through chat — composes the existing AI chat + the core.openwop.ai.image-generate node; no new chat system. Pure-agent pack.",
+  "version": "1.0.1",
+  "description": "Image Generator guide. Helps a user shape a strong image prompt and explains the in-app generation affordances. Image generation itself rides its existing non-conversational path (the MediaRef Generate/Edit-with-AI widget and the media generate route / image-generate workflow node \u2014 an egress + budget + media-asset dispatch that is deliberately NOT a chat tool). Pure-agent pack; no chat tools.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/feature.image-gen.agents",
@@ -24,12 +24,10 @@
       "agentId": "feature.image-gen.agents.default",
       "persona": "Image Generator",
       "label": "Image Generator",
-      "description": "Generates images from a text prompt and returns them as chat artifacts. Uses openwop:core.openwop.ai.image-generate; honest-off (host_capability_missing) when no image provider is wired.",
+      "description": "Helps a user craft a strong image prompt and points them to the in-app Generate / Edit-with-AI affordance. Image generation runs through the media-generation path (workflow node / MediaRef widget), not a conversational tool — so this guide has no chat tools and never claims to have produced an image itself.",
       "modelClass": "general",
       "systemPromptRef": "prompts/image-generator.md",
-      "toolAllowlist": [
-        "openwop:core.openwop.ai.image-generate"
-      ],
+      "toolAllowlist": [],
       "memoryShape": {
         "scratchpad": true,
         "conversation": false,

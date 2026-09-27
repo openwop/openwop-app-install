@@ -22,7 +22,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true'; // allow the mock provider
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
@@ -71,6 +71,15 @@ describe('core.conversationGate — open/exchange/close', () => {
     expect(conv(opened.events, 'conversation.opened')).toHaveLength(1);
 
     // Exchange 1 — user turn + agent reply, run STAYS suspended.
+    //
+    // ADR 0665 D4 — PROGRAMMED deliberately. This assertion's own comment used to read
+    // "mock returns '' w/o a program; real providers fill it", i.e. it was standing in for
+    // a real reply using the unprogrammed mock's empty completion. An empty completion is
+    // now a TYPED non-contribution turn, so that stand-in no longer models the case this
+    // lifecycle test is about. Programming a reply asserts what the comment always meant;
+    // the empty case has its own coverage in `advisor-no-contribution.test.ts`.
+    resetMockPrograms();
+    programMock('', [{ content: 'I can help with that.' }]);
     const ex1 = await api<{ conversation?: { operation: string; turns: number } }>(
       `/v1/runs/${runId}/interrupts/gate`,
       { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'What can you do?' } } }) },
@@ -84,7 +93,8 @@ describe('core.conversationGate — open/exchange/close', () => {
     const roles1 = exchanged1.map((e) => (e.payload?.turn as { role?: string })?.role);
     expect(roles1).toEqual(['user', 'agent']);
     const agentTurn = (exchanged1[1]!.payload!.turn as { content?: unknown; turnIndex?: number; from?: string });
-    expect(typeof agentTurn.content).toBe('string'); // mock returns '' w/o a program; real providers fill it
+    expect(typeof agentTurn.content).toBe('string');
+    expect(agentTurn.content).toBe('I can help with that.');
     expect(agentTurn.turnIndex).toBe(2); // open=0, user=1, agent=2
 
     // Exchange 2 — turnIndexes keep climbing; still suspended.
@@ -101,7 +111,60 @@ describe('core.conversationGate — open/exchange/close', () => {
     expect(conv(done.events, 'conversation.closed')).toHaveLength(1);
   });
 
-  it('streams the reply as ai.message.chunk events before the final conversation.exchanged (ADR 0079 §Phase 1)', async () => {
+  it('accepts a MULTIMODAL turn — an audio-only ContentPart[] with no typed text is a valid exchange', async () => {
+    const workflowId = 'openwop-app.conversation.mm';
+    await api('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({
+      workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'hi' } }], edges: [],
+    }) });
+    const create = await api<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({
+      workflowId, inputs: { provider: 'mock', model: 'mock-1' }, tenantId: TENANT,
+    }) });
+    const runId = create.body.runId;
+    await poll(runId);
+
+    // Voice clip, NO typed text — the exact send that used to 422 ("requires a
+    // non-empty turn.content") because attachments were dropped / text-only checked.
+    const audioTurn = [{ type: 'audio', mimeType: 'audio/webm', dataBase64: 'UklGRg==', durationSeconds: 6 }];
+    const ex = await api<{ conversation?: { operation: string } }>(
+      `/v1/runs/${runId}/interrupts/gate`,
+      { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: audioTurn } } }) },
+    );
+    expect(ex.status).toBe(200);
+
+    // The stored user turn keeps the REAL parts (so dispatch gets the audio), and the
+    // text part of a mixed turn is redacted like plain text.
+    const after = await poll(runId);
+    const exchanged = conv(after.events, 'conversation.exchanged');
+    const userTurn = exchanged[0]!.payload!.turn as { role?: string; content?: unknown };
+    expect(userTurn.role).toBe('user');
+    expect(Array.isArray(userTurn.content)).toBe(true);
+    const parts = userTurn.content as Array<{ type: string; dataBase64?: string }>;
+    expect(parts[0]?.type).toBe('audio');
+    expect(parts[0]?.dataBase64).toBe('UklGRg==');
+
+    // Mixed text+audio: a pasted key inside the text part is redacted before persisting.
+    const mixed = [
+      { type: 'text', text: 'my key is sk-abcdefghijklmnop1234' },
+      { type: 'audio', mimeType: 'audio/webm', dataBase64: 'UklGRg==' },
+    ];
+    await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: mixed } } }) });
+    const after2 = await poll(runId);
+    const userTurns = conv(after2.events, 'conversation.exchanged')
+      .map((e) => e.payload?.turn as { role?: string; content?: unknown })
+      .filter((t) => t.role === 'user');
+    const mixedStored = userTurns[1]!.content as Array<{ type: string; text?: string }>;
+    expect(mixedStored[0]?.text).toContain('sk-***');
+    expect(mixedStored[0]?.text).not.toContain('sk-abcdefghijklmnop1234');
+
+    // Emptiness is still enforced: a parts array with NO payload → the same 422.
+    const empty = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: [{ type: 'text', text: '   ' }] } } }) });
+    expect(empty.status).toBe(422);
+    // And the plain-string regression guard: blank text still 422s.
+    const blank = await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: '   ' } } }) });
+    expect(blank.status).toBe(422);
+  });
+
+  it('streams the reply as output.chunk events before the final conversation.exchanged (ADR 0079 §Phase 1)', async () => {
     // The conversation mock path dispatches with no nodeId → the mock program is
     // keyed by '' (see dispatchReply / dispatchMock). Register a multi-word reply
     // so it chunks into several deltas.
@@ -119,7 +182,7 @@ describe('core.conversationGate — open/exchange/close', () => {
 
       await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'hello?' } } }) });
       const after = await poll(runId);
-      const chunks = conv(after.events, 'ai.message.chunk');
+      const chunks = conv(after.events, 'output.chunk');
       // Multiple deltas, concatenating to the full reply.
       expect(chunks.length).toBeGreaterThan(1);
       expect(chunks.map((e) => (e.payload as { chunk?: string }).chunk).join('')).toBe('Hello there friend');
@@ -135,7 +198,7 @@ describe('core.conversationGate — open/exchange/close', () => {
     }
   });
 
-  it('redacts secrets from the streamed ai.message.chunk deltas, not just the final turn (SR-1 parity)', async () => {
+  it('redacts secrets from the streamed output.chunk deltas, not just the final turn (SR-1 parity)', async () => {
     // A reply that echoes the conformance canary must be scrubbed in the
     // PERSISTED chunk stream too — the transient delta lands in the durable
     // event log, so it must honor the same strip-on-persist as the turn.
@@ -154,7 +217,7 @@ describe('core.conversationGate — open/exchange/close', () => {
 
       await api(`/v1/runs/${runId}/interrupts/gate`, { method: 'POST', body: JSON.stringify({ resumeValue: { operation: 'exchange', turn: { content: 'the key?' } } }) });
       const after = await poll(runId);
-      const chunkText = conv(after.events, 'ai.message.chunk').map((e) => (e.payload as { chunk?: string }).chunk).join('');
+      const chunkText = conv(after.events, 'output.chunk').map((e) => (e.payload as { chunk?: string }).chunk).join('');
       expect(chunkText).not.toContain(CANARY);          // raw secret scrubbed from the stream
       expect(chunkText).toContain('<<redacted');         // replaced by the redaction marker
       // The authoritative turn is redacted too (unchanged behavior).
@@ -195,11 +258,11 @@ describe('core.conversationGate — open/exchange/close', () => {
       expect(after.status.startsWith('waiting')).toBe(true); // still suspended
       const exchanged = conv(after.events, 'conversation.exchanged');
       expect(exchanged.map((e) => (e.payload?.turn as { role?: string })?.role)).toEqual(['user', 'agent']);
-      const chunks = conv(after.events, 'ai.message.chunk');
+      const chunks = conv(after.events, 'output.chunk');
       expect(chunks.length).toBeGreaterThan(1);
       expect(chunks.map((e) => (e.payload as { chunk?: string }).chunk).join('')).toBe('Async reply here');
       // No terminal error on the happy path.
-      expect(conv(after.events, 'ai.message.error')).toHaveLength(0);
+      expect(conv(after.events, 'openwop-app.ai.message-error')).toHaveLength(0);
     } finally {
       delete process.env.OPENWOP_CONVERSATION_EXCHANGE_ASYNC;
       resetMockPrograms();

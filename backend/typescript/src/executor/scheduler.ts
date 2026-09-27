@@ -203,7 +203,13 @@ export function topologicalOrder(
 ): string[] {
   const indegree = new Map<string, number>();
   for (const n of definition.nodes) {
-    indegree.set(n.nodeId, graph.incoming.get(n.nodeId)?.length ?? 0);
+    // Count DISTINCT upstream nodes, not raw edges: two edges from the same
+    // source to the same target (e.g. an artifact port + a warning port) are
+    // legal — the input assembly delivers every edge — but raw-edge counting
+    // paired with the per-distinct-target relaxation below could never drain
+    // such a node, misreporting a parallel edge as `cycle_detected`.
+    const sources = new Set((graph.incoming.get(n.nodeId) ?? []).map((e) => e.sourceNodeId));
+    indegree.set(n.nodeId, sources.size);
   }
   // Stable seeding by nodeId for replay determinism.
   const ready = [...graph.sources].sort();
@@ -274,7 +280,28 @@ export function evaluateTrigger(
   // Source node: always ready (caller seeds these as ready up front).
   if (ins.length === 0) return 'ready';
 
-  const upstreamStates = ins.map((e) => snapshot.nodeState.get(e.sourceNodeId) ?? 'pending');
+  // Fold each edge's condition into an EFFECTIVE upstream state. The wire spec
+  // (workflow-chain-packs.md §edges) says a conditioned edge is "a branch that
+  // fires only when the condition holds against the source node's output" — so
+  // a completed source whose edge condition evaluates FALSE is a not-taken
+  // branch: the target must see it as `skipped`, not `completed`. Evaluating
+  // the condition only for input contribution (buildNodeInputs) while still
+  // triggering the node was a control-flow bug — a false-conditioned branch ran
+  // anyway (with empty inputs), so `core.flow.router`/`if` never actually routed
+  // and content-router fired every branch. This makes edge conditions
+  // control-flow, matching the spec. Deterministic (same outputs → same verdict)
+  // so replay/fork-safe. ADR 0208.
+  const upstreamStates = ins.map((e): NodeState => {
+    const s = snapshot.nodeState.get(e.sourceNodeId) ?? 'pending';
+    if (
+      s === 'completed' &&
+      e.condition &&
+      !evaluateCondition(e.condition as EdgeCondition, snapshot.nodeOutputs.get(e.sourceNodeId))
+    ) {
+      return 'skipped';
+    }
+    return s;
+  });
   const allTerminal = upstreamStates.every((s) => TERMINAL.has(s));
   const anyTerminal = upstreamStates.some((s) => TERMINAL.has(s));
   const anyCompleted = upstreamStates.some((s) => s === 'completed');
@@ -490,14 +517,40 @@ export function markSuspended(
   snapshot.nodeState.set(nodeId, 'suspended');
 }
 
+/** Why was `nodeId` skipped — because an incoming branch condition evaluated
+ *  false (content routing, ADR 0208), or because an upstream failed / was itself
+ *  skipped? Observability only; does not affect scheduling. */
+export function skipReasonFor(
+  nodeId: string,
+  graph: SchedulerGraph,
+  snapshot: SchedulerSnapshot,
+): 'condition' | 'upstream' {
+  const ins = graph.incoming.get(nodeId) ?? [];
+  const conditionGated = ins.some((e) => {
+    const s = snapshot.nodeState.get(e.sourceNodeId);
+    return (
+      s === 'completed' &&
+      e.condition &&
+      !evaluateCondition(e.condition as EdgeCondition, snapshot.nodeOutputs.get(e.sourceNodeId))
+    );
+  });
+  return conditionGated ? 'condition' : 'upstream';
+}
+
 /**
  * Release any downstream nodes that have become ready given the current
  * snapshot. Idempotent; safe to call after every state mutation.
+ *
+ * `onSkip` (optional) is invoked once per node the moment it transitions to
+ * `skipped`, with the reason — used for observability (a routing branch that
+ * didn't fire otherwise leaves no trace). Omitting it is a pure no-op, so
+ * scheduler unit tests and replay re-derivation are unaffected.
  */
 export function releaseDownstream(
   changedNodeId: string,
   graph: SchedulerGraph,
   snapshot: SchedulerSnapshot,
+  onSkip?: (nodeId: string, reason: 'condition' | 'upstream') => void,
 ): void {
   const downstream = graph.outgoing.get(changedNodeId) ?? [];
   const visited = new Set<string>();
@@ -512,6 +565,7 @@ export function releaseDownstream(
     if (verdict === 'ready') snapshot.nodeState.set(id, 'ready');
     else if (verdict === 'skip') {
       snapshot.nodeState.set(id, 'skipped');
+      if (onSkip) onSkip(id, skipReasonFor(id, graph, snapshot));
       // Skipped propagates — re-evaluate downstream.
       const out = graph.outgoing.get(id) ?? [];
       for (const e of out) if (!visited.has(e.targetNodeId)) queue.push(e.targetNodeId);

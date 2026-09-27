@@ -3,7 +3,9 @@
  * OrgsPage (GAP-ANALYSIS E11). Presentational; state + handlers stay lifted.
  */
 
+import { Button } from '../ui/Button.js';
 import type { FormEvent } from 'react';
+import { StateCard } from '../ui/StateCard.js';
 import { useTranslation } from 'react-i18next';
 import type { Team } from '../client/accessClient.js';
 import { ColumnsIcon, TrashIcon } from '../ui/icons/index.js';
@@ -27,10 +29,10 @@ export function TeamsPanel({ teams, teamName, setTeamName, onCreateTeam, onDelet
       </h3>
       <form onSubmit={onCreateTeam} className="action-bar u-mb-2">
         <input value={teamName} onChange={(e) => setTeamName(e.target.value)} placeholder={t('newTeamPlaceholder')} aria-label={t('newTeamAriaLabel')} />
-        <button type="submit" className="primary" disabled={!teamName.trim() || !can('host:teams:manage')} title={can('host:teams:manage') ? undefined : t('addTeamRequiresScope')}>{t('addTeam')}</button>
+        <Button variant="primary" type="submit" disabled={!teamName.trim() || !can('host:teams:manage')} title={can('host:teams:manage') ? undefined : t('addTeamRequiresScope')}>{t('addTeam')}</Button>
       </form>
       {teams.length === 0 ? (
-        <p className="teams-muted">{t('noTeamsYet')}</p>
+        <StateCard title={t('noTeamsYet')} />
       ) : (
         <div className="u-flex u-wrap u-gap-2 u-mb-3">
           {teams.map((team) => (

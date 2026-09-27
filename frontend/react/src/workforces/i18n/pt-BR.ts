@@ -20,6 +20,8 @@ export const messages = {
   noneTitle: 'Nenhuma força de trabalho ainda',
   noneBody: 'Carregue dados de exemplo para explorar as forças de trabalho de exemplo com semanas de histórico de execução.',
   loadExampleData: 'Carregar dados de exemplo',
+  noneBodyClean: 'As forças de trabalho aparecem aqui quando seus agentes executam trabalho real. Contrate seu primeiro agente para começar.',
+  hireFirstAgent: 'Contratar seu primeiro agente',
   // Key-figure filter band
   filterAriaLabel: 'O que precisa de você — clique para filtrar',
   figureWorkforces: 'Forças de trabalho',
@@ -123,6 +125,10 @@ export const messages = {
 
   // Trace search panel
   traceSearch: 'Busca de rastros',
+  traceColSelect: 'Selecionar para comparação',
+  traceSelectRun: 'Selecionar a execução {{runId}} para comparação',
+  traceCompareSelected: 'Comparar as duas execuções selecionadas',
+  traceCompareHint: 'Selecione duas execuções para compará-las lado a lado.',
   traceSearchHelp:
     'Busque execuções em toda a força de trabalho por id de correlação, id de lote, id de execução, resultado ou status.',
   traceQueryAriaLabel: 'Consulta de rastro',
@@ -217,21 +223,22 @@ export const messages = {
 
   // Lifecycle / autonomy labels (DESIGN.md §5.3)
   statusShadowLabel: 'Sombra',
-  statusShadowGloss: 'Roda junto com humanos, não toma nenhuma ação real',
   statusPilotingLabel: 'Pilotando',
-  statusPilotingGloss: 'Agindo sobre trabalho real, com revisão humana',
   statusProductionLabel: 'Produção',
-  statusProductionGloss: 'Autônoma-limitada dentro da política, ao vivo',
-  autonomyReviewLabel: 'Revisão',
-  autonomyReviewGloss: 'Toda decisão aguarda aprovação humana',
-  autonomyGuidedLabel: 'Guiada',
-  autonomyGuidedGloss: 'Age, mas encaminha decisões importantes para revisão',
-  autonomyAutoLabel: 'Auto',
-  autonomyAutoGloss: 'Autônoma-limitada dentro de sua política',
+  autonomyReviewLabel: 'Supervisionado',
+  autonomyGuidedLabel: 'Guiado',
+  autonomyAutoLabel: 'Autônomo',
   journeyShadowLabel: 'Observando',
   journeyShadowGloss: 'Observa sua equipe trabalhar e aprende — ainda não toma nenhuma ação real.',
   journeyPilotingLabel: 'Auxiliando',
   journeyPilotingGloss: 'Age sobre trabalho real, com um humano revisando exceções.',
   journeyProductionLabel: 'Rodando por conta própria',
   journeyProductionGloss: 'Roda de forma autônoma dentro das diretrizes de sua política.',
+
+  // §4.5 collection kit — busca por nome
+  filterGroup: 'Filtrar forças de trabalho',
+  searchPlaceholder: 'Buscar forças de trabalho…',
+  searchAria: 'Buscar forças de trabalho por nome',
+  signalsUnreadable: "{{count}} força(s) de trabalho não puderam ser verificadas por completo — as contagens de aprovações, prontidão e políticas abaixo cobrem apenas as que conseguimos ler.",
+  overviewSignalsUnreadable: "Esta força de trabalho não pôde ser verificada por completo — os sinais de aprovações, prontidão e políticas podem estar incompletos, então nenhum aval é exibido.",
 } as const;

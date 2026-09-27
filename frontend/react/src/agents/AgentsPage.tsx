@@ -9,37 +9,47 @@
  * `/agents/new`, Install from registry → `/agents/install`, per-row Fork.
  */
 
-import { useEffect, useState } from 'react';
+import { Button } from '../ui/Button.js';
+import { useCallback, useEffect, useState } from 'react';
 import { Trans, useTranslation } from 'react-i18next';
 import { slugify } from './agentUi.js';
 import { Link, useNavigate } from 'react-router-dom';
 import { listAgents, type AgentEntry } from '../client/agentsClient.js';
 import { listRoster } from './rosterClient.js';
 import { PageHeader } from '../ui/PageHeader.js';
-import { DataTable, DensityToggle, type DataColumn } from '../ui/DataTable.js';
+import { DataTable, type DataColumn } from '../ui/DataTable.js';
+import { ViewToggle, useViewMode } from '../ui/ViewToggle.js';
+import { AgentTemplateCard, TemplateSignals } from './AgentTemplateViews.js';
 import { StateCard } from '../ui/StateCard.js';
 import { SkeletonRows } from '../ui/Skeleton.js';
 import { TextField } from '../ui/Field.js';
 import { Notice } from '../ui/Notice.js';
 import { PackageIcon, SearchIcon } from '../ui/icons/index.js';
-import { formatNumber } from '../i18n/format.js';
 
 interface State {
   agents: readonly AgentEntry[];
   isLoading: boolean;
   error: string | null;
+  /** The advisor filter could not be read, so the list may include agents that
+   *  are NOT reusable templates. Distinct from "there are no advisors". */
+  filterUnavailable: boolean;
 }
 
 export function AgentsPage(): JSX.Element {
   const { t } = useTranslation('agents');
-  const [state, setState] = useState<State>({ agents: [], isLoading: true, error: null });
+  const [state, setState] = useState<State>({ agents: [], isLoading: true, error: null, filterUnavailable: false });
   const [query, setQuery] = useState('');
-  const [density, setDensity] = useState<'comfortable' | 'compact'>('comfortable');
+  const [view, setView] = useViewMode('agent-templates', 'list');
   const navigate = useNavigate();
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
+  /** Shared by the mount effect and the Retry button. It used to live inline in
+   *  a `[]`-dep effect while Retry only set `isLoading: true` — so Retry cleared
+   *  the error, showed the loading card, and NOTHING EVER REFETCHED. The page
+   *  then claimed to be loading forever, which is the exact failure-as-loading
+   *  state the error card existed to avoid. A retry that cannot retry is worse
+   *  than no retry: it converts a stated failure back into a false claim. */
+  const load = useCallback(async (isCancelled: () => boolean = () => false): Promise<void> => {
+    setState((prev) => ({ ...prev, isLoading: true, error: null }));
       try {
         // Advisor-subject agents (ADR 0040) are backed by user-agents, so they
         // surface in the `/v1/agents` inventory (and stay @-mentionable in chat) —
@@ -47,27 +57,38 @@ export function AgentsPage(): JSX.Element {
         // as reusable templates here. Cross-reference the roster (the single
         // source of the `roleKey:'advisor'` marker) and drop their backing agents.
         // Best-effort: a roster failure must not blank the templates list.
+        let filterUnavailable = false;
         const [agents, advisorRoster] = await Promise.all([
           listAgents(),
           listRoster({ includeAdvisors: true })
             .then((r) => r.filter((e) => e.roleKey === 'advisor'))
-            .catch(() => []),
+            // `[]` here means "no advisors exist" AND "we could not check" — the
+            // same value for two different facts. Blanking the whole library over
+            // it would be worse, so the degrade stays; what was missing is SAYING
+            // so. Undisclosed, the page presents advisor-backed agents as
+            // installable templates and counts them in "N templates".
+            .catch(() => { filterUnavailable = true; return []; }),
         ]);
-        if (cancelled) return;
+        if (isCancelled()) return;
         const advisorAgentIds = new Set(advisorRoster.map((e) => e.agentRef.agentId));
         const visible = agents.filter((a) => !advisorAgentIds.has(a.agentId));
-        setState({ agents: visible, isLoading: false, error: null });
+        setState({ agents: visible, isLoading: false, error: null, filterUnavailable });
       } catch (err) {
-        if (cancelled) return;
+        if (isCancelled()) return;
         setState({
           agents: [],
           isLoading: false,
           error: err instanceof Error ? err.message : String(err),
+          filterUnavailable: false,
         });
       }
-    })();
-    return () => { cancelled = true; };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    void load(() => cancelled);
+    return () => { cancelled = true; };
+  }, [load]);
 
   const filtered = state.agents.filter((a) => {
     if (!query.trim()) return true;
@@ -120,56 +141,46 @@ export function AgentsPage(): JSX.Element {
     {
       key: 'signals',
       header: t('templatesColSignals'),
-      render: (a) => (
-        <div className="u-flex u-gap-2 u-wrap u-items-center">
-          {a.degraded && a.degraded.length > 0 ? (
-            <span
-              className="chip chip--warning"
-              title={t('templatesDegradedTitle', { count: a.degraded.length })}
-            >
-              {t('templatesDegraded', { count: a.degraded.length })}
-            </span>
-          ) : null}
-          {a.hasHandoffSchemas ? <span className="chip chip--muted">{t('templatesHandoff')}</span> : null}
-          {a.confidenceThreshold !== undefined ? (
-            <span className="chip chip--muted">{t('templatesConfidence', { value: formatNumber(a.confidenceThreshold, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) })}</span>
-          ) : null}
-        </div>
-      ),
+      render: (a) => <TemplateSignals agent={a} />,
     },
   ];
 
   return (
-    <section className="page-stack">
+    <section data-walkthrough="agent-templates.page" className="page-stack">
       <PageHeader
         eyebrow={t('templatesEyebrow')}
         title={t('templatesTitle')}
         lede={<Trans t={t} i18nKey="templatesLede" components={{ 0: <Link to="/agents" />, 1: <code /> }} />}
         actions={
           <>
-            <button type="button" className="secondary" onClick={() => navigate('/agents/install')}>
+            <Button variant="secondary" onClick={() => navigate('/agents/install')}>
               {t('templatesInstallFromRegistry')}
-            </button>
-            <button type="button" className="primary" onClick={() => navigate('/agents/new')}>
+            </Button>
+            <Button variant="primary" onClick={() => navigate('/agents/new')}>
               {t('templatesAuthorNew')}
-            </button>
+            </Button>
           </>
         }
       />
 
+      {/* Warn, don't block: the library itself loaded, but one of its filters
+          did not, so a row here may not actually be a reusable template. */}
+      {state.filterUnavailable ? (
+        <Notice variant="warning" announce={t('templatesAdvisorFilterUnavailable')}>{t('templatesAdvisorFilterUnavailable')}</Notice>
+      ) : null}
+
       {state.error ? (
-        <StateCard
+        <StateCard announce
           icon={<PackageIcon size={26} />}
           title={t('templatesLoadErrorTitle')}
           body={state.error}
           action={
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => setState({ agents: [], isLoading: true, error: null })}
+            <Button
+              variant="secondary"
+              onClick={() => { void load(); }}
             >
               {t('templatesRetry')}
-            </button>
+            </Button>
           }
         />
       ) : state.isLoading ? (
@@ -184,12 +195,12 @@ export function AgentsPage(): JSX.Element {
           body={t('templatesEmptyBody')}
           action={
             <>
-              <button type="button" className="secondary" onClick={() => navigate('/agents/install')}>
+              <Button variant="secondary" onClick={() => navigate('/agents/install')}>
                 {t('templatesInstallFromRegistry')}
-              </button>
-              <button type="button" className="primary" onClick={() => navigate('/agents/new')}>
+              </Button>
+              <Button variant="primary" onClick={() => navigate('/agents/new')}>
                 {t('templatesAuthorNew')}
-              </button>
+              </Button>
             </>
           }
         />
@@ -207,26 +218,32 @@ export function AgentsPage(): JSX.Element {
             <span className="muted u-fs-12">
               {t('templatesCountLabel', { count: state.agents.length, filtered: filtered.length, total: state.agents.length })}
             </span>
-            <DensityToggle value={density} onChange={setDensity} />
+            <ViewToggle value={view} onChange={setView} className="u-ml-auto" />
           </div>
 
-          <DataTable<AgentEntry>
-            columns={columns}
-            rows={[...filtered]}
-            rowKey={(a) => a.agentId}
-            density={density}
-            caption={t('templatesCaption')}
-            initialSort={{ key: 'template', dir: 'asc' }}
-            onRowClick={(a) => navigate(`/agents/templates/${encodeURIComponent(a.agentId)}`)}
-            empty={
-              <Notice variant="info">
-                <span className="u-flex u-gap-2 u-items-center">
-                  <SearchIcon size={15} aria-hidden />
-                  <Trans t={t} i18nKey="templatesNoMatchQuery" values={{ query }} components={{ 0: <code /> }} />
-                </span>
-              </Notice>
-            }
-          />
+          {filtered.length === 0 ? (
+            <Notice variant="info">
+              <span className="u-flex u-gap-2 u-items-center">
+                <SearchIcon size={15} aria-hidden />
+                <Trans t={t} i18nKey="templatesNoMatchQuery" values={{ query }} components={{ 0: <code /> }} />
+              </span>
+            </Notice>
+          ) : view === 'grid' ? (
+            <div className="card-grid">
+              {filtered.map((a) => (
+                <AgentTemplateCard key={a.agentId} agent={a} />
+              ))}
+            </div>
+          ) : (
+            <DataTable<AgentEntry>
+              columns={columns}
+              rows={[...filtered]}
+              rowKey={(a) => a.agentId}
+              caption={t('templatesCaption')}
+              initialSort={{ key: 'template', dir: 'asc' }}
+              onRowClick={(a) => navigate(`/agents/templates/${encodeURIComponent(a.agentId)}`)}
+            />
+          )}
         </>
       )}
     </section>

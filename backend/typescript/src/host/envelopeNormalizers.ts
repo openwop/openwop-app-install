@@ -168,6 +168,3 @@ function isNormalizableKind(type: string): type is NormalizableKind {
   return type in ENVELOPE_NORMALIZERS;
 }
 
-export function _hasNormalizer(type: string): boolean {
-  return isNormalizableKind(type);
-}

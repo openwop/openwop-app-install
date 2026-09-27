@@ -9,12 +9,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/usage',
     element: <UsageDashboardPage />,
-    tier: 'workspace',
+    tier: 'admin', archetype: 'admin',
     nav: {
-      group: 'Workspace',
-      label: 'LLM usage',
+      group: 'Analytics & usage',
+      label: 'LLM usage', labelKey: 'usageAnalyticsLabel',
       icon: ActivityIcon,
-      hint: 'Per-model token usage',
+      hint: 'Per-model token usage', hintKey: 'usageAnalyticsHint',
       featureId: 'usage-analytics',
     },
   },

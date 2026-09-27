@@ -12,6 +12,7 @@ import type { AddressInfo } from 'node:net';
 import { createApp } from '../src/index.js';
 import type { Storage } from '../src/storage/storage.js';
 import { makeMcpClient, McpError } from '../src/host/mcpClient.js';
+import { MCP_CURRENT_VERSION, MCP_META_PROTOCOL_VERSION } from '../src/host/mcpProfile.js';
 import { getProvider, registerProvider } from '../src/features/connections/providerRegistry.js';
 import { loadConnectionPacks } from '../src/features/connections/connectionPackLoader.js';
 import { __resetConnectionsStore, createSecretConnection } from '../src/features/connections/connectionsService.js';
@@ -63,7 +64,7 @@ describe('Outbound MCP client (ADR 0030)', () => {
         }
       });
     });
-    await new Promise<void>((r) => srv.listen(0, r));
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
     const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/mcp`;
 
     registerProvider({ id: 'testmcp', label: 'Test MCP', kind: 'bearer', authFlow: 'none', reach: 'mcp', scopes: { read: [] }, refreshable: false, defaultScopes: [], consumerNodes: ['core.openwop.mcp'], mcpServer: { url, transport: 'http' } });
@@ -80,10 +81,18 @@ describe('Outbound MCP client (ADR 0030)', () => {
 
   it('invokeTool: per-user Bearer + JSON-RPC tools/call + untrusted output + provenance', async () => {
     const out = await client('u1').invokeTool('testmcp', 'echo', { x: 1 });
-    expect(out).toEqual({ result: [{ type: 'text', text: 'tool output' }], isError: false, untrustedContent: true });
+    // ADR 0553 P2 — `negotiatedVersion` is ADDITIVE: the revision the call
+    // was actually made under. The §23 seam reports it, and reporting the
+    // preferred revision while having used a lower one is the silent
+    // downgrade RFC 0153 §B forbids, so it has to come from the call.
+    expect(out).toEqual({ negotiatedVersion: MCP_CURRENT_VERSION, result: [{ type: 'text', text: 'tool output' }], isError: false, untrustedContent: true });
     expect(last.auth).toBe('Bearer mcp-token');
     expect(last.method).toBe('tools/call');
-    expect(last.params).toEqual({ name: 'echo', arguments: { x: 1 } });
+    // ADR 0553 P2 — the call now self-describes (§B), so `params` carries
+    // `_meta` alongside the tool arguments. Asserted rather than stripped: a
+    // current-revision request WITHOUT it is one a conforming peer refuses.
+    expect(last.params).toMatchObject({ name: 'echo', arguments: { x: 1 } });
+    expect((last.params as { _meta?: Record<string, unknown> })._meta?.[MCP_META_PROTOCOL_VERSION]).toBe(MCP_CURRENT_VERSION);
     const meta = (await storage.getRun('run-mcp'))?.metadata as Record<string, unknown> | undefined;
     expect((meta?.connectionUse as Array<{ provider?: string }> | undefined)?.some((u) => u.provider === 'testmcp')).toBe(true);
   });
@@ -120,7 +129,7 @@ describe('Outbound MCP client (ADR 0030)', () => {
     try {
       // invokeTool over SSE: skip the pushed notification frame, match the response id.
       const tool = await client('u1').invokeTool('testmcp', 'echo', { x: 1 });
-      expect(tool).toEqual({ result: [{ type: 'text', text: 'tool output' }], isError: false, untrustedContent: true });
+      expect(tool).toEqual({ negotiatedVersion: MCP_CURRENT_VERSION, result: [{ type: 'text', text: 'tool output' }], isError: false, untrustedContent: true });
       // list + read also round-trip over SSE.
       expect(await client('u1').listTools('testmcp')).toEqual({ tools: [{ name: 'echo' }] });
       expect(await client('u1').readResource('testmcp', 'res://x')).toEqual({ content: 'resource body', mimeType: 'text/plain', untrustedContent: true });
@@ -134,7 +143,7 @@ describe('Outbound MCP client (ADR 0030)', () => {
     sseEol = '\r\n\r\n';
     try {
       const tool = await client('u1').invokeTool('testmcp', 'echo', { x: 1 });
-      expect(tool).toEqual({ result: [{ type: 'text', text: 'tool output' }], isError: false, untrustedContent: true });
+      expect(tool).toEqual({ negotiatedVersion: MCP_CURRENT_VERSION, result: [{ type: 'text', text: 'tool output' }], isError: false, untrustedContent: true });
     } finally {
       sseMode = false;
       sseEol = '\n\n';
@@ -249,7 +258,7 @@ describe('Work-twin reach:mcp providers — google/slack (ADR 0033 §3.1 + Corre
         res.end(JSON.stringify({ jsonrpc: '2.0', id: rpc.id, result }));
       });
     });
-    await new Promise<void>((r) => srv.listen(0, r));
+    await new Promise<void>((r) => srv.listen(0, '127.0.0.1', r));
     const url = `http://127.0.0.1:${(srv.address() as AddressInfo).port}/mcp`;
 
     // (b) A connection pack (RFC 0095) supplies the Google MCP server URL,
@@ -294,18 +303,19 @@ describe('Work-twin reach:mcp providers — google/slack (ADR 0033 §3.1 + Corre
   const twinClient = (): ReturnType<typeof makeMcpClient> =>
     makeMcpClient({ storage, tenantId: 'ttwin', runId: 'run-twin', actingUserId: 'twin-user', orgId: 'ttwin' });
 
-  it('(a) built-in google/slack are reach:mcp but ship no MCP endpoint → not MCP-reachable today (fail-closed)', async () => {
-    // The honest posture: the tag exists, but a bare `reach:'mcp'` with no
-    // `mcpServer` URL is correctly un-invocable via the MCP client (no fabricated
-    // capability). google/slack instead reach via brokered HTTP egress (apiHosts).
+  it('(a) slack is reach:mcp with no MCP endpoint → server_not_found (fail-closed); google now carries the ADR 0466 Calendar MCP endpoint', async () => {
+    // The honest posture: a bare `reach:'mcp'` with no `mcpServer` URL is correctly
+    // un-invocable via the MCP client (no fabricated capability) — slack is that case.
+    // google, by contrast, now carries a host-curated MCP endpoint (ADR 0466 — Google's
+    // first-party Calendar MCP server), so it is past `server_not_found`.
     expect(getProvider('google')?.reach).toBe('mcp');
     expect(getProvider('slack')?.reach).toBe('mcp');
-    expect(getProvider('google')?.mcpServer?.url).toBeUndefined(); // no built-in MCP endpoint
-    expect(getProvider('slack')?.mcpServer?.url).toBeUndefined();
-    expect(getProvider('google')?.apiHosts).toContain('googleapis.com'); // brokered-HTTP path instead
+    // ADR 0466 — the built-in google now ships the Calendar MCP endpoint.
+    expect(getProvider('google')?.mcpServer?.url).toBe('https://calendarmcp.googleapis.com/mcp/v1');
+    expect(getProvider('slack')?.mcpServer?.url).toBeUndefined(); // slack: still no endpoint
+    expect(getProvider('google')?.apiHosts).toContain('googleapis.com'); // brokered-HTTP path also
     // (this runs BEFORE the pack-install test below mutates the `google` registry entry)
-    await expect(twinClient().invokeTool('google', 'gmail.create_draft', { to: 'x' }))
-      .rejects.toMatchObject({ code: 'server_not_found' });
+    // slack has no endpoint ⇒ correctly un-invocable via MCP.
     await expect(twinClient().invokeTool('slack', 'chat.postMessage', { text: 'hi' }))
       .rejects.toMatchObject({ code: 'server_not_found' });
   });
@@ -335,10 +345,12 @@ describe('Work-twin reach:mcp providers — google/slack (ADR 0033 §3.1 + Corre
     // ctx.mcp.invokeTool('google', …) — the exact call a `core.openwop.mcp.invoke-tool`
     // node makes — resolves the NAMED provider and dispatches.
     const out = await twinClient().invokeTool('google', 'gmail.create_draft', { to: 'x@y.z' });
-    expect(out).toEqual({ result: [{ type: 'text', text: 'gmail draft created' }], isError: false, untrustedContent: true });
+    expect(out).toEqual({ negotiatedVersion: MCP_CURRENT_VERSION, result: [{ type: 'text', text: 'gmail draft created' }], isError: false, untrustedContent: true });
     expect(last.auth).toBe('Bearer google-user-token'); // per-user token, host-side only
     expect(last.method).toBe('tools/call');
-    expect(last.params).toEqual({ name: 'gmail.create_draft', arguments: { to: 'x@y.z' } });
+    // Carries the §B `_meta` self-description like every current-revision
+    // call; the identity of the tool + arguments is what this leg is about.
+    expect(last.params).toMatchObject({ name: 'gmail.create_draft', arguments: { to: 'x@y.z' } });
     // Provenance stamped for the named provider (RFC 0079).
     const meta = (await storage.getRun('run-twin'))?.metadata as Record<string, unknown> | undefined;
     expect((meta?.connectionUse as Array<{ provider?: string }> | undefined)?.some((u) => u.provider === 'google')).toBe(true);

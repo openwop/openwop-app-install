@@ -41,4 +41,11 @@ describe('canvas.cad artifact type', () => {
   it('rejects an unknown units value', () => {
     expect(validateArtifact('canvas.cad', { units: 'furlongs', solids: [{ kind: 'sphere', radius: 1 }] }).valid).toBe(false);
   });
+  // ADR 0317 follow-up — the additive in-plane rotation field.
+  it('accepts an optional numeric rotation on a solid', () => {
+    expect(validateArtifact('canvas.cad', { solids: [{ kind: 'box', width: 40, height: 30, depth: 20, rotation: 45 }] }).valid).toBe(true);
+  });
+  it('rejects a non-numeric rotation', () => {
+    expect(validateArtifact('canvas.cad', { solids: [{ kind: 'box', rotation: '45' }] }).valid).toBe(false);
+  });
 });

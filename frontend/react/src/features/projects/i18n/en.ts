@@ -8,6 +8,10 @@
  * `t('common:…')`. Plurals use i18next `_one`/`_other` (Intl.PluralRules).
  */
 export const messages = {
+  loadFailedTitle: "Could not load your projects",
+  loadFailedBody: "The server did not answer, so we can’t tell which projects exist. This is not a sign that you have none — creating one now could duplicate an existing project.",
+  membersLoadFailedTitle: "Could not load this project’s team",
+  membersLoadFailedBody: "We can’t tell who is on this project. This does NOT mean nobody is — adding people now could duplicate existing members.",
   // ── Projects list page ──
   listEyebrow: 'Workspace',
   listTitle: 'Projects',
@@ -56,6 +60,13 @@ export const messages = {
   memoryAddPlaceholder: 'A fact or decision this project should remember.',
   memoryEmptyBody: "Add facts and decisions for this project; they're recalled when relevant.",
   knowledgeIntro: 'Attach <0>documents</0> to this project — cited sources its agents and workflows can draw on, alongside the facts in its Memory tab.',
+  // `PRJWF-3` — the audience at the CREATE door. Projects is the THIRD lane to get this
+  // (agents: ADR 0664 D2; personal: ADR 0666 D6), and the shared slot's own docblock names the
+  // project case FIRST — a collection created here IS stamped to the project, so unlike the
+  // personal lane its audience really is the project's own readers. The sentence says that
+  // rather than claiming privacy, and points at the visibility control that decides it.
+  knowledgeAudience:
+    'A source created here belongs to this project: whoever can read the project can read it, and its agents and workflows can cite it. The project’s visibility setting decides who that is.',
   knowledgeEmptyBody: 'Create a source above, then add documents this project can cite.',
   knowledgeSearchTitle: 'Search this project’s knowledge',
   knowledgeSearchPlaceholder: 'What should this project recall?',
@@ -110,7 +121,14 @@ export const messages = {
   visibilityGroupAria: 'Project visibility',
   visibilityOrg: 'Org-visible',
   visibilityPrivate: 'Private',
-  visibilityPrivateHelp: 'Only members and workspace writers can see this project — and its board, memory, knowledge, and schedules.',
+  visibilityPrivateHelp: 'Only members and workspace writers can see this project — its overview, team, chat, board, memory, knowledge, sources, podcasts, workflows and schedules.',
+  visibilityConfirmTitle: 'Make this project private?',
+  visibilityConfirmBody: 'Everyone with read access in this workspace who is not a member will lose the project and its board, memory, knowledge, sources, chat, podcasts, workflows and schedules. You can switch back at any time.',
+  visibilityConfirmAction: 'Make private',
+  visibilityNowPrivate: 'This project is now private — only members and workspace writers can see it.',
+  visibilityNowOrg: 'This project is now visible to everyone with read access in this workspace.',
+  milestoneDone: 'Done',
+  milestoneOpen: 'Not done',
   visibilityOrgHelp: 'Anyone with read access in this workspace can see this project.',
   visibilityEditNote: 'Editing always requires workspace write — membership never grants it.',
   addToTeam: 'Add to the team',
@@ -143,14 +161,22 @@ export const messages = {
   chatIntro: 'One shared thread for everyone on <0>{{name}}</0>. The project\'s agents join the room — <1>@</1>-mention any of them, or <2>convene the whole team</2> for a structured round.',
   inTheRoom: 'In the room',
   noAgentsNotice: 'No agents on this project yet — add some on the <0>Members</0> tab to bring them into the room.',
+  rosterFailedNotice: 'Agent names could not be loaded, so the identifiers below are shown instead of persona names.',
   opening: 'Opening…',
   openProjectChat: 'Open project chat',
-  openChatNeedsWrite: 'Opening the project chat needs edit access (<0>workspace:write</0>) in this project\'s org.',
   convene: 'convene the whole team',
   conveneCadenceHeading: 'Convene cadence',
   cadenceHelp: 'On convene, the moderator opens and each agent weighs in one at a time. Bounded for cost — at most {{max}} agents take part.',
   cadenceSaveError: 'Could not save the cadence.',
   cadenceSaved: 'Cadence saved.',
+  deleteCascadeBody: 'This permanently deletes the project’s board and cards, its memory, its schedules, and the full history of its project chat.',
+  deleteCascadeBodyNotebook: 'This is a notebook: deleting it permanently destroys its ingested source corpus, along with its board and cards, its memory, its schedules, and the full history of its chat.',
+  deleteReceipt: 'Project deleted — chat conversations removed: {{conversations}}; memory entries cleared: {{memory}}; schedules removed: {{schedules}}.',
+  deleteReceiptCorpus: 'Its ingested source corpus was deleted with it.',
+  cadenceModeratorNotMember: 'That moderator must be one of this project’s agent members — add the agent on the Members tab, then save again.',
+  cadenceModeratorMissing: 'That moderator agent is no longer in this workspace’s roster.',
+  cadenceProjectGone: 'This project could not be loaded — it may have been deleted, or your access to it removed. Refresh to see its current state.',
+  cadenceRejected: 'The server rejected this cadence as invalid — adjust it and try again.',
   moderatorLabel: 'Moderator (chair)',
   moderatorNone: 'None — any agent opens',
   roundsLabel: 'Rounds',
@@ -185,4 +211,22 @@ export const messages = {
 
   // ── Clients (error contexts surfaced to the user) ──
   // (client errors reuse the generic asJson context strings, kept as identifiers)
+  deleteProjectConfirm: 'Delete project "{{name}}"?',
+  directoryLoadFailed: "The people and agent directories could not be loaded.",
+  directoryUnavailable: "Directory unavailable",
+  directoryNamesFallback: "The people and agent directories could not be loaded, so members below may show their id instead of their name, and nobody can be added right now.",
+  rosterNamesFallback: 'We could not load the agent roster, so agents on this team show their ids instead of their names. People can still be added.',
+  workflowsUnverified: "Could not check this workflow against your workspace — it may still run.",
+  assignListIncomplete: "Your own workflows could not be loaded, so this list shows only the built-in templates. Anything you built yourself is missing from it — retry before assuming a workflow is gone.",
+  accessCheckFailed: "We could not check your permissions, so the create-project form is hidden. This is not a decision about your access — retry in a moment.",
+  goalHint: "Up to {{max}} characters.",
+  objectivesHint: "One per line — up to {{max}} lines of {{chars}} characters each.",
+  capObjectives: "{{over}} objective(s) over the limit of {{max}} — remove them or they will not be saved.",
+  capObjectiveLength: "{{lines}} objective(s) are longer than {{max}} characters and would be cut short.",
+  capMilestones: "{{over}} milestone(s) over the limit of {{max}} — remove them or they will not be saved.",
+  capGoalLength: "The goal is longer than {{max}} characters and would be cut short.",
+  capBriefLength: "The brief is longer than {{max}} characters and would be cut short.",
+  capMilestoneTitleLength: "{{lines}} milestone title(s) are longer than {{max}} characters and would be cut short.",
+  orgsEmptyBody: "Projects belong to a workspace. Create one first, then come back here.",
+  orgsFailedBody: "the workspace list, so there is nothing to create a project in yet",
 } as const;

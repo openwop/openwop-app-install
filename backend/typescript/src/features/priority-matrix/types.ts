@@ -14,35 +14,22 @@
 import type { KanbanColumn } from '../../host/kanbanService.js';
 
 /** How an idea's per-criterion scores combine into one priority number. */
-export type Aggregation = 'weighted-sum' | 'ratio';
+// ADR 0534 P0 — the weighted-scoring vocabulary moved to `host/weightedScoring.ts`
+// alongside the engine that defines its semantics, so core can own it without
+// importing a feature. Re-exported here so every existing PM import is unchanged.
+// Imported locally AND re-exported: a bare `export type { X } from '…'` does not
+// create a local binding, so this file's own uses of `CriteriaSet` (below) would
+// silently resolve to `any`.
+import type {
+  Aggregation,
+  CriterionDirection,
+  PresetId,
+  Criterion,
+  CriteriaSet,
+} from '../../host/weightedScoring.js';
+export type { Aggregation, CriterionDirection, PresetId, Criterion, CriteriaSet };
+export { PRESET_IDS } from '../../host/weightedScoring.js';
 
-/** Whether a higher 1–10 score is better (`benefit`) or worse (`cost`).
- *  Cost/effort/job-size criteria are `cost` — they drag priority DOWN. */
-export type CriterionDirection = 'benefit' | 'cost';
-
-/** A named framework a criteria set was seeded from (UX honesty: the slider model
- *  is Weighted Scoring; WSJF/RICE are ratio presets — ADR 0058 § Scoring model). */
-export type PresetId = 'weighted' | 'wsjf' | 'rice' | 'ice' | 'value-effort';
-export const PRESET_IDS: readonly PresetId[] = ['weighted', 'wsjf', 'rice', 'ice', 'value-effort'];
-
-/** One weighted factor an idea is scored against. */
-export interface Criterion {
-  id: string;
-  name: string;
-  description?: string;
-  /** The slider — relative importance, 1..10. */
-  weight: number;
-  direction: CriterionDirection;
-  /** Anchor text for the 1..10 score input (reduces score-gaming, ADR 0058 UX). */
-  scaleHint?: string;
-}
-
-/** The configurable, per-list weighted scoring model. */
-export interface CriteriaSet {
-  presetId?: PresetId;
-  aggregation: Aggregation;
-  criteria: Criterion[];
-}
 
 /** A named container of ideas. Workspace-scoped by default; a `projectId` scopes
  *  it to a project (the board's `ownerSubject`, ADR 0046). The ideas/statuses live
@@ -79,6 +66,12 @@ export type VoteAggregation = 'mean' | 'median';
 
 /** The scoring overlay on one idea (= one kanban card) in `single` mode. Keyed by
  *  (list, card). */
+/** PMXU-1 (ADR 0590) — the ACTOR CLASS that produced a scoring write, stamped
+ *  truthfully at the writer (chat tool = 'agent', run surface = 'workflow',
+ *  routes default 'human'). OPTIONAL: rows written before the stamp existed
+ *  carry none — absence means "pre-stamp row", never "human". Do NOT backfill. */
+export type ScoreSource = 'human' | 'workflow' | 'agent';
+
 export interface IdeaScore {
   listId: string;
   /** The kanban card id — the idea itself. */
@@ -89,6 +82,8 @@ export interface IdeaScore {
   computedPriority: number;
   updatedBy: string;
   updatedAt: string;
+  /** PMXU-1 — actor class of the writer (absent = pre-stamp row). */
+  source?: ScoreSource;
 }
 
 /** Optional schedule overlay on one idea (= one kanban card) — ADR 0103. Keyed by
@@ -117,6 +112,8 @@ export interface IdeaVote {
   /** criterionId → 1..10 for THIS voter. */
   scores: Record<string, number>;
   updatedAt: string;
+  /** PMXU-1 (ADR 0590) — actor class of the writer (absent = pre-stamp row). */
+  source?: ScoreSource;
 }
 
 /** How a meeting agenda is ordered (ADR 0058 — the saved doc, not just the live
@@ -149,9 +146,36 @@ export interface PlanningSession {
   agendaDocumentId?: string;
   /** Fallback agenda body when `documents` is OFF (no hard dependency). */
   agendaMarkdown: string;
+  /** ADR 0234 §C7 — "why we picked these" (decision records cite it, ADR 0233). */
+  rationale?: string;
+  /** ADR 0235 §D1 — named what-if selections under constraint sets (cap 8).
+   *  Stored ON the session (the aggregate root); resolution is AT READ. */
+  scenarios?: SessionScenario[];
   createdBy: string;
   createdAt: string;
 }
+
+/** ADR 0235 §D1 — a named what-if selection. Inert data until a human selects
+ *  it as plan-of-record (which is why an agent may safely PROPOSE one). */
+export interface SessionScenario {
+  scenarioId: string;
+  name: string;
+  selection: { mode: 'top-n'; n: number } | { mode: 'manual'; cardIds: string[] };
+  constraints?: {
+    /** Keep at most this many ideas above the line. */
+    maxItems?: number;
+    /** Keep ideas while cumulative intake `estimatedValue` stays within this. */
+    maxBudget?: number;
+  };
+  /** Stamped when the scenario came from a run (the AI arm) — never selected by it. */
+  proposedBy?: 'agent';
+  /** Exactly one scenario per session may be the plan of record. */
+  planOfRecord?: boolean;
+  createdBy: string;
+  createdAt: string;
+}
+
+export const SCENARIO_CAP_PER_SESSION = 8;
 
 /**
  * The default status set, mapped to `host.kanban` columns. Free-form + renameable
@@ -198,14 +222,18 @@ export const CRITERIA_PRESETS: Record<PresetId, CriteriaSet> = {
   },
   rice: {
     presetId: 'rice',
-    aggregation: 'ratio',
+    aggregation: 'product-ratio',
     criteria: [
       { id: 'reach', name: 'Reach', weight: 1, direction: 'benefit' },
       { id: 'impact', name: 'Impact', weight: 1, direction: 'benefit' },
       { id: 'confidence', name: 'Confidence', weight: 1, direction: 'benefit' },
-      { id: 'effort', name: 'Effort', weight: 1, direction: 'cost', scaleHint: '(Reach × Impact × Confidence) ÷ Effort' },
+      { id: 'effort', name: 'Effort', weight: 1, direction: 'cost', scaleHint: '(Reach × Impact × Confidence) ÷ Effort — shown on the 1–10 band, so the ORDER is RICE\'s; the number is not the raw product' },
     ],
   },
+  // ADR 0667 D2 — ICE has TWO live definitions in the field: the GrowthHackers / Sean
+  // Ellis AVERAGE of Impact, Confidence and Ease, and Itamar Gilad's PRODUCT. This
+  // implements the average, deliberately. Recorded because the file previously said
+  // nothing, and a reader could not tell a choice from an oversight.
   ice: {
     presetId: 'ice',
     aggregation: 'weighted-sum',

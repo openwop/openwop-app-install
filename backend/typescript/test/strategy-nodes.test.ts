@@ -25,13 +25,18 @@ const strategySurface = {
 };
 
 describe('feature.strategy.nodes', () => {
-  it('exposes exactly the five declared nodes', () => {
+  it('exposes exactly the ten declared nodes (v1.1 measurement loop + v1.2 decision draft)', () => {
     expect(Object.keys(nodes).sort()).toEqual([
+      'feature.strategy.nodes.check-in',
       'feature.strategy.nodes.create-board-memo',
       'feature.strategy.nodes.get-context',
       'feature.strategy.nodes.get-health',
       'feature.strategy.nodes.get-strategy',
+      'feature.strategy.nodes.list-check-ins',
+      'feature.strategy.nodes.list-stale-krs',
       'feature.strategy.nodes.list-strategies',
+      'feature.strategy.nodes.record-decision',
+      'feature.strategy.nodes.sync-metrics',
     ]);
   });
 
@@ -56,20 +61,33 @@ describe('feature.strategy.nodes', () => {
       .toMatchObject({ status: 'success', outputs: { strategies: [{ id: 's1' }] } });
   });
 
-  it('create-board-memo persists agent-authored markdown to Documents', async () => {
-    let created: Record<string, unknown> = {}, versioned: Record<string, unknown> = {};
+  // CORRECTED (ADR 0676 D1). This test PINNED THE DEFECT: it stubbed the hand-rolled
+  // `createDocument` + `addVersion` two-step and asserted the idempotencyKey merely
+  // "contains s1" — a key that ALSO embedded the documentId minted on the line above, so
+  // it was unique on every execution and deduped nothing. `addVersion`'s lookup is scoped
+  // to the document (`documentsService.ts:481-485`), so on a freshly minted document no
+  // key can ever match. The node now routes through the ADR 0166 owner
+  // `createDraftDocument`, which mints a DETERMINISTIC documentId from `idemBase` — the
+  // only place a duplicate can actually be prevented. The real coverage below is kept.
+  it('create-board-memo persists agent-authored markdown to Documents via the ADR 0166 owner', async () => {
+    let draft: Record<string, unknown> = {};
     const documents = {
-      createDocument: async (a: Record<string, unknown>) => { created = a; return { document: { documentId: 'doc-1' } }; },
-      addVersion: async (a: Record<string, unknown>) => { versioned = a; return { version: { versionId: 'v1' } }; },
+      createDraftDocument: async (a: Record<string, unknown>) => {
+        draft = a;
+        return { document: { documentId: `doc:${String(a.idemBase)}` }, version: { versionId: 'v1', version: 1 } };
+      },
     };
     const r = await nodes['feature.strategy.nodes.create-board-memo']({
       features: { strategy: strategySurface, documents },
       inputs: { orgId: 'org-1', strategyId: 's1', title: 'Q3 board update', markdown: '# Q3\nOn the rails.' },
     });
-    expect(r).toMatchObject({ status: 'success', outputs: { persisted: true, documentId: 'doc-1', strategyId: 's1' } });
-    expect(created.kind).toBe('board-update');
-    expect(versioned.content).toContain('On the rails');
-    expect(String(versioned.idempotencyKey)).toContain('s1');
+    expect(r).toMatchObject({ status: 'success', outputs: { persisted: true, strategyId: 's1' } });
+    expect(draft.kind).toBe('board-update');
+    expect(draft.content).toContain('On the rails');
+    // The idemBase must be CONTENT-derived, never runId-derived: `createDraftDocument`
+    // defaults its base to the runId (`surface.ts:79`), which a `:fork` CHANGES — which is
+    // the defect this replaces. Asserted as a stable, content-keyed value.
+    expect(String(draft.idemBase)).toMatch(/^strategy-board-memo:[0-9a-f]{32}$/);
   });
 
   it('create-board-memo degrades to inline markdown when documents is OFF', async () => {
@@ -103,10 +121,10 @@ describe('feature.strategy.agents — agent pack manifest', () => {
     expect(a.systemPrompt.length).toBeGreaterThan(0);
     // tool-allowlisted to its OWN nodes only (read + the Documents-writing memo node).
     const allow = a.toolAllowlist ?? [];
-    expect(allow).toContain('openwop:feature.strategy.nodes.get-health');
-    expect(allow).toContain('openwop:feature.strategy.nodes.create-board-memo');
+    expect(allow).toContain('openwop:strategy.get-health');
+    expect(allow).toContain('openwop:strategy.create-board-memo');
     // read-only-strategy invariant: NO strategy-mutation tool is allowlisted.
-    expect(allow.some((tool: string) => /strategy\.nodes\.(create-strategy|update|delete|replace-links)/.test(tool))).toBe(false);
+    expect(allow.some((tool: string) => /strategy\.(create-strategy|update|delete|replace-links)/.test(tool))).toBe(false);
     expect(getAgentRegistry().listAgentIds()).toContain(a.agentId);
   });
 });

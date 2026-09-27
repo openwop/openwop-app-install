@@ -1,0 +1,25 @@
+{
+  "$comment": "app.openwop.dev /.well-known/openwop (OpenWOP-Version: 2) signingKeys, fetched 2026-09-24 while serving ea9cd39ee",
+  "signingKeys": [
+    {
+      "keyId": "openwop-app-bundle-2",
+      "alg": "ed25519",
+      "publicKey": "WVhUJ8jHoQf9g9b8VPsfMS6kiOjUSbGdjbIAiemOVq4",
+      "use": "certification-bundle"
+    },
+    {
+      "keyId": "openwop-app-bundle-1",
+      "alg": "ed25519",
+      "publicKey": "LScAhSRhmis61ScTN4wgwn8Ul19u01V148PkP7ok5ec",
+      "use": "certification-bundle",
+      "retiredAt": "2026-09-21T14:26:59Z"
+    },
+    {
+      "keyId": "openwop-app-self-2026-09-04",
+      "alg": "ed25519",
+      "publicKey": "SFBjFSjHaQSUbIb-FQudyk-DwOagmGyshJBwC-0zvZ4",
+      "use": "certification-bundle",
+      "retiredAt": "2026-09-19T00:00:00Z"
+    }
+  ]
+}

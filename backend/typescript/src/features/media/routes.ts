@@ -8,11 +8,14 @@
  *   POST   /assets                      upload an asset                [workspace:write]
  *   GET    /assets[?collectionId|q|tag] list / search                  [workspace:read]
  *   GET    /assets/:assetId             one asset (+ serve url)        [workspace:read]
- *   PATCH  /assets/:assetId             rename / tag / move            [workspace:write]
+ *   PATCH  /assets/:assetId             rename / tag / move / alt-text  [workspace:write]
  *   DELETE /assets/:assetId             delete (frees bytes)           [workspace:write]
  *   POST   /assets/:assetId/use         mark used (usage tracking)     [workspace:write]
+ *   POST   /assets/:assetId/alt-text    AI alt-text proposal (ADR 0363; +`accessibility` toggle) [workspace:write]
  *
- * TOGGLE-GATED on `media`. AUTHORITY (ADR 0006): every route resolves the
+ * ALWAYS-ON (ADR 0027) — there is NO toggle gate (MEDIA-CODE-7: this header
+ * previously claimed toggle-gating; `authorize` below is org-scoped RBAC only).
+ * AUTHORITY (ADR 0006): every route resolves the
  * caller's RFC 0049 scope IN THE PATH org (`resolveEffectiveAccess`) — read on
  * `workspace:read` (viewer+), write on `workspace:write` (editor+); a non-member
  * gets zero scopes ⇒ 403. The org must exist in the caller's tenant ⇒ 404 (IDOR
@@ -23,8 +26,9 @@
 
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
+import { createHash } from 'node:crypto';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { requireOrgScope, requireString, optionalString as optString } from '../featureRoute.js';
+import { requireOrgScope, requireFeatureEnabled, requireString, optionalString as optString } from '../featureRoute.js';
 import type { Scope } from '../../host/accessControlService.js';
 import { isAllowedUploadMime, allowedUploadMimeList } from '../../host/allowedUploadMime.js';
 import * as mediaStorage from './mediaStorage.js';
@@ -37,6 +41,13 @@ import {
   getAsset,
   listAssets,
   listCollections,
+  findAssetByContentHash,
+  mergeAssetMetadataOnDedup,
+  parseFilenameTags,
+  selectAssets,
+  autotagAsset,
+  generateAltText,
+  listUsageForAsset,
   markUsed,
   updateAsset,
   viewAsset,
@@ -83,9 +94,9 @@ export function registerMediaRoutes(deps: RouteDeps): void {
   // ── Collections ──
   app.post(`${BASE}/collections`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:write');
+      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
       const name = requireString((req.body as { name?: unknown })?.name, 'name');
-      res.status(201).json(await createCollection(user.tenantId, orgId, name, user.userId));
+      res.status(201).json(await createCollection(tenantId, orgId, name, user.userId));
     } catch (err) {
       next(err);
     }
@@ -93,8 +104,8 @@ export function registerMediaRoutes(deps: RouteDeps): void {
 
   app.get(`${BASE}/collections`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:read');
-      res.json({ collections: await listCollections(user.tenantId, orgId) });
+      const { orgId, tenantId } = await authorize(req, 'workspace:read');
+      res.json({ collections: await listCollections(tenantId, orgId) });
     } catch (err) {
       next(err);
     }
@@ -102,8 +113,8 @@ export function registerMediaRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/collections/:collectionId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:write');
-      const result = await deleteCollection(user.tenantId, orgId, req.params.collectionId);
+      const { orgId, tenantId } = await authorize(req, 'workspace:write');
+      const result = await deleteCollection(tenantId, orgId, req.params.collectionId);
       if (!result) throw new OpenwopError('not_found', 'Collection not found.', 404, { collectionId: req.params.collectionId });
       res.json({ deleted: result });
     } catch (err) {
@@ -114,18 +125,31 @@ export function registerMediaRoutes(deps: RouteDeps): void {
   // ── Assets ──
   app.post(`${BASE}/assets`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:write');
-      const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown; collectionId?: unknown; tags?: unknown };
+      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const body = (req.body ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown; collectionId?: unknown; tags?: unknown; lineage?: unknown; marketing?: unknown };
       const contentBase64 = requireString(body.contentBase64, 'contentBase64');
       const contentType = requireString(body.contentType, 'contentType');
       const name = requireString(body.name, 'name');
       // Validate bytes + MIME, then check the org has capacity — BOTH before
       // storing, so a rejected upload never orphans bytes.
       const decodedBytes = validateUpload(contentBase64, contentType);
-      await assertOrgCapacity(user.tenantId, orgId, decodedBytes);
-      const stored = await mediaStorage.put(user.tenantId, { contentBase64, contentType });
+      // ADR 0352 P2 — SHA-256 dedup BEFORE storing: identical bytes return the
+      // existing asset (200 + deduplicated) instead of a copy. Hash the decoded
+      // bytes so re-encoding differences can't defeat it.
+      const contentHash = createHash('sha256').update(Buffer.from(contentBase64, 'base64')).digest('hex');
+      const existing = await findAssetByContentHash(tenantId, orgId, contentHash, optString(body.collectionId));
+      if (existing) {
+        // MEDIA-CODE-5 / CS-DATA-8 — a dedup hit merges the caller's NEW tags +
+        // missing marketing-facet fields into the existing row (existing values
+        // and name win) instead of silently discarding them.
+        const merged = await mergeAssetMetadataOnDedup(existing, { tags: body.tags, marketing: body.marketing });
+        res.status(200).json({ ...viewAsset(merged), deduplicated: true });
+        return;
+      }
+      await assertOrgCapacity(tenantId, orgId, decodedBytes);
+      const stored = await mediaStorage.put(tenantId, { contentBase64, contentType });
       const asset = await createAsset({
-        tenantId: user.tenantId,
+        tenantId,
         orgId,
         ...(optString(body.collectionId) ? { collectionId: optString(body.collectionId) } : {}),
         name,
@@ -135,6 +159,12 @@ export function registerMediaRoutes(deps: RouteDeps): void {
         serveToken: stored.serveToken,
         tags: body.tags,
         uploadedBy: user.userId,
+        contentHash,
+        // ADR 0229 — optional provenance (derivedFrom / generatedBy:'ai' /
+        // prompt / model / rightsNote); sanitized + bounded in the service.
+        ...(body.lineage !== undefined ? { lineage: body.lineage } : {}),
+        // ADR 0352 P1 — optional typed marketing facet.
+        ...(body.marketing !== undefined ? { marketing: body.marketing } : {}),
       });
       res.status(201).json(viewAsset(asset));
     } catch (err) {
@@ -142,10 +172,80 @@ export function registerMediaRoutes(deps: RouteDeps): void {
     }
   });
 
+  // ADR 0352 P2 — bulk upload: ≤20 items per call, each through the SAME
+  // validate→dedup→capacity→store→create pipeline (no second write path).
+  // Deterministic filename parsing seeds tags (`product_angle_persona.ext`).
+  app.post(`${BASE}/assets/bulk`, async (req, res, next) => {
+    try {
+      const { user, orgId, tenantId } = await authorize(req, 'workspace:write');
+      const body = (req.body ?? {}) as { items?: unknown; collectionId?: unknown };
+      const items = Array.isArray(body.items) ? body.items : [];
+      if (items.length === 0 || items.length > 20) {
+        throw new OpenwopError('validation_error', '`items` MUST hold 1–20 uploads.', 400, { field: 'items' });
+      }
+      const results: Array<Record<string, unknown>> = [];
+      for (const raw of items) {
+        const it = (raw ?? {}) as { contentBase64?: unknown; contentType?: unknown; name?: unknown; tags?: unknown };
+        try {
+          const contentBase64 = requireString(it.contentBase64, 'contentBase64');
+          const contentType = requireString(it.contentType, 'contentType');
+          const name = requireString(it.name, 'name');
+          const decodedBytes = validateUpload(contentBase64, contentType);
+          const contentHash = createHash('sha256').update(Buffer.from(contentBase64, 'base64')).digest('hex');
+          const existing = await findAssetByContentHash(tenantId, orgId, contentHash, optString(body.collectionId));
+          if (existing) {
+            // MEDIA-CODE-5 — merge the item's EXPLICIT tags into the existing row.
+            const merged = await mergeAssetMetadataOnDedup(existing, { tags: it.tags });
+            results.push({ name, status: 'deduplicated', asset: viewAsset(merged) });
+            continue;
+          }
+          await assertOrgCapacity(tenantId, orgId, decodedBytes);
+          const stored = await mediaStorage.put(tenantId, { contentBase64, contentType });
+          const fileTags = parseFilenameTags(name);
+          const givenTags = Array.isArray(it.tags) ? it.tags.filter((t): t is string => typeof t === 'string') : [];
+          const asset = await createAsset({
+            tenantId, orgId,
+            ...(optString(body.collectionId) ? { collectionId: optString(body.collectionId) } : {}),
+            name, contentType,
+            sizeBytes: stored.sizeBytes, storageRef: stored.storageRef, serveToken: stored.serveToken,
+            tags: [...givenTags, ...fileTags],
+            uploadedBy: user.userId,
+            contentHash,
+          });
+          results.push({ name, status: 'created', asset: viewAsset(asset) });
+        } catch (err) {
+          results.push({ name: typeof it.name === 'string' ? it.name : '', status: 'error', message: err instanceof Error ? err.message : 'upload failed' });
+        }
+      }
+      res.status(207).json({ results });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ADR 0352 P4 — weighted selection (read-only ranking; body carries criteria).
+  app.post(`${BASE}/assets/select`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorize(req, 'workspace:read');
+      const body = (req.body ?? {}) as { product?: unknown; industry?: unknown; useCase?: unknown; personaIds?: unknown; collectionId?: unknown; limit?: unknown };
+      const result = await selectAssets(tenantId, orgId, {
+        ...(optString(body.product) ? { product: optString(body.product) } : {}),
+        ...(optString(body.industry) ? { industry: optString(body.industry) } : {}),
+        ...(optString(body.useCase) ? { useCase: optString(body.useCase) } : {}),
+        ...(Array.isArray(body.personaIds) ? { personaIds: body.personaIds.filter((x): x is string => typeof x === 'string') } : {}),
+        ...(optString(body.collectionId) ? { collectionId: optString(body.collectionId) } : {}),
+        ...(typeof body.limit === 'number' ? { limit: body.limit } : {}),
+      });
+      res.json(result);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.get(`${BASE}/assets`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:read');
-      const assets = await listAssets(user.tenantId, orgId, {
+      const { orgId, tenantId } = await authorize(req, 'workspace:read');
+      const assets = await listAssets(tenantId, orgId, {
         ...(optString(req.query.collectionId) ? { collectionId: String(req.query.collectionId) } : {}),
         ...(optString(req.query.q) ? { q: String(req.query.q) } : {}),
         ...(optString(req.query.tag) ? { tag: String(req.query.tag) } : {}),
@@ -158,8 +258,8 @@ export function registerMediaRoutes(deps: RouteDeps): void {
 
   app.get(`${BASE}/assets/:assetId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:read');
-      const asset = await getAsset(user.tenantId, orgId, req.params.assetId);
+      const { orgId, tenantId } = await authorize(req, 'workspace:read');
+      const asset = await getAsset(tenantId, orgId, req.params.assetId);
       if (!asset) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId: req.params.assetId });
       res.json(viewAsset(asset));
     } catch (err) {
@@ -169,13 +269,18 @@ export function registerMediaRoutes(deps: RouteDeps): void {
 
   app.patch(`${BASE}/assets/:assetId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:write');
-      const body = (req.body ?? {}) as { name?: unknown; tags?: unknown; collectionId?: unknown };
-      const patch: { name?: string; tags?: unknown; collectionId?: string | null } = {};
+      const { orgId, tenantId } = await authorize(req, 'workspace:write');
+      const body = (req.body ?? {}) as { name?: unknown; tags?: unknown; collectionId?: unknown; lineage?: unknown; marketing?: unknown; renditions?: unknown; altText?: unknown; altTextSource?: unknown };
+      const patch: { name?: string; tags?: unknown; collectionId?: string | null; lineage?: unknown; marketing?: unknown; renditions?: unknown; altText?: string | null; altTextSource?: unknown } = {};
       if (typeof body.name === 'string') patch.name = body.name;
       if (body.tags !== undefined) patch.tags = body.tags;
+      if ('lineage' in body) patch.lineage = body.lineage; // ADR 0229 — null clears
+      if ('marketing' in body) patch.marketing = body.marketing; // ADR 0352 P1 — null clears
+      if ('renditions' in body) patch.renditions = body.renditions; // ADR 0352 P5 — null clears
+      if ('altText' in body) patch.altText = body.altText === null ? null : typeof body.altText === 'string' ? body.altText : ''; // ADR 0363 P1 — null clears
+      if ('altTextSource' in body) patch.altTextSource = body.altTextSource; // ADR 0363 P1 — validated in updateAsset
       if ('collectionId' in body) patch.collectionId = body.collectionId === null ? null : optString(body.collectionId) ?? null;
-      const updated = await updateAsset(user.tenantId, orgId, req.params.assetId, patch);
+      const updated = await updateAsset(tenantId, orgId, req.params.assetId, patch);
       if (!updated) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId: req.params.assetId });
       res.json(viewAsset(updated));
     } catch (err) {
@@ -185,8 +290,8 @@ export function registerMediaRoutes(deps: RouteDeps): void {
 
   app.delete(`${BASE}/assets/:assetId`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:write');
-      const ok = await deleteAsset(user.tenantId, orgId, req.params.assetId);
+      const { orgId, tenantId } = await authorize(req, 'workspace:write');
+      const ok = await deleteAsset(tenantId, orgId, req.params.assetId);
       if (!ok) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId: req.params.assetId });
       res.status(204).end();
     } catch (err) {
@@ -194,12 +299,51 @@ export function registerMediaRoutes(deps: RouteDeps): void {
     }
   });
 
+  // ADR 0352 P3 — AI auto-tag proposal (suggest-confirm; apply via PATCH).
+  app.post(`${BASE}/assets/:assetId/autotag`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorize(req, 'workspace:write');
+      const proposal = await autotagAsset(tenantId, orgId, req.params.assetId);
+      res.json({ proposal });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // ADR 0363 P1 — AI alt-text proposal (suggest-confirm; apply via PATCH). Media
+  // is always-on, but this route is gated on the `accessibility` toggle (the
+  // accessibility feature owns the switch; the generation logic lives here beside
+  // autotag, where the byte + vision seams already are).
+  app.post(`${BASE}/assets/:assetId/alt-text`, async (req, res, next) => {
+    try {
+      await requireFeatureEnabled(req, 'accessibility', 'Accessibility');
+      const { orgId, tenantId } = await authorize(req, 'workspace:write');
+      const proposal = await generateAltText(tenantId, orgId, req.params.assetId);
+      res.json({ proposal });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.post(`${BASE}/assets/:assetId/use`, async (req, res, next) => {
     try {
-      const { user, orgId } = await authorize(req, 'workspace:write');
-      const updated = await markUsed(user.tenantId, orgId, req.params.assetId);
+      const { orgId, tenantId } = await authorize(req, 'workspace:write');
+      const updated = await markUsed(tenantId, orgId, req.params.assetId);
       if (!updated) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId: req.params.assetId });
       res.json(viewAsset(updated));
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // "Used by" — the documents referencing this asset (ADR 0206 usage refs; the
+  // reference graph supersedes the bare usageCount as the asset-detail source).
+  app.get(`${BASE}/assets/:assetId/usage`, async (req, res, next) => {
+    try {
+      const { orgId, tenantId } = await authorize(req, 'workspace:read');
+      const usage = await listUsageForAsset(tenantId, orgId, req.params.assetId);
+      if (!usage) throw new OpenwopError('not_found', 'Asset not found.', 404, { assetId: req.params.assetId });
+      res.json({ usage });
     } catch (err) {
       next(err);
     }

@@ -4,11 +4,11 @@
  * → Schedule & heartbeat. No raw ids in the primary surface.
  *
  * On finish it composes the existing host-extension surfaces:
- *   1. POST /v1/host/openwop-app/agents       — a user-authored agent (editable
+ *   1. POST /host/openwop-app/agents       — a user-authored agent (editable
  *      instructions; agentRef `user.*` so the Instructions tab can edit it)
- *   2. POST /v1/host/openwop-app/roster       — the named agent bound to that agent
- *   3. POST /v1/host/openwop-app/kanban/boards — its task board (4 demo lanes)
- *   4. POST /v1/host/openwop-app/scheduler/jobs — any chosen starter schedules
+ *   2. POST /host/openwop-app/roster       — the named agent bound to that agent
+ *   3. POST /host/openwop-app/kanban/boards — its task board (4 demo lanes)
+ *   4. POST /host/openwop-app/scheduler/jobs — any chosen starter schedules
  * then routes to the new agent's workspace.
  */
 
@@ -24,9 +24,13 @@ import { Notice } from '../ui/Notice.js';
 import { StructuredPromptEditor } from './StructuredPromptEditor.js';
 import { AgentAvatar } from './AgentAvatar.js';
 import { PageHeader } from '../ui/PageHeader.js';
-import { ArrowLeftIcon } from '../ui/icons/index.js';
+import { ArrowLeftIcon, SparklesIcon } from '../ui/icons/index.js';
 import { FormError } from '../ui/Field.js';
 import { useFocusTrap } from '../ui/useFocusTrap.js';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
+import { AgentAuthorPanel } from './AgentAuthorPanel.js';
+import { dismissStashedAgentDraft, getStashedAgentDraft, type StashedDraft } from './agentAuthorDraftClient.js';
+import { Button } from '../ui/Button.js';
 
 const DEMO_LANES: KanbanColumn[] = [
   { id: 'todo', name: 'To Do' },
@@ -100,6 +104,11 @@ export function AgentCreateWizard(): JSX.Element {
   const trapRef = useFocusTrap<HTMLElement>(true);
   const [step, setStep] = useState(1);
   const [error, setError] = useState<string | null>(null);
+  // ADR 0514 P3 — the describe-to-create drawer (toggle-gated, default off).
+  const agentAuthor = useFeatureAccess('agent-author');
+  const [authorOpen, setAuthorOpen] = useState(false);
+  // OQ1 — the Agent Author's stashed draft, offered as a dismissible prefill.
+  const [stashedDraft, setStashedDraft] = useState<StashedDraft | null>(null);
   const [creating, setCreating] = useState(false);
   // Per-step inline validation (AGT-2): once the user tries to advance/finish
   // with the current step's required fields empty, mark it "attempted" so the
@@ -154,10 +163,43 @@ export function AgentCreateWizard(): JSX.Element {
       const tpl = ROLE_TEMPLATES.find((r) => r.key === roleParam);
       if (tpl) {
         pickRole(tpl);
-        setName(EXAMPLE_NAMES[tpl.key] ?? '');
+        // DEMO-17: suggest the persona name as a PLACEHOLDER only (see the name
+        // field) — never write it into the value, or an untouched wizard creates
+        // a real agent named "Sawyer" in a production tenant.
       }
     }
   }, [searchParams]);
+
+  // OQ1 — fetch the caller's stashed AI draft on mount AND after the author
+  // drawer closes (the chat may have just stashed one). Toggle-gated with the
+  // rest of the describe-to-create surface. A failed read makes NO offer and
+  // NO claim (enrichment tier — see agentAuthorDraftClient).
+  useEffect(() => {
+    if (!agentAuthor.enabled || authorOpen) return;
+    let cancelled = false;
+    void getStashedAgentDraft().then((r) => { if (!cancelled) setStashedDraft(r?.draft ?? null); });
+    return () => { cancelled = true; };
+  }, [agentAuthor.enabled, authorOpen]);
+
+  const applyStashedDraft = (): void => {
+    if (!stashedDraft) return;
+    // Partial by design (dismissible suggestions): only fields the wizard
+    // actually edits are prefilled; the rest of the draft rides the chat lane.
+    setIsCustom(true);
+    setRole(null);
+    setName(stashedDraft.persona);
+    if (stashedDraft.roleKey || stashedDraft.label) setRoleTitle(stashedDraft.roleKey ?? stashedDraft.label ?? '');
+    if (stashedDraft.description) setSystemPrompt(stashedDraft.description);
+    if (stashedDraft.autonomyLevel) setAutonomy(stashedDraft.autonomyLevel);
+    if (stashedDraft.workflows && stashedDraft.workflows.length > 0) setSelectedWorkflows(new Set(stashedDraft.workflows));
+    setStashedDraft(null);
+    void dismissStashedAgentDraft(); // consume — the offer never re-appears
+  };
+
+  const rejectStashedDraft = (): void => {
+    setStashedDraft(null);
+    void dismissStashedAgentDraft();
+  };
 
   const pickRole = (r: RoleTemplate) => {
     setRole(r);
@@ -287,6 +329,31 @@ export function AgentCreateWizard(): JSX.Element {
 
       {error ? <Notice variant="error">{error}</Notice> : null}
 
+      {/* ADR 0514 P3 — describe-to-create, ABOVE the manual wizard (the
+          Copilot Studio arrangement: NL first, the manual path intact and one
+          click away). Gated on the agent-author toggle (default OFF). */}
+      {agentAuthor.enabled ? (
+        authorOpen ? (
+          <AgentAuthorPanel onClose={() => setAuthorOpen(false)} />
+        ) : (
+          <Button variant="quiet" className="u-fs-13" onClick={() => setAuthorOpen(true)}>
+            <SparklesIcon size={13} /> {t('authorEntry')}
+          </Button>
+        )
+      ) : null}
+
+      {/* OQ1 — the stashed AI draft as a dismissible offer (never auto-applied;
+          the user chooses). Consuming either way deletes the stash. */}
+      {agentAuthor.enabled && !authorOpen && stashedDraft ? (
+        <Notice variant="info">
+          <span className="u-flex u-gap-2 u-items-center u-wrap">
+            <span>{t('stashedDraftOffer', { persona: stashedDraft.persona })}</span>
+            <Button variant="secondary" size="sm" onClick={applyStashedDraft}>{t('stashedDraftApply')}</Button>
+            <Button variant="quiet" size="sm" onClick={rejectStashedDraft}>{t('stashedDraftDismiss')}</Button>
+          </span>
+        </Notice>
+      ) : null}
+
       {step === 1 ? (
         <div>
           <StepHeader step={1} title={t('wizStep1Title')} />
@@ -301,13 +368,10 @@ export function AgentCreateWizard(): JSX.Element {
                   type="button"
                   aria-pressed={selected}
                   onClick={() => pickRole(r)}
-                  // TODO(UX AGT-4): needs .createwiz-role-btn (base border/bg) +
-                  // .createwiz-role-btn.is-selected (accent border + clay-wash) in
-                  // global.css — moved off the token-valued inline style.
                   className={selected ? 'createwiz-role-btn is-selected' : 'createwiz-role-btn'}
                 >
                   <strong className="u-fs-14 u-iflex u-items-center u-gap-1-5">
-                    <RoleIcon size={15} style={{ color: 'var(--color-accent)' }} /> {r.title}
+                    <RoleIcon size={15} style={{ color: 'var(--clay-text)' }} /> {r.title}
                   </strong>
                   <div className="muted u-fs-12">{r.blurb}</div>
                 </button>
@@ -317,18 +381,17 @@ export function AgentCreateWizard(): JSX.Element {
               type="button"
               aria-pressed={isCustom}
               onClick={pickCustom}
-              // TODO(UX AGT-4): see .createwiz-role-btn.is-selected note above.
               className={isCustom ? 'createwiz-role-btn is-selected' : 'createwiz-role-btn'}
             >
               <strong className="u-fs-14 u-iflex u-items-center u-gap-1-5">
-                <CustomRoleIcon size={15} style={{ color: 'var(--color-accent)' }} /> {t('wizCustomRole')}
+                <CustomRoleIcon size={15} style={{ color: 'var(--clay-text)' }} /> {t('wizCustomRole')}
               </strong>
               <div className="muted u-fs-12">{t('wizCustomRoleBlurb')}</div>
             </button>
           </div>
           <div className="u-flex u-gap-2 u-wrap">
             <label className="u-flex-1 u-minw-200">
-              <div className="u-fs-13 u-fw-600">{t('wizName')}</div>
+              <h3 className="u-fs-13 u-fw-600 u-m-0">{t('wizName')}</h3>
               <input
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -341,7 +404,7 @@ export function AgentCreateWizard(): JSX.Element {
               <FormError>{nameError}</FormError>
             </label>
             <label className="u-flex-1 u-minw-200">
-              <div className="u-fs-13 u-fw-600">{t('wizRoleTitle')}</div>
+              <h3 className="u-fs-13 u-fw-600 u-m-0">{t('wizRoleTitle')}</h3>
               <input
                 value={roleTitle}
                 onChange={(e) => setRoleTitle(e.target.value)}
@@ -380,7 +443,7 @@ export function AgentCreateWizard(): JSX.Element {
               {MODEL_CLASS_OPTIONS.map((m) => <option key={m.key} value={m.key}>{t(m.labelKey)}</option>)}
             </select>
           </label>
-          <div className="u-fs-13 u-fw-600">{t('wizInstructionsLabel')}</div>
+          <h3 className="u-fs-13 u-fw-600 u-m-0">{t('wizInstructionsLabel')}</h3>
           <p className="muted u-fs-12 u-mt-0">
             {t('wizInstructionsHint')}
           </p>
@@ -438,32 +501,31 @@ export function AgentCreateWizard(): JSX.Element {
       {step === 5 ? (
         <div>
           <StepHeader step={5} title={t('wizStep5Title')} />
-          <div className="u-fs-13 u-fw-600">{t('wizHeartbeatHeading')}</div>
+          <h3 className="u-fs-13 u-fw-600 u-m-0">{t('wizHeartbeatHeading')}</h3>
           <p className="muted u-fs-12 u-mt-0">{t('wizHeartbeatHint', { name: name || 'the agent' })}</p>
-          <select value={heartbeat} onChange={(e) => setHeartbeat(e.target.value)} className="createwiz-mb-08">
+          <select aria-label={t('wizHeartbeatHeading')} value={heartbeat} onChange={(e) => setHeartbeat(e.target.value)} className="createwiz-mb-08">
             {HEARTBEAT_OPTIONS.map((h) => <option key={h.key} value={h.key}>{t(h.labelKey)}</option>)}
           </select>
 
-          <div className="u-fs-13 u-fw-600">{t('wizStartingAutonomy')}</div>
+          <h3 className="u-fs-13 u-fw-600 u-m-0">{t('wizStartingAutonomy')}</h3>
           <p className="muted u-fs-12 u-mt-0">
             {t('wizAutonomyHint')}
           </p>
           <div className="action-bar createwiz-mb-08">
             {([['review', t('wizAutonomySupervised')], ['guided', t('wizAutonomyGuided')], ['auto', t('wizAutonomyAutonomous')]] as const).map(([value, label]) => (
-              <button
+              <Button
                 key={value}
-                type="button"
-                className={autonomy === value ? 'primary btn-sm' : 'secondary btn-sm'}
+                variant={autonomy === value ? 'primary' : 'secondary'} size="sm"
                 aria-pressed={autonomy === value}
                 onClick={() => setAutonomy(value)}
               >
                 {label}
-              </button>
+              </Button>
             ))}
           </div>
           {heartbeat !== 'manual' && selectedWorkflows.size > 0 ? (
             <div>
-              <div className="u-fs-13 u-fw-600">{t('wizStarterSchedule')}</div>
+              <h3 className="u-fs-13 u-fw-600 u-m-0">{t('wizStarterSchedule')}</h3>
               <div className="u-flex u-gap-1-5 u-wrap u-mt-1">
                 <select value={scheduleWorkflowId} onChange={(e) => setScheduleWorkflowId(e.target.value)}>
                   <option value="">{t('wizNoStarterSchedule')}</option>
@@ -520,7 +582,7 @@ export function AgentCreateWizard(): JSX.Element {
       ) : null}
 
       <div className="createwiz-footer-nav">
-        <button type="button" className="secondary" onClick={() => setStep((s) => Math.max(1, s - 1))} disabled={step === 1 || creating}>Back</button>
+        <Button variant="secondary" onClick={() => setStep((s) => Math.max(1, s - 1))} disabled={step === 1 || creating}>{t('common:back')}</Button>
         <div className="u-flex u-items-center u-gap-2-5">
           {nextHint() ? <span className="muted u-fs-13">{nextHint()}</span> : null}
           {step < 5 ? (
@@ -529,9 +591,9 @@ export function AgentCreateWizard(): JSX.Element {
             // Disabling it under the same predicate that gates the errors would
             // make those errors unreachable. goNext() blocks the advance itself,
             // and nextHint() (above) explains why an invalid step won't advance.
-            <button type="button" className="primary" onClick={goNext}>{t('wizNext')}</button>
+            <Button variant="primary" onClick={goNext}>{t('wizNext')}</Button>
           ) : (
-            <button type="button" className="primary" onClick={() => void onFinish()} disabled={creating}>{creating ? t('wizCreating') : t('wizCreateAgentBtn')}</button>
+            <Button variant="primary" onClick={() => void onFinish()} disabled={creating}>{creating ? t('wizCreating') : t('wizCreateAgentBtn')}</Button>
           )}
         </div>
       </div>

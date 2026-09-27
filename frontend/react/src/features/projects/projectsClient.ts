@@ -1,5 +1,5 @@
 /**
- * Projects client (ADR 0046) — drives /v1/host/openwop-app/projects. A project is
+ * Projects client (ADR 0046) — drives /host/openwop-app/projects. A project is
  * a `kind:'project'` Subject that owns a board + memory + assigned workflows.
  */
 
@@ -20,6 +20,18 @@ export interface ProjectMember { ref: string; role: ProjectRole; addedAt: string
 /** ADR 0054 D6 — the group-chat cadence policy (shared with the advisory board). */
 export interface TurnPolicy { rounds: number; order: 'declared' | 'round-robin'; synthesize: boolean }
 export interface Project { id: string; tenantId: string; orgId: string; name: string; workflows: string[]; charter?: ProjectCharter; members?: ProjectMember[]; visibility?: ProjectVisibility; moderatorRosterId?: string; turnPolicy?: TurnPolicy; boardId: string;
+  /** ADR 0084 — a project created via `POST /notebooks` carries this marker. It
+   *  is NOT the "does deleting this erase a corpus" question — read
+   *  `deletesCorpus` for that. `ensureNotebookForProject` (opening the Sources
+   *  tab) provisions a corpus without ever setting `facet`. */
+  facet?: 'notebook';
+  /** ADR 0601 § Corrections (HIGH-2) — does deleting this project ERASE its
+   *  source corpus? Computed SERVER-SIDE from the same predicate the eraser acts
+   *  on (`notebookCorpusToDelete`), so the confirm dialog and the delete cannot
+   *  disagree. Absent on an older backend → treat as false (the generic warning:
+   *  understating a blast radius is bad, but inventing one is worse, and the
+   *  receipt still reports what actually happened). */
+  deletesCorpus?: boolean;
   /** ADR 0063 — the caller's effective WRITE access (`workspace:write` in the
    *  project's org), projected by the read so the FE can pre-gate write controls.
    *  A UX hint only; the backend re-checks on every write. Absent on responses
@@ -28,11 +40,45 @@ export interface Project { id: string; tenantId: string; orgId: string; name: st
 export interface MemoryNote { id: string; content: string; contentTrust: 'trusted' | 'untrusted'; createdAt: string }
 export interface Org { orgId: string; name: string }
 
-const base = `${config.baseUrl}/v1/host/openwop-app/projects`;
+/**
+ * UX_UPGRADE-projects R2 (PRJ2-M5) — the charter caps the backend ACTUALLY
+ * enforces. `parseCharter` (`backend/typescript/src/features/projects/
+ * projectsService.ts` — the SSoT for these numbers) `.slice()`s and truncates
+ * silently on a FULL-REPLACE patch, then returns 200 with the trimmed charter.
+ * The editor showed no limit, no counter and no warning, so a pasted 30-line
+ * objective list lost 10 lines and a 300-character goal lost 100, and the save
+ * reported success. Mirrored here so the loss is refused at the keyboard
+ * instead of happening after the write.
+ *
+ * Pinned in BOTH directions, which takes two tests because neither package can
+ * import the other: `backend/typescript/test/projects-charter-caps.test.ts`
+ * asserts the truncation behaviourally (a backend cap moving goes red), and
+ * `__tests__/charterCapParity.test.ts` parses the caps out of the backend
+ * source (a value HERE moving goes red). The first draft shipped only the
+ * former while claiming both — so lowering a number in this file would have
+ * blocked saves the server accepts, with the whole suite green.
+ */
+export const CHARTER_LIMITS = {
+  goal: 200,
+  brief: 8000,
+  objectives: 20,
+  objectiveLength: 200,
+  milestones: 50,
+  milestoneTitle: 160,
+} as const;
+
+const base = `${config.baseUrl}/host/openwop-app/projects`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
-  if (!res.ok) throw new Error(`${ctx} failed (${res.status})`);
+  if (!res.ok) {
+    // PROJ-UX-1 — carry the status + parsed error envelope on the thrown error
+    // (additive: the message convention is unchanged) so the UI can surface the
+    // server's typed reason instead of discarding the body. The cadence editor
+    // keys on `status`; `classifyHttpError`/`errorCodeOf` read the rest.
+    const body: unknown = await res.json().catch(() => undefined);
+    throw Object.assign(new Error(`${ctx} failed (${res.status})`), { status: res.status, ...(body !== undefined ? { body } : {}) });
+  }
   return res.json() as Promise<T>;
 }
 
@@ -48,9 +94,20 @@ export async function getProject(id: string): Promise<Project> {
   return asJson<Project>(await fetch(`${base}/${encodeURIComponent(id)}`, fetchOpts({ headers: authedHeaders() })), 'getProject');
 }
 
-export async function deleteProject(id: string): Promise<void> {
-  const res = await fetch(`${base}/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok) throw new Error(`deleteProject failed (${res.status})`);
+/** PROJ-UX-5 — the backend's honest cleanup counts (PRJ2-R6 fixed the fabricated
+ *  count; this client then discarded the body, leaving the receipt with zero
+ *  readers repo-wide). Fields absent on older backends are simply omitted. */
+export interface DeleteProjectReceipt {
+  deleted: boolean;
+  memoryEntriesCleared?: number;
+  schedulesCleared?: number;
+  conversationsDeleted?: number;
+  /** Notebook-facet only — the exclusively-provisioned source corpus. */
+  notebookCorpusDeleted?: boolean;
+}
+
+export async function deleteProject(id: string): Promise<DeleteProjectReceipt> {
+  return asJson<DeleteProjectReceipt>(await fetch(`${base}/${encodeURIComponent(id)}`, fetchOpts({ method: 'DELETE', headers: authedHeaders() })), 'deleteProject');
 }
 
 /** Set the project's assigned-workflow portfolio (the pool its schedules + board
@@ -108,5 +165,5 @@ export async function deleteMemory(id: string, noteId: string): Promise<void> {
 }
 
 export async function listOrgs(): Promise<Org[]> {
-  return (await asJson<{ orgs: Org[] }>(await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() })), 'listOrgs')).orgs;
+  return (await asJson<{ orgs: Org[] }>(await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() })), 'listOrgs')).orgs;
 }

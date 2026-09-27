@@ -2,7 +2,7 @@
  * Per-agent Activity tab (PRD §9 Activity) — the richer, runs-derived activity
  * log for ONE agent. Unlike the fleet feed (AgentActivityFeed, derived from
  * current board state), this reads the durable runs store via
- * `GET /v1/host/openwop-app/roster/:id/activity`, so every row carries a real
+ * `GET /host/openwop-app/roster/:id/activity`, so every row carries a real
  * timestamp, the run OUTCOME (a status chip), and links to the run.
  */
 

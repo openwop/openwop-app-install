@@ -36,11 +36,18 @@ describe('intelligence — budget optimizer (pure)', () => {
     expect(meta.changeAmount).toBeLessThan(0); // trimmed
     expect(google.changeAmount).toBeGreaterThan(0); // scaled
     expect(r.projectedRoasGain).toBeGreaterThan(0);
+    // R2 CI-SP-3 — the structured note the FE localizes (the prose mirror no
+    // longer mints a '$').
+    expect(r.noteCode).toBe('shift');
+    expect(r.noteParams).toMatchObject({ from: 'meta', to: 'google' });
+    expect(r.noteParams!.shift).toBeGreaterThan(0);
+    expect(r.note).not.toContain('$');
   });
 
   it('no reallocation when a single platform dominates', () => {
     const r = optimizeBudget([rec({ platform: 'google', spend: 1000, revenue: 4000 })]);
     expect(r.reallocations).toHaveLength(0);
+    expect(r.noteCode).toBe('not_enough_platforms');
   });
 });
 
@@ -56,6 +63,22 @@ describe('intelligence — forecaster (pure)', () => {
     expect(f.creativeFatigue.detected).toBe(true);
     expect(f.creativeFatigue.dropPercent).toBeGreaterThan(15);
     expect(f.projection.projectedSpend).toBeGreaterThanOrEqual(0);
+  });
+
+  it('R2 CI-SP-6: a multi-ad-set campaign projects per DAY, not per record', () => {
+    // A record is one day of ONE AD-SET. Two ad-sets over four days = eight
+    // records; dividing by record count halved the daily run-rate and
+    // projected HALF of truth. Aggregate per date first.
+    const records = ['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04'].flatMap((date) => [
+      rec({ date, adSet: 'a', spend: 60, conversions: 3, impressions: 1000, clicks: 50 }),
+      rec({ date, adSet: 'b', spend: 40, conversions: 2, impressions: 1000, clicks: 50 }),
+    ]);
+    const [f] = forecastCampaigns(records, { horizonDays: 30 });
+    // 100/day x 30 = 3000 (the per-record math said 50/day -> 1500).
+    expect(f.projection.projectedSpend).toBe(3000);
+    expect(f.projection.projectedConversions).toBe(150);
+    // Flat CTR across halves - no fatigue false-positive from ad-set mixing.
+    expect(f.creativeFatigue.detected).toBe(false);
   });
 });
 
@@ -73,10 +96,21 @@ describe('campaign-intel — nodes + agent', () => {
     expect(narrated.outputs?.narrative).toBe('Shift Meta to Google.');
   });
 
+  it('plan-budget narrates from the host callAI `content` field (XCH-CI-1 regression)', async () => {
+    // The node once read `ai.completion`, which the host never returns — the
+    // narrative silently stayed empty. Pin the `.content` read.
+    const features = { 'campaign-intel': { planBudget: async () => ({ plan: { totalBudgetMinor: 500000, channels: [] } }) } };
+    const narrated = await nodePack['feature.campaign-intel.nodes.plan-budget']({ features, callAI: async () => ({ content: 'Half a million minor units across channels.' }), inputs: { orgId: 'o1', totalBudgetMinor: 500000, targetConversions: 100 } });
+    expect(narrated.outputs?.narrative).toBe('Half a million minor units across channels.');
+  });
+
   it('loads the Campaign Intelligence Analyst', () => {
     const loaded = loadAgentsFromManifest(join(REPO_ROOT, 'packs', 'feature.campaign-intel.agents'));
     expect(loaded[0].agentId).toBe('feature.campaign-intel.agents.intelligence-analyst');
-    expect(loaded[0].toolAllowlist).toContain('openwop:feature.campaign-intel.nodes.budget-optimize');
+    // CFP-1: the allowlist now points at REGISTERED chat tools (agentTools.ts),
+    // not the surface-backed node typeIds that never resolved at dispatch. That
+    // these ids are actually offerable is asserted in campaign-intel-agent-tools.test.ts.
+    expect(loaded[0].toolAllowlist).toContain('openwop:campaign-intel.budget-optimize');
   });
 });
 
@@ -87,7 +121,7 @@ describe('campaign-intel — routes', () => {
     process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
     process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
     for (const id of ['campaign-intel', 'campaign-connectors']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });

@@ -180,8 +180,22 @@ done
 
 echo
 echo "== Deploy Cloud Run backend =="
-run bash scripts/sync-schemas.sh
-run bash scripts/sync-fixtures.sh
+# The vendored trees are COMMITTED, so a clean checkout already carries them and
+# this step is a refresh, not a requirement. Both corpus syncs require `--tag`
+# (an untagged one copies whatever the sibling clone's working tree is on), so
+# pass the tags this repo is actually pinned to: `schemas/CORPUS_TAG` for the
+# schemas, and the tag matching the INSTALLED suite for the fixtures — that is
+# what `check-vendored-fixtures.mjs` asserts against. With no corpus clone (the
+# ordinary adopter case) the committed copies are used as-is.
+CORPUS_DIR="${OPENWOP_CORPUS_DIR:-$REPO_ROOT/../openwop}"
+if git -C "$CORPUS_DIR" rev-parse --git-dir >/dev/null 2>&1; then
+  SCHEMAS_TAG="$(cat "$REPO_ROOT/schemas/CORPUS_TAG")"
+  SUITE_PIN="$(sed -n 's/.*"@openwop\/openwop-conformance"[[:space:]]*:[[:space:]]*"[^0-9]*\([0-9][^"]*\)".*/\1/p' "$REPO_ROOT/backend/typescript/package.json" | head -1)"
+  run bash scripts/sync-schemas.sh --tag "$SCHEMAS_TAG"
+  run bash scripts/sync-fixtures.sh --tag "openwop-conformance/v$SUITE_PIN"
+else
+  echo "skip: no corpus clone at $CORPUS_DIR — deploying the committed vendored schemas/ + conformance-fixtures/"
+fi
 run bash scripts/sync-packs.sh
 # Secrets + env ride on the deploy itself (merge-style --update-*), so even the
 # FIRST revision of a brand-new service boots fully configured — no transient

@@ -126,7 +126,7 @@ export function WorkforceRow({ wf, signals }: { wf: Workforce; signals: WfSignal
         )}
       </div>
       <div className="list-row-actions action-bar">
-        <Link to={href} className="secondary btn-sm">{t('openWorkforceAction')}</Link>
+        <Link to={href} className="btn secondary btn-sm">{t('openWorkforceAction')}</Link>
       </div>
     </div>
   );

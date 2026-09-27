@@ -208,6 +208,20 @@ export function validateDispatchFanOutConfig(
 
 /** The `dispatch` capability family advertised at the `/.well-known/openwop` document root
  *  (RFC 0118 + RFC 0073 §document-root). Single source of truth for advertise/serve parity. */
+/** RFC 0126 — does this host honor per-item input on a `next-worker` decision
+ *  (`nextWorkerInputs[]` projected into each child)? HONEST-ON now that RFC 0126
+ *  is `Accepted` (openwop#826, single-witness graduation on the #1278 executor arm
+ *  under the bootstrap-steward waiver): the executor implements the projection +
+ *  the fail-closed gate, and the RFC that governs the wire concept is accepted, so
+ *  advertising `dispatch.perItemInput` is an honest wire claim (no longer trips
+ *  `OPENWOP_REQUIRE_BEHAVIOR`). The env is now a DISABLE escape hatch —
+ *  `OPENWOP_DISPATCH_PER_ITEM_INPUT=false` forces it back off (e.g. to reproduce
+ *  the honest-off / fail-closed path); any other value (incl. unset) advertises it.
+ *  (Was honest-off until → Accepted; see this file's git history.) */
+export function perItemInputSupported(): boolean {
+  return process.env.OPENWOP_DISPATCH_PER_ITEM_INPUT !== 'false';
+}
+
 export function dispatchCapability(): {
   supported: true;
   fanOutSupported: true;
@@ -215,6 +229,7 @@ export function dispatchCapability(): {
   joinModes: readonly JoinMode[];
   onChildFailureModes: readonly OnChildFailure[];
   maxFanOut: number;
+  perItemInput: boolean;
 } {
   // HONESTY (advertise only what's behaviorally honored — capabilities.md, fails
   // OPENWOP_REQUIRE_BEHAVIOR otherwise): this host advertises ONLY `wait-all`. The
@@ -238,5 +253,6 @@ export function dispatchCapability(): {
     joinModes: ['wait-all'],
     onChildFailureModes: ['collect', 'absorb'],
     maxFanOut: HOST_MAX_FAN_OUT,
+    perItemInput: perItemInputSupported(),
   };
 }

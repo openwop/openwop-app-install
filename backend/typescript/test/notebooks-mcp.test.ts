@@ -18,7 +18,9 @@ import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createApp } from '../src/index.js';
-import { isToolAllowed, listTools } from '../src/host/mcpServerRegistry.js';
+import { isToolAllowed, listTools, requiredScopeForTool } from '../src/host/mcpServerRegistry.js';
+import { registerWorkflow } from '../src/host/workflowsRegistry.js';
+import { createMember } from '../src/host/accessControlService.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 
@@ -33,7 +35,7 @@ beforeAll(async () => {
   process.env.OPENWOP_MCP_SERVER_ENABLED = 'true'; // mount the MCP server + /v1/tools
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['notebooks', 'kb', 'users']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -131,6 +133,17 @@ describe('notebooks MCP tools — registration + roundtrip', () => {
 });
 
 describe('notebooks MCP tools — gating (ADR 0087)', () => {
+  // ADR 0601 — `isToolAllowed` now also enforces the RBAC scope the tool's own
+  // RFC 0078 descriptor advertises, so a principal must be a MEMBER holding that
+  // scope. These two cases pin the ANONYMITY gate and the TOGGLE gate, so their
+  // principals are given member rows that satisfy the scope leg; otherwise a
+  // toggle-off assertion would pass for the wrong reason (denied on scope, not on
+  // the toggle). `editor` carries both workspace:read and workspace:write.
+  beforeAll(async () => {
+    await createMember({ tenantId: 'some-tenant', orgId: 'org-mcp-gate', subject: 'u1', displayName: 'u1', roles: ['editor'] });
+    await createMember({ tenantId: 't-first', orgId: 'org-mcp-first', subject: 'u1', displayName: 'u1', roles: ['editor'] });
+  });
+
   it('denies the anonymous principal; requires the notebooks toggle', async () => {
     const tool = listTools().find((t) => t.name === 'notebook-search')!;
     expect(tool.mcpRequiresAuth).toBe(true);
@@ -182,6 +195,36 @@ describe('notebooks MCP tools — /v1/tools projection (RFC 0078)', () => {
     expect(addSource!.safetyTier).toBe('write');
     expect(addSource!.approval).toBe('always');
     expect(addSource!.auth?.scopes).toContain('workspace:write');
+  });
+
+  it('ADR 0601 — the SERVED descriptor\'s advertised scope IS the one the gate enforces', async () => {
+    // Register an UNGATED tool first. Without one the loop below only sees GATED
+    // tools, where the shared rule and a hand-rolled `safetyTier` derivation give
+    // the SAME answer — so the assertion would pass against a catalog that had
+    // drifted back to deriving its own scope. Measured: it did. This is the only
+    // input that separates the two.
+    registerWorkflow({
+      workflowId: 'test.adr0601.catalog-ungated',
+      nodes: [{ nodeId: 'expose', typeId: 'core.openwop.mcp.expose-tool', config: { name: 'adr0601-catalog-ungated', inputSchema: { type: 'object', additionalProperties: true } } }],
+      edges: [],
+    } as never);
+    // The advert and the enforcement used to be derived independently, which is
+    // how `workspace:write` came to be advertised while `isToolAllowed` checked no
+    // scope at all. They now share `requiredScopeForTool`. This closes the loop
+    // over the WIRE bytes rather than over the helper: for every tool the catalog
+    // actually serves, `auth.scopes` equals the shared rule's answer.
+    const { c } = await ownerWithOrg('mcp-scope-parity');
+    const list = (await c.get('/v1/tools')).body as Array<{ toolId: string; auth?: { scopes?: string[] } }>;
+    expect(list.length, 'an empty catalog would make this loop vacuous').toBeGreaterThan(0);
+    let checked = 0;
+    for (const d of list) {
+      const manifest = listTools().find((m) => `mcp:${m.name}` === d.toolId);
+      if (!manifest) continue;
+      const required = requiredScopeForTool(manifest);
+      expect(d.auth?.scopes ?? [], d.toolId).toEqual(required ? [required] : []);
+      checked += 1;
+    }
+    expect(checked, 'no served descriptor resolved back to a manifest').toBeGreaterThan(0);
   });
 });
 

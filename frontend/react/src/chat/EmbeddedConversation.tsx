@@ -14,11 +14,15 @@
  * @see docs/adr/0073-embeddable-conversation-view.md
  */
 
-import { useCallback, type ReactNode } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { useChatSession, type ContentPart } from './hooks/useChatSession.js';
 import { useAgentMentions } from './lib/agentMentions.js';
 import { useScopeToAgent } from './activeAgents/useScopeToAgent.js';
 import { ConversationView } from './ConversationView.js';
+// Lazy for the same entry-weight reason as ChatSidebar (the strip pulls the
+// full review-card tree; embeds shouldn't pay it until reviews exist).
+const ConversationReviewsStrip = lazy(() =>
+  import('./reviews/ConversationReviewsStrip.js').then((m) => ({ default: m.ConversationReviewsStrip })));
 import { runCoreSubmit } from './lib/chatSubmit.js';
 import { registerDefaultCommands } from './registry/defaultCommands.js';
 import { getProvider } from '../byok/lib/providers.js';
@@ -26,7 +30,7 @@ import type { BYOKActiveConfig } from '../byok/lib/useBYOKConfig.js';
 
 registerDefaultCommands();
 
-export function EmbeddedConversation({ agentId, config, tenantId = 'demo', onReconfigureBYOK, renderEmptyState }: {
+export function EmbeddedConversation({ agentId, config, tenantId = 'demo', onReconfigureBYOK, renderEmptyState, onTurnSettled }: {
   /** Agent to scope this conversation to (e.g. the Workflow Architect). */
   agentId: string;
   /** A valid BYOK config — the host surface gates on it before rendering this. */
@@ -36,6 +40,13 @@ export function EmbeddedConversation({ agentId, config, tenantId = 'demo', onRec
   /** Context-aware empty state (e.g. a workflow-authoring welcome). Receives the
    *  composer-seed callback so example prompts dispatch a real turn. */
   renderEmptyState?: (onPick: (text: string) => void) => ReactNode;
+  /** ADR 0596 — fired once each time a turn finishes (sending true → false).
+   *  The embed does NOT hand the consumer the turn's content: `agent.toolReturned`
+   *  (RFC 0064) carries `{toolName, status, durationMs}` and NO result payload, so
+   *  a tool's return value is not on the wire and cannot be relayed. This is a
+   *  "something may have changed, re-read your own state" tick — the consumer
+   *  learns what happened from an authoritative host read, never from the chat. */
+  onTurnSettled?: () => void;
 }): JSX.Element {
   const {
     session, isSending, error, send, cancel, reset, resolveInterrupt, runWorkflowMention,
@@ -45,6 +56,14 @@ export function EmbeddedConversation({ agentId, config, tenantId = 'demo', onRec
   useScopeToAgent(activeAgents, agentEntries, agentId);
 
   const onRegenerate = useCallback((id: string) => { void regenerate(id, config); }, [regenerate, config]);
+
+  // ADR 0596 — the turn-settled tick. Edge-triggered on the true → false
+  // transition so a consumer re-reads once per turn, not once per render.
+  const wasSending = useRef(false);
+  useEffect(() => {
+    if (wasSending.current && !isSending) onTurnSettled?.();
+    wasSending.current = isSending;
+  }, [isSending, onTurnSettled]);
 
   // Per-model capability hints (mirror ChatSidebar) so the composer flags
   // unsupported attachments honestly.
@@ -67,10 +86,22 @@ export function EmbeddedConversation({ agentId, config, tenantId = 'demo', onRec
 
   return (
     <div className="u-flex u-flex-col u-flex-1 u-minh-0">
+      {/* ADR 0473 — parity with the two primary surfaces (ChatSidebar/TabSession):
+          reviews that trace back to THIS embedded conversation (the Workflow
+          Architect's proposals, notably) render where the promise was made. */}
+      <Suspense fallback={null}>
+        <ConversationReviewsStrip conversationId={session.id} isSending={isSending} />
+      </Suspense>
       <ConversationView
         messages={session.messages}
         tenantId={tenantId}
         voiceAgentId={agentId}
+        // ADR 0277 — thread the conversationId like the two primary surfaces
+        // (ChatSidebar/TabSession): the voice controller keys the remembered
+        // agent choice by it, and the ADR 0199 transcript digest can fire the
+        // moment an embed's conversation carries server-side meta. An ephemeral
+        // embed's id resolves no meta backend-side — harmless, never blocking.
+        voiceConversationId={session.id}
         error={error}
         isSending={isSending}
         onPickSuggestion={(t) => onUserSubmit(t)}

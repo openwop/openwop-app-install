@@ -29,6 +29,12 @@ describe('cms section validation — hero CTAs + safeLink', () => {
   it('preserves the hero eyebrow', () => {
     expect(data({ type: 'hero', data: { heading: 'H', eyebrow: 'v1.1' } }).eyebrow).toBe('v1.1');
   });
+  it('keeps a closed hero visual and its image alt text, but drops unknown visual modes', () => {
+    expect(data({ type: 'hero', data: { heading: 'H', visual: 'journey', imageToken: 'media:hero', alt: 'A winding path' } }))
+      .toMatchObject({ visual: 'journey', imageToken: 'media:hero', alt: 'A winding path' });
+    expect(data({ type: 'hero', data: { heading: 'H', visual: 'javascript:alert(1)' } }).visual).toBeUndefined();
+    expect(data({ type: 'hero', data: { heading: 'H', visual: 'run' } }).visual).toBe('run');
+  });
 });
 
 describe('cms section validation — columns layout + titles', () => {
@@ -37,6 +43,8 @@ describe('cms section validation — columns layout + titles', () => {
   it('keeps a valid layout', () => {
     expect(cols('steps').layout).toBe('steps');
     expect(cols('stats').layout).toBe('stats');
+    expect(cols('showcase').layout).toBe('showcase');
+    expect(cols('rows').layout).toBe('rows');
   });
   it('defaults an unknown or missing layout to "cards"', () => {
     expect(cols('bogus').layout).toBe('cards');

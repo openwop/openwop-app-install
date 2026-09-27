@@ -35,8 +35,10 @@
  */
 
 import { listRegisteredWorkflows } from './workflowsRegistry.js';
-import { listBuiltinWorkflows } from './builtinWorkflows.js';
+import { listChainBackedWorkflows } from './chainBackedWorkflows.js';
 import { resolveOne } from './featureToggles/service.js';
+import { resolveEffectiveAccess, resolveSubjectScopesUnion, type Scope } from './accessControlService.js';
+import { credentialAuthority, keyDeclarationPermits, tenantOwnerScopes } from './protocolAuthorization.js';
 import type { WorkflowDefinition } from '../executor/types.js';
 import type { Principal } from '../types.js';
 
@@ -47,7 +49,7 @@ import type { Principal } from '../types.js';
  *  workflows would never appear in `tools/list` / `/v1/tools`. */
 function allWorkflowDefs(): WorkflowDefinition[] {
   const byId = new Map<string, WorkflowDefinition>();
-  for (const def of listBuiltinWorkflows()) byId.set(def.workflowId, def);
+  for (const def of listChainBackedWorkflows()) byId.set(def.workflowId, def); // ADR 0472 P4 — MCP projections
   for (const def of listRegisteredWorkflows()) byId.set(def.workflowId, def);
   return Array.from(byId.values());
 }
@@ -162,28 +164,160 @@ export function isAnonymousPrincipal(principal: Principal | undefined): boolean 
 }
 
 /**
- * ADR 0087 gate — may `principal` see/call this tool? An ungated tool (no metadata
- * hints — the conformance sample tools) is allowed for anyone, preserving the
- * existing reference behavior. A gated tool (e.g. the notebook tools) requires a
- * non-anonymous caller AND, when `mcpFeatureToggle` is set, that toggle enabled for
- * the caller's tenant. Fail-closed.
+ * ADR 0601 — THE RULE, written once: the RBAC scope a tool's RFC 0078 descriptor
+ * ADVERTISES, and the scope `isToolAllowed` ENFORCES. Both call this one function,
+ * so an advertised requirement cannot drift away from an enforced one.
+ *
+ * Before ADR 0601 the two halves lived apart: `routes/toolCatalog.ts` derived
+ * `auth.scopes` from `mcpSafetyTier` and emitted `workspace:write` for the write
+ * tools, while `isToolAllowed` checked only "non-anonymous" + the feature toggle.
+ * A `workspace:read` member 403'd by every HTTP sibling could point an MCP client
+ * at the same host and write. The descriptor was a claim the host did not honour.
+ *
+ * `null` means the tool claims NO scope and none is checked — the ungated
+ * conformance sample tools (no `mcpRequiresAuth`, no `mcpFeatureToggle`). That
+ * branch is honest by construction rather than by comment: the catalog now emits
+ * `scopes: []` for exactly the tools this returns `null` for, so there is no tool
+ * anywhere that advertises a scope nothing enforces.
  */
-export async function isToolAllowed(manifest: ExposedToolManifest, principal: Principal | undefined): Promise<boolean> {
+export function requiredScopeForTool(manifest: ExposedToolManifest): 'workspace:write' | 'workspace:read' | null {
+  if (!manifest.mcpRequiresAuth && !manifest.mcpFeatureToggle) return null;
+  return manifest.mcpSafetyTier === 'write' ? 'workspace:write' : 'workspace:read';
+}
+
+/**
+ * ADR 0601 R1 (corrected) — the ONE answer to "what may this MCP caller do in
+ * this tenant", for EVERY credential lane `middleware/auth.ts` can mint.
+ *
+ * The first cut of this gate asked `resolveEffectiveAccess(tenantId, { subject:
+ * principal.principalId })` and was wrong twice.
+ *
+ *  1. **It could never match for a credential principal.** `principalId` is an
+ *     identity, and only the cookie/OIDC lanes mint one that is also an RBAC
+ *     SUBJECT. The API-key lanes mint `bearer:<first 8 chars>` / `apikey:<keyId>`
+ *     — strings no member row is ever keyed on, and the first of which changes on
+ *     rotation. MEASURED on this branch, demo mode OFF: 17 gated tools before the
+ *     gate, **0 after**, for env-key, `owk_` key, anonymous session AND the
+ *     conformance seam — four lanes, not the two first reported. Telling an
+ *     operator to seed a member row named after eight characters of their secret
+ *     is not an exit.
+ *  2. **It was non-deterministic.** With no `orgId`, `resolveEffectiveAccess`
+ *     takes the FIRST matching member row, so a subject who is `viewer` in org-A
+ *     and `editor` in org-B resolves to whichever the store iterates first — an
+ *     answer that can flap across a restart. `resolveSubjectScopesUnion`'s own
+ *     docblock names this exact shape ("the org-scoped, first-match … is the
+ *     wrong tool") for exactly this kind of non-org-scoped surface.
+ *
+ * So authority is resolved from PROVENANCE (`Principal.auth`, stamped where the
+ * credential was verified) rather than guessed from the id string:
+ *
+ *  - `api-key` — an `owk_` key is a **delegation**. Its authority is its
+ *    ISSUER's (`ApiKeyRecord.createdBy`, a real subject), narrowed by the key's
+ *    own declared scopes when it declares any (ADR 0270: "a key can't exceed its
+ *    scopes"). This is what keeps the restoration from becoming an escalation:
+ *    `POST /developer-keys` is gated on `requirePrincipal` alone, so ANY
+ *    authenticated member — including a `viewer` — can mint a key. Had an
+ *    unscoped key been granted the tenant's own authority (the tempting reading
+ *    of "a key carries its own authority"), that viewer would have written over
+ *    MCP through a key they issued themselves, re-opening the very escalation
+ *    ADR 0601 closed, through a side door.
+ *  - `env-key` — configured in the host's own environment, so whoever set it is
+ *    the deployment operator, not a tenant member. It acts as the tenant's own
+ *    principal in the tenant ADR 0561 pinned it to. A member cannot mint one, so
+ *    there is no escalation path. (A `*`-scoped env key is still denied every
+ *    gated tool by `isAnonymousPrincipal` — pre-existing ADR 0087 behaviour,
+ *    deliberately not widened here.)
+ *  - `subject` / `anon` / `test-seam` / unstamped — resolved as a subject, below.
+ *
+ * Subject resolution is the DETERMINISTIC tenant-wide union, and only falls back
+ * to `resolveEffectiveAccess` when the union found no membership at all. That
+ * fallback is not a re-introduction of the first-match ambiguity — it is only
+ * reachable when there are ZERO rows to be ambiguous between — and it exists so
+ * the "no member row" rules (the tenant-owner principal, and the demo
+ * single-principal exception at `accessControlService.ts:1271`) keep living in
+ * ONE place. Copying that exception here would have been a second implementation
+ * of a security rule; omitting it would have silently taken every anonymous
+ * session on the demo deploy from working tools to none.
+ */
+async function resolveMcpAuthority(principal: Principal): Promise<readonly Scope[]> {
+  const tenantId = principal.tenants[0]!;
+  // The provenance classification is shared with the content ops (ADR 0748
+  // correction): ONE reading of where a credential's authority comes from.
+  const authority = credentialAuthority(principal, principal.principalId);
+  if (authority.source === 'tenant-owner') return tenantOwnerScopes(tenantId);
+  const subject = authority.subject ?? principal.principalId;
+  const union = await resolveSubjectScopesUnion(tenantId, subject);
+  const scopes = union.basis === 'member' ? union.scopes : (await resolveEffectiveAccess(tenantId, { subject })).scopes;
+  // An undeclared scope list means "undeclared", not "none" — every key issued
+  // before ADR 0601 carries `[]`. A key that DOES declare scopes is narrowed to
+  // them: strictly tighter, never looser. ADR 0755 D2: the ONE reading shared
+  // with the protocol lane — `'*'` is undeclared here too.
+  const declared = authority.declaredScopes;
+  return declared ? scopes.filter((s) => keyDeclarationPermits(declared, s)) : scopes;
+}
+
+/**
+ * ADR 0087 gate (+ ADR 0601 scope enforcement) — may `principal` see/call this
+ * tool? An ungated tool (no metadata hints — the conformance sample tools) is
+ * allowed for anyone, preserving the existing reference behavior. A gated tool
+ * (e.g. the notebook tools) requires a non-anonymous caller, the
+ * `mcpFeatureToggle` enabled for the caller's tenant when set, AND the RBAC scope
+ * its own descriptor advertises. Fail-closed at every step.
+ *
+ * `authority` is the caller's resolved scope set. It is a PARAMETER rather than a
+ * lookup so a `tools/list` over N tools resolves it ONCE: it used to be resolved
+ * per tool, and `resolveEffectiveAccess` full-scans members + groups + customRoles
+ * (`members.list()` is the cross-tenant scan the tenant index at
+ * `accessControlService.ts:374` exists to avoid), so a single list call did ~57
+ * full collection scans — the `host_ext_kv` prefix-scan incident's exact shape.
+ *
+ * RESIDUAL, stated rather than hidden (ADR 0601 § Residuals, rewritten): the
+ * scope is resolved TENANT-wide — the UNION across the caller's org memberships,
+ * because a `tools/list` call names no org and there is no org to scope to. So
+ * this closes "a `workspace:read` member writes over MCP" — the named escalation
+ * — and does NOT close "a member with write in org A writes a notebook in org B".
+ * The per-org check belongs at the SURFACE, where the resource names its org
+ * (`resolveProjectAccess` already does exactly that for the notebook tools'
+ * backing routes). Do not read this gate as more than it is.
+ */
+export async function isToolAllowedWith(
+  manifest: ExposedToolManifest,
+  principal: Principal | undefined,
+  authority: () => Promise<readonly Scope[]>,
+): Promise<boolean> {
   if (!manifest.mcpRequiresAuth && !manifest.mcpFeatureToggle) return true;
   if (isAnonymousPrincipal(principal)) return false;
+  const tenantId = principal!.tenants[0]!;
   if (manifest.mcpFeatureToggle) {
-    const tenantId = principal!.tenants[0]!;
     const assignment = await resolveOne(manifest.mcpFeatureToggle, { tenantId, userId: principal!.principalId });
     if (!assignment || !assignment.enabled) return false;
+  }
+  const required = requiredScopeForTool(manifest);
+  if (required) {
+    if (!(await authority()).includes(required)) return false;
   }
   return true;
 }
 
+/** A once-per-call memo of `resolveMcpAuthority`. Lazy on purpose: a caller whose
+ *  tools are all ungated never pays for a resolution nothing will read. */
+function authorityOnce(principal: Principal | undefined): () => Promise<readonly Scope[]> {
+  let pending: Promise<readonly Scope[]> | undefined;
+  return () => (pending ??= principal ? resolveMcpAuthority(principal) : Promise.resolve([]));
+}
+
+/** ADR 0087 — the single-tool gate (`tools/call`, `GET /v1/tools/{toolId}`). */
+export async function isToolAllowed(manifest: ExposedToolManifest, principal: Principal | undefined): Promise<boolean> {
+  return isToolAllowedWith(manifest, principal, authorityOnce(principal));
+}
+
 /** ADR 0087 — the tools `principal` is authorized to see (the gated projection used
- *  by both `tools/list` and the `/v1/tools` discovery endpoint). */
+ *  by both `tools/list` and the `/v1/tools` discovery endpoint). ADR 0601: ONE
+ *  authority resolution for the whole list, not one per tool. */
 export async function listToolsForPrincipal(principal: Principal | undefined): Promise<ExposedToolManifest[]> {
   const all = listTools();
-  const allowed = await Promise.all(all.map((t) => isToolAllowed(t, principal)));
+  const authority = authorityOnce(principal);
+  const allowed = await Promise.all(all.map((t) => isToolAllowedWith(t, principal, authority)));
   return all.filter((_, i) => allowed[i]);
 }
 

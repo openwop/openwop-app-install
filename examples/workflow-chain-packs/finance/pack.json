@@ -1,38 +1,49 @@
 {
   "name": "core.openwop.workflows.finance",
-  "version": "1.0.0",
+  "version": "1.1.6",
   "kind": "workflow-chain",
-  "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Finance cluster: Invoice → AP Processing, Month-End Close Checklist, and Expense/Budget Approval + anomaly detection. Reasons with core.ai.chatCompletion; binds the ERP (NetSuite) via core.openwop.http.openapi-call connectionRef for validation + posting; every posting/reimbursement runs through a threshold core.chat.approvalGate. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts shipping the http + ai + chat + kb + integration packs. Published under core.openwop.workflows.* (openwop-team key).",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0149) — the Finance cluster: Invoice → AP Processing, Month-End Close Checklist, and Expense/Budget Approval + anomaly detection. Reasons with core.ai.chatCompletion; recommends ERP actions (validation + posting) provider-agnostically via core.openwop.connectors.erp-action (NetSuite when connected); every posting/reimbursement runs through a threshold core.chat.approvalGate. All tenant-specific values are run parameters (replay-deterministic). Resolves on hosts shipping the http + ai + chat + kb + integration packs. Published under core.openwop.workflows.* (openwop-team key).",
   "author": "openwop",
   "license": "Apache-2.0",
   "engines": { "openwop": ">=1.0.0" },
+  "keywords": ["Finance"],
   "chains": [
     {
       "chainId": "finance.invoice-ap",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Invoice → AP Processing",
-      "description": "Extract invoice line items, validate against the PO/ledger in the ERP (NetSuite), run a threshold-based approval, then post the invoice and send a payment notification.",
+      "description": "Extract invoice line items, validate against the PO/ledger in the ERP (provider-agnostic), run a threshold-based approval, then post the invoice and send a payment notification.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
         "required": ["invoiceText"],
         "properties": {
-          "invoiceText": { "type": "string", "description": "The invoice content (extracted text or a description)." }
+          "erpBaseUrl": { "type": "string", "default": "", "description": "The ERP REST base (e.g. https://{account}.suitetalk.api.netsuite.com). Empty ⇒ recommend only." },
+          "vendorId": { "type": "string", "default": "", "description": "The ERP vendor id for a live vendor-bill post." },
+          "billAmount": { "type": "string", "default": "", "description": "The invoice amount for a live post." },
+          "invoiceText": { "type": "string", "description": "The invoice content (extracted text or a description)." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "extract", "typeId": "core.ai.chatCompletion", "name": "Extract line items", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Extract vendor, line items, amounts, and totals from the invoice. Invoice: {{params.invoiceText}}" }, "inputs": {} },
-          { "id": "validate", "typeId": "core.openwop.http.openapi-call", "name": "Validate vs PO (NetSuite)", "position": { "x": 320, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.netsuite", "operationId": "matchPurchaseOrder" }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 640, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "post", "typeId": "core.openwop.http.openapi-call", "name": "Post invoice (NetSuite)", "position": { "x": 960, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.netsuite", "operationId": "createVendorBill" }, "inputs": {} },
-          { "id": "notify", "typeId": "core.openwop.integration.notification-push", "name": "Payment notice", "position": { "x": 1240, "y": 0 }, "config": {}, "inputs": {} }
+          { "id": "extract", "typeId": "core.ai.chatCompletion", "name": "Extract line items", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Extract vendor, line items, amounts, and totals from the invoice. Invoice: {{params.invoiceText}}",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "validate", "typeId": "core.openwop.connectors.erp-action", "name": "Validate vs PO (ERP)", "position": { "x": 320, "y": 0 }, "config": { "action": "match-po" }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 640, "y": 0 }, "config": { "title": "Approve posting this invoice to the ERP", "artifactType": "erp.invoice", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — nothing posted", "position": { "x": 960, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "post", "typeId": "core.openwop.connectors.erp-action", "name": "Post invoice (ERP)", "position": { "x": 960, "y": 0 }, "config": { "action": "post-bill", "baseUrl": "{{params.erpBaseUrl}}", "vendorId": "{{params.vendorId}}", "amount": "{{params.billAmount}}" }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Payment notice", "position": { "x": 1240, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Invoice → AP Processing" } }
         ],
         "edges": [
           { "from": "extract", "to": "validate" },
-          { "from": "validate", "to": "approve" },
-          { "from": "approve", "to": "post" },
+          { "from": "validate", "to": "approve.artifact" },
+          { "from": "approve", "to": "post", "condition": { "type": "truthy", "left": "approved" } },
+          { "from": "approve", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } },
           { "from": "post", "to": "notify" }
         ]
       },
@@ -40,38 +51,49 @@
     },
     {
       "chainId": "finance.month-end-close",
-      "version": "1.0.0",
+      "version": "1.0.2",
       "label": "Month-End Close Checklist",
       "description": "Orchestrate the close: build the task checklist, collect supporting docs from the knowledge base, draft variance notes, chase missing approvals, then produce a close-readiness report.",
       "parameters": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["period"],
+        "required": ["period", "orgId", "collectionId", "query"],
         "properties": {
-          "period": { "type": "string", "description": "Close period, e.g. '2026-05'." }
+          "period": { "type": "string", "description": "Close period, e.g. '2026-05'." },
+          "orgId": { "type": "string", "description": "Org whose knowledge base holds the supporting docs." },
+          "collectionId": { "type": "string", "description": "Knowledge-base collection id to search." },
+          "query": { "type": "string", "description": "Supporting-docs search query (source node reads it from run inputs)." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "checklist", "typeId": "core.ai.chatCompletion", "name": "Close checklist", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Build the month-end close checklist for {{params.period}} across teams, with owners and dependencies." }, "inputs": {} },
-          { "id": "docs", "typeId": "feature.kb.nodes.rag", "name": "Collect supporting docs", "position": { "x": 0, "y": 140 }, "config": { "query": "month-end close supporting documents {{params.period}}" }, "inputs": {} },
-          { "id": "variance", "typeId": "core.ai.chatCompletion", "name": "Draft variance notes", "position": { "x": 320, "y": 70 }, "config": { "systemPrompt": "Draft variance commentary for {{params.period}} from the checklist status and supporting docs; flag missing items." }, "inputs": {} },
+          { "id": "checklist", "typeId": "core.ai.chatCompletion", "name": "Close checklist", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Build the month-end close checklist for {{params.period}} across teams, with owners and dependencies.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "docs", "typeId": "feature.kb.nodes.rag", "name": "Collect supporting docs", "position": { "x": 0, "y": 140 }, "config": {}, "inputs": { "query": "{{params.query}}", "orgId": "{{params.orgId}}", "collectionId": "{{params.collectionId}}" } },
+          { "id": "variance", "typeId": "core.ai.chatCompletion", "name": "Draft variance notes", "position": { "x": 320, "y": 70 }, "config": { "systemPrompt": "Draft variance commentary for {{params.period}} from the checklist status and supporting docs; flag missing items.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
           { "id": "chase", "typeId": "core.chat.approvalGate", "name": "Chase approvals", "position": { "x": 640, "y": 70 }, "config": {}, "inputs": {} },
-          { "id": "report", "typeId": "core.openwop.integration.notification-push", "name": "Close-readiness report", "position": { "x": 960, "y": 70 }, "config": {}, "inputs": {} }
+          { "id": "report", "typeId": "feature.notifications.nodes.notify", "name": "Close-readiness report", "position": { "x": 960, "y": 70 }, "config": { "audience": "tenant" }, "inputs": { "title": "Month-End Close Checklist" } }
         ],
         "edges": [
-          { "from": "checklist", "to": "variance" },
-          { "from": "docs", "to": "variance" },
+          { "from": "checklist", "to": "variance.checklist" },
+          { "from": "docs", "to": "variance.docs" },
           { "from": "variance", "to": "chase" },
-          { "from": "chase", "to": "report" }
+          { "from": "chase.decision", "to": "report.message" }
         ]
       },
       "outputs": { "report": { "type": "string", "description": "Close-readiness report." } }
     },
     {
       "chainId": "finance.expense-approval",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "label": "Expense / Budget Approval + Anomaly Detection",
       "description": "Check an expense against policy, run a duplicate/anomaly check, route through a threshold approval chain, then reimburse via the ERP and flag outliers.",
       "parameters": {
@@ -79,20 +101,30 @@
         "additionalProperties": false,
         "required": ["expenseContext"],
         "properties": {
-          "expenseContext": { "type": "string", "description": "The expense to assess (amount, category, submitter, notes)." }
+          "erpBaseUrl": { "type": "string", "default": "", "description": "The ERP REST base (e.g. https://{account}.suitetalk.api.netsuite.com). Empty ⇒ recommend only." },
+          "employeeId": { "type": "string", "default": "", "description": "The ERP employee id for a live expense-report post." },
+          "expenseAmount": { "type": "string", "default": "", "description": "The reimbursement amount for a live post." },
+          "expenseContext": { "type": "string", "description": "The expense to assess (amount, category, submitter, notes)." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
         }
       },
       "capabilities": ["side-effectful"],
       "dag": {
         "nodes": [
-          { "id": "check", "typeId": "core.ai.chatCompletion", "name": "Policy + anomaly check", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Assess the expense against policy and detect duplicates/anomalies. Expense: {{params.expenseContext}}" }, "inputs": {} },
-          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 320, "y": 0 }, "config": {}, "inputs": {} },
-          { "id": "reimburse", "typeId": "core.openwop.http.openapi-call", "name": "Reimburse (NetSuite)", "position": { "x": 640, "y": 0 }, "config": { "connectionRef": "core.openwop.connections.netsuite", "operationId": "createExpenseReport" }, "inputs": {} },
-          { "id": "flag", "typeId": "core.openwop.integration.notification-push", "name": "Flag outliers", "position": { "x": 960, "y": 0 }, "config": {}, "inputs": {} }
+          { "id": "check", "typeId": "core.ai.chatCompletion", "name": "Policy + anomaly check", "position": { "x": 0, "y": 0 }, "config": { "systemPrompt": "Assess the expense against policy and detect duplicates/anomalies. Expense: {{params.expenseContext}}",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Threshold approval", "position": { "x": 320, "y": 0 }, "config": { "title": "Approve reimbursing this expense via the ERP", "artifactType": "erp.expense", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — no reimbursement", "position": { "x": 640, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "reimburse", "typeId": "core.openwop.connectors.erp-action", "name": "Reimburse (ERP)", "position": { "x": 640, "y": 0 }, "config": { "action": "create-expense-report", "baseUrl": "{{params.erpBaseUrl}}", "employeeId": "{{params.employeeId}}", "amount": "{{params.expenseAmount}}" }, "inputs": {} },
+          { "id": "flag", "typeId": "feature.notifications.nodes.notify", "name": "Flag outliers", "position": { "x": 960, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Expense / Budget Approval + Anomaly Detection" } }
         ],
         "edges": [
-          { "from": "check", "to": "approve" },
-          { "from": "approve", "to": "reimburse" },
+          { "from": "check", "to": "approve.artifact" },
+          { "from": "approve", "to": "reimburse", "condition": { "type": "truthy", "left": "approved" } },
+          { "from": "approve", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } },
           { "from": "reimburse", "to": "flag" }
         ]
       },

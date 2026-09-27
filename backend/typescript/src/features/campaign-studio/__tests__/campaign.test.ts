@@ -34,6 +34,15 @@ describe('canvas.campaign artifact type', () => {
   it('rejects an unknown channel type', () => {
     expect(validateArtifact('canvas.campaign', { name: 'X', channels: [{ name: 'c', type: 'telepathy' }] }).valid).toBe(false);
   });
+  it('ADR 0360 — accepts optional board positions on funnel stages; rejects out-of-range', () => {
+    const base = { name: 'X', channels: [{ name: 'c', type: 'email' }] };
+    expect(validateArtifact('canvas.campaign', { ...base, funnel: [{ stage: 'awareness', x: 120, y: 240 }] }).valid).toBe(true);
+    // Pre-ADR docs (no positions) stay valid — the additive guarantee.
+    expect(validateArtifact('canvas.campaign', { ...base, funnel: [{ stage: 'awareness' }] }).valid).toBe(true);
+    expect(validateArtifact('canvas.campaign', { ...base, funnel: [{ stage: 'awareness', x: -5 }] }).valid).toBe(false);
+    expect(validateArtifact('canvas.campaign', { ...base, funnel: [{ stage: 'awareness', y: 4001 }] }).valid).toBe(false);
+    expect(validateArtifact('canvas.campaign', { ...base, funnel: [{ stage: 'awareness', x: 'left' }] }).valid).toBe(false);
+  });
   it('rejects an unknown funnel stage', () => {
     expect(validateArtifact('canvas.campaign', { name: 'X', channels: [{ name: 'c', type: 'email' }], funnel: [{ stage: 'mind-meld' }] }).valid).toBe(false);
   });

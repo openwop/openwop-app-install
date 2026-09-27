@@ -15,9 +15,6 @@ export const messages = {
   lede: 'Assemble a council of advisor agents — then convene it in the AI chat by typing its @@handle.',
 
   // Convene hint (rich)
-  conveneHint: 'To convene a board, open the AI chat and type its <1>@@handle</1> (e.g. <3>@@timeless what should we prioritize?</3>). Every advisor joins the chat’s Active agents and the council weighs in there.',
-
-  // Board list
   boardsEmptyTitle: 'No boards yet',
   boardsEmptyBody: 'Assemble your first council of advisor agents to get started.',
 
@@ -39,7 +36,7 @@ export const messages = {
   // Strategy context picker (ADR 0076 Phase 5)
   strategyContextLabel: 'Strategy context',
   planningContextLabel: 'Planning context',
-  planningContextHint: 'Give advisors your strategies and projects as planning context — their objectives, status, and milestones. For deep document search, use the “Shared knowledge” toggles on a board card.',
+  planningContextHint: 'Give advisors your strategies and projects as planning context — a snapshot of objectives, status, and milestones taken when the board chat opens or is summoned. For live document search on every turn, use the “Shared knowledge” section when editing a board.',
   projectContextLabel: 'Project context',
   projectContextCount_one: '{{count}} project',
   projectContextCount_other: '{{count}} projects',
@@ -54,7 +51,14 @@ export const messages = {
   boardNamePlaceholder: 'Founders board',
   organizationLabel: 'Organization',
   visibilityLabel: 'Visibility',
-  visibilityPrivate: 'Private (only me)',
+  // ADR 0665 D3 — was "Private (only me)", which the access rule does not deliver:
+  // `resolveBoardAccess` grants an org `workspace:write` holder authority over the
+  // board SUBJECT regardless of visibility — the documented cross-feature
+  // "visibility is not authority" rule (ADR 0054 D5), which projects implement
+  // identically. The rule is unchanged; the promise now matches it, in the wording
+  // `features/projects/i18n` already ships for the same rule.
+  visibilityPrivate: 'Private',
+  visibilityPrivateHelp: 'Only you and workspace writers can see this board — its advisors and its boardroom transcript.',
   visibilityShared: 'Shared (workspace)',
   personaKindLabel: 'Persona kind',
   advisorsLabel: 'Advisors',
@@ -62,6 +66,10 @@ export const messages = {
   createBoard: 'Create board',
   editBoard: 'Edit board',
   saveChanges: 'Save changes',
+  openingChatAction: 'Opening…',
+  openChatAction: 'Open chat',
+  openBoardChatLabel: 'Open the {{name}} board chat',
+  openChatError: 'Could not open the board chat.',
   editAction: 'Edit',
   cloneAction: 'Clone',
   editBoardLabel: 'Edit {{name}}',
@@ -73,11 +81,23 @@ export const messages = {
   personaFictional: 'Fictional characters',
   personaOriginal: 'Original personas',
   personaLiving: 'Living individuals (requires acknowledgement)',
-  sharedKnowledgeLabel: 'Shared knowledge:',
+  sharedKnowledgeLabel: 'Shared knowledge',
+  sharedKnowledgeHint: 'Give every advisor on this board retrieval access to these knowledge bases — searched live on each turn, so answers track the latest content.',
+  sharedKnowledgeLoadFailed: 'Couldn\'t load shared-knowledge settings. Reopen the board to try again.',
   sharedKnowledgeOnTitle: 'All advisors can retrieve {{kind}} — click to stop sharing',
   sharedKnowledgeOffTitle: 'Give all advisors access to {{kind}}',
   sharedKnowledgeEmptyTitle: 'No {{kind}} to share yet — add knowledge to a project to share it with this board',
   sharedKind_strategy: 'Strategy KB',
   'sharedKind_priority-matrix': 'Priority Matrix KB',
   sharedKind_project: 'Project KBs',
+  'sharedKind_team-portfolio': 'Team Portfolio KB',
+  contextLoadFailed: "Strategies and projects could not be loaded, so no planning context can be attached to this board right now. Any context already saved on it is left untouched.",
+  dialogErrorAnnounce: "That didn’t save. The reason is shown in the dialog.",
+  deleteErrorAnnounce: "That didn’t delete. The reason is shown in the dialog.",
+  moderatorLabel: "Chair (synthesizes)",
+  moderatorHint: "The chair sums up at the end. Leave unset and the first advisor to speak also writes the recommendation — a disputant judging the dispute.",
+  moderatorNone: "No chair — the first advisor synthesizes",
+  moderatorOutOfCohort: "{{persona}} — chairing, not in this cohort",
+  boardContextStaleBody: "We couldn’t refresh this boardroom’s saved record of the plans it was given, so that record is out of date. Your advisors are still grounded in the plans you can read, checked fresh on every turn.",
+  boardContextStaleOpen: "Open the boardroom anyway",
 } as const;

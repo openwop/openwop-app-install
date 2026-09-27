@@ -6,6 +6,7 @@
  * portfolio (`entry.workflows`).
  */
 import { useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import {
   SubjectSchedulesPanel, LOCAL_TZ, cadenceLabel,
   type SubjectSchedulesClient, type SubjectScheduleRow,
@@ -20,10 +21,15 @@ const toRow = (j: ScheduledJob): SubjectScheduleRow => ({
   ...(j.timezone !== undefined ? { timezone: j.timezone } : {}),
   ...(j.lastRunAt !== undefined ? { lastRunAt: j.lastRunAt } : {}),
   ...(j.lastRunId !== undefined ? { lastRunId: j.lastRunId } : {}),
+  // GEN-PRJ-1 — surface the daemon's skip record (dead schedules must be visible).
+  ...(j.lastSkippedAt !== undefined ? { lastSkippedAt: j.lastSkippedAt } : {}),
+  ...(j.lastSkipReason !== undefined ? { lastSkipReason: j.lastSkipReason } : {}),
+  ...(j.nextFireAt !== undefined ? { nextFireAt: j.nextFireAt } : {}),
 });
 const labelFor = (wf: string, cron: string): string => `${workflowName(wf)} · ${cadenceLabel(cron)}`;
 
 export function AgentSchedulesPanel({ entry }: { entry: RosterEntry }): JSX.Element {
+  const { t } = useTranslation('agents');
   const { rosterId } = entry;
   const agentId = entry.agentRef.agentId;
   const client: SubjectSchedulesClient = useMemo(() => ({
@@ -41,9 +47,9 @@ export function AgentSchedulesPanel({ entry }: { entry: RosterEntry }): JSX.Elem
       client={client}
       workflows={entry.workflows}
       copy={{
-        emptyBody: `Create one below so ${entry.persona} runs a workflow on a cadence.`,
-        helper: `Cadence shown in ${LOCAL_TZ}. Schedules fire automatically on this cadence (a background daemon), or immediately with “Run now”.`,
-        noWorkflowsHint: `Assign ${entry.persona} a workflow first (its Workflow portfolio), then schedule it here.`,
+        emptyBody: t('schedulesEmptyBody', { persona: entry.persona }),
+        helper: t('schedulesHelper', { tz: LOCAL_TZ }),
+        noWorkflowsHint: t('schedulesNoWorkflowsHint', { persona: entry.persona }),
       }}
     />
   );

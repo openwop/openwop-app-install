@@ -1,0 +1,7 @@
+{
+  "alg": "ed25519",
+  "keyId": "openwop-team-1",
+  "manifest": "pack.json",
+  "signatureFile": "pack.json.sig",
+  "note": "Detached Ed25519 signature over the exact bytes of pack.json, by the openwop-team-1 publisher key (ADR 0367 T1). entry.mjs.sig covers the exact bytes of the main-frame module entry.mjs with the same key. RFC 0117 §Signing."
+}

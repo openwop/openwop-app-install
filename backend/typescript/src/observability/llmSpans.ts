@@ -21,6 +21,23 @@ const SAFE_KEYS: ReadonlySet<string> = new Set([
 
 export type LlmSpanAttrs = Record<string, string | number | boolean | undefined>;
 
+/**
+ * ADR 0118 Phase 6 — OpenInference span kind (a fixed, closed enum outside the
+ * `openwop.*` namespace, so it needs no wire RFC and no allowlist: it provably
+ * carries no prompt/PII/credential). Set as the RAW attribute key
+ * `openinference.span.kind` so off-the-shelf GenAI trace viewers (Arize Phoenix,
+ * Langfuse, Grafana Tempo) can classify the span — do NOT route it through
+ * `safeSpanAttributes`, which would (correctly) prefix it `openwop.ai.` and break
+ * the convention. Mapping to this app's span tree:
+ *   openwop.chat.turn        → 'AGENT'
+ *   openwop.provider.dispatch → 'LLM'
+ *   tool-call child span      → 'TOOL'
+ */
+export type OpenInferenceSpanKind = 'AGENT' | 'LLM' | 'TOOL' | 'CHAIN';
+
+/** The raw (non-`openwop.`-prefixed) OpenInference span-kind attribute key. */
+export const OPENINFERENCE_SPAN_KIND_KEY = 'openinference.span.kind';
+
 /** Filter attributes to the safe allowlist (prefixing `openwop.ai.`). Drops prompt
  *  content, credentials, and ANY non-allowlisted or undefined key. */
 export function safeSpanAttributes(attrs: LlmSpanAttrs): Record<string, string | number | boolean> {
@@ -35,12 +52,16 @@ export function safeSpanAttributes(attrs: LlmSpanAttrs): Record<string, string |
 /** Run `fn` inside a child span carrying ONLY allowlist-safe attributes. The span
  *  is closed on success AND error (error recorded, never the prompt). When the
  *  tracer is a no-op (OTel not configured), this is a thin pass-through. */
-export async function withLlmSpan<T>(name: string, attrs: LlmSpanAttrs, fn: () => Promise<T>): Promise<T> {
+export async function withLlmSpan<T>(name: string, attrs: LlmSpanAttrs, fn: () => Promise<T>, spanKind?: OpenInferenceSpanKind): Promise<T> {
   const safe = safeSpanAttributes(attrs);
   // The OTel API tracer is a NO-OP when no SDK provider is registered (OTel not
   // configured) — so this is a thin pass-through off the hot path, never throwing.
   return trace.getTracer('openwop.llm-spans').startActiveSpan(name, async (span: Span) => {
     try {
+      // ADR 0118 Phase 6 — the OpenInference kind is a fixed closed enum (no
+      // content/credential risk), so it's set RAW, alongside (not through) the
+      // allowlisted openwop.* attributes.
+      if (spanKind) span.setAttribute(OPENINFERENCE_SPAN_KIND_KEY, spanKind);
       for (const [k, v] of Object.entries(safe)) span.setAttribute(k, v);
       const r = await fn();
       span.setStatus({ code: SpanStatusCode.OK });

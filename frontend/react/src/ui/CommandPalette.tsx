@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { setNavSource } from '../chrome/navSource.js';
+import { useFocusTrap } from './useFocusTrap.js';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { type IconCmp } from '../chrome/navItems.js';
 import { useResolvedNav } from '../chrome/navConfig/NavConfigProvider.js';
-import { useFeatureVisible, useFeatureBadge } from '../featureToggles/FeatureAccessContext.js';
-import { SearchIcon, PlayIcon, BotIcon, ScaleIcon, DatabaseIcon } from './icons/index.js';
+import { useFeatureVisible, useFeatureBadge, useFeatureLocked } from '../featureToggles/FeatureAccessContext.js';
+import { SearchIcon, PlayIcon, BotIcon, ScaleIcon, DatabaseIcon, LockIcon } from './icons/index.js';
+import { getContributedCommands, subscribeCommandSources } from './commandContributions.js';
+import { GROUP_LABEL_KEYS } from '../chrome/features.js';
 
 /**
  * <CommandPalette> — the app-wide ⌘K / Ctrl+K jump-to-anything (gap #2).
@@ -20,7 +24,11 @@ interface Command {
   hint: string;
   group: string;
   icon: IconCmp;
-  to: string;
+  /** Navigation target — set for nav/action rows; absent for `run` commands. */
+  to?: string;
+  /** In-place action (ADR 0334 3b-3) — contributed by a mounted surface;
+   *  invoked instead of navigating. */
+  run?: () => void;
   /** Toggle id this command belongs to — hidden unless enabled (ADR §3.4). */
   featureId?: string;
 }
@@ -28,20 +36,23 @@ interface Command {
 // Quick actions beyond raw navigation — the verbs an operator reaches for.
 // Labels/hints carry their ui-catalog keys; resolved per render so they
 // follow the active locale (the `group` label is shared across these rows).
-interface ActionSpec { id: string; labelKey: string; hintKey: string; icon: IconCmp; to: string }
+interface ActionSpec { id: string; labelKey: string; hintKey: string; icon: IconCmp; to: string; admin?: boolean }
 const ACTIONS: readonly ActionSpec[] = [
-  { id: 'act-new-run', labelKey: 'cmdkActNewRunLabel', hintKey: 'cmdkActNewRunHint', icon: PlayIcon, to: '/runs' },
+  { id: 'act-new-run', labelKey: 'cmdkActNewRunLabel', hintKey: 'cmdkActNewRunHint', icon: PlayIcon, to: '/runs', admin: true },
   { id: 'act-new-agent', labelKey: 'cmdkActNewAgentLabel', hintKey: 'cmdkActNewAgentHint', icon: BotIcon, to: '/agents/new' },
-  { id: 'act-compare', labelKey: 'cmdkActCompareLabel', hintKey: 'cmdkActCompareHint', icon: ScaleIcon, to: '/compare' },
-  { id: 'act-reseed', labelKey: 'cmdkActReseedLabel', hintKey: 'cmdkActReseedHint', icon: DatabaseIcon, to: '/example-data' },
+  { id: 'act-compare', labelKey: 'cmdkActCompareLabel', hintKey: 'cmdkActCompareHint', icon: ScaleIcon, to: '/compare', admin: true },
+  { id: 'act-reseed', labelKey: 'cmdkActReseedLabel', hintKey: 'cmdkActReseedHint', icon: DatabaseIcon, to: '/example-data', admin: true },
 ];
 
 export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JSX.Element | null {
   const nav = useNavigate();
   const { t } = useTranslation('ui');
+  const { t: tn } = useTranslation('nav');
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
+  // DS-3: aria-modal without a real trap let Tab escape to the page.
+  const trapRef = useFocusTrap<HTMLDivElement>(true);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLUListElement>(null);
 
@@ -78,19 +89,33 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
   // rail hides (ADR §3.4).
   const isVisible = useFeatureVisible();
   const badgeFor = useFeatureBadge();
+  const lockedFor = useFeatureLocked();
   // The palette mirrors the LIVE, resolved menu (ADR 0139): items already
   // reflect the tenant+user layout overrides and are feature-gated, so a hidden
   // or disabled destination is never jump-to-able.
   const { workspace, admin } = useResolvedNav();
+  // `/admin` is always-on and cannot be hidden, so a non-empty resolved admin
+  // projection is the same authority decision used by the rail. Avoid a second
+  // permission predicate drifting from that projection.
+  const canUseAdmin = admin.length > 0;
+  // Live in-place commands contributed by whatever surface is currently mounted
+  // (ADR 0334 3b-3) — e.g. the document editor's "Insert chart / Import Word".
+  // Re-subscribed via useSyncExternalStore so mount/unmount re-renders the list.
+  const contributed = useSyncExternalStore(subscribeCommandSources, getContributedCommands, getContributedCommands);
   const commands = useMemo<Command[]>(() => [
+    ...contributed.map((c) => ({ id: c.id, label: c.label, hint: c.hint, group: c.group, icon: c.icon, run: c.run })),
     ...[...workspace, ...admin].flatMap((g) => g.items.map((it) => ({
-      id: `nav-${it.to}`, label: it.label, hint: it.hint, group: g.label, icon: it.icon, to: it.to,
+      id: `nav-${it.to}`,
+      label: it.labelKey ? tn(it.labelKey, { defaultValue: it.label }) : it.label,
+      hint: it.hintKey ? tn(it.hintKey, { defaultValue: it.hint }) : it.hint,
+      group: g.custom ? g.label : tn(GROUP_LABEL_KEYS[g.id] ?? '', { defaultValue: g.label }),
+      icon: it.icon, to: it.to,
       ...(it.featureId ? { featureId: it.featureId } : {}),
     }))),
-    ...ACTIONS.map((a) => ({
+    ...ACTIONS.filter((a) => !a.admin || canUseAdmin).map((a) => ({
       id: a.id, label: t(a.labelKey), hint: t(a.hintKey), group: t('cmdkActionsGroup'), icon: a.icon, to: a.to,
     })),
-  ], [t, workspace, admin]);
+  ], [t, tn, workspace, admin, contributed, canUseAdmin]);
   const results = useMemo(() => {
     const q = query.trim().toLowerCase();
     const visible = commands.filter((c) => isVisible(c.featureId));
@@ -100,11 +125,16 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
 
   const activate = useCallback((cmd: Command | undefined, keepOpen = false) => {
     if (!cmd) return;
-    // Shift+Enter navigates but leaves the palette open so an operator can
-    // jump again without re-opening it (DS-3); a plain Enter/click closes.
+    // ADR 0419 — a locked (paid-but-unbought) command upsells to the feature store
+    // instead of running (its page/action would 403). False when billing off / entitled.
+    if (cmd.featureId && lockedFor(cmd.featureId)) { close(); nav('/marketplace/bundles'); return; }
+    // An in-place action always closes first (its own UI — a modal/menu — takes
+    // over), then runs. Navigation supports Shift+Enter "keep open" so an
+    // operator can jump again without re-opening (DS-3).
+    if (cmd.run) { close(); cmd.run(); return; }
     if (!keepOpen) close();
-    nav(cmd.to);
-  }, [close, nav]);
+    if (cmd.to) { setNavSource('palette'); nav(cmd.to); }
+  }, [close, nav, lockedFor]);
 
   function onInputKey(e: React.KeyboardEvent) {
     if (e.key === 'Escape') { e.preventDefault(); close(); return; }
@@ -131,6 +161,7 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/click-events-have-key-events */}
       <div
         className="cmdk-panel"
+        ref={trapRef}
         role="dialog"
         aria-modal="true"
         aria-label={t('cmdkLabel')}
@@ -144,6 +175,10 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
             className="cmdk-input"
             placeholder={t('cmdkPlaceholder')}
             aria-label={t('cmdkSearchLabel')}
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="cmdk-listbox"
+            aria-activedescendant={`cmdk-opt-${active}`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={onInputKey}
@@ -155,13 +190,18 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
         {results.length === 0 ? (
           <div className="cmdk-empty">{t('cmdkNoMatches', { query })}</div>
         ) : (
-          <ul className="cmdk-list" ref={listRef} role="listbox" aria-label={t('cmdkListLabel')}>
+          <ul id="cmdk-listbox" className="cmdk-list" ref={listRef} role="listbox" aria-label={t('cmdkListLabel')}>
             {results.map((cmd, idx) => {
               const Icon = cmd.icon;
               const badge = badgeFor(cmd.featureId);
+              const locked = lockedFor(cmd.featureId);
               return (
-                <li key={cmd.id} data-idx={idx} role="option" aria-selected={idx === active}>
+                <li key={cmd.id} role="none">
                   <button
+                    id={`cmdk-opt-${idx}`}
+                    data-idx={idx}
+                    role="option"
+                    aria-selected={idx === active}
                     type="button"
                     className={`cmdk-item${idx === active ? ' is-active' : ''}`}
                     onMouseMove={() => setActive(idx)}
@@ -169,7 +209,8 @@ export function CommandPalette({ openSignal }: { openSignal?: number } = {}): JS
                   >
                     <span className="cmdk-item-icon" aria-hidden><Icon size={15} /></span>
                     <span className="cmdk-item-label">{cmd.label}</span>
-                    {badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
+                    {locked ? <span role="img" className="app-nav-lock" aria-label={t('cmdkLocked')}><LockIcon size={13} /></span>
+                      : badge ? <span className="nav-badge nav-badge--beta">{badge}</span> : null}
                     <span className="cmdk-item-group">{cmd.group}</span>
                   </button>
                 </li>

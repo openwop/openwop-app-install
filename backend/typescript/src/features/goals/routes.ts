@@ -12,7 +12,7 @@
 import type { Request, Response, NextFunction } from 'express';
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { tenantOf } from '../../host/requestSubject.js';
+import { callerSubject, tenantOf } from '../../host/requestSubject.js';
 import {
   listGoals,
   getGoal,
@@ -20,8 +20,18 @@ import {
   updateGoal,
   transitionGoal,
   ensureDemoGoal,
+  bindContributingRun,
+  evaluateGoal,
+  armContinuation,
   BoundsRequiredError,
   JudgeOnlyStateError,
+  GoalNotActiveError,
+  GoalBoundExceededError,
+  VerifierUnavailableError,
+  VerifierFailedError,
+  ConcurrentGoalUpdateError,
+  ContinuationModeError,
+  ScheduleRegistrationError,
   type CreateGoalInput,
 } from './goalsService.js';
 import type { ContinuationMode, GoalBounds, GoalJudge, GoalState } from './types.js';
@@ -56,7 +66,11 @@ function parseCreate(req: Request): CreateGoalInput {
     completion: { check: completion.check as GoalJudge, ...(typeof completion.verifierRef === 'string' ? { verifierRef: completion.verifierRef } : {}) },
     continuation: { mode: continuation.mode as ContinuationMode, ...(typeof continuation.armRef === 'string' ? { armRef: continuation.armRef } : {}) },
     bounds: (body.bounds && typeof body.bounds === 'object' ? (body.bounds as GoalBounds) : undefined),
-    owner: { tenant: tenantOf(req) },
+    // ADR 0412 P5 — principal/workspace ownership: a goal created by an
+    // identified caller is principal-owned (mutations require the same acting
+    // principal; uniform 404 otherwise). The wildcard conformance bearer has
+    // no subject and keeps tenant-only semantics.
+    owner: { tenant: tenantOf(req), ...(callerSubject(req) ? { principal: callerSubject(req) } : {}) },
   };
 }
 
@@ -109,7 +123,7 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
   // conformance driver uses) route here so the state-guard leg is non-vacuous.
   const update = wrap(async (req: Request, res: Response) => {
     try {
-      const g = await updateGoal(tenantOf(req), paramId(req), (req.body ?? {}) as Record<string, unknown>);
+      const g = await updateGoal(tenantOf(req), paramId(req), (req.body ?? {}) as Record<string, unknown>, callerSubject(req));
       if (!g) throw new OpenwopError('not_found', 'Goal not found.', 404);
       res.json(g);
     } catch (err) {
@@ -124,10 +138,104 @@ export function registerGoalsRoutes(deps: RouteDeps): void {
     app.post(
       `/v1/host/openwop-app/goals/:id/${action}`,
       wrap(async (req, res) => {
-        const g = await transitionGoal(tenantOf(req), paramId(req), action);
+        const g = await transitionGoal(tenantOf(req), paramId(req), action, callerSubject(req));
         if (!g) throw new OpenwopError('not_found', 'Goal not found.', 404);
         res.json(g);
       }),
     );
   }
+
+  // ADR 0412 P1 — bind a contributing run (dedup append, CAS).
+  app.post(
+    '/v1/host/openwop-app/goals/:id/runs',
+    wrap(async (req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof body.runId !== 'string' || !ID_PATTERN.test(body.runId)) {
+        throw new OpenwopError('validation_error', 'Field `runId` is required.', 400, { field: 'runId' });
+      }
+      if (body.costUsd !== undefined && (typeof body.costUsd !== 'number' || !Number.isFinite(body.costUsd) || body.costUsd < 0)) {
+        throw new OpenwopError('validation_error', 'Field `costUsd` must be a non-negative number.', 400, { field: 'costUsd' });
+      }
+      try {
+        const g = await bindContributingRun(tenantOf(req), paramId(req), body.runId, body.costUsd as number | undefined, callerSubject(req));
+        if (!g) throw new OpenwopError('not_found', 'Goal not found.', 404);
+        res.json(g);
+      } catch (err) {
+        if (err instanceof ConcurrentGoalUpdateError) throw new OpenwopError('conflict', err.message, 409);
+        throw err;
+      }
+    }),
+  );
+
+  // ADR 0412 P4 — arm `schedule` continuation: ONE deterministic scheduler job
+  // per goal firing the consumer-supplied checkpoint workflow. Pause/resume
+  // toggle it; terminal transitions disarm it.
+  app.post(
+    '/v1/host/openwop-app/goals/:id/arm',
+    wrap(async (req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      for (const field of ['workflowId', 'cronExpr'] as const) {
+        if (typeof body[field] !== 'string' || (body[field] as string).length === 0) {
+          throw new OpenwopError('validation_error', `Field \`${field}\` is required.`, 400, { field });
+        }
+      }
+      if (body.timezone !== undefined && typeof body.timezone !== 'string') {
+        throw new OpenwopError('validation_error', 'Field `timezone` must be a string.', 400, { field: 'timezone' });
+      }
+      try {
+        const g = await armContinuation(
+          tenantOf(req),
+          paramId(req),
+          {
+            workflowId: body.workflowId as string,
+            cronExpr: body.cronExpr as string,
+            ...(typeof body.timezone === 'string' ? { timezone: body.timezone } : {}),
+          },
+          callerSubject(req),
+        );
+        if (!g) throw new OpenwopError('not_found', 'Goal not found.', 404);
+        res.json(g);
+      } catch (err) {
+        if (err instanceof GoalNotActiveError) throw new OpenwopError('conflict', err.message, 409, { state: err.state });
+        if (err instanceof ContinuationModeError) throw new OpenwopError('conflict', err.message, 409, { mode: err.mode });
+        if (err instanceof ScheduleRegistrationError) throw new OpenwopError('validation_error', err.message, 422);
+        if (err instanceof ConcurrentGoalUpdateError) throw new OpenwopError('conflict', err.message, 409);
+        throw err;
+      }
+    }),
+  );
+
+  // ADR 0412 P1 — the judge-write path. The caller supplies ONLY the opaque
+  // immutable evidence snapshot (ref + hash); the verdict is computed server-
+  // side by the registered verifier, preserving `goal-completion-judge-only`
+  // (a request body cannot carry a verdict). Fail-closed: missing verifier →
+  // 409, broken verifier → 502, and neither transitions the goal.
+  app.post(
+    '/v1/host/openwop-app/goals/:id/evaluate',
+    wrap(async (req, res) => {
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      for (const field of ['snapshotRef', 'snapshotHash'] as const) {
+        if (typeof body[field] !== 'string' || (body[field] as string).length === 0) {
+          throw new OpenwopError('validation_error', `Field \`${field}\` is required.`, 400, { field });
+        }
+      }
+      try {
+        const result = await evaluateGoal(
+          tenantOf(req),
+          paramId(req),
+          { snapshotRef: body.snapshotRef as string, snapshotHash: body.snapshotHash as string },
+          callerSubject(req),
+        );
+        if (!result) throw new OpenwopError('not_found', 'Goal not found.', 404);
+        res.json(result);
+      } catch (err) {
+        if (err instanceof GoalNotActiveError) throw new OpenwopError('conflict', err.message, 409, { state: err.state });
+        if (err instanceof GoalBoundExceededError) throw new OpenwopError('conflict', err.message, 409, { breach: err.breach });
+        if (err instanceof VerifierUnavailableError) throw new OpenwopError('conflict', err.message, 409);
+        if (err instanceof VerifierFailedError) throw new OpenwopError('runner_unavailable', err.message, 502);
+        if (err instanceof ConcurrentGoalUpdateError) throw new OpenwopError('conflict', err.message, 409);
+        throw err;
+      }
+    }),
+  );
 }

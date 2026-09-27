@@ -16,9 +16,11 @@
  * value is submitted.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { deleteKey, listStoredRefs, storeKey } from './lib/byokClient.js';
+import { deleteKey, getActiveConfig, listStoredRefs, storeKey } from './lib/byokClient.js';
+import { duplicateKeysNotice } from './lib/duplicateKeysNotice.js';
 import { PROVIDERS, type ProviderConfig } from './lib/providers.js';
 import { AiDefaultCard } from './AiDefaultCard.js';
 import { CompatEndpointsCard } from './CompatEndpointsCard.js';
@@ -38,6 +40,7 @@ import {
 import { KeyFigureBand, type KeyFigureItem } from '../ui/KeyFigure.js';
 import { GlobeIcon, KeyIcon, PlusIcon, RotateCwIcon, TrashIcon } from '../ui/icons/index.js';
 import { CredentialList, type CredentialEntry } from './CredentialViews.js';
+import { SubscriptionCredentialCard } from './SubscriptionCredentialCard.js';
 
 /** The bare credentialRef the host's web-research surface resolves for a
  *  BYOK search key (ADR 0101 Phase 3 — `resolveSecret('web-search')`). NOT a
@@ -62,6 +65,7 @@ export function KeysPage(): JSX.Element {
   const { t } = useTranslation('byok');
   const { embedded } = useHub();
   const [refs, setRefs] = useState<readonly string[] | null>(null);
+  const [refsUnreadable, setRefsUnreadable] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [adding, setAdding] = useState<string | null>(null);
   // Which provider tile is acting as the active filter (null = show all).
@@ -70,7 +74,7 @@ export function KeysPage(): JSX.Element {
   const [pendingDelete, setPendingDelete] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   // Most-recently-stored masked view, keyed by credentialRef. The BE's
-  // POST /v1/host/openwop-app/byok/secrets returns `{ credentialRef, masked }`
+  // POST /host/openwop-app/byok/secrets returns `{ credentialRef, masked }`
   // but the LIST endpoint only returns refs. Persisting the masked
   // value in component state lets the user visually confirm "this is
   // the sk-ant-...e4f7 I just added" until they reload the page.
@@ -79,13 +83,29 @@ export function KeysPage(): JSX.Element {
   // default "list" view; Grid renders each provider's keys as cards alongside.
   const [viewMode, setViewMode] = useViewMode('keys', 'list');
 
+  // ADR 0517 open question 1 — which ref is the chat actually BOUND to? Without
+  // it the page can count keys but cannot say which of them matters, and
+  // "you have 7 Google keys" with no indication of which is live is an
+  // invitation to delete the wrong one. `null` = no binding; `'unknown'` = we
+  // could not read it, which must NOT be rendered as "none are in use".
+  const [activeRef, setActiveRef] = useState<string | null | 'unknown'>('unknown');
+
   const refresh = useCallback(async () => {
+    // Read the binding alongside the refs. A failure here is isolated: the key
+    // list is still worth showing, we just decline to claim which one is live.
+    void getActiveConfig()
+      .then((env) => setActiveRef(env.config?.credentialRef ?? null))
+      .catch(() => setActiveRef('unknown'));
     try {
       setError(null);
       const list = await listStoredRefs();
+      setRefsUnreadable(false);
       setRefs(list);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
+      // The page-level error is shown, but the voice card gets the empty array
+      // too — flag it so it does not read that as "your configured key is gone".
+      setRefsUnreadable(true);
       setRefs([]);
     }
   }, []);
@@ -179,7 +199,7 @@ export function KeysPage(): JSX.Element {
   }
 
   return (
-    <section>
+    <section data-walkthrough="keys.page">
       {embedded ? null : (
         <PageHeader
           eyebrow={t('settingsEyebrow')}
@@ -192,9 +212,9 @@ export function KeysPage(): JSX.Element {
         {!loading && totalKeys > 0 ? (
           <ViewToggle value={viewMode} onChange={setViewMode} labels={{ list: t('keysViewTable') }} />
         ) : null}
-        <button className="secondary" onClick={() => { void refresh(); }}>
+        <Button variant="secondary" onClick={() => { void refresh(); }}>
           <span className="u-iflex u-gap-1"><RotateCwIcon size={14} aria-hidden /> {t('common:refresh')}</span>
-        </button>
+        </Button>
       </div>
 
       {error && <Notice variant="error">{error}</Notice>}
@@ -215,23 +235,28 @@ export function KeysPage(): JSX.Element {
           </div>
         )}
 
-        {/* Whole-page zero-key state — a fresh tenant lands on one CTA. */}
-        {!loading && totalKeys === 0 && (
+        {/* Whole-page zero-key state — a fresh tenant lands on one CTA. Hidden
+            once the CTA is clicked: the provider sections below then render the
+            add form (previously `adding` mounted nothing at zero keys — the
+            "Add your first key" button was a visible no-op). */}
+        {!loading && totalKeys === 0 && adding === null && (
           <div className="surface-card">
             <StateCard
               icon={<KeyIcon size={28} />}
               title={t('noKeysTitle')}
               body={t('noKeysBody')}
               action={
-                <button onClick={() => setAdding(byokProviders[0]?.id ?? null)}>
+                <Button variant="primary" onClick={() => setAdding(byokProviders[0]?.id ?? null)}>
                   <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addFirstKey')}</span>
-                </button>
+                </Button>
               }
             />
           </div>
         )}
 
-        {!loading && totalKeys > 0 && visibleProviders.map((p) => {
+        {!loading && (totalKeys > 0 || adding !== null) && visibleProviders
+          .filter((p) => totalKeys > 0 || adding === p.id)
+          .map((p) => {
           const list = grouped.get(p.id) ?? [];
           const isAdding = adding === p.id;
           return (
@@ -242,6 +267,15 @@ export function KeysPage(): JSX.Element {
                     <KeyIcon size={13} aria-hidden /> {p.label}
                   </span>
                   <span className="muted">{t('keyCount', { count: list.length })}</span>
+                  {/* ADR 0101 Phase 4 — a provider whose native search is licensed
+                      only for display can't back features that SAVE sources as
+                      evidence. Shown here so the constraint is visible when
+                      choosing a provider, not when a run refuses. */}
+                  {p.searchSuitability === 'answer-only' && (
+                    <span className="chip chip--muted" title={t('searchAnswerOnlyHint')}>
+                      <span className="u-iflex u-gap-1"><GlobeIcon size={13} aria-hidden /> {t('searchAnswerOnly')}</span>
+                    </span>
+                  )}
                 </div>
                 {!isAdding && (
                   <IconButton
@@ -252,6 +286,16 @@ export function KeysPage(): JSX.Element {
                   />
                 )}
               </div>
+
+              {/* ADR 0517 open question 1 — a provider with more than one stored key.
+                * The reported workspace had SEVEN Google keys and no way to tell
+                * which was live, so cleanup was undiscoverable and risky. Naming the
+                * active one makes removing the rest obviously safe; when we could not
+                * read the binding we say so rather than guessing. */}
+              {(() => {
+                const notice = duplicateKeysNotice(list.map((e) => e.ref), activeRef, p.label);
+                return notice ? <Notice variant="info">{t(notice.key, notice.params)}</Notice> : null;
+              })()}
 
               {isAdding && (
                 <AddKeyForm
@@ -277,9 +321,9 @@ export function KeysPage(): JSX.Element {
                     title={t('noProviderKeysTitle', { provider: p.label })}
                     body={t('noProviderKeysBody')}
                     {...(isAdding ? {} : { action: (
-                      <button onClick={() => setAdding(p.id)}>
+                      <Button variant="primary" onClick={() => setAdding(p.id)}>
                         <span className="u-iflex u-gap-1"><PlusIcon size={15} aria-hidden /> {t('addAKey')}</span>
-                      </button>
+                      </Button>
                     ) })}
                   />
                 }
@@ -293,6 +337,11 @@ export function KeysPage(): JSX.Element {
         {!loading && (
           <WebSearchKeyCard configured={webSearchConfigured} onChanged={refresh} />
         )}
+
+        {/* RFC 0121 AT-OWN-RISK subscription credential (ADR 0180). Self-hides
+            when the host does NOT advertise the `subscription` mode (dark by
+            default). Gated behind a mandatory risk acknowledgement. */}
+        <SubscriptionCredentialCard />
 
         {/* Legacy refs (no `<provider>:` prefix) — surfaced separately
             so the user can clean them up. */}
@@ -323,7 +372,7 @@ export function KeysPage(): JSX.Element {
           inside the hub they render there, not buried in the Keys tab. */}
       {embedded ? null : (
         <div className="u-mt-4">
-          <RealtimeVoiceSettings storedRefs={refs ?? []} />
+          <RealtimeVoiceSettings storedRefs={refs ?? []} refsUnreadable={refsUnreadable} />
         </div>
       )}
 
@@ -335,12 +384,12 @@ export function KeysPage(): JSX.Element {
             {t('deleteThisKeyBodyAfter')}
           </p>
           <div className="action-bar u-justify-end">
-            <button className="secondary" onClick={() => setPendingDelete(null)} disabled={deleting}>
+            <Button variant="secondary" onClick={() => setPendingDelete(null)} disabled={deleting}>
               {t('common:cancel')}
-            </button>
-            <button className="secondary u-text-danger" onClick={() => { void confirmDelete(); }} disabled={deleting}>
+            </Button>
+            <Button variant="danger" onClick={() => { void confirmDelete(); }} disabled={deleting}>
               {deleting ? t('deleting') : t('deleteKeyModalLabel')}
-            </button>
+            </Button>
           </div>
         </Modal>
       )}
@@ -380,9 +429,9 @@ export function WebSearchKeyCard({ configured, onChanged }: { configured: boolea
           {configured && <span className="muted">{t('webSearch.configured')}</span>}
         </div>
         {configured && !editing && (
-          <button className="secondary" onClick={() => { void remove(); }} disabled={busy}>
+          <Button variant="secondary" onClick={() => { void remove(); }} disabled={busy}>
             <span className="u-iflex u-gap-1"><TrashIcon size={14} aria-hidden /> {t('common:remove')}</span>
-          </button>
+          </Button>
         )}
       </div>
       <p className="muted">{t('webSearch.body')}</p>
@@ -397,8 +446,8 @@ export function WebSearchKeyCard({ configured, onChanged }: { configured: boolea
             autoComplete="off"
           />
           <div className="u-flex u-gap-2 u-justify-end">
-            {configured && <button className="secondary" onClick={() => { setEditing(false); setValue(''); }} disabled={busy}>{t('common:cancel')}</button>}
-            <button onClick={() => { void save(); }} disabled={busy || !value.trim()}>{busy ? t('common:saving') : t('common:save')}</button>
+            {configured && <Button variant="secondary" onClick={() => { setEditing(false); setValue(''); }} disabled={busy}>{t('common:cancel')}</Button>}
+            <Button variant="primary" onClick={() => { void save(); }} disabled={busy || !value.trim()}>{busy ? t('common:saving') : t('common:save')}</Button>
           </div>
         </div>
       )}
@@ -504,10 +553,10 @@ function AddKeyForm({
         )}
       </div>
       <div className="u-flex u-gap-2 u-justify-end">
-        <button className="secondary" onClick={onCancel} disabled={saving}>{t('common:cancel')}</button>
-        <button onClick={() => { void onSubmit(); }} disabled={saving}>
+        <Button variant="secondary" onClick={onCancel} disabled={saving}>{t('common:cancel')}</Button>
+        <Button variant="primary" onClick={() => { void onSubmit(); }} disabled={saving}>
           {saving ? t('common:saving') : t('saveKey')}
-        </button>
+        </Button>
       </div>
     </div>
   );

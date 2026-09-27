@@ -1,7 +1,7 @@
 {
   "name": "core.openwop.agents.research-crew",
   "version": "1.0.0",
-  "description": "Multi-agent research crew. 4 specialists — planner / retriever / critic / writer — bundled into one pack for dispatch via RFC 0006 orchestrator. Mirrors CrewAI's sequential/hierarchical crew templates.",
+  "description": "Multi-agent research crew. 4 specialists — planner / retriever / critic / writer — bundled into one pack for dispatch via orchestrator. Mirrors CrewAI's sequential/hierarchical crew templates.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.agents.research-crew",
@@ -33,7 +33,7 @@
       "toolAllowlist": [],
       "memoryShape": {
         "scratchpad": true,
-        "conversation": true,
+        "conversation": false,
         "longTerm": false
       },
       "handoff": {
@@ -60,7 +60,7 @@
       "memoryShape": {
         "scratchpad": true,
         "conversation": false,
-        "longTerm": true
+        "longTerm": false
       },
       "handoff": {
         "taskSchemaRef": "schemas/retriever.task.schema.json",

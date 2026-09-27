@@ -1,0 +1,32 @@
+{
+  "name": "feature.destination-sync.nodes",
+  "version": "1.0.0",
+  "kind": "nodes",
+  "description": "Destination Sync (CDP-D) — the `prepare` verb over ctx.features['destination-sync']: CDC-filter a record set against the sync's watermark and field-map each into destination payloads (advancing the cursor), so a downstream core.openwop.http.fetch (fanned out per payload) does the SSRF-guarded egress. No bespoke sender — egress rides the existing http node (ruling #3).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.destination-sync.nodes.prepare",
+      "version": "1.0.0",
+      "role": "read",
+      "label": "Destination Sync Prepare",
+      "description": "CDC-filter + field-map a record set for a configured destination sync; outputs { payloads, count, nextCursor? } for a downstream core.openwop.http.fetch (per-payload fan-out) to egress. Advances the sync watermark so a re-run sends only changed records. Inputs: { syncId, records }."
+    },
+    {
+      "typeId": "feature.destination-sync.nodes.prepare-onward",
+      "version": "1.0.0",
+      "role": "read",
+      "label": "Destination Sync Prepare Onward (OpenWOP host)",
+      "description": "ADR 0289 / RFC 0128 G4 — for an 'openwop-host' sync, build the onward OpenWOP envelopes carrying the re-emitted permittedPurposes label (⊆ received, never-widen, []-drop) and flatten envelopes[0] onto { onwardBody, peerIngestUrl } so a single downstream core.openwop.http.fetch POSTs it to the peer's trigger-bridge ingest. Outputs { envelopes, onwardBody, peerIngestUrl, count, dropped, nextCursor?, connectionId? }. Flag-gated: honest-off when purpose propagation is disabled. Inputs: { syncId, records }."
+    },
+    {
+      "typeId": "feature.destination-sync.nodes.warehouse-load",
+      "version": "1.0.0",
+      "role": "action",
+      "label": "Destination Sync Warehouse Load (reverse-ETL BigQuery)",
+      "description": "ADR 0292 / CDP-D §6 — for a 'warehouse' sync, run the GOVERNED reverse-ETL BigQuery tabledata.insertAll over ctx.features['destination-sync'].warehouseLoad. Gated by actionPolicyOf('warehouse.load') (default approval-required, fail-closed): disabled → refuse; draft-only → dry-run the rows that WOULD load (loaded:0); approval-required/unset → mint-or-consult a warehouse-load approval and insert ONLY when approved. Deterministic per-row insertId dedups a replay/:fork. Surfaces the gate verdict as the node status (loaded | requires_approval | draft_run | disabled | no_connection | failed). Outputs carry counts + per-row failure reasons — NEVER row bodies (subject data) or credentials. Inputs: { syncId, records }."
+    }
+  ]
+}

@@ -204,7 +204,11 @@ export async function adsImageGenerate(ctx) {
       if (!img || typeof img !== 'object') continue;
       allImages.push({
         url: typeof img.url === 'string' ? img.url : undefined,
-        base64: typeof img.base64 === 'string' ? img.base64 : undefined,
+        // ADR 0083 §Amendment — emit `contentBase64` (not `base64`) so the host
+        // run-artifact producer mints each ad image as a real media: asset (or a
+        // file link from `url`), landing them in the Library. Matches the live
+        // `core.openwop.ai.image-generate` convention (single output convention).
+        contentBase64: typeof img.base64 === 'string' ? img.base64 : undefined,
         mimeType: typeof img.mimeType === 'string' ? img.mimeType : 'image/png',
         width: Number.isFinite(Number(img.width)) ? Number(img.width) : dimensions.width,
         height: Number.isFinite(Number(img.height)) ? Number(img.height) : dimensions.height,
@@ -240,7 +244,9 @@ export async function adsImageGenerate(ctx) {
   return {
     status: 'success',
     outputs: {
-      assets: allImages,
+      // `images:[{contentBase64|url}]` — the host media-output convention the
+      // run-artifact producer recognizes (ADR 0083 §Amendment). Was `assets`.
+      images: allImages,
       totalGenerated: allImages.length,
       filteredCount: totalFilteredCount,
       perPromptStats,
@@ -253,7 +259,7 @@ export async function adsImageGenerate(ctx) {
   };
 }
 
-const nodes = {
+export const nodes = {
   'ads.image.generate': adsImageGenerate,
 };
 

@@ -1,13 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://openwop.dev/packs/feature.workflow-author.nodes/persist.output.schema.json",
+  "$id": "https://packs.openwop.dev/feature.workflow-author.nodes/1.0.4/persist.output.schema.json",
   "title": "Workflow Author Persist Output",
   "type": "object",
   "required": ["workflowId"],
   "properties": {
     "workflowId": { "type": "string", "description": "The registered workflowId, now resolvable by POST /v1/runs and the builder." },
     "nodeCount": { "type": "integer" },
-    "definition": { "type": "object", "description": "The persisted WorkflowDefinition." }
+    "definition": { "type": "object", "description": "The persisted WorkflowDefinition." },
+    "preservedFields": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["inputs", "variables", "configurableSchema", "settings", "compensation"] },
+      "description": "ADR 0524 §5 — fields the submitted definition omitted ENTIRELY that the host KEPT from the existing workflow rather than deleting (this pack's response schema cannot express them, so an omission is not a deletion). Absent when the save was lossless. To genuinely delete one, name it in the persist tool's `clearFields`."
+    }
   },
   "additionalProperties": false
 }

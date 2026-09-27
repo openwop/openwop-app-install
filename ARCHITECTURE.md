@@ -23,6 +23,12 @@ schedule, integration, public route, or admin surface:
   `MUST`, that belongs in the upstream OpenWOP RFC/spec process before or with
   the host implementation. Host-local product APIs live under
   `/v1/host/openwop-app/*` and remain non-normative.
+- **Never hard-code a workflow.** A workflow ships as a **chain** (nodes + edges,
+  an RFC 0013 workflow-chain pack, built-loader-loaded → builder-editable +
+  `/`-runnable) or as a **stack** (todos on a kanban board, ADR 0311; a chain can
+  be stacked as a card). Do not register an in-tree `builtinWorkflows` module (the
+  deprecated ADR 0072 pattern) — it is invisible to the builder + `/` and not
+  editable. See "Agents, workflows, and schedules" below.
 - **Use the feature-package seam.** Product features live under
   `backend/typescript/src/features/<id>/` and
   `frontend/react/src/features/<id>/`, then append to the backend and frontend
@@ -62,6 +68,15 @@ schedule, integration, public route, or admin surface:
   not add private one-off databases, queues, vector stores, credential stores,
   search adapters, or background dispatch loops unless the architecture first
   records why the existing seam cannot carry the requirement.
+- **Ground every model exchange.** Any schema/catalog/enum text that reaches a
+  model must be either generated at call time from its single source of truth
+  or test-pinned to it (a parity tripwire); every AI-authoring path needs a
+  declared output contract, a typed failure (never success-with-empty), and —
+  where the model can act on errors — one bounded error-fed repair. Pick the
+  right lane (see "AI information-exchange architecture" below): provider-native
+  tools for chat turns, RFC 0021 envelopes for in-run structured intents, MCP
+  for external integrations. Tracked in `docs/steward/LLM-EXCHANGE-AUDIT.md` at the repo
+  root — a new model-facing surface should land with its row and tripwire.
 - **Record non-trivial decisions.** New architecture, cross-cutting seams,
   auth/RBAC/BYOK/replay behavior, public unauthenticated surfaces, workflow
   surfaces, connector behavior, and anything touching the wire need an ADR under
@@ -114,6 +129,8 @@ New work should normally enter through one of these seams:
 | Workflow-visible feature API | `ctx.features.<id>` via `backend/typescript/src/host/featureSurfaces.ts` |
 | Workflow execution | `backend/typescript/src/executor/` and `workflowCatalog` |
 | Agent templates and installed pack agents | `AgentRegistry`, pack `agents[]`, and agent routes |
+| Money obligation to a third party (shares, commissions, bounties) | `host/obligationLedger.ts` — accrual/reversal rows + evidence-gated payout runs (ADR 0447); adapters convert to integer minor units; the host never moves money |
+| Capability token (bearer secret or public link) | LINK-shaped ⇒ a `sharing` resolver (ADR 0013); BEARER-shaped ⇒ a feature store on `host/capabilityToken.ts` (hash at rest, tenant in content, uniform 404). Hand-rolled `createHash` token stores trip `test/capability-token-tripwire.test.ts` (ADR 0448) |
 | Standing agent instances / named coworkers | `rosterService`, agent workspace routes, heartbeat daemon |
 | Agent config + capability activation | `agentProfile` host-ext (`/v1/host/openwop-app/agents/:id/profile`) + `AgentProfile.capabilities` (ADR 0031) |
 | New third-party provider | RFC 0095 connection pack under `examples/connection-packs/<id>/pack.json` (ADR 0033) — no code |
@@ -121,11 +138,23 @@ New work should normally enter through one of these seams:
 | Human approvals | approval service/routes and interrupt/approval-gate primitives |
 | Credentials and third-party app auth | BYOK secret resolver + Connections broker |
 | Durable feature data | `Storage`, `DurableCollection`, or the owning feature service |
+| Subject-bearing durable data (any store recording a data-subject identifier) | `registerSubjectEraser` at the owning host/feature module (ADR 0077/0381) — delete or anonymize, the owner's choice — OR the documented exemption allowlist with a lawful-retention/technical justification (there is no third state, ADR 0464 §2.1). Host stores are enumerated + enforced by `test/subject-erasure-coverage.test.ts`: a new subject-bearing `DurableCollection` in `src/host/**` fails the build until it is covered or exempted |
+| React when ANOTHER feature's record is deleted / credential revoked (clean up or disable your soft references) | the keyed-registry lifecycle seams — `commerce/productLifecycleSeam.ts` (`onProductDeleted`, #1337), `host/crmRecordLifecycle.ts` (`onCrmRecordDeleted`, ADR 0283), `host/connectionLifecycle.ts` (`onConnectionRevoked`, ADR 0285), `host/rosterLifecycle.ts` (`onRosterMemberDeleted`, ADR 0288), `host/conversationLifecycle.ts` (`onConversationDeleted`, ADR 0288), `host/mediaAssetLifecycle.ts` (`onMediaAssetDeleted`, DATB-1). Same contract: keyed registration (repeat boots overwrite), idempotent bounded handlers, best-effort fan-out fired AFTER the owning row is gone. Disposition taxonomy (ADR 0288): PRUNE dead refs/live membership, DISABLE (never delete) authored configs, TOLERATE ON READ historical provenance |
 | Org-scoping a Subject's work surface (board visibility) | `host/subjectOrgScope.ts` (`setSubjectOrgResolver` / `resolveSubjectOrg`) — the owning feature derives the org from the `ownerSubject` (ADR 0046) |
 | Member/visibility-scoping a Subject's surfaces (resolve a caller's read/write level) | `host/subjectAccess.ts` (`setSubjectAccessResolver` / `resolveSubjectAccess` → `'none'\|'read'\|'write'`) — the owning feature composes org authority with the subject's visibility + members; WRITE stays org-scoped, READ gains a membership dimension (ADR 0054 D5). Orthogonal to `subjectOrgScope` (org-derivation). |
-| Resolve a cross-cutting decision **once per run** and replay it verbatim (e.g. tool-output-compaction mode) | _implemented, ADR 0099_ — `host/runStartContext.ts` (`registerRunStartContributor`), applied where runs are created (`runDispatch.ts`/`runStarter.ts`): a contributor resolves once at creation and freezes into `run.metadata`, read verbatim on `:fork`. Generalizes the `trustBoundary` read-side precedent to a write-side resolver, for features that own no run-creation route. |
-| Transform tool output at the typed tool-result boundary (e.g. compaction) without editing core | _implemented, ADR 0099_ — `host/toolResultTransform.ts` (`registerToolResultTransform`), applied by the tool-result **builder** — the `agentDispatch` host-driven loop (`agentDispatch.ts:832`) and the workflow tool-loop node's `onToolUse` return (`bootstrap/nodes.ts:1726`), where a string is first known to be tool output and about to enter the model context. The provider dispatchers (`dispatchAnthropicWithTools`/`dispatchMiniMaxWithTools`) **relay** the builder's already-compacted `content` verbatim into the wire `tool_result` — they do **not** transform it (that would double-compact). Covers chat + pack-nodes + manifest dispatch with no `'tool'` message role needed (the AI-adapter message array is type-blind: `AiCallMessage.role` = `user\|assistant\|system`). Relay pinned by `tool-output-compaction-relay.test.ts`. |
+| Resolve a cross-cutting decision **once per run** and replay it verbatim (e.g. tool-output-compaction mode) | _implemented, ADR 0099_ — `host/runStartContext.ts` (`registerRunStartContributor`), applied by the ONE run-insert seam `host/runInsert.ts` `insertRunWithStartContext(...)`: a contributor resolves once at creation and freezes into `run.metadata`, read verbatim on `:fork`. *(CORRECTED 2026-08-23, feature-30 closeout — `TOCC-12` (iii), the one leg of that finding ADR 0604 did NOT sweep. This row said the contributors are "applied where runs are created (`runDispatch.ts`/`runStarter.ts`)" and **`runDispatch.ts` contains ZERO `insertRun` / `stampRunStartContext` calls** — it owns `buildRunRecord` + `RESERVED_RUN_METADATA_KEYS`, not the insert. `runStarter.ts:123` is one of ~20 callers of the real seam, not a co-owner. Re-derived at closeout: `Storage` declares exactly ONE run-row writer (`storage.ts:138 insertRun`), 20 files call it, and **four bypass this seam deliberately** — `host/workforceEval.ts`, `host/anonymousActor.ts`, `routes/anonSurfaceSeam.ts`, `routes/testSeam.ts` — so a run created on those lanes carries no frozen decision at all (tracker `TOCC-11`, open). ADR 0604 §4 records this citation family as corrected; it corrected two of the three legs.)* **Two writers COPY another run's metadata** (`routes/runs.ts` `:fork`, `routes/workflowDebug.ts` redrive) and both MUST pass `derivedFromRun: true` so a contributor treats the copied blob as authoritative in BOTH directions — present AND absent (ADR 0604 §D1; ratchet `test/run-metadata-copy-sites.test.ts`). Generalizes the `trustBoundary` read-side precedent to a write-side resolver, for features that own no run-creation route. |
+| Transform tool output at the typed tool-result boundary (e.g. compaction) without editing core | _implemented, ADR 0099_ — `host/toolResultTransform.ts` (`registerToolResultTransform`), applied by the tool-result **builder** — the `agentDispatch` host-driven loop (`agentDispatch.ts:1252`) and the workflow tool-loop node's `onToolUse` return (`bootstrap/nodes.ts:2024`), where a string is first known to be tool output and about to enter the model context. *(Both citations CORRECTED 2026-08-23, ADR 0604/TOCC-12: `agentDispatch.ts:832` was a BLANK line at the assessed ref — the nearest compaction text was a comment at `:833` and the real call site `:1252`. Citation rot has now been the finding on three consecutive features; a `file:line` in this table is a claim, and stale ones send readers to unrelated code with full confidence.)* The provider dispatchers (`dispatchAnthropicWithTools`/`dispatchMiniMaxWithTools`) **relay** the builder's already-compacted `content` verbatim into the wire `tool_result` — they do **not** transform it (that would double-compact). Covers pack-nodes + manifest dispatch + — since ADR 0604 — the interactive `/` chat, with no `'tool'` message role needed. *(CORRECTED 2026-08-23, TOCC-1: "Covers chat" was FALSE for the whole life of the feature. `conversationToolLoop.ts` passed fifteen keys into `runChatToolLoop` and `compaction` was not one of them, so the transform short-circuited on every chat turn. The claim was made here, in `FEATURES.md` and in ADR 0099, which had conflated the `bootstrap/nodes.ts` heartbeat node — whose tool names are regex-validated to exclude `:` and `.`, so no `openwop:*` id can reach it — with the `/` chat. The lane is now wired and ratcheted by `test/tool-result-compaction-callers.test.ts`.)* (the AI-adapter message array is type-blind: `AiCallMessage.role` = `user\|assistant\|system`). Relay pinned by `tool-output-compaction-relay.test.ts`. |
+| Work that OUTLIVES the thing that started it (a fire-and-forget refresh, a module-scope in-flight promise latch, a React effect's async continuation) | There is no single owner, and that is the point of this row: pick the form that matches the runtime. **Backend** — a module-scope `let x: Promise<T> \| null` latch MUST be able to recover from a stuck attempt: clear it on settle (`.catch`/`.finally` → `x = null`) AND, if the work is ever fire-and-forget, add a TIME BOUND. Cloud Run sets `cpu-throttling=true`, so once a response is flushed the instance is throttled (DEPLOY.md quantifies it as ~5% CPU) and a detached continuation may not resume for a long time — MEASURED at 16+ minutes in #3056, with active traffic throughout, i.e. effectively never for any purpose that matters. A promise that has not settled has not rejected either, so clear-on-settle alone does not cover it. That combination is the #3056 outage (`/` served a pruned bundle 16+ min; ten requests served, ZERO fetch failures logged). Prefer finishing the work IN-REQUEST (`await` it, bounded) — that is the only place CPU is guaranteed. Enforced by `test/detached-latch-tripwire.test.ts`. **Frontend** — a `.then` that calls setState must be guarded by a mounted ref RE-ARMED INSIDE the effect, never cleanup-only (StrictMode mounts → cleans up → remounts, so a cleanup-only ref is already false when the component is live — the ADR 0517 Phase E trap). Reference: `memory/MemoryBrowser.tsx`. NOTE this is a TEST-INTEGRITY concern, not a production one: React 18 makes a late setState a no-op, but jsdom teardown turns it into an unhandled rejection that fails the whole suite while every test reports green (`src/test/unhandled-rejection-attribution.ts` names the test) |
+| Perform an EXTERNAL EFFECT from inside a run (outbound network, a user-visible notification, an email) | call `assertEffectAllowed(kind)` from the seam that performs it (`host/runEffectContext.ts`, ADR 0531) — the executor establishes a run-scoped `AsyncLocalStorage` context around every node execution, and the guard fails a replay CLOSED (`replay_source_missing`) so a fork cannot fire the effect a second time. This is the BACKSTOP; the ADR 0341 typeId classifier (`executor/sideEffects.ts`) is the fast path that serves the recorded outcome instead — a backstop firing means a node is MISSING from that classifier. A new effect seam adds a member to `EffectKind` **and** a behavioral test in `test/run-effect-context.test.ts`. Effects already idempotent by deterministic key (e.g. `obligationLedger.accrue`) are deliberately NOT guarded — keying is stronger than fail-closed |
 | Host capabilities for pack nodes | host-surface registry and selected surface adapters |
+| Decide whether a pack's CODE may execute at all (node packs, agent packs) | `host/packTrust.ts` (ADR 0555 P0) is the SOLE authority — `classifyPackDir()` returns a `PackTrustTier` (`steward` / `operator-trusted` / `untrusted` / `revoked`) plus the `dispatchable` decision, and `packs/tarballLoader.ts` + `packs/agentLoader.ts` CALL it rather than deriving a tier themselves. `steward` is attested by the committed `packs/.steward-manifest.json` (`scripts/gen-steward-manifest.mjs --check` gates it in `scripts/ci.sh`), NEVER by "the pack was in the packs dir" — two env vars steer the dev mount, so a mount-derived tier would let configuration redefine the trusted corpus. Revocation has TWO sources (`host/packRevocations.ts` durable rows + the ADR 0367 pinned keyring's `OPENWOP_TRUSTED_PACK_REVOCATIONS`) and `packTrust` is the only reader of either. The gate refuses the dynamic **import**, not just `execute` — `await import(url)` runs a module's top level, so "load but don't dispatch" is not a boundary for ES modules. Policy is default-ON with no deployment posture; `OPENWOP_PACK_TRUST_ALLOW_UNSIGNED` relaxes dispatch WITHOUT reclassifying and can never un-revoke. Test fixtures attest via `test/setup/attestPackFixture.ts`, never by disabling the policy |
+| Run a pack's code OUT of the host's trust domain (isolation) | `host/packIsolationPolicy.ts` decides PLACEMENT (`OPENWOP_PACK_ISOLATION` = `untrusted` default / `off` / `all` / `fake`) and `host/packIsolationDispatch.ts` selects the ADAPTER (`OPENWOP_PACK_ISOLATION_ADAPTER` = `child` default / `fake`). ONE seam: `IsolationAdapter` (`host/isolationAdapter.ts`) — a new adapter implements `{id, guarantees, dispatch}` and inherits every guard, because capability, authority, replay and trust live HOST-side on the dispatch record (`packDispatchRegistry.ts`) and every effect returns through `packHostCallBroker.ts`, which is the only place `runWithEffectContext` + `runWithAuthority` are re-established across the process boundary (ADR 0531 / ADR 0556 P3 — AsyncLocalStorage does NOT cross it). An adapter declares `guarantees` as an EXHAUSTIVE `Record<IsolationGuarantee,'enforced'|'not-enforced'>` (`host/isolationGuarantees.ts`); a tier requiring more than the adapter enforces is REFUSED (`pack_isolation_guarantee_unmet`), never downgraded and never run in-process. `network-denied` is `not-enforced` by every adapter on this platform and the escape suite asserts egress still works — do NOT flip it without containing egress in the same commit. Do not add a second sandbox concept: the ADR 0114/0146 `sandboxAdapter.ts` family is a DIFFERENT contract (a source STRING evaluated remotely), not this one (ADR 0555 P1/P2) |
+| Give a chat agent a READ/catalog tool (app state or schemas at turn time) | `registerFeatureAgentTool` (`host/agentToolProvider.ts`, ADR 0308) from the feature's `agentTools.ts` — read-only tools MUST reuse the HTTP route's access predicate via a SHARED helper (e.g. `buildOwnedTaskDeck`, `searchVisibleConversations`) so route and tool cannot drift, and fail EMPTY without `scope.actingUserId`. New tools are allowlisted per agent pack, NOT added to the ADR 0315 default-on baseline (that is its own ADR-level decision) |
+| Feed a pack node's prompt a live catalog instead of a hand-copy | a feature-surface `getCatalog` op (the ADR 0358 pattern: `features/app-builder/surface.ts`, `features/slides/surface.ts`) read via `ctx.features.<id>` with a test-pinned literal fallback for foreign hosts; per-canvas component menus come from `host/canvasComponentCatalog.ts` (`catalogPromptSchema`) |
+| Closed-world validation a pack node can call (and repair against) | a feature-surface `validate` op wrapping the feature's ONE validator (`validateAppDoc`, `validateSlidesDoc`, `wa.validateDraft`) — the node feeds the errors back for one bounded repair before failing typed |
+| Let ANY agent ask "what schemas exist?" at turn time | `openwop:schema.lookup` builtin (`host/agentToolProvider.ts`) — node typeIds, canvas component catalogs, artifact types; its output is compaction-exempt (`SCHEMA_READ_EXEMPT_TOOLS`, `host/toolResultTransform.ts`) |
+| In-run structured intent from the model (RFC 0021) | the envelope acceptor (`host/envelopeAcceptor.ts`) + the live `schema.request` loop in `host/agentDispatch.ts` `runChatToolLoop` (payload `{ envelopeType }`, answered out-of-band, capped at the advertised `schemaRounds`); a new envelope KIND is wire → OpenWOP RFC first |
+| Pin a prompt's hand-carried vocabulary to its SSoT | a `promptCatalogParity.test.ts` in the owning feature's `__tests__/` (readFileSync the pack prompt; the `catalogParity.test.ts` precedent — inverted tripwires for tool-first prompts), plus the repo-wide phantom-tool-id lint `test/agent-prompt-tool-ids.test.ts` |
 | Public content | CMS, Media, Publishing, Sharing, Forms, Consent, and Analytics public-route patterns |
 | Governance / policy / audit | governance service and `storage.listAudit` |
 
@@ -150,10 +179,44 @@ not feature-local inventions.
   the Executive Operations twin are both just agents with the `assistant`
   capability activated; there is no "Iris's graph," only the tenant work-graph any
   capability-activated agent operates on (ADR 0023 §Correction, ADR 0031).
-- **Workflows** must be workflow definitions executed by the shared executor.
-  A feature may provide workflow templates, node packs, feature workflow
-  surfaces, or UI to author workflows, but it should not create a separate
-  workflow engine or alternate run lifecycle.
+- **Workflows are NEVER hard-coded.** A workflow is one of exactly two shapes,
+  both executed by the ONE shared executor:
+  - a **chain** — a graph of **nodes and edges**, authored and shipped as an
+    RFC 0013 / ADR 0163 **workflow-chain pack** (`kind:"workflow-chain"`) and
+    loaded through the built chain loader (`host/workflowChainPackLoader.ts`). A
+    chain surfaces in the builder's template gallery + the `/` picker, and
+    instantiates into a tenant-owned, **builder-editable** workflow via
+    `POST …/workflows/from-chain` (`expandChain` → `registerWorkflow` →
+    `recordOwnership`). Its nodes come from node packs, so it is inspectable and
+    editable end-to-end. **A chain can hold a sub-chain — workflows can hold
+    workflows** (composition/nesting is first-class): a chain node may reference
+    another chain, co-expanded and co-registered on instantiation. (Today's pack
+    format does not yet express nesting or a run-produced variable bag; those are
+    additive RFC 0013 extensions — see below — NOT reasons to hard-code.)
+  - a **stack** — an ordered set of **todos on a kanban board** (the ADR 0311
+    work-intake pattern). A **chain can be *stacked*** — enqueued as a card in a
+    kanban stack — so a stack sequences/orchestrates chains as units of work.
+
+  Do **NOT** register an in-tree `builtinWorkflows` module (the **deprecated**
+  ADR 0072 pattern): a code-pinned `WorkflowDefinition` is invisible to the
+  builder + `/`, is not user-editable, and shadows the chain loader — it violates
+  this rule. A feature may provide **node packs**, **chain packs**, a feature
+  workflow surface, or authoring UI — never a hard-coded definition, a separate
+  workflow engine, or an alternate run lifecycle. (The in-tree-builtins migration
+  to chains/stacks is **DONE** — the `BackendFeature.builtinWorkflows` field is gone
+  (declaring one is a TypeScript error), `host/builtinWorkflows.ts` is deleted, and
+  the `LEGACY_PINNED_WORKFLOWS` quarantine is drained to EMPTY / ratchet-frozen (ADR
+  0472 P4); the history is tracked in `docs/steward/builtin-workflow-migration-audit.md`.
+  The `*BuiltinWorkflows` arrays still in `src/features/**` are the chain-backed SSoT
+  sources P4 registers, NOT the retired seam.) Two capabilities the pack format
+  does not yet express — **sub-chain nesting** (a chain node holding another
+  chain) and a **run-produced variable bag** (a node writing a value a later node
+  reads by name) — are **additive RFC 0013 extensions**, not fundamental limits:
+  nesting rides the manifest's existing `chains[]` (co-expand + co-register the
+  child, rewrite the parent's reference to the minted id), and produced values map
+  to explicit output→input **edges** (chain-native) or a pass-through `variables[]`.
+  Both realize already-stated model capabilities in the format; reverting to a
+  hard-coded definition is not an option.)
 - **Schedules** must use the scheduler service and daemon. A feature may create
   scheduled jobs, expose scheduling UI, or provide scheduled workflow templates,
   but it should not poll its own private cron loop for work that the scheduler
@@ -164,6 +227,77 @@ not feature-local inventions.
 
 This keeps agent activity, workflow history, approvals, replay/fork, audit,
 notifications, governance, and capability discovery aligned across the app.
+
+## AI information-exchange architecture (the three lanes)
+
+The app's value proposition is that a model can build and automate the app
+itself, so every model↔app conversation is architecture, not prompt trivia.
+There are exactly THREE channels, each with one owner — do not invent a fourth
+or use one lane for another's job (audited + tracked in `docs/steward/LLM-EXCHANGE-AUDIT.md`
+at the repo root; re-runs of `/grade-ai-exchange` update that file):
+
+1. **Chat-time tools (provider-native function calling)** — how an agent asks
+   the app questions and takes gated actions during a conversation turn.
+   Compiled per turn by `host/conversationToolLoop.ts` from
+   `effectiveToolAllowlist` (manifest ∪ the ADR 0315 default-on baseline, or an
+   ADR 0104 full-replace override); definitions come from `agentToolProvider.ts`
+   builtins + `registerFeatureAgentTool` registrations. Voice gets the SAME set
+   by construction (`voice/realtime/toolBridge.ts`, set-parity-pinned).
+   Schema/catalog asks ride `openwop:schema.lookup` or a feature catalog tool
+   (`openwop:app-builder.catalog`, `openwop:slides.catalog`); app-state asks
+   ride read tools that share their HTTP route's access predicate. Tool-first
+   prompts keep NO hand-copied catalog (inverted tripwires pin the absence).
+
+2. **RFC 0021 AI Envelopes (in-run structured intent)** — typed JSON the model
+   emits in completion text (`{type, envelopeId, correlationId, payload, meta}`),
+   validated by `host/envelopeAcceptor.ts` against per-kind schemas
+   (`schemas/envelopes/*.schema.json`), round-capped, trust-attributed
+   (`meta.source` routes LLM-emitted mutations through approval gates),
+   correlation-deduped (replay/fork reads recorded outcomes verbatim), and
+   BYOK-canary-redacted. The managed chat loop answers `schema.request`
+   ({ envelopeType } — an ENVELOPE KIND's schema, injected out-of-band;
+   `schema.response` is the MODEL's ack, never the host's delivery vehicle).
+   This lane is normative OpenWOP wire: `/.well-known/openwop` advertises
+   `supportedEnvelopes` + `schemaVersions` + `limits`, so a new kind or field
+   is an OpenWOP RFC before host work.
+
+3. **MCP (external integrations)** — transport to/from OTHER processes: the
+   outbound client (`host/mcpClient.ts`, RFC 0020, approval-ledger +
+   egress-firewall gated), the MCP server router exposing workflows as tools,
+   and `core.openwop.mcp.handle-sampling` (inbound content is third-party —
+   fenced `<UNTRUSTED>` unconditionally). MCP is never the in-run intent
+   channel: it has no replay/dedup/round-cap/trust-attribution story.
+
+Cross-lane invariants (enforced by tests — treat a red one as a lie to a model,
+not a flaky test):
+
+- **SSoT or pinned.** Schema text reaching a model is generated at call time
+  from its single source of truth (`getCatalog` surface ops,
+  `catalogPromptSchema`, `buildAuthoringCatalog`) or test-pinned to it
+  (`promptCatalogParity.test.ts` per feature; `agent-prompt-tool-ids.test.ts`
+  repo-wide — every `openwop:`-prefixed id in any agent pack must resolve).
+- **Typed failure + bounded repair.** An unparseable/invalid model reply is a
+  typed failure (`AI_OUTPUT_UNPARSEABLE` / `app_doc_invalid` / …), never
+  success-with-empty or a fabricated placeholder; authoring paths feed the
+  validator's errors back for ONE bounded repair before failing (the
+  workflow-author `draft` loop and app-builder `render` structured-`isError`
+  feedback are the reference implementations).
+- **Read before write.** An agent that edits an artifact fetches it first
+  (`get-design`, `canvasRead`, `get-brief`, `documents.get`,
+  `workflow-author get`) — revisions ground on the real object, never memory.
+- **Gated apply.** Model output reaches durable state only through closed-world
+  validation and/or a human gate (HITL review steps, chain approvals, CAS
+  writes, draft-only tools).
+- **Byte-exact schemas.** Tool outputs that ARE schemas/catalogs are never
+  compacted (`SCHEMA_READ_EXEMPT_TOOLS` in `host/toolResultTransform.ts` — a
+  host-level invariant, outside the frozen per-run compaction decision);
+  `compactToolSchema` strips only annotation keys from tool definitions.
+
+Reference implementations to copy, not re-derive: **app-builder's agent-tool
+trio** (`features/app-builder/agentTools.ts` — catalog → get-design → render
+with validate/repair/CAS) and **workflow-author's draft→validate→persist**
+(`packs/feature.workflow-author.nodes` over `wa.getCatalog()`); both are graded
+A+ in the tracker with their residual drift risks stated.
 
 ## Feature-package architecture
 
@@ -356,10 +490,10 @@ A vertical slice from chat input → real provider dispatch → streamed tokens 
 
 - `ChatTab.tsx` — state machine that routes between BYOK wizard (no key) and `ChatSidebar` (key present).
 - `ChatSidebar.tsx` + `ChatHeader` + `MessageFeed` + `MessageBubble` + `ChatInput` + `WelcomeCard` — the sidebar UI.
-- `useChatSession.ts` — message thread state + per-turn dispatch. Each turn = one `POST /v1/runs` with `workflowId: 'openwop-app.chat.turn'`. Subscribes to SSE; appends `ai.message.chunk` deltas to the in-flight assistant bubble; on `node.suspended` fetches the open interrupt and renders the matching card via the registry.
+- `useChatSession.ts` — message thread state + per-turn dispatch. Each turn = one `POST /v1/runs` with `workflowId: 'openwop-app.chat.turn'`. Subscribes to SSE; appends `output.chunk` deltas to the in-flight assistant bubble; on `node.suspended` fetches the open interrupt and renders the matching card via the registry.
 - **Card registry** (`chat/registry/`) is the extensibility seam. Adopters call `registerCard({cardType, Component, ...})` from any module to add their own card type. Built-in registrations cover the 4 interrupt kinds (approval / clarification / refinement / cancellation). Cards wrap in `CardErrorBoundary` so a broken third-party card doesn't crash the panel.
 
-BE-side: `vendor.openwop-app.chat-responder` node calls Anthropic / OpenAI / Google providers via raw `fetch` (no SDK deps). Each token delta becomes an `ai.message.chunk` event through `ctx.emit()` — strip-on-persist applies automatically.
+BE-side: `vendor.openwop-app.chat-responder` node calls Anthropic / OpenAI / Google providers via raw `fetch` (no SDK deps). Each token delta becomes an `output.chunk` event through `ctx.emit()` — strip-on-persist applies automatically.
 
 #### Streaming contract for LLM interactions (ADR 0079)
 
@@ -371,7 +505,7 @@ inventing a parallel stream:
   in `providers/dispatch.ts` — every real provider streams via Web
   `ReadableStream` async-iteration; the conformance `mock` streams a chunked
   canned reply) and emit each delta as a single canonical event:
-  `ctx.emit('ai.message.chunk', { chunk, isLast: false })` (or `log.append(...)`
+  `ctx.emit('output.chunk', { chunk, isLast: false })` (or `log.append(...)`
   from a host route). It is **transient** — stream-only, NO channel reducer folds
   it — so the authoritative turn (`conversation.exchanged`) / node result stays
   the source of truth on reload and `:fork`. Each delta MUST be
@@ -382,10 +516,10 @@ inventing a parallel stream:
   `aiProvidersHost.callAI`'s plain-text branch, which is **opt-in per call**
   (`req.stream === true`) so non-interactive batch/agent nodes don't append one
   durable event per token for no consumer; structured/JSON calls never stream.
-  `node.message` was the transitional dual-emit and was **retired in ADR 0079
+  `openwop-app.node.message` was the transitional dual-emit and was **retired in ADR 0079
   Phase 5** — do not reintroduce it.
 - **Consumer.** Tail the run SSE on the direct `*.run.app` URL (`subscribeToRun`,
-  CDN-bypassing) and feed each `ai.message.chunk` `chunk` through the
+  CDN-bypassing) and feed each `output.chunk` `chunk` through the
   `useApplyAnimation` batcher into the in-flight bubble. Both chat SSE handlers
   (`chatTurnSubscription.ts`, `useChatSession.ts`) already do this; guard against
   the SSE's replay-from-seq-0 with a subscribe-time cursor
@@ -393,7 +527,7 @@ inventing a parallel stream:
 - **Async exchange (optional).** The conversation `exchange` can ack early and
   finish generation in the background so a long reply rides the SSE past the ~60s
   CDN POST ceiling — flag `OPENWOP_CONVERSATION_EXCHANGE_ASYNC` (default OFF). A
-  post-ack failure surfaces as a terminal `ai.message.error` event, not a POST
+  post-ack failure surfaces as a terminal `openwop-app.ai.message-error` event, not a POST
   4xx. See ADR 0079 §Phase 3.
 
 ### Host-extension HTTP routes (vendor-prefixed)
@@ -437,6 +571,30 @@ The catalog endpoint (`GET /v1/host/openwop-app/node-catalog`) cross-references 
 | `ctx.fs` | sandboxed local fs under `<dataDir>/host-fs/<tenant>/` with path-escape rejection | `core.openwop.files` (read/write/stat/list/delete) |
 | `ctx.queueBus` | in-memory publish/ack/nack/streamPublish | `core.openwop.messaging` (publish/ack/nack/stream-*) |
 | `ctx.observability` | delegates to the workflow-engine structured logger | `core.openwop.obs` (log/metric/span/alert) |
+
+### `ctx.compensation` — the inverse-action identity (RFC 0151 §C)
+
+**Pack-facing contract, added 2026-08-16 by the ADR 0554 wire flip.** A node module
+normally sees no `ctx.compensation`. It is present ONLY when that node is running
+as an **inverse action** — the compensator the unwind invoked for a node that
+declared `compensation.nodeTypeId` — and it carries:
+
+| Field | Meaning |
+|---|---|
+| `ctx.compensation.inverseActionId` | The §C inverse-action identity. **Constant across retries** of the same obligation. |
+| `ctx.compensation.attempt` | Which attempt this is. **Varies.** Also now the real value of `ctx.attempt`, which was previously pinned at `1` on this path. |
+
+**What a compensator MUST do with it:** present `inverseActionId` — by itself — as
+the idempotency key at the downstream provider. RFC 0151 §C puts `attempt`
+*outside* the identity precisely so a retry re-presents the same key; a
+compensator that composes the two (or derives a key from anything else that moves)
+mints a second obligation on every retry, which for a refund node is a second
+refund. This is the whole reason the block exists: before it, the host held the
+identity and the compensator — the only thing that can present it downstream —
+had no way to reach it.
+
+The block is optional in the type, so existing nodes compile and run unchanged;
+a node that never acts as a compensator will simply never see it.
 
 Surfaces NOT wired (advertised honestly as `supported=false`): `host.mcp`, `host.a2a`, `host.triggers` (subset), `host.db.nosql`, `host.db.search`. The palette badges these as "host?" in the UI and the inspector explains.
 

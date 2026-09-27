@@ -154,6 +154,8 @@ describe('ENG-1 approval-gate timeout atomicity (lazy + sweep)', () => {
 
     const events = await storage.listEvents(run.runId);
     const resolved = events.find((e) => e.type === 'interrupt.resolved');
-    expect(resolved?.payload).toMatchObject({ outcome: 'rejected', reason: 'timeout' });
+    // ADR 0722 A.2 — `outcome` (single-valued, undeclared on the closed def) became
+    // RFC 0183's `decision`; `reason` stays until the corpus seats it.
+    expect(resolved?.payload).toMatchObject({ decision: 'rejected', reason: 'timeout' });
   });
 });

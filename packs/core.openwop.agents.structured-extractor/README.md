@@ -20,7 +20,7 @@ This pack is the production extractor: **caller-supplied schema** at dispatch ti
 
 When the LLM's output fails JSON Schema validation:
 
-1. Validate via `openwop:core.data.json-schema-validate` — get the structured error list.
+1. Validate via `openwop:core.openwop.data.json-schema-validate` — get the structured error list.
 2. Re-prompt with the validation errors + the original input + the original schema.
 3. Retry up to `maxFixAttempts` (default 3).
 4. If still failing, return the `error` shape with `code: "schema_violation"` + the final error list.

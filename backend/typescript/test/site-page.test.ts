@@ -1,9 +1,16 @@
 /**
- * System home-page editor (ADR 0027, Option A) — the host-level homepage a super
- * admin edits regardless of org/tenant. Asserts: the seeded page renders publicly;
- * a super admin (wildcard bearer) reads + edits it; a non-superadmin is 403; and a
- * NORMAL signed-in user cannot reach the reserved system org via the org-scoped CMS
- * routes (tenant isolation intact).
+ * System home page via the collapsed CMS surface (ADR 0027) — the public front
+ * page is a real CMS page in the reserved `host-site` org, edited by a super
+ * admin through the STANDARD CMS routes (`requireCmsScope` grants host authority
+ * for that one org). Publishing's SEO route composes the same guard so metadata
+ * for that page is manageable without inventing a second system-site authority
+ * rule. Asserts: the seeded page renders publicly; a super admin drives the full
+ * CMS route family (list/read/edit/publish/versions/SEO) on it; a
+ * malformed edit fails closed without taking the live homepage offline; and a
+ * NORMAL signed-in user cannot reach the reserved org (tenant isolation intact).
+ *
+ * The bespoke `/site-page` route was retired in the collapse — editing now goes
+ * through `/cms/orgs/host-site/*`, so there is no second edit path to test.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AddressInfo } from 'node:net';
@@ -24,13 +31,27 @@ beforeAll(async () => {
   delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://localhost:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
 const j = async <T>(res: Response): Promise<T> => (await res.json()) as T;
-const sp = (method: string, body?: unknown) =>
-  fetch(`${BASE}/v1/host/openwop-app/site-page`, { method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
+/** Super-admin (wildcard bearer) drives the CMS route family on the reserved org. */
+const cms = (method: string, path: string, body?: unknown) =>
+  fetch(`${BASE}/v1/host/openwop-app/cms/orgs/host-site${path}`, {
+    method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+const publicHome = () => fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`);
+const seo = (method: string, pageId: string, body?: unknown) =>
+  fetch(`${BASE}/v1/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, {
+    method, headers: ADMIN, ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+const homeId = async (): Promise<string> => {
+  const pages = (await j<{ pages: { slug: string; pageId: string }[] }>(await cms('GET', '/pages'))).pages;
+  const home = pages.find((p) => p.slug === 'home');
+  if (!home) throw new Error('seeded home page missing');
+  return home.pageId;
+};
 
 async function normalClient(): Promise<(method: string, path: string, body?: unknown) => Promise<Response>> {
   let cookie = '';
@@ -51,9 +72,8 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
 
 describe('system home page — public render (unauthenticated)', () => {
   it('serves the seeded host-site home page to an anonymous visitor', async () => {
-    // touch the editor once so the site is ensured (boot also does this in prod)
-    await sp('GET');
-    const res = await fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`);
+    await cms('GET', '/pages'); // ensure the site (boot also does this in prod)
+    const res = await publicHome();
     expect(res.status).toBe(200);
     const page = await j<{ slug: string; sections: unknown[] }>(res);
     expect(page.slug).toBe('home');
@@ -61,45 +81,74 @@ describe('system home page — public render (unauthenticated)', () => {
   });
 });
 
-describe('system home page — super admin edit', () => {
-  it('reads the working page and edits it cross-tenant by host authority', async () => {
-    const got = await j<{ page: { pageId: string; slug: string } }>(await sp('GET'));
-    expect(got.page.slug).toBe('home');
+describe('front-page collapse — super admin drives the CMS route family on host-site (ADR 0027)', () => {
+  it('lists + reads the seeded home page through /cms/orgs/host-site', async () => {
+    const list = await cms('GET', '/pages');
+    expect(list.status).toBe(200);
+    const one = await cms('GET', `/pages/${await homeId()}`);
+    expect(one.status).toBe(200);
+  });
 
-    const edited = await sp('PUT', { title: 'Welcome', sections: [{ type: 'hero', data: { heading: 'Edited by super admin' } }] });
-    expect(edited.status).toBe(200);
-    const page = (await j<{ page: { status: string; sections: { data: { heading?: string } }[] } }>(edited)).page;
-    expect(page.status).toBe('published');
-    expect(page.sections[0]?.data?.heading).toBe('Edited by super admin');
+  it('edits the published home page via the standard CMS PATCH — the change goes live in place', async () => {
+    const saved = await cms('PATCH', `/pages/${await homeId()}`, {
+      title: 'Home', sections: [{ type: 'hero', data: { heading: 'CMS-driven front page' } }],
+    });
+    expect(saved.status).toBe(200);
+    const live = await j<{ sections: { data: { heading?: string } }[] }>(await publicHome());
+    expect(live.sections[0]?.data?.heading).toBe('CMS-driven front page');
+  });
 
-    // the edit is live on the public surface
-    const pub = await j<{ sections: { data: { heading?: string } }[] }>(await fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`));
-    expect(pub.sections[0]?.data?.heading).toBe('Edited by super admin');
+  it('runs the draft→publish transition on a host-site page (unpublish → publish round-trip)', async () => {
+    const id = await homeId();
+    expect((await cms('POST', `/pages/${id}/unpublish`)).status).toBe(200);
+    const draft = await j<{ status: string }>(await cms('GET', `/pages/${id}`));
+    expect(draft.status).toBe('draft');
+    expect((await cms('POST', `/pages/${id}/publish`)).status).toBe(200);
+  });
+
+  it('lists page versions on host-site (capability the bespoke editor lacked)', async () => {
+    const versions = await cms('GET', `/pages/${await homeId()}/versions`);
+    expect(versions.status).toBe(200);
+  });
+
+  it('writes + reads SEO metadata for the reserved host-site page', async () => {
+    const id = await homeId();
+    const saved = await seo('PUT', id, {
+      metaTitle: 'KickTodo — One meaningful action today',
+      metaDescription: 'Choose a guided challenge and take the next useful step.',
+      canonicalUrl: 'https://kicktodo.com/',
+      noindex: false,
+    });
+    expect(saved.status).toBe(200);
+    expect((await j<{ seo: { metaTitle?: string } }>(saved)).seo.metaTitle).toBe('KickTodo — One meaningful action today');
+
+    const read = await seo('GET', id);
+    expect(read.status).toBe(200);
+    expect((await j<{ seo: { canonicalUrl?: string } }>(read)).seo.canonicalUrl).toBe('https://kicktodo.com/');
+  });
+
+  it('a malformed edit 400s WITHOUT taking the live homepage offline', async () => {
+    const id = await homeId();
+    // establish a known-good published state
+    await cms('PATCH', `/pages/${id}`, { sections: [{ type: 'hero', data: { heading: 'Live' } }] });
+    // malformed sections (not an array) → 400; the in-place edit never commits, so the page stays live
+    const bad = await cms('PATCH', `/pages/${id}`, { sections: { not: 'an array' } });
+    expect(bad.status).toBe(400);
+    const pub = await publicHome();
+    expect(pub.status).toBe(200);
+    expect((await j<{ sections: { data: { heading?: string } }[] }>(pub)).sections[0]?.data?.heading).toBe('Live');
   });
 });
 
 describe('system home page — authority + isolation', () => {
-  it('forbids a non-superadmin (403)', async () => {
-    const call = await normalClient();
-    expect((await call('GET', '/v1/host/openwop-app/site-page')).status).toBe(403);
-    expect((await call('PUT', '/v1/host/openwop-app/site-page', { sections: [] })).status).toBe(403);
-  });
-
-  it('a malformed edit 400s WITHOUT taking the live homepage offline', async () => {
-    // ensure a good published page first
-    await sp('PUT', { sections: [{ type: 'hero', data: { heading: 'Live' } }] });
-    // malformed sections (not an array) → 400, and the page must STAY published
-    const bad = await sp('PUT', { sections: { not: 'an array' } });
-    expect(bad.status).toBe(400);
-    const pub = await fetch(`${BASE}/v1/host/openwop-app/public/host-site/pages/home`);
-    expect(pub.status).toBe(200); // still live (validate-before-unpublish)
-    expect((await j<{ sections: { data: { heading?: string } }[] }>(pub)).sections[0]?.data?.heading).toBe('Live');
-  });
-
   it('hides the reserved system org from a normal user via the org-scoped CMS routes (404, cross-tenant)', async () => {
     const call = await normalClient();
-    // requireOrgScope: host-site is not in the caller's tenant ⇒ 404, never editable.
+    // requireCmsScope: a non-superadmin gets the same 404 any foreign org yields,
+    // so the reserved org's editability stays invisible in the CMS namespace.
     expect((await call('GET', '/v1/host/openwop-app/cms/orgs/host-site/pages')).status).toBe(404);
     expect((await call('POST', '/v1/host/openwop-app/cms/orgs/host-site/pages', { title: 'X' })).status).toBe(404);
+    const pageId = await homeId();
+    expect((await call('GET', `/v1/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`)).status).toBe(404);
+    expect((await call('PUT', `/v1/host/openwop-app/publishing/orgs/host-site/pages/${encodeURIComponent(pageId)}/seo`, { metaTitle: 'X' })).status).toBe(404);
   });
 });

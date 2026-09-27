@@ -1,7 +1,7 @@
 {
   "name": "feature.kb.agents",
-  "version": "1.0.0",
-  "description": "Knowledge Base feature agent pack (ADR 0014 Phase 3) — a manifest agent shipped by the KB feature whose tools are the feature.kb.nodes (search / rag) over the ctx.features.kb surface. The first feature-bound agent: a feature ships an agent tool-allowlisted to its own workflow surface (RFC 0003 agents[] + RFC 0002 §A14 allowlist).",
+  "version": "1.0.1",
+  "description": "Knowledge Base feature agent pack — a manifest agent shipped by the KB feature whose tools are the host RAG retrieval tools (openwop:knowledge.search + the openwop:core.rag.retriever-* retrievers). The first feature-bound agent: a feature ships an agent scoped to real conversational retrieval tools (agents[] + allowlist).",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "kb", "knowledge", "agent", "rag"],
@@ -15,12 +15,13 @@
       "agentId": "feature.kb.agents.researcher",
       "persona": "RESEARCH",
       "label": "Knowledge Base Researcher",
-      "description": "Answers questions grounded in an org's Knowledge Base. Retrieves with feature.kb.nodes.search / feature.kb.nodes.rag (over ctx.features.kb), then composes a cited answer from the augmented context. Tools are allowlisted to the KB feature surface only.",
+      "description": "Answers questions grounded in an org's Knowledge Base. Retrieves with openwop:knowledge.search (lexical) and the openwop:core.rag.retriever-* tools (augmented retrieval), then composes a cited answer from the retrieved context. Tools are allowlisted to the host retrieval surface only.",
       "modelClass": "research",
       "systemPromptRef": "prompts/kb-researcher.md",
       "toolAllowlist": [
-        "openwop:feature.kb.nodes.search",
-        "openwop:feature.kb.nodes.rag"
+        "openwop:knowledge.search",
+        "openwop:core.rag.retriever-basic",
+        "openwop:core.rag.retriever-contextual-compression"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }

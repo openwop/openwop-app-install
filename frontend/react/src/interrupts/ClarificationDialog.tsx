@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../client/interruptsClient.js';
@@ -51,11 +52,11 @@ export function ClarificationDialog({ runId, nodeId, data, onResolved }: Props) 
         value={answer}
         onChange={(e) => setAnswer(e.target.value)}
       />
-      {error && <div className="alert error">{error}</div>}
+      {error && <div role="alert" className="alert error">{error}</div>}
       <div className="button-row">
-        <button onClick={submit} disabled={submitting || !answer.trim()}>
+        <Button variant="primary" onClick={submit} disabled={submitting || !answer.trim()}>
           {submitting ? t('submitting') : t('submitAnswer')}
-        </button>
+        </Button>
       </div>
     </div>
   );

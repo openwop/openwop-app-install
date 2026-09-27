@@ -29,7 +29,8 @@ describe('a2uiInterruptCard', () => {
     const card = a2uiInterruptCard(surfaceInterrupt);
     expect(card).not.toBeNull();
     expect(card?.cardType).toBe('ui.a2ui-surface');
-    expect(card?.payload.catalogVersion).toBe(A2UI_CATALOG_VERSION);
+    // The payload is a union since ADR 0749 (0.9.1 tree | v0.9); this is the tree arm.
+    expect((card?.payload as { catalogVersion?: unknown } | undefined)?.catalogVersion).toBe(A2UI_CATALOG_VERSION);
     // the extracted payload must validate against the host catalog
     expect(parseSurface(card?.payload).ok).toBe(true);
   });

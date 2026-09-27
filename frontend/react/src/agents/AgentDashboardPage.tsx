@@ -5,19 +5,21 @@
  *
  * DECISIONS LIVE IN THE INBOX now. The former "Needs you" hero (approvals +
  * board blockers) moved to /inbox — the single action portal — and the run
- * ledger moved to Mission Control (/mission), which owns the live fleet view.
+ * ledger moved to the Runs page "Active runs" tab (/runs?tab=active), which owns the live fleet view.
  * This page is decision-free management.
  *
  * First visit seeds the built-in demo agents automatically (idempotent); the
  * roster/board/schedule data all come from the host-extension surfaces.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { checkAgent, seedExampleAgents } from './rosterClient.js';
 import { listApprovals, type PendingApproval } from './approvalsClient.js';
 import { getCapabilities } from '../client/runsClient.js';
+import { useDemoMode } from '../client/useDemoMode.js';
 import { loadAgentViews, type AgentView, type AgentStatus } from './agentViewModel.js';
 import { roleKeyForAgent, roleThemeForKey } from './roleTemplates.js';
 import { RosterRow } from './RosterRow.js';
@@ -72,10 +74,15 @@ function ConceptStrip(): JSX.Element {
 export function AgentDashboardPage(): JSX.Element {
   const { t } = useTranslation('agents');
   const navigate = useNavigate();
+  // Gate A (ADR 0196): the "Load example agents" empty-state button is demo-only.
+  const demo = useDemoMode();
   const [views, setViews] = useState<AgentView[]>([]);
   // Per-agent approvals power the quick-look drawer's "waiting on you" peek
   // (the GLOBAL queue lives in the Inbox; here it's agent-scoped context).
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  // AG-R2-1 — the approvals read failed; the drawer says "couldn't check"
+  // instead of silently rendering the same nothing as "no approvals".
+  const [approvalsFailed, setApprovalsFailed] = useState(false);
   const [hiring, setHiring] = useState(false);
   // Quick-look drawer state rides the URL (?agent=<rosterId>&tab=) so a
   // drawer view is shareable/refreshable.
@@ -139,12 +146,20 @@ export function AgentDashboardPage(): JSX.Element {
 
   const refresh = useCallback(async () => {
     try {
+      // AG-R2-1 — a failed approvals read must not impersonate "nothing
+      // waiting": the drawer's peek is the only place a roster tile answers
+      // "is this agent waiting on me?", so record the failure instead of
+      // flattening it into [].
       const [v, ap] = await Promise.all([
         loadAgentViews(),
-        listApprovals('pending').catch(() => []),
+        listApprovals('pending').then(
+          (list) => ({ list, failed: false }),
+          () => ({ list: [] as PendingApproval[], failed: true }),
+        ),
       ]);
       setViews(v);
-      setApprovals(ap);
+      setApprovals(ap.list);
+      setApprovalsFailed(ap.failed);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -169,8 +184,11 @@ export function AgentDashboardPage(): JSX.Element {
         }
         if (!cancelled) {
           setViews(loaded);
-          const ap = await listApprovals('pending').catch(() => []);
-          if (!cancelled) setApprovals(ap);
+          const ap = await listApprovals('pending').then(
+            (list) => ({ list, failed: false }),
+            () => ({ list: [] as PendingApproval[], failed: true }),
+          );
+          if (!cancelled) { setApprovals(ap.list); setApprovalsFailed(ap.failed); }
         }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
@@ -236,18 +254,25 @@ export function AgentDashboardPage(): JSX.Element {
   };
 
   return (
-    <section>
+    <section data-walkthrough="agents.page">
       <PageHeader
         eyebrow={t('templatesEyebrow')}
         title={t('dashTitle')}
         lede={t('dashLede')}
         actions={
-          <button type="button" className="btn-accent-solid" onClick={() => setHiring(true)}>{t('dashHireAgent')}</button>
+          <Button variant="accent-solid" onClick={() => setHiring(true)}>{t('dashHireAgent')}</Button>
         }
       />
 
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {/* The recent-failures read is best-effort so it cannot blank the board —
+          but falling back to "no failures" turns UNKNOWN into HEALTHY, and
+          spotting failures is the main reason to scan this dashboard. Say it
+          wasn't checked rather than showing an unverified all-clear. */}
+      {views.some((v) => v.failureCheckUnavailable)
+        ? <Notice variant="warning">{t('failureCheckUnavailable')}</Notice>
+        : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
       {loading ? (
         <StateCard loading title={t('dashLoading')} />
@@ -260,10 +285,16 @@ export function AgentDashboardPage(): JSX.Element {
           body={t('dashEmptyBody')}
           action={
             <>
-              <button type="button" className="primary" onClick={() => navigate('/agents/new')}>{t('dashCreateFromTemplate')}</button>
-              <button type="button" className="secondary" onClick={() => void onLoadDemo()} disabled={seeding}>
-                {seeding ? t('dashLoadingDemo') : t('dashLoadExample')}
-              </button>
+              <Button variant="primary" onClick={() => navigate('/agents/new')}>{t('dashCreateFromTemplate')}</Button>
+              {/* Demo-only escape hatch (ADR 0196 Gate A / DEMO-11): one-click
+                  seeding of the canned roster must not exist on a clean
+                  install — an enterprise tenant stays empty until the admin
+                  creates real agents. */}
+              {demo && (
+                <Button variant="secondary" onClick={() => void onLoadDemo()} disabled={seeding}>
+                  {seeding ? t('dashLoadingDemo') : t('dashLoadExample')}
+                </Button>
+              )}
             </>
           }
         />
@@ -328,7 +359,7 @@ export function AgentDashboardPage(): JSX.Element {
               icon={<BotIcon size={26} />}
               title={t('dashNoMatchTitle')}
               body={t('dashNoMatchBody')}
-              action={<button type="button" className="secondary" onClick={() => { setQuery(''); setStatusFilter('all'); setRoleFilter('all'); }}>{t('dashClearFilters')}</button>}
+              action={<Button variant="secondary" onClick={() => { setQuery(''); setStatusFilter('all'); setRoleFilter('all'); }}>{t('dashClearFilters')}</Button>}
             />
           ) : viewMode === 'grid' ? (
             <div className="card-grid">
@@ -369,6 +400,7 @@ export function AgentDashboardPage(): JSX.Element {
           <AgentDrawer
             view={drawerView}
             approvals={approvals.filter((a) => a.rosterId === drawerView.entry.rosterId)}
+            approvalsUnavailable={approvalsFailed}
             tab={drawerTab}
             onTab={(tab) => openDrawer(drawerView.entry.rosterId, tab)}
             onClose={closeDrawer}

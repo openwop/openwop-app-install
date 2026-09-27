@@ -4,7 +4,7 @@
 **Date:** 2026-06-19
 **Depends on / composes:** ADR 0068 (unified review projection — the SSoT this builds on), ADR 0070 (quorum review policies), ADR 0050 (addressed vs broadcast notifications), `notifications/emitter.ts`, `routes/interrupts.ts` (`resolveAndResume`), `host/approvalDecision.ts` (`claimApproval`/`rejectApproval`), `chat/registry/` (card registry seam).
 **Surface:** host-extension under `/v1/host/openwop-app/*` + a frontend feature-local store. No core route/nav edits.
-**RFC gate:** **Host work only — no RFC needed.** Every new surface is non-normative (`/v1/host/openwop-app/*`), reuses the existing `node.interrupt.resolved` wire event, and adds no required field, capability, or normative event to the OpenWOP wire. (A standard cross-host "review changed" event would need a new OpenWOP RFC; this is deliberately host-local.)
+**RFC gate:** **Host work only — no RFC needed.** Every new surface is non-normative (`/v1/host/openwop-app/*`), reuses the existing `interrupt.resolved` wire event, and adds no required field, capability, or normative event to the OpenWOP wire. (A standard cross-host "review changed" event would need a new OpenWOP RFC; this is deliberately host-local.)
 
 ## Why this exists
 
@@ -57,7 +57,7 @@ Emit it at the two decision owners, after a successful state transition:
 - `resolveAndResume` — on resolve (`status: 'resolved'`) **and** on quorum `pending` (`status: 'pending'` + updated `policy` counts, so other surfaces re-render quorum progress without a full refetch — ADR 0070).
 - `claimApproval` / `rejectApproval` — on `approved` / `rejected`.
 
-Because emission is at the decision owner, it is correct **regardless of which FE surface, client, or user** drove the decision. The existing `node.interrupt.resolved` run-event is unchanged and still drives per-run surfaces.
+Because emission is at the decision owner, it is correct **regardless of which FE surface, client, or user** drove the decision. The existing `interrupt.resolved` run-event is unchanged and still drives per-run surfaces.
 
 ### 2. Frontend — one `reviewStatusStore`, every surface reads/subscribes through it
 

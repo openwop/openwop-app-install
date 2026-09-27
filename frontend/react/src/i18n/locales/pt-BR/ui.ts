@@ -3,6 +3,24 @@
  * Populated as strings are externalized (ADR 0065 Phase 2).
  */
 export const messages = {
+
+  // OrgSelectionState (HG-4) — the ONE noun + the ONE branch order.
+  orgStateFailedTitle: 'Não foi possível carregar suas organizações',
+  // `conta vazia` nomeava a COBRANÇA, não esta coleção — ver o catálogo en.
+  orgStateFailedBody: 'Esta é uma leitura que falhou, não uma lista de organizações vazia.',
+  orgStateFailedBodyWith: '{{what}}. Esta é uma leitura que falhou, não uma lista de organizações vazia.',
+  orgStateEmptyTitle: 'Nenhuma organização',
+  // Sem instrução (quem a carrega é o CTA) e sem o substantivo (quem o carrega é
+  // a cláusula): «Crie uma organização primeiro — … pertencem a uma organização.»
+  // dizia-o duas vezes. Ver o catálogo en.
+  orgStateEmptyBody: '{{what}}.',
+  orgStateEmptyAction: 'Criar uma organização',
+  orgStateEmptyAskAdmin: 'Peça a um administrador para criar uma.',
+  orgStateInlineSentence: '{{title}}. {{body}}',
+  orgStateRetry: 'Tentar novamente',
+  orgPickerLabel: 'Organização',
+  orgPickerGroupLabel: 'Organizações',
+  orgPickerLoading: 'Carregando organizações…',
   // CommandPalette
   cmdkLabel: 'Paleta de comandos',
   cmdkPlaceholder: 'Ir para uma página ou ação…',
@@ -26,6 +44,8 @@ export const messages = {
   cmdkActReseedHint: 'Redefinir a lista de exemplo integrada',
   // Toast
   toastDismiss: 'Dispensar',
+  toastDismissAll: 'Dispensar tudo ({{count}})',
+  toastRegionLabel: 'Notificações',
   // ErrorBoundary
   errorTitle: 'Algo deu errado',
   errorBodyRegion: 'A região {{region}} encontrou um erro inesperado. ',
@@ -41,14 +61,14 @@ export const messages = {
   tableBulkActionsLabel: 'Ações em massa',
   tableSelectedCount: '{{n}} selecionado(s)',
   tableClear: 'Limpar',
+  tableNoFilterMatches: 'Nenhuma linha corresponde a “{{query}}”.',
+  tableFilterMatches_one: '{{n}} linha corresponde.',
+  tableFilterMatches_other: '{{n}} linhas correspondem.',
   tableSelectHeader: 'Selecionar',
   tableSelectAll: 'Selecionar tudo',
   tableDeselectAll: 'Desmarcar tudo',
   tableSelectRow: 'Selecionar linha',
   tableSortBy: 'Ordenar por {{column}}',
-  tableDensityLabel: 'Densidade das linhas',
-  tableDensityComfortable: 'Confortável',
-  tableDensityCompact: 'Compacta',
   // MarkdownEditor toolbar
   mdToolbarLabel: 'Formatação',
   mdBold: 'Negrito',
@@ -83,4 +103,23 @@ export const messages = {
   viewToggleLabel: 'Ver como grade ou lista',
   viewGrid: 'Grade',
   viewList: 'Lista',
+  colorSwatches: "Cores do tema",
+  colorAccent: "Destaque",
+  colorText: "Texto",
+  colorMuted: "Suave",
+  colorSuccess: "Sucesso",
+  colorWarn: "Aviso",
+  colorDanger: "Perigo",
+  colorInfo: "Info",
+  colorNone: "Nenhum",
+  colorRecent: "Cor recente {{value}}",
+  colorHexPlaceholder: "#rrggbb ou uma cor CSS",
+  colorPickFromScreen: "Escolher uma cor da tela",
+
+  cmdkLocked: 'Bloqueado — desbloqueie na loja de recursos',
+
+  // FORM-UX-2 (ADR 0584) — a proteção IN-APP contra a perda de alterações.
+  unsavedLeaveTitle: 'Sair sem salvar?',
+  unsavedLeaveBody: 'As alterações não salvas desta página serão descartadas. Salve antes para mantê-las.',
+  unsavedLeaveConfirm: 'Descartar alterações',
 } as const;

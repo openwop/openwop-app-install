@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { ProviderConfig, ProviderModel } from './lib/providers.js';
@@ -45,13 +46,12 @@ export function ModelGrid({
       <p className="muted u-mt-1 u-fs-12">{t('fromProvider')} <strong>{provider.label}</strong></p>
       <div className="u-flex u-flex-col u-gap-2 u-mt-3">
         {provider.models.map((m) => (
-          <button
+          <Button
             key={m.id}
-            type="button"
-            className="secondary modelgrid-model-btn"
+            variant="secondary" className="modelgrid-model-btn"
             onClick={() => onPick(m)}
             style={{
-              borderColor: m.id === selectedModelId ? 'var(--color-accent)' : 'var(--color-border)',
+              borderColor: m.id === selectedModelId ? 'var(--clay-text)' : 'var(--rule)',
             }}
           >
             <div className="u-flex u-w-full u-items-center u-gap-2">
@@ -69,16 +69,15 @@ export function ModelGrid({
                 </span>
               )}
             </div>
-          </button>
+          </Button>
         ))}
 
         {/* "Other" — escape hatch for models not in the curated list
             (preview releases, fine-tunes, snapshots, future versions
             we haven't bumped the taxonomy for). */}
         {!customMode ? (
-          <button
-            type="button"
-            className="secondary modelgrid-model-btn modelgrid-other-btn"
+          <Button
+            variant="secondary" className="modelgrid-model-btn modelgrid-other-btn"
             onClick={() => setCustomMode(true)}
           >
             <div className="u-flex u-w-full u-items-center u-gap-2">
@@ -88,10 +87,10 @@ export function ModelGrid({
             <div className="muted u-fs-11 u-mt-1-5">
               {t('otherModelDesc')}
             </div>
-          </button>
+          </Button>
         ) : (
           <div className="card modelgrid-custom-card">
-            <div className="u-fw-600 u-fs-13 u-mb-2">{t('customModel')}</div>
+            <h3 className="u-fw-600 u-fs-13 u-mb-2 u-mt-0">{t('customModel')}</h3>
             <TextField
               label={t('customModelIdLabel')}
               value={customId}
@@ -102,18 +101,18 @@ export function ModelGrid({
               spellCheck={false}
               help={provider.customModelHelp ?? t('customModelHelpDefault', { provider: provider.label })}
             />
-            {customError && <div className="alert error u-fs-12">{customError}</div>}
+            {customError && <div role="alert" className="alert error u-fs-12">{customError}</div>}
             <div className="button-row">
-              <button type="button" onClick={submitCustom} disabled={!customId.trim()}>{t('useThisModel')}</button>
-              <button type="button" className="secondary" onClick={() => { setCustomMode(false); setCustomId(''); setCustomError(null); }}>
+              <Button variant="primary" onClick={submitCustom} disabled={!customId.trim()}>{t('useThisModel')}</Button>
+              <Button variant="secondary" onClick={() => { setCustomMode(false); setCustomId(''); setCustomError(null); }}>
                 {t('cancel')}
-              </button>
+              </Button>
             </div>
           </div>
         )}
       </div>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={onBack}>{t('back')}</button>
+        <Button variant="secondary" onClick={onBack}>{t('back')}</Button>
       </div>
     </div>
   );

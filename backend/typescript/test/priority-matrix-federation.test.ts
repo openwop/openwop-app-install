@@ -130,7 +130,7 @@ beforeAll(async () => {
   process.env.OPENWOP_BYOK_EPHEMERAL = 'true'; // in-memory per-tenant secret store (ADR 0062 credential tests)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const d = getToggleDefault('priority-matrix');
   if (d) await saveConfig({ ...d, status: 'on' }, 'test');
 });
@@ -277,5 +277,84 @@ describe('federation — route RBAC', () => {
     const url = `/v1/host/openwop-app/priority-matrix/peers/${encodeURIComponent(peer.id)}/credential`;
     expect((await c.put(url, { token: 'mine', scope: 'user' })).status).toBe(204);   // own cred (c1)
     expect((await c.put(url, { token: 'shared', scope: 'tenant' })).status).toBe(403); // tenant cred = superadmin
+  });
+});
+
+/**
+ * PMX-1 (ADR 0590, Blocker) — `setPeerCredential` ran the ADR 0062 peer bearer
+ * through `cleanString` → the secret-shaped scrub, which replaces any bare
+ * `[A-Za-z0-9_-]{40,}` run with `[REDACTED:secret-shaped]`. Every
+ * production-shaped token (opaque 40+-char base64url, JWT segments) was
+ * DESTROYED at save while the PUT returned 204 — the entire per-user/workspace
+ * credential lane was non-functional for real tokens, and every prior fixture
+ * was sub-40-char so the suite could not see it. Tokens are validated against
+ * the RFC 6750 `token68` grammar and stored VERBATIM (never scrubbed).
+ *
+ * Deviation from the tracker prescription, witnessed: the prescribed
+ * `cleanOpaqueToken` charset (`[A-Za-z0-9_.:-]`) REJECTS valid RFC 6750
+ * bearers carrying `~ + / =` (e.g. plain-base64 with padding) — the fix uses
+ * the token68 grammar instead so a legal bearer can never be refused.
+ */
+describe('PMX-1 — production-shaped bearer tokens survive save byte-identical', () => {
+  const t = 'tenant-pmx1';
+
+  it('a 43-char base64url token (the scrub-oracle shape) round-trips', async () => {
+    await __resetFederationStore();
+    const peer = await addPeer(t, 'owner', { label: 'East', baseUrl: 'https://east.example.test' });
+    const token = 'k3QzX9vLmN2pR7wYtB5cD8fG1hJ4sA6uE0iO-_xZTa9'; // 43 chars, base64url
+    expect(token).toHaveLength(43);
+    await setPeerCredential(t, peer.id, token, 'tenant');
+    expect(await resolvePeerToken(peer, { tenantId: t })).toBe(token);
+  });
+
+  it('a JWT-shaped token (three 40+-char base64url segments) round-trips', async () => {
+    await __resetFederationStore();
+    const peer = await addPeer(t, 'owner', { label: 'East', baseUrl: 'https://east.example.test' });
+    const seg = (n: number): string => 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9'.repeat(2).slice(0, n);
+    const jwt = `${seg(44)}.${seg(52)}.${seg(43)}`;
+    await setPeerCredential(t, peer.id, jwt, 'user', 'u1');
+    expect(await resolvePeerToken(peer, { tenantId: t, actingUserId: 'u1' })).toBe(jwt);
+  });
+
+  it('a plain-base64 token with `=` padding (RFC 6750 token68) round-trips — the cleanOpaqueToken charset would refuse it', async () => {
+    await __resetFederationStore();
+    const peer = await addPeer(t, 'owner', { label: 'East', baseUrl: 'https://east.example.test' });
+    const token = `aGVsbG8rd29ybGQvZm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA==`;
+    await setPeerCredential(t, peer.id, token, 'tenant');
+    expect(await resolvePeerToken(peer, { tenantId: t })).toBe(token);
+  });
+
+  it('a token with embedded whitespace/quotes is refused LOUDLY (400), never silently mangled', async () => {
+    await __resetFederationStore();
+    const peer = await addPeer(t, 'owner', { label: 'East', baseUrl: 'https://east.example.test' });
+    await expect(setPeerCredential(t, peer.id, 'abc def', 'tenant')).rejects.toMatchObject({ httpStatus: 400 });
+    await expect(setPeerCredential(t, peer.id, 'tok"en', 'tenant')).rejects.toMatchObject({ httpStatus: 400 });
+    expect(await resolvePeerToken(peer, { tenantId: t })).toBeUndefined(); // nothing stored
+  });
+});
+
+/**
+ * PMX-D3 (ADR 0590) — the read-then-write cap race: two CONCURRENT adds at
+ * cap−1 could both pass the pre-check and exceed the cap by one. The
+ * post-write re-check elects a deterministic loser that compensates its own
+ * row, so the cap holds under collision.
+ */
+describe('PMX-D3 — concurrent addPeer cannot exceed the cap', () => {
+  it('at cap−1, two concurrent adds yield exactly ONE new peer and one cap refusal', async () => {
+    await __resetFederationStore();
+    const t = 'tenant-cap-race';
+    for (let i = 0; i < 24; i++) {
+      await addPeer(t, 'owner', { label: `P${String(i).padStart(2, '0')}`, baseUrl: 'https://p.example.test' });
+    }
+    const attempt = (label: string) =>
+      addPeer(t, 'owner', { label, baseUrl: 'https://p.example.test' }).then(() => 'ok' as const, () => 'refused' as const);
+    const results = await Promise.all([attempt('Race A'), attempt('Race B')]);
+    // Fail-closed: at least one racer is refused (at the boundary BOTH may be —
+    // the cap invariant wins over admission), and the cap is NEVER exceeded.
+    expect(results).toContain('refused');
+    expect((await listPeers(t)).length).toBeLessThanOrEqual(25);
+    // Convergence: a sequential retry settles the count at exactly the cap.
+    await addPeer(t, 'owner', { label: 'Retry', baseUrl: 'https://p.example.test' }).catch(() => undefined);
+    expect((await listPeers(t)).length).toBe(25);
   });
 });

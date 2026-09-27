@@ -81,8 +81,8 @@ describe('KB file upload — extraction', () => {
     expect((await getDocument(TENANT, ORG, col.collectionId, uploaded.documentId))?.contentTrust).toBe('untrusted');
     // an explicit contentTrust:'trusted' on a file upload is IGNORED (can't override the fence)
     const forced = await ingestDocument(TENANT, ORG, 'tester', col.collectionId, {
-      title: 'g.txt', contentBase64: Buffer.from('forced', 'utf8').toString('base64'), contentType: 'text/plain', contentTrust: 'trusted',
-    });
+      title: 'g.txt', contentBase64: Buffer.from('forced', 'utf8').toString('base64'), contentType: 'text/plain',
+    }, { contentTrust: 'trusted' });
     expect((await getDocument(TENANT, ORG, col.collectionId, forced.documentId))?.contentTrust).toBe('untrusted');
   });
 

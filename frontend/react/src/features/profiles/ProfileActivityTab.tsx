@@ -1,7 +1,7 @@
 /**
  * Profile Activity tab (ADR 0025) — the human's run-activity feed, the user-side
  * mirror of an agent's `AgentActivityTab`. Reads the durable runs store via
- * `GET /v1/host/openwop-app/profiles/me/activity`, so every row carries a real
+ * `GET /host/openwop-app/profiles/me/activity`, so every row carries a real
  * timestamp, the run OUTCOME (a status chip), and a link to the run. Surfaces
  * runs the user's personal board / schedule fired on their behalf.
  */
@@ -12,7 +12,8 @@ import { getMyActivity, type AgentActivityItem } from './profilesClient.js';
 import { workflowName } from '../../agents/roleTemplates.js';
 import { relativeTime } from '../../agents/agentViewModel.js';
 import { useFormat } from '../../i18n/useFormat.js';
-import { Notice } from '../../ui/Notice.js';
+import { Button } from '../../ui/Button.js';
+import { Skeleton } from '../../ui/Skeleton.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { ClockIcon, ZapIcon, PlayIcon, CheckIcon } from '../../ui/icons/index.js';
 
@@ -61,22 +62,31 @@ export function ProfileActivityTab(): JSX.Element {
   };
   const [items, setItems] = useState<AgentActivityItem[] | null>(null);
   const [truncated, setTruncated] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  /** The read FAILED — distinct from loading (PROF-UX-3, the /team bar). */
+  const [loadFailed, setLoadFailed] = useState(false);
 
   const refresh = useCallback(async () => {
+    setLoadFailed(false);
     try {
       const res = await getMyActivity();
       setItems(res.items);
       setTruncated(res.truncated);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+    } catch {
+      // No raw err.message on the page — the announced StateCard below carries
+      // the designed copy + retry.
+      setLoadFailed(true);
     }
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  if (error) return <Notice variant="error">{error}</Notice>;
-  if (items === null) return <p className="muted">{t('loadingActivity')}</p>;
+  if (loadFailed) {
+    return (
+      <StateCard announce icon={<ClockIcon />} title={t('activityFailedTitle')} body={t('activityFailedBody')}
+        action={<Button variant="secondary" onClick={() => void refresh()}>{t('retry')}</Button>} />
+    );
+  }
+  if (items === null) return <Skeleton />;
   if (items.length === 0) {
     return (
       <StateCard

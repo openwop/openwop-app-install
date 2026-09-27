@@ -32,10 +32,10 @@ export interface UsageRollupRow {
 
 /** The caller's orgs (the dashboard org picker). */
 export async function listOrgs(): Promise<Org[]> {
-  return (await http<{ orgs: Org[] }>('/v1/host/openwop-app/orgs')).orgs ?? [];
+  return (await http<{ orgs: Org[] }>('/host/openwop-app/orgs')).orgs ?? [];
 }
 
 export async function fetchUsageRollup(orgId: string): Promise<UsageRollupRow[]> {
-  const r = await http<{ rollup: UsageRollupRow[] }>(`/v1/host/openwop-app/usage/orgs/${encodeURIComponent(orgId)}/rollup`);
+  const r = await http<{ rollup: UsageRollupRow[] }>(`/host/openwop-app/usage/orgs/${encodeURIComponent(orgId)}/rollup`);
   return r.rollup ?? [];
 }

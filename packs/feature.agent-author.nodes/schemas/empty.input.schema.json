@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.0/empty.input.schema.json",
+  "title": "Empty Input",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

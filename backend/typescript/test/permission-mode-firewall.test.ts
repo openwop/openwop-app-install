@@ -44,4 +44,45 @@ describe('ADR 0150 — permission mode firewall gating', () => {
       expect(hook.evaluate([], t).decision).not.toBe('require-approval');
     }
   });
+
+  // ADR 0610 D5 / PMC-1 — safe mode gates the host-mediated egress CLASS, not just the
+  // hard-coded name set. `core.openwop.integration.email-send` is a classified
+  // `egress:'host-mediated'` tool that is NOT in SENSITIVE_APPROVAL_TOOLS — before this it
+  // proceeded UNASKED in safe mode (email/slack/sms/a2a/mcp sends did too).
+  const EMAIL_SEND = 'core.openwop.integration.email-send'; // classified write+host-mediated egress
+  describe('PMC-1 — the egress CLASS is gated, not a name set', () => {
+    it('control: the egress tool is NOT in the hard-coded name set', () => {
+      expect(SENSITIVE_APPROVAL_TOOLS.has(EMAIL_SEND)).toBe(false);
+    });
+    it('SAFE mode: a host-mediated egress tool needs approval even absent from the name set', () => {
+      const hook = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, gateHostMediatedEgress: true, bypassApproval: false });
+      expect(hook.evaluate([], EMAIL_SEND).decision).toBe('require-approval');
+    });
+    it('BYPASS mode: the same egress tool is allowed (the downgrade still applies)', () => {
+      const hook = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, gateHostMediatedEgress: true, bypassApproval: true });
+      expect(hook.evaluate([], EMAIL_SEND).decision).toBe('allow');
+    });
+    it('SAFE + already-approved: the egress tool is allowed (no re-defer)', () => {
+      const hook = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, gateHostMediatedEgress: true, approvedTools: new Set([EMAIL_SEND]) });
+      expect(hook.evaluate([], EMAIL_SEND).decision).toBe('allow');
+    });
+    it('a NON-egress read tool is NOT class-gated in safe mode (non-vacuous)', () => {
+      const hook = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, gateHostMediatedEgress: true });
+      expect(hook.evaluate([], 'openwop:knowledge.search').decision).toBe('allow');
+    });
+    // Adversarial-review catch: the gate MUST read the REAL classification, not the
+    // `treat-as-risky` fallback (RISKY_FALLBACK is egress:'host-mediated'). Under the
+    // PRODUCTION default `unknownToolPolicy:'treat-as-risky'`, an UNCLASSIFIED read
+    // (documents.get / get-design / get-brief — "agents read before they write") must
+    // stay `allow`, NOT be mass-deferred for approval.
+    it('an UNCLASSIFIED read is NOT class-gated even under treat-as-risky (no mass over-block)', () => {
+      const hook = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, gateHostMediatedEgress: true, unknownToolPolicy: 'treat-as-risky' });
+      expect(hook.evaluate([], 'openwop:documents.get').decision).toBe('allow');
+      expect(hook.evaluate([], 'openwop:app-builder.get-design').decision).toBe('allow');
+    });
+    it('a classified host-mediated egress tool IS still gated under treat-as-risky', () => {
+      const hook = buildFirewallHook({ rules: [], requireApprovalTools: SENSITIVE_APPROVAL_TOOLS, gateHostMediatedEgress: true, unknownToolPolicy: 'treat-as-risky' });
+      expect(hook.evaluate([], EMAIL_SEND).decision).toBe('require-approval');
+    });
+  });
 });

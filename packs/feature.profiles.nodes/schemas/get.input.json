@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.profiles.nodes/1.1.0/get.input.json",
+  "title": "ProfilesGetInput",
+  "description": "The member to read. `userId` is the opaque durable account id (`user:<id>`) in the RUN's tenant — the same key the `ctx.features.profiles.getProfile` surface reads. An EMPTY or absent id is a typed `validation_error` node failure (never a success with `profile: null`); a real id that is not found in the tenant is an explicit `{ profile: null, found: false }`.",
+  "type": "object",
+  "required": [
+    "userId"
+  ],
+  "properties": {
+    "userId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "description": "Target member id (`user:<id>`)."
+    }
+  },
+  "additionalProperties": true
+}

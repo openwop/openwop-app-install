@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/list-invitations.output.json",
+  "title": "OrgsListInvitationsOutput",
+  "description": "Ids-only rows: never the recipient email (PII a run does not need \u2014 a chain that needs the address holds it as its own parameter), never the token or its hash.",
+  "type": "object",
+  "required": [
+    "orgId",
+    "invitations",
+    "count"
+  ],
+  "properties": {
+    "orgId": {
+      "type": "string"
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "invitations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "inviteId",
+          "role",
+          "status",
+          "expiresAt"
+        ],
+        "properties": {
+          "inviteId": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "enum": [
+              "viewer",
+              "editor",
+              "admin"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pending",
+              "declined"
+            ],
+            "description": "ADR 0564 \u2014 a declined row stays visible until age-out."
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

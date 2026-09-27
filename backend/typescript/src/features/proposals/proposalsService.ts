@@ -19,7 +19,13 @@ import { PROPOSAL_KINDS, type Proposal, type ProposalKind, type ProposalState } 
 
 // Row key is `${tenant}::${id}` so the collection is tenant-partitioned and a
 // prefix scan lists exactly one tenant's slice (no cross-tenant read).
-const proposals = new DurableCollection<Proposal>('proposals', (p) => `${p.owner.tenant}::${p.id}`);
+// PROPC-ERASURE-TEARDOWN — the tenant lives NESTED at `owner.tenant`, not as a
+// top-level `tenantId`, so without an explicit `tenantOf` resolver
+// `purgeTenantRows` falls back to the `jsonTenantId` top-level probe → `undefined`
+// → every proposals row (subject PII: `owner.principal`, AI content, sourceRunIds)
+// is SKIPPED on account-deletion teardown and SURVIVES tenant deletion. The 4th
+// arg makes teardown reach the rows (matches the sibling `suggestionStore.ts`).
+const proposals = new DurableCollection<Proposal>('proposals', (p) => `${p.owner.tenant}::${p.id}`, undefined, (p) => p.owner.tenant);
 
 const nowIso = (): string => new Date().toISOString();
 
@@ -160,6 +166,74 @@ export async function applyProposal(tenant: string, id: string): Promise<ApplyRe
 /** Test/seed helper — upsert a proposal directly. */
 export async function putProposal(p: Proposal): Promise<void> {
   await proposals.put(p);
+}
+
+/**
+ * The ONE real producer (RFC 0096) — a `workflow-chain-pack` proposal minted from
+ * an ACCEPTED ambient-work-graph pattern.
+ *
+ * The signal is genuinely honest: the ambient-work-graph mined a recurring
+ * tool-call pattern seen ≥3× (ADR 0137) and a HUMAN with workspace-write scope
+ * explicitly ACCEPTED turning it into a workflow. That human-vetted accept is the
+ * reviewable-learning signal — recorded here as a durable, INERT proposal the
+ * workspace can revise / apply / reject / archive (so `openwop:proposals.list`'s
+ * "check before proposing again" is now truthful, not vacuous).
+ *
+ * DETERMINISTIC DEDUP: the proposal id is derived from the (already
+ * hash-derived, tenant-scoped) `suggestionId`, so re-accepting the same
+ * suggestion (accept is idempotent) NEVER spams a second proposal — an existing
+ * row is returned untouched (its own revise/reject state is preserved). The
+ * artifact is an inert byte image (the tool skeleton + its run evidence); apply
+ * installs it verbatim (`proposal-no-resynthesis`).
+ */
+export async function createProposalFromAcceptedPattern(
+  tenant: string,
+  pattern: {
+    suggestionId: string;
+    toolSequence: string[];
+    count: number;
+    exampleRunIds: string[];
+    sampleGoal?: string;
+  },
+  principal?: string,
+): Promise<Proposal> {
+  const id = `wg:${pattern.suggestionId}`;
+  const existing = await getProposal(tenant, id);
+  if (existing) return existing; // idempotent — the accepted signal produces at most one proposal
+
+  const skeleton = pattern.toolSequence.join(' → ');
+  const proposal: Proposal = {
+    id,
+    kind: 'workflow-chain-pack',
+    state: 'draft',
+    title: pattern.sampleGoal
+      ? `Automate a recurring pattern: ${pattern.sampleGoal}`
+      : `Automate a recurring ${pattern.count}× pattern`,
+    rationale:
+      `This tool pattern (${skeleton}) recurred across ${pattern.count} runs and was accepted for automation. `
+      + 'Turning it into a workflow chain removes the repeated manual steps.',
+    // Inert byte image — the accepted skeleton + its run evidence. No synthesizer
+    // is consulted at apply; the stored bytes install verbatim.
+    artifact: {
+      toolSequence: pattern.toolSequence,
+      occurrences: pattern.count,
+      ...(pattern.sampleGoal ? { sampleGoal: pattern.sampleGoal } : {}),
+    },
+    provenance: { sourceRunIds: pattern.exampleRunIds },
+    duplicateOf: null,
+    owner: { tenant, ...(principal ? { principal } : {}) },
+    createdAt: nowIso(),
+  };
+  // Insert-only CAS (never a get→put): two concurrent accepts of the SAME
+  // suggestion can both clear the `getProposal` pre-check above, but only the
+  // writer that wins the create-if-absent installs the row. The loser re-reads and
+  // returns the winner's row, so a racing accept can never clobber a concurrent
+  // revise/reject the workspace made between the pre-check and the write.
+  if (!(await proposals.compareAndSwap(null, proposal))) {
+    const won = await getProposal(tenant, id);
+    if (won) return won;
+  }
+  return proposal;
 }
 
 /**

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.0/catalog.output.schema.json",
+  "title": "Agent Author Catalog Output",
+  "type": "object",
+  "required": ["agents", "workflows", "roster", "autonomyLevels"],
+  "properties": {
+    "agents": { "type": "array", "items": { "type": "object", "required": ["agentId"], "properties": { "agentId": { "type": "string" }, "label": { "type": "string" }, "description": { "type": "string" } }, "additionalProperties": false } },
+    "workflows": { "type": "array", "items": { "type": "object", "required": ["workflowId"], "properties": { "workflowId": { "type": "string" }, "name": { "type": "string" }, "description": { "type": "string" } }, "additionalProperties": false } },
+    "roster": { "type": "array", "items": { "type": "object", "required": ["rosterId", "persona"], "properties": { "rosterId": { "type": "string" }, "persona": { "type": "string" }, "roleKey": { "type": "string" } }, "additionalProperties": false } },
+    "autonomyLevels": { "type": "array", "items": { "type": "string", "enum": ["auto", "guided", "review"] } }
+  },
+  "additionalProperties": false
+}

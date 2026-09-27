@@ -23,6 +23,7 @@ export const messages = {
   documentsTitle: 'Documents',
   documentsHint: 'Bound knowledge collections — chunked, embedded, and cited when recalled.',
   documentsCreateOrgFirst: 'Create an organization first to hold this agent’s documents.',
+  documentsOrgsFailed: 'Could not load your organizations, so we can’t tell which exist. Nothing here means you need to create one.',
   organizationLabel: 'Organization',
   newCollectionNameLabel: 'New collection name',
   newCollectionNamePlaceholder: 'Account playbook',
@@ -55,7 +56,10 @@ export const messages = {
 
   // Notes section
   notesTitle: 'Notes & facts',
-  notesHint: 'Private to this agent; recalled automatically each turn (not cited).',
+  notesHint: 'Recalled automatically each turn (not cited). Visible to anyone who can use this agent.',
+  // ADR 0664 D2 — the grant is real and intended; the disclosure was missing.
+  audienceDisclosure: 'Anyone who can use {{persona}} can retrieve anything you add here — including people who are not in the project a collection came from. That access does not end when your own access to it does.',
+  audienceBoundWarning: 'This collection is restricted to its project members, but {{persona}} is available to the whole workspace. Binding it here makes its contents retrievable by anyone who can use this agent.',
   allowCuratedNotes: 'Allow curated notes for this agent',
   enabled: 'enabled',
   disabled: 'disabled',
@@ -81,4 +85,10 @@ export const messages = {
   memoryCuratedOff: 'Curated memories are off for this agent. <1>Enable them</1> to add facts it will recall.',
   memoryAddPlaceholder: 'The CFO prefers Friday status updates.',
   memoryEmptyBody: 'Add facts {{persona}} should remember; they are recalled when relevant.',
+  // KB-UX-3 / ADR 0583 — a source that FAULTED is named, never folded into "no matches".
+  retrievePartial: 'Part of this knowledge could not be searched, so this answer is incomplete.',
+  retrievePartialSources: 'Unsearched: {{sources}}',
+  retrieveSource_kb: 'documents',
+  retrieveSource_memory: 'notes',
+  errorAnnounce: 'The agent knowledge panel reported a problem — the details are on screen.',
 } as const;

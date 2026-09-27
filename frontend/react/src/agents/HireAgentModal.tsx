@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
@@ -75,23 +76,22 @@ export function HireAgentModal({ onClose }: { onClose: () => void }): JSX.Elemen
         <div className="hire-label">{t('hireStartingAutonomy')}</div>
         <div className="action-bar">
           {([['review', t('hireAutonomySupervised')], ['guided', t('hireAutonomyGuided')], ['auto', t('hireAutonomyAutonomous')]] as const).map(([value, label]) => (
-            <button
+            <Button
               key={value}
-              type="button"
-              className={autonomy === value ? 'primary btn-sm' : 'secondary btn-sm'}
+              variant={autonomy === value ? 'primary' : 'secondary'} size="sm"
               aria-pressed={autonomy === value}
               onClick={() => setAutonomy(value)}
             >
               {label}
-            </button>
+            </Button>
           ))}
         </div>
 
         <div className="hire-foot action-bar">
-          <button type="button" className="secondary btn-sm" onClick={onClose}>{t('newCancel')}</button>
-          <button type="button" className="btn-accent-solid btn-sm" disabled={roleKey === null} onClick={go}>
+          <Button variant="secondary" size="sm" onClick={onClose}>{t('newCancel')}</Button>
+          <Button variant="accent-solid" size="sm" disabled={roleKey === null} onClick={go}>
             {t('hireContinue')} <ArrowRightIcon size={14} aria-hidden />
-          </button>
+          </Button>
         </div>
     </Modal>
   );

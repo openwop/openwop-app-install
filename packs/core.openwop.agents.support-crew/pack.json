@@ -57,8 +57,8 @@
       ],
       "memoryShape": {
         "scratchpad": true,
-        "conversation": true,
-        "longTerm": true
+        "conversation": false,
+        "longTerm": false
       },
       "handoff": {
         "taskSchemaRef": "schemas/resolver.task.schema.json",
@@ -79,7 +79,7 @@
       "memoryShape": {
         "scratchpad": true,
         "conversation": false,
-        "longTerm": true
+        "longTerm": false
       },
       "handoff": {
         "taskSchemaRef": "schemas/escalator.task.schema.json",

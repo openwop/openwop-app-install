@@ -13,6 +13,7 @@ import { buildPromptSurface } from './promptSurface.js';
 
 export const promptsFeature: BackendFeature = {
   id: 'prompts',
+  requiredPacks: [{ name: 'feature.prompts.nodes', version: '1.1.0' }], // NP-HOLE-PROMPTS-1
   registerRoutes: (deps) => {
     registerPromptLibraryRoutes(deps);
   },

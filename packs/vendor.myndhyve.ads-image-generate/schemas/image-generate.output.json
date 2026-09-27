@@ -3,17 +3,17 @@
   "$id": "https://packs.openwop.dev/vendor.myndhyve.ads-image-generate/1.0.0/image-generate.output.json",
   "title": "AdsImageGenerateOutput",
   "type": "object",
-  "required": ["assets", "totalGenerated", "filteredCount", "perPromptStats", "dimensions", "platform", "placement", "usage", "success"],
+  "required": ["images", "totalGenerated", "filteredCount", "perPromptStats", "dimensions", "platform", "placement", "usage", "success"],
   "properties": {
-    "assets": {
+    "images": {
       "type": "array",
-      "description": "Generated images across all prompts. Each carries promptIndex + enhancedPrompt in metadata for traceability.",
+      "description": "Generated images across all prompts (host media-output convention `images:[{contentBase64|url}]` so the run-artifact producer mints them as Library assets). Each carries promptIndex + enhancedPrompt in metadata for traceability.",
       "items": {
         "type": "object",
         "required": ["mimeType", "width", "height", "safetyFiltered", "metadata"],
         "properties": {
-          "url": { "type": "string", "description": "Host-served URL (preferred for large assets)." },
-          "base64": { "type": "string", "description": "Inline base64 (smaller assets; host's choice)." },
+          "url": { "type": "string", "description": "Host-served URL (preferred for large assets) — becomes a file-link Library asset." },
+          "contentBase64": { "type": "string", "description": "Inline base64 (smaller assets; host's choice) — minted as a media: Library asset." },
           "mimeType": { "type": "string", "enum": ["image/png", "image/jpeg", "image/webp"] },
           "width": { "type": "integer", "minimum": 1 },
           "height": { "type": "integer", "minimum": 1 },

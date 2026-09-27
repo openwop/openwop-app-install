@@ -40,7 +40,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -151,6 +151,33 @@ describe('access-control host-extension — HTTP', () => {
     expect(preview.body.roles).toEqual(['viewer']);
     expect(preview.body.scopes).toContain('runs:read');
     expect(preview.body.scopes).not.toContain('runs:create');
+  });
+
+  it('projects the CALLER\'s superadmin authority into its own resolution — and never into a preview of someone else', async () => {
+    // `dev-token` is the wildcard bearer, which `isSuperadmin` accepts — the same
+    // predicate every admin route gates on. Before this field existed a pure
+    // superadmin with no org role read `basis:'none'` here and the SPA hid the
+    // Admin entry while every admin route answered 200 (white-label bring-up,
+    // 2026-09-06).
+    const own = await api<{ basis: string; superadmin?: boolean }>('/v1/host/openwop-app/access/effective');
+    expect(own.status).toBe(200);
+    expect(own.body.superadmin).toBe(true);
+
+    // A preview describes SOMEONE ELSE: superadmin is the caller's property.
+    const bySubject = await api<{ basis: string; superadmin?: boolean }>('/v1/host/openwop-app/access/effective?subject=not-a-member');
+    expect(bySubject.body.basis).toBe('none');
+    expect(bySubject.body.superadmin, 'a subject preview must not inherit the caller\'s superadmin').toBeUndefined();
+    const org = await api<{ orgId: string }>('/v1/host/openwop-app/orgs', { method: 'POST', body: JSON.stringify({ name: 'sa-preview' }) });
+    const m = await api<{ memberId: string }>(`/v1/host/openwop-app/orgs/${org.body.orgId}/members`, {
+      method: 'POST', body: JSON.stringify({ displayName: 'Viewer', subject: 'subj-sa-viewer', roles: ['viewer'] }),
+    });
+    const byMember = await api<{ basis: string; superadmin?: boolean }>(`/v1/host/openwop-app/access/effective?memberId=${m.body.memberId}`);
+    expect(byMember.body.basis).toBe('member');
+    expect(byMember.body.superadmin).toBeUndefined();
+
+    // The service itself never sets it — the route owns the projection.
+    const svc = await resolveEffectiveAccess('any-tenant');
+    expect('superadmin' in svc).toBe(false);
   });
 
   it('groups carry roles and grant them to members (batch RBAC, group-derived scopes)', async () => {
@@ -302,9 +329,23 @@ describe('access-control — protocol-safety guardrails (service unit)', () => {
     const prev = process.env.OPENWOP_DEMO_MODE;
     process.env.OPENWOP_DEMO_MODE = 'true';
     try {
-      const demo = await resolveEffectiveAccess('iso-demo', { subject: 'anon:demo-session' });
+      // GC-6 / ADR 0508 — the tenant is now `anon:<sid>`, which is what a real
+      // anonymous demo caller actually presents (`middleware/cookieSession.ts:150`
+      // mints `tenantId: anon:${sid}`). The previous fixture paired an `anon:`
+      // SUBJECT with the arbitrary tenant `'iso-demo'`, a combination no flow
+      // produces; the bypass is now scoped to single-principal tenants, so the
+      // fixture had to model the real one. The behaviour under test — an anonymous
+      // demo user must not 403 on /advisors — is unchanged and still asserted.
+      const demo = await resolveEffectiveAccess('anon:demo-session', { subject: 'anon:demo-session' });
       expect(demo.basis).toBe('tenant-owner');
       expect(demo.scopes).toContain('workspace:read');
+
+      // And the narrowing itself: the SAME unknown subject in a shared `ws:`
+      // workspace stays fail-closed, because a multi-member workspace is not the
+      // single-principal sandbox this exception is for.
+      const shared = await resolveEffectiveAccess('ws:iso-demo-shared', { subject: 'anon:demo-session' });
+      expect(shared.basis).toBe('none');
+      expect(shared.scopes).toEqual([]);
     } finally {
       if (prev === undefined) delete process.env.OPENWOP_DEMO_MODE;
       else process.env.OPENWOP_DEMO_MODE = prev;

@@ -1,0 +1,93 @@
+{
+  "name": "feature.territories.nodes",
+  "version": "1.2.0",
+  "description": "Sales Territory Management node pack — seven READ nodes over the ctx.features.territories surface: list territory models (+ the active model), list a model's territories (hierarchy), list its assignment rules and quotas, dry-run a model's assignment preview, and compute per-territory attainment (weighted pipeline vs quota, rolled up the hierarchy, with per-rep splits). PLUS two GOVERNED WRITE nodes (A5 — v1.1.0): activate-model and set-quota, which enforce the run OWNER's scope (host:territories:manage / workspace:write; system runs denied) and are kept OUT of the advisory agent's allowlist. NOTE (CFP-1 / D9): the app drives the governed model activation/archival through the SHARED reviews approval gate (kind: territory-model-transition), not a direct agent tool call — no built-in workflow ignites these nodes; they stay composable catalog entries for a builder-authored chain. All nodes are role:\"action\", tenant+org-guarded (CTI-1); tenantId comes from the run scope, never node args.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "territories", "sales", "quota", "attainment", "crm"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    {
+      "typeId": "feature.territories.nodes.list-models",
+      "version": "1.0.0",
+      "label": "Territories: List Models",
+      "description": "Lists an org's territory models + the active model id over ctx.features.territories.listModels. Inputs: { orgId }. Output: { models, activeModelId }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.territories.nodes.active-model",
+      "version": "1.0.0",
+      "label": "Territories: Active Model",
+      "description": "Returns the org's currently-active territory model id (or null) over ctx.features.territories.activeModel. Inputs: { orgId }. Output: { activeModelId }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.territories.nodes.list-territories",
+      "version": "1.0.0",
+      "label": "Territories: List Territories",
+      "description": "Lists a model's territories (the parent-child hierarchy) over ctx.features.territories.listTerritories. Inputs: { orgId, modelId }. Output: { territories }. Tenant+org-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.territories.nodes.list-rules",
+      "version": "1.0.0",
+      "label": "Territories: List Rules",
+      "description": "Lists a model's assignment rules (priority-ordered) over ctx.features.territories.listRules. Inputs: { orgId, modelId }. Output: { rules }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.territories.nodes.list-quotas",
+      "version": "1.0.0",
+      "label": "Territories: List Quotas",
+      "description": "Lists a model's per-territory quotas over ctx.features.territories.listQuotas. Inputs: { orgId, modelId, period? }. Output: { quotas }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.territories.nodes.preview",
+      "version": "1.0.0",
+      "label": "Territories: Preview Assignment",
+      "description": "Dry-runs a model's assignment rules against the org's live CRM records (no writes) over ctx.features.territories.previewModel — the per-territory coverage a re-org WOULD produce. Inputs: { orgId, modelId }. Output: { summary }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.territories.nodes.attainment",
+      "version": "1.0.0",
+      "label": "Territories: Attainment",
+      "description": "Computes per-territory attainment over ctx.features.territories.attainment: weighted pipeline (Σ amount × stage.probability) + won vs quota, rolled up the hierarchy, with per-rep splits keyed on deal owner. Inputs: { orgId, modelId, period? }. Output: { period, territories, unassigned }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.territories.nodes.activate-model",
+      "version": "1.0.0",
+      "label": "Territories: Activate Model",
+      "description": "GOVERNED WRITE (ADR 0272 A5) — activates a territory model over ctx.features.territories.activateModel, changing CRM record visibility + forecasting org-wide. Enforces host:territories:manage against the RUN OWNER (system runs denied). Not in the advisory agent's allowlist. NOTE (CFP-1 / D9): no built-in workflow ignites this node — the app's actual governed activation rides the SHARED reviews approval gate (kind: territory-model-transition); this node stays a composable catalog entry. Inputs: { orgId, modelId }. Output: { success, model }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
+    },
+    {
+      "typeId": "feature.territories.nodes.set-quota",
+      "version": "1.1.0",
+      "label": "Territories: Set Quota",
+      "description": "GOVERNED WRITE (ADR 0272 A5) — sets a territory's per-period quota over ctx.features.territories.setQuota. Enforces workspace:write against the run owner (system runs denied). Inputs: { orgId, modelId, territoryId, period, amount, currency, repSplits? }. `currency` is REQUIRED whenever `amount` > 0 (R2 TER2-B3 — an amount with no unit cannot be compared with the deals it is measured by, and the host returns 400); a zero amount needs none. `repSplits` REPLACES the stored splits, so omit it only when you intend to clear them. Output: { success, quota }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": ["side-effectful"]
+    }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

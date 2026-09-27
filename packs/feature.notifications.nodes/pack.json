@@ -1,0 +1,24 @@
+{
+  "name": "feature.notifications.nodes",
+  "version": "1.0.0",
+  "description": "In-app notification node over ctx.features.notifications — the ONE notification owner (notifications/emitter.ts: durable row + SSE + Web Push + Teams + email). Replaces core.openwop.integration.notification-push in chains: that node requires a per-recipient deviceToken no chain author can know, so it POSTed to an undefined address and reported success. Audience is EXPLICIT (tenant | self | role:<name>) — never inferred from how the run started.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "notifications", "inbox"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs" },
+  "nodes": [
+    {
+      "typeId": "feature.notifications.nodes.notify",
+      "version": "1.0.0",
+      "label": "Notify: In-App",
+      "description": "Emits one in-app notification (inbox row + SSE + the user's configured push/email channels) over ctx.features.notifications. Audience is explicit: `tenant` broadcasts, `self` addresses the run's acting user, `role:<name>` addresses a role (default-deny). Reports `emitted:false` with a reason rather than silently succeeding.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [],
+      "configSchemaRef": "schemas/notify.config.json",
+      "inputSchemaRef": "schemas/notify.input.json",
+      "outputSchemaRef": "schemas/notify.output.json"
+    }
+  ]
+}

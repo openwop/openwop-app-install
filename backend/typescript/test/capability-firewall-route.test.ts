@@ -15,7 +15,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -57,6 +57,14 @@ describe('capability-firewall routes (ADR 0135, always-on)', () => {
     const get = await c('GET', RULES_PATH);
     expect(get.body.isDefault).toBe(false);
     expect(get.body.rules.map((r: any) => r.id)).toEqual(['no-exec']);
+
+    // CS-TL-2 — the mutation left an audit trail (symmetric with the ADR 0104
+    // allowlist grants; a silent rule weakening was the audit finding).
+    const { hostExtStorage } = await import('../src/host/hostExtPersistence.js');
+    const audits = await hostExtStorage().listAudit();
+    const entry = [...audits].reverse().find((a: { action?: string }) => a.action === 'capability-firewall.rules.set');
+    expect(entry).toBeTruthy();
+    expect(JSON.stringify(entry)).toContain('"ruleCount":1');
   });
 
   it('invalid rule (bad verdict) ⇒ 400', async () => {

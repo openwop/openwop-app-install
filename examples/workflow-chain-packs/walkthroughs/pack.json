@@ -1,0 +1,613 @@
+{
+  "name": "core.openwop.workflows.walkthroughs",
+  "version": "1.0.1",
+  "kind": "workflow-chain",
+  "description": "The first-party SYSTEM guided walkthroughs (single-step page tours), migrated from the deprecated builtinWorkflows seam (ADR 0472 P4). Each chainId keeps its original walkthrough.* id so the FE player + replay resolve unchanged; registered chain-backed with metadata.walkthrough=true so the walkthroughs surface lists them.",
+  "keywords": [
+    "Walkthroughs",
+    "Onboarding"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "tour.campaign-studio.first-brief",
+      "version": "1.0.0",
+      "label": "Campaign Studio: your first brief",
+      "description": "Campaign Studio: your first brief — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "campaign-studio.new-brief.click",
+              "narration": "csWalkthroughNewBrief"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.agents.roster",
+      "version": "1.0.0",
+      "label": "Agents: meet the roster",
+      "description": "Agents: meet the roster — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "agents.page.view",
+              "narration": "agentsWalkthroughRoster"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.workflows.dashboard",
+      "version": "1.0.0",
+      "label": "Workflows: the dashboard",
+      "description": "Workflows: the dashboard — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "workflows.page.view",
+              "narration": "workflowsWalkthroughDashboard"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.runs.index",
+      "version": "1.0.0",
+      "label": "Runs: the run history",
+      "description": "Runs: the run history — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "runs.page.view",
+              "narration": "runsWalkthroughIndex"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.keys.providers",
+      "version": "1.0.0",
+      "label": "Keys: provider credentials",
+      "description": "Keys: provider credentials — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "keys.page.view",
+              "narration": "keysWalkthroughProviders"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.funnels.list",
+      "version": "1.0.0",
+      "label": "Funnels: your sales funnels",
+      "description": "Funnels: your sales funnels — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "funnels.page.view",
+              "narration": "funnelsWalkthroughList"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.models.hub",
+      "version": "1.0.0",
+      "label": "Models: pick your models",
+      "description": "Models: pick your models — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "models.page.view",
+              "narration": "modelsWalkthroughHub"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.boards.kanban",
+      "version": "1.0.0",
+      "label": "Boards: the kanban",
+      "description": "Boards: the kanban — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "boards.page.view",
+              "narration": "boardsWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.workforces.gallery",
+      "version": "1.0.0",
+      "label": "Workforces: the gallery",
+      "description": "Workforces: the gallery — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "workforces.page.view",
+              "narration": "workforcesWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.inbox.notifications",
+      "version": "1.0.0",
+      "label": "Inbox: notifications",
+      "description": "Inbox: notifications — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "inbox.page.view",
+              "narration": "inboxWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.projects.list",
+      "version": "1.0.0",
+      "label": "Projects: your projects",
+      "description": "Projects: your projects — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "projects.page.view",
+              "narration": "projectsWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.agent-templates.list",
+      "version": "1.0.0",
+      "label": "Agents: templates",
+      "description": "Agents: templates — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "agent-templates.page.view",
+              "narration": "agentTemplatesWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.roster.orgchart",
+      "version": "1.0.0",
+      "label": "Roster: the org chart",
+      "description": "Roster: the org chart — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "roster.page.view",
+              "narration": "rosterWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.media.library",
+      "version": "1.0.0",
+      "label": "Media: the library",
+      "description": "Media: the library — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "media.page.view",
+              "narration": "mediaWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.cms.pages",
+      "version": "1.0.0",
+      "label": "CMS: your pages",
+      "description": "CMS: your pages — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "cms.page.view",
+              "narration": "cmsWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.publishing.settings",
+      "version": "1.0.0",
+      "label": "Publishing: settings",
+      "description": "Publishing: settings — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "publishing.page.view",
+              "narration": "publishingWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.prompts.library",
+      "version": "1.0.0",
+      "label": "Prompts: the library",
+      "description": "Prompts: the library — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "prompts.page.view",
+              "narration": "promptsWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.memory.ledger",
+      "version": "1.0.0",
+      "label": "Memory: the ledger",
+      "description": "Memory: the ledger — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "memory.page.view",
+              "narration": "memoryWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.capabilities.panel",
+      "version": "1.0.0",
+      "label": "Capabilities: the panel",
+      "description": "Capabilities: the panel — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "capabilities.page.view",
+              "narration": "capabilitiesWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.cli.quickstart",
+      "version": "1.0.0",
+      "label": "CLI: quickstart",
+      "description": "CLI: quickstart — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "cli.page.view",
+              "narration": "cliWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.feature-toggles.list",
+      "version": "1.0.0",
+      "label": "Feature toggles",
+      "description": "Feature toggles — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "feature-toggles.page.view",
+              "narration": "featureTogglesWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.orgs.list",
+      "version": "1.0.0",
+      "label": "Orgs: your workspaces",
+      "description": "Orgs: your workspaces — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "orgs.page.view",
+              "narration": "orgsWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.users.list",
+      "version": "1.0.0",
+      "label": "Users: members",
+      "description": "Users: members — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "users.page.view",
+              "narration": "usersWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.connections.list",
+      "version": "1.0.0",
+      "label": "Connections: providers",
+      "description": "Connections: providers — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "connections.page.view",
+              "narration": "connectionsWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.example-data.dashboard",
+      "version": "1.0.0",
+      "label": "Example data",
+      "description": "Example data — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "example-data.page.view",
+              "narration": "exampleDataWalkthrough"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "walkthrough.commerce.catalog",
+      "version": "1.0.0",
+      "label": "Commerce: your product catalog",
+      "description": "Commerce: your product catalog — a guided page tour.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "t1",
+            "typeId": "ui.walkthrough.step",
+            "config": {
+              "actionId": "commerce.page.view",
+              "narration": "commerceWalkthroughCatalog"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,555 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openwop.dev/spec/v2/certification-bundle.schema.json",
+  "title": "Certification bundle v3 (RFC 0168 §E)",
+  "description": "Closed root. witnessSha256 covers the reporter record (RFC 0148 §C); signature is an Ed25519 attestation over the canonical JSON of {witnessSha256, host.build, suite.version, discovery.sha256}; evidenceTier independent requires a verifier keyId distinct from the host's. A bundle with blocked > 0 does not certify; a relaxed obligation cannot certify its profile (RFC 0173 §A.2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bundleVersion",
+    "generatedAt",
+    "suite",
+    "host",
+    "discovery",
+    "claimedProfiles",
+    "results",
+    "witnessSha256",
+    "assertionCount",
+    "signature"
+  ],
+  "properties": {
+    "bundleVersion": {
+      "const": "3"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "targetMajor",
+        "specArtifactsVersion"
+      ],
+      "properties": {
+        "name": {
+          "const": "@openwop/openwop-conformance"
+        },
+        "version": {
+          "type": "string"
+        },
+        "targetMajor": {
+          "type": "integer",
+          "enum": [
+            1,
+            2
+          ]
+        },
+        "specArtifactsVersion": {
+          "type": "string"
+        },
+        "stampSha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "host": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version",
+        "build"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "vendor": {
+          "type": "string"
+        },
+        "build": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "kind",
+            "id"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "image-digest",
+                "commit",
+                "artifact-sha256"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        },
+        "signingKeyId": {
+          "$ref": "ids.schema.json#/$defs/keyId",
+          "description": "The host key the signature was made with (the same keyId as signature.keyId)."
+        },
+        "relaxations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "obligation",
+              "durability",
+              "reason"
+            ],
+            "properties": {
+              "obligation": {
+                "type": "string"
+              },
+              "durability": {
+                "type": "string",
+                "enum": [
+                  "session",
+                  "deployment",
+                  "persisted"
+                ],
+                "description": "RFC 0173 §A.2 — session (lost on restart), deployment (set at deploy time), persisted (survives restarts and is auditable)."
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "RFC 0173 §A.2 — operator relaxations; a relaxed obligation's profile cannot certify."
+        },
+        "deployment": {
+          "type": "string",
+          "enum": [
+            "colocated-companion"
+          ],
+          "description": "RFC 0216 §B — present only on a bundle cut from a colocated companion (the served host's image, run beside the suite so it can trust a suite-held trust anchor). Inside the witnessSha256 preimage when present. Absent: the bundle measures the served host. A companion is acceptance evidence only for spec/v2/harness-trust-anchors.json rows, and only when it pairs with a served-host bundle (RFC 0216 §C)."
+        }
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "sha256",
+        "protocolVersions",
+        "preferredVersion"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "protocolVersions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "preferredVersion": {
+          "type": "string"
+        },
+        "document": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "The captured /.well-known/openwop payload. OPTIONAL: bundles cut before suite 2.0.5 do not carry it and remain valid. When present it MUST hash (canonical JSON, keys sorted at every level) to `sha256`, and a verifier re-derives every certified profile from it (RFC 0148 §B(1)). Without it, `claimedProfiles[].certified` is a claim only the emitter can evaluate: a digest of a document the reader does not have proves nothing about its contents, and re-fetching does not substitute because the host redeploys while the bundle attests to the build it names. The object is deliberately OPEN (`additionalProperties: true`): it is a verbatim capture of a third-party document, and closing it would reject a payload from any host richer than this schema anticipated."
+        }
+      }
+    },
+    "claimedProfiles": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "evidenceTier",
+          "witnessCount",
+          "certified"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^openwop-[a-z0-9-]+$"
+          },
+          "evidenceTier": {
+            "type": "string",
+            "enum": [
+              "self",
+              "steward",
+              "independent"
+            ]
+          },
+          "witnessCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "certified": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "results": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "totals",
+        "requirements"
+      ],
+      "properties": {
+        "totals": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "executedPass",
+            "executedFail",
+            "skipped",
+            "inapplicable",
+            "blocked"
+          ],
+          "properties": {
+            "executedPass": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "executedFail": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "skipped": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "inapplicable": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "blocked": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        },
+        "requirements": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "scenario",
+              "result"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^openwop\\.(?!it\\.(?:a2a-parts-schemas|a2ui-v09-profile|artifact-schema-compile-bounded|artifact-type-legacy-ids|bundle-maturity-gate|capability-example-root-layout|certification-floor-enforcement|chain-subchain-unsupported-refused|compensation-profile|core-manifest-and-extension-registry|discovery-canonical-family-no-shadow|edge-condition-truthy-falsy|effect-identity-composition|effect-identity-cross-scope|error-envelope-canonical-shape|event-codemap-complete|form-content-packs|locale-key-grammar|multi-region-effect-vocabulary|node-pack-mcp-server-record|normative-example-extraction|openapi-asyncapi-sdk-parity|openapi-security-declared|pack-manifest-extensions|protocol-version-grammar|registry-declarative-kinds|removal-dates-minor|rfc-0147-self-audit|rfc-lifecycle-coherence|semantic-digest-v2|spec-corpus-validity|spec-section-citations|tool-descriptor-annotations|tool-result-trust-monotone|v1-webhook-rotation-contract|v1-webhook-unregister-contract|v2-alias-covers-reword|v2-bundle-signature-attributable|v2-bundle-witness-preimage|v2-colocated-companion|v2-corpus-tag-pinned|v2-declaration-parity|v2-envelope-catalog|v2-eos-clock|v2-error-registry-prose-parity|v2-event-naming-rule|v2-events-channel-parity|v2-externally-gated-never-stable|v2-facet-advertisement|v2-front-door-counts|v2-id-kinds-bound|v2-interop-map-coherent|v2-lane-exp-only-schema|v2-normative-home-gate|v2-one-signing-scheme|v2-path-parity|v2-push-credential-coherent|v2-release-identity|v2-req-only-assertions|v2-retention-floors|v2-retirement-gate|v2-seams-not-in-canonical|v2-security-defaults-table|v2-spec-artifacts-digest|v2-surface-monotone-gate|v2-threat-model-template|v2-umbrella-alias-covered|v2-umbrella-child-parts|v2-umbrella-codemod-at-active|v2-umbrella-codemod-legs|v2-umbrella-migration-deprecation|v2-witness-required|versioned-composition-profiles|workflow-chain-internal-flag|workload-identity-profile)\\.)(requirement|it|scenario|floor|profile|family)\\.[a-z0-9]",
+                "description": "RFC 0168 §A.1 — `openwop.<area>.<slug>`. The suite mints six areas: `requirement` (an explicit `req()` id), `it` (a per-test id from the scenario file and title), `scenario` and `floor` (per-file rows), `profile` (a claimed-profile row) and `family` (a capability gate). The lookahead refuses every id minted from a corpus-coherence file: those run in the spec repo’s CI and MUST NOT appear in a host bundle (conformance.md §\"Two products, two ledgers\"; RFC 0168 §D.1). `scripts/check-req-only.mjs` fails when the list drifts from `conformance/src/coherence/`."
+              },
+              "scenario": {
+                "type": "string"
+              },
+              "result": {
+                "type": "string",
+                "enum": [
+                  "executed-pass",
+                  "executed-fail",
+                  "skipped",
+                  "inapplicable",
+                  "blocked"
+                ]
+              },
+              "assertions": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "detail": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "object",
+                "additionalProperties": false,
+                "minProperties": 1,
+                "description": "RFC 0158 §E — structured evidence for this row. OPTIONAL, and carried on the ROW rather than at the bundle root because the attestation covers witnessSha256 and witnessSha256 digests the rows: a root-level block would be unsigned. It enters the witness digest only when present, so every bundle without it digests exactly as before. Closed: one optional member per kind of evidence. Recorded for an `executed-pass` row only.",
+                "properties": {
+                  "recovery": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "class",
+                      "boundMs",
+                      "observedMs"
+                    ],
+                    "description": "On a kill row (`0158.kill-after-accept`, `0158.kill-during-execution`): the recovery CLASS the exercise exercised, the bound it was judged against, and the kill → RESUMPTION interval observed (never kill → terminal, RFC 0158 §B.4). `class` MUST name an entry of `recoveryBounds[]` and `boundMs` MUST equal that entry's `bound`: That refuses an undeclared class, a bound label that disagrees with its class, and a resumption outside the bound. It does NOT refuse a host that names the wrong DECLARED class while resuming inside that class's longer bound — a seam that kills before the host holds its execution claim exercises an easier class than the one it labels, and no arithmetic separates that from a fast recovery. Recording the interval makes the mislabel visible to a reader; killing only once the claim is held remains the host's obligation (RFC 0158 §E).",
+                    "properties": {
+                      "class": {
+                        "type": "string",
+                        "pattern": "^[a-z][A-Za-z0-9._-]{0,63}$",
+                        "description": "Opaque and host-chosen — NOT an enum. \"leased\" / \"unleased\" name one host's mechanisms and boot re-entry another's; a closed vocabulary would select for an architecture."
+                      },
+                      "boundMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "observedMs": {
+                        "type": "integer",
+                        "minimum": 0
+                      }
+                    }
+                  },
+                  "recoveryBounds": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 16,
+                    "description": "On `0158.bound-is-derived`: the declared recovery bound PER WORK CLASS, each with the terms that produce it, so a reader can recompute it (RFC 0158 §B.5, §E). There is deliberately NO scalar overall bound: Unresolved Question 1 resolved per class, and a convenience total is the lie by aggregation that resolution rejects. This proves ARITHMETIC — that each bound follows from its stated mechanism — and MUST NOT be cited as evidence that the mechanism runs; only a kill row's `observedMs` witnesses that.",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "class",
+                        "bound",
+                        "terms"
+                      ],
+                      "properties": {
+                        "class": {
+                          "type": "string",
+                          "pattern": "^[a-z][A-Za-z0-9._-]{0,63}$"
+                        },
+                        "bound": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "description": "Milliseconds. MUST equal the sum of `terms[].ms`."
+                        },
+                        "terms": {
+                          "type": "array",
+                          "minItems": 1,
+                          "maxItems": 16,
+                          "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": [
+                              "name",
+                              "ms"
+                            ],
+                            "properties": {
+                              "name": {
+                                "type": "string",
+                                "pattern": "^[a-z][A-Za-z0-9._-]{0,63}$"
+                              },
+                              "ms": {
+                                "type": "integer",
+                                "minimum": 0
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "description": "RFC 0148 §A — **THE LEDGER, and the array a consumer counts.** One row per requirement id the run resolved, carrying `scenario`, the `result` disposition and `assertions`. `results.totals` is this array tallied. `detail.nonPass[]` re-lists the SAME ids as a derived view with a different, smaller field set, so a consumer that walks the document generically sees every non-pass id TWICE and, depending on where it stops, reports either count as the size of the run. Two sessions did exactly that on one file within an hour of each other on 2026-09-19 — one read 227 rows and the other 317 (227 + 90), and a blocked-row count came out as 3 or 6 by the same mechanism. Count THIS array; read `detail.nonPass[]` for its `reason` text and nothing else."
+        }
+      }
+    },
+    "witnessSha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "assertionCount": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nonPass"
+      ],
+      "properties": {
+        "nonPass": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "result",
+              "reason"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "result": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "RFC 0148 §A — **a DERIVED VIEW, not a second ledger.** Every id here also appears in `results.requirements[]`; this array exists to carry the human-readable `reason` for each non-pass row in one place. It MAY omit fields the ledger carries (`scenario` and `assertions` are absent by design, not by accident), so its rows are NOT interchangeable with ledger rows and MUST NOT be summed with them. A tool counting dispositions reads `results.requirements[]` or `results.totals`."
+        }
+      },
+      "description": "Required when any result is not executed-pass (allOf below). A DERIVED projection of `results.requirements[]` for readability — never an independent source of counts."
+    },
+    "durability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rung"
+      ],
+      "description": "RFC 0158 §D — the qualification rung this host CLAIMS. OPTIONAL; absent means no rung is claimed, which is every host's status by default (§E.10 mints no discovery capability, so this is the only place a rung is stated). It is a CLAIM and is outside the attestation: a verifier MUST re-derive it from the signed rows — every row of the rung `executed-pass`, each kill row's `evidence.recovery.class` naming a `recoveryBounds[]` entry whose `bound` equals its `boundMs` and is not exceeded by its `observedMs`, and each entry's terms summing to its bound — and MUST reject a bundle whose claim it cannot derive (`rung-not-derivable`). Only `durable-single-instance` is derivable in this revision: `peer-resume` is bundle-witnessed by evidence not yet carried, so a higher claim is refused, not assumed.",
+      "properties": {
+        "rung": {
+          "enum": [
+            "durable-single-instance",
+            "durable-multi-instance",
+            "multi-region-qualified"
+          ]
+        }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alg",
+        "keyId",
+        "sig",
+        "over"
+      ],
+      "properties": {
+        "alg": {
+          "const": "ed25519"
+        },
+        "keyId": {
+          "$ref": "ids.schema.json#/$defs/keyId"
+        },
+        "sig": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        },
+        "over": {
+          "type": "array",
+          "const": [
+            "witnessSha256",
+            "host.build",
+            "suite.version",
+            "discovery.sha256"
+          ]
+        }
+      }
+    },
+    "verifierSignature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alg",
+        "keyId",
+        "sig"
+      ],
+      "properties": {
+        "alg": {
+          "const": "ed25519"
+        },
+        "keyId": {
+          "$ref": "ids.schema.json#/$defs/keyId"
+        },
+        "sig": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{86}$"
+        }
+      },
+      "description": "RFC 0168 §E.2 — required when any claimed profile is evidenceTier independent; the key MUST differ from the host's."
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "results": {
+            "properties": {
+              "totals": {
+                "anyOf": [
+                  {
+                    "properties": {
+                      "executedFail": {
+                        "minimum": 1
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "skipped": {
+                        "minimum": 1
+                      }
+                    }
+                  },
+                  {
+                    "properties": {
+                      "blocked": {
+                        "minimum": 1
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "detail"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "claimedProfiles": {
+            "contains": {
+              "properties": {
+                "evidenceTier": {
+                  "const": "independent"
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "verifierSignature"
+        ]
+      }
+    }
+  ]
+}

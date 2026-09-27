@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
-import { TextField, TextareaField, SelectField, Field } from '../Field.js';
+import { TextField, TextareaField, SelectField, Field, CheckboxField } from '../Field.js';
 
 afterEach(cleanup);
 
@@ -57,5 +57,13 @@ describe('Field primitive accessibility wiring', () => {
     const input = screen.getByTestId('c');
     expect(input.getAttribute('aria-invalid')).toBe('true');
     expect(screen.getByLabelText('Custom')).toBe(input);
+  });
+});
+
+describe('CheckboxField label register (RFCW-UX-7)', () => {
+  it('the option text rides .field-check-label — content in sans, not the mono caption register', () => {
+    render(<CheckboxField label="Auto-translate on submit" />);
+    const label = screen.getByText('Auto-translate on submit').closest('label');
+    expect(label?.classList.contains('field-check-label')).toBe(true);
   });
 });

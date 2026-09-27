@@ -11,8 +11,11 @@
  */
 
 import { useTranslation } from 'react-i18next';
+import { useState } from 'react';
 import { Markdown } from '../../ui/Markdown.js';
 import { FileTextIcon } from '../../ui/icons/index.js';
+import { mediaSrc } from '../mediaSrc.js';
+import { getReviewArtifactRenderer } from './reviewArtifactRenderers.js';
 import type { ReviewAsset } from './reviewClient.js';
 
 const EMAIL_HEADER_LINE = /^\s*(To|From|Cc|Bcc|Subject|Reply-To)\s*:\s*(.*)$/i;
@@ -60,6 +63,23 @@ function EmailView({ content }: { content: string }): JSX.Element {
 export function AssetPreview({ asset, hideLabel }: { asset: ReviewAsset; hideLabel?: boolean }): JSX.Element {
   const { t } = useTranslation('chat');
   const content = asset.content;
+  // ADR 0458 §2.4 — a media asset (a generated image/video) renders INLINE so the
+  // approver actually sees what they approve. The serve URL is model-influenced,
+  // so it MUST pass the shared `mediaSrc` allowlist (XSS) before it reaches a raw
+  // <img>/<video>; a disallowed scheme yields null and falls through to the text
+  // path. A missing/unknown MIME never renders media (no guessing).
+  // grade-ux fix: a 404/unreachable media URL must degrade to a designed
+  // fallback, never a broken-media glyph.
+  const [mediaFailed, setMediaFailed] = useState(false);
+  const src = !mediaFailed && asset.url && asset.mimeType ? mediaSrc(asset.mimeType, asset.url) : null;
+  const isImage = src != null && asset.mimeType!.startsWith('image/');
+  const isVideo = src != null && asset.mimeType!.startsWith('video/');
+  const mediaAlt = asset.label ?? t('assetPreviewMediaAlt');
+  // ADR 0459 grade-fix — a TYPED artifact (a registered artifactTypeId) renders through
+  // the review-renderer registry (a humanized card) instead of dumping raw JSON as
+  // markdown. Media still wins (it has no artifactTypeId); an unregistered type falls
+  // through to the markdown/email path below (untyped content is unchanged).
+  const TypedRenderer = src == null ? getReviewArtifactRenderer(asset.artifactTypeId) : null;
   return (
     <div className="assetpreview-asset">
       {asset.label && !hideLabel && (
@@ -68,7 +88,20 @@ export function AssetPreview({ asset, hideLabel }: { asset: ReviewAsset; hideLab
           <span className="u-fw-600 u-fs-13">{asset.label}</span>
         </div>
       )}
-      {content
+      {isImage ? (
+        <figure className="u-my-1-5">
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions --
+              onError is a resource-load failure hook (the designed broken-media
+              fallback), not a user interaction on the image. */}
+          <img src={src!} alt={mediaAlt} loading="lazy" className="msgrender-img" onError={() => setMediaFailed(true)} />
+        </figure>
+      ) : isVideo ? (
+        <video src={src!} controls preload="metadata" aria-label={mediaAlt} className="msgrender-img" onError={() => setMediaFailed(true)} />
+      ) : mediaFailed ? (
+          <p className="muted u-fs-12" role="status">{t('assetPreviewMediaFailed')}</p>
+      ) : TypedRenderer ? (
+        <div className="assetpreview-body"><TypedRenderer asset={asset} /></div>
+      ) : content
         ? (looksLikeEmail(content)
             ? <EmailView content={content} />
             : <div className="assetpreview-body"><Markdown>{content}</Markdown></div>)

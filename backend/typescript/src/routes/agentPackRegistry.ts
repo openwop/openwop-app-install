@@ -24,8 +24,13 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { OpenwopError } from '../types.js';
 import { getAgentRegistry } from '../executor/agentRegistry.js';
-import { installPackFromRegistry, resolveDefaultPackDir } from '../packs/registryInstaller.js';
+import { installPackFromRegistry, resolveDefaultPackDir, isSafePackName } from '../packs/registryInstaller.js';
+import { isSuperadmin, requireSuperadmin } from '../host/superadmin.js';
 import { createLogger } from '../observability/logger.js';
+
+/** SemVer (with optional pre-release/build) — `version` is interpolated into the
+ *  registry URL + fs paths, so reject anything that isn't a clean version string. */
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 const log = createLogger('routes.agentPackRegistry');
 
@@ -46,10 +51,16 @@ interface AgentPackSummary {
 }
 
 export function registerAgentPackRegistryRoutes(app: Express): void {
-  app.get('/v1/host/openwop-app/registry/agent-packs', (_req, res, next) => {
+  app.get('/v1/host/openwop-app/registry/agent-packs', (req, res, next) => {
     try {
       const packs = scanLocalAgentPacks();
-      res.json({ packs, total: packs.length });
+      // UX_UPGRADE-agents AG-G1 — the list tells the caller whether they may
+      // INSTALL, computed from the SAME predicate the install route enforces
+      // (`isSuperadmin`, the boolean behind `requireSuperadmin`). The UI used to
+      // offer Install to everyone, so a non-superadmin's only feedback was a
+      // 403 with a developer hint. One predicate, read + write agree — the
+      // CLAUDE.md rule for a route and its UI sharing an access check.
+      res.json({ packs, total: packs.length, canInstall: isSuperadmin(req) });
     } catch (err) {
       next(err);
     }
@@ -57,6 +68,10 @@ export function registerAgentPackRegistryRoutes(app: Express): void {
 
   app.post('/v1/host/openwop-app/registry/agent-packs/install', async (req, res, next) => {
     try {
+      // (2026-07 vuln-scan M10) A host-global pack install hot-reloads code into the
+      // running host — an operator-only action. Gate on superadmin, matching the
+      // sibling workflow-chain-pack installer (routes/workflows.ts).
+      requireSuperadmin(req, 'Agent-pack registry install');
       const body = (req.body ?? {}) as { name?: unknown; version?: unknown };
       if (typeof body.name !== 'string' || body.name.length === 0) {
         throw new OpenwopError('validation_error', '`name` is required.', 400);
@@ -68,9 +83,17 @@ export function registerAgentPackRegistryRoutes(app: Express): void {
           400,
         );
       }
+      // Path-safety (2026-07 vuln-scan): `name` reaches join(packDir, name) + rmSync
+      // and the registry URL; the prefix check alone admits `…agents.x/../../y`.
+      if (!isSafePackName(body.name)) {
+        throw new OpenwopError('validation_error', '`name` contains path-unsafe characters.', 400);
+      }
       const version = typeof body.version === 'string' && body.version.length > 0
         ? body.version
         : '1.0.0';
+      if (!SEMVER_RE.test(version)) {
+        throw new OpenwopError('validation_error', '`version` MUST be a SemVer string.', 400);
+      }
       const packDir = resolveDefaultPackDir();
       const registry = process.env.OPENWOP_REGISTRY_URL;
       const trustedKeysDir = resolve('../../../registry/keys');

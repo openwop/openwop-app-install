@@ -20,21 +20,23 @@
  * principal); the page never sends a tenantId. Drag-drop via @dnd-kit.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
-import { useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { listRoster, type RosterEntry } from '../agents/rosterClient.js';
 import { roleThemeForAgent, workflowName } from '../agents/roleTemplates.js';
+import { listWorkflowSummaries, type WorkflowSummaryDTO } from '../workflows/workflowsClient.js';
 import { AgentAvatar } from '../agents/AgentAvatar.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
-import { handleTablistKeyDown } from '../ui/rovingTabs.js';
 import { classifyHttpError } from '../client/classifyHttpError.js';
 import { PageHeader } from '../ui/PageHeader.js';
 import { IconButton } from '../ui/IconButton.js';
-import { AlertIcon, ColumnsIcon, DotsIcon, PencilIcon, TrashIcon, WorkflowIcon, ZapIcon } from '../ui/icons/index.js';
-import { KanbanBoardView, type NewCardInput } from './KanbanBoardView.js';
+import { AlertIcon, ClockIcon, ColumnsIcon, DotsIcon, PencilIcon, TrashIcon, WorkflowIcon, ZapIcon } from '../ui/icons/index.js';
+import { KanbanBoardView, type CardMovePosition, type CardPatch, type NewCardInput } from './KanbanBoardView.js';
+import { BoardReviewsSection } from './BoardReviewsSection.js';
 import { AssignedColumn } from './AssignedColumn.js';
 import { CreateBoardModal } from './CreateBoardModal.js';
 import { Modal } from '../ui/Modal.js';
@@ -51,11 +53,14 @@ import {
   claimCard,
   listBoardsWithCards,
   patchCard,
+  runWorkItem,
+  setColumnLimit,
   subscribeBoardEvents,
   type AssignedCard,
   type KanbanBoard,
   type KanbanBoardWithCards,
   type KanbanCard,
+  type KanbanWorkItem,
 } from './kanbanClient.js';
 
 /** Waiting-lane cards on a board (drives the pill dot + the header chip). */
@@ -138,8 +143,8 @@ function RenameBoardModal({ current, onClose, onSubmit }: {
         <h2 className="u-fs-16 u-m-0">{t('renameBoard')}</h2>
         <TextField label={t('boardNameLabel')} required value={name} onChange={(e) => setName(e.target.value)} placeholder={t('boardNamePlaceholder')} />
         <div className="action-bar u-justify-end">
-          <button type="button" className="secondary" onClick={onClose} disabled={busy}>{t('common:cancel')}</button>
-          <button type="submit" className="primary" disabled={!canSave}>{t('common:save')}</button>
+          <Button variant="secondary" onClick={onClose} disabled={busy}>{t('common:cancel')}</Button>
+          <Button variant="primary" type="submit" disabled={!canSave}>{t('common:save')}</Button>
         </div>
       </form>
     </Modal>
@@ -148,9 +153,20 @@ function RenameBoardModal({ current, onClose, onSubmit }: {
 
 export function KanbanPage(): JSX.Element {
   const { t } = useTranslation('kanban');
+  // Every board has its own URL (`/boards/:boardId`, routing-correction wave);
+  // the bare `/boards` redirects below so the page never greets with an empty
+  // shell (decision-first: show the work, not a picker).
+  const { boardId } = useParams<{ boardId: string }>();
+  const navigate = useNavigate();
   const [boards, setBoards] = useState<KanbanBoardWithCards[]>([]);
   const [activeBoard, setActiveBoard] = useState<KanbanBoard | null>(null);
   const [cards, setCards] = useState<KanbanCard[]>([]);
+  const [workItems, setWorkItems] = useState<KanbanWorkItem[]>([]);
+  const [startingWorkItemIds, setStartingWorkItemIds] = useState<Set<string>>(new Set());
+  const workItemsByCardId = useMemo(
+    () => new Map(workItems.map((workItem) => [workItem.cardId, workItem] as const)),
+    [workItems],
+  );
   // BLD-4: cards with an in-flight move PATCH — guards against double-drag
   // races. A ref (not state) so toggling it never triggers a re-render.
   const movingCardIds = useRef<Set<string>>(new Set());
@@ -158,12 +174,20 @@ export function KanbanPage(): JSX.Element {
   // Init-true so the first load shows a loading state, not a false "No boards
   // yet" empty flash before the fetch resolves (GAP-ANALYSIS E5).
   const [boardsLoading, setBoardsLoading] = useState(true);
+  // UX-BRD-1 — the boards read FAILED; we must not claim the user has none.
+  const [boardsFailed, setBoardsFailed] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [renaming, setRenaming] = useState(false);
   // Roster members boards can be bound to (RFC 0086): the owner's avatar
   // renders in the switcher pill and the board header.
   const [roster, setRoster] = useState<RosterEntry[]>([]);
+  // Kanban binds the exact tenant-owned workflow visible in Workflow Builder.
+  // This deliberately replaces the static role-template catalog so a user can
+  // edit a workflow and select that owned revision from either board or card UX.
+  const [workflowOptions, setWorkflowOptions] = useState<WorkflowSummaryDTO[]>([]);
+  const [workflowOptionsLoading, setWorkflowOptionsLoading] = useState(true);
+  const [workflowOptionsFailed, setWorkflowOptionsFailed] = useState(false);
   // ADR 0049 — the "assigned to me" mirror, folded into the personal board as a
   // synthetic leftmost column (was the standalone /my-work page until
   // 2026-06-16). `personalBoardId` tells us which board hosts the rail; the
@@ -187,7 +211,16 @@ export function KanbanPage(): JSX.Element {
   const refreshBoards = useCallback(async () => {
     try {
       setBoards(await listBoardsWithCards());
+      setBoardsFailed(false);
     } catch (err) {
+      // UX-BRD-1 — the error Notice below is set, but `boards` stayed [] and
+      // `boardsLoading` went false, so the render ALSO fell through to
+      // "No boards yet — Create a board to start tracking work" with a New-board
+      // CTA. A user who owns boards was told they own none and invited to make a
+      // duplicate. An error beside a false claim is still a false claim; and the
+      // header's "never greets with an empty shell" promise is broken precisely
+      // here, since the redirect can't fire without a board to redirect to.
+      setBoardsFailed(true);
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     } finally {
       setBoardsLoading(false);
@@ -196,9 +229,13 @@ export function KanbanPage(): JSX.Element {
 
   const openBoard = useCallback(async (boardId: string) => {
     try {
-      const { board, cards: c } = await getBoard(boardId);
+      // `workItems` is an additive board-read field. Treat an older host or
+      // embed that has not adopted it yet as an empty projection rather than
+      // breaking the reusable board shell.
+      const { board, cards: c, workItems: nextWorkItems = [] } = await getBoard(boardId);
       setActiveBoard(board);
       setCards(c);
+      setWorkItems(nextWorkItems);
     } catch (err) {
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     }
@@ -211,16 +248,37 @@ export function KanbanPage(): JSX.Element {
     // so we know which board hosts the "Assigned to me" rail.
     void getPersonalBoard().then(({ board }) => setPersonalBoardId(board.id)).catch(() => { /* personal board optional */ });
     void listRoster().then(setRoster).catch(() => { /* roster optional */ });
+    void listWorkflowSummaries()
+      .then((workflows) => { setWorkflowOptions(workflows); setWorkflowOptionsFailed(false); })
+      .catch(() => { setWorkflowOptionsFailed(true); })
+      .finally(() => { setWorkflowOptionsLoading(false); });
   }, [refreshBoards, refreshAssigned]);
 
-  // Auto-open a board so the page never greets with an empty shell (decision-
-  // first: show the work, not a picker). A `?card=` deep-link prefers the
-  // personal board (the rail lives there); otherwise the first board.
+  const workflowLabel = useCallback(
+    (workflowId: string): string => workflowOptions.find((workflow) => workflow.workflowId === workflowId)?.name ?? workflowName(workflowId),
+    [workflowOptions],
+  );
+
+  // The URL owns the open board: load whatever `:boardId` names (and reload on
+  // param change — back/forward included).
   useEffect(() => {
-    if (activeBoard) return;
-    if (highlightCardId && personalBoardId) { void openBoard(personalBoardId); return; }
-    if (boards[0]) void openBoard(boards[0].id);
-  }, [boards, activeBoard, openBoard, highlightCardId, personalBoardId]);
+    if (boardId) { void openBoard(boardId); return; }
+    setActiveBoard(null);
+    setCards([]);
+    setWorkItems([]);
+  }, [boardId, openBoard]);
+
+  // The bare `/boards` redirects (replace) to a concrete board so the page
+  // never greets with an empty shell (decision-first: show the work, not a
+  // picker). A `?card=` deep-link prefers the personal board (the rail lives
+  // there); otherwise the first board. The query string rides along.
+  useEffect(() => {
+    if (boardId || boardsLoading) return;
+    const target = highlightCardId && personalBoardId ? personalBoardId : boards[0]?.id;
+    if (!target) return;
+    const qs = params.toString();
+    navigate(`/boards/${encodeURIComponent(target)}${qs ? `?${qs}` : ''}`, { replace: true });
+  }, [boardId, boards, boardsLoading, highlightCardId, personalBoardId, params, navigate]);
 
   // Live refresh: while a board is open, refetch on any change (this client's
   // moves, another client's, or a triggered run updating a card's lastRunId).
@@ -272,7 +330,7 @@ export function KanbanPage(): JSX.Element {
       const board = await createBoard(input);
       setCreating(false);
       await refreshBoards();
-      await openBoard(board.id);
+      navigate(`/boards/${encodeURIComponent(board.id)}`);
     } catch (err) {
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     }
@@ -304,7 +362,7 @@ export function KanbanPage(): JSX.Element {
       }
       setNotice(t('duplicatedNotice', { name: activeBoard.name }));
       await refreshBoards();
-      await openBoard(copy.id);
+      navigate(`/boards/${encodeURIComponent(copy.id)}`);
     } catch (err) {
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     }
@@ -337,7 +395,10 @@ export function KanbanPage(): JSX.Element {
       await deleteBoard(board.id);
       setActiveBoard(null);
       setCards([]);
+      setWorkItems([]);
       await refreshBoards();
+      // Back to the bare route; its redirect picks the next board (or empty state).
+      navigate('/boards', { replace: true });
     } catch (err) {
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     }
@@ -379,21 +440,45 @@ export function KanbanPage(): JSX.Element {
     }
   };
 
-  const onMoveCard = async (cardId: string, toColumnId: string) => {
+  // KB-R2-1 — persist an in-place card edit. The view sends CHANGED fields
+  // only, so this can never clobber a field the user didn't touch.
+  const onEditCard = async (cardId: string, patch: CardPatch) => {
+    if (!activeBoard) return;
+    const card = cards.find((c) => c.id === cardId);
+    try {
+      await patchCard(cardId, patch);
+      await openBoard(activeBoard.id);
+      await refreshBoards();
+      setNotice(t('cardUpdatedNotice', { title: patch.title ?? card?.title ?? '' }));
+    } catch (err) {
+      setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
+    }
+  };
+
+  const onMoveCard = async (cardId: string, toColumnId: string, position?: CardMovePosition) => {
     if (!activeBoard) return;
     const card = cards.find((c) => c.id === cardId);
     // BLD-4: guard against a second drag of the same card before its PATCH
     // settles — two in-flight moves race and the later rollback can clobber
     // the earlier outcome. No-op the re-entry.
     if (movingCardIds.current.has(cardId)) return;
-    const prevColumnId = card?.columnId;
+    const prevCard = card;
     // Optimistic move (GAP-ANALYSIS E15): apply locally immediately so the card
     // stays where it was dropped instead of snapping back then jumping after the
     // round-trip.
     movingCardIds.current.add(cardId);
-    setCards((cs) => cs.map((c) => (c.id === cardId ? { ...c, columnId: toColumnId } : c)));
+    // The shared board owns an in-lane optimistic rank. Do not replace its
+    // local list with a parent array that has no rank change yet; cross-lane
+    // moves still mirror immediately for the surrounding board chrome.
+    if (card?.columnId !== toColumnId) {
+      setCards((cs) => cs.map((c) => (c.id === cardId ? { ...c, columnId: toColumnId } : c)));
+    }
     try {
-      const { triggeredRunId } = await patchCard(cardId, { columnId: toColumnId });
+      const { triggeredRunId } = await patchCard(cardId, {
+        columnId: toColumnId,
+        ...(position?.beforeCardId ? { beforeCardId: position.beforeCardId } : {}),
+        ...(position?.afterCardId ? { afterCardId: position.afterCardId } : {}),
+      });
       if (triggeredRunId && card) setNotice(t('startedRunNotice', { title: card.title }));
       // Reconcile with server truth (covers triggered-run side effects); the
       // card is already in place so there is no visible jump.
@@ -403,12 +488,39 @@ export function KanbanPage(): JSX.Element {
       // BLD-3: revert ONLY the moved card against the *current* state via a
       // functional update — restoring a stale whole-list snapshot would clobber
       // any concurrent refetch/update that landed during the round-trip.
-      if (prevColumnId !== undefined) {
-        setCards((cs) => cs.map((c) => (c.id === cardId ? { ...c, columnId: prevColumnId } : c)));
+      if (prevCard && prevCard.columnId !== toColumnId) {
+        setCards((cs) => cs.map((c) => (c.id === cardId ? prevCard : c)));
       }
+      // An in-lane position optimistic update lives only in the shared board;
+      // restore the authoritative order if its PATCH fails.
+      void openBoard(activeBoard.id);
       setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
     } finally {
       movingCardIds.current.delete(cardId);
+    }
+  };
+
+  /** Explicit human delivery for the reusable WorkItem aggregate. This is not
+   * an App Builder action: the board sends only the core id, and the backend
+   * resolves the tenant-owned, Builder-editable workflow binding at dispatch. */
+  const onRunWorkItem = async (workItemId: string): Promise<void> => {
+    if (!activeBoard || startingWorkItemIds.has(workItemId)) return;
+    const card = cards.find((candidate) => candidate.workItemId === workItemId);
+    setStartingWorkItemIds((current) => new Set(current).add(workItemId));
+    setError(null);
+    try {
+      await runWorkItem(activeBoard.id, workItemId);
+      await openBoard(activeBoard.id);
+      await refreshBoards();
+      setNotice(t('workRunStartedNotice', { title: card?.title ?? '' }));
+    } catch (err) {
+      setError((() => { const c = classifyHttpError(err); return `${c.title} — ${c.detail}`; })());
+    } finally {
+      setStartingWorkItemIds((current) => {
+        const next = new Set(current);
+        next.delete(workItemId);
+        return next;
+      });
     }
   };
 
@@ -434,37 +546,34 @@ export function KanbanPage(): JSX.Element {
   const showAssignedRail = Boolean(activeBoard && personalBoardId && activeBoard.id === personalBoardId && openAssigned.length > 0);
 
   return (
-    <section>
+    <section data-walkthrough="boards.page">
       <PageHeader
         eyebrow={t('boardsEyebrow')}
         title={t('boardsTitle')}
         lede={<>{t('boardsLedePre')}<ZapIcon size={12} aria-hidden /> <strong>{t('boardsLedeTrigger')}</strong>{t('boardsLedePost')}</>}
-        actions={<button type="button" className="btn-accent-solid" onClick={() => setCreating(true)}>{t('newBoard')}</button>}
+        actions={<Button variant="accent-solid" onClick={() => setCreating(true)}>{t('newBoard')}</Button>}
       />
 
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
-      {/* Switcher pills: owner avatar · name · live count · attention dot. */}
+      {/* Switcher pills: owner avatar · name · live count · attention dot.
+          Each pill is a real LINK to the board's own URL (`/boards/:boardId`) —
+          cmd/middle-click, share, back/forward — so the strip is a nav, not a
+          tablist (the routing-correction wave; tabs were in-page state). */}
       <div className="board-pills">
-        {/* role="tablist" wraps ONLY the board tabs (display:contents keeps the
-            flex row); the "+ New board" action is a sibling, not a tab, so the
-            tablist's required-children contract holds (a11y, axe-verified). */}
         {boards.length > 0 ? (
-        <div role="tablist" aria-label={t('boardsTitle')} className="kanbanpage-tablist" onKeyDown={handleTablistKeyDown}>
+        <nav aria-label={t('boardsTitle')} className="kanbanpage-tablist">
         {boards.map((b) => {
           const o = b.rosterId ? rosterById.get(b.rosterId) : undefined;
           const waiting = waitingCount(b.columns, b.cards);
-          const active = activeBoard?.id === b.id;
+          const active = boardId === b.id;
           return (
-            <button
+            <Link
               key={b.id}
-              type="button"
-              role="tab"
-              aria-selected={active}
-              tabIndex={active ? 0 : -1}
+              to={`/boards/${encodeURIComponent(b.id)}`}
+              aria-current={active ? 'page' : undefined}
               className={active ? 'board-pill is-active' : 'board-pill'}
-              onClick={() => void openBoard(b.id)}
             >
               {o ? (
                 <AgentAvatar
@@ -477,11 +586,11 @@ export function KanbanPage(): JSX.Element {
               ) : null}
               <span className="board-pill-name">{b.name}</span>
               <span className="board-pill-count">{b.cards.length}</span>
-              {waiting > 0 ? <span className="board-pill-dot" title={t('waitingOnYou', { count: waiting })} aria-label={t('waitingOnYou', { count: waiting })} /> : null}
-            </button>
+              {waiting > 0 ? <span role="img" className="board-pill-dot" title={t('waitingOnYou', { count: waiting })} aria-label={t('waitingOnYou', { count: waiting })} /> : null}
+            </Link>
           );
         })}
-        </div>
+        </nav>
         ) : null}
         <button type="button" className="board-pill board-pill--new" onClick={() => setCreating(true)}>
           {t('newBoard')}
@@ -506,7 +615,7 @@ export function KanbanPage(): JSX.Element {
             ) : null}
             {activeTrigger ? (
               <span className="board-head-trigger">
-                <WorkflowIcon size={13} aria-hidden /> {t('triggers')}&nbsp;<strong>{workflowName(activeTrigger)}</strong>
+                <WorkflowIcon size={13} aria-hidden /> {t('triggers')}&nbsp;<strong>{workflowLabel(activeTrigger)}</strong>
               </span>
             ) : null}
             {activeWaiting > 0 ? (
@@ -514,17 +623,74 @@ export function KanbanPage(): JSX.Element {
                 <AlertIcon size={11} aria-hidden /> {t('waitingOnYou', { count: activeWaiting })}
               </span>
             ) : null}
+            {/* ADR 0313 D3 — an agent board SAYS whether its owner actually
+                checks it (the silence chip): the resolved cadence, or off. */}
+            {owner?.heartbeat ? (
+              owner.heartbeat.effectiveIntervalMs > 0 ? (
+                <span className="chip chip--muted" title={t('heartbeatChipTitle')}>
+                  <ClockIcon size={11} aria-hidden /> {t('heartbeatEvery', { minutes: Math.max(1, Math.round(owner.heartbeat.effectiveIntervalMs / 60_000)) })}
+                </span>
+              ) : (
+                <span className="chip chip--warning" title={t('heartbeatOffTitle')}>
+                  <ClockIcon size={11} aria-hidden /> {t('heartbeatOff')}
+                </span>
+              )
+            ) : null}
             <span className="board-head-spacer" />
             <BoardMenu onRename={() => void onRenameBoard()} onDuplicate={() => void onDuplicateBoard()} onDelete={() => void onDeleteBoard()} />
           </div>
+
+          {/* ADR 0311 P3 — read-time "Needs review" lane over the ADR 0068
+              projection (a view, never an owner; renders nothing when empty). */}
+          <BoardReviewsSection boardId={activeBoard.id} />
 
           <KanbanBoardView
             board={activeBoard}
             cards={cards}
             ownerPersona={owner?.persona}
+            todoAutonomy={owner?.heartbeat
+              ? (owner.heartbeat.effectiveIntervalMs > 0 && owner.heartbeat.agentTurnFallback ? 'agent-turn' : 'off')
+              : undefined}
+            workflowOptions={workflowOptions}
             onMoveCard={(cardId, toColumnId) => void onMoveCard(cardId, toColumnId)}
             onCreateCard={(columnId, input) => void onCreateCard(columnId, input)}
+            onEditCard={(cardId, patch) => void onEditCard(cardId, patch)}
             onDeleteCard={(cardId) => void onDeleteCard(cardId)}
+            workItemsByCardId={workItemsByCardId}
+            onRunWorkItem={(workItemId) => void onRunWorkItem(workItemId)}
+            startingWorkItemIds={startingWorkItemIds}
+            onDeleteCards={(cardIds) => {
+              void (async () => {
+                // ONE count-confirm for the whole batch — the per-card handler's
+                // dialog would fire N times through a fan-out.
+                if (!(await confirm({ title: t('deleteCardsConfirm', { count: cardIds.length }), danger: true, confirmLabel: t('common:delete') }))) return;
+                try {
+                  await Promise.all(cardIds.map((id) => deleteCard(id)));
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+                // Same rule as every other mutation here: refresh the RENDERED
+                // board (activeBoard) before the list, or the deleted cards sit
+                // on screen until a reload.
+                await openBoard(activeBoard.id);
+                await refreshBoards();
+              })();
+            }}
+            onSetColumnLimit={(columnId, wipLimit) => {
+              void (async () => {
+                try {
+                  await setColumnLimit(activeBoard.id, columnId, wipLimit);
+                  // `openBoard` FIRST — the rendered board is `activeBoard`,
+                  // which `refreshBoards` (the boards LIST) does not touch.
+                  // Browser-verified: without this the limit persisted but the
+                  // column readout only appeared after a page reload.
+                  await openBoard(activeBoard.id);
+                  await refreshBoards();
+                } catch (e) {
+                  setError(e instanceof Error ? e.message : String(e));
+                }
+              })();
+            }}
             leadingColumn={showAssignedRail ? (
               <AssignedColumn
                 cards={openAssigned}
@@ -537,16 +703,35 @@ export function KanbanPage(): JSX.Element {
         </>
       ) : boardsLoading ? (
         <StateCard loading title={t('loadingBoards')} />
+      ) : boardsFailed ? (
+        // UX-BRD-1 — a failed read never borrows the "create your first board"
+        // invitation; offer a retry instead of a duplicate.
+        <StateCard
+          announce
+          icon={<ColumnsIcon size={26} />}
+          title={t('boardsUnavailableTitle')}
+          body={t('boardsUnavailableBody')}
+          action={<Button variant="secondary" size="sm" onClick={() => void refreshBoards()}>{t('common:retry')}</Button>}
+        />
       ) : (
         <StateCard
           icon={<ColumnsIcon size={26} />}
           title={t('noBoardsYet')}
           body={t('noBoardsBody')}
-          action={<button type="button" className="btn-accent-solid btn-sm" onClick={() => setCreating(true)}>{t('newBoard')}</button>}
+          action={<Button variant="accent-solid" size="sm" onClick={() => setCreating(true)}>{t('newBoard')}</Button>}
         />
       )}
 
-      {creating ? <CreateBoardModal roster={roster} onClose={() => setCreating(false)} onCreate={(input) => void onCreateBoard(input)} /> : null}
+      {creating ? (
+        <CreateBoardModal
+          roster={roster}
+          workflowOptions={workflowOptions}
+          workflowOptionsLoading={workflowOptionsLoading}
+          workflowOptionsFailed={workflowOptionsFailed}
+          onClose={() => setCreating(false)}
+          onCreate={(input) => void onCreateBoard(input)}
+        />
+      ) : null}
       {renaming && activeBoard ? <RenameBoardModal current={activeBoard.name} onClose={() => setRenaming(false)} onSubmit={(name) => void submitRename(name)} /> : null}
     </section>
   );

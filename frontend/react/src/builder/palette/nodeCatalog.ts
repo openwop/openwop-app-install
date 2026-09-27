@@ -177,6 +177,54 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
       },
     ],
   },
+  // Walkthrough steps (ADR 0368 / 0378 P4).
+  //
+  // ADR 0435 added these because the builder resolved host-registered nodes
+  // ONLY from this static catalog, so without them `deserialize` threw
+  // errCantLoadNodeTypes and NO walkthrough could be opened at all.
+  //
+  // ADR 0440 P3 removed that dependency — the server catalog is now the
+  // authority on existence, and these types resolve through it. They stay here
+  // deliberately, in the overlay's NEW role: curated presentation. Via the
+  // general path alone a walkthrough step renders as "Step" with no config
+  // fields (the backend carries no metadata for local rows by design); these
+  // entries restore the real label and the authorable actionId / narration /
+  // hitl fields. `mergeWithStatic` composes them with the server's
+  // host-surface facts, so nothing is lost either way.
+  {
+    // kind === typeId (the convention `catalogRegistry.toCatalogEntry` uses for
+    // every dynamic entry); a hyphenated kind reads as a CSS class token to
+    // check-orphan-classes and trips the unstyled-surface gate.
+    kind: 'ui.walkthrough.step',
+    typeId: 'ui.walkthrough.step',
+    label: 'Walkthrough step',
+    description: 'Spotlights a registered UI action and waits for the player to perform it. Mark a step HITL when the human must act (typing, choosing a file).',
+    category: 'flow',
+    badge: 'W',
+    accent: 'var(--clay)',
+    inputs: [{ name: 'in', type: 'any' }],
+    outputs: [{ name: 'out', type: 'any' }],
+    configFields: [
+      { key: 'actionId', label: 'Action id', kind: 'text', defaultValue: '', help: 'A semantic id from the walkthrough action registry, e.g. chat.composer.send-message.' },
+      { key: 'narration', label: 'Narration', kind: 'text', defaultValue: '', help: 'Caption shown while the step runs. An i18n key in the walkthroughs namespace, or literal text.' },
+      { key: 'hitl', label: 'Wait for the human', kind: 'checkbox', defaultValue: false, help: 'Pause until the real user performs this step themselves.' },
+    ],
+  },
+  {
+    kind: 'ui.walkthrough.checkpoint',
+    typeId: 'ui.walkthrough.checkpoint',
+    label: 'Walkthrough checkpoint',
+    description: 'Waits for an expected app condition before continuing — the honest "did that actually work?" gate between steps.',
+    category: 'flow',
+    badge: 'C',
+    accent: 'var(--color-success)',
+    inputs: [{ name: 'in', type: 'any' }],
+    outputs: [{ name: 'out', type: 'any' }],
+    configFields: [
+      { key: 'expect', label: 'Expected condition', kind: 'text', defaultValue: '', help: 'A checkpoint id from the walkthrough action registry, e.g. campaign-studio.brief-exists.' },
+      { key: 'narration', label: 'Narration', kind: 'text', defaultValue: '', help: 'Caption shown while the checkpoint waits.' },
+    ],
+  },
   {
     kind: 'uppercase',
     typeId: 'local.openwop-app.uppercase',
@@ -216,7 +264,7 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
   {
     kind: 'approval',
     typeId: 'core.approvalGate',
-    label: 'Approval Gate',
+    label: 'Approval gate',
     description: 'Suspends the run for human approval. Resumes on resolve.',
     category: 'control',
     badge: 'A',
@@ -357,7 +405,7 @@ export const NODE_CATALOG: readonly NodeCatalogEntry[] = [
     label: 'Sticky note',
     description: 'A canvas annotation for documentation. Never executes; not sent to the backend.',
     category: 'control',
-    badge: '📝',
+    badge: 'N', // letter token like the rest — emoji-as-icon is banned (§5.2 / BLD-3)
     accent: 'var(--ink-3)',
     inputs: [],
     outputs: [],

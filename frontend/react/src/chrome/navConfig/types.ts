@@ -2,12 +2,12 @@
  * ADR 0139 — Configurable Navigation Menu: the override data model.
  *
  * The navigation is declared by `FEATURES[].nav` (chrome/features.tsx) — the
- * SUGGESTED defaults. A `MenuConfig` is a SPARSE overlay that re-tiers / re-groups
+ * SUGGESTED defaults. A `MenuConfig` is a SPARSE overlay that re-groups
  * / re-orders / hides those declared items and renames/reorders/adds headers.
  * Two layers stack (`tenant` ← `user`); empty layers reproduce today's menu
  * exactly (see `resolveNav` + its regression test).
  *
- * Stored host-side under `/v1/host/openwop-app/menu-config` (ADR 0139 Phase 2):
+ * Stored host-side under `/host/openwop-app/menu-config` (ADR 0139 Phase 2):
  * the `tenant` layer is superadmin-edited + shared; the `user` layer is the
  * caller's personalization. Per-browser section-collapse state is NOT here — it
  * lives in a cookie (`navCollapseCookie.ts`).
@@ -17,7 +17,8 @@ import type { FeatureTier } from '../featureTypes.js';
 /** A per-item override, keyed by the item's route `path` in `MenuConfig.items`.
  *  Every field is optional — a sparse patch over the declared `nav`. */
 export interface ItemOverride {
-  /** Move the item between the main (workspace) and admin menus. */
+  /** @deprecated Legacy persisted field. Ignored by the resolver because tier
+   *  selects the route shell and authority boundary, not menu presentation. */
   tier?: FeatureTier;
   /** Re-home the item under a different header — stores a header **id**
    *  (built-in id = the declared group label; custom id = `hdr_*`). */

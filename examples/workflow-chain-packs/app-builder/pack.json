@@ -1,0 +1,484 @@
+{
+  "name": "vendor.openwop.app-builder.workflows",
+  "version": "1.4.0",
+  "kind": "workflow-chain",
+  "description": "The App Builder production chains (ADR 0346 / RFC 0013). The design chain is the portable source of truth for `app-builder.design` \u2014 the host registers it at boot via the feature's registration adapter (RFC 0124 deferred expansion), and it remains instantiable from the chain gallery like any chain.",
+  "keywords": [
+    "Apps"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "app-builder.design",
+      "version": "1.3.0",
+      "label": "App design (PRD \u2192 research \u2192 plan \u2192 screens \u2192 audit \u2192 review)",
+      "description": "Design a multi-screen app from one idea: a concise PRD, grounded product research (personas, brand voice, visual direction), a screen-flow plan rendered into the closed `canvas.app-builder` component catalog, per-screen deepening of the thinnest screens, a deterministic quality audit, and a human review gate.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "idea"
+        ],
+        "properties": {
+          "idea": {
+            "type": "string",
+            "description": "The product idea to design an app for."
+          }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "intake",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Intake",
+            "position": {
+              "x": -240,
+              "y": 0
+            },
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "modelClass": "chat",
+              "systemPrompt": "You assess an app idea before design (AI-08). If the idea is materially ambiguous (unclear audience, contradictory scope, or a missing decision that would change the screens), reply with exactly one line starting with 'VERDICT_CLARIFY: ' followed by ONE focused question covering the most important unknowns. If the idea is clear enough to design, reply with exactly 'VERDICT_OK'. No other text."
+            },
+            "inputs": {
+              "idea": "{{params.idea}}"
+            }
+          },
+          {
+            "id": "clarify",
+            "typeId": "core.clarificationGate",
+            "name": "Clarify",
+            "position": {
+              "x": -120,
+              "y": 0
+            },
+            "config": {
+              "question": "The designer needs one clarification before building your app. See the question above and answer in a sentence or two.",
+              "schema": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Your answer to the clarifying question."
+              }
+            }
+          },
+          {
+            "id": "prd",
+            "typeId": "core.ai.chatCompletion",
+            "name": "PRD",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "modelClass": "chat",
+              "systemPrompt": "You are a product manager. Write a concise PRD (goals, target users, key user stories, screens list) for the app idea you are given. Markdown, under 500 words. If a 'clarifications' input is provided, treat it as the user's authoritative answers and honor it over any conflicting reading of the idea."
+            },
+            "inputs": {
+              "idea": "{{params.idea}}"
+            }
+          },
+          {
+            "id": "research",
+            "typeId": "feature.app-builder.nodes.research",
+            "name": "Product research",
+            "position": {
+              "x": 260,
+              "y": 0
+            },
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "modelClass": "chat"
+            },
+            "inputs": {
+              "idea": "{{params.idea}}"
+            }
+          },
+          {
+            "id": "plan",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Screen-flow plan",
+            "position": {
+              "x": 520,
+              "y": 0
+            },
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "modelClass": "chat",
+              "systemPrompt": "You are an app architect. From the PRD you are given, output ONLY a JSON object for the app design (raw JSON, no prose, no code fences): { \"name\", \"description\", \"theme\": \"default\", \"themeColors\": { \"primary\": \"#rrggbb\", \"secondary\": \"#rrggbb\" }, \"screens\": [{ \"id\", \"name\", \"route\", \"isInitial\", \"x\", \"y\", \"components\": [...] }], \"connectors\": [{ \"from\", \"to\", \"trigger\", \"transition\", \"label\" }] }. LAYOUT: give every screen integer \"x\" and \"y\" so the screens sit on a canvas in user-flow order \u2014 start the initial screen near x:80,y:80, space screens about 320 apart horizontally, wrap to a new row (about 520 lower) every 3\u20134 screens, keep values under ~4000, and never overlap. CONNECTORS: add one connector per navigation path with \"from\"/\"to\" screen ids, a \"trigger\" (click|submit|load), a \"transition\" (push|replace|modal|fade|slide|none), and a short \"label\"; leave sourceEdge/targetEdge unset (auto-routed). RESEARCH: you are also given product research (personas, brand voice, visual direction incl. suggested theme colors) \u2014 ground the copy, tone, and themeColors of every screen in it when present. CONTENT: use realistic, specific copy \u2014 real product names, labels, and plausible numbers \u2014 NEVER \"Lorem ipsum\" or placeholder text. Use ONLY these component types: stack, grid, card, accordion, tabs, dialog, drawer, spacer, heading, text, badge, chip, divider, alert, avatar, icon, progress, rating, calendar, snackbar, stepper, image, video, carousel, button, fab, textInput, textarea, dateInput, fileUpload, search, checkbox, toggle, select, radioGroup, slider, form (children: input controls, a submit button, and text/heading/divider/alert only), link, navBar (children: link/button only), sideNav (children: link/button/divider only), breadcrumb, pagination, list, table, statCard."
+            },
+            "inputs": {}
+          },
+          {
+            "id": "render",
+            "typeId": "feature.app-builder.nodes.render",
+            "name": "Render app design",
+            "position": {
+              "x": 780,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "deepen",
+            "typeId": "feature.app-builder.nodes.deepen",
+            "name": "Deepen thin screens",
+            "position": {
+              "x": 1040,
+              "y": 0
+            },
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "modelClass": "chat"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "audit",
+            "typeId": "feature.app-builder.nodes.audit",
+            "name": "Quality audit",
+            "position": {
+              "x": 1300,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "review",
+            "typeId": "core.approvalGate",
+            "name": "Review the app design",
+            "position": {
+              "x": 1560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the app design",
+              "prompt": "Review the generated screens \u2014 accept the design or send specific screens back for refinement.",
+              "requiredApprovals": 1
+            },
+            "inputs": {}
+          },
+          {
+            "id": "auditRecord",
+            "typeId": "feature.app-builder.nodes.capture",
+            "name": "Typed audit record",
+            "position": {
+              "x": 1560,
+              "y": 160
+            },
+            "config": {
+              "artifactTypeId": "app.audit",
+              "title": "Quality audit"
+            },
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "intake.content",
+            "to": "clarify.question",
+            "triggerRule": "all_success",
+            "condition": {
+              "type": "contains",
+              "left": "content",
+              "right": "VERDICT_CLARIFY"
+            }
+          },
+          {
+            "from": "intake.content",
+            "to": "prd.intakeVerdict",
+            "triggerRule": "any_success",
+            "condition": {
+              "type": "contains",
+              "left": "content",
+              "right": "VERDICT_OK"
+            }
+          },
+          {
+            "from": "clarify.output",
+            "to": "prd.clarifications",
+            "triggerRule": "any_success"
+          },
+          {
+            "from": "prd.content",
+            "to": "research.prd",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "research.planContext",
+            "to": "plan.input",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "plan.content",
+            "to": "render.source",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "render.artifact",
+            "to": "deepen.artifact",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "research.content",
+            "to": "deepen.research",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "deepen.artifact",
+            "to": "audit.artifact",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "deepen.warning",
+            "to": "audit.upstreamWarning",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "audit",
+            "to": "review.input",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "audit.report",
+            "to": "auditRecord.value",
+            "triggerRule": "all_success"
+          }
+        ]
+      },
+      "outputs": {
+        "report": {
+          "type": "object",
+          "description": "The deterministic quality-audit report ({score, findings[]}) alongside the primary canvas.app-builder artifact."
+        }
+      }
+    },
+    {
+      "chainId": "app-builder.plan-to-kanban",
+      "version": "1.0.0",
+      "label": "App Builder work plan \u2192 Kanban",
+      "description": "Turn an existing App Builder canvas into a reviewed, dependency-aware work plan on any selected Kanban board. The App Builder node only proposes work from the canvas; the reusable core Kanban node owns tenant scope, materialization, lifecycle and retries. Every node remains editable in the Workflow Builder.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canvasId", "boardId"],
+        "properties": {
+          "canvasId": {
+            "type": "string",
+            "description": "The stored canvas.app-builder design to plan."
+          },
+          "boardId": {
+            "type": "string",
+            "description": "The reusable Kanban board that will receive approved work-item projections."
+          },
+          "columnId": {
+            "type": "string",
+            "description": "Target board column id; defaults to todo."
+          },
+          "workflowId": {
+            "type": "string",
+            "description": "Optional workflow to attach to each proposed card; board-level trigger bindings remain editable separately."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "propose",
+            "typeId": "feature.app-builder.nodes.propose-kanban-work",
+            "name": "Propose app work",
+            "position": { "x": 0, "y": 0 },
+            "config": {},
+            "inputs": {
+              "canvasId": "{{params.canvasId}}",
+              "columnId": "{{params.columnId}}",
+              "workflowId": "{{params.workflowId}}"
+            }
+          },
+          {
+            "id": "review",
+            "typeId": "core.approvalGate",
+            "name": "Review the work plan",
+            "position": { "x": 300, "y": 0 },
+            "config": {
+              "title": "Review the app work plan",
+              "prompt": "Review the proposed screen work and dependencies. Approve to create tracked Kanban work; reject to edit the canvas or this workflow first.",
+              "requiredApprovals": 1
+            },
+            "inputs": {}
+          },
+          {
+            "id": "materialize",
+            "typeId": "core.openwop.kanban.work-items.materialize",
+            "name": "Create reusable work items",
+            "position": { "x": 600, "y": 0 },
+            "config": { "requireApproval": true },
+            "inputs": { "boardId": "{{params.boardId}}" }
+          }
+        ],
+        "edges": [
+          {
+            "from": "propose",
+            "to": "review.input",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "propose.proposal",
+            "to": "materialize.proposal",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "review",
+            "to": "materialize.approval",
+            "triggerRule": "all_success"
+          }
+        ]
+      },
+      "outputs": {
+        "workItems": {
+          "type": "array",
+          "description": "The approved, durable core WorkItems created for this canvas revision."
+        },
+        "cards": {
+          "type": "array",
+          "description": "The board-card projections of the created WorkItems."
+        }
+      }
+    },
+    {
+      "chainId": "app-builder.repair",
+      "version": "1.0.0",
+      "label": "App repair (governed: candidate \u2192 re-audit \u2192 review \u2192 apply)",
+      "description": "Repair an existing app design: read the current canvas, apply the repair instructions with one AI call re-normalized through the render gate, re-audit the candidate deterministically, review it at a human gate, and \u2014 only on approval \u2014 CAS-write it back as a new working-copy version (a concurrent edit conflicts, never clobbers).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "canvasId",
+          "instructions"
+        ],
+        "properties": {
+          "canvasId": {
+            "type": "string",
+            "description": "The canvas.app-builder canvas to repair."
+          },
+          "instructions": {
+            "type": "string",
+            "description": "What to repair \u2014 audit finding codes or a description."
+          }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "repair",
+            "typeId": "feature.app-builder.nodes.repair",
+            "name": "Repair candidate",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "provider": "anthropic",
+              "model": "claude-sonnet-4-6",
+              "modelClass": "chat"
+            },
+            "inputs": {
+              "canvasId": "{{params.canvasId}}",
+              "instructions": "{{params.instructions}}"
+            }
+          },
+          {
+            "id": "audit",
+            "typeId": "feature.app-builder.nodes.audit",
+            "name": "Re-audit",
+            "position": {
+              "x": 260,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "review",
+            "typeId": "core.approvalGate",
+            "name": "Review the repair",
+            "position": {
+              "x": 520,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the repaired design",
+              "prompt": "Compare the repaired design against the findings \u2014 approve to apply it as a new version, or reject.",
+              "requiredApprovals": 1
+            },
+            "inputs": {}
+          },
+          {
+            "id": "apply",
+            "typeId": "feature.app-builder.nodes.apply-repair",
+            "name": "Apply approved repair",
+            "position": {
+              "x": 780,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          }
+        ],
+        "edges": [
+          {
+            "from": "repair.artifact",
+            "to": "audit.artifact",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "audit",
+            "to": "review.input",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "repair.artifact",
+            "to": "apply.artifact",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "repair.canvasId",
+            "to": "apply.canvasId",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "repair.baseVersion",
+            "to": "apply.baseVersion",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "review.approved",
+            "to": "apply.approval",
+            "triggerRule": "all_success"
+          }
+        ]
+      },
+      "outputs": {
+        "applied": {
+          "type": "object",
+          "description": "{ canvasId, newVersion } once the approved candidate is written."
+        }
+      }
+    }
+  ]
+}

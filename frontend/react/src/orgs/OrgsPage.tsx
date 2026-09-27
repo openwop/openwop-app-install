@@ -29,7 +29,7 @@ export function OrgsPage(): JSX.Element {
   const c = useOrgsController();
 
   return (
-    <section>
+    <section data-walkthrough="orgs.page">
       {embedded ? null : (
         <PageHeader
           eyebrow={t('pageEyebrow')}

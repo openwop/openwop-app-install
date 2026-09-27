@@ -16,7 +16,7 @@ import type { StartRunDeps } from '../src/host/runStarter.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import { registerJob, getJob, resetScheduling } from '../src/host/schedulingService.js';
 import { processDueSchedules } from '../src/host/scheduleDaemon.js';
-import { checkAutonomousRunBudget, type RunBudgetConfig } from '../src/host/runBudgetService.js';
+import { checkAutonomousRunBudget, checkDeepInvestigationBudget, pruneRunBudget, type RunBudgetConfig } from '../src/host/runBudgetService.js';
 
 const hostSuite: StartRunDeps['hostSuite'] = {
   workflowCatalog: { getWorkflow: async (id) => ({ workflowId: id, definition: { workflowId: id, nodes: [] } }) },
@@ -86,5 +86,82 @@ describe('scheduleDaemon honors the run budget', () => {
     const after = (await getJob('j'))!.nextFireAt!;
     expect(after).toBeGreaterThan(now); // advanced anyway — no wedge, resumes next window
     expect(after).toBeGreaterThan(before);
+  });
+});
+
+/**
+ * XCH-GRP-3 — the deep-investigation budget (per ROOM, per window) sharing the
+ * same atomic `run_budget` counter, plus the two bugs the shared table creates
+ * for `pruneRunBudget` (which the autonomous budget alone never exposed).
+ */
+describe('deep-investigation budget (XCH-GRP-3)', () => {
+  const DEEP: RunBudgetConfig = { limit: 2, windowMs: 3_600_000 };
+
+  it('allows up to the limit per ROOM, then denies — and rooms are isolated', async () => {
+    const now = Date.now();
+    for (const n of [1, 2]) {
+      const d = await checkDeepInvestigationBudget(storage, 't1', 'room-a', now, DEEP);
+      expect(d.allowed, `deep run ${n} should be allowed`).toBe(true);
+    }
+    expect((await checkDeepInvestigationBudget(storage, 't1', 'room-a', now, DEEP)).allowed).toBe(false);
+    // A DIFFERENT room in the same tenant is unaffected — the burst this guards
+    // is a mention-storm in ONE room, not tenant-wide activity.
+    expect((await checkDeepInvestigationBudget(storage, 't1', 'room-b', now, DEEP)).allowed).toBe(true);
+    // And a different tenant's same-named room is its own bucket.
+    expect((await checkDeepInvestigationBudget(storage, 't2', 'room-a', now, DEEP)).allowed).toBe(true);
+  });
+
+  it('does NOT share a counter with the autonomous budget (bucket namespacing)', async () => {
+    const now = Date.now();
+    const cfg: RunBudgetConfig = { limit: 1, windowMs: 3_600_000 };
+    // Spend the tenant's autonomous budget…
+    expect((await checkAutonomousRunBudget(storage, 't-share', now, cfg)).allowed).toBe(true);
+    expect((await checkAutonomousRunBudget(storage, 't-share', now, cfg)).allowed).toBe(false);
+    // …the deep budget for a room in that tenant must be untouched.
+    expect((await checkDeepInvestigationBudget(storage, 't-share', 't-share', now, cfg)).allowed).toBe(true);
+  });
+
+  it('window rollover resets the room count', async () => {
+    const now = Date.now();
+    for (const _ of [1, 2]) await checkDeepInvestigationBudget(storage, 't1', 'room-r', now, DEEP);
+    expect((await checkDeepInvestigationBudget(storage, 't1', 'room-r', now, DEEP)).allowed).toBe(false);
+    expect((await checkDeepInvestigationBudget(storage, 't1', 'room-r', now + DEEP.windowMs, DEEP)).allowed).toBe(true);
+  });
+
+  it('limit <= 0 ⇒ unlimited (the env convention) and consumes nothing', async () => {
+    const now = Date.now();
+    const off: RunBudgetConfig = { limit: 0, windowMs: 3_600_000 };
+    for (const _ of [1, 2, 3, 4]) {
+      expect((await checkDeepInvestigationBudget(storage, 't1', 'room-off', now, off)).allowed).toBe(true);
+    }
+  });
+
+  // ── pruneRunBudget: the two bugs the SHARED table introduces ──
+  it('prunes deep rows even when the AUTONOMOUS cap is disabled (no unbounded growth)', async () => {
+    const now = 10 * 3_600_000;
+    const autoOff: RunBudgetConfig = { limit: 0, windowMs: 3_600_000 };
+    // A deep row in an OLD window.
+    await checkDeepInvestigationBudget(storage, 't1', 'room-old', now - 3_600_000, DEEP);
+    // Pre-fix this returned 0 immediately (autonomous limit <= 0), leaving deep
+    // rows to accumulate forever.
+    const pruned = await pruneRunBudget(storage, now, autoOff, DEEP);
+    expect(pruned).toBeGreaterThan(0);
+  });
+
+  it('never prunes a LIVE deep row when the deep window is longer than the autonomous one', async () => {
+    const now = 10 * 3_600_000 + 60_000; // just past an hour boundary
+    const auto: RunBudgetConfig = { limit: 5, windowMs: 3_600_000 };       // 1h
+    const deepLong: RunBudgetConfig = { limit: 2, windowMs: 24 * 3_600_000 }; // 24h
+    // Spend the room's deep budget in the CURRENT (24h) window.
+    await checkDeepInvestigationBudget(storage, 't1', 'room-long', now, deepLong);
+    await checkDeepInvestigationBudget(storage, 't1', 'room-long', now, deepLong);
+    expect((await checkDeepInvestigationBudget(storage, 't1', 'room-long', now, deepLong)).allowed).toBe(false);
+    // Pruning at the AUTONOMOUS (1h) boundary would delete the live 24h row and
+    // silently reset the counter — a budget that never enforces.
+    await pruneRunBudget(storage, now, auto, deepLong);
+    expect(
+      (await checkDeepInvestigationBudget(storage, 't1', 'room-long', now, deepLong)).allowed,
+      'the live deep row must survive the prune',
+    ).toBe(false);
   });
 });

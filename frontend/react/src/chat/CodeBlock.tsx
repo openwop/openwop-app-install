@@ -3,9 +3,11 @@
  * MessageRenderer so MermaidDiagram can reuse it as its degrade target without a
  * MessageRenderer↔MermaidDiagram import cycle; ADR 0129 Phase 2).
  */
+import { Button } from '../ui/Button.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckIcon } from '../ui/icons/index.js';
+import { copyToClipboard } from '../ui/copyToClipboard.js';
 
 export interface CodeBlockProps { source: string; language?: string | undefined }
 
@@ -15,11 +17,12 @@ export function CodeBlock({ source, language }: CodeBlockProps): JSX.Element {
 
   async function copy(): Promise<void> {
     try {
-      await navigator.clipboard.writeText(source);
+      const r = await copyToClipboard(source, null);
+      if (!r.ok) return;
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
-      /* clipboard unavailable; silently ignore */
+      /* copyToClipboard reports failure itself; nothing left to swallow */
     }
   }
 
@@ -27,9 +30,8 @@ export function CodeBlock({ source, language }: CodeBlockProps): JSX.Element {
     <div className="msgrender-code">
       <div className="u-flex u-items-center u-justify-between u-pad-4x8 u-bg-surface u-border-b u-fs-11 muted">
         <span>{language ?? t('codeLabel')}</span>
-        <button
-          type="button"
-          className="secondary msgrender-copy-btn"
+        <Button
+          variant="secondary" className="msgrender-copy-btn"
           onClick={copy}
           aria-label={t('copyCode')}
         >
@@ -38,7 +40,7 @@ export function CodeBlock({ source, language }: CodeBlockProps): JSX.Element {
               <CheckIcon size={12} /> {t('copied')}
             </span>
           ) : t('copy')}
-        </button>
+        </Button>
       </div>
       <pre className="msgrender-code-pre">
         <code>{source}</code>

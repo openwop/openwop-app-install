@@ -407,7 +407,7 @@ export async function adsPublishMeta(ctx) {
   }
 }
 
-const nodes = {
+export const nodes = {
   'ads.publish.meta': adsPublishMeta,
 };
 

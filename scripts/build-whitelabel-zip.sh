@@ -29,13 +29,18 @@
 #     the `.agents/` mirror — the steward's CI wired to openwop-dev, migration
 #     notes). These were never inside the old `apps/workflow-engine/` subtree, so
 #     the pre-split zip never carried them; keep that boundary.
-#   - the steward GRADING/TRACKING reports — `CODEBASE-ASSESSMENT.md`,
-#     `UX-ASSESSMENT.md`, `LOCALIZATION-ASSESSMENT.md`, `SCREEN_POLISH.md`,
-#     `MANUAL_TESTS.md`, `NODE-PACK-AUDIT.md`. These are internal A–F readiness
-#     reports the steward's grade-*/polish-screens/manual-tests skills regenerate
-#     as features land (they name blockers, F grades, open debt) — never an
-#     adopter deliverable. Shipped code only cites them in comments, so dropping
-#     them is non-functional.
+#   - `docs/steward/` — ALL the steward GRADING/TRACKING reports, which now live
+#     in one directory instead of scattered across the repo root. These are
+#     internal A–F readiness reports the grade-*/polish-screens/manual-tests
+#     skills regenerate as features land (they name blockers, F grades, open
+#     debt) — never an adopter deliverable. Shipped code only cites them in
+#     comments, so dropping them is non-functional.
+#
+#     They used to sit at the root and be stripped by a hand-kept list of six
+#     filenames, which rotted to ~180 unstripped reports before anyone noticed
+#     (see the allowlist below). One directory + one glob is the durable shape:
+#     a new report is inside the stripped tree by construction, and the root
+#     allowlist below is the backstop if one ever lands outside it.
 #
 # Output (into $OUT_DIR, default ./dist-whitelabel; gitignored):
 #   $OUT_DIR/openwop-demo-app.zip
@@ -84,13 +89,80 @@ fi
 # Steward-internal repo meta. `zip -d` returns 12 ("nothing to do") when no
 # entry matches, which is fine; only a real failure should abort. (`*` spans
 # `/` in zip's delete globs, so these catch entries at any depth.)
+# `backend/typescript/test/steward/` holds the tests that READ the paths stripped
+# on the line above (docs/steward, .github). Shipping the tests without their
+# artefacts made every adopter's first `npm test` red with ENOENT — MEASURED
+# 2026-09-06 on a hosted runner against this bundle. The lane is defined by this
+# strip list, so it is stripped here, and `test/steward/steward-lane-ratchet.test.ts`
+# refuses any test outside it that names a stripped path.
 zip -q -d "$ZIP" \
   "${PREFIX}.claude/*" "${PREFIX}.agents/*" "${PREFIX}.github/*" \
-  "${PREFIX}MIGRATION-TODO.md" "${PREFIX}TODO.md" \
-  "${PREFIX}CODEBASE-ASSESSMENT.md" "${PREFIX}UX-ASSESSMENT.md" \
-  "${PREFIX}LOCALIZATION-ASSESSMENT.md" "${PREFIX}SCREEN_POLISH.md" \
-  "${PREFIX}MANUAL_TESTS.md" "${PREFIX}NODE-PACK-AUDIT.md" \
+  "${PREFIX}docs/steward/*" "${PREFIX}docs/research/*" \
+  "${PREFIX}backend/typescript/test/steward/*" \
   || [[ $? -eq 12 ]]
+
+# Root-level markdown: an ALLOWLIST, enforced by construction. Anything at the
+# repo root that is not a named adopter deliverable is deleted.
+#
+# This replaced a hand-kept denylist of six report filenames, and the swap is the
+# whole point. That list was written when six reports existed; by 2026-08 the
+# steward's grade-*/upgrade-ux/polish-screens skills had generated ~180 more
+# (80 `UX_UPGRADE-*.md` alone, added 2026-07-24..26), and every one of them was
+# shipping — against this script's own stated policy that readiness reports
+# naming blockers, F grades, and open debt are "never an adopter deliverable".
+# Nothing failed, because a denylist cannot know what it has not been told about.
+# `publish-install-repo.sh` pushes this same tree to the PUBLIC
+# openwop/openwop-app-install repo, so the next release would have published all
+# of them. (The last sync predates the flood — 2026-06-30 — so they never went
+# out; `AGENTS.md`/`CLAUDE.md` did, and are dropped below.)
+#
+# Allowlist inverts the failure mode: a new steward report is dropped by default,
+# and a genuinely new adopter doc is dropped LOUDLY (printed below, and the
+# presence guard further down fails if a listed deliverable goes missing). Adding
+# a deliverable is a one-line edit here — which is the point at which someone
+# decides whether adopters should receive it.
+WHITELABEL_ROOT_MD_KEEP=(
+  README.md CHANGELOG.md RELEASES.md ROADMAP.md
+  ARCHITECTURE.md DESIGN.md FEATURES.md conformance.md
+  DEPLOY.md DEPLOY-SMOKE.md
+  OPENWOP-SYNC.md OPENWOP-WHATSAPP.md
+)
+
+# Steward report NAMING FAMILIES, for markdown below the root (chiefly `docs/`,
+# which holds ~44 per-ADR assessments the root allowlist cannot see).
+#
+# `docs/adr/` is EXEMPT: ADRs are an adopter deliverable, and three of them have
+# slugs that match these families by coincidence — 0301-cdp-f-AUDIT-hash-chain,
+# 0337-appbuilder-MYNDHYVE-parity, 0416-trust-center-AUDIT-export. Matching on
+# filename shape is a proxy for intent, and this is where the proxy is wrong.
+STEWARD_REPORT_RE='(ASSESSMENT|-AUDIT|_AUDIT|UX_UPGRADE|GAP-SWEEP|_SWEEP|SCREEN_POLISH|MANUAL_TESTS|MYNDHYVE)[^/]*\.md$'
+STEWARD_EXEMPT_RE="^${PREFIX}docs/adr/"
+
+STEWARD_DROP=()
+while IFS= read -r entry; do
+  [ -n "$entry" ] || continue
+  case "$entry" in "$PREFIX"*) : ;; *) continue ;; esac
+  base="${entry#"$PREFIX"}"
+
+  # Root-level markdown: allowlist by construction.
+  if [[ "$base" != */* && "$base" == *.md ]]; then
+    keep=0
+    for allowed in "${WHITELABEL_ROOT_MD_KEEP[@]}"; do
+      if [ "$base" = "$allowed" ]; then keep=1; break; fi
+    done
+    [ "$keep" -eq 1 ] || STEWARD_DROP+=("$entry")
+    continue
+  fi
+
+  # Below the root: drop the steward report families, except under docs/adr/.
+  if grep -qE "$STEWARD_EXEMPT_RE" <<<"$entry"; then continue; fi
+  if grep -qiE "$STEWARD_REPORT_RE" <<<"$entry"; then STEWARD_DROP+=("$entry"); fi
+done < <(unzip -Z1 "$ZIP" | grep -E '\.md$' || true)
+
+if (( ${#STEWARD_DROP[@]} > 0 )); then
+  echo "[whitelabel-zip] stripping ${#STEWARD_DROP[@]} steward-internal doc(s) (not adopter deliverables)"
+  zip -q -d "$ZIP" "${STEWARD_DROP[@]}" || [[ $? -eq 12 ]]
+fi
 
 # Fail loudly if any REAL (non-example) .env file survived — e.g. a future
 # tracked env file the enumeration above somehow missed. Examples are allowed.
@@ -113,6 +185,31 @@ if grep -qE "^${PREFIX}(\.claude|\.agents)/" <<<"$ZIP_LISTING"; then
   exit 1
 fi
 
+# Guard: every allowlisted root deliverable must have SURVIVED. The allowlist
+# drops what it does not recognize, so a rename (README.md → readme.md) would
+# otherwise silently ship a bundle with no README rather than failing.
+for deliverable in "${WHITELABEL_ROOT_MD_KEEP[@]}"; do
+  if ! grep -qxF "${PREFIX}${deliverable}" <<<"$ZIP_LISTING"; then
+    echo "[whitelabel-zip] FATAL: allowlisted deliverable ${deliverable} is not in the zip." >&2
+    echo "  Either it was renamed/removed (update WHITELABEL_ROOT_MD_KEEP) or the strip is over-broad." >&2
+    exit 1
+  fi
+done
+
+# Guard: no steward GRADING/TRACKING report anywhere in the tree, at any depth.
+# The root allowlist above cannot see `docs/`, and that is where the per-ADR
+# assessments live (`docs/DATA-ASSESSMENT-*.md`, `docs/CODEBASE-ASSESSMENT-*.md`
+# — 86 of them). Matching on the naming families the steward skills actually
+# emit is a proxy, so keep it broad and case-insensitive; a false positive is a
+# one-line allowlist edit, a false negative publishes open-debt reports to a
+# public repo.
+if grep -iE "$STEWARD_REPORT_RE" <<<"$ZIP_LISTING" | grep -qvE "$STEWARD_EXEMPT_RE"; then
+  echo "[whitelabel-zip] FATAL: steward grading/tracking report(s) remain in the zip." >&2
+  grep -iE "$STEWARD_REPORT_RE" <<<"$ZIP_LISTING" | grep -vE "$STEWARD_EXEMPT_RE" >&2
+  echo "  These name blockers, F grades, and open debt — never an adopter deliverable." >&2
+  exit 1
+fi
+
 # Guard: the runtime-vendored corpora the backend loads at boot MUST be in the zip.
 # `providers.json` (model catalog the AI-chat/model-picker read), `packs/` (node /
 # agent / artifact-type / connection packs every feature surface rides on — campaign
@@ -124,6 +221,18 @@ echo "[whitelabel-zip] verifying runtime-vendored corpora are present"
 for path in 'providers\.json' 'packs/' 'schemas/' 'conformance-fixtures/'; do
   if ! grep -qE "^${PREFIX}${path}" <<<"$ZIP_LISTING"; then
     echo "[whitelabel-zip] FATAL: ${path//\\/} missing from the zip (backend would not boot)." >&2
+    exit 1
+  fi
+done
+
+# Guard: the native shells are part of the white-label deliverable (ADR 0291 —
+# adopters rebrand them via clients/desktop/branding.json + clients/ios/project.yml),
+# so the zip must carry their sources + white-label seams.
+echo "[whitelabel-zip] verifying native shells (clients/) are present"
+for path in 'clients/desktop/branding\.json' 'clients/desktop/src/main\.js' \
+            'clients/ios/project\.yml' 'clients/ios/Sources/OpenWOP/Branding\.swift'; do
+  if ! grep -qE "^${PREFIX}${path}$" <<<"$ZIP_LISTING"; then
+    echo "[whitelabel-zip] FATAL: ${path//\\/} missing from the zip (native shells are part of the white-label bundle)." >&2
     exit 1
   fi
 done

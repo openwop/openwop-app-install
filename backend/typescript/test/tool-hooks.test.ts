@@ -16,6 +16,8 @@ import {
   evaluateToolHook,
   computeArgsHash,
   resetToolHookBuckets,
+  extractToolErrorCode,
+  deriveToolErrorCode,
 } from '../src/host/toolHooks.js';
 import { canonicalize } from '../src/providers/llmCacheKey.js';
 import { sanitizeFreeTextDeep } from '../src/byok/textRedaction.js';
@@ -88,6 +90,56 @@ describe('RFC 0064 — evaluateToolHook', () => {
     const statuses = Array.from({ length: 6 }, call);
     expect(statuses.slice(0, 5)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
     expect(statuses[5]).toBe('rate_limited');
+  });
+
+  it('§F error: a ran-and-threw failure carries status:error + populated error + durationMs (it ran)', () => {
+    const r = evaluateToolHook({
+      principal: 'user:alice',
+      toolName: 'search',
+      // The tool passes the gates (no requiredScopes) and runs, then throws.
+      args: { q: 'hello' },
+      simulateToolError: true,
+    });
+    // The seam call itself succeeds — the failure lives in the tool event.
+    expect(r.httpStatus).toBe(200);
+    expect(r.toolReturned.status).toBe('error');
+    expect(r.toolReturned.error).toEqual({ code: 'tool_execution_failed', message: 'simulated tool execution failure' });
+    // It RAN → non-negative duration (unlike the forbidden/rate_limited gates).
+    expect(r.toolReturned.durationMs).toBeGreaterThanOrEqual(0);
+    // A ran-and-threw error is not an HTTP-level errorCode (that's for the gates).
+    expect(r.errorCode).toBeUndefined();
+  });
+
+  it('§F error: the gate statuses still carry NO error payload (error ⊥ gate)', () => {
+    const forbidden = evaluateToolHook({ principal: 'p', toolName: 't', requiredScopes: ['s'], args: {} });
+    expect(forbidden.toolReturned.status).toBe('forbidden');
+    expect(forbidden.toolReturned.error).toBeUndefined();
+    const limited = evaluateToolHook({ principal: 'p', toolName: 't', args: {}, simulateRateLimitExhausted: true });
+    expect(limited.toolReturned.status).toBe('rate_limited');
+    expect(limited.toolReturned.error).toBeUndefined();
+  });
+});
+
+describe('RFC 0064 §F — tool-error code classifiers', () => {
+  it('extractToolErrorCode: a thrown structured code wins; an unstructured throw is generic', () => {
+    expect(extractToolErrorCode(Object.assign(new Error('off'), { code: 'host_capability_disabled' }))).toBe('host_capability_disabled');
+    expect(extractToolErrorCode(new Error('boom'))).toBe('tool_execution_failed');
+    expect(extractToolErrorCode('a bare string')).toBe('tool_execution_failed');
+    expect(extractToolErrorCode(null)).toBe('tool_execution_failed');
+  });
+
+  it('deriveToolErrorCode: prefers errorCode (a swallowed throw), else parses content JSON (.code/.error), else generic', () => {
+    // 1. explicit errorCode wins even over a content code (the throw is authoritative).
+    expect(deriveToolErrorCode({ content: '{"code":"other"}', errorCode: 'host_capability_disabled' })).toBe('host_capability_disabled');
+    // 2. returned structured failure — code parsed from the stringified content.
+    expect(deriveToolErrorCode({ content: JSON.stringify({ code: 'host_capability_missing', message: 'no surface' }) })).toBe('host_capability_missing');
+    expect(deriveToolErrorCode({ content: JSON.stringify({ error: 'validation_error', message: 'bad' }) })).toBe('validation_error');
+    // 3. non-JSON content (a plain `tool_failed: …` string) → generic.
+    expect(deriveToolErrorCode({ content: 'tool_failed: kaboom' })).toBe('tool_execution_failed');
+    expect(deriveToolErrorCode({ content: '' })).toBe('tool_execution_failed');
+    // a JSON scalar / array with no code → generic (never throws).
+    expect(deriveToolErrorCode({ content: '"just a string"' })).toBe('tool_execution_failed');
+    expect(deriveToolErrorCode({ content: '[1,2,3]' })).toBe('tool_execution_failed');
   });
 });
 

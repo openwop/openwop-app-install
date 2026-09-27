@@ -1,0 +1,42 @@
+{
+  "name": "feature.walkthroughs.nodes",
+  "version": "1.0.0",
+  "description": "Walkthroughs feature node pack \u2014 reads over ctx.features.walkthroughs (ADR 0378): the launchable walkthrough list and the tenant's progress, so an onboarding/heartbeat workflow can gate a branch on walkthrough state (the engine's ui.walkthrough.* step nodes are HOST-registered suspend primitives by design \u2014 this pack wraps only the ctx READ surface). role:action (recorded).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "walkthroughs",
+    "onboarding",
+    "progress"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.walkthroughs.nodes.list",
+      "version": "1.0.0",
+      "label": "Walkthroughs: List",
+      "description": "Lists the walkthroughs the tenant can launch over ctx.features.walkthroughs.listWalkthroughs. Output: { walkthroughs }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.walkthroughs.nodes.progress",
+      "version": "1.0.0",
+      "label": "Walkthroughs: Progress",
+      "description": "Reads the tenant's walkthrough progress over ctx.features.walkthroughs.walkthroughProgress (per-user rows for the run's acting user; legacy tenant fallback). Output: { progress }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "_comment": "ADR 0550 P1 — SHRINK-ONLY quarantine of conformance scenarios that are already failing on main. Read conformance/QUARANTINE.md before touching this file. Adding an entry requires a recorded reason and is a debt, not a dismissal; the only routine edit is REMOVAL.",
+  "_baseline": {
+    "measuredAt": "2026-08-16",
+    "measuredAgainst": "origin/main df03c3476, @openwop/openwop-conformance 1.123.0",
+    "mainFailures": 0,
+    "mainFailingFiles": 0,
+    "note": "EMPTIED AGAIN, and this time by the exit condition the entries themselves named rather than by a harness fix. The two `replay-llm-cache-key*` entries asserted the RETIRED RFC 0150 §C v1 cache-key recipe against a host that answers v2; openwop#1011 re-pointed both scenarios at v2 and the pin bump 1.106.0 -> 1.123.0 brings that in. Verified in the INSTALLED package, not just the sibling tree: both `src/scenarios/replay-llm-cache-key*.test.ts` now reference `openwop-semantic-request-v2`. The earlier 2026-08-13 emptying is recorded in QUARANTINE.md and stands: those ten entries were never host non-conformance but an ambient-pack-dir harness defect, and the fix (a private per-run vendored mount) is what makes this number depend on the commit rather than the machine."
+  },
+  "maxEntries": 0,
+  "entries": []
+}

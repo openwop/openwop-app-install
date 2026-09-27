@@ -7,7 +7,7 @@
  * surface. The pure helpers (statusMeta, statusRingColor, relativeTime) are
  * tested directly.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { RosterEntry } from '../rosterClient.js';
 import type { KanbanBoard, KanbanCard } from '../../kanban/kanbanClient.js';
 import type { ScheduledJob } from '../scheduleClient.js';
@@ -17,7 +17,8 @@ const m = vi.hoisted(() => ({
   roster: [] as RosterEntry[],
   boards: [] as (KanbanBoard & { cards?: KanbanCard[] })[],
   jobs: [] as ScheduledJob[],
-  failures: { items: [] as { rosterId?: string }[], truncated: false },
+  failures: { items: [] as { rosterId?: string }[], truncated: false } as { items: { rosterId?: string }[]; truncated: boolean } | null,
+  failuresThrow: false,
   oneEntry: null as RosterEntry | null,
   oneBoardCards: [] as KanbanCard[],
 }));
@@ -28,7 +29,7 @@ vi.mock('../rosterClient.js', () => ({
     if (!m.oneEntry) throw new Error('not found');
     return { ...m.oneEntry, rosterId: id };
   }),
-  getFleetActivity: vi.fn(async () => m.failures),
+  getFleetActivity: vi.fn(async () => { if (m.failuresThrow) throw new Error('activity read failed'); return m.failures; }),
 }));
 vi.mock('../../kanban/kanbanClient.js', () => ({
   listBoards: vi.fn(async () => m.boards),
@@ -208,5 +209,37 @@ describe('exported pure helpers', () => {
     // Past a week → ISO date prefix.
     const old = new Date(Date.now() - 30 * 86_400_000).toISOString();
     expect(relativeTime(old)).toBe(old.slice(0, 10));
+  });
+});
+
+
+describe('loadAgentViews — an unread failure check is not an all-clear', () => {
+  // The recent-failures read is best-effort so it cannot blank the dashboard,
+  // but falling back to `{ items: [] }` made UNKNOWN indistinguishable from
+  // HEALTHY: every agent silently lost its error badge exactly when health
+  // could not be established. Both arms are asserted — pinning only the failure
+  // arm would stay green if this regressed to "always unavailable".
+  beforeEach(() => { m.failuresThrow = false; m.failures = { items: [], truncated: false }; });
+  afterEach(() => { m.failuresThrow = false; });
+
+  it('flags the check as unavailable when the activity read throws', async () => {
+    m.roster = [entry()];
+    m.failuresThrow = true;
+    const [view] = await loadAgentViews();
+    expect(view!.failureCheckUnavailable).toBe(true);
+  });
+
+  it('does NOT flag it when the read succeeds with no failures', async () => {
+    m.roster = [entry()];
+    m.failures = { items: [], truncated: false };
+    const [view] = await loadAgentViews();
+    expect(view!.failureCheckUnavailable).toBe(false);
+  });
+
+  it('single-agent view carries the same distinction', async () => {
+    m.oneEntry = entry();
+    m.failuresThrow = true;
+    const view = await loadAgentView('r1');
+    expect(view!.failureCheckUnavailable).toBe(true);
   });
 });

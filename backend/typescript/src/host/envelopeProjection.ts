@@ -229,11 +229,13 @@ export function projectOutcome(outcome: EnvelopeOutcome, opts: ProjectOpts): Tes
         type: 'cap.breached',
         payload: {
           kind: outcome.capKind,
-          // The acceptor doesn't know the limit + observed values directly;
-          // the test seam threads them via the cap counters. Reason carries
-          // both for now; production hosts emit explicit numeric fields.
-          limit: extractCapNumeric(outcome.reason, 'cap'),
-          observed: extractCapNumeric(outcome.reason, 'current') ?? extractCapNumeric(outcome.reason, 'observed'),
+          // Explicit numeric cap + observed value (TODO-6): the acceptor now
+          // threads `limit`/`observed` directly from the breached counter, so
+          // this emits real numeric fields instead of regex-parsing `reason`.
+          // The reason-string parse remains a defensive fallback for any
+          // outcome that predates the explicit fields.
+          limit: outcome.limit ?? extractCapNumeric(outcome.reason, 'cap'),
+          observed: outcome.observed ?? extractCapNumeric(outcome.reason, 'current') ?? extractCapNumeric(outcome.reason, 'observed'),
           ...(nodeId !== undefined ? { nodeId } : {}),
         },
         causationId,

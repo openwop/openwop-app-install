@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/list-invitations.config.json",
+  "title": "OrgsListInvitationsConfig",
+  "description": "Authoring-time configuration. `orgId` is optional (default: the run's workspace root). Authorization is never configured here: it is the run's acting user holding host:members:manage in the target org (the SAME predicate the /orgs/:orgId/invites routes use), checked in the host surface.",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string",
+      "maxLength": 200,
+      "description": "Org to list (default: the run's workspace root)."
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,44 @@
+{
+  "name": "core.openwop.workflows.scheduled-chat-turn",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "The scheduled-agent-chat turn workflow (ADR 0125), migrated off the in-tree `registerWorkflow(DEF)` pin site (ADR 0701 / PIN_SITE_QUARANTINE drain). chainId keeps the original workflowId so every existing scheduler job row, run stamp and dispatch keeps resolving. One agent-runner node; the recurring tick supplies agentId/task/conversationId per fire through the run's `configurable`, which `registerChainBackedWorkflow`'s deferred expansion materializes as run-overridable variables (RFC 0124).",
+  "keywords": ["scheduled-agent-chats", "ADR 0125"],
+  "engines": { "openwop": ">=1.0.0" },
+  "chains": [
+    {
+      "chainId": "openwop-app.scheduled-chat.turn",
+      "version": "1.0.0",
+      "label": "Scheduled agent chat — one turn",
+      "description": "Runs the bound agent once against the scheduled prompt and posts the reply into the bound conversation. Autonomous: the credential is the host-owned managed key, never BYOK, because a tick has no acting user to hold one.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["agentId", "task"],
+        "properties": {
+          "agentId": { "type": "string", "description": "The scheduled agent to run." },
+          "task": { "type": "string", "description": "The scheduled prompt the agent runs on." },
+          "credentialRef": { "type": "string", "description": "The host-owned managed credential (autonomous tick — no BYOK)." },
+          "conversationId": { "type": "string", "description": "The bound conversation the reply posts into (ADR 0125 Phase 2c)." }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "run",
+            "typeId": "local.openwop-app.agent-runner",
+            "name": "Run the scheduled agent turn",
+            "position": { "x": 0, "y": 0 },
+            "inputs": {
+              "agentId": "{{params.agentId}}",
+              "task": "{{params.task}}",
+              "credentialRef": "{{params.credentialRef}}",
+              "conversationId": "{{params.conversationId}}"
+            }
+          }
+        ],
+        "edges": []
+      }
+    }
+  ]
+}

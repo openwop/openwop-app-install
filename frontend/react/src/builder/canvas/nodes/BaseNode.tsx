@@ -7,18 +7,46 @@
  * glow so the canvas doubles as an execution view.
  */
 
+import { Button } from '../../../ui/Button.js';
 import { memo, useState, type ReactNode } from 'react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
 import { useTranslation } from 'react-i18next';
 import { catalogEntry } from '../../palette/catalogRegistry.js';
+import { formatUsd } from '../../../i18n/format.js';
 import { useBuilderStore, type NodeRunStatus } from '../../store/builderStore.js';
-import { CircleIcon, CheckIcon, XIcon, PauseIcon, AlertIcon } from '../../../ui/icons/index.js';
+import { CircleIcon, CheckIcon, XIcon, PauseIcon, AlertIcon, LinkIcon, PinIcon } from '../../../ui/icons/index.js';
+
+/** §7.4 / CV-5 — the keyboard-connect affordance state BuilderCanvas feeds
+ *  each node (the GraphSurface arm→target pattern, typed-port validated). */
+export interface NodeConnectState {
+  /** A source is armed somewhere on the canvas. */
+  armed: boolean;
+  /** This node IS the armed source. */
+  isSource: boolean;
+  /** Armed + this node has a type-compatible input for the source. */
+  canTarget: boolean;
+  onArm: () => void;
+  onTarget: () => void;
+}
 
 interface NodeData extends Record<string, unknown> {
   kind: string;
   name: string;
   /** Live run status painted by the execution overlay; undefined when idle. */
   runStatus?: NodeRunStatus;
+  /** ADR 0475 — this node's output is pinned in the debug session. */
+  pinned?: boolean;
+  /** ADR 0476 — failed-run count for the failure heatmap (undefined = off). */
+  failureCount?: number;
+  /** ADR 0482 §6 — this node's USD from the latest terminal run's costByNode
+   *  stamp, painted by the cost-heatmap mode (undefined = off/none). */
+  costUsd?: number;
+  /** ADR 0481 D5 — live-session peers with this node selected (quiet dots
+   *  beside the pin corner; `color` is a design-token var() reference;
+   *  `clientId` is the stable render key — names can collide, ux-H3). */
+  peers?: { clientId: number; name: string; color: string }[];
+  /** §7.4 / CV-5 keyboard-connect (absent for client-only nodes). */
+  connect?: NodeConnectState;
 }
 
 // Status → accent color + glyph for the live-execution overlay badge.
@@ -69,6 +97,7 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
     >
       {showCapWarning && (
         <span
+          role="img"
           className="builder-node-warn-badge"
           title={t('hostCantRunNodeTitle', { caps: missingSurfaces.join(', ') })}
           aria-label={t('hostCapabilityMissingNeedsAria', { caps: missingSurfaces.join(', ') })}
@@ -76,8 +105,59 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
           <AlertIcon size={14} />
         </span>
       )}
+      {typeof d.failureCount === 'number' && d.failureCount > 0 && (
+        <span
+          className="builder-node-heat-badge"
+          role="img"
+          title={t('heatBadgeTitle', { count: d.failureCount })}
+          aria-label={t('heatBadgeAria', { count: d.failureCount })}
+        >
+          {d.failureCount}
+        </span>
+      )}
+      {/* ADR 0482 §6 — the cost-heatmap badge (mutually exclusive with the
+          failure badge by construction: the store carries ONE mode). */}
+      {typeof d.costUsd === 'number' && d.costUsd > 0 && (
+        <span
+          className="builder-node-heat-badge builder-node-heat-badge--cost"
+          role="img"
+          title={t('costBadgeTitle', { usd: formatUsd(d.costUsd) })}
+          aria-label={t('costBadgeAria', { usd: formatUsd(d.costUsd) })}
+        >
+          {formatUsd(d.costUsd)}
+        </span>
+      )}
+      {d.pinned && (
+        <span
+          className="builder-node-pin-badge"
+          role="img"
+          title={t('debugPinnedBadgeTitle')}
+          aria-label={t('debugPinnedBadgeAria')}
+        >
+          <PinIcon size={12} />
+        </span>
+      )}
+      {/* ADR 0481 D5 — live-session peer markers: quiet identity dots beside
+          the pin corner (deliberately NOT a fifth corner badge). */}
+      {d.peers && d.peers.length > 0 && (
+        <span
+          className="builder-node-peers"
+          role="img"
+          title={t('collabNodePeersAria', { names: d.peers.map((p) => p.name).join(', ') })}
+          aria-label={t('collabNodePeersAria', { names: d.peers.map((p) => p.name).join(', ') })}
+        >
+          {d.peers.slice(0, 3).map((p) => (
+            <span key={p.clientId} className="builder-node-peer-dot" style={{ background: p.color }} />
+          ))}
+          {/* ux-M1 — dots cap at 3; the remainder is said, not hidden. */}
+          {d.peers.length > 3 && (
+            <span className="builder-node-peers-more">+{d.peers.length - 3}</span>
+          )}
+        </span>
+      )}
       {runMeta && (
         <span
+          role="img"
           className="builder-node-run-badge basenode-run-badge"
           title={runMetaLabel}
           aria-label={t('runStatusBadgeAria', { status: runMetaLabel })}
@@ -118,6 +198,28 @@ function BaseNodeImpl({ id, data, selected }: NodeProps) {
           {entry.badge}
         </span>
         <EditableTitle nodeId={id} name={d.name} />
+        {/* §7.4 / CV-5 — keyboard-connect: the selected node arms a source;
+            armed, every type-compatible node offers a validated target. */}
+        {d.connect && selected && !d.connect.armed && entry.outputs.length > 0 ? (
+          <Button
+            variant="quiet" size="sm" className="builder-node-connect nodrag"
+            title={t('connectArmFromNode', { name: d.name })}
+            aria-label={t('connectArmFromNode', { name: d.name })}
+            onClick={(e) => { e.stopPropagation(); d.connect?.onArm(); }}
+          >
+            <LinkIcon size={12} aria-hidden />
+          </Button>
+        ) : null}
+        {d.connect?.canTarget ? (
+          <Button
+            variant="accent" size="sm" className="builder-node-connect nodrag"
+            title={t('connectTargetNode', { name: d.name })}
+            aria-label={t('connectTargetNode', { name: d.name })}
+            onClick={(e) => { e.stopPropagation(); d.connect?.onTarget(); }}
+          >
+            <LinkIcon size={12} aria-hidden /> {t('connectTo')}
+          </Button>
+        ) : null}
       </div>
       <div className="builder-node-ports">
         <div className="builder-node-ports-col">

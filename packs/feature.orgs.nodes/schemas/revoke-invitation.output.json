@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/revoke-invitation.output.json",
+  "title": "OrgsRevokeInvitationOutput",
+  "description": "Ids-only. A missing / foreign invite is a uniform typed not_found, never `revoked: false`. Note: the `host.orgs.invitation.revoked` event is the admin ROUTE's (ADR 0622 D1, one site) \u2014 a workflow revoke fans out nothing.",
+  "type": "object",
+  "required": [
+    "inviteId",
+    "orgId",
+    "revoked"
+  ],
+  "properties": {
+    "inviteId": {
+      "type": "string"
+    },
+    "orgId": {
+      "type": "string"
+    },
+    "revoked": {
+      "type": "boolean",
+      "const": true
+    }
+  },
+  "additionalProperties": false
+}

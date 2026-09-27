@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.doc-writer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Technical documentation author. Produces README sections, API docs, architecture notes, and changelogs from source material. RAG-grounded. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -26,12 +26,10 @@
       "agentId": "core.openwop.agents.doc-writer.default",
       "persona": "Doc Writer",
       "label": "Documentation Writer Agent",
-      "description": "Produces technical documentation in one of several supported shapes (readme-section, api-reference, architecture-note, changelog, runbook). Grounds claims via openwop:core.rag.retrieve and writes output via openwop:core.files.fs-write when a destination path is supplied.",
+      "description": "Produces technical documentation in one of several supported shapes (readme-section, api-reference, architecture-note, changelog, runbook). Grounds claims via openwop:core.rag.retriever-basic and returns the document for the enclosing workflow to persist.",
       "modelClass": "writing",
       "systemPromptRef": "prompts/doc-writer.md",
       "toolAllowlist": [
-        "openwop:core.files.write",
-        "openwop:core.files.read",
         "openwop:core.rag.retriever-basic"
       ],
       "memoryShape": {

@@ -114,7 +114,17 @@ export function compactInputSchema(schema: unknown): Record<string, unknown> | u
   if (stripped.type !== 'object') return undefined;
   if (typeof stripped.properties !== 'object' || stripped.properties === null) return undefined;
   if (hasNonSubsetKeyword(stripped)) return undefined;
-  return stripped;
+  // The v2 compact schema CLOSES the top level to exactly `{type, properties}`
+  // (`additionalProperties: false`, pinned since v2.0.0-rc.3); v1's open schema
+  // admits the same shape, so one projection serves both majors. We used to
+  // return `stripped` whole, so a tool's `required` / `additionalProperties`
+  // rode along and every compact descriptor with an argument schema was invalid
+  // on the v2 wire — first caught by suite 2.40.0's
+  // `tool-catalog-compact-projection` on a production cut (2026-09-26), with an
+  // existing unit test PINNING the leak. Nested property schemas are unchanged
+  // (`properties` stays open in the schema). The full descriptor, not this
+  // lossy view, remains the validation authority on dispatch.
+  return { type: 'object', properties: stripped.properties };
 }
 
 /**

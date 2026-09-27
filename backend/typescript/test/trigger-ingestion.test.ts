@@ -141,7 +141,7 @@ describe('trigger ingestion service (RFC 0099 §F, sqlite memory)', () => {
       externalDeliveryId: 'd-redact',
     });
     expect(result.outcome).toBe('delivered');
-    const events = await getEventLog().list(result.runId!, { fromSeq: 0, limit: 1000 });
+    const events = await getEventLog().list(result.runId!, { fromSeq: -1, limit: 1000 });
     const delivery = events.find((e) => e.type === 'trigger.delivery.attempted');
     expect(delivery).toBeTruthy();
     const serialized = JSON.stringify(delivery!.payload);
@@ -260,7 +260,7 @@ describe('trigger ingestion HTTP surface (RFC 0099 §F.2/§F.3)', () => {
     delete process.env.OPENWOP_TRIGGER_INGESTION_ENABLED;
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await __resetTriggerBridgeStore();
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 

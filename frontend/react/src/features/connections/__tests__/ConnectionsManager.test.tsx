@@ -53,11 +53,13 @@ describe('ConnectionsManager (FP-2)', () => {
     expect(mConnections).toHaveBeenCalled();
   });
 
-  it('surfaces an error Notice when a load fails', async () => {
+  it('surfaces independent retryable error states when both reads fail', async () => {
     mProviders.mockRejectedValue(new Error('load boom'));
     mConnections.mockRejectedValue(new Error('also boom'));
     render(<ConnectionsManager />);
-    await waitFor(() => expect(screen.getByText('load boom')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Providers could not be loaded')).toBeTruthy());
+    expect(screen.getByText('Connections could not be loaded')).toBeTruthy();
+    expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(2);
   });
 
   it('FP-4: a providers failure does NOT blank the connections list (independent settle)', async () => {
@@ -65,7 +67,8 @@ describe('ConnectionsManager (FP-2)', () => {
     mConnections.mockResolvedValue([conn({ displayName: 'Still Here' })]);
     render(<ConnectionsManager />);
     await waitFor(() => expect(screen.getByText('Still Here')).toBeTruthy()); // connections rendered
-    expect(screen.getByText('providers down')).toBeTruthy(); // error still surfaced
+    expect(screen.getByText('Providers could not be loaded')).toBeTruthy(); // error still surfaced
+    expect(screen.queryByText('Connections could not be loaded')).toBeNull();
   });
 
   it('offers the org-share scope ONLY to a caller with host:connections:manage', async () => {
@@ -85,6 +88,10 @@ describe('ConnectionsManager (FP-2)', () => {
   });
 
   it('revokes a connection', async () => {
+    // The destructive action is confirm()-gated (XC-1); without a mounted
+    // <ConfirmRoot> it falls back to window.confirm — accept it.
+    const origConfirm = window.confirm;
+    window.confirm = () => true;
     mProviders.mockResolvedValue([prov()]);
     mConnections.mockResolvedValue([conn()]);
     mRevoke.mockResolvedValue(undefined);
@@ -92,6 +99,7 @@ describe('ConnectionsManager (FP-2)', () => {
     await waitFor(() => expect(screen.getByText('My ServiceNow')).toBeTruthy());
     fireEvent.click(screen.getByLabelText(/revoke/i));
     await waitFor(() => expect(mRevoke).toHaveBeenCalledWith('c1'));
+    window.confirm = origConfirm;
   });
 
   it('creates a connection from the secret form (secret trimmed, scoped to the user by default)', async () => {

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.0/draft.io.schema.json",
+  "title": "Agent Author Draft Object",
+  "type": "object",
+  "required": ["persona", "agentId"],
+  "properties": {
+    "persona": { "type": "string", "description": "Display name — must be distinct from every existing roster persona." },
+    "agentId": { "type": "string", "description": "The backing agent — must be an agentId from the catalog's agents list (closed-world)." },
+    "label": { "type": "string" },
+    "description": { "type": "string" },
+    "roleKey": { "type": "string", "description": "Optional role slug (e.g. engineer, researcher)." },
+    "autonomyLevel": { "type": "string", "enum": ["auto", "guided", "review"] },
+    "workflows": { "type": "array", "items": { "type": "string" }, "description": "Workflow ids from the catalog's workflows list only." }
+  },
+  "additionalProperties": false
+}

@@ -4,6 +4,7 @@
  * Board / Schedules / Instructions / Integrations / Activity.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
@@ -29,14 +30,16 @@ import { AgentActivityTab } from './AgentActivityTab.js';
 import { RecurringTasksPanel } from './RecurringTasksPanel.js';
 import { AgentHealthPanel } from './AgentHealthPanel.js';
 import { AgentAvatar } from './AgentAvatar.js';
-import { getMyProfile, setAgentPinned, setChatAgentPinned } from '../features/profiles/profilesClient.js';
+import { getMyProfile, pinLimitOf, setAgentPinned, setChatAgentPinned } from '../features/profiles/profilesClient.js';
 import { AvatarEditor } from './AvatarEditor.js';
 import { AgentDetailsEditor } from './AgentDetailsEditor.js';
 import { Notice } from '../ui/Notice.js';
 import { StateCard } from '../ui/StateCard.js';
 import { Markdown } from '../ui/Markdown.js';
 
-/** Human label for an autonomous-heartbeat cadence (ms). 0/absent ⇒ manual. */
+/** Human label for an agent's RESOLVED autonomous-heartbeat cadence (ms) — pass
+ *  `heartbeat.effectiveIntervalMs` (ADR 0313), which folds in the host default;
+ *  0 ⇒ off/manual. */
 function formatHeartbeat(intervalMs: number | undefined, t: TFunction): string {
   if (!intervalMs || intervalMs <= 0) return t('wsHeartbeatManual');
   const mins = Math.round(intervalMs / 60_000);
@@ -51,7 +54,7 @@ const TABS: ReadonlyArray<{ key: TabKey; labelKey: string }> = [
   { key: 'workflows', labelKey: 'wsTabWorkflows' },
   { key: 'board', labelKey: 'wsTabBoard' },
   { key: 'schedules', labelKey: 'wsTabSchedules' },
-  // ADR 0101 — the former Profile tab is folded into Instructions as "Guardrails".
+  // ADR 0493 — the former Profile tab is folded into Instructions as "Guardrails".
   { key: 'instructions', labelKey: 'wsTabInstructions' },
   // ADR 0038 — per-agent knowledge & memory (always-on since 2026-06-16).
   { key: 'knowledge', labelKey: 'wsTabKnowledge' },
@@ -152,7 +155,12 @@ export function AgentWorkspacePage(): JSX.Element {
         window.dispatchEvent(new Event('openwop:pinned-chat-agents-changed'));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('wsUpdatePinError'));
+      // ADR 0624 D6 / PROF-10 — the 13th pin is an honest 409 `validation_error`
+      // with `details.maxPinned`; say the cap in the user's language (keyed on
+      // the contract, not the English message). Anything else: the server's own
+      // prose, else the generic line. Rendered through the announced Notice.
+      const max = pinLimitOf(err);
+      setError(max !== undefined ? t('wsPinLimit', { max }) : err instanceof Error ? err.message : t('wsUpdatePinError'));
     } finally {
       setPinBusy(false);
     }
@@ -198,6 +206,10 @@ export function AgentWorkspacePage(): JSX.Element {
     setError(null);
     try {
       await deleteRosterEntry(view.entry.rosterId);
+      // The backend cascade unpins the dead rosterId in storage; tell the live
+      // sidebar + chat welcome to re-read so the pin doesn't linger until reload.
+      window.dispatchEvent(new Event('openwop:pinned-agents-changed'));
+      window.dispatchEvent(new Event('openwop:pinned-chat-agents-changed'));
       navigate('/agents');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -239,7 +251,7 @@ export function AgentWorkspacePage(): JSX.Element {
           icon={<AlertIcon size={20} />}
           title={t('wsNotFoundTitle')}
           body={t('wsNotFoundBody')}
-          action={<Link to="/agents" className="secondary btn-sm">{t('wsBackToAgents')}</Link>}
+          action={<Link to="/agents" className="btn secondary btn-sm">{t('wsBackToAgents')}</Link>}
         />
       </section>
     );
@@ -259,14 +271,13 @@ export function AgentWorkspacePage(): JSX.Element {
         <div className="u-flex-1 u-minw-200">
           <h1 className="u-m-0 u-flex u-items-center u-gap-2 u-wrap">
             {entry.persona}
-            <button
-              type="button"
-              className="secondary btn-sm u-iflex u-items-center u-gap-1"
+            <Button
+              variant="secondary" size="sm" className="u-iflex u-items-center u-gap-1"
               onClick={() => setEditingDetails(true)}
               title={t('wsEditDetailsTitle', { persona: entry.persona })}
             >
               <PencilIcon size={13} /> {t('wsEditDetails')}
-            </button>
+            </Button>
           </h1>
           <div className="muted">{entry.label ?? t('agent')}</div>
         </div>
@@ -277,9 +288,9 @@ export function AgentWorkspacePage(): JSX.Element {
               aria-haspopup="menu"
               title={t('wsPinTitle')}
             >
-              <PinIcon size={14} style={{ verticalAlign: '-2px', marginInlineEnd: '4px' }} />
+              <PinIcon size={14} className="u-icon-inline-lead" />
               {pinned || chatPinned ? t('wsPinned') : t('wsPin')}
-              <ChevronDownIcon size={14} style={{ verticalAlign: '-2px', marginInlineStart: '4px' }} />
+              <ChevronDownIcon size={14} className="u-icon-inline-trail" />
             </summary>
             <div className="pin-menu-panel surface-card" role="menu">
               <button
@@ -315,34 +326,31 @@ export function AgentWorkspacePage(): JSX.Element {
                 : t('wsHeartbeatTitleManual')
             }
           >
-            {t('wsHeartbeatLabel', { cadence: formatHeartbeat(entry.heartbeatIntervalMs, t) })}
+            {t('wsHeartbeatLabel', { cadence: formatHeartbeat(entry.heartbeat?.effectiveIntervalMs ?? entry.heartbeatIntervalMs, t) })}
           </span>
         </div>
       </div>
 
       <div className="action-bar u-mb-3 u-items-center">
-        <button
-          type="button"
-          className="primary"
+        <Button variant="primary"
           onClick={() => void onCheckNow()}
           disabled={busy || !entry.enabled}
           title={t('wsCheckNowTitle', { persona: entry.persona })}
         >
           {busy ? t('wsChecking') : t('wsCheckNow')}
-        </button>
-        <button type="button" className="secondary" onClick={() => setTab('board')}>{t('wsAddTask')}</button>
-        <button type="button" className="secondary" onClick={() => setTab('workflows')}>{t('wsRunWorkflow')}</button>
-        <button type="button" className="secondary" onClick={() => void onTogglePause()}>{entry.enabled ? t('wsPause') : t('wsResume')}</button>
-        <button type="button" className="secondary" onClick={() => setTab('instructions')}>{t('wsInstructions')}</button>
-        <button
-          type="button"
-          className="secondary u-text-danger"
+        </Button>
+        <Button variant="secondary" onClick={() => setTab('board')}>{t('wsAddTask')}</Button>
+        <Button variant="secondary" onClick={() => setTab('workflows')}>{t('wsRunWorkflow')}</Button>
+        <Button variant="secondary" onClick={() => void onTogglePause()}>{entry.enabled ? t('wsPause') : t('wsResume')}</Button>
+        <Button variant="secondary" onClick={() => setTab('instructions')}>{t('wsInstructions')}</Button>
+        <Button
+          variant="danger"
           onClick={() => void onDelete()}
           disabled={busy}
           title={t('wsDeleteTitle', { persona: entry.persona })}
         >
           {t('wsDelete')}
-        </button>
+        </Button>
         <span className="muted u-fs-12">
           {entry.lastHeartbeatAt
             ? t('wsLastChecked', { when: relativeTime(entry.lastHeartbeatAt) })
@@ -353,8 +361,12 @@ export function AgentWorkspacePage(): JSX.Element {
         </span>
       </div>
 
-      {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {/* PROF-UX-15(b) — a pin/unpin (or any other) failure here used to land in
+          a conditionally-mounted Notice with no `announce`, i.e. inserted already
+          holding its text and therefore unheard. Spoken explicitly, like the
+          success line below. */}
+      {error ? <Notice variant="error" announce={error}>{error}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
       {/* Tabs — the canonical editorial tab strip (DESIGN.md §5 `.tabs`/`.tab`),
           symmetric with the user profile's tabs (ADR 0025). */}
@@ -392,30 +404,25 @@ export function AgentWorkspacePage(): JSX.Element {
           <AgentIntegrationsPanel boardId={view.board?.id ?? null} persona={entry.persona} onChanged={() => void refresh()} />
           {/* ADR 0044 — the "Twin of …" agent↔person recall link (self-gates on
               the twin-recall toggle). Relocated here from the removed Profile tab
-              (ADR 0101) — it's an integration-style link, not a governance guardrail. */}
+              (ADR 0493) — it's an integration-style link, not a governance guardrail. */}
           <AgentTwinPanel rosterId={entry.rosterId} persona={entry.persona} />
         </div>
       ) : null}
       {tab === 'activity' ? <AgentActivityTab rosterId={entry.rosterId} persona={entry.persona} refreshSignal={boardRefresh} /> : null}
 
-      {/* ADR 0023 — the Chief of Staff's recurring tasks (perception loops) +
-          operating-health metrics. These are at-a-glance summaries ("what it
-          runs on a schedule" + "how it's doing"), so they belong on the
-          Overview tab only — previously they rendered after the tab switch and
-          repeated at the bottom of EVERY tab. Only this agent owns loops/health;
-          the health panel self-hides for non-admins (superadmin-gated endpoint). */}
-      {entry.roleKey === 'chief-of-staff' && tab === 'overview' ? (
-        <div className="u-mt-4 u-grid u-gap-4">
-          <RecurringTasksPanel />
-          <AgentHealthPanel persona={entry.persona} />
-        </div>
-      ) : null}
+      {/* ADR 0023 — the assistant capability's recurring tasks (perception
+          loops) + operating-health metrics. These are at-a-glance summaries
+          ("what it runs on a schedule" + "how it's doing"), so they belong on
+          the Overview tab only. The health panel self-hides for non-admins
+          (superadmin-gated endpoint). Gating lives in
+          `AssistantControlPanels` — see AST-UX-2 there. */}
+      {tab === 'overview' ? <AssistantControlPanels rosterId={entry.rosterId} roleKey={entry.roleKey} persona={entry.persona} /> : null}
 
       <details className="u-mt-5">
         <summary className="muted u-fs-12 u-cursor-pointer">{t('wsAdvancedSummary')}</summary>
         <p className="muted u-fs-12 u-mt-2">
           {t('wsAdvancedDetail', { persona: entry.persona, agentId: entry.agentRef.agentId, rosterId: entry.rosterId })}
-          {' '}<button type="button" className="secondary btn-sm" onClick={() => navigate('/roster')}>{t('wsOpenRawRoster')}</button>
+          {' '}<Button variant="secondary" size="sm" onClick={() => navigate('/roster')}>{t('wsOpenRawRoster')}</Button>
         </p>
       </details>
 
@@ -436,6 +443,54 @@ export function AgentWorkspacePage(): JSX.Element {
         />
       ) : null}
     </section>
+  );
+}
+
+/**
+ * AST-UX-2 — the assistant's OFF SWITCH, gated on the CAPABILITY.
+ *
+ * These two panels are the only surface in the product that can pause a
+ * perception loop or read the assistant's action health. They used to render
+ * under `entry.roleKey === 'chief-of-staff'`, which is the exact role↔capability
+ * fusion ADR 0023 §Correction removed: the backend resolves the acting assistant
+ * agent purely by the `assistant` capability and says so at the seam
+ * (`features/assistant/capability.ts`, `actionApproval.ts`). So a tenant whose
+ * capability-activated agent carried any other roleKey had loops drafting and
+ * sending on a cron with NO reachable pause control.
+ *
+ * THE GATE IS A UNION, DELIBERATELY, and this is the "widening a predicate
+ * creates a new state" rule applied to itself. Reading `capabilities` alone
+ * would be a NARROWING for one real population: `ensureAssistantAgent` only
+ * self-heals the capability flag onto the seeded `chief-of-staff` holder the
+ * first time something enqueues an action or enables a loop
+ * (`capability.ts DEFAULT_ASSISTANT_SEED_ROLE`), so a tenant seeded before the
+ * flag — and before it ever used the feature — would have LOST the panels
+ * entirely. The roleKey arm is therefore kept as exactly what the backend calls
+ * it: a bootstrap fallback, to be deleted when every seed carries the flag in
+ * data. Nobody who could reach the panels before loses them; agents that could
+ * not, and should, gain them.
+ *
+ * The read is best-effort: a missing/unreadable profile means "no capability",
+ * never an error surface — the loops panel does its own failure reporting.
+ */
+export function AssistantControlPanels(
+  { rosterId, roleKey, persona }: { rosterId: string; roleKey: string | undefined; persona: string },
+): JSX.Element | null {
+  const [capable, setCapable] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setCapable(false);
+    void getAgentProfile(rosterId)
+      .then((p) => { if (!cancelled) setCapable(Boolean(p?.capabilities?.includes('assistant'))); })
+      .catch(() => { /* no profile / not readable → capability unproven */ });
+    return () => { cancelled = true; };
+  }, [rosterId]);
+  if (!capable && roleKey !== 'chief-of-staff') return null;
+  return (
+    <div className="u-mt-4 u-grid u-gap-4">
+      <RecurringTasksPanel />
+      <AgentHealthPanel persona={persona} />
+    </div>
   );
 }
 
@@ -502,12 +557,12 @@ function PriorityPanel({
                 {topTodo.title}
                 {topTodo.priority === 'high' ? <span className="chip chip--danger agentws-high-chip">{t('wsHigh')}</span> : null}
               </div>
-              <button type="button" className="primary btn-sm u-mt-1-5" onClick={onCheckNow} disabled={busy || !entry.enabled}>
+              <Button variant="primary" size="sm" className="u-mt-1-5" onClick={onCheckNow} disabled={busy || !entry.enabled}>
                 {busy ? t('wsChecking') : t('wsPickUpNow')}
-              </button>
+              </Button>
             </>
           ) : (
-            <div className="muted u-fs-13">{t('wsNoPendingTasks')} <button type="button" className="secondary btn-sm" onClick={() => onGoto('board')}>{t('wsAddATask')}</button></div>
+            <div className="muted u-fs-13">{t('wsNoPendingTasks')} <Button variant="secondary" size="sm" onClick={() => onGoto('board')}>{t('wsAddATask')}</Button></div>
           )}
         </div>
         <div className="agentws-cell">
@@ -529,7 +584,7 @@ function PriorityPanel({
               <div className="muted u-fs-13 u-mt-1">{String(nextSchedule.metadata?.label ?? nextSchedule.cronExpr)}</div>
             </div>
           ) : (
-            <div className="muted u-fs-13">{t('wsNoSchedule')} <button type="button" className="secondary btn-sm" onClick={() => onGoto('schedules')}>{t('wsAddOne')}</button></div>
+            <div className="muted u-fs-13">{t('wsNoSchedule')} <Button variant="secondary" size="sm" onClick={() => onGoto('schedules')}>{t('wsAddOne')}</Button></div>
           )}
         </div>
       </div>
@@ -556,17 +611,17 @@ function OverviewTab({ view, onGoto, onCheckNow, busy }: { view: AgentView; onGo
         <ul className="agentws-portfolio-list">
           {entry.workflows.slice(0, 4).map((w) => <li key={w}>{workflowName(w)}</li>)}
         </ul>
-        <button type="button" className="secondary u-fs-12 u-mt-1-5" onClick={() => onGoto('workflows')}>{t('wsManageWorkflows')}</button>
+        <Button variant="secondary" className="u-fs-12 u-mt-1-5" onClick={() => onGoto('workflows')}>{t('wsManageWorkflows')}</Button>
       </div>
       <div className="agentws-overview-card">
         <strong>{t('wsTaskBoard')}</strong>
         <p className="u-fs-14 u-mb-1-5">{t('wsLaneCounts', { todo: laneCounts.todo, working: laneCounts.working, waiting: laneCounts.waiting, done: laneCounts.done })}</p>
-        <button type="button" className="secondary u-fs-12" onClick={() => onGoto('board')}>{t('wsOpenBoard')}</button>
+        <Button variant="secondary" className="u-fs-12" onClick={() => onGoto('board')}>{t('wsOpenBoard')}</Button>
       </div>
       <div className="agentws-overview-card">
         <strong>{t('wsSchedule')}</strong>
         <p className="u-fs-14 u-mb-1-5">{nextSchedule ? String(nextSchedule.metadata?.label ?? nextSchedule.cronExpr) : t('wsNoScheduleYet')}</p>
-        <button type="button" className="secondary u-fs-12" onClick={() => onGoto('schedules')}>{t('wsManageSchedules')}</button>
+        <Button variant="secondary" className="u-fs-12" onClick={() => onGoto('schedules')}>{t('wsManageSchedules')}</Button>
       </div>
       {/* ADR 0101 Phase 3 — the agent's declared success metrics, surfaced from
           its guardrails profile. Self-hides when none are declared. */}

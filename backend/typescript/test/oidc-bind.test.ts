@@ -26,7 +26,11 @@ import { _resetOidcVerifier } from '../src/middleware/auth.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { listMembers, isWorkspaceMember } from '../src/host/accessControlService.js';
+import { ensureFeatureDefaultOrgs, type FeatureDefaultOrg } from '../src/host/featureDefaultOrgs.js';
+import { setDefaultWorkspaceTargets } from '../src/host/workspaceJoinLedger.js';
+import { registerToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getBoard, personalBoardId } from '../src/host/kanbanService.js';
+import { setUserStatus } from '../src/features/users/usersService.js';
 
 function b64url(buf: Buffer | string): string {
   return Buffer.from(buf).toString('base64').replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_');
@@ -60,7 +64,7 @@ beforeAll(async () => {
   const jwks = { keys: [{ ...pubJwk, kid: 'test-kid-1', alg: 'RS256', use: 'sig' }] };
   const issuerApp = express();
   issuerApp.get('/.well-known/jwks.json', (_req, res) => res.json(jwks));
-  issuerServer = await new Promise<http.Server>((r) => { const s = issuerApp.listen(0, () => r(s)); });
+  issuerServer = await new Promise<http.Server>((r) => { const s = issuerApp.listen(0, '127.0.0.1', () => r(s)); });
   issuer = `http://127.0.0.1:${(issuerServer.address() as { port: number }).port}`;
 
   process.env.OPENWOP_OIDC_ISSUER = issuer;
@@ -72,7 +76,7 @@ beforeAll(async () => {
   _resetOidcVerifier();
 
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const def = getToggleDefault('users');
   if (def) await saveConfig({ ...def, status: 'on' }, 'test');
 });
@@ -102,6 +106,9 @@ function client(token: string): { get: (p: string) => Promise<Res>; post: (p: st
     const single = res.headers.get('set-cookie');
     const setCookies: string[] = typeof h.getSetCookie === 'function' ? h.getSetCookie() : single ? [single] : [];
     for (const sc of setCookies) {
+      // ADR 0621 — honour a cookie CLEAR (`__session=; …Max-Age=0`) the way a
+      // browser does: the jar drops the session instead of replaying it.
+      if (/^__session=;/.test(sc)) { cookie = ''; continue; }
       const m = /(__session=[^;]+)/.exec(sc);
       if (m) cookie = m[1];
     }
@@ -200,6 +207,112 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     expect(await isWorkspaceMember(userId, ws)).toBe(true);
   });
 
+  // USERS-1 (fail-closed, finding H5): the OIDC bind lane must consult the
+  // durable record's status BEFORE minting a session. Pre-fix, a disabled user's
+  // bind cheerfully re-issued a full user-tier cookie — the disable lifecycle
+  // was only enforced on the users feature's own routes.
+  //
+  // NOTE on the cookie assertions: they pin THIS LANE's behavior — the bind
+  // route mints the BOUND cookie (`userId` claim), so the assertions decode the
+  // payload rather than matching on mere cookie presence. "No bound cookie
+  // leaves" is NOT a host-wide invariant: the auth middleware still re-issues
+  // cookies for a disabled user's session with no store consult, on three
+  // residual lanes — the bearer promote/refresh re-mint that PRESERVES
+  // `boundUserId` (middleware/auth.ts ~861-890, incl. the MFA mark-flap
+  // re-issue), and the sliding-window refresh (~993) that re-signs any bound
+  // cookie with <REFRESH_THRESHOLD remaining, so a daily visitor's disabled
+  // session renews indefinitely. Per-request status enforcement is the
+  // ADR 0015 §0 / ADR 0006 (USERS-2) design question, deliberately not
+  // closed here.
+  it('a DISABLED user is refused a session on bind (403, no BOUND cookie); re-enable restores it', async () => {
+    const boundCookies = (res: Response): Array<Record<string, unknown>> => {
+      const h = res.headers as Headers & { getSetCookie?: () => string[] };
+      const all = typeof h.getSetCookie === 'function' ? h.getSetCookie() : [res.headers.get('set-cookie') ?? ''];
+      return all
+        .map((sc) => /__session=([^;]+)/.exec(sc)?.[1])
+        .filter((v): v is string => Boolean(v))
+        .map((v) => JSON.parse(Buffer.from(v.split('.')[0]!.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString()) as Record<string, unknown>)
+        .filter((p) => typeof p.userId === 'string');
+    };
+    const sub = 'firebase-uid-disabled-1';
+    const c = client(mint(sub));
+
+    // Active polarity first: bind succeeds and mints the durable user.
+    const bind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
+    expect(bind.status, JSON.stringify(bind.body)).toBe(200);
+    const userId = bind.body.user.userId as string;
+
+    await setUserStatus(userId, 'disabled', { reason: 'admin' });
+
+    // Fresh channel (bearer only, no cookie): the unbound path must refuse with
+    // the canonical envelope and MUST NOT issue a BOUND session cookie.
+    // ADR 0621 D1 rev. 2 (review BLOCKER-1): the auth middleware's UNBOUND-lane
+    // read now resolves the disabled row by personal tenant and refuses the
+    // request itself (`401 account_disabled`, no mint) before the route's own
+    // USERS-1 `403 forbidden` can run — that 403 remains as the mint-site
+    // defence, reachable only if the middleware read were ever bypassed.
+    const refused = await fetch(`${BASE}/v1/host/openwop-app/users/auth/oidc/bind`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${mint(sub)}`, 'content-type': 'application/json' },
+    });
+    expect(refused.status).toBe(401);
+    const body = (await refused.json()) as { error?: string };
+    expect(body.error).toBe('account_disabled');
+    expect(boundCookies(refused)).toHaveLength(0);
+
+    // The already-bound fast path (pre-disable cookie) is refused too — a
+    // disabled account must not have its bind re-confirmed. ADR 0621 D1 (b):
+    // the refusal now lands one layer EARLIER — the auth middleware refuses the
+    // bearer + stale-bound-cookie request itself (`401 account_disabled`, cookie
+    // cleared) before the route's own 403 could run. Either layer is fail-closed;
+    // the middleware is the one that also ends the LIVE session.
+    const rebind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
+    expect(rebind.status, JSON.stringify(rebind.body)).toBe(401);
+    expect(rebind.body.error).toBe('account_disabled');
+
+    // Only the explicit lifecycle call restores sign-in (both polarities).
+    await setUserStatus(userId, 'active', { reason: 'admin' });
+    const restored = await fetch(`${BASE}/v1/host/openwop-app/users/auth/oidc/bind`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${mint(sub)}`, 'content-type': 'application/json' },
+    });
+    expect(restored.status).toBe(200);
+    const bound = boundCookies(restored);
+    expect(bound.length).toBeGreaterThan(0);
+    expect(bound[0]!.userId).toBe(userId);
+  });
+
+  // USERS-1 family (review F1a): the workspace SWITCH also re-mints the bound
+  // session (`issueUserSession`) — the same mint-site class as the ACS/bind
+  // lanes. Both polarities: disabled → 403 and no fresh bound cookie; enabled →
+  // the switch works again.
+  it('a DISABLED user cannot re-mint a session via workspace switch; enable restores it', async () => {
+    const sub = 'firebase-uid-disabled-switch';
+    const c = client(mint(sub));
+    const userId = (await c.post('/v1/host/openwop-app/users/auth/oidc/bind')).body.user.userId as string;
+    const ws = (await c.post('/v1/host/openwop-app/workspaces', { name: 'DisabledCo' })).body.workspaceId as string;
+    expect(ws).toMatch(/^ws:/);
+
+    await setUserStatus(userId, 'disabled', { reason: 'admin' });
+    // ADR 0621 D1 (b): the middleware refuses the bearer + stale-bound-cookie
+    // request (`401 account_disabled`, cookie cleared) before the switch route's
+    // own USERS-1 403 — the LIVE session ends, not just the re-mint.
+    const refused = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    expect(refused.status, JSON.stringify(refused.body)).toBe(401);
+    expect(refused.body.error).toBe('account_disabled');
+
+    await setUserStatus(userId, 'active', { reason: 'admin' });
+    // ADR 0621 D2: the disable bumped the session epoch, so the pre-disable
+    // cookie stays dead by construction (re-enable does not reset it). The
+    // browser dropped it on the 401 above; the SPA re-binds from its IdP token
+    // — the bind stamps the NEW epoch — and only then does the switch work.
+    const rebound = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
+    expect(rebound.status, JSON.stringify(rebound.body)).toBe(200);
+    const ok = await c.post(`/v1/host/openwop-app/workspaces/${encodeURIComponent(ws)}/switch`);
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    expect(ok.body.active).toBe(ws);
+  });
+
   // Regression for the duplicate "My Board" bug: the SAME human reaching the host
   // first over an UNBOUND bearer then over a BOUND cookie must get exactly ONE
   // personal board. Pre-fix, the provisioning choke point keyed the board on the
@@ -226,5 +339,53 @@ describe('ADR 0003 Phase 4a — OIDC bind', () => {
     // …and the oidc:<sub>-keyed duplicate board was NEVER created.
     expect(await getBoard(canonicalBoardId)).not.toBeNull();
     expect(await getBoard(personalBoardId(personalTenant, `oidc:${sub}`))).toBeNull();
+  });
+});
+
+// ADR 0684 correction (second defect) — auto-join must key on the CANONICAL
+// subject the rest of the request path resolves. `bind` prefixed an already-
+// prefixed `userId`, so every row landed under `user:user:<hash>`; the
+// service-level enterable test could not see it because it hands auto-join a
+// consistent subject directly. This one goes through the real route.
+describe('ADR 0684 — bind auto-joins the CANONICAL subject into a declared default workspace', () => {
+  const DECL: FeatureDefaultOrg = {
+    featureId: 'bind-default-feature', orgId: 'host-bindtest', tenantId: 'host-bindtest', name: 'Bind Test',
+  };
+
+  beforeAll(async () => {
+    registerToggleDefault({ id: DECL.featureId, label: DECL.name, status: 'on', bucketUnit: 'user', salt: DECL.featureId } as never);
+    await ensureFeatureDefaultOrgs([DECL]);
+    setDefaultWorkspaceTargets([DECL]);
+  });
+
+  it('the joined subject is the one the session resolves — listable, switchable, sticky', async () => {
+    const sub = 'firebase-uid-bind-default-1';
+    const c = client(mint(sub));
+    const bind = await c.post('/v1/host/openwop-app/users/auth/oidc/bind');
+    expect(bind.status, JSON.stringify(bind.body)).toBe(200);
+    const userId = bind.body.user.userId as string;
+    expect(userId).toMatch(/^user:/);
+
+    // The regression, stated as the row that must NOT exist: nothing may be
+    // keyed under a double-prefixed subject.
+    expect(await isWorkspaceMember(`user:${userId}`, DECL.tenantId), 'double-prefixed subject must own nothing').toBe(false);
+    expect(await isWorkspaceMember(userId, DECL.tenantId), 'canonical subject is a member').toBe(true);
+
+    // 1. LISTABLE through the route the switcher uses.
+    const me = await c.get('/v1/host/openwop-app/me/workspaces');
+    expect(me.status).toBe(200);
+    expect(me.body.workspaces.map((w: any) => w.workspaceId)).toContain(DECL.tenantId);
+
+    // 2. SWITCHABLE — the 403 seen in production.
+    const sw = await c.post(`/v1/host/openwop-app/workspaces/${DECL.tenantId}/switch`);
+    expect(sw.status, JSON.stringify(sw.body)).toBe(200);
+
+    // 3. STICKY — a fresh bind re-resolves the active workspace fail-closed and
+    //    must keep it rather than bounce the caller to personal.
+    const c2 = client(mint(sub));
+    const bind2 = await c2.post('/v1/host/openwop-app/users/auth/oidc/bind');
+    expect(bind2.status).toBe(200);
+    const me2 = await c2.get('/v1/host/openwop-app/me/workspaces');
+    expect(me2.body.active).toBe(DECL.tenantId);
   });
 });

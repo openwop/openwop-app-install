@@ -72,6 +72,30 @@ function ensureCallAI(ctx) {
  * Returns the input array verbatim when ctx.trustBoundary is absent or
  * `'trusted'` — zero behavioral change for non-MCP-mount runs.
  */
+/**
+ * Coerce a node's inputs into a non-empty messages[] for callAI. A chatCompletion /
+ * structured-output node fed STRUCTURED upstream data (e.g. `{triage:{...}}` from a
+ * preceding node) — not a chat `messages` array — would otherwise pass
+ * `messages: undefined` to the provider and crash with "messages is not iterable".
+ * Precedence: an explicit `messages[]` → a recognized single-string port → the
+ * structured inputs serialized as ONE user turn (so the model still acts on them per
+ * the `systemPrompt`). Returns [] only when there is genuinely no input at all.
+ */
+function toMessages(inputs) {
+  const src = inputs && typeof inputs === 'object' ? inputs : {};
+  if (Array.isArray(src.messages) && src.messages.length > 0) return src.messages;
+  for (const k of ['prompt', 'text', 'message', 'content', 'input']) {
+    if (typeof src[k] === 'string' && src[k].length > 0) return [{ role: 'user', content: src[k] }];
+  }
+  for (const [k, v] of Object.entries(src)) {
+    if (k !== 'messages' && typeof v === 'string' && v.length > 0) return [{ role: 'user', content: v }];
+  }
+  const structured = {};
+  for (const [k, v] of Object.entries(src)) if (k !== 'messages' && v !== undefined) structured[k] = v;
+  if (Object.keys(structured).length > 0) return [{ role: 'user', content: JSON.stringify(structured) }];
+  return [];
+}
+
 function applyUntrustedMarkers(messages, trustBoundary) {
   if (trustBoundary !== 'untrusted' || !Array.isArray(messages)) return messages;
   return messages.map((m) => {
@@ -103,7 +127,7 @@ function normalizeFinishReason(raw) {
 export async function chatCompletion(ctx) {
   ensureCallAI(ctx);
   const { provider, model, systemPrompt, temperature, maxTokens, stopSequences } = ctx.config;
-  const { messages } = ctx.inputs;
+  const messages = toMessages(ctx.inputs);
 
   const result = await ctx.callAI({
     provider,
@@ -143,16 +167,44 @@ export async function chatCompletion(ctx) {
  * types align. Deep semantic validation is the host's job.
  */
 function shallowSchemaCheck(data, schema) {
-  if (!schema || typeof schema !== 'object') return true;
+  return schemaCheckErrors(data, schema).length === 0;
+}
+
+/** XCH-CORE-1 (LLM-EXCHANGE-AUDIT Wave 2): dependency-free recursive walker
+ *  over the JSON-Schema subset workflow authors actually write —
+ *  type / required / properties / items / enum / const — with a depth cap.
+ *  PERMISSIVE by design: unknown keywords are ignored (never stricter than
+ *  the provider's native structured output). Returns path-prefixed error
+ *  strings so the retry prompt can teach the model what to fix. */
+function schemaCheckErrors(data, schema, path = '$', depth = 0) {
+  if (!schema || typeof schema !== 'object' || depth > 8) return [];
+  const errors = [];
   if (schema.type) {
-    const actualType = Array.isArray(data) ? 'array' : data === null ? 'null' : typeof data;
+    const actualType = Array.isArray(data) ? 'array' : data === null ? 'null' : typeof data === 'number' && Number.isInteger(data) ? 'integer' : typeof data;
     const expected = Array.isArray(schema.type) ? schema.type : [schema.type];
-    if (!expected.includes(actualType)) return false;
+    const matches = expected.some((t) => t === actualType || (t === 'number' && actualType === 'integer'));
+    if (!matches) { errors.push(`${path}: expected type ${expected.join('|')}, got ${actualType}`); return errors; }
   }
-  if (schema.required && Array.isArray(schema.required) && data && typeof data === 'object' && !Array.isArray(data)) {
-    for (const k of schema.required) if (!(k in data)) return false;
+  if (schema.const !== undefined && JSON.stringify(data) !== JSON.stringify(schema.const)) {
+    errors.push(`${path}: must equal the const value ${JSON.stringify(schema.const)}`);
   }
-  return true;
+  if (Array.isArray(schema.enum) && !schema.enum.some((v) => JSON.stringify(v) === JSON.stringify(data))) {
+    errors.push(`${path}: must be one of ${schema.enum.map((v) => JSON.stringify(v)).join(', ')}`);
+  }
+  if (data && typeof data === 'object' && !Array.isArray(data)) {
+    if (Array.isArray(schema.required)) {
+      for (const k of schema.required) if (!(k in data)) errors.push(`${path}: missing required key '${k}'`);
+    }
+    if (schema.properties && typeof schema.properties === 'object') {
+      for (const [k, sub] of Object.entries(schema.properties)) {
+        if (k in data) errors.push(...schemaCheckErrors(data[k], sub, `${path}.${k}`, depth + 1));
+      }
+    }
+  }
+  if (Array.isArray(data) && schema.items && typeof schema.items === 'object' && !Array.isArray(schema.items)) {
+    data.forEach((item, i) => errors.push(...schemaCheckErrors(item, schema.items, `${path}[${i}]`, depth + 1)));
+  }
+  return errors;
 }
 
 export async function structuredOutput(ctx) {
@@ -161,16 +213,21 @@ export async function structuredOutput(ctx) {
     provider, model, systemPrompt, temperature, maxTokens,
     outputSchema, retryOnInvalidJson = 2,
   } = ctx.config;
-  const { messages } = ctx.inputs;
+  const messages = toMessages(ctx.inputs);
 
   let retries = 0;
   let lastErr = null;
 
   while (retries <= retryOnInvalidJson) {
+    // XCH-CORE-1: a retry FEEDS THE VALIDATION ERRORS BACK — re-rolling the
+    // same messages just re-samples the same mistake.
+    const attemptMessages = lastErr
+      ? [...messages, { role: 'user', content: `Your previous structured output was INVALID:\n${lastErr}\nReturn a corrected JSON value that satisfies the schema. Fix ALL of the above.` }]
+      : messages;
     const result = await ctx.callAI({
       provider,
       model,
-      messages: applyUntrustedMarkers(messages, ctx.trustBoundary),
+      messages: applyUntrustedMarkers(attemptMessages, ctx.trustBoundary),
       responseSchema: outputSchema,
       ...(systemPrompt !== undefined ? { systemPrompt } : {}),
       ...(temperature !== undefined ? { temperature } : {}),
@@ -178,10 +235,11 @@ export async function structuredOutput(ctx) {
     });
 
     const data = result.data;
+    const schemaErrors = data === undefined ? [] : schemaCheckErrors(data, outputSchema);
     if (data === undefined) {
       lastErr = 'host returned no `data` field — provider may not support structured output';
-    } else if (!shallowSchemaCheck(data, outputSchema)) {
-      lastErr = 'data did not match outputSchema (shallow structural check failed)';
+    } else if (schemaErrors.length) {
+      lastErr = schemaErrors.slice(0, 10).join('\n');
     } else {
       return {
         status: 'success',
@@ -261,7 +319,7 @@ export async function toolCalling(ctx) {
     );
   }
   const { provider, model, systemPrompt, temperature, maxTokens, tools, toolChoice } = ctx.config;
-  const { messages } = ctx.inputs;
+  const messages = toMessages(ctx.inputs);
 
   const result = await ctx.callAIWithTools({
     provider,
@@ -320,8 +378,21 @@ export async function classify(ctx) {
     messages: applyUntrustedMarkers([{ role: 'user', content: `Labels: ${labels.join(', ')}\n\nText:\n${ctx.inputs.text}` }], ctx.trustBoundary),
     model: ctx.config.model,
   });
-  const label = (r.text ?? r.content ?? '').trim();
-  return { status: 'success', outputs: { label: labels.includes(label) ? label : labels[0], confidence: labels.includes(label) ? 0.8 : 0.2, allScores: [] } };
+  // XCH-CORE-2 (LLM-EXCHANGE-AUDIT Wave 2): no fabricated confidence, no
+  // silent coercion to labels[0]. Normalize-match first (models add case/
+  // punctuation noise); a genuinely off-list reply is a typed failure the
+  // caller can see, not a fake first-label classification. `confidence` /
+  // `allScores` are omitted — this node has no real scores to report.
+  const raw = (r.text ?? r.content ?? '').trim();
+  const norm = (s) => s.toLowerCase().replace(/["'`.,;:!]/g, '').trim();
+  const label = labels.find((l) => l === raw) ?? labels.find((l) => norm(l) === norm(raw));
+  if (label === undefined) {
+    throw Object.assign(
+      new Error(`model reply is not one of the ${labels.length} configured labels`),
+      { code: 'classification_unmatched', details: { reply: raw.slice(0, 200), labels } },
+    );
+  }
+  return { status: 'success', outputs: { label } };
 }
 
 export async function extract(ctx) {
@@ -344,33 +415,64 @@ export async function extract(ctx) {
     return { status: 'success', outputs: { value: r.parsed, confidence: 1 } };
   }
   const raw = r.text ?? r.content ?? null;
-  if (raw == null) {
-    return { status: 'success', outputs: { value: null, confidence: 0 } };
+  if (raw != null) {
+    try {
+      return { status: 'success', outputs: { value: JSON.parse(raw), confidence: 1 } };
+    } catch { /* fall through to the bounded repair */ }
   }
+  // XCH-CORE-6 (LLM-EXCHANGE-AUDIT round 2): ONE bounded repair before the
+  // honest low-confidence fallback — feed the failure back instead of
+  // shipping raw prose at confidence 0 on the first miss.
   try {
-    return { status: 'success', outputs: { value: JSON.parse(raw), confidence: 1 } };
-  } catch {
-    return { status: 'success', outputs: { value: raw, confidence: 0 } };
-  }
+    const retry = await ctx.callAI({
+      systemPrompt: 'Extract structured data per the provided JSON Schema. Reply with JSON only.',
+      messages: applyUntrustedMarkers([
+        { role: 'user', content: `Schema:\n${JSON.stringify(ctx.config.schema)}\n\nText:\n${ctx.inputs.text}` },
+        { role: 'assistant', content: String(raw ?? '') },
+        { role: 'user', content: 'Your previous reply was not parseable JSON matching the schema. Return ONLY the JSON value — no prose, no code fences.' },
+      ], ctx.trustBoundary),
+      responseSchema: ctx.config.schema,
+      model: ctx.config.model,
+    });
+    if (retry.data != null) return { status: 'success', outputs: { value: retry.data, confidence: 1 } };
+    const retryRaw = retry.text ?? retry.content ?? null;
+    if (retryRaw != null) {
+      try { return { status: 'success', outputs: { value: JSON.parse(retryRaw), confidence: 1 } }; } catch { /* honest fallback below */ }
+    }
+  } catch { /* honest fallback below */ }
+  return { status: 'success', outputs: { value: raw, confidence: 0 } };
 }
 
 export async function guardrails(ctx) {
   if (typeof ctx.guardrails?.evaluate === 'function') {
     const r = await ctx.guardrails.evaluate({ text: ctx.inputs.text, checks: ctx.config.checks });
-    return { status: 'success', outputs: r };
+    return { status: 'success', outputs: { enforced: true, ...r } };
   }
-  // No-op fallback: pass everything through.
-  return { status: 'success', outputs: { passed: true, violations: [] } };
+  // XCH-CORE-3: never report a fabricated pass as an enforced one. Without the
+  // host capability the node cannot evaluate anything — say so honestly, and
+  // let strict callers refuse to proceed at all.
+  if (ctx.config?.requireEnforcement === true) {
+    throw Object.assign(new Error('host does not implement ctx.guardrails and requireEnforcement is set'), { code: 'HOST_CAPABILITY_MISSING' });
+  }
+  return { status: 'success', outputs: { passed: true, violations: [], enforced: false, reason: 'host_capability_missing' } };
 }
 
 export async function transform(ctx) {
   if (typeof ctx.callAI !== 'function') throw Object.assign(new Error('host does not implement ctx.callAI'), { code: 'HOST_CAPABILITY_MISSING' });
   const exShown = (ctx.config.examples ?? []).map((e) => `Input: ${JSON.stringify(e.input)}\nOutput: ${JSON.stringify(e.output)}`).join('\n\n');
+  // XCH-CORE-5 (LLM-EXCHANGE-AUDIT Wave 5): an optional caller-declared
+  // outputSchema engages provider-native structured output; result.data is
+  // then preferred over text parsing.
+  const outputSchema = ctx.config.outputSchema && typeof ctx.config.outputSchema === 'object' ? ctx.config.outputSchema : undefined;
   const r = await ctx.callAI({
     systemPrompt: 'Transform the input per the instruction. Reply with the transformed JSON value only.',
     messages: applyUntrustedMarkers([{ role: 'user', content: `Instruction: ${ctx.inputs.instruction}\n\n${exShown}\n\nInput: ${JSON.stringify(ctx.inputs.value)}\nOutput:` }], ctx.trustBoundary),
     model: ctx.config.model,
+    ...(outputSchema ? { responseSchema: outputSchema } : {}),
   });
+  if (outputSchema && r.data !== undefined) {
+    return { status: 'success', outputs: { result: r.data } };
+  }
   let result;
   try { result = JSON.parse(r.text ?? r.content ?? 'null'); } catch { result = r.text ?? r.content; }
   return { status: 'success', outputs: { result } };

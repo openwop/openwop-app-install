@@ -1,0 +1,153 @@
+/* ── Layer 3: ADR 0510 primitives — post-monolith additions (DSA-010) ──
+ * Extracted verbatim from the tail of global.css (first modularization
+ * tranche): the gallery specimen classes, InlineState/EmptyRow, coarse-
+ * pointer hit areas, and the classes minted by the static-inline-style
+ * migration. Imported AFTER the monolith by styles/index.css. */
+/* ── Design-system gallery (ADR 0510 Phase 2, DSA-031) ─────────────────────
+ * The /design-system engineering surface's type specimens — token-driven so
+ * the gallery snapshots exercise the real scale, never inline literals. */
+.dsg-type-display { font-family: var(--serif); font-size: var(--text-display); }
+.dsg-type-body { font-size: var(--text-body); }
+.dsg-type-meta { font-family: var(--mono); font-size: var(--text-eyebrow); letter-spacing: 0.04em; }
+.dsg-admin-matrix { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-3); }
+.dsg-admin-fixture, .dsg-admin-state { min-width: 0; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); padding: var(--space-3); }
+.dsg-admin-fixture__body { display: grid; grid-template-columns: minmax(170px, 1.15fr) minmax(80px, 0.85fr); min-height: 210px; }
+.dsg-admin-fixture__rail { min-width: 0; padding-inline-end: var(--space-2); border-inline-end: 1px solid var(--rule); }
+.dsg-admin-fixture__rail ul { list-style: none; margin: var(--space-2) 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dsg-admin-fixture__content { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); }
+.dsg-admin-fixture--collapsed .dsg-admin-fixture__body { grid-template-columns: 44px minmax(0, 1fr); }
+.dsg-admin-fixture--collapsed .admin-nav-label { display: none; }
+.dsg-admin-fixture--collapsed .admin-nav-link { justify-content: center; padding-inline: 0; }
+.dsg-admin-fixture--mobile { grid-column: span 1; }
+.admin-shell.is-collapsed .dsg-admin-fixture--expanded .admin-nav-label,
+.admin-shell.is-collapsed .dsg-admin-fixture--mobile .admin-nav-label { display: inline; }
+.admin-shell.is-collapsed .dsg-admin-fixture--expanded .admin-nav-link,
+.admin-shell.is-collapsed .dsg-admin-fixture--mobile .admin-nav-link { justify-content: flex-start; padding: var(--space-2) var(--space-2-5); }
+.dsg-admin-fixture--mobile .admin-rail-mobile-toggle { display: flex; }
+.dsg-admin-fixture--mobile .admin-rail-title { display: none; }
+.dsg-admin-fixture--mobile .dsg-admin-fixture__body { display: block; }
+.dsg-admin-fixture--mobile .dsg-admin-fixture__rail { border-inline-end: 0; padding: var(--space-2) 0 0; }
+.dsg-admin-state { display: flex; flex-direction: column; gap: var(--space-2); }
+.dsg-admin-state > code { color: var(--ink-3); font-size: var(--text-eyebrow); }
+@media (max-width: 1024px) { .dsg-admin-matrix { grid-template-columns: 1fr; } }
+
+/* ── InlineState / EmptyRow (ADR 0510 Phase 4, DSA-030) ────────────────────
+ * The compact designed-state primitives for EMBEDDED regions — panels, tabs,
+ * table bodies. Full-page states stay with <StateCard>. */
+.inline-state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--ink-3);
+}
+.inline-state--failed { color: var(--color-danger-text); }
+.inline-state--failed svg { flex-shrink: 0; }
+.inline-state--loading { min-height: 32px; }
+.inline-state-row td { padding: 0; }
+
+/* ── Coarse-pointer hit areas (ADR 0510 Phase 4, DSA-023) ──────────────────
+ * WCAG 2.5.8 target floor is 24px; the mobile benchmark is 44px EFFECTIVE.
+ * Two mechanisms, chosen by context:
+ *   1. ISOLATED targets (icon buttons and chip closes) — an
+ *      invisible ::after expansion to --hit-target, visual size unchanged.
+ *   2. CLUSTERED targets (swatch rows, dense action groups) — the REAL size
+ *      and gap grow, because an invisible overlap onto a neighbour causes
+ *      mis-taps worse than a small target.
+ * Never expand inside a cluster with ::after. */
+@media (pointer: coarse) {
+  .icon-button,
+  .demo-host-banner-close,
+  .workflow-card-menu-btn {
+    position: relative;
+  }
+  .icon-button::after,
+  .demo-host-banner-close::after,
+  .workflow-card-menu-btn::after {
+    content: '';
+    position: absolute;
+    inset: 50% auto auto 50%;
+    translate: -50% -50%;
+    width: max(100%, var(--hit-target));
+    height: max(100%, var(--hit-target));
+  }
+  /* Clustered targets grow for real: the appearance swatch strip. */
+  .appearance-swatch { width: 32px; height: 32px; }
+  .u-flex.u-gap-1 > .chip { min-height: 28px; }
+}
+
+/* ── ADR 0510 Phase 4 (DSA-011) — classes minted by the static-inline-style
+ * migration. Utilities are token-anchored single-purpose; the named classes
+ * hold bespoke chrome relocated VERBATIM from inline objects (visual no-op). */
+.u-overflow-x-auto { overflow-x: auto; }
+.u-static { position: static; }
+.u-col-span-2 { grid-column: span 2; }
+.u-maxw-560 { max-width: 560px; }
+.u-maxw-640 { max-width: 640px; }
+.u-maxw-720 { max-width: 720px; }
+.u-minw-220 { min-width: 220px; }
+.u-w-4r { width: 4rem; }
+.u-w-4-5r { width: 4.5rem; }
+.u-w-40p { width: 40%; }
+.u-w-80p { width: 80%; }
+.u-h-70vh { height: 70vh; }
+.u-maxh-14r { max-height: 14rem; }
+.u-img-fluid { display: block; width: 100%; height: auto; }
+.u-fieldset-bare { border: none; padding: 0; margin: 0; }
+.u-icon-inline-lead { vertical-align: -2px; margin-inline-end: 4px; }
+.u-icon-inline-trail { vertical-align: -2px; margin-inline-start: 4px; }
+.compareview-body { display: flex; height: 70vh; min-height: 0; }
+.chartrender-img { width: 100%; height: auto; max-height: 60vh; }
+.salesmap-card { padding: 0; overflow: hidden; position: relative; }
+/* MapView legend ramp swatch — was a fully static inline style; the DSYS-2 AST
+   scanner caught it (the old regex split the gradient on its commas and missed
+   it). Static geometry/paint belongs in a class (DESIGN.md §10). */
+.salesmap-legend-ramp { display: inline-block; width: 3rem; height: 0.6rem; background: linear-gradient(to right, var(--paper-2), var(--clay-text)); }
+/* The rest of the MapView legend/controls chrome — surfaced by the corrected
+   DSYS-2 classifier (a var() property no longer exempts the static literals
+   beside it). */
+.salesmap-controls { position: absolute; top: var(--space-2); right: var(--space-2); gap: var(--space-1); background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); padding: var(--space-1); }
+.salesmap-legend-presence { display: inline-block; width: 0.9rem; height: 0.6rem; background: var(--clay-text); opacity: 0.45; }
+.salesmap-legend-dot { display: inline-block; width: 0.6rem; height: 0.6rem; border-radius: 50%; background: var(--clay-text); }
+.salesmap-legend-dot--outlet { background: var(--color-success); }
+/* A divided action bar (projects chat + overview footers). */
+.action-bar--divided { border-top: 1px solid var(--rule); padding-top: var(--space-3); }
+/* Composer-row trailing checkbox alignment (ProjectChatTab). */
+.proj-composer-side { align-self: flex-end; padding-bottom: var(--space-2); }
+/* Ordered-list indent for the overview task list. */
+.proj-ol-indent { padding-inline-start: var(--space-4); }
+/* The BYOK key-entry shield icon. */
+.byok-entry-icon { display: inline-flex; flex-shrink: 0; padding-top: 1px; color: var(--clay-text); }
+.uiplugin-frame { width: 100%; min-height: 320px; border: 1px solid var(--rule); border-radius: var(--radius); }
+.emailpreview-frame { width: 100%; height: 200px; border: 0; }
+.rendersec-thumb { width: 3rem; height: 3rem; object-fit: cover; }
+.mediaedit-overlay { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; touch-action: none; }
+
+/* ── Per-mode brand marks (ADR 0510 §6, DSA-016) ───────────────────────────
+ * BrandLogo renders BOTH custom variants; exactly one shows per EFFECTIVE
+ * mode. Mirrors the tokens' mode plumbing: the manual theme classes win,
+ * otherwise the OS preference decides. */
+.brandlogo--dark { display: none; }
+:root.theme-dark .brandlogo--light { display: none; }
+:root.theme-dark .brandlogo--dark { display: inline-block; }
+@media (prefers-color-scheme: dark) {
+  :root:not(.theme-light) .brandlogo--light { display: none; }
+  :root:not(.theme-light) .brandlogo--dark { display: inline-block; }
+}
+
+/* ── Declared canvas touch level (ADR 0510 §9, DSA-027) ────────────────────
+ * Shown ≤600px only — the honest small-screen statement of what THIS editor
+ * supports on touch. Sits above the toolbar; never covers the canvas. */
+.cv-editor__touchlevel { display: none; }
+@media (max-width: 600px) {
+  .cv-editor__touchlevel {
+    display: block;
+    margin: 0;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-sm);
+    color: var(--ink-3);
+    border-bottom: 1px solid var(--rule);
+    background: var(--paper-2);
+  }
+}

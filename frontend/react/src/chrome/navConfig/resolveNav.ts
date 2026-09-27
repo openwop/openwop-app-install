@@ -16,6 +16,18 @@ import { EMPTY_MENU_CONFIG, type HeaderDef, type ItemOverride, type MenuConfig }
 export interface ResolvedNav {
   workspace: NavGroup[];
   admin: NavGroup[];
+  /** ADR 0641 — the `site` rail: product surfaces at clean root URLs, rendered
+   *  by <SiteShell> instead of the workspace <Sidebar>.
+   *
+   *  This is the concrete form of ADR 0641's withdrawal of `cms.menu`. That
+   *  decision claimed a new entity was needed because "all six destinations are
+   *  feature routes, not pages" — true, and an argument for THIS manifest rather
+   *  than for a second store. Site nav is derived from the same `FEATURES`
+   *  declarations the workspace rail reads, through the same `access()` gate, so
+   *  `featureId` gating and `hiddenWhenFeature` are inherited rather than
+   *  restated. A second per-tenant menu record would be a second owner of "is
+   *  this destination live for this tenant", and two owners of one fact drift. */
+  site: NavGroup[];
 }
 
 /** Visibility predicate — mirrors the rails' `isVisible`: core items (no
@@ -27,6 +39,25 @@ export interface ResolveNavInput {
   tenant?: MenuConfig;
   user?: MenuConfig;
   access: AccessPredicate;
+  /** Caller authority projected into navigation. Omit for declared/default
+   *  catalogs and tests that intentionally inspect the complete manifest. */
+  authority?: NavAuthority;
+}
+
+export interface NavAuthority {
+  admin: boolean;
+  superadmin: boolean;
+  scopes: readonly string[];
+}
+
+/** One presentation-only authority predicate shared by the resolver and menu
+ * editor. Omitted authority means "inspect the complete declared catalog". */
+export function authorityAllows(f: FeatureRoute, authority?: NavAuthority): boolean {
+  if (!authority) return true;
+  if (f.tier === 'admin' && !authority.admin) return false;
+  if (f.nav?.superadminOnly && !authority.superadmin) return false;
+  if (f.nav?.requiredScope && !authority.superadmin && !authority.scopes.includes(f.nav.requiredScope)) return false;
+  return true;
 }
 
 /** Merge the two layers into one effective config (user wins, per field). */
@@ -71,13 +102,16 @@ function applyHeaderOverrides(groups: NavGroup[], headers: Map<string, HeaderDef
 /**
  * Resolve the effective navigation. Pure: no DOM / cookie / network access.
  */
-export function resolveNav({ features, tenant = EMPTY_MENU_CONFIG, user = EMPTY_MENU_CONFIG, access }: ResolveNavInput): ResolvedNav {
+export function resolveNav({ features, tenant = EMPTY_MENU_CONFIG, user = EMPTY_MENU_CONFIG, access, authority }: ResolveNavInput): ResolvedNav {
   const merged = mergeLayers(tenant, user);
   const knownHeaderIds = new Set(merged.headers.map((h) => h.id));
 
   const effective: FeatureRoute[] = [];
   for (const f of features) {
     if (!f.nav) continue;
+    // Route tier is an authorization boundary (ADR 0203), not a menu-layout
+    // preference. Project that same boundary into every navigation consumer.
+    if (!authorityAllows(f, authority)) continue;
     const alwaysOn = !f.nav.featureId;
     // 1. feature-toggle HARD gate — runs before any override; a `hidden:false`
     //    can never reveal a disabled feature.
@@ -91,7 +125,6 @@ export function resolveNav({ features, tenant = EMPTY_MENU_CONFIG, user = EMPTY_
     // 2. hide override — never applies to always-on items.
     if (ov.hidden && !alwaysOn) continue;
 
-    const tierEff: FeatureTier = ov.tier ?? f.tier;
     // 3. group override — a stale id pointing at a deleted header falls back to
     //    the declared group (the item is never dropped). A built-in group id is
     //    always valid (it's a declared label); a custom id must still exist.
@@ -105,16 +138,22 @@ export function resolveNav({ features, tenant = EMPTY_MENU_CONFIG, user = EMPTY_
 
     // exactOptionalPropertyTypes: only set `order` when defined (never `: undefined`).
     const navEff = { ...f.nav, group: groupEff, ...(orderEff !== undefined ? { order: orderEff } : {}) };
-    effective.push({ ...f, tier: tierEff, nav: navEff });
+    // A saved legacy `tier` override is deliberately ignored. The declared
+    // tier selects the route shell and its authority gate; menu configuration
+    // may arrange a route only inside that boundary.
+    effective.push({ ...f, nav: navEff });
   }
 
   const headerMap = new Map(merged.headers.map((h) => [h.id, h] as const));
   const wsHeaders = filterByTier(headerMap, 'workspace');
   const adHeaders = filterByTier(headerMap, 'admin');
 
+  const siteHeaders = filterByTier(headerMap, 'site');
+
   return {
     workspace: applyHeaderOverrides(navGroups(effective.filter((f) => f.tier === 'workspace')), wsHeaders),
     admin: applyHeaderOverrides(navGroups(effective.filter((f) => f.tier === 'admin')), adHeaders),
+    site: applyHeaderOverrides(navGroups(effective.filter((f) => f.tier === 'site')), siteHeaders),
   };
 }
 

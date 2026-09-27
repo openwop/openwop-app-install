@@ -1,7 +1,7 @@
 {
   "name": "feature.csm.agents",
-  "version": "1.0.0",
-  "description": "CSM feature agent pack (ADR 0014) — a manifest agent whose tools are feature.csm.nodes over the ctx.features.csm surface. Reads at-risk accounts and recommends save-plays; tool-allowlisted to the CSM feature surface only, and READ-ONLY (it does not auto-mutate health). Mirrors feature.kb.agents.",
+  "version": "1.2.0",
+  "description": "CSM feature agent pack — a manifest agent whose tools are feature.csm.nodes over the ctx.features.csm surface. Reads at-risk accounts and recommends save-plays; tool-allowlisted to the CSM feature surface only, and READ-ONLY (it does not auto-mutate health). Mirrors feature.kb.agents.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "csm", "customer-success", "agent", "health"],

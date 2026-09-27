@@ -12,7 +12,7 @@
  * RFCS/0058-run-execution-bounds.md §C and spec/v1/run-options.md §runTimeoutMs.
  */
 
-import { describe, expect, it, beforeAll } from 'vitest';
+import { describe, expect, it, beforeAll, vi } from 'vitest';
 import { executeRun } from '../src/executor/executor.js';
 import { getNodeRegistry } from '../src/executor/nodeRegistry.js';
 import { openStorage } from '../src/storage/index.js';
@@ -90,7 +90,10 @@ describe('RFC 0058 — runTimeoutMs (run-duration bound)', () => {
     const payload = breach!.payload as { kind?: string; limit?: number; observed?: number };
     expect(payload.kind).toBe('run-duration');
     expect(payload.limit).toBe(20);
-    expect(payload.observed).toBeGreaterThanOrEqual(20);
+    // RFC 0058 §A "when the deadline PASSES": strictly greater, never equal —
+    // `run-execution-bounds-shape` asserts `observed > limit` and reads equality
+    // as a `>=` breach. See the boundary test below for the deterministic case.
+    expect(payload.observed).toBeGreaterThan(20);
 
     // §C: cap.breached MUST precede run.failed.
     expect(types.indexOf('cap.breached')).toBeGreaterThanOrEqual(0);
@@ -98,6 +101,34 @@ describe('RFC 0058 — runTimeoutMs (run-duration bound)', () => {
 
     const failed = events.find((e) => e.type === 'run.failed')!;
     expect((failed.payload as { error: { code: string } }).error.code).toBe('run_timeout');
+  });
+
+  it('the deadline TIMER landing exactly ON the boundary still emits observed > limit (RFC 0058 §A "passes")', async () => {
+    // Fake timers make the race deterministic: the in-flight `test.slow` node
+    // (200ms) never settles before the deadline timer, and advancing the clock
+    // by EXACTLY the limit fires that timer with Date.now() === deadline. Before
+    // the fix, `breachRunDuration` minted `observed === limit` right there
+    // (`isRunDurationBreached` guards only the batch-loop path — #3222). After
+    // it, the breach waits until the clock is strictly past the deadline.
+    vi.useFakeTimers();
+    try {
+      const run = await newRun('wf.timeout.boundary', { runTimeoutMs: 20 });
+      const pending = executeRun(storage, run, oneNode('wf.timeout.boundary', 'test.slow'));
+      await vi.advanceTimersByTimeAsync(20);   // deadline timer fires: now === deadline
+      // Give the (post-fix) 1ms boundary wait its tick(s); harmless pre-fix.
+      await vi.advanceTimersByTimeAsync(5);
+      const result = await pending;
+      expect(result.status).toBe('failed');
+      const events = await storage.listEvents(run.runId);
+      const breach = events.find((e) => e.type === 'cap.breached');
+      expect(breach).toBeTruthy();
+      const payload = breach!.payload as { kind?: string; limit?: number; observed?: number };
+      expect(payload.kind).toBe('run-duration');
+      expect(payload.limit).toBe(20);
+      expect(payload.observed).toBeGreaterThan(20);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not breach when the run finishes within runTimeoutMs', async () => {

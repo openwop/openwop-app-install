@@ -1,5 +1,5 @@
 /**
- * FP-5 (CODEBASE-ASSESSMENT.md): the CMS markdown renderer's open-redirect /
+ * FP-5 (docs/steward/CODEBASE-ASSESSMENT.md): the CMS markdown renderer's open-redirect /
  * unsafe-scheme guard had no test. SectionRenderer's `isSafeHref` / `isInternal`
  * are internal, so this exercises them through the RENDERED output: a public
  * `richText` section whose body carries `[label](url)` markdown links. The

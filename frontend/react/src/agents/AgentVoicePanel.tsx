@@ -10,9 +10,10 @@
  * PUT replaces the whole profile, so save carries every loaded field through and merges
  * only `configParameters.voice` (the AgentGuardrailsPanel discipline — never wipe siblings).
  *
- * NON-NORMATIVE host-local product config under `/v1/host/openwop-app/*`.
+ * NON-NORMATIVE host-local product config under `/host/openwop-app/*`.
  */
-import { useEffect, useState } from 'react';
+import { Button } from '../ui/Button.js';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getAgentProfile, putAgentProfile, type AgentProfile, type AgentProfileInput } from './rosterClient.js';
 import { listStoredRefs } from '../byok/lib/byokClient.js';
@@ -68,15 +69,40 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
   const [voiceId, setVoiceId] = useState('');
   const [credentialRef, setCredentialRef] = useState('');
   const [storedRefs, setStoredRefs] = useState<readonly string[]>([]);
+  // FRGATE-5 — `listStoredRefs()` is swallowed to `[]` below, and an empty list
+  // rendered `voiceNoKeys` ("No keys stored yet — add one on the Keys page").
+  // On a FAILED read that sends the user to create a key they may already have,
+  // which is the instructive-positive-claim shape check-failed-read-sentinels
+  // names by example. The read stays soft-failing on purpose — the rest of the
+  // panel is usable without it — but the CLAIM has to know the difference.
+  const [refsFailed, setRefsFailed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Retry for the refs read alone — re-reading the whole profile would discard
+  // the provider/voiceId/credentialRef the user may have edited since load.
+  // Guarded by a sequence token because this is reachable from a button, so a
+  // slow first attempt could otherwise land after a newer one.
+  const refsSeq = useRef(0);
+  const reloadRefs = useCallback(async (): Promise<void> => {
+    const seq = ++refsSeq.current;
+    try {
+      const r = await listStoredRefs();
+      if (seq === refsSeq.current) { setStoredRefs(r); setRefsFailed(false); }
+    } catch {
+      if (seq === refsSeq.current) setRefsFailed(true);
+    }
+  }, []);
 
   useEffect(() => {
     let live = true;
     void (async () => {
       try {
-        const [p, refs] = await Promise.all([getAgentProfile(rosterId), listStoredRefs().catch(() => [])]);
+        const [p, refs] = await Promise.all([
+          getAgentProfile(rosterId),
+          listStoredRefs().then((r) => { setRefsFailed(false); return r; }).catch(() => { setRefsFailed(true); return []; }),
+        ]);
         if (!live) return;
         setProfile(p);
         setStoredRefs(refs);
@@ -119,7 +145,7 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
       </h3>
       <p className="muted u-fs-13 u-m-0">{t('voiceDesc')}</p>
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
       <div className="u-flex u-gap-3 u-flex-wrap u-items-end">
         <SelectField label={t('voiceProvider')} value={provider} onChange={(e) => setProvider(e.target.value)} className="u-flex-1">
           {VOICE_PROVIDERS.map((p) => <option key={p.id || 'default'} value={p.id}>{p.label ?? t('voiceProviderDefault')}</option>)}
@@ -139,7 +165,16 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
             <option value="">{t('voiceKeySelect')}</option>
             {storedRefs.map((ref) => <option key={ref} value={ref}>{ref}</option>)}
           </SelectField>
-          {storedRefs.length === 0 ? (
+          {/* Three states, and the failed one is a state rather than the absence
+              of one. The select stays ENABLED: its placeholder ("no key") is a
+              legitimate choice that does not depend on this read, so disabling it
+              would remove a working option because a different read failed. */}
+          {refsFailed ? (
+            <p className="muted u-fs-12 u-m-0">
+              {t('voiceKeysUnknown')}{' '}
+              <Button variant="quiet" size="sm" onClick={() => void reloadRefs()}>{t('common:retry')}</Button>
+            </p>
+          ) : storedRefs.length === 0 ? (
             <p className="muted u-fs-12 u-m-0">{t('voiceNoKeys')}</p>
           ) : credentialRef ? null : (
             <p className="muted u-fs-12 u-m-0">{t('voiceNeedsKey')}</p>
@@ -148,9 +183,9 @@ export function AgentVoicePanel({ rosterId }: { rosterId: string }): JSX.Element
       ) : null}
       {hintKey ? <p className="muted u-fs-12 u-m-0">{t(hintKey)}</p> : null}
       <div className="action-bar">
-        <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => void save()}>
+        <Button variant="primary" size="sm" disabled={busy} onClick={() => void save()}>
           {busy ? t('voiceSaving') : t('voiceSave')}
-        </button>
+        </Button>
       </div>
     </section>
   );

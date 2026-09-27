@@ -36,7 +36,7 @@ export const messages = {
   // PackDetailView
   loadingPack: 'Chargement de {{name}}…',
   byAuthor: 'par {{author}} · ',
-  homepage: 'page d\'accueil',
+  homepage: 'page d’accueil',
   repo: 'dépôt',
   latestVersionHeading: 'Dernière {{version}}',
   signatureLabel: 'Signature',
@@ -57,9 +57,9 @@ export const messages = {
   someNodesInstalled: "{{installed}}/{{total}} des nœuds de ce pack sont installés.",
   notInstalledOnHost: 'Non installé sur cet hôte.',
   installReadOnly:
-    'Le navigateur est une découverte en lecture seule — pour l\'ajouter, un opérateur configure ceci dans l\'environnement de l\'hôte et redémarre :',
-  copyInstallLineTitle: 'Copier la ligne d\'installation de l\'environnement',
+    'Le navigateur est une découverte en lecture seule — pour l’ajouter, un opérateur configure ceci dans l’environnement de l’hôte et redémarre :',
+  copyInstallLineTitle: 'Copier la ligne d’installation de l’environnement',
   copy: 'Copier',
   copied: 'Copié',
-  installDeferred: 'L\'installation à la demande depuis le navigateur est différée derrière un modèle de niveau de confiance et d\'authentification.',
+  installDeferred: 'L’installation à la demande depuis le navigateur est différée derrière un modèle de niveau de confiance et d’authentification.',
 } as const;

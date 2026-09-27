@@ -39,8 +39,12 @@ export interface BrandConfig {
   assistantName: string;
   /** Square icon mark used in the sidebar header and PWA manifest. */
   markSrc: string;
+  /** Dark-mode variant of the mark (ADR 0510 §6, additive). Empty = use markSrc. */
+  markSrcDark: string;
   /** Optional full lockup asset for marketing/brand surfaces. */
   lockupSrc: string;
+  /** Dark-mode variant of the full lockup. Empty = use lockupSrc. */
+  lockupSrcDark: string;
   /** @deprecated Use `markSrc`; retained as a compatibility alias. */
   logoSrc: string;
   /** Favicon — a URL or `data:` URI. Build-time only (stamped into HTML). */
@@ -65,6 +69,18 @@ export interface BrandConfig {
   appGate: { mode: 'none' | 'password' | 'sign-in'; password: string };
 }
 
+/**
+ * The upstream openwop-app STOCK identity, exported as constants so a fork can be
+ * TOLD apart from the stock build (`scripts/check-branding.sh`, `BrandLogo`,
+ * `check-network-recorder-posture.mjs` compare against these — never against
+ * `BRAND_DEFAULTS`, which a white-label fork rewrites).
+ */
+export const STOCK_OPENWOP_MARK_SRC = '/OpenWOP.svg';
+export const STOCK_OPENWOP_IDENTITY = {
+  productName: 'OpenWOP',
+  homeUrl: 'https://openwop.dev/',
+} as const;
+
 export const BRAND_DEFAULTS: BrandConfig = {
   productName: 'OpenWOP',
   brandMark: { pre: 'Open', emphasis: 'WOP', sub: 'agent platform' },
@@ -72,7 +88,9 @@ export const BRAND_DEFAULTS: BrandConfig = {
   footerText: '',
   assistantName: 'OpenWOP',
   markSrc: '/OpenWOP.svg',
+  markSrcDark: '',
   lockupSrc: '',
+  lockupSrcDark: '',
   logoSrc: '/OpenWOP.svg',
   faviconSrc:
     "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>" +
@@ -89,6 +107,11 @@ export const BRAND_DEFAULTS: BrandConfig = {
   repoUrl: 'https://github.com/openwop/openwop',
   themeColor: '#1a1a17',
   defaultTheme: 'system',
+  // Enterprise posture (ADR 0196 Phase 4): `none` is the PUBLIC-DEMO gate —
+  // anonymous cookie tenancy so evaluators land straight in the app. A
+  // white-label / enterprise install SHOULD ship `mode: 'sign-in'` in its
+  // brand config so identity is mandatory from the first request (`password`
+  // is a shared-secret stopgap, not an identity posture). See WHITE-LABEL.md.
   appGate: { mode: 'none', password: '' },
 };
 
@@ -168,7 +191,9 @@ export const BRAND_ENV_KEYS = {
   footerText: 'VITE_BRAND_FOOTER_TEXT',
   assistantName: 'VITE_BRAND_ASSISTANT_NAME',
   markSrc: 'VITE_BRAND_MARK_SRC',
+  markSrcDark: 'VITE_BRAND_MARK_SRC_DARK',
   lockupSrc: 'VITE_BRAND_LOCKUP_SRC',
+  lockupSrcDark: 'VITE_BRAND_LOCKUP_SRC_DARK',
   logoSrc: 'VITE_BRAND_LOGO_SRC',
   faviconSrc: 'VITE_BRAND_FAVICON_SRC',
   documentTitle: 'VITE_BRAND_DOCUMENT_TITLE',
@@ -218,7 +243,9 @@ export function resolveBrandFromEnv(
 ): BrandConfig {
   const k = BRAND_ENV_KEYS;
   const markSrc = optional(env[k.markSrc]) ?? optional(env[k.logoSrc]) ?? BRAND_DEFAULTS.markSrc;
+  const markSrcDark = optional(env[k.markSrcDark]) ?? BRAND_DEFAULTS.markSrcDark;
   const lockupSrc = optional(env[k.lockupSrc]) ?? BRAND_DEFAULTS.lockupSrc;
+  const lockupSrcDark = optional(env[k.lockupSrcDark]) ?? BRAND_DEFAULTS.lockupSrcDark;
   return {
     productName: coalesce(env[k.productName], BRAND_DEFAULTS.productName),
     brandMark: {
@@ -230,7 +257,9 @@ export function resolveBrandFromEnv(
     footerText: coalesce(env[k.footerText], BRAND_DEFAULTS.footerText),
     assistantName: coalesce(env[k.assistantName], BRAND_DEFAULTS.assistantName),
     markSrc,
+    markSrcDark,
     lockupSrc,
+    lockupSrcDark,
     logoSrc: markSrc,
     faviconSrc: coalesce(env[k.faviconSrc], BRAND_DEFAULTS.faviconSrc),
     documentTitle: coalesce(env[k.documentTitle], BRAND_DEFAULTS.documentTitle),

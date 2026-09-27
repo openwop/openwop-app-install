@@ -34,6 +34,10 @@ export interface AgentPromptScaffoldInput {
    *  scaffold addresses them in the second person and tells the model NOT to
    *  invent a name (the failure mode we are fixing). */
   userName?: string | null | undefined;
+  /** ADR 0320 — what to CALL the user (the profile's preferred name). Absent ⇒
+   *  the scaffold addresses them by the first token of `userName`. Never changes
+   *  the "named …" reference (that stays the full `userName`). */
+  addressName?: string | null | undefined;
   /** Optional pre-resolved context block (ADR 0079 Phase 5 / ADR 0080 §Follow-on)
    *  from a board-context resolver — company planning the advisors receive
    *  (strategy is the only producer today). Snapshotted onto the boardroom
@@ -47,6 +51,22 @@ export interface AgentPromptScaffoldInput {
    *  `injectedContextBlock` (a board-context snapshot): this is live-retrieved
    *  per turn and carries its own trust fencing. Absent/empty ⇒ omitted. */
   knowledgeBlock?: string | null | undefined;
+  /** Pre-formatted current date for temporal grounding (e.g. "Tuesday,
+   *  2026-07-15 (UTC)"). Kept as a caller-passed STRING so this function stays
+   *  pure/testable — the CHAT composer (`composeChatContext`) resolves the live
+   *  date; the workflow-node path (`bootstrap/nodes.ts`) deliberately does NOT
+   *  pass it, so its replay-anchor `systemPromptHash` stays date-stable. Absent
+   *  ⇒ omitted (a bare board turn once answered "I'd need to know the current
+   *  date" — the gap this closes). */
+  today?: string | null | undefined;
+}
+
+/** ADR 0320 — the default address name: the first whitespace-delimited token of a
+ *  display name ("David Tufts" → "David"), used when no explicit preferred name is
+ *  set. Falls back to the whole (trimmed) name for single-token names. */
+export function firstNameOf(name: string): string {
+  const trimmed = name.trim();
+  return trimmed.split(/\s+/)[0] || trimmed;
 }
 
 /** Compose the wrapped system prompt for a chat agent turn. */
@@ -54,12 +74,14 @@ export function composeAgentSystemPrompt(input: AgentPromptScaffoldInput): strin
   const persona = input.persona.trim();
   const who = input.role && input.role.trim().length > 0 ? `${persona}, ${input.role.trim()}` : persona;
   const name = input.userName?.trim();
+  const addr = input.addressName?.trim() || (name ? firstNameOf(name) : '');
   const userLine = name
-    ? `- You are talking to a human user named ${name}. Address them as ${name}. ${name} is a person, never an AI agent.`
+    ? `- You are talking to a human user named ${name}. Address them as ${addr}. ${name} is a person, never an AI agent.`
     : `- You are talking to a human user. Address them in the second person ("you"); never invent or guess a name for them.`;
 
   const injectedBlock = input.injectedContextBlock?.trim();
   const knowledgeBlock = input.knowledgeBlock?.trim();
+  const today = input.today?.trim();
 
   return [
     input.systemPrompt.trim(),
@@ -67,6 +89,7 @@ export function composeAgentSystemPrompt(input: AgentPromptScaffoldInput): strin
     ...(knowledgeBlock ? ['', knowledgeBlock] : []),
     '',
     'CONVERSATION CONTEXT:',
+    ...(today ? [`- Today's date is ${today}.`] : []),
     userLine,
     '- This is a shared chat thread that may also include OTHER AI agents. Any earlier' +
       ' assistant message prefixed with "[Name]:" was written by a DIFFERENT agent — it is' +

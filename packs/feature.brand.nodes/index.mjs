@@ -11,6 +11,13 @@
  * degrades to the deterministic score alone (never fails the run).
  */
 
+/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
+ *  anthropic `recommended: true` model; src/providers/catalog.ts
+ *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
+ *  .mjs packs cannot import the catalog, so the default lives in this ONE
+ *  greppable constant — the /refresh-model-catalog sweep updates it. */
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
+
 function ensureBrand(ctx) {
   const brand = ctx.features && ctx.features.brand;
   if (!brand || typeof brand.checkComplianceDeterministic !== 'function') {
@@ -85,7 +92,7 @@ export async function complianceCheck(ctx) {
       const voiceBlock = str(voiceOut.voice);
       const ai = await ctx.callAI({
         provider: str(i.provider) || 'anthropic',
-        model: str(i.model) || 'claude-sonnet-4-6',
+        model: str(i.model) || DEFAULT_MODEL,
         systemPrompt:
           'You are a brand-compliance auditor. Score how well the CONTENT matches the BRAND VOICE on a 0-100 scale (tone, formality, voice consistency). Reply with strict JSON only.',
         messages: [{ role: 'user', content: `BRAND VOICE:\n${voiceBlock}\n\nCONTENT:\n${content}` }],
@@ -142,8 +149,16 @@ export async function complianceCheck(ctx) {
   };
 }
 
+export async function getBrand(ctx) {
+  const brand = ensureBrand(ctx);
+  const i = ctx.inputs ?? {};
+  const out = await brand.getBrand({ brandId: str(i.brandId) });
+  return { status: 'success', outputs: { brand: out.brand ?? null } };
+}
+
 export const nodes = {
   'feature.brand.nodes.list-brands': listBrands,
+  'feature.brand.nodes.get-brand': getBrand,
   'feature.brand.nodes.get-app-identity': getAppIdentity,
   'feature.brand.nodes.resolve-voice': resolveVoice,
   'feature.brand.nodes.compliance-check': complianceCheck,

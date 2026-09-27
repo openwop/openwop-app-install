@@ -4,10 +4,14 @@ import { FEATURES } from '../../../chrome/features.js';
 import type { FeatureRoute } from '../../../chrome/featureTypes.js';
 import { scopesOf, tabIdOf, visibleHubRoutes, type HubRoute } from '../../../chrome/hubProjection.js';
 
-const route = (path: string, hubTab: FeatureRoute['hubTab']): FeatureRoute => ({
+const route = (
+  path: string,
+  hubTab: FeatureRoute['hubTab'],
+  tier: FeatureRoute['tier'] = 'admin',
+): FeatureRoute => ({
   path,
   element: createElement('div'),
-  tier: 'admin',
+  tier,
   hubTab,
 });
 
@@ -24,23 +28,25 @@ describe('visibleHubRoutes — projection logic', () => {
   ];
 
   it('keeps only routes with a hubTab', () => {
-    const ids = visibleHubRoutes(features, () => true, 'access', ACCESS_GROUPS).map(tabIdOf);
+    const ids = visibleHubRoutes(features, () => true, true, 'access', ACCESS_GROUPS).map(tabIdOf);
     expect(ids).not.toContain('not-a-tab');
   });
 
   it('orders by group (credentials → identity) then hubTab.order', () => {
-    const ids = visibleHubRoutes(features, () => true, 'access', ACCESS_GROUPS).map(tabIdOf);
+    const ids = visibleHubRoutes(features, () => true, true, 'access', ACCESS_GROUPS).map(tabIdOf);
     expect(ids).toEqual(['keys', 'connections', 'users', 'firewall']);
   });
 
   it('gates a tab whose featureId is disabled', () => {
-    const ids = visibleHubRoutes(features, (id) => id !== 'capability-firewall', 'access', ACCESS_GROUPS).map(tabIdOf);
+    const ids = visibleHubRoutes(features, (id) => id !== 'capability-firewall', true, 'access', ACCESS_GROUPS).map(
+      tabIdOf,
+    );
     expect(ids).not.toContain('firewall');
     expect(ids).toContain('keys');
   });
 
   it('scopesOf defaults to workspace-only, honours explicit scopes', () => {
-    const visible = visibleHubRoutes(features, () => true, 'access', ACCESS_GROUPS);
+    const visible = visibleHubRoutes(features, () => true, true, 'access', ACCESS_GROUPS);
     const byId = (id: string) => visible.find((r) => tabIdOf(r) === id) as HubRoute;
     expect(scopesOf(byId('keys'))).toEqual(['workspace']);
     expect(scopesOf(byId('connections'))).toEqual(['workspace', 'personal']);
@@ -54,14 +60,36 @@ describe('visibleHubRoutes — projection logic', () => {
       route('/scheduled-chats', { hub: 'chat-deployment', order: 1 }),
       route('/legacy', { order: 0 }), // no hub ⇒ defaults to 'access'
     ];
-    expect(visibleHubRoutes(mixed, () => true, 'access').map(tabIdOf)).toEqual(['legacy', 'keys']);
-    expect(visibleHubRoutes(mixed, () => true, 'models').map(tabIdOf)).toEqual(['leaderboard']);
-    expect(visibleHubRoutes(mixed, () => true, 'chat-deployment').map(tabIdOf)).toEqual(['scheduled-chats']);
+    expect(visibleHubRoutes(mixed, () => true, true, 'access').map(tabIdOf)).toEqual(['legacy', 'keys']);
+    expect(visibleHubRoutes(mixed, () => true, true, 'models').map(tabIdOf)).toEqual(['leaderboard']);
+    expect(visibleHubRoutes(mixed, () => true, true, 'chat-deployment').map(tabIdOf)).toEqual(['scheduled-chats']);
+  });
+
+  // AHC-1 / MHC-1 / CDC-1 / CSCC-1 — the projection must gate an `admin`-tier tab
+  // for a non-admin caller ITSELF, not lean on the coarse <AdminLayout> shell + an
+  // all-tabs-admin invariant. `workspace`/`public` tiers stay visible to everyone.
+  describe('tier gating (defense-in-depth, not toggle-only)', () => {
+    const mixedTiers: FeatureRoute[] = [
+      route('/keys', { group: 'credentials', order: 0 }, 'workspace'), // everyone
+      route('/firewall', { group: 'identity', order: 1 }, 'admin'), // admin-only
+      route('/status', { group: 'identity', order: 2 }, 'public'), // everyone
+    ];
+
+    it('drops the admin-tier tab for a non-admin caller', () => {
+      const ids = visibleHubRoutes(mixedTiers, () => true, false, 'access', ACCESS_GROUPS).map(tabIdOf);
+      expect(ids).not.toContain('firewall'); // admin-tier — gated
+      expect(ids).toEqual(['keys', 'status']); // workspace + public — visible to all
+    });
+
+    it('keeps the admin-tier tab for an admin caller', () => {
+      const ids = visibleHubRoutes(mixedTiers, () => true, true, 'access', ACCESS_GROUPS).map(tabIdOf);
+      expect(ids).toEqual(['keys', 'firewall', 'status']); // all three visible to admin
+    });
   });
 });
 
 describe('Access Hub manifest wiring (the real FEATURES)', () => {
-  const hub = visibleHubRoutes(FEATURES, () => true, 'access', ACCESS_GROUPS);
+  const hub = visibleHubRoutes(FEATURES, () => true, true, 'access', ACCESS_GROUPS);
   const ids = hub.map(tabIdOf);
 
   it('tags exactly the Credentials + Identity surfaces as hub tabs', () => {

@@ -35,10 +35,17 @@ import { createHash } from 'node:crypto';
 import { DurableCollection } from './hostExtPersistence.js';
 import type { Subject } from './subject.js';
 import { computeNextFire } from './cronSchedule.js';
+import { registerSubjectEraser } from './subjectErasure.js';
+import { ERASED, subjectKeyForms } from './subjectErasureRedaction.js';
 
 /** Largest future horizon the host honors — mirrors the advertised
  *  `capabilities.scheduling.maxFutureHorizon: 'P30D'`. */
 export const MAX_FUTURE_HORIZON_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** ADR 0309 D1 — the EXPLICIT one-shot cadence sentinel: `registerJob` takes the
+ *  single fire time from `firstFireAtMs`, and the first fire spends the job.
+ *  Opt-in by exact match — any other unparseable cron stays inert (GC-R2). */
+export const ONE_SHOT_CRON = 'once';
 
 export interface ScheduledJob {
   jobId: string;
@@ -73,12 +80,69 @@ export interface ScheduledJob {
   /** Run-level `configurable` for fired runs — e.g. `connections: ['google']`,
    *  the ADR 0024 §4 / Option C credential opt-in the assistant loops use. */
   configurable?: Record<string, unknown>;
+  /** Per-fire workflow INPUTS, seeded into the run's variable bag by
+   *  `seedRunVariables` (so `input('x')` / `{{inputs.x}}` resolve). A workflow
+   *  that declares `variables[]` but whose scheduled fires carry no inputs runs
+   *  with those variables UNDEFINED — the KickTodo daily loop did exactly that
+   *  until this field existed (its `input('enrollmentId')` nodes were inert on
+   *  every scheduled tick). SERVER-STAMPED ONLY: the scheduler HTTP route does
+   *  not read this from the client body, because seeding arbitrary variables
+   *  into a scheduled run is a capability only internal callers should hold. */
+  inputs?: Record<string, unknown>;
   /** runId of the most recent run this schedule fired. */
   lastRunId?: string;
-  /** ISO-8601 wall-clock time of the most recent fire (set in markJobFired).
-   *  Distinct from `lastFiredTick` (the deterministic tick index); this is the
-   *  human-facing "last run …" timestamp. */
+  /**
+   * ISO-8601 wall-clock time the most recent RUN started. Distinct from
+   * `lastFiredTick` (the deterministic tick index); this is the human-facing
+   * "last run …" timestamp, and it is PAIRED with `lastRunId` — the two always
+   * describe the same run.
+   *
+   * WF-COS-4 (2026-08-19): it used to be stamped by `markJobFired`, which the
+   * daemon calls BEFORE dispatch. So a fire that was then dropped for budget,
+   * failed to resolve a workflow, or threw still advanced `lastRunAt` to NOW
+   * while leaving `lastRunId` at the PREVIOUS fire's value — and every consumer
+   * renders that pair together. The assistant loop panel said "last run: just
+   * now" with a `/runs/<id>` link to a run from hours earlier: a run that never
+   * happened, reported as one that did.
+   *
+   * PRECISELY WHAT CHANGED — and this sentence used to be wrong, which is worth
+   * keeping visible. It said "`markJobFired` now stamps this ONLY when a runId
+   * is supplied". It does NOT: `markJobFired`'s body is byte-identical to what
+   * it always was and stamps `lastRunAt` UNCONDITIONALLY. What changed is the
+   * CALLERS. The daemon no longer calls it at all — it uses `advanceJobSlot` +
+   * `recordJobRun`/`recordJobSkipped` below, so the two facts are stamped
+   * separately. The deterministic-tick trigger route keeps calling it for the
+   * shape where a fire IS the event (a job bound to no workflow), and takes the
+   * split path when a bound workflow fails to resolve. The stamp is therefore
+   * honest by CALLER DISCIPLINE, not by a guard inside this function.
+   */
   lastRunAt?: string;
+  /** WF-COS-4 — the honest counterpart: the most recent fire that advanced the
+   *  slot and produced NO run, with the reason. Absent ⇒ every fire so far
+   *  produced a run. A surface that renders `lastRunAt` should render this too,
+   *  or it is showing half the truth. */
+  lastSkippedAt?: string;
+  /** WF-COS-4 — why the last skipped fire produced no run. */
+  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error' | 'feature-disabled';
+  /**
+   * ADR 0599 §6 — the feature that OWNS this schedule, resolved against the
+   * feature-toggle service at FIRE TIME (`scheduleDaemon`). Absent ⇒ ungated,
+   * which is every pre-existing job, so this is purely additive.
+   *
+   * Why a fire-time gate and not a teardown listener. `insights-suite` protected
+   * its schedules with a toggle-status listener that deleted every tenant's job
+   * when the GLOBAL status flipped to `off`. That is backwards in both
+   * directions at once: the listener fires only on a change to the global
+   * `status` field, so a per-tenant `tenantOverrides[t]={status:'off'}` — the
+   * only per-tenant disable that exists — tore down NOTHING and that tenant's
+   * jobs kept firing; while a global flip to `off` ran a repo-global scan and
+   * hard-deleted the jobs of tenants the same request had explicitly KEPT
+   * enabled, with no auto-resurrect. A gate on the CREATION lane is not a gate
+   * on the USE lane. Resolving the toggle for `job.tenantId` at the moment of
+   * firing is per-tenant and correct in both directions, and it is
+   * non-destructive: re-enabling simply resumes.
+   */
+  featureId?: string;
   /** IANA timezone the cadence is expressed in. The background daemon
    *  (scheduleDaemon.ts) evaluates the cadence against this zone when computing
    *  `nextFireAt`; the deterministic tick seam still ignores it. */
@@ -152,7 +216,10 @@ export function missedWindow(missedTicks: number, jobId: string = DEMO_JOB_ID): 
 const jobs = new DurableCollection<ScheduledJob>('scheduler:job', (j) => j.jobId);
 
 export interface ScheduleHorizonError {
-  code: 'schedule_horizon_exceeded';
+  /** `jobid_conflict` (ADR 0379 P2): the explicit jobId belongs to another
+   *  tenant — reported with the same not-available message either way (no
+   *  cross-tenant existence oracle). */
+  code: 'schedule_horizon_exceeded' | 'jobid_conflict';
   message: string;
 }
 
@@ -172,6 +239,8 @@ export async function registerJob(
     enabled?: boolean;
     metadata?: Record<string, unknown>;
     configurable?: Record<string, unknown>;
+    inputs?: Record<string, unknown>;
+    featureId?: string;
     timezone?: string;
   },
   nowMs: number = Date.now(),
@@ -185,7 +254,25 @@ export async function registerJob(
       },
     };
   }
-  const nextFireAt = computeNextFire(input.cronExpr, nowMs, input.timezone);
+  // ADR 0309 D1 — ONE-SHOT completion of the shape this file already
+  // anticipated ("Undefined when … one-shot/spent"): the EXPLICIT `'once'`
+  // sentinel takes its single fire time from `firstFireAtMs`; `markJobFired`'s
+  // recompute then yields null and deletes `nextFireAt` (spent; row retained
+  // for the Schedules tab + cancel). Grade-pass fix GC-R2: the sentinel is
+  // OPT-IN — any other unparseable cron stays INERT exactly as before, because
+  // the public scheduler route (routes/scheduler.ts) passes client-supplied
+  // `firstFireAtMs` and a typo'd cadence must not become a surprise one-shot.
+  // ADR 0379 P2 — cross-tenant overwrite guard: the store is jobId-keyed and
+  // the public route accepts EXPLICIT jobIds, so without this a caller could
+  // hijack/clobber another tenant's job by supplying its id (pre-existing
+  // exposure, surfaced by the deterministic-id audit). Same-tenant re-register
+  // stays the intentional upsert.
+  const prior = await jobs.get(input.jobId);
+  if (prior && prior.tenantId !== input.tenantId) {
+    return { ok: false, error: { code: 'jobid_conflict', message: 'jobId is not available.' } };
+  }
+  const nextFireAt = computeNextFire(input.cronExpr, nowMs, input.timezone)
+    ?? (input.cronExpr === ONE_SHOT_CRON ? input.firstFireAtMs ?? null : null);
   const job: ScheduledJob = {
     jobId: input.jobId,
     tenantId: input.tenantId,
@@ -199,6 +286,8 @@ export async function registerJob(
     ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
     ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
     ...(input.configurable !== undefined ? { configurable: input.configurable } : {}),
+    ...(input.inputs !== undefined ? { inputs: input.inputs } : {}),
+    ...(input.featureId !== undefined ? { featureId: input.featureId } : {}),
     ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
     ...(nextFireAt !== null ? { nextFireAt } : {}),
     createdAt: new Date(nowMs).toISOString(),
@@ -212,6 +301,14 @@ export async function listJobs(tenantId?: string): Promise<ScheduledJob[]> {
   const all = await jobs.list();
   const scoped = tenantId === undefined ? all : all.filter((j) => j.tenantId === tenantId);
   return scoped.sort((a, b) => (a.createdAt ?? '').localeCompare(b.createdAt ?? ''));
+}
+
+/** RI-9 — does the tenant have a scheduled job bound to `workflowId`? Guards the
+ *  workflow-delete path (a delete must refuse while a schedule fires against the
+ *  definition, mirroring the run-reference 409). Status-agnostic: a DISABLED job is a
+ *  latent orphan (re-enabling fires against a gone workflow), so any bound job counts. */
+export async function hasJobForWorkflow(tenantId: string, workflowId: string): Promise<boolean> {
+  return (await listJobs(tenantId)).some((j) => j.workflowId === workflowId);
 }
 
 /** ADR 0045 — the job's owner as the canonical `Subject`. Prefers the generic
@@ -303,7 +400,28 @@ export async function updateJob(
   return job;
 }
 
-/** Record that a job fired (durable bookkeeping for the CRUD surface). */
+/**
+ * Record that a job fired (durable bookkeeping for the CRUD surface) and advance
+ * `nextFireAt`.
+ *
+ * WF-COS-4 — READ `advanceJobSlot` BELOW BEFORE CALLING THIS FROM A DISPATCH
+ * PATH. This stamps `lastRunAt` UNCONDITIONALLY, which is a claim that a run
+ * happened, while stamping `lastRunId` only when a runId is supplied — so
+ * calling it without one leaves the two describing DIFFERENT fires, and every
+ * consumer renders them together.
+ *
+ * That claim is true of exactly ONE shape, and its remaining caller is narrowed
+ * to it: the RFC 0052 deterministic-tick trigger route firing a job bound to no
+ * workflow, where `result.runsFired > 0` IS the whole event and there is no run
+ * to name. It was FALSE of the background daemon (which calls before dispatch
+ * and then has three ways to bail — it now uses `advanceJobSlot`), and it was
+ * equally false of that same route when a BOUND workflow failed to resolve,
+ * which the route now splits off explicitly (`advanceJobSlot` +
+ * `recordJobSkipped(…, 'workflow-unresolved')`).
+ *
+ * NOTHING inside this function enforces any of that. Do not add a caller
+ * without deciding which shape it is.
+ */
 export async function markJobFired(
   jobId: string,
   tick: number,
@@ -324,6 +442,33 @@ export async function markJobFired(
   await jobs.put(job);
 }
 
+/**
+ * WF-COS-4 — advance a job's slot WITHOUT claiming that a run happened.
+ *
+ * The daemon must advance `nextFireAt` BEFORE dispatch: the claim row is
+ * permanent, so advancing after dispatch would let a crash leave the slot
+ * perpetually due AND un-claimable, i.e. a wedged schedule. It used to do that
+ * through `markJobFired`, which also stamps `lastRunAt` — and three bail-outs
+ * follow that call (over-budget, unresolved workflow, thrown dispatch), none of
+ * which retracted the stamp. The row then read `lastRunAt = now` beside a
+ * `lastRunId` from the PREVIOUS fire, and every consumer renders the pair
+ * together: the assistant loop panel showed "last run: just now" with a
+ * `/runs/<id>` link to a run from hours earlier.
+ *
+ * Splitting the two facts, rather than moving the advance, is what keeps the
+ * anti-wedge property intact. `recordJobRun` stamps the run; `recordJobSkipped`
+ * records a slot that produced nothing.
+ */
+export async function advanceJobSlot(jobId: string, tick: number, firedAtMs: number = Date.now()): Promise<void> {
+  const job = await jobs.get(jobId);
+  if (!job) return;
+  job.lastFiredTick = tick;
+  const next = computeNextFire(job.cronExpr, firedAtMs, job.timezone);
+  if (next !== null) job.nextFireAt = next;
+  else delete job.nextFireAt;
+  await jobs.put(job);
+}
+
 /** Record only the most-recent run on a job (lastRunId + lastRunAt), without
  *  touching nextFireAt. The daemon advances nextFireAt BEFORE dispatch (so a
  *  crash can't wedge the schedule), then calls this once the run id is known. */
@@ -332,7 +477,79 @@ export async function recordJobRun(jobId: string, runId: string, firedAtMs: numb
   if (!job) return;
   job.lastRunId = runId;
   job.lastRunAt = new Date(firedAtMs).toISOString();
+  // A fire that produced a run clears any earlier skip note — otherwise the
+  // surface would keep warning about a problem that has since resolved, which is
+  // the mirror image of the defect this pair exists to fix.
+  delete job.lastSkippedAt;
+  delete job.lastSkipReason;
   await jobs.put(job);
+}
+
+/** WF-COS-4 — record that a fire consumed its slot and produced NO run. The
+ *  counterpart to `recordJobRun`: a surface that reads `lastRunAt` without this
+ *  cannot distinguish "ran an hour ago" from "has been failing to run since". */
+export async function recordJobSkipped(
+  jobId: string,
+  reason: NonNullable<ScheduledJob['lastSkipReason']>,
+  atMs: number = Date.now(),
+): Promise<void> {
+  const job = await jobs.get(jobId);
+  if (!job) return;
+  job.lastSkippedAt = new Date(atMs).toISOString();
+  job.lastSkipReason = reason;
+  await jobs.put(job);
+}
+
+// ── ADR 0464 P2 — DSAR subject erasure ───────────────────────────────────────
+// A scheduled job is a structurally-needed row (deleting it would strand its
+// bound workflow / break the Schedules tab), so a DSAR ANONYMIZES the owning
+// subject in place rather than deleting the row — AND disables it. A job that
+// acts AS the erased person must not keep firing on their behalf after they're
+// gone, so `enabled` is forced false; the person's `ownerUserId` / user-kind
+// `ownerSubject` are overwritten with the sentinel. Agent/roster attribution
+// (`rosterId`/`agentId`) is not a person and is preserved. Jobs the subject does
+// not own are untouched. Idempotent (a re-run finds the sentinel, already
+// disabled); fail-closed on falsy input. Written via a direct `jobs.put` so no
+// next-fire recompute / owner mutation side effects fire.
+
+/** DSAR eraser — anonymize + disable every scheduled job owned by the subject. */
+export async function eraseSubjectSchedules(tenantId: string, subjectKey: string): Promise<void> {
+  if (!tenantId || !subjectKey) return;
+  const { forms } = subjectKeyForms(subjectKey);
+  for (const job of await listJobs(tenantId)) {
+    const s = scheduleSubject(job);
+    // SCC-4 — a job "acts as" a user when a feature stamps `metadata.actingUserId` (the
+    // assistant loops, `features/assistant/loops.ts`: AGENT-owned but firing on the
+    // enabling human's behalf + credentials, ADR 0024 Phase D). That IS user-ownership
+    // for DSAR: such a job MUST be disabled (it cannot keep firing as an erased person —
+    // ADR 0464 §rationale) and its `actingUserId` scrubbed. Without this the agent-owned
+    // carriers escape the owner gate below and leak the raw id.
+    const actsAsErasedUser = typeof job.metadata?.actingUserId === 'string' && forms.has(job.metadata.actingUserId);
+    const ownedByUser = (s?.kind === 'user' && forms.has(s.id)) || (job.ownerUserId !== undefined && forms.has(job.ownerUserId)) || actsAsErasedUser;
+    if (!ownedByUser) continue;
+    const next: ScheduledJob = { ...job, enabled: false };
+    if (next.ownerUserId !== undefined) next.ownerUserId = ERASED;
+    if (next.ownerSubject && next.ownerSubject.kind === 'user' && forms.has(next.ownerSubject.id)) {
+      next.ownerSubject = { kind: 'user', id: ERASED };
+    }
+    // SCC-4 — the owner scrub above misses the raw user id that feature tools ALSO
+    // stamp into `metadata.actingUserId` (scheduled-agent-chats followup/recurring,
+    // `agentTools.ts`; the value flows onto each fired run per ADR 0308). Scrub it too,
+    // so a DSAR leaves no raw person identifier on the job. Host-wide: any subject-owned
+    // job carrying `metadata.actingUserId` for the erased subject. Only the identifier is
+    // redacted (not `configurable`/task content, which is not a person id and is needed
+    // for the schedule to remain a coherent, disabled record).
+    if (next.metadata && typeof next.metadata.actingUserId === 'string' && forms.has(next.metadata.actingUserId)) {
+      next.metadata = { ...next.metadata, actingUserId: ERASED };
+    }
+    await jobs.put(next);
+  }
+}
+
+/** Register the scheduling DSAR eraser (idempotent — the seam dedupes by
+ *  reference). Called from the host-erasers boot step (host/hostSubjectErasers.ts). */
+export function registerSchedulingErasure(): void {
+  registerSubjectEraser(eraseSubjectSchedules);
 }
 
 /** Reset all scheduler state (test teardown). Resets the in-memory tick clock

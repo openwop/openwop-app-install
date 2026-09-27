@@ -20,6 +20,8 @@ import express, { type Express } from 'express';
 import http from 'node:http';
 import { createSign, generateKeyPairSync, type KeyObject } from 'node:crypto';
 import { authMiddleware, _resetOidcVerifier } from '../src/middleware/auth.js';
+import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { usersSessionAuthority } from '../src/features/users/feature.js';
 
 // ── tiny synthetic OIDC issuer ───────────────────────────────────
 
@@ -47,7 +49,7 @@ async function startSyntheticIssuer(audience: string): Promise<SyntheticIssuer> 
   const app = express();
   app.get('/.well-known/jwks.json', (_req, res) => res.json(jwks));
   const server = await new Promise<http.Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   const port = (server.address() as { port: number }).port;
   const issuer = `http://127.0.0.1:${port}`;
@@ -86,6 +88,13 @@ beforeAll(async () => {
   process.env.OPENWOP_OIDC_AUDIENCE = issuer.audience;
   process.env.OPENWOP_OIDC_JWKS_URL = issuer.jwksUrl;
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true'; // isolate the bearer path
+  // ADR 0621 rev. 2 — the unbound OIDC lane now consults the session authority
+  // (no permissive default on the seam). This harness mounts the bare
+  // middleware with NO host-ext persistence and no users store, so the honest
+  // unbound-lane answer is "no durable row was ever bound" (`null`); the
+  // `userId` read is the feature's real one (never reached — no bound cookie).
+  registerSessionAuthority(usersSessionAuthority);
+  registerPersonalTenantSessionAuthority(async () => null);
   _resetOidcVerifier();
 
   const app: Express = express();
@@ -97,7 +106,7 @@ beforeAll(async () => {
     tenantId: req.tenantId,
   }));
   appServer = await new Promise<http.Server>((resolve) => {
-    const s = app.listen(0, () => resolve(s));
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
   });
   appPort = (appServer.address() as { port: number }).port;
 });
@@ -159,12 +168,15 @@ describe('P3.1 OIDC bearer verification', () => {
     const token = issuer.mint({ aud: 'some-other-audience' });
     const res = await call(token);
     expect(res.status).toBe(401);
-    const body = (await res.json()) as { details: { reason: string } };
+    const body = (await res.json()) as { error: string; details: { reason: string } };
     expect(body.details.reason).toBe('wrong_audience');
+    // RFC 0200 §D — the credential VERIFIED, so the top-level code is the
+    // registered `audience_mismatch`, not a generic `unauthenticated`.
+    expect(body.error).toBe('audience_mismatch');
   });
 
   it('API-key Bearer still works alongside OIDC', async () => {
-    process.env.OPENWOP_API_KEYS = 'admin-test-key';
+    process.env.OPENWOP_API_KEYS = 'admin-test-key:*'; // ADR 0561 — this leg asserts the OPERATOR principal, which is now opt-in
     const res = await call('admin-test-key');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { principalId: string; tenants: string[] };

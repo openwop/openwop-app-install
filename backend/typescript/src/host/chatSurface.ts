@@ -19,6 +19,7 @@ import { createHash } from 'node:crypto';
 import { createLogger } from '../observability/logger.js';
 import type { BundleScope } from './inMemorySurfaces.js';
 import type { Storage } from '../storage/storage.js';
+import { publishChatMessageAppended } from './chatMessageBus.js';
 
 const log = createLogger('host.chat');
 
@@ -77,10 +78,16 @@ export function createChatSurface(scope: BundleScope): ChatSurface {
   async function append(storage: Storage, sessionId: string, role: StorageRole, text: string, messageId: string, meta: string | null, now: string): Promise<void> {
     await ensureSession(storage, sessionId, now);
     const content = JSON.stringify({ role, content: text, ...(meta ? { meta: JSON.parse(meta) } : {}) });
+    const record = { messageId, sessionId, role, content, meta, authorSubject: null, createdAt: now };
     try {
       // Host-written workflow activity has no human author (ADR 0102 Phase 2) →
       // null author ⇒ owner-writable.
-      await storage.appendChatMessage({ messageId, sessionId, role, content, meta, authorSubject: null, createdAt: now });
+      await storage.appendChatMessage(record);
+      // ADR 0192 D6 — a pack can address ANY session id (incl. a channel/group),
+      // so converge on the bus post-processing (live publish + mention stamping)
+      // after a REAL append. Placed after the append so an idempotent replay
+      // (duplicate id, swallowed below) does not re-publish.
+      publishChatMessageAppended(record, tenantId);
     } catch (err) {
       // Duplicate messageId (deterministic from idempotencyKey) → idempotent
       // replay; swallow. Mirrors the route's duplicate detection across sqlite
@@ -130,4 +137,3 @@ export function createChatSurface(scope: BundleScope): ChatSurface {
   };
 }
 
-export function _clearChatCardsForTest(): void { _cards.clear(); }

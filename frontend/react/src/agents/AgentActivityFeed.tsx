@@ -6,6 +6,8 @@
  */
 
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { workflowName, roleThemeForAgent, type RoleTheme } from './roleTemplates.js';
 import type { AgentView } from './agentViewModel.js';
 import { AgentAvatar } from './AgentAvatar.js';
@@ -20,7 +22,7 @@ interface ActivityItem {
   runId?: string | undefined;
 }
 
-function deriveActivity(views: AgentView[]): ActivityItem[] {
+function deriveActivity(views: AgentView[], t: TFunction<'agents'>): ActivityItem[] {
   const items: ActivityItem[] = [];
   for (const view of views) {
     const persona = view.entry.persona;
@@ -31,30 +33,31 @@ function deriveActivity(views: AgentView[]): ActivityItem[] {
       const lane = view.board?.columns.find((c) => c.id === card.columnId);
       const laneName = (lane?.name ?? '').toLowerCase();
       if (card.lastRunId && (laneName === 'working' || laneName === 'doing')) {
-        items.push({ ...who, key: `${card.id}-run`, text: `${persona} picked up “${card.title}”`, runId: card.lastRunId });
+        items.push({ ...who, key: `${card.id}-run`, text: t('feedPickedUp', { persona, title: card.title }), runId: card.lastRunId });
       } else if (laneName.startsWith('waiting')) {
-        items.push({ ...who, key: `${card.id}-wait`, text: `${persona} has “${card.title}” waiting on a human` });
+        items.push({ ...who, key: `${card.id}-wait`, text: t('feedWaiting', { persona, title: card.title }) });
       }
     }
     // New work queued in To Do.
     if (view.laneCounts.todo > 0) {
-      items.push({ ...who, key: `${view.entry.rosterId}-todo`, text: `${persona} has ${view.laneCounts.todo} new task${view.laneCounts.todo === 1 ? '' : 's'} in To Do` });
+      items.push({ ...who, key: `${view.entry.rosterId}-todo`, text: t('feedNewTasks', { persona, count: view.laneCounts.todo }) });
     }
     // Scheduled runs.
     for (const job of view.jobs.filter((j) => j.enabled !== false).slice(0, 2)) {
-      const label = String(job.metadata?.label ?? (job.workflowId ? workflowName(job.workflowId) : 'a workflow'));
-      items.push({ ...who, key: `${job.jobId}-sched`, text: `${persona}: ${label} is scheduled` });
+      const label = String(job.metadata?.label ?? (job.workflowId ? workflowName(job.workflowId) : t('feedWorkflowFallback')));
+      items.push({ ...who, key: `${job.jobId}-sched`, text: t('feedScheduled', { persona, label }) });
     }
   }
   return items.slice(0, 10);
 }
 
 export function AgentActivityFeed({ views }: { views: AgentView[] }): JSX.Element {
-  const items = deriveActivity(views);
+  const { t } = useTranslation('agents');
+  const items = deriveActivity(views, t);
   if (items.length === 0) {
     return (
       <p className="muted u-fs-14">
-        No work yet. Create an agent, add a task, or click “Check now” to see its heartbeat pick up work.
+        {t('feedEmpty')}
       </p>
     );
   }
@@ -68,11 +71,11 @@ export function AgentActivityFeed({ views }: { views: AgentView[] }): JSX.Elemen
             roleTheme={item.roleTheme}
             size={22}
             showBadge={false}
-            alt={`${item.persona}'s photo`}
+            alt={t('feedPersonaPhoto', { persona: item.persona })}
           />
           <span>
             {item.text}
-            {item.runId ? <> · <Link to={`/runs/${item.runId}`}>view run</Link></> : null}
+            {item.runId ? <> · <Link to={`/runs/${item.runId}`}>{t('viewRun')}</Link></> : null}
           </span>
         </li>
       ))}

@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "ADR 0722 — payload keys this host WRITES under one name that the corpus $def SEATS under another.",
+    "Applied on the major-2 READ (and the webhook fan-out) by storage/v2PayloadProjection.ts; never on write.",
+    "This file is MIGRATION DEBT, not a design: every row here exists because the emitting site is a node",
+    "PACK whose keys cannot change without a version bump + registry publish (token not held). When that",
+    "publish lands, the pack emits the seated name and the row is DELETED. A test asserts every target key",
+    "is a declared property of the def, so a row cannot outlive the corpus seat it maps to.",
+    "myndhyve-1's variableChanged lesson: the def and the host naming one fact differently, with the mapping",
+    "written nowhere, cost data at rest. This is the mapping, written in exactly one place."
+  ],
+  "artifact.created": { "artifactTypeId": "artifactType", "versionId": "version" }
+}

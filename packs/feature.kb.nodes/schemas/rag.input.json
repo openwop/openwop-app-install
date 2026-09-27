@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/rag.input.json",
+  "title": "KbRagInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) \u2014 a chain may supply either, so nothing is `required` here; the SURFACE refuses a missing or unusable key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "orgId": {
+      "type": "string",
+      "description": "The org that owns the collection. A cross-org id is simply not found (the service enforces the tenant+org key)."
+    },
+    "collectionId": {
+      "type": "string",
+      "description": "The KB collection to act on."
+    },
+    "query": {
+      "type": "string",
+      "description": "The natural-language query."
+    },
+    "topK": {
+      "type": "number",
+      "description": "How many chunks to return. Absent \u21d2 the host default (`DEFAULT_TOP_K` = 8); present-but-unusable is a typed failure, never a silent fallback."
+    }
+  },
+  "additionalProperties": true
+}

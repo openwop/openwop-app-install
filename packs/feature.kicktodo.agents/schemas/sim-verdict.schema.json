@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KickTodo simulation verdict",
+  "description": "The typed verdict a Challenge Factory simulation persona returns after walking a candidate plan (ADR 0458 P2). READ-ONLY advisory for the factory's evaluation stage — it commits NO domain state; the creator decides what to change and any revision rides the governed KickTodo Creator surfaces. Closed-world: a sim that cannot produce this exact shape is a typed failure, never success-with-empty.",
+  "type": "object",
+  "required": ["verdict", "findings", "personaSummary"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["pass", "flag", "block"],
+      "description": "The persona's overall judgement of the plan: `pass` (livable as-is), `flag` (usable but with concerns worth the creator's attention), `block` (a defect a participant like this persona could not get past)."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Zero or more specific findings. May be empty (a clean pass); an empty array is a positive statement, not an omission.",
+      "items": {
+        "type": "object",
+        "required": ["severity", "text"],
+        "properties": {
+          "day": {
+            "type": "integer",
+            "description": "The plan day the finding is about, when it is day-specific."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["note", "flag", "block"],
+            "description": "How serious this finding is for this persona: `note` (minor), `flag` (concern), `block` (a stopper)."
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The finding in plain language, from the persona's point of view."
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "personaSummary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A short plain-language summary of how the plan felt to this persona overall — what worked and what would make or break it for them."
+    }
+  },
+  "additionalProperties": false
+}

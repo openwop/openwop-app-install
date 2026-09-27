@@ -9,8 +9,11 @@
  *   ── "View progress →" link that opens the panel + focuses this run
  *   ── footer (slug, runId, builder link, elapsed)
  *
- * Rendered when a `workflow_run` ChatMessage is dispatched via the
- * `@mention` direct-dispatch path (`useChatSession.runWorkflowMention`).
+ * Rendered for any `workflow_run` ChatMessage — the `@mention` direct-dispatch
+ * path (`useChatSession.runWorkflowMention`) AND a run an agent TOOL ignited
+ * mid-turn, which arrives as a `workflow_run` conversation turn and is projected
+ * by `turnsToBubbles` (ADR 0491). A tool-dispatched run has no `/slug` behind it,
+ * so the footer's slug element and its separator are conditional.
  */
 
 import { useTranslation } from 'react-i18next';
@@ -18,6 +21,7 @@ import { Link } from 'react-router-dom';
 import { STATUS_COLORS, STATUS_LABEL_KEYS } from './workflowProgress/StepList.js';
 import { formatElapsed } from './workflowProgress/formatters.js';
 import { formatNumber } from '../i18n/format.js';
+import { Notice } from '../ui/Notice.js';
 import type { ChatMessage } from './hooks/useChatSession.js';
 
 interface Props {
@@ -85,10 +89,10 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
         </div>
 
         <div className="muted u-mt-1 u-fs-11 u-o-75 u-flex u-wrap u-gap-1-5 u-items-baseline">
-          <code>/{run.slug}</code>
+          {run.slug && <code>/{run.slug}</code>}
           {run.runId && !run.runUnavailable && (
             <>
-              <span>·</span>
+              {run.slug && <span>·</span>}
               <Link to={`/runs/${run.runId}`} title={t('openRunDetail')}>
                 run {run.runId.slice(0, 12)}
               </Link>
@@ -96,7 +100,7 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
           )}
           {run.runId && run.runUnavailable && (
             <>
-              <span>·</span>
+              {run.slug && <span>·</span>}
               {/* Run record gone — render the id without a link + a
                   muted hint so the user understands why action buttons
                   below are disabled. */}
@@ -116,6 +120,24 @@ export function WorkflowRunBubble({ message, onOpenProgress, isFocusedInPanel }:
           <span>·</span>
           <span>{formatElapsed(run.startedAt)}</span>
         </div>
+
+        {/* ADR 0491 — WHY a run failed belongs in the CHAT, not only in the
+            progress rail. The bubble previously showed a bare red "Failed" pill,
+            so a user whose run died (e.g. the Challenge Factory refusing demo
+            research sources) had to open a second surface to learn anything —
+            precisely the "the chat doesn't tell you the truth" gap this ADR
+            closes. `<Notice variant="error">` also carries role="alert", so the
+            terminal failure is ANNOUNCED rather than only rendered. */}
+        {run.status === 'failed' && run.error && (
+          <div className="u-mt-1-5">
+            <Notice variant="error">
+              {/* The message is the human part; the wire code is diagnostic, so it
+                  trails as muted detail instead of leading the sentence. */}
+              {run.error.message}
+              <span className="muted u-fs-11 u-ml-1">({run.error.code})</span>
+            </Notice>
+          </div>
+        )}
 
         {run.runUnavailable && (
           <div

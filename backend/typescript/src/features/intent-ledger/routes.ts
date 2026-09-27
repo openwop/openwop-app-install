@@ -20,7 +20,6 @@ import { tenantOf } from '../featureRoute.js';
 import { getConversationMeta } from '../../host/conversationStore.js';
 import { isVisibleToAsync } from '../../host/conversationVisibility.js';
 import { getLedger, saveLedger, validateLedgerInput } from './ledgerStore.js';
-import { llmExtractLedger, isComplexRequest } from './ledgerExtractor.js';
 import { readIntentLedgerStamp } from './ledgerProjection.js';
 import { reckonLedger, type ToolEvent } from './ledgerReckoning.js';
 import type { IntentLedger } from './types.js';
@@ -86,34 +85,22 @@ export function registerIntentLedgerRoutes(deps: RouteDeps): void {
     } catch (err) { next(err); }
   });
 
-  // Draft: from a user-supplied body, OR auto-extracted from `lastUserMessage` + `ceiling`.
+  // Draft from a user-supplied goal (MANUAL). The chat-first, model-authored draft
+  // path now rides the `openwop:intent-ledger.draft-contract` agent tool (CFP A13):
+  // the ONE chat's agent authors the contract in-conversation, so this REST handler
+  // no longer hides a managed-LLM extractor behind a button.
   app.post(`${BASE}/draft`, async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
       const conversationId = req.params.conversationId;
       await requireOwner(req, tenantId, conversationId);
-      const body = (req.body ?? {}) as { goal?: unknown; lastUserMessage?: unknown; ceiling?: unknown };
-      let fields;
-      if (typeof body.goal === 'string' && body.goal.trim()) {
-        fields = validateLedgerInput(body);
-      } else {
-        const ceiling = Array.isArray(body.ceiling) ? body.ceiling.filter((x): x is string => typeof x === 'string') : [];
-        const text = typeof body.lastUserMessage === 'string' ? body.lastUserMessage : '';
-        // ADR 0136 — the over-friction guard, live: a trivial request doesn't warrant a
-        // mission contract. (Tool ids in `ceiling` are advisory; the live loop re-clamps
-        // the resolved scope to the agent's real ceiling, so an empty ceiling is safe.)
-        if (!isComplexRequest(text, ceiling)) {
-          throw new OpenwopError('validation_error', 'This request is simple enough not to need a mission contract — add a goal to draft one anyway.', 422);
-        }
-        fields = await llmExtractLedger(tenantId, text, ceiling);
-        if (!fields.goal) throw new OpenwopError('validation_error', 'Could not draft a ledger from this conversation — supply a goal.', 422);
-      }
+      const fields = validateLedgerInput(req.body);
       const ledger: IntentLedger = {
         ledgerId: `il-${Date.now().toString(36)}`,
         tenantId, conversationId,
         ...fields,
         status: 'draft',
-        proposedBy: typeof body.goal === 'string' ? 'user' : 'extractor',
+        proposedBy: 'user',
         createdAt: new Date().toISOString(),
       };
       res.json({ ledger: await saveLedger(ledger) });

@@ -33,6 +33,7 @@
  */
 
 import vm from 'node:vm';
+import { classifySandboxError, recordSandboxExecution } from '../observability/metricSeams.js';
 
 export interface SandboxOptions {
   /** Wall-clock budget for synchronous execution. Default 1000ms. */
@@ -151,6 +152,16 @@ export function execGuardedSandboxVm(code: string, opts: GuardedSandboxOptions =
  *  allow-listed effects. Hardened against prototype-chain escapes via
  *  `execGuardedSandboxVm` — see the file header. */
 export function runInSandbox(code: string, opts: SandboxOptions = {}): SandboxResult {
+  // ADR 0556 P1 — the vm lane's classification IS the metric. `sandbox_escape_attempt`
+  // is a security signal an operator alerts on immediately, and it is only
+  // distinguishable from an ordinary script error inside `classifySandboxRun`
+  // below; emitting from a caller would have to re-derive it and would drift.
+  const result = classifySandboxRun(code, opts);
+  recordSandboxExecution('vm', result.ok ? 'ok' : classifySandboxError(result.error));
+  return result;
+}
+
+function classifySandboxRun(code: string, opts: SandboxOptions): SandboxResult {
   const allowed = new Set(opts.allowedHostCalls ?? []);
   const dispatch: SandboxDispatch = (name, args) => {
     if (!allowed.has(name)) throw new CapabilityDenied(`host call '${name}' not permitted`);

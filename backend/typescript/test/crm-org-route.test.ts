@@ -28,7 +28,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   const u = getToggleDefault('users');
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
@@ -160,6 +160,44 @@ describe('crm org surface — companies, deals, pipelines (owner)', () => {
   });
 });
 
+describe('crm org surface — deal owner/closeDate/status (ADR 0008 amendment)', () => {
+  it('derives status from stage moves, honors explicit status, validates closeDate', async () => {
+    await enableCrm('on');
+    const { owner, orgId } = await ownerWithMember('viewer');
+    const pipeline = (await owner.get(c(orgId, '/pipelines'))).body.pipelines[0];
+    const wonStage = pipeline.stages.find((s: { name: string }) => s.name === 'Won');
+    const lostStage = pipeline.stages.find((s: { name: string }) => s.name === 'Lost');
+
+    // Create: defaults to open (first stage), accepts owner + closeDate.
+    const deal = await owner.post(c(orgId, '/deals'), { title: 'Amendment deal', owner: 'user:alice', closeDate: '2026-09-30' });
+    expect(deal.status, JSON.stringify(deal.body)).toBe(201);
+    expect(deal.body.status).toBe('open');
+    expect(deal.body.owner).toBe('user:alice');
+    expect(deal.body.closeDate).toBe('2026-09-30');
+    const id = encodeURIComponent(deal.body.dealId);
+
+    // Garbage closeDate / status → 400.
+    expect((await owner.post(c(orgId, '/deals'), { title: 'x', closeDate: 'soon' })).status).toBe(400);
+    expect((await owner.post(c(orgId, '/deals'), { title: 'x', status: 'paused' })).status).toBe(400);
+    expect((await owner.patch(c(orgId, `/deals/${id}`), { closeDate: '2026-13-45' })).status).toBe(400);
+
+    // Stage move to Won derives status=won; to Lost derives lost; back to an
+    // open-named stage derives open.
+    expect((await owner.patch(c(orgId, `/deals/${id}`), { stageId: wonStage.stageId })).body.status).toBe('won');
+    expect((await owner.patch(c(orgId, `/deals/${id}`), { stageId: lostStage.stageId })).body.status).toBe('lost');
+    expect((await owner.patch(c(orgId, `/deals/${id}`), { stageId: pipeline.stages[0].stageId })).body.status).toBe('open');
+
+    // Explicit status in the SAME patch as a stage move wins over derivation.
+    const explicit = await owner.patch(c(orgId, `/deals/${id}`), { stageId: wonStage.stageId, status: 'open' });
+    expect(explicit.body.status).toBe('open');
+
+    // Owner + closeDate clear with null.
+    const cleared = await owner.patch(c(orgId, `/deals/${id}`), { owner: null, closeDate: null });
+    expect(cleared.body.owner).toBeUndefined();
+    expect(cleared.body.closeDate).toBeUndefined();
+  });
+});
+
 describe('crm org surface — RBAC', () => {
   it('editor writes; viewer is read-only (403); cross-org + cross-tenant fail closed', async () => {
     await enableCrm('on');
@@ -248,6 +286,74 @@ describe('crm org surface — custom fields + import (Phase 3)', () => {
     expect(ok.body.customFields).toEqual({ tier: 'gold', employees: 250 });
   });
 
+  it('ADR 0213 §1 — date/enum/reference field types: validation + tombstoned/cross-org refs rejected', async () => {
+    await enableCrm('on');
+    const { owner, orgId } = await ownerWithMember('viewer');
+
+    // date
+    expect((await owner.post(c(orgId, '/fields'), { entityType: 'deal', key: 'renewal', label: 'Renewal', type: 'date' })).status).toBe(201);
+    expect((await owner.post(c(orgId, '/deals'), { title: 'D', customFields: { renewal: 'not-a-date' } })).status).toBe(400);
+    const dealOk = await owner.post(c(orgId, '/deals'), { title: 'D', customFields: { renewal: '2026-12-31' } });
+    expect(dealOk.status, JSON.stringify(dealOk.body)).toBe(201);
+    expect(dealOk.body.customFields.renewal).toBe('2026-12-31');
+
+    // enum
+    expect((await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'plan', label: 'Plan', type: 'enum', options: ['starter', 'pro', 'enterprise'] })).status).toBe(201);
+    expect((await owner.post(c(orgId, '/companies'), { name: 'X', customFields: { plan: 'ultra' } })).status).toBe(400);
+    const companyOk = await owner.post(c(orgId, '/companies'), { name: 'X', customFields: { plan: 'pro' } });
+    expect(companyOk.status, JSON.stringify(companyOk.body)).toBe(201);
+
+    // reference (company → company): valid, dangling, cross-org, tombstoned.
+    expect((await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'parent', label: 'Parent', type: 'reference', refEntityType: 'company' })).status).toBe(201);
+    const parent = await owner.post(c(orgId, '/companies'), { name: 'Parent Co' });
+    expect((await owner.post(c(orgId, '/companies'), { name: 'Y', customFields: { plan: 'pro', parent: 'cmp:nope' } })).status).toBe(400); // dangling
+    const child = await owner.post(c(orgId, '/companies'), { name: 'Y', customFields: { plan: 'pro', parent: parent.body.companyId } });
+    expect(child.status, JSON.stringify(child.body)).toBe(201);
+    expect(child.body.customFields.parent).toBe(parent.body.companyId);
+
+    // Tombstoned reference target rejected.
+    const other = await owner.post(c(orgId, '/companies'), { name: 'Other' });
+    const merged = await owner.post(c(orgId, `/companies/${encodeURIComponent(parent.body.companyId)}/merge`), { sourceCompanyId: other.body.companyId });
+    expect(merged.status, JSON.stringify(merged.body)).toBe(200);
+    expect((await owner.post(c(orgId, '/companies'), { name: 'Z', customFields: { plan: 'pro', parent: other.body.companyId } })).status).toBe(400);
+
+    // Cross-org reference rejected (a company that exists, but in a DIFFERENT org).
+    const another = await ownerWithMember('viewer');
+    await another.owner.post(c(another.orgId, '/fields'), { entityType: 'company', key: 'parent', label: 'Parent', type: 'reference', refEntityType: 'company' });
+    expect((await another.owner.post(c(another.orgId, '/companies'), { name: 'Foreign', customFields: { parent: parent.body.companyId } })).status).toBe(400);
+
+    // Bad enum/reference field defs.
+    expect((await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'badenum', label: 'Bad', type: 'enum', options: [] })).status).toBe(400);
+    expect((await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'badref', label: 'Bad', type: 'reference', refEntityType: 'not-a-thing' })).status).toBe(400);
+  });
+
+  it('ADR 0257 seam adoption — a rollover date is now rejected; a real leap day is accepted', async () => {
+    await enableCrm('on');
+    const { owner, orgId } = await ownerWithMember('viewer');
+    expect((await owner.post(c(orgId, '/fields'), { entityType: 'deal', key: 'renewal', label: 'Renewal', type: 'date' })).status).toBe(201);
+    // Day-overflow "rollover" dates (that Date.parse silently rolls to the next month) are now
+    // rejected at write time by the shared seam's strict round-trip check — the ONE deliberate
+    // behavior delta of the seam adoption (write-time only; stored rows are never re-validated).
+    expect((await owner.post(c(orgId, '/deals'), { title: 'D', customFields: { renewal: '2023-02-30' } })).status).toBe(400);
+    expect((await owner.post(c(orgId, '/deals'), { title: 'D', customFields: { renewal: '2023-04-31' } })).status).toBe(400);
+    // A real leap day still validates.
+    const leap = await owner.post(c(orgId, '/deals'), { title: 'D', customFields: { renewal: '2024-02-29' } });
+    expect(leap.status, JSON.stringify(leap.body)).toBe(201);
+    expect(leap.body.customFields.renewal).toBe('2024-02-29');
+  });
+
+  it('ADR 0257 seam adoption — a string custom field is still bounded + secret-scrubbed (unchanged)', async () => {
+    await enableCrm('on');
+    const { owner, orgId } = await ownerWithMember('viewer');
+    expect((await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'note', label: 'Note', type: 'string' })).status).toBe(201);
+    // The seam uses the SAME host cleanString (cap 120 + secret-shape scrub) CRM already used —
+    // so a >120-char value is capped, exactly as before delegation.
+    const long = 'x'.repeat(200);
+    const co = await owner.post(c(orgId, '/companies'), { name: 'Bounded', customFields: { note: long } });
+    expect(co.status, JSON.stringify(co.body)).toBe(201);
+    expect((co.body.customFields.note as string).length).toBeLessThanOrEqual(120);
+  });
+
   it('import: dedup by key, column mapping, per-row errors', async () => {
     await enableCrm('on');
     const { owner, orgId } = await ownerWithMember('viewer');
@@ -308,5 +414,69 @@ describe('crm org surface — followup hardening', () => {
     expect(imp.status).toBe(200);
     expect(imp.body.created).toBe(1); // only the row with tier
     expect(imp.body.errors).toHaveLength(1); // the row missing the required field
+  });
+
+  // CRMGAP-6: the field-def resolution + entity-cap count are now hoisted OUT
+  // of the per-row loop (read once, not once per row) — this pins that a
+  // larger batch still enforces per-row required-field validation, type
+  // validation, and dedup EXACTLY like the single-row path, so the hoist is a
+  // performance change only, never a correctness one.
+  it('import: a 200-row batch still validates required/typed custom fields + dedup per row', async () => {
+    await enableCrm('on');
+    const { owner, orgId } = await ownerWithMember('viewer');
+    await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'tier', label: 'Tier', type: 'string', required: true });
+    await owner.post(c(orgId, '/fields'), { entityType: 'company', key: 'employees', label: 'Employees', type: 'number' });
+
+    const rows: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 200; i++) {
+      if (i % 20 === 0) {
+        // Every 20th row is missing the required `tier` field → per-row error.
+        rows.push({ name: `NoTier-${i}` });
+      } else if (i % 20 === 1) {
+        // Every 20th+1 row has a WRONG-typed custom field → per-row error.
+        rows.push({ name: `BadType-${i}`, customFields: { tier: 'gold', employees: 'lots' } });
+      } else if (i % 20 === 2) {
+        // A duplicate name (dedup exercised across a large seen-set).
+        rows.push({ name: `NoTier-0`, customFields: { tier: 'gold' } });
+      } else {
+        rows.push({ name: `Company-${i}`, customFields: { tier: 'gold', employees: i } });
+      }
+    }
+    const imp = await owner.post(c(orgId, '/import'), { entityType: 'company', dedupeBy: 'name', rows });
+    expect(imp.status, JSON.stringify(imp.body)).toBe(200);
+    // 10 missing-tier + 10 bad-type = 20 errors; 10 duplicate `NoTier-0` names
+    // (i%20==2) = 10 skipped (the dedup check runs BEFORE field validation, so
+    // the i=0 row's name is already in the seen-set by the time its own
+    // missing-tier error is raised — it counts as an error, not a skip).
+    expect(imp.body.errors.length).toBe(20);
+    expect(imp.body.skipped).toBe(10);
+    expect(imp.body.created).toBe(200 - 20 - 10);
+    const list = await owner.get(c(orgId, '/companies'));
+    expect(list.body.companies).toHaveLength(imp.body.created);
+    for (const co of list.body.companies) {
+      expect(co.customFields.tier).toBe('gold');
+    }
+  });
+
+  // CRMGAP-6/9: the import route's running cap counter (seeded from one
+  // pre-loop `listCompanies`, incremented per successful create, checked via
+  // the shared `assertUnderCap` — CRMGAP-9's one cap-check primitive every
+  // per-scope CRM entity count uses) must throw the SAME validation_error/409
+  // shape at the SAME threshold the direct-create path's internal
+  // full-collection check uses — a full 5000-row fixture is too slow for a
+  // unit test, so this pins the shared primitive directly instead.
+  it('assertUnderCap (the primitive the import route\'s hoisted counter and createCompany both call) enforces MAX_PER_ORG_ENTITIES', async () => {
+    const { assertUnderCap, MAX_PER_ORG_ENTITIES } = await import('../src/features/crm/crmEntitiesService.js');
+    expect(MAX_PER_ORG_ENTITIES).toBe(5000);
+    expect(() => assertUnderCap(4999, MAX_PER_ORG_ENTITIES, 'companies')).not.toThrow();
+    let threw: unknown;
+    try {
+      assertUnderCap(5000, MAX_PER_ORG_ENTITIES, 'companies');
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw).toBeInstanceOf(Error);
+    expect((threw as { code?: string }).code).toBe('validation_error');
+    expect((threw as { httpStatus?: number }).httpStatus).toBe(409);
   });
 });

@@ -27,3 +27,11 @@ declare module '*/packs/core.openwop.mcp/index.mjs' {
   type PackOutcome = { status: string; outputs: Record<string, unknown> };
   export function invokeTool(ctx: PackCtx): Promise<PackOutcome>;
 }
+
+/** ADR 0738 — the generic Kanban work-item node is a plain ESM pack. Keep its
+ * test import typed without falsely coupling it to any feature/canvas model. */
+declare module '*/packs/core.openwop.kanban-work-items/index.mjs' {
+  type PackCtx = Record<string, unknown>;
+  type PackOutcome = { status: string; outputs: Record<string, unknown> };
+  export function materializeWorkItems(ctx: PackCtx): Promise<PackOutcome>;
+}

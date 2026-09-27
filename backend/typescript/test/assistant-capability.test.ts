@@ -9,6 +9,7 @@
  *   - the bootstrap default self-heals to a capability flag (back-compat).
  */
 
+import { getAgentProfile } from '../src/host/agentProfileService.js';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -27,7 +28,6 @@ import {
   listCapabilityAgents,
   findAssistantAgent,
   ensureAssistantAgent,
-  agentHasAssistantCapability,
 } from '../src/features/assistant/capability.js';
 import type { RosterEntry } from '../src/host/rosterService.js';
 
@@ -103,7 +103,14 @@ describe('assistant capability — resolution is by capability, not roleKey', ()
     const bootstrapped = await ensureAssistantAgent(t);
     // The bootstrap stamped the capability onto its profile (data), so the next
     // resolution is pure-capability — no roleKey fallback needed.
-    expect(await agentHasAssistantCapability(t, bootstrapped.rosterId)).toBe(true);
+    //
+    // ADR 0662 D4 — this used to assert `agentHasAssistantCapability`, a predicate with no
+    // production caller: the test proved a function nothing used, which is how an inert
+    // predicate keeps looking load-bearing. Assert the REAL contract instead — ADR 0023
+    // §Correction says the capability's job is to RESOLVE the acting agent — by reading the
+    // profile the bootstrap stamped and then resolving through it.
+    const profile = await getAgentProfile(t, bootstrapped.rosterId);
+    expect(profile?.capabilities, 'the bootstrap stamps the capability onto the profile').toContain(ASSISTANT_CAPABILITY);
     expect((await findAssistantAgent(t))?.rosterId).toBe(bootstrapped.rosterId);
 
     // Idempotent: a second ensure resolves the same agent by capability.

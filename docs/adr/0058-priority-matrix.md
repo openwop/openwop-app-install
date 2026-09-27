@@ -282,6 +282,16 @@ failure. **UX-review (DESIGN.md §5.1):** the score matrix reuses the shared
 values), the list selector is the sanctioned `.tabs`/`.tab` strip (`role="tablist"`),
 and the add/planning forms use `.surface-form` — no hand-rolled table/tab/form.
 
+> **Correction (2026-07-09, routing):** the ".tabs list selector" shape above
+> shipped, but it made the open list a transient in-page state — no shareable
+> URL, no back/forward, plus an auto-land-on-first-list hack to compensate.
+> Each list now lives at its own route, **`/priority-matrix/:listId`**
+> (`PriorityListPage.tsx`), following the `/projects/:projectId` pattern (and
+> the same-day ADR 0079 strategy correction): the index page shows the lists
+> as a card grid of real `<Link>`s + the ADR 0060 portfolio rollup, and the
+> detail page leads with a `PageHeader` (list name) + a "Back to portfolio"
+> ghost link. The rest of this section is unchanged.
+
 **Phase 4 completed (follow-on, this conversation):** the `feature.priority-matrix
 .{nodes,agents}` packs now ship — 5 nodes over the surface + a Prioritization Analyst
 agent whose `toolAllowlist` is those nodes. There is **no separate AI-chat-envelope seam**

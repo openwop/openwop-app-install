@@ -45,7 +45,3 @@ export function dropSpeak(sessionId: string): void {
   active.delete(sessionId);
 }
 
-/** Test-only reset. */
-export function __resetVoiceTurns(): void {
-  active.clear();
-}

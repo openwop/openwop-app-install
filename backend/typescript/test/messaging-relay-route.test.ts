@@ -21,7 +21,7 @@ let BASE = '';
 async function freePort(): Promise<number> {
   return new Promise((resolve) => {
     const probe = http.createServer();
-    probe.listen(0, () => {
+    probe.listen(0, '127.0.0.1', () => {
       const { port } = probe.address() as AddressInfo;
       probe.close(() => resolve(port));
     });

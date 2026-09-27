@@ -28,8 +28,16 @@ export interface A2uiInterruptCard {
   /** Mirrors the `ui.a2ui-surface` payload shape `{ catalogVersion, surface }`.
    *  `surface` is left `unknown` on purpose — `A2uiSurfaceCard.parseSurface`
    *  validates it against the host catalog and fail-closes on a bad shape. */
-  payload: { catalogVersion: string; surface: unknown };
+  payload: { catalogVersion: string; surface: unknown } | V09CardPayload;
 }
+
+/** RFC 0209 (ADR 0749) — an A2UI v0.9 surface on an interrupt: one version-2
+ *  payload, or several of ONE surface (`surfaces`, folded in order). Left
+ *  unvalidated here for the same reason as `surface` above: the renderer's
+ *  profile parse is the validator and fail-closes. */
+export type V09CardPayload = Record<string, unknown> | { surfaces: unknown[] };
+
+const V09_KEYS = ['version', 'catalogId', 'surfaceId', 'messages', 'reasoning'] as const;
 
 /**
  * If `interrupt.data` carries an A2UI surface (`{ catalogVersion: string,
@@ -41,6 +49,16 @@ export function a2uiInterruptCard(
 ): A2uiInterruptCard | null {
   const data = interrupt?.data;
   if (!isRecord(data)) return null;
+  if (Array.isArray(data.surfaces) && data.surfaces.length > 0) {
+    return { cardType: 'ui.a2ui-surface', payload: { surfaces: data.surfaces } };
+  }
+  if (data.version === 'v0.9') {
+    // Carry ONLY the payload's own keys — an interrupt's data also holds a
+    // free-text `question` fallback, which the closed profile would refuse.
+    const payload: Record<string, unknown> = {};
+    for (const k of V09_KEYS) if (k in data) payload[k] = data[k];
+    return { cardType: 'ui.a2ui-surface', payload };
+  }
   if (!isRecord(data.surface) || typeof data.catalogVersion !== 'string') return null;
   return {
     cardType: 'ui.a2ui-surface',

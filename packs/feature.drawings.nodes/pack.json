@@ -1,7 +1,7 @@
 {
   "name": "feature.drawings.nodes",
   "version": "1.0.0",
-  "description": "Drawings canvas producer node pack (ADR 0153 Phase 4). The `render` node emits a typed `canvas.drawing` artifact — a constrained vector scene { width?, height?, shapes[] } of typed shapes — that flows through the run-output producer (ADR 0083) and renders inline in the chat artifact workbench as safe inline SVG. Constrained typed JSON, never raw markup; pure transform; replay-safe.",
+  "description": "Drawings canvas producer node pack. The `render` node emits a typed `canvas.drawing` artifact — a constrained vector scene { width?, height?, shapes[] } of typed shapes — that flows through the run-output producer and renders inline in the chat artifact workbench as safe inline SVG. Constrained typed JSON, never raw markup; pure transform; replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "drawings", "canvas", "svg", "illustration"],

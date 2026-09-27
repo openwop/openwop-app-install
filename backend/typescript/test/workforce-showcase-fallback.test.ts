@@ -40,7 +40,7 @@ beforeAll(async () => {
   // Stand in for the server-only boot seed (index.ts `main()`).
   await seedShowcaseWorkforces(app.locals.storage as Storage, 1_750_000_000_000);
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 

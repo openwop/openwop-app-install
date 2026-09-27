@@ -20,6 +20,7 @@
  * role="alert" so screen readers announce the failure on first paint.
  */
 
+import { Button } from '../ui/Button.js';
 import i18n from '../i18n/index.js';
 import { classifyChatError, type KnownError } from './lib/errorClassify.js';
 import type { ChatMessage } from './types.js';
@@ -68,22 +69,20 @@ export function ErrorCard({ error, onReconfigure, onRetry }: Props): JSX.Element
       {k.action && (
         <div className="u-mt-2">
           {k.action.kind === 'reconfigure-byok' && onReconfigure && (
-            <button
-              type="button"
-              className="secondary errcard-action-btn"
+            <Button
+              variant="secondary" className="errcard-action-btn"
               onClick={onReconfigure}
             >
               {k.action.label}
-            </button>
+            </Button>
           )}
           {k.action.kind === 'retry' && onRetry && (
-            <button
-              type="button"
-              className="secondary errcard-action-btn"
+            <Button
+              variant="secondary" className="errcard-action-btn"
               onClick={onRetry}
             >
               {k.action.label}
-            </button>
+            </Button>
           )}
         </div>
       )}

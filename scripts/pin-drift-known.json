@@ -1,0 +1,4 @@
+{
+  "$comment": "The KNOWN pack pin drift that `--allow-pin-drift` is allowed to waive (issue #3940). `check-pack-pin-drift.mjs` exits 4 when every unshipped pack matches a row here EXACTLY (name + vendored + pinned) and 1 when anything else drifts \u2014 so the waiver covers this list and nothing new can hide behind it. A row that no longer drifts also fails (STALE WAIVER): delete it. This list may only shrink; adding a row is a decision to ship unverified code to production and belongs in a PR that says so.",
+  "unshipped": []
+}

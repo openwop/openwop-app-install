@@ -27,7 +27,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -97,23 +97,52 @@ describe('conversations — typed model + participants', () => {
   });
 
   it('attaches a board → promotes the conversation to a group linked to the board (idempotent)', async () => {
+    // CORRECTED by WF-BOA-3 (ADR 0588 D3, 2026-08-19). This used to attach the
+    // string `'board-titans'` — a board that does not exist — and assert 200,
+    // pinning the defect: the handler validated `boardId` as a STRING and never
+    // read the board, so any caller could stamp fabricated board provenance and
+    // a client-chosen RFC 0101 speak-set onto a durable conversation. The lane
+    // now gates on the board and DERIVES the speak-set from its cohort, so the
+    // test needs a real board — and the participants it asserts are the ones the
+    // SERVER chose, not the ones the body asked for.
     const { c } = await owner();
+    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    const advisor = await c.post('/v1/host/openwop-app/roster', { persona: 'Ada Lovelace', agentRef: { agentId: 'core.openwop.agents.brief-writer' } });
+    expect(advisor.status, JSON.stringify(advisor.body)).toBe(201);
+    const board = await c.post('/v1/host/openwop-app/advisors/boards', {
+      orgId: org.body.orgId, name: 'Titans', advisors: [advisor.body.rosterId],
+      personaKind: 'historical', visibility: 'shared',
+    });
+    expect(board.status, JSON.stringify(board.body)).toBe(201);
+    const boardId = board.body.boardId as string;
+    const cohortRef = `agent:${advisor.body.agentRef.agentId}`;
+
     const conv = await c.post(S, { title: 'chat' }); // default `agent`
     const id = conv.body.sessionId;
-    const r = await c.post(`${S}/${id}/board`, { boardId: 'board-titans', participants: ['agent:user.t.felix', 'agent:user.t.ada'] });
+    const r = await c.post(`${S}/${id}/board`, { boardId });
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.body.type).toBe('group');
-    expect(r.body.boardId).toBe('board-titans');
+    expect(r.body.boardId).toBe(boardId);
     const refs = (r.body.participants as Array<{ subjectRef: string }>).map((p) => p.subjectRef);
-    expect(refs).toContain('agent:user.t.felix');
-    expect(refs).toContain('agent:user.t.ada');
+    expect(refs).toContain(cohortRef);
     // Re-summoning the same board doesn't duplicate the cohort.
-    const again = await c.post(`${S}/${id}/board`, { boardId: 'board-titans', participants: ['agent:user.t.felix'] });
-    expect((again.body.participants as Array<{ subjectRef: string }>).filter((p) => p.subjectRef === 'agent:user.t.felix').length).toBe(1);
+    const again = await c.post(`${S}/${id}/board`, { boardId });
+    expect((again.body.participants as Array<{ subjectRef: string }>).filter((p) => p.subjectRef === cohortRef).length).toBe(1);
     // It now lists under groups with its board link intact.
     const got = await c.get(`${S}/${id}`);
     expect(got.body.type).toBe('group');
-    expect(got.body.boardId).toBe('board-titans');
+    expect(got.body.boardId).toBe(boardId);
+  });
+
+  it('WF-BOA-3 — a boardId that does not resolve is a 404, not a stamp', async () => {
+    // The arm the corrected test above can no longer carry: an unreadable /
+    // non-existent board must leave NO board provenance on the conversation.
+    const { c } = await owner();
+    const conv = await c.post(S, { title: 'chat' });
+    const id = conv.body.sessionId;
+    const r = await c.post(`${S}/${id}/board`, { boardId: 'board-titans' });
+    expect(r.status, JSON.stringify(r.body)).toBe(404);
+    expect((await c.get(`${S}/${id}`)).body.boardId).toBeUndefined();
   });
 
   it('rename preserves the conversation type + participants in the response', async () => {

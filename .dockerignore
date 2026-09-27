@@ -1,0 +1,75 @@
+# Docker build context exclusions.
+#
+# WHY THIS EXISTS: without it the context is ~549M, of which
+# `backend/typescript/node_modules` alone is 453M — and the Dockerfile never
+# copies it (it copies package.json + package-lock.json and runs `npm ci`
+# itself, twice: once in the builder stage with dev deps, once in the runtime
+# stage with --omit=dev). Uploading it to the daemon is pure waste.
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# READ BEFORE ADDING AN EXCLUSION — the trap this file is built around.
+#
+# `build-meta/commit.txt` is GITIGNORED (deliberately: scripts/preflight-deploy.sh
+# refuses a dirty tree, and this file is regenerated every deploy). It is ALSO
+# load-bearing: the Dockerfile does `COPY build-meta ./build-meta`, and that file
+# is what makes /api/readiness report `build.commit`. ADR 0518 + scripts/
+# verify-deploy.sh treat `unknown` as a FAILED deploy, because an unstamped
+# image is indistinguishable from a stale one.
+#
+# So DO NOT model this file on .gitignore. The sibling `.gcloudignore` does
+# (`#!include:.gitignore`) and therefore needs an explicit `!build-meta/commit.txt`
+# negation — which was caught pre-merge on 2026-08-10 only by diffing
+# `gcloud meta list-files-for-upload`. That failure is SILENT and test-invisible:
+# the unit tests point at a temp dir via OPENWOP_BUILD_META_DIR, so they pass
+# whether or not the real file ever ships.
+#
+# MEASURED 2026-08-13, both sabotages, because the two failure modes differ and
+# only one of them is dangerous:
+#   exclude `build-meta`            → docker build FAILS (rc=1). Loud. Harmless.
+#   exclude `build-meta/commit.txt` → docker build SUCCEEDS (rc=0), and the image
+#                                     reports commit: unknown.
+# The second is the one a .gitignore-derived list produces, because .gitignore
+# ignores `commit.txt` but NOT the tracked `.gitkeep` beside it — so the
+# directory still ships and `COPY build-meta` is satisfied by an empty dir.
+# A green build that produced an unidentifiable artifact is the exact shape of
+# gate this repo keeps finding; see docs/adr/0550 P2.
+#
+# This file avoids the trap structurally instead: it is an ALLOW-BY-DEFAULT list
+# that excludes only build products and dependency trees, and never mentions any
+# path the Dockerfile COPYs. Every COPY source below must stay un-excluded:
+#   backend/typescript/{package.json,package-lock.json,tsconfig.json,
+#                       vitest.config.ts,src,scripts,vendor}
+#   providers.json  conformance-fixtures  schemas  packs  distributions
+#   examples/workflow-chain-packs  examples/connection-packs  build-meta
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Dependency trees — reinstalled inside the image from the lockfile.
+**/node_modules
+
+# Version control. (Small in a git worktree, where .git is a file; large in the
+# main checkout, which is the case that matters.)
+.git
+.gitignore
+
+# Build products — the image builds its own.
+backend/typescript/lib
+frontend/react/dist
+frontend/react/.vite
+
+# Test/CI output.
+coverage
+playwright-report
+test-results
+**/*.log
+
+# Local editor / OS noise.
+.DS_Store
+**/.DS_Store
+.idea
+.vscode
+
+# Local env files — secrets must never enter a build context. No negation here:
+# this Dockerfile builds the BACKEND only, and frontend/react/.env.production is
+# consumed by `vite build` on the host, never inside the image.
+.env
+.env.*

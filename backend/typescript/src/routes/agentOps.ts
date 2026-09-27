@@ -20,12 +20,17 @@
  * @see src/host/runStarter.ts — the shared run dispatch
  */
 
-import type { Express, Request } from 'express';
+import type { Express, Request, Response } from 'express';
 import { OpenwopError } from '../types.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
 import { seedEverything } from '../host/seedEverything.js';
 import { exampleDataStatus, runDemoClear, runExampleDataSeed } from '../host/exampleDataSeeders.js';
+import type { StepResult } from '../host/exampleDataSeeders.js';
+import { exampleDataSeedEnabled } from '../host/exampleDataSeed.js';
+import { provisionDemoFeatures } from '../host/demoProvision.js';
+import { withSeedLock } from '../host/seedLock.js';
+import { isSuperadmin, requireSuperadmin } from '../host/superadmin.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { runHeartbeatOnce } from '../host/heartbeatService.js';
 import { projectAgentActivity } from '../host/agentActivity.js';
@@ -37,6 +42,46 @@ interface Deps {
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
+}
+
+function actorOf(req: Request): string {
+  return (req as { userId?: string; principal?: { principalId?: string } }).userId
+    ?? (req as { principal?: { principalId?: string } }).principal?.principalId
+    ?? 'superadmin';
+}
+
+/** True when the client asked for the streaming NDJSON seed (ADR 0292). The full
+ *  reseed outruns the 30s request-timeout + the ~60s `/api` proxy budget; a
+ *  streamed response flushes headers immediately (making the timer a no-op) and
+ *  emits one JSON line per step, so the UI shows progress and never times out.
+ *  The UI hits this via the direct `*.run.app` URL — the SSE-bypass pattern —
+ *  because the Firebase `/api` rewrite would buffer it. */
+function wantsStream(req: Request): boolean {
+  return (req.headers.accept ?? '').includes('application/x-ndjson');
+}
+
+/** Run a seed as an NDJSON stream: `{type:'step',...}` per seeder, then a final
+ *  `{type:'summary',...}`. Header flush first = timeout no-op. Writes that fail
+ *  (client hung up) are swallowed — `runExampleDataSeed` keeps going and the
+ *  idempotent seed still lands. */
+async function streamSeed(
+  res: Response,
+  run: (onStep: (r: StepResult) => void) => Promise<{ success: boolean; summary: unknown; results: StepResult[] }>,
+  extra?: object,
+): Promise<void> {
+  res.status(200);
+  res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+  const write = (obj: unknown): void => {
+    if (res.writableEnded) return;
+    try { res.write(`${JSON.stringify(obj)}\n`); } catch { /* client gone */ }
+  };
+  if (extra) write({ type: 'provision', ...extra });
+  const result = await run((r) => write({ type: 'step', ...r }));
+  write({ type: 'summary', success: result.success, summary: result.summary, ...(extra ? { provision: extra } : {}) });
+  if (!res.writableEnded) res.end();
 }
 
 export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
@@ -60,10 +105,21 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
 
   // ── /demo-data dashboard surface (extensible seeder registry) ─────────────
   // Per-step live inventory: one row per registered demo data type with its
-  // current count. Drives the dashboard's "N present" + checkboxes.
+  // current count. Drives the dashboard's "N present" + checkboxes. `enabled`
+  // reflects the OPENWOP_DEMO_SEED_ENABLED kill-switch (posture-dependent
+  // default, DUR-3/ADR 0195) so the dashboard can disclose "seeding disabled"
+  // honestly instead of rendering a success-shaped no-op. Clearing existing
+  // example data stays available either way (removal is never gated).
   app.get('/v1/host/openwop-app/example-data/status', async (req, res, next) => {
     try {
-      res.status(200).json({ steps: await exampleDataStatus(tenantOf(req), deps.storage) });
+      res.status(200).json({
+        enabled: exampleDataSeedEnabled(),
+        // Drives the FE's superadmin-only "Provision demo tenant" affordance
+        // (SEED-RS-UX1) — server-authoritative, so the button hides for a
+        // non-superadmin instead of showing then 403-ing.
+        superadmin: isSuperadmin(req),
+        steps: await exampleDataStatus(tenantOf(req), deps.storage),
+      });
     } catch (err) {
       next(err);
     }
@@ -77,7 +133,54 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
       const body = (req.body ?? {}) as { steps?: unknown; dryRun?: unknown };
       const steps = Array.isArray(body.steps) ? body.steps.filter((s): s is string => typeof s === 'string') : undefined;
       const dryRun = body.dryRun === true;
-      res.status(200).json(await runExampleDataSeed(tenantOf(req), deps.storage, { steps, dryRun }));
+      const tenantId = tenantOf(req);
+      // Dry-run writes nothing — no lock needed. A real seed takes the per-tenant
+      // seed lock so a concurrent re-click can't race the seeders' read-then-create
+      // guards and duplicate rows (SEED concurrency fix).
+      if (dryRun) {
+        res.status(200).json(await runExampleDataSeed(tenantId, deps.storage, { steps, dryRun: true }));
+        return;
+      }
+      await withSeedLock(deps.storage, tenantId, async () => {
+        // Stream when asked (default UI path) so the full reseed never trips the
+        // 30s / ~60s timeouts; otherwise return the aggregate JSON in one shot
+        // (the batch request-timeout budget covers it — ADR 0292).
+        if (wantsStream(req)) {
+          await streamSeed(res, (onStep) => runExampleDataSeed(tenantId, deps.storage, { steps, onStep }));
+          return;
+        }
+        res.status(200).json(await runExampleDataSeed(tenantId, deps.storage, { steps }));
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // Superadmin: provision a full demo tenant (DG-SEED-7). Enables the demo
+  // feature toggles FOR THIS TENANT ONLY (per-tenant override — never global),
+  // then runs the full seed so the previously-gated surfaces (CRM, commerce,
+  // merchandising, CDP, territories, …) actually populate. The toggle flip lives
+  // here, above the pure seeders — a seeder still never flips a toggle itself.
+  app.post('/v1/host/openwop-app/example-data/provision-demo', async (req, res, next) => {
+    try {
+      requireSuperadmin(req, 'Demo-tenant provisioning');
+      const tenantId = tenantOf(req);
+      if (!exampleDataSeedEnabled()) {
+        throw new OpenwopError('conflict', 'Demo seeding is disabled on this deployment (OPENWOP_DEMO_SEED_ENABLED=false).', 409);
+      }
+      // Serialize under the per-tenant seed lock: the full reseed is long enough
+      // that an impatient re-click would otherwise launch a concurrent pass and
+      // race the seeders' read-then-create guards, duplicating rows (SEED
+      // concurrency fix). A concurrent provision now gets a clean 409.
+      await withSeedLock(deps.storage, tenantId, async () => {
+        const provision = await provisionDemoFeatures(tenantId, actorOf(req));
+        if (wantsStream(req)) {
+          await streamSeed(res, (onStep) => runExampleDataSeed(tenantId, deps.storage, { onStep }), provision);
+          return;
+        }
+        const result = await runExampleDataSeed(tenantId, deps.storage, {});
+        res.status(200).json({ provision, ...result });
+      });
     } catch (err) {
       next(err);
     }
@@ -89,7 +192,19 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
     try {
       const body = (req.body ?? {}) as { steps?: unknown };
       const steps = Array.isArray(body.steps) ? body.steps.filter((s): s is string => typeof s === 'string') : undefined;
-      res.status(200).json(await runDemoClear(tenantOf(req), deps.storage, { steps }));
+      const tenantId = tenantOf(req);
+      // Clear is a long, cascade-heavy write (roster deletes, thousands of CDP
+      // rows). Under the seed lock so it can't race a concurrent seed/clear, and
+      // streamed when asked so it flushes headers first — dodging the Firebase
+      // `/api` ~60s cap (the UI hits the direct *.run.app URL) and the request
+      // timer, bounded only by Cloud Run's outer timeout (ADR 0292 / ADR 0321).
+      await withSeedLock(deps.storage, tenantId, async () => {
+        if (wantsStream(req)) {
+          await streamSeed(res, (onStep) => runDemoClear(tenantId, deps.storage, { steps, onStep }));
+          return;
+        }
+        res.status(200).json(await runDemoClear(tenantId, deps.storage, { steps }));
+      });
     } catch (err) {
       next(err);
     }
@@ -99,8 +214,8 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   app.post('/v1/host/openwop-app/roster/:rosterId/check', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
-      const entry = await getRosterEntry(req.params.rosterId);
-      if (!entry || entry.tenantId !== tenantId) {
+      const entry = await getRosterEntry(tenantId, req.params.rosterId);
+      if (!entry) {
         throw new OpenwopError('not_found', 'Agent not found.', 404, { rosterId: req.params.rosterId });
       }
       if (!entry.enabled) {
@@ -124,8 +239,8 @@ export function registerAgentOpsRoutes(app: Express, deps: Deps): void {
   app.get('/v1/host/openwop-app/roster/:rosterId/activity', async (req, res, next) => {
     try {
       const tenantId = tenantOf(req);
-      const entry = await getRosterEntry(req.params.rosterId);
-      if (!entry || entry.tenantId !== tenantId) {
+      const entry = await getRosterEntry(tenantId, req.params.rosterId);
+      if (!entry) {
         throw new OpenwopError('not_found', 'Agent not found.', 404, { rosterId: req.params.rosterId });
       }
       const limit = Math.min(50, Math.max(1, Number.parseInt(String(req.query.limit ?? '25'), 10) || 25));

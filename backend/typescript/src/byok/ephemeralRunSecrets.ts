@@ -17,6 +17,45 @@ export function setRunSecrets(runId: string, secrets: Record<string, string>): v
   ephemeralByRun.set(runId, { ...secrets });
 }
 
+/**
+ * MERGE one freshly-resolved secret into the run's registry (H49).
+ *
+ * Deliberately distinct from `setRunSecrets`, which REPLACES the whole map —
+ * the executor's pre-dispatch seeding (`executor.ts` `setRunSecrets(run.runId,
+ * …)`) relies on replace semantics, so reusing it here would silently wipe every
+ * declared `credentialRef` the moment a node resolved a secret of its own.
+ *
+ * WHY THIS EXISTS. The registry was populated at exactly ONE site — the
+ * executor, from the run's DECLARED `credentialRefs` / node `requires`. A node
+ * that resolves a secret mid-run through `byok/secretResolver.ts` (which
+ * `conformance.secret.echo` in `bootstrap/nodes.ts` has always done) left that
+ * plaintext invisible to the registry, and therefore invisible to BOTH
+ * consumers that exist to contain it:
+ *
+ *  1. `stripSecretsFromPersisted` — the storage/event-log scrubber. An
+ *     undeclared secret was never scrubbed from persisted run records. That
+ *     hole predates H49 and is the primary motivation.
+ *  2. SR-1 memory-write redaction (`writeMemoryEntryRedacted`) — added in H49,
+ *     which reads the same registry.
+ *
+ * Registering is therefore a containment WIDENING, never a leak: it can only
+ * cause more material to be scrubbed. The one real hazard of a wider registry is
+ * over-eager SUBSTRING redaction shredding legitimate content, and that is
+ * bounded at the redaction site by the spec's 8-character floor
+ * (`SR1_MIN_SECRET_LENGTH` in `textRedaction.ts`) rather than here — this
+ * function stays a faithful record of what the run actually resolved.
+ *
+ * Values are process-memory only and die with the run via `clearRunSecrets`,
+ * exactly as the seeded ones do. No-ops on an empty ref or an empty value so a
+ * failed resolution can never register a sentinel that matches everything.
+ */
+export function registerRunSecret(runId: string, credentialRef: string, value: string): void {
+  if (runId.length === 0 || credentialRef.length === 0 || value.length === 0) return;
+  const current = ephemeralByRun.get(runId);
+  if (current) current[credentialRef] = value;
+  else ephemeralByRun.set(runId, { [credentialRef]: value });
+}
+
 export function getRunSecrets(runId: string): Record<string, string> {
   return ephemeralByRun.get(runId) ?? {};
 }
@@ -38,10 +77,24 @@ export function clearRunSecrets(runId: string): void {
  * (`aiProvidersHost.ts`) receives the RAW map so its convention-
  * based lookup still works.
  *
- * NOTE: This is defense-in-depth. A malicious pack with arbitrary
- * code execution could still call `String.prototype` tricks or use
- * `Reflect.ownKeys` shenanigans. The true sandbox is the worker-
- * thread / wasm isolation per RFC 0008 (not implemented in this sample).
+ * TRUST BOUNDARY (verified 2026-07-03, deferred-work review): the previously
+ * hypothesized `Reflect.ownKeys` / `JSON.stringify` bypasses do NOT work —
+ * both route through the throwing `ownKeys`/`getOwnPropertyDescriptor` traps
+ * (pinned by `test/ephemeral-secrets-view.test.ts`). The Proxy's real job is
+ * preventing ACCIDENTAL enumeration/serialization leaks (a pack spreading
+ * ctx.secrets into `outputs`, a debug JSON.stringify). It is NOT — and cannot
+ * be — a defense against genuinely malicious pack code: in-process JS has
+ * `process.env`, `node:fs`, and patchable globals, so no secrets-view design
+ * changes that calculus. The actual security boundary for pack code is the
+ * SUPPLY CHAIN — packs install through the Ed25519-signed registry pipeline
+ * (signature + SRI verification), so arbitrary-malicious-pack-code means a
+ * compromised signing key, not a Proxy bypass. Genuinely UNTRUSTED code (user
+ * code-exec) already runs in the CPython-WASI sandbox (host/wasiSandbox.ts,
+ * ADR 0146) — isolation where the threat is real. Per-node worker/wasm
+ * isolation (RFC 0008) for signed pack code is deliberately NOT built: the
+ * cost (bridging the whole async ctx surface across a worker boundary) buys
+ * nothing against the actual threat model. Revisit ONLY if unsigned
+ * third-party packs ever load at runtime.
  */
 export function nonEnumerableSecretsView(secrets: Record<string, string>): Record<string, string> {
   return new Proxy(secrets, {

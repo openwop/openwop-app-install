@@ -24,7 +24,7 @@
       "toolAllowlist": [
         "openwop:core.flow.split-in-batches"
       ],
-      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": true },
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "handoff": {
         "taskSchemaRef": "schemas/audit-summarizer.task.schema.json",
         "returnSchemaRef": "schemas/audit-summarizer.return.schema.json"

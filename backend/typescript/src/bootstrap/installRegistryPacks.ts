@@ -16,8 +16,9 @@
  */
 
 import { resolve, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createLogger } from '../observability/logger.js';
+import { isTombstoned } from '../host/packTombstones.js';
 import {
   installPackFromRegistry,
   parseInstallList,
@@ -40,6 +41,24 @@ const DEFAULT_PACKS: InstallTarget[] = [
  * disk from the local mount / vendored image, so those are skipped (no pointless
  * registry round-trip); only genuinely-absent declared packs hit the registry.
  */
+/** ADR 0655 D5 — pure, so the rule is a unit witness. `onDisk` null ⇒ nothing
+ *  vendored ⇒ install. A vendored copy STRICTLY newer than the pin is never
+ *  overwritten: strict ⇒ refuse (loud), non-strict ⇒ skip. */
+export function classifyRegistryInstall(input: { onDisk: string | null; requested: string; strict: boolean }): 'install' | 'skip' | 'refuse' {
+  if (!input.onDisk) return 'install';
+  if (compareSemverLoose(input.onDisk, input.requested) <= 0) return 'install';
+  return input.strict ? 'refuse' : 'skip';
+}
+function compareSemverLoose(a: string, b: string): number {
+  const pa = a.split('.').map((x) => parseInt(x, 10) || 0); const pb = b.split('.').map((x) => parseInt(x, 10) || 0);
+  for (let i = 0; i < 3; i++) { const d = (pa[i] ?? 0) - (pb[i] ?? 0); if (d !== 0) return d; }
+  return 0;
+}
+function readOnDiskVersion(dir: string): string | null {
+  try { const m = JSON.parse(readFileSync(join(dir, 'pack.json'), 'utf-8')) as { version?: unknown }; return typeof m.version === 'string' ? m.version : null; }
+  catch { return null; }
+}
+
 export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[] = []): Promise<void> {
   const raw = process.env.OPENWOP_INSTALL_PACKS;
   const packDir = resolveDefaultPackDir();
@@ -51,7 +70,26 @@ export async function ensureRegistryPacksInstalled(featurePacks: InstallTarget[]
   // Dedupe by name@version (env list + missing feature packs).
   const seen = new Set<string>();
   const targets: InstallTarget[] = [];
+  const strict = process.env.OPENWOP_STRICT_REGISTRY === 'true';
   for (const t of [...envTargets, ...missingFeaturePacks]) {
+    // ADR 0655 D5 (EMWF-2) — a registry install must never DOWNGRADE below the
+    // image-vendored copy. The mount symlinks the vendored pack first; a symlink
+    // carries no install marker, so the installer used to rmSync it and write the
+    // OLDER pin every boot (measured 2026-09-11: `core.openwop.integration` 1.1.2
+    // vendored, 1.1.0 pinned — the WF-EM-6 fix never served). In STRICT mode the
+    // policy holds (the pin is what ships, signed) and the drift is REFUSED loudly
+    // — `preflight-deploy.sh` fails on it before the build; non-strict keeps the
+    // vendored copy and skips the install.
+    const onDisk = readOnDiskVersion(join(packDir, t.name));
+    const verdict = classifyRegistryInstall({ onDisk, requested: t.version, strict });
+    if (verdict === 'refuse') {
+      log.error('registry pin below vendored — install refused, the drift must be fixed by publish + re-pin (ADR 0655 D5)', { pack: t.name, pinned: t.version, vendored: onDisk });
+      continue;
+    }
+    if (verdict === 'skip') { log.warn('registry pack install skipped (vendored newer)', { pack: t.name, pinned: t.version, vendored: onDisk }); continue; }
+    // ADR 0194 P4: a tombstoned (removed-from-host) pack is never re-installed
+    // at boot; a superadmin restore (or explicit marketplace install) lifts it.
+    if (isTombstoned(t.name)) { log.info('registry pack install skipped (tombstoned)', { pack: t.name }); continue; }
     const key = `${t.name}@${t.version}`;
     if (seen.has(key)) continue;
     seen.add(key);

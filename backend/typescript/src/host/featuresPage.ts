@@ -33,7 +33,7 @@ const FEATURES_SLUG = 'features';
 const SYSTEM_ACTOR = 'system';
 /** Bump when featurePages.json changes — a redeploy then refreshes the live page
  *  IF it has never been human-edited (see `doEnsure`). */
-const SEED_VERSION = 4;
+const SEED_VERSION = 5;
 
 // ── Content model (the brand-authorable JSON shape) ─────────────────────────
 

@@ -57,6 +57,9 @@ ctx.kanban.timelinePlan({ boardId, scheduler, ... })
 
 ctx.kanban.automateRules({ boardId, rules, replaceExisting, idempotencyKey })
   → Promise<{ activeRules, added, appliedAt? }>
+  // A host without a durable workflow binding rejects with
+  // `{ code: 'kanban_automation_unavailable' }`; a pack never creates an
+  // in-memory runner as a substitute.
 
 ctx.kanban.resourceMonitor({ boardId, maxConcurrentPerAssignee, includeAgents })
   → Promise<{ assigneeLoad, wipBreaches, overdueTasks, monitoredAt? }>

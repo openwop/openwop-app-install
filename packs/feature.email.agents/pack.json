@@ -1,7 +1,7 @@
 {
   "name": "feature.email.agents",
-  "version": "1.0.0",
-  "description": "Email feature agent pack (ADR 0014) — a copywriter agent that drafts/optimizes campaign subject + body (the baseline's email.generate / email.optimize). Tool-allowlisted to feature.email.nodes only; it writes copy, it does not send. Mirrors feature.kb.agents.",
+  "version": "1.0.1",
+  "description": "Email feature agent pack — a copywriter agent that drafts/optimizes campaign subject + body (the baseline's email.generate / email.optimize). Tool-allowlisted to the registered openwop:email.* chat tools (get-campaign read + save-draft write); it drafts copy, it does not send. Mirrors feature.kb.agents.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "email", "agent", "copywriter", "marketing"],
@@ -15,12 +15,12 @@
       "agentId": "feature.email.agents.copywriter",
       "persona": "GENERAL",
       "label": "Email Copywriter",
-      "description": "Drafts and optimizes marketing campaign copy (subject line + body, with {{contact.*}} merge fields). May read existing templates for style via feature.email.nodes.list-templates. Writes copy only — it does NOT send (no send tool in its allowlist, by design).",
+      "description": "Drafts and optimizes marketing campaign copy (subject line + body, with {{contact.*}} merge fields). Reads existing drafts + templates for style via openwop:email.get-campaign and persists the copy into a DRAFT campaign via openwop:email.save-draft. Drafts copy only — it does NOT send (no send tool in its allowlist, by design).",
       "modelClass": "general",
       "systemPromptRef": "prompts/email-copywriter.md",
       "toolAllowlist": [
-        "openwop:feature.email.nodes.list-templates",
-        "openwop:feature.email.nodes.render"
+        "openwop:email.get-campaign",
+        "openwop:email.save-draft"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }

@@ -11,14 +11,16 @@
  * `GET /strategy/context`, which omits unreadable strategies); a write to a
  * read-only strategy 403s on `replaceLinks` and surfaces a clean notice.
  */
+import { Button } from '../../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../../ui/Modal.js';
 import { Notice } from '../../ui/Notice.js';
 import { CheckboxField } from '../../ui/Field.js';
+import { InlineState } from '../../ui/InlineState.js';
 import { FlagIcon } from '../../ui/icons/index.js';
 import {
-  listStrategies, getStrategy, replaceLinks, getStrategyContext,
+  listStrategies, getStrategy, replaceLinks, getStrategyContext, FeatureDisabledError,
   type Strategy, type StrategyLink, type StrategyContextEntry,
 } from './strategyClient.js';
 
@@ -33,16 +35,48 @@ export interface StrategyRefLite { id: string; title: string }
 export function ProjectStrategyChips({ projectId }: { projectId: string }): JSX.Element | null {
   const { t } = useTranslation('strategy');
   const [entries, setEntries] = useState<StrategyContextEntry[] | null>(null);
+  // SPU-7 (= code `SPC-12`(A)) — the catch used to collapse BOTH causes onto
+  // `setEntries([])`, and the docblock stated that as the intent. The two are not
+  // equivalent, and `strategyClient.ts:107` already distinguishes them:
+  //
+  //  - toggle OFF (`FeatureDisabledError`) ⇒ there IS no strategy surface here,
+  //    so rendering nothing is the correct and complete answer;
+  //  - a TRANSIENT failure (a 429 — a documented hazard for pages that fan out
+  //    reads on load) ⇒ rendering nothing CLAIMS "this project is aligned to no
+  //    strategy". A PM reads that, re-links the project, and creates a duplicate.
+  //
+  // The compact `InlineState kind="failed"` is the documented primitive for an
+  // embedded region (DESIGN.md:461); `announcePolite` because this fires on LOAD,
+  // not on an action the user just took.
+  const [failed, setFailed] = useState(false);
+  const [tick, setTick] = useState(0);
   useEffect(() => {
     let live = true;
-    // Any failure (toggle off ⇒ FeatureDisabledError, or transient) ⇒ render
-    // nothing; the project page must never break on the strategy section.
+    setFailed(false);
     void getStrategyContext({ projectId })
       .then((e) => { if (live) setEntries(e); })
-      .catch(() => { if (live) setEntries([]); });
+      .catch((e) => {
+        if (!live) return;
+        if (e instanceof FeatureDisabledError) { setEntries([]); return; }
+        setFailed(true);
+      });
     return () => { live = false; };
-  }, [projectId]);
+  }, [projectId, tick]);
 
+  if (failed) {
+    return (
+      <div className="proj-section">
+        <span className="proj-eyebrow">{t('projectAlignmentHeading')}</span>
+        <InlineState
+          kind="failed"
+          message={t('chipsLoadFailed')}
+          announce={t('chipsLoadFailed')}
+          announcePolite
+          action={<Button variant="link" size="sm" onClick={() => setTick((v) => v + 1)}>{t('common:retry')}</Button>}
+        />
+      </div>
+    );
+  }
   if (!entries || entries.length === 0) return null;
   return (
     <div className="proj-section">
@@ -73,9 +107,9 @@ export function StrategyAlignment({ listId, cardId, refs, onChanged, onError }: 
   return (
     <div className="u-flex u-items-center u-gap-1 u-flex-wrap">
       {refs.map((r) => <span key={r.id} className="chip chip--accent u-fs-11"><FlagIcon size={11} /> {r.title}</span>)}
-      <button type="button" className="ghost btn-sm" onClick={() => setOpen(true)} aria-label={t('alignButtonLabel')}>
+      <Button variant="quiet" size="sm" onClick={() => setOpen(true)} aria-label={t('alignButtonLabel')}>
         {refs.length ? t('alignEdit') : t('alignButton')}
-      </button>
+      </Button>
       {open ? (
         <AlignModal listId={listId} cardId={cardId} onClose={() => setOpen(false)} onChanged={onChanged} onError={onError} t={t} />
       ) : null}
@@ -90,13 +124,21 @@ function AlignModal({ listId, cardId, onClose, onChanged, onError, t }: {
 }): JSX.Element {
   const [strategies, setStrategies] = useState<Strategy[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // R3 (the R2 deferral) — a failed read used to setStrategies([]), so the modal
+  // claimed "no strategies to align" after the toast faded. Failure is its own
+  // state now, with a retry that re-runs the read.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadTick, setLoadTick] = useState(0);
 
   // Lazy-load readable strategies when the modal mounts (onError/t are stable).
   useEffect(() => {
+    let live = true;
+    setLoadFailed(false);
     void listStrategies()
-      .then((s) => setStrategies(s.filter((x) => x.status !== 'archived')))
-      .catch((e) => { onError(e instanceof Error ? e.message : t('alignFailed')); setStrategies([]); });
-  }, [onError, t]);
+      .then((s) => { if (live) setStrategies(s.filter((x) => x.status !== 'archived')); })
+      .catch(() => { if (live) { setStrategies(null); setLoadFailed(true); } });
+    return () => { live = false; };
+  }, [loadTick]);
 
   const toggle = async (s: Strategy, aligned: boolean): Promise<void> => {
     setBusyId(s.id);
@@ -118,7 +160,15 @@ function AlignModal({ listId, cardId, onClose, onChanged, onError, t }: {
     <Modal label={t('alignModalLabel')} onClose={onClose}>
       <h2 className="u-mt-0">{t('alignModalHeading')}</h2>
       <p className="muted u-fs-12">{t('alignHint')}</p>
-      {strategies === null ? (
+      {loadFailed ? (
+        /* SPU-5 — five sibling failure notices in this feature pass `announce`
+           and this one did not; the modal is a focus trap, so an unannounced
+           failure here is a dialog whose entire content is silent. */
+        <Notice variant="error" announce={t('alignLoadFailed')}>
+          {t('alignLoadFailed')}{' '}
+          <Button variant="secondary" size="sm" onClick={() => setLoadTick((v) => v + 1)}>{t('alignRetry')}</Button>
+        </Notice>
+      ) : strategies === null ? (
         <p className="muted">{t('common:loading')}</p>
       ) : strategies.length === 0 ? (
         <Notice variant="info">{t('alignNoStrategies')}</Notice>
@@ -139,7 +189,7 @@ function AlignModal({ listId, cardId, onClose, onChanged, onError, t }: {
           })}
         </ul>
       )}
-      <div className="action-bar u-mt-3 u-justify-end"><button type="button" className="secondary" onClick={onClose}>{t('common:close')}</button></div>
+      <div className="action-bar u-mt-3 u-justify-end"><Button variant="secondary" onClick={onClose}>{t('common:close')}</Button></div>
     </Modal>
   );
 }

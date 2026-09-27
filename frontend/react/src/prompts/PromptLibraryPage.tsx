@@ -4,7 +4,9 @@
  * bundled samples + any future BE store via listPrompts).
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useMemo, useState } from 'react';
+import { useStorageSubject } from '../platform/useStorageSubject.js';
 import { useTranslation } from 'react-i18next';
 import { listPrompts, renderLocal } from './promptsClient.js';
 import type { PromptKind, PromptTemplate } from './types.js';
@@ -54,6 +56,8 @@ export function PromptLibraryPage() {
   const { t } = useTranslation('prompts');
   const [prompts, setPrompts] = useState<PromptTemplate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  /** PL-G1 — the read FAILED, as distinct from `prompts === null` = still loading. */
+  const [failed, setFailed] = useState(false);
   const [kindFilter, setKindFilter] = useState<PromptKind | 'all'>('all');
   const [search, setSearch] = useState('');
   const [viewMode, setViewMode] = useViewMode('prompts', 'grid');
@@ -76,14 +80,41 @@ export function PromptLibraryPage() {
   const [refreshNonce, setRefreshNonce] = useState(0);
   const refresh = () => setRefreshNonce((n) => n + 1);
 
+  // ADR 0434 / IDN-3 boot-window tri-state (IDN-11). Prompts are BACKEND-FIRST —
+  // localStorage is only the offline fallback — so a read during the boot window
+  // is bounded rather than wrong. But it is still a read against the WRONG
+  // subject: a returning signed-in user briefly lists the anonymous scope, and
+  // nothing re-lists when auth settles, so the empty state can persist until an
+  // unrelated CRUD mutation bumps `refreshNonce`.
+  //
+  // Depend on the primitive key, never the object `useStorageSubject` returns —
+  // a fresh object every render would re-run this effect on every render
+  // (the `useChatSessions` precedent, chat/hooks/useChatSessions.ts).
+  const subjectState = useStorageSubject();
+  const subjectKey = subjectState.status === 'user' ? subjectState.subject : subjectState.status;
+
   useEffect(() => {
     let cancelled = false;
+    // Hold the skeleton through the boot window instead of fetching twice.
+    // Fetching at `pending` resolves against the ANONYMOUS scope, so the page
+    // paints "no prompts yet" and only then corrects itself — a returning
+    // signed-in user watching their library flash empty is the exact regression
+    // this wiring exists to remove, not to introduce. `prompts` stays null, so
+    // the existing Skeleton grid keeps rendering. Safe to gate on: the subject
+    // ALWAYS settles (auth/localContentAdoption.ts:44-49 resolves it even for
+    // the no-auth and anonymous first-calls — the "stuck pending forever" bug
+    // is already fixed there), so this cannot hang.
+    if (subjectKey === 'pending') return;
     listPrompts({})
       .then((items) => {
-        if (!cancelled) setPrompts(items);
+        if (!cancelled) { setPrompts(items); setFailed(false); setError(null); }
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        // PL-G1 — same shape as MEM-G1: leaving `prompts` at its LOADING sentinel
+        // made a failed read render the skeleton grid with `aria-busy="true"`
+        // indefinitely. A screen reader is told the page is still working, for
+        // as long as it is open.
+        if (!cancelled) { setFailed(true); setError(err instanceof Error ? err.message : String(err)); }
       });
     // Capability discovery in parallel — don't gate the prompt list on it.
     getCapabilities()
@@ -97,7 +128,7 @@ export function PromptLibraryPage() {
     return () => {
       cancelled = true;
     };
-  }, [refreshNonce]);
+  }, [refreshNonce, subjectKey]);
 
   // Run the Tier-1 lint once per prompt-list change, regardless of host
   // advertisement (so we can show a banner even when off). The banner
@@ -138,12 +169,12 @@ export function PromptLibraryPage() {
   const clearFilters = () => { setKindFilter('all'); setSearch(''); };
 
   return (
-    <section>
+    <section data-walkthrough="prompts.page">
       <PageHeader
         eyebrow={t('pageEyebrow')}
         title={t('pageTitle')}
         lede={t('pageLede')}
-        actions={<button type="button" onClick={() => setEditing('new')}>{t('newPrompt')}</button>}
+        actions={<Button variant="primary" onClick={() => setEditing('new')}>{t('newPrompt')}</Button>}
       />
 
       <div className="page-stack">
@@ -192,8 +223,14 @@ export function PromptLibraryPage() {
           <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
         </div>
 
-        {prompts === null ? (
-          <div className="card-grid" aria-busy="true" aria-label={t('loadingPromptsAria')}>
+        {prompts === null && failed ? (
+          <StateCard announce
+            title={t('loadFailedTitle')}
+            body={t('loadFailedBody')}
+            action={<Button variant="secondary" size="sm" onClick={refresh}>{t('retry')}</Button>}
+          />
+        ) : prompts === null ? (
+          <div role="status" className="card-grid" aria-busy="true" aria-label={t('loadingPromptsAria')}>
             {Array.from({ length: 6 }, (_, i) => (
               <div className="surface-card u-grid u-gap-2" key={i}>
                 <Skeleton width="55%" height={16} />
@@ -208,14 +245,14 @@ export function PromptLibraryPage() {
               icon={<FileTextIcon size={26} />}
               title={t('noMatchTitle')}
               body={t('noMatchBody')}
-              action={<button type="button" className="secondary" onClick={clearFilters}>{t('clearFilters')}</button>}
+              action={<Button variant="secondary" onClick={clearFilters}>{t('clearFilters')}</Button>}
             />
           ) : (
             <StateCard
               icon={<FileTextIcon size={26} />}
               title={t('emptyTitle')}
               body={t('emptyBody')}
-              action={<button type="button" onClick={() => setEditing('new')}>{t('newPrompt')}</button>}
+              action={<Button variant="primary" onClick={() => setEditing('new')}>{t('newPrompt')}</Button>}
             />
           )
         ) : viewMode === 'grid' ? (
@@ -295,8 +332,8 @@ function DeletePromptModal({
           {t('deleteModalBodyPrefix')} <strong>{name}</strong>{t('deleteModalBodySuffix')}
         </p>
         <div className="action-bar u-gap-2 u-justify-end u-mt-4">
-          <button type="button" className="secondary" onClick={onClose}>{t('common:cancel')}</button>
-          <button type="button" className="secondary u-text-danger" onClick={onConfirm}>{t('deletePromptButton')}</button>
+          <Button variant="secondary" onClick={onClose}>{t('common:cancel')}</Button>
+          <Button variant="danger" onClick={onConfirm}>{t('deletePromptButton')}</Button>
         </div>
       </div>
     </Modal>
@@ -358,7 +395,7 @@ function PromptEditorModal({
     <Modal label={isEdit ? t('editModalTitle') : t('newModalTitle')} onClose={onClose}>
       <div className="modal-header">
         <h3>{isEdit ? t('editModalTitle') : t('newModalTitle')}</h3>
-        <button type="button" className="secondary" onClick={onClose}>{t('common:cancel')}</button>
+        <Button variant="secondary" onClick={onClose}>{t('common:cancel')}</Button>
       </div>
       <div className="modal-body">
         {saveError && <Notice variant="error">{saveError}</Notice>}
@@ -410,8 +447,8 @@ function PromptEditorModal({
           </div>
         )}
         <div className="action-bar u-gap-2 u-justify-end u-mt-4">
-          <button type="button" className="secondary" onClick={onClose}>{t('common:cancel')}</button>
-          <button type="button" onClick={onSave}>{isEdit ? t('saveChanges') : t('createPrompt')}</button>
+          <Button variant="secondary" onClick={onClose}>{t('common:cancel')}</Button>
+          <Button variant="primary" onClick={onSave}>{isEdit ? t('saveChanges') : t('createPrompt')}</Button>
         </div>
       </div>
     </Modal>
@@ -442,7 +479,7 @@ function PromptDetailModal({ prompt, onClose }: { prompt: PromptTemplate; onClos
     <Modal label={prompt.name ?? prompt.templateId} onClose={onClose}>
       <div className="modal-header">
         <h3>{prompt.name ?? prompt.templateId}</h3>
-        <button type="button" className="secondary" onClick={onClose}>{t('common:close')}</button>
+        <Button variant="secondary" onClick={onClose}>{t('common:close')}</Button>
       </div>
       <div className="modal-body">
         <div className="form-row">
@@ -499,7 +536,7 @@ function PromptDetailModal({ prompt, onClose }: { prompt: PromptTemplate; onClos
         <p className="muted">
           {t('localRenderNotePrefix')}{' '}
           <code>capabilities.prompts.supported</code>{t('localRenderNoteMiddle')}{' '}
-          <code>POST /v1/prompts:render</code> {t('localRenderNoteSuffix')}
+          <code>POST /prompts:render</code> {t('localRenderNoteSuffix')}
         </p>
       </div>
     </Modal>

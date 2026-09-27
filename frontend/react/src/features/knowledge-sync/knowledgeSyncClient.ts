@@ -1,14 +1,43 @@
 /**
  * Knowledge-sync client (ADR 0107) — host-extension, non-normative. Wraps
- * /v1/host/openwop-app/knowledge-sync/*. The backend 404s every route when the
+ * /host/openwop-app/knowledge-sync/*. The backend 404s every route when the
  * `knowledge-sync` toggle is off, so the panel self-hides on a failed list.
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 
-const BASE = `${config.baseUrl}/v1/host/openwop-app/knowledge-sync`;
+const BASE = `${config.baseUrl}/host/openwop-app/knowledge-sync`;
 
 export type SyncCadence = '15m' | 'hourly' | 'daily';
 export type SyncStatus = 'active' | 'paused' | 'error';
+
+/** ADR 0605 Tier 6 (`KSU-3`) — WHY a source is paused. A revoked credential needs
+ *  "reconnect your account", not "un-pause"; absent ⇒ the user paused it.
+ *
+ *  ADR 0605 R2 (`KSC-21`) adds `creator-erased`: a DSAR erased the member whose
+ *  identity every pass acts as, so the backend paused the source and tombstoned
+ *  its `createdBy`. The panel deliberately does NOT branch on it the way it
+ *  branches on `connection-revoked`, and the reason is that the two states already
+ *  render differently: this one always carries a `lastError`, which the panel
+ *  renders as a focusable warning `<Notice>` naming the exit ("add the folder again
+ *  with your own connected account"), whereas a plain `user` pause carries none.
+ *  A dedicated chip + four locales is a real improvement and is filed rather than
+ *  smuggled in — the type is widened here so it stops claiming two values when the
+ *  wire has three. */
+export type PausedReason = 'user' | 'connection-revoked' | 'creator-erased';
+
+/** ADR 0605 Tier 6 (`KSU-1`) — what the last pass DID, persisted by the backend so
+ *  a SCHEDULED run can be reported at all. `pruned` is the deletion count. */
+export interface SyncRunSummary {
+  at: string;
+  ingested: number;
+  pruned: number;
+  unchanged: number;
+  failed: number;
+  skippedMedia: number;
+  /** Set when the provider listing could not be proved complete, in which case
+   *  `pruned` is 0 BY REFUSAL rather than because nothing was deleted. */
+  listingIncomplete?: string;
+}
 
 export interface SyncSource {
   id: string;
@@ -23,6 +52,8 @@ export interface SyncSource {
   status: SyncStatus;
   lastSyncedAt?: string;
   lastError?: string;
+  pausedReason?: PausedReason;
+  lastRun?: SyncRunSummary;
 }
 
 export interface SyncRunResult {
@@ -30,6 +61,12 @@ export interface SyncRunResult {
   pruned: number;
   unchanged: number;
   failed: number;
+  /** ADR 0605 Tier 6 (`KSU-8`) — was DROPPED at this type while the backend computed
+   *  and logged it, so a media-off source over a folder of 40 images toasted
+   *  "0 updated, 0 removed, 0 failed": a total no-op that read as a clean full sync. */
+  skippedMedia: number;
+  /** ADR 0605 Tier 1 — the folder could not be fully read, so NOTHING was pruned. */
+  listingIncomplete?: string;
   errors: string[];
 }
 
@@ -41,10 +78,21 @@ async function jsonOrThrow(res: Response): Promise<unknown> {
   return res.json();
 }
 
-/** List the org's sync sources. Rejects (404) when the feature is off — the panel
- *  treats that as "render nothing". */
-export async function listSyncSources(orgId: string): Promise<SyncSource[]> {
+/**
+ * List the org's sync sources. Returns **`null`** for exactly one condition — a
+ * 404, meaning the feature is off for this tenant — and **throws** on everything
+ * else.
+ *
+ * This used to reject for 404 too, so the panel could not tell "feature off" from
+ * "server unreachable" and swallowed both into `available = false`, i.e. rendering
+ * nothing. Its comment claimed a distinction ("404 ⇒ feature off") that the client
+ * never actually made. Same `null`-means-one-thing contract as
+ * `profile-memory/memoryExtractionClient.getExtractionGrant`, which is the
+ * established shape for this in the repo.
+ */
+export async function listSyncSources(orgId: string): Promise<SyncSource[] | null> {
   const res = await fetch(`${BASE}?orgId=${encodeURIComponent(orgId)}`, fetchOpts({ headers: authedHeaders() }));
+  if (res.status === 404) return null;
   return ((await jsonOrThrow(res)) as { sources: SyncSource[] }).sources;
 }
 

@@ -77,6 +77,9 @@ export function createAwsKmsClient(keyId: string): KmsClient {
   }
   return {
     keyName: () => keyId,
+    // ADR 0024 follow-up: resolve the SDK without a KMS round-trip, so boot can
+    // tell whether this backend could ever work.
+    preflight: async () => { await getClient(); },
     async encrypt(plaintextDek) {
       const { mod, client } = await getClient();
       const resp = await client.send(new mod.EncryptCommand({ KeyId: keyId, Plaintext: plaintextDek }));
@@ -97,6 +100,46 @@ export function createAwsKmsClient(keyId: string): KmsClient {
  * DefaultAzureCredential (managed identity on Container Apps / env creds in
  * dev). `@azure/keyvault-keys` + `@azure/identity` are loaded lazily.
  */
+/**
+ * Why this is not just `"…are not installed"`.
+ *
+ * `@azure/keyvault-keys` + `@azure/identity` are declared `optionalDependencies`,
+ * and npm does not reliably install the transitive `dependencies` OF an optional
+ * dependency. Observed on npm 11.6.2: both Azure packages install, but
+ * `@azure/core-rest-pipeline` and `@azure/core-client` — which they `require` —
+ * do not, so `import('@azure/identity')` fails with ERR_MODULE_NOT_FOUND on a
+ * package the operator never named. (npm then wants to REWRITE the lockfile to
+ * record that incomplete tree, which is how this surfaced.)
+ *
+ * In that state the old message was actively misleading: it told the operator to
+ * run `npm install @azure/keyvault-keys @azure/identity`, which npm considers
+ * already satisfied, so the advice does nothing and the operator is left with an
+ * error that names the wrong problem. Name the module that is ACTUALLY missing.
+ *
+ * Exported for the test — the branch matters more than the string.
+ */
+export function azureLoadFailureMessage(err: unknown, keysPkg: string, idPkg: string): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const missing = /Cannot find package '([^']+)'/.exec(message)?.[1];
+  // A missing package that is NOT one of the two we asked for means the Azure
+  // packages themselves are present but their dependency tree is incomplete.
+  if (missing && missing !== keysPkg && missing !== idPkg) {
+    return (
+      `OPENWOP_BYOK_KMS_KEY selects Azure Key Vault. \`${keysPkg}\` and \`${idPkg}\` ARE ` +
+      `installed, but their dependency \`${missing}\` is not — npm does not always install ` +
+      `the transitive dependencies of an optionalDependency, which leaves the Azure backend ` +
+      `present but unloadable. Install the missing package explicitly: ` +
+      `\`npm install ${missing}\`. Underlying error: ${message}`
+    );
+  }
+  return (
+    `OPENWOP_BYOK_KMS_KEY selects Azure Key Vault but the optional ` +
+    `${keysPkg} / ${idPkg} packages are not installed. Run ` +
+    `\`npm install ${keysPkg} ${idPkg}\`. ` +
+    `Underlying error: ${message}`
+  );
+}
+
 export function createAzureKeyVaultKmsClient(keyUrl: string): KmsClient {
   const ALGO = 'RSA-OAEP-256' as const;
   interface AzureCrypto {
@@ -117,18 +160,17 @@ export function createAzureKeyVaultKmsClient(keyUrl: string): KmsClient {
           return new k.CryptographyClient(keyUrl, new id.DefaultAzureCredential());
         })
         .catch((err) => {
-          throw new Error(
-            `OPENWOP_BYOK_KMS_KEY selects Azure Key Vault but the optional ` +
-              `@azure/keyvault-keys / @azure/identity packages are not installed. Run ` +
-              `\`npm install @azure/keyvault-keys @azure/identity\`. ` +
-              `Underlying error: ${(err as Error).message}`,
-          );
+          throw new Error(azureLoadFailureMessage(err, keysPkg, idPkg));
         });
     }
     return clientPromise;
   }
   return {
     keyName: () => keyUrl,
+    // ADR 0024 follow-up. This is the backend the deferral actually bit: the
+    // Azure dependency tree can be incomplete while the two named packages are
+    // present, so "configured" meant nothing until something tried to use it.
+    preflight: async () => { await getClient(); },
     async encrypt(plaintextDek) {
       const client = await getClient();
       const resp = await client.wrapKey(ALGO, plaintextDek);

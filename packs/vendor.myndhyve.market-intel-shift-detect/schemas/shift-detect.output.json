@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-shift-detect/1.0.0/shift-detect.output.json",
+  "title": "MarketIntelShiftDetectOutput",
+  "type": "object",
+  "required": ["alert"],
+  "properties": {
+    "alert": {
+      "type": "object",
+      "required": ["summary", "hasShift"],
+      "properties": {
+        "newPains": { "type": "array" },
+        "resolvedPains": { "type": "array" },
+        "intensifiedPains": { "type": "array" },
+        "angleDeltas": { "type": "array" },
+        "summary": { "type": "string" },
+        "hasShift": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

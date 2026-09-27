@@ -8,14 +8,17 @@
 export const messages = {
   // SubjectKnowledgePanel — errors / notices
   loadError: 'Échec du chargement des connaissances.',
-  actionError: 'Échec de l\'action.',
+  orgsFailed: "Vos espaces de travail n’ont pas pu être chargés : ce n’est pas une liste vide, elle est inconnue.",
+  orgsFailedInline: 'Choisissez un espace de travail une fois la liste chargée.',
+  orgsNoneYet: 'Aucun espace de travail pour l’instant — créez-en un pour ajouter une source de connaissances.',
+  actionError: 'Échec de l’action.',
   sourceCreated: 'Source de connaissances créée.',
   documentAdded: 'Document ajouté.',
   documentRemoved: 'Document supprimé.',
   sourceUnbound: 'Source dissociée.',
   // SubjectKnowledgePanel — list / states
   loadingTitle: 'Chargement des connaissances…',
-  emptyTitle: 'Aucune source de connaissances pour l\'instant',
+  emptyTitle: 'Aucune source de connaissances pour l’instant',
   // CreateSource — form
   workspaceLabel: 'Espace de travail',
   newSourceLabel: 'Nom de la nouvelle source',
@@ -40,10 +43,18 @@ export const messages = {
   search: 'Rechercher',
   note: 'note',
   external: 'externe',
-  noMatches: 'Aucune correspondance pour l\'instant.',
+  noMatches: 'Aucune correspondance pour l’instant.',
   syncedBadge: 'Synchronisé',
   syncedTitle: 'Synchronisé automatiquement depuis {{source}} — le contenu est en lecture seule ici',
   syncedNotice: 'Cette collection est synchronisée avec vos éléments {{source}}. Gérez-les sur cette page ; les documents ici sont en lecture seule.',
   syncedSource_strategy: 'Stratégie',
   'syncedSource_priority-matrix': 'Matrice de priorités',
+  deleteDocConfirm: 'Supprimer ce document ?',
+  unbindConfirm: 'Détacher cette source ?',
+  // KB-UX-3 / ADR 0583 — une source en ÉCHEC est nommée, jamais confondue avec « aucune correspondance ».
+  retrievePartial: 'Une partie de ces connaissances n’a pas pu être fouillée : cette réponse est incomplète.',
+  retrievePartialSources: 'Non fouillé : {{sources}}',
+  retrieveSource_kb: 'documents',
+  retrieveSource_memory: 'notes',
+  errorAnnounce: 'Le panneau de connaissances a signalé un problème — le détail est affiché à l’écran.',
 } as const;

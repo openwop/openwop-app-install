@@ -47,6 +47,8 @@ export interface ScoreOptions {
   channel?: BrandChannel;
   /** Override the pass threshold (default 70). */
   passThreshold?: number;
+  /** ADR 0354 P3 — ADDITIVE parent-brand bans (resolveEffectiveBrandRules). */
+  extraBannedPhrases?: string[];
 }
 
 /**
@@ -66,7 +68,8 @@ export function scoreComplianceDeterministic(
 
   // ── HARD: banned phrases (caps the score) ──
   let hasBannedPhrase = false;
-  for (const phrase of brand.keyPhrases.bannedPhrases) {
+  const allBanned = [...brand.keyPhrases.bannedPhrases, ...(opts.extraBannedPhrases ?? [])];
+  for (const phrase of allBanned) {
     if (containsPhrase(lower, phrase)) {
       hasBannedPhrase = true;
       issues.push({
@@ -139,6 +142,11 @@ export interface ResolveVoiceOptions {
   channel?: BrandChannel;
   /** Apply a named tone register over the base voice. */
   register?: string;
+  /** ADR 0354 P4 — prefer this persona's channel rule when one exists. */
+  personaId?: string;
+  /** ADR 0354 P3 (BRAND-CODE-4 grade fix) — ADDITIVE parent-brand bans
+   *  (resolveEffectiveBrandRules), appended to the NEVER-use list. */
+  extraBannedPhrases?: string[];
 }
 
 /**
@@ -148,7 +156,14 @@ export interface ResolveVoiceOptions {
  */
 export function resolveVoice(brand: Brand, opts: ResolveVoiceOptions = {}): string {
   const vp = brand.voiceProfile;
-  const channelRule = opts.channel ? brand.channelVoiceRules.find((r) => r.channel === opts.channel) : undefined;
+  // ADR 0354 P4 — a persona-specific rule wins over the channel-generic one.
+  const channelRule = opts.channel
+    ? (opts.personaId
+        ? brand.channelVoiceRules.find((r) => r.channel === opts.channel && r.personaId === opts.personaId)
+        : undefined)
+      ?? brand.channelVoiceRules.find((r) => r.channel === opts.channel && !r.personaId)
+      ?? brand.channelVoiceRules.find((r) => r.channel === opts.channel)
+    : undefined;
   const register = opts.register ? vp.toneRegisters.find((r) => r.name === opts.register) : undefined;
   const formality = channelRule?.formalityOverride ?? register?.formalityLevel ?? vp.formalityLevel;
 
@@ -177,8 +192,9 @@ export function resolveVoice(brand: Brand, opts: ResolveVoiceOptions = {}): stri
 
   const avoid = [...vp.avoidPhrases, ...(channelRule?.avoidPhrases ?? [])];
   if (avoid.length) lines.push(`Avoid (off-voice): ${avoid.join('; ')}`);
-  if (brand.keyPhrases.bannedPhrases.length) {
-    lines.push(`NEVER use (banned): ${brand.keyPhrases.bannedPhrases.join('; ')}`);
+  const banned = [...new Set([...brand.keyPhrases.bannedPhrases, ...(opts.extraBannedPhrases ?? [])])];
+  if (banned.length) {
+    lines.push(`NEVER use (banned): ${banned.join('; ')}`);
   }
   if (vp.samplePhrases.length) lines.push(`\nOn-brand sample phrasing: ${vp.samplePhrases.join('; ')}`);
 

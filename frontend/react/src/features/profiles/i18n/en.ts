@@ -6,12 +6,20 @@
  * duplicated. Plural keys use i18next `_one`/`_other` suffixes.
  */
 export const messages = {
+  directoryFailedTitle: 'Could not load the team directory',
+  directoryFailedBody: 'This is a failed read, not an empty directory — it does not mean your teammates have no profiles.',
+  directoryRetry: 'Try again',
   // ── My Profile page chrome ────────────────────────────────────────────
   eyebrow: 'Platform',
   title: 'My Profile',
   lede: 'Your self-service profile. Visible to your team in the directory.',
-  loadProfileFailed: 'Failed to load your profile.',
-  loadBoardFailed: 'Failed to load your board.',
+  profileFailedTitle: 'Could not load your profile',
+  profileFailedBody: 'This is a failed read — your profile is intact on the server.',
+  boardFailedTitle: 'Could not load your board',
+  boardFailedBody: 'This is a failed read, not an empty board.',
+  activityFailedTitle: 'Could not load your activity',
+  activityFailedBody: 'This is a failed read, not an empty feed — it does not mean you have no activity.',
+  retry: 'Try again',
 
   // Tabs
   tabProfile: 'Profile',
@@ -31,11 +39,28 @@ export const messages = {
   emailUnverified: 'Email unverified',
   completenessLabel: 'Profile completeness: {{percent}}',
   upload: 'Upload',
+  uploading: 'Uploading…',
+
+  // Portfolio (PROF-UX-4)
+  portfolioTitle: 'Portfolio',
+  portfolioHint: 'Work images shown on your card in the team directory.',
+  portfolioEmpty: 'No portfolio images yet. Add one to show your work.',
+  addPortfolioImage: 'Add image',
+  removePortfolioImageN: 'Remove portfolio image {{index}}',
+  portfolioImageAlt: 'Portfolio image',
+  portfolioImageUnavailable: 'Image unavailable',
+  portfolioAdded: 'Portfolio image added.',
+  portfolioAddFailed: 'Could not add the portfolio image.',
+  portfolioRemoved: 'Portfolio image removed.',
+  portfolioRemoveFailed: 'Could not remove the portfolio image.',
 
   // Details fields
   details: 'Details',
   yourName: 'Your name',
   yourNamePlaceholder: 'e.g. Jordan Rivera',
+  preferredNameLabel: 'Preferred name',
+  preferredNamePlaceholder: 'e.g. David',
+  preferredNameHint: 'What agents should call you. Defaults to your first name.',
   jobTitleLabel: 'Job title',
   jobTitlePlaceholder: 'Staff Engineer',
   departmentLabel: 'Department',
@@ -58,6 +83,13 @@ export const messages = {
   skills: 'Skills',
   skillsHint: 'Endorsements from teammates are preserved when you edit a skill you keep.',
   skillPlaceholder: 'Skill',
+  skillNameAria: 'Skill name',
+  proficiencyAria: 'Proficiency level (1–5)',
+  proficiencyLevel1: '1 — Beginner',
+  proficiencyLevel2: '2 — Developing',
+  proficiencyLevel3: '3 — Proficient',
+  proficiencyLevel4: '4 — Advanced',
+  proficiencyLevel5: '5 — Expert',
   removeSkillLabel: 'Remove skill {{name}}',
   endorsedCount: '{{count}} endorsed',
   addSkill: 'Add skill',
@@ -65,7 +97,6 @@ export const messages = {
 
   // Board intro (rich — numbered <0><1><2> are <strong> spans)
   boardIntro: '<0>Your board.</0> New work arrives in <1>To Do</1>. <2>Drag a card</2> between lanes to move it along — dropping a card into a trigger lane runs its workflow on your behalf.',
-  loadingBoard: 'Loading your board…',
 
   // ── Toasts (My Profile) ───────────────────────────────────────────────
   hoursRangeError: 'Hours / week must be a number between 0 and 168.',
@@ -80,7 +111,6 @@ export const messages = {
   avatarRemoveFailed: 'Could not remove avatar.',
 
   // ── Activity tab ──────────────────────────────────────────────────────
-  loadingActivity: 'Loading activity…',
   noActivityTitle: 'No activity yet',
   noActivityBody: 'Run a workflow from My Board or a schedule, and your activity — with outcomes and timestamps — will appear here.',
   sourceHeartbeat: 'picked up a task',
@@ -134,6 +164,10 @@ export const messages = {
   // Toolbar
   searchPlaceholder: 'Search by name, role, skill…',
   searchAriaLabel: 'Search the team directory',
+  filterGroup: 'Filter the team directory',
+  filterDepartmentAria: 'Filter by department',
+  allDepartments: 'All departments',
+  clearFilters: 'Clear filters',
   countFiltered: '{{shown}} of {{total}}',
   countPeople_one: 'person',
   countPeople_other: 'people',
@@ -143,6 +177,7 @@ export const messages = {
   noProfilesBody: 'Profiles appear here as teammates fill them in.',
   noMatchesTitle: 'No matches',
   noMatchesBody: 'Nobody matches "{{query}}". Try a different name, role, or skill.',
+  noMatchesBodyGeneric: 'No teammates match the current filters.',
 
   // Availability labels
   availabilityAvailable: 'Available',
@@ -159,10 +194,24 @@ export const messages = {
 
   // Skill endorse affordance
   cannotEndorseOwn: 'You cannot endorse your own skill',
+  endorseIdentityUnknown: 'Endorsing is unavailable — we could not confirm which profile is yours',
   removeEndorsement: 'Remove your endorsement',
   endorseSkill: 'Endorse this skill',
 
   // Self footer
   completenessAria: 'Your profile completeness',
   editProfile: 'Edit profile',
+  actionFailed: 'Something went wrong. Please try again.',
+
+  // ── Feature loop 2026-09 it.3 (PROF-UX-8 / 13 / 14 / 15) ─────────────
+  profileTabsAria: 'Profile sections',
+  portfolioMustBeImage: 'Portfolio image must be an image.',
+  imageTooLarge: 'That image is too large (max {{mib}} MiB).',
+  workflowAssigned: 'Workflow assigned.',
+  workflowUnassigned: 'Workflow unassigned.',
+  // PROF-UX-14 render slot — the meter's "what next" caption, from `completenessMissing`.
+  completenessNext: 'Next: add {{items}}',
+  fieldAvatar: 'Avatar',
+  fieldEquipment: 'Equipment',
+  fieldInterests: 'Interests',
 } as const;

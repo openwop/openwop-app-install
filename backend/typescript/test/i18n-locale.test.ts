@@ -91,4 +91,13 @@ describe('core-purity boundary (ADR 0001)', () => {
       }
     }
   });
+
+  it('host/contentLocales imports nothing from features/ (ADR 0406 Phase 1)', () => {
+    const file = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'host', 'contentLocales.ts');
+    const src = readFileSync(file, 'utf8');
+    const importLines = src.split('\n').filter((l) => /^\s*import\b/.test(l) || /\bfrom\s+['"]/.test(l));
+    for (const line of importLines) {
+      expect(line, line.trim()).not.toMatch(/features\//);
+    }
+  });
 });

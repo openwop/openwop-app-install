@@ -1,11 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/chat-completion.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/chat-completion.input.json",
   "title": "ChatCompletionInput",
   "type": "object",
-  "required": [
-    "messages"
-  ],
   "properties": {
     "messages": {
       "type": "array",
@@ -33,7 +30,33 @@
         "additionalProperties": false
       },
       "description": "Conversation messages in turn order. The final message MUST be role=user (the host MAY relax this for completion-only providers but conformance MUST emit `role: 'user'` last). System messages MAY appear anywhere but typically at the start; hosts MAY merge them into config.systemPrompt internally."
+    },
+    "prompt": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Shorthand for a single user turn. `toMessages` maps it to `[{role:'user',content:<value>}]`."
+    },
+    "text": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Shorthand for a single user turn (alias of `prompt`)."
+    },
+    "message": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Shorthand for a single user turn (alias of `prompt`)."
+    },
+    "content": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Shorthand for a single user turn (alias of `prompt`)."
+    },
+    "input": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Shorthand for a single user turn (alias of `prompt`); also the port a portless edge lands on."
     }
   },
-  "additionalProperties": false
+  "additionalProperties": true,
+  "description": "Input for the chat-completion node. `messages` is the CANONICAL form, but it is NOT required: `toMessages` (packs/core.openwop.ai/index.mjs) accepts, in order \u2014 (1) a non-empty `messages` array; (2) any of `prompt`/`text`/`message`/`content`/`input` as a non-empty string; (3) ANY other string-valued property; (4) all remaining structured properties, JSON-stringified into one user turn. Only a completely empty input object yields no messages.\n\nThis schema previously declared `required: [\"messages\"]` with `additionalProperties: false`, which was wrong in both directions: it demanded a field the node does not need, and forbade the exact alternative fields the node reads. Nothing validates node inputs at dispatch (ADR 0498 \u00a7Open), so the schema was pure documentation \u2014 and it documented a contract the implementation never had."
 }

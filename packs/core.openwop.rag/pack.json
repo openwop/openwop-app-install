@@ -1,7 +1,7 @@
 {
   "name": "core.openwop.rag",
-  "version": "1.0.1",
-  "description": "Retrieval-Augmented-Generation primitives: loaders, splitters, vector ops (thin wrappers over core.openwop.db.vector-*), and retrievers (basic / multi-query / contextual-compression).",
+  "version": "1.0.2",
+  "description": "Retrieval-Augmented-Generation primitives: loaders, splitters, vector ops (thin wrappers over core.openwop.db.vector-*), and retrievers (basic / multi-query / contextual-compression). Agent-tooling only (ADR 0643 D2): these nodes are the tool surface an agent pack allowlists; the host's KB WRITE surface for chains is `feature.kb.nodes`, and this pack is not the way a workflow ingests, deletes or reindexes a tenant collection.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
   "homepage": "https://openwop.dev/packs/core.openwop.rag",

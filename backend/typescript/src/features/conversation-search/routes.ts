@@ -13,9 +13,8 @@
  */
 import type { Request, Response, NextFunction } from 'express';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
-import { listConversationMetas, type ConversationType } from '../../host/conversationStore.js';
-import { isVisibleToAsync } from '../../host/conversationVisibility.js';
-import { searchConversations, type SearchScope } from './searchEngine.js';
+import type { ConversationType } from '../../host/conversationStore.js';
+import { searchVisibleConversations } from './searchEngine.js';
 
 const MAX_LIMIT = 50;
 const VALID_TYPES: ReadonlySet<string> = new Set<ConversationType>(['agent', 'person', 'group', 'workspace']);
@@ -49,28 +48,13 @@ export function registerConversationSearchRoutes(deps: RouteDeps): void {
       const limitRaw = Number.parseInt(param(req, 'limit') ?? '', 10);
       const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, MAX_LIMIT) : 20;
 
-      // Resolve the caller's VISIBLE conversations through the shared ADR 0043
-      // predicate, then pass ONLY those ids into the search scope.
-      const [sessions, metas] = await Promise.all([
-        storage.listChatSessions(tenantId),
-        listConversationMetas(tenantId),
-      ]);
-      const byId = new Map(metas.map((m) => [m.conversationId, m]));
-      const shown = await Promise.all(
-        sessions.map((s) => isVisibleToAsync(byId.get(s.sessionId) ?? null, tenantId, actingUserId)),
-      );
-      const visibleSessions = sessions.filter((_, i) => shown[i]);
-
-      const scope: SearchScope = {
-        tenantId,
-        visibleConversationIds: visibleSessions.map((s) => s.sessionId),
-        titleById: new Map(visibleSessions.map((s) => [s.sessionId, s.title])),
-        typeById: new Map(visibleSessions.map((s) => [s.sessionId, byId.get(s.sessionId)?.type ?? 'agent'])),
+      // XCH-HOLE-5 (Wave 4): visibility resolution + scope + query live in the
+      // ONE shared helper so this route and the agent tool cannot drift.
+      const hits = await searchVisibleConversations(storage, tenantId, actingUserId, q, {
         ...(type ? { type } : {}),
         ...(role ? { role } : {}),
         limit,
-      };
-      const hits = await searchConversations(storage, scope, q);
+      });
       res.json({ hits });
     } catch (err) {
       next(err);

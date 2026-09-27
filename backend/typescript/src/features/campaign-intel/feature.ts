@@ -13,14 +13,23 @@
 import type { BackendFeature } from '../types.js';
 import { registerCampaignIntelRoutes } from './routes.js';
 import { buildCampaignIntelSurface } from './surface.js';
+import { registerCampaignIntelAgentTools } from './agentTools.js';
 
 export const campaignIntelFeature: BackendFeature = {
   id: 'campaign-intel',
-  registerRoutes: (deps) => registerCampaignIntelRoutes(deps),
+  registerRoutes: (deps) => {
+    registerCampaignIntelRoutes(deps);
+    // CFP-1 (docs/chat-first-port/e4-campaign-connectors-intel.md, C14) — bridge
+    // the intel surface into the ONE chat so the Campaign Intelligence Analyst has
+    // REAL tools (budget-optimize / forecast / plan-budget) instead of a
+    // silently-dropped node-typeId allowlist. The ADR 0308 D2 feature-registered-
+    // builtin seam; per-tenant toggle honesty lives inside each tool's run.
+    registerCampaignIntelAgentTools();
+  },
   surface: { id: 'campaign-intel', build: buildCampaignIntelSurface },
   requiredPacks: [
-    { name: 'feature.campaign-intel.nodes', version: '1.0.0' },
-    { name: 'feature.campaign-intel.agents', version: '1.0.0' },
+    { name: 'feature.campaign-intel.nodes', version: '1.1.1' },
+    { name: 'feature.campaign-intel.agents', version: '1.2.1' },
   ],
   toggleDefault: {
     id: 'campaign-intel',
@@ -32,4 +41,9 @@ export const campaignIntelFeature: BackendFeature = {
     bucketUnit: 'tenant',
     salt: 'campaign-intel',
   },
+  // ADR 0200 Phase 1 — SOFT dep (advisory, never a lock): Intelligence analyzes
+  // performance records that Campaign Connectors syncs (performanceService); it
+  // reads the store directly (toggle-decoupled), so it degrades to "no data yet"
+  // rather than orphaning. The console suggests enabling connectors.
+  recommends: ['campaign-connectors'],
 };

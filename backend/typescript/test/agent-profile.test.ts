@@ -58,7 +58,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -232,6 +232,51 @@ describe('agent profile autonomy sync + data preservation (ADR 0101)', () => {
     expect(after?.twin?.userId).toBe('user-7');
     expect(after?.permissions?.never).toEqual(['email.send']);
   });
+
+  it('DATA-2 — a heal racing a user edit never clobbers the edit (CAS re-read-merge)', async () => {
+    const t = 'tenant-cas';
+    const id = 'host:cas-1';
+    await upsertAgentProfile(t, id, { roleKey: 'r', autonomy: { specLevel: 'recommend' } });
+    // Interleave: a user governance edit lands BETWEEN the heal's read and its
+    // swap. Simulated by racing both — whichever order the scheduler picks,
+    // the end state must contain BOTH the edit and the capability.
+    await Promise.all([
+      activateAgentCapability(t, id, 'challenge-authoring', { roleKey: 'r', autonomy: { specLevel: 'recommend' } }),
+      upsertAgentProfile(t, id, { roleKey: 'r', permissions: { read: [], write: [], never: ['email.send'] }, autonomy: { specLevel: 'recommend' } }),
+    ]);
+    // Assert DIRECTLY on the race outcome (terminal-grade F-4: a repair call
+    // here made the capability assertion tautological). Whichever order the
+    // scheduler picked, CAS re-read-merge on the heal + prior-merge on the
+    // upsert must leave BOTH facts standing.
+    const merged = await getAgentProfile(t, id);
+    expect(merged?.capabilities).toContain('challenge-authoring');
+    expect(merged?.permissions?.never).toEqual(['email.send']);
+  });
+
+  it('DATA-2 — concurrent identical activations converge on ONE capability entry', async () => {
+    const t = 'tenant-cas2';
+    const id = 'host:cas-2';
+    await Promise.all(Array.from({ length: 4 }, () =>
+      activateAgentCapability(t, id, 'challenge-authoring', { roleKey: 'r', autonomy: { specLevel: 'recommend' } })));
+    const p2 = await getAgentProfile(t, id);
+    expect(p2?.capabilities?.filter((c) => c === 'challenge-authoring')).toHaveLength(1);
+  });
+
+  it('F-8 — concurrent DIFFERENT-capability creators both land (CAS insert, loser merges)', async () => {
+    const t = 'tenant-cas3';
+    const id = 'host:cas-3';
+    await Promise.all([
+      activateAgentCapability(t, id, 'challenge-authoring', { roleKey: 'r', autonomy: { specLevel: 'recommend' } }),
+      activateAgentCapability(t, id, 'assistant', { roleKey: 'r', autonomy: { specLevel: 'recommend' } }),
+    ]);
+    const p3 = await getAgentProfile(t, id);
+    expect(p3?.capabilities).toContain('challenge-authoring');
+    expect(p3?.capabilities).toContain('assistant');
+    // Exactly two — a lost-then-merged insert must not duplicate either entry.
+    // (Scheduling usually makes both creators read-absent in the same tick and
+    // exercise the CAS-loser continue; the invariant holds either way.)
+    expect(p3?.capabilities).toHaveLength(2);
+  });
 });
 
 describe('agent profile routes — happy path', () => {
@@ -325,7 +370,7 @@ describe('agent profile routes — auth required', () => {
       enableConsoleTracer: false,
     });
     await new Promise<void>((res) => {
-      authServer = app.listen(0, () => { AUTH_BASE = `http://127.0.0.1:${(authServer.address() as AddressInfo).port}`; res(); });
+      authServer = app.listen(0, '127.0.0.1', () => { AUTH_BASE = `http://127.0.0.1:${(authServer.address() as AddressInfo).port}`; res(); });
     });
   });
   afterAll(async () => {
@@ -378,5 +423,86 @@ describe('agent profile routes — tenant isolation + fail-closed', () => {
     const a = await newTenantClient();
     expect((await a('GET', '/v1/host/openwop-app/agents/host:nope-00000000/profile')).status).toBe(404);
     expect((await a('PUT', '/v1/host/openwop-app/agents/host:nope-00000000/profile', SAMPLE_BODY)).status).toBe(404);
+  });
+});
+
+/**
+ * ADR 0373 Phase 1b — the tenant ELECTION surface for a capability.
+ *
+ * This exists because the /ux-review of Phase 1a asked "how does a real user
+ * turn this on?" and the answer was: they can't. The profile PUT deliberately
+ * does NOT own `capabilities` (they belong to capability activation), and the
+ * only writer was a feature-internal bootstrap — so the capability was
+ * activatable only from a test. Without these routes, ADR 0373 would have
+ * shipped the very "implemented but unreachable" defect it was written to cure.
+ *
+ * Authz is only observable at the HTTP boundary, so these are route tests.
+ */
+describe('ADR 0373 — capability election routes', () => {
+  const DEEP = '/capabilities/deep-investigation';
+
+  it('elects, reflects, and revokes the capability (the full round trip)', async () => {
+    const a = await newTenantClient();
+    const id = await makeAgent(a, 'Research Analyst');
+
+    // Not elected yet.
+    const before = await a<{ capabilities?: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    expect(bodyOf(before).capabilities ?? []).not.toContain('deep-investigation');
+
+    const elected = await a<{ capabilities: string[] }>('PUT', `/v1/host/openwop-app/agents/${id}${DEEP}`);
+    expect(elected.status).toBe(200);
+    expect(bodyOf(elected).capabilities).toContain('deep-investigation');
+
+    // It is durable + readable through the profile the exchange seam reads.
+    const after = await a<{ capabilities: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    expect(bodyOf(after).capabilities).toContain('deep-investigation');
+
+    // Electing twice is idempotent (no duplicate entries).
+    await a('PUT', `/v1/host/openwop-app/agents/${id}${DEEP}`);
+    const twice = await a<{ capabilities: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    expect(bodyOf(twice).capabilities.filter((c) => c === 'deep-investigation')).toHaveLength(1);
+
+    // REVOKE — a grant that cannot be revoked is a governance defect.
+    const revoked = await a<{ capabilities: string[] }>('DELETE', `/v1/host/openwop-app/agents/${id}${DEEP}`);
+    expect(revoked.status).toBe(200);
+    expect(bodyOf(revoked).capabilities).not.toContain('deep-investigation');
+    // Revoking again is a no-op, not an error.
+    expect((await a('DELETE', `/v1/host/openwop-app/agents/${id}${DEEP}`)).status).toBe(200);
+  });
+
+  it('REFUSES a feature-owned capability — a tenant must not hand-activate assistant', async () => {
+    // THE load-bearing test: `ensureAssistantAgent` resolves the assistant BY
+    // capability with a seeded-holder bootstrap, so a hand-activated second
+    // holder would make `findAssistantAgent` ambiguous — an integrity break
+    // reachable from a plain tenant-owner request. The allowlist is what stops
+    // it; without this test the allowlist is just a comment.
+    const a = await newTenantClient();
+    const id = await makeAgent(a, 'Not The Assistant');
+    const res = await a('PUT', `/v1/host/openwop-app/agents/${id}/capabilities/assistant`);
+    expect(res.status, 'assistant is feature-owned, not tenant-electable').toBe(404);
+    const profile = await a<{ capabilities?: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    expect(bodyOf(profile).capabilities ?? []).not.toContain('assistant');
+  });
+
+  it('404s an unknown capability name without confirming it exists', async () => {
+    const a = await newTenantClient();
+    const id = await makeAgent(a, 'Analyst');
+    expect((await a('PUT', `/v1/host/openwop-app/agents/${id}/capabilities/not-a-capability`)).status).toBe(404);
+  });
+
+  it('tenant isolation — tenant B cannot elect on tenant A\'s agent', async () => {
+    const a = await newTenantClient();
+    const b = await newTenantClient();
+    const id = await makeAgent(a, 'A-owned Analyst');
+    expect((await b('PUT', `/v1/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant elect must 404').toBe(404);
+    expect((await b('DELETE', `/v1/host/openwop-app/agents/${id}${DEEP}`)).status, 'cross-tenant revoke must 404').toBe(404);
+    // A's agent is untouched.
+    const profile = await a<{ capabilities?: string[] }>('GET', `/v1/host/openwop-app/agents/${id}/profile`);
+    expect(bodyOf(profile).capabilities ?? []).not.toContain('deep-investigation');
+  });
+
+  it('fails closed on an unknown agent id', async () => {
+    const a = await newTenantClient();
+    expect((await a('PUT', `/v1/host/openwop-app/agents/host:nope-00000000${DEEP}`)).status).toBe(404);
   });
 });

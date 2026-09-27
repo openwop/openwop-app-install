@@ -20,7 +20,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, res); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
   const kb = getToggleDefault('kb');
   if (kb) await saveConfig({ ...kb, status: 'on' }, 'test'); // tenant-wide retrieve is toggle-aware
 });

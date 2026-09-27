@@ -112,7 +112,7 @@ The app has two planes, and only one defaults to non-durable:
 | `OPENWOP_DEPLOY_POSTURE` | `auth` | Require sign-in for managed-tier turns. |
 | `OPENWOP_STORAGE_DSN` | `postgres://…` | Durable control plane (runs, events, secrets). |
 | `OPENWOP_BYOK_KMS_KEY` | `projects/…/cryptoKeys/…` | **Mandatory in `auth`.** Signed-in tenant secrets get KMS-envelope encryption. The backend now **refuses to boot** in the `auth` posture without it — it will not silently fall back to the ephemeral/plaintext secret store. |
-| `OPENWOP_BYOK_ENCRYPTION_KEY` | `openssl rand -hex 32` | Only needed if a deploy uses the **local-AES** BYOK path (not `OPENWOP_BYOK_EPHEMERAL=true` and not KMS). Under `NODE_ENV=production` the backend now **fails closed** rather than auto-generating a throwaway disk key (SEC-3): a freshly-minted disk key is unrecoverable across Cloud Run instances/restarts and gives false at-rest assurance. The live demo sets `OPENWOP_BYOK_EPHEMERAL=true`, so it never hits this path. |
+| `OPENWOP_BYOK_ENCRYPTION_KEY` | `printf '%s' "$(openssl rand -hex 32)"` | **Required in the `auth` posture, INCLUDING when `OPENWOP_BYOK_KMS_KEY` is set.** The two are not alternatives: KMS envelope-encrypts signed-in tenant secrets, while the local-AES path keeps its own master key and is still reached at boot. Setting only KMS fails closed with *"BYOK local-AES master key is not configured in production"* (SEC-3 refuses to mint a throwaway disk key — one generated on a fresh Cloud Run instance is unrecoverable across restarts and gives false at-rest assurance). Only `OPENWOP_BYOK_EPHEMERAL=true` deploys, like the live demo, skip it. **Never rotate it once live** — anything encrypted under it becomes unreadable. Use `printf '%s'`, not a bare pipe: see the secret-seeding note below. |
 
 ### Optional AI capabilities (off by default — honest-off until configured)
 
@@ -124,7 +124,7 @@ about preserving live config).
 
 | Capability (ADR) | Env to enable | Notes |
 |---|---|---|
-| **Code execution** (ADR 0114 + 0146) — the *Code Interpreter* chat agent | **In-process WASI is ON BY DEFAULT** (just sync the asset). **External (upgrade):** `OPENWOP_CODE_EXEC_ENDPOINT=https://<your-code-api>` (+ `OPENWOP_CODE_EXEC_KEY`). **Opt out:** `OPENWOP_CODE_EXEC_RUNTIME=off` | **WASI** runs CPython in-process under Node's `node:wasi` — a *sound* boundary (no `js` FFI; no host fs/env/network), Python-only, ~36 ms cold start. It is **on by default whenever `backend/typescript/vendor/python-3.12.0.wasm` is present**, so the **build MUST run `bash scripts/sync-pythonwasm.sh`** (vendors the ~25 MB binary) — a host that never synced it stays honest-off → `capability_not_provided` (no false advertisement). **External** (a LibreChat-style Code API; strong isolation + polyglot) **always wins** when its endpoint is set; `=off` forces honest-off. **Memory is best-effort under WASI** (a hard cap needs the deferred ADR 0146 Phase 4b; note on Cloud Run `/tmp` is tmpfs/RAM, so guest scratch writes count against instance memory) — size the instance + keep `OPENWOP_CODE_EXEC_MAX_CONCURRENT` (default 8) modest. Captured stdout/stderr is read-capped by `OPENWOP_CODE_EXEC_MAX_OUTPUT_BYTES` (default 1 MB) so a huge print can't OOM the host. Optional: `OPENWOP_CODE_EXEC_LANGUAGES` (external default `python,javascript,typescript,bash,ruby,go`; WASI advertises `python` only), `OPENWOP_CODE_EXEC_MAX_PER_DAY` (per-tenant daily cap, default 100; `0`/unset = uncapped). Execution is gated behind a per-run HITL approval. |
+| **Code execution** (ADR 0114 + 0146) — the *Code Interpreter* chat agent | **Managed sandbox (recommended for a new deploy — ADR 0114 Phase 8):** `OPENWOP_CODE_EXEC_PROVIDER=e2b` + `OPENWOP_E2B_API_KEY=<e2b key>`. **In-process WASI is ON BY DEFAULT** (just sync the asset). **External (self-hosted Code-API):** `OPENWOP_CODE_EXEC_ENDPOINT=https://<your-code-api>` (+ `OPENWOP_CODE_EXEC_KEY`). **Opt out of WASI:** `OPENWOP_CODE_EXEC_RUNTIME=off` | **E2B (ADR 0114 Phase 8)** is the easiest way to get **working code-exec** on a new deploy without standing up a bespoke Code-API service: get an API key from the E2B dashboard, then set `OPENWOP_CODE_EXEC_PROVIDER=e2b` + `OPENWOP_E2B_API_KEY` — the capability lights up (`supported:true`) against E2B's isolated micro-VMs, which genuinely enforce the CPU/mem/fs/network isolation the OPERATOR CONTRACT assumes. It is **operator-validated** against E2B's documented REST API (create → exec → kill; egress SSRF-pinned to the `e2b.dev` eTLD+1), and rides the same per-tenant budget + concurrency cap + HITL approval as every other adapter. **Selection precedence (explicit):** `e2b` (provider + key) → `OPENWOP_CODE_EXEC_ENDPOINT` (Code-API) → in-process WASI → honest-off (`capability_not_provided`). A `provider=e2b` with a MISSING key falls through to the next tier (never a hard error). **WASI** runs CPython in-process under Node's `node:wasi` — a *sound* boundary (no `js` FFI; no host fs/env/network), Python-only, ~36 ms cold start. It is **on by default whenever `backend/typescript/vendor/python-3.12.0.wasm` is present**, so the **build MUST run `bash scripts/sync-pythonwasm.sh`** (vendors the ~25 MB binary) — a host that never synced it stays honest-off → `capability_not_provided` (no false advertisement). The self-hosted **Code-API** (a LibreChat-style service; strong isolation + polyglot) remains the escape hatch when its endpoint is set and no E2B provider is selected; `=off` forces honest-off. **Memory is best-effort under WASI** (a hard cap needs the deferred ADR 0146 Phase 4b; note on Cloud Run `/tmp` is tmpfs/RAM, so guest scratch writes count against instance memory) — size the instance + keep `OPENWOP_CODE_EXEC_MAX_CONCURRENT` (default 8) modest. Captured stdout/stderr is read-capped by `OPENWOP_CODE_EXEC_MAX_OUTPUT_BYTES` (default 1 MB) so a huge print can't OOM the host. Optional: `OPENWOP_CODE_EXEC_LANGUAGES` (external default `python,javascript,typescript,bash,ruby,go`; WASI advertises `python` only), `OPENWOP_CODE_EXEC_MAX_PER_DAY` (per-tenant daily cap, default 100; `0`/unset = uncapped). Execution is gated behind a per-run HITL approval. |
 | **Image generation** (ADR 0115) — the *Image Generator* chat agent | `OPENWOP_IMAGE_PROVIDER_ENABLED=true` **and** `OPENWOP_IMAGE_PROVIDER_ENDPOINT=https://<provider>` (+ `OPENWOP_IMAGE_PROVIDER_KEY`) | Flips `imageGeneration.supported` in discovery only when enabled. Per-provider routing: `OPENWOP_IMAGE_PROVIDER_ENDPOINT_<PROVIDER>` / `_KEY_<PROVIDER>` (e.g. `_GOOGLE` for Imagen) override the generic endpoint, so `openai` and `google` can route to their own backends; the generic endpoint is the fallback. SSRF-guarded; the endpoint is never echoed (§D). Without it, `callImageGenerator` returns `host_capability_missing`. |
 | **Self-hosted / OpenAI-compatible providers** (ADR 0121 / RFC 0108) — the Keys-page connect form | `OPENWOP_COMPAT_PROVIDER_ENABLED=true` | The operator opt-in that exposes the `/compat-endpoints` config surface (the **Self-hosted / OpenAI-compatible endpoints** card on `/keys`) so tenants can add an Ollama / LM Studio / vLLM / any compat base URL. RFC 0108 is Accepted, so the `aiProviders.selfHosted[]` advertisement is honest once a reachable endpoint is configured. Per-endpoint base URL + optional key are stored via BYOK (the key never returns to the FE); declared capabilities (vision/tools/long-context) are taken from what the tenant sets (the host can't probe a black box). SSRF-guarded. |
 
@@ -132,6 +132,35 @@ All three keep the per-tenant feature posture intact — they are **operator** o
 the service), not per-user toggles. The chat agents (`Code Interpreter`, `Image Generator`)
 are already discoverable in the agent picker regardless; they simply gain a working tool once
 the capability is wired.
+
+### LLM observability — OTel tracing + browser spans (ADR 0118)
+
+Span export is **env-gated infra** (default off; no toggle). Set
+`OTEL_EXPORTER_OTLP_ENDPOINT` on the backend to export the per-turn / per-dispatch
+spans (`openwop.chat.turn`, `openwop.provider.dispatch`) to any OTLP collector.
+Spans carry **structured attributes only** — provider/model/token/latency and the
+allowlisted `openwop.*` metadata — **never** prompt/response bytes, PII, or
+credentials (the `safeSpanAttributes` allowlist is the single enforcement point).
+
+- **OpenInference compatibility (Phase 6).** Each span also carries the raw
+  `openinference.span.kind` attribute (`LLM` on a provider dispatch), so
+  off-the-shelf GenAI trace viewers — **Arize Phoenix, Langfuse, Grafana Tempo** —
+  classify the span without any openwop-specific config. It's a fixed closed enum
+  outside the `openwop.*` namespace (no content/credential risk by construction).
+- **Optional Langfuse sink (Phase 4).** `OPENWOP_LANGFUSE_HOST` /
+  `_PUBLIC_KEY` / `_SECRET_KEY` add a second OTLP exporter on the same span tree
+  (Basic auth from host-side keys — never on the wire).
+- **Browser-side OTel (Phase 6).** Set `VITE_OTEL_EXPORTER_OTLP_ENDPOINT` **at
+  frontend BUILD time** (`.env.production` / build env) to lazily bootstrap
+  `@opentelemetry/sdk-trace-web` in the SPA. It auto-instruments the SPA's own
+  `fetch` calls, so a browser-perceived request span becomes the **parent** of the
+  matching backend span — client-perceived latency correlates directly with the
+  server trace. Browser spans carry **only route/timing/status** (no PII, no
+  bodies). The **collector must accept CORS from the SPA origin**. The whole
+  OTel-web SDK ships in a **separate lazy async chunk** — unset ⇒ zero entry-bundle
+  cost, no browser tracing. (The cross-origin `*.run.app` SSE stream deliberately
+  does NOT get a `traceparent` header — that would trip a CORS preflight and break
+  SSE.)
 
 ### Headless profile — no rendering client (ADR 0168 Part A)
 
@@ -170,11 +199,35 @@ OPENWOP_SURFACE_KV=<id>        # per-surface override (KV, TABLE, CACHE, BLOB,
                                # QUEUEBUS, OBSERVABILITY)
 ```
 
+In the `auth` posture the boot guard (ADR 0195, corrected by ADR 0636) requires
+every surface that **has** a durable adapter to use one. Two do not have one under
+the `durable` id — `blob` (only `s3`) and `observability` (none) — so the working
+auth configuration is:
+
+```bash
+OPENWOP_SURFACE_BACKEND=durable
+OPENWOP_SURFACE_OBSERVABILITY=memory        # no durable adapter exists; not counted
+OPENWOP_SURFACE_BLOB=s3                     # + OPENWOP_BLOB_S3_* — or:
+OPENWOP_SURFACE_BLOB=memory                 #   ephemeral uploads, acknowledged BY NAME:
+OPENWOP_ALLOW_INMEMORY_SURFACES=blob
+```
+
+The acknowledgement is a comma list of surface keys; `true` also boots but makes
+**every** surface ephemeral, which is the case the guard exists to catch. Both boot
+errors print the exact lines to add.
+
+**Upgrade ordering (ADR 0636):** the list form is understood from `093014619`
+onward; every older backend reads the hatch as a strict `=== 'true'`, so
+`=blob` on an older revision REFUSES TO BOOT. Set the list form in the same deploy
+that ships the new code — never as a config-only update to a revision that
+predates it.
+
 Shipped backends:
 
 - `memory` — the in-memory tier (default; process-local, wiped on restart).
 - `durable` — backs **`kv`, `cache`, `table`, `queue`, `queueBus`, `vector`,
-  `search`, `nosql`, and `fs`** (`OPENWOP_SURFACE_<KEY>=durable`). Real adapters
+  `search`, `nosql`, `fs`, `sql`, and `memory`** (`OPENWOP_SURFACE_<KEY>=durable`;
+  NOT `blob` or `observability` — see the `auth` note above). Real adapters
   over the shared `Storage` (whatever `OPENWOP_STORAGE_DSN` points at — sqlite or
   Postgres), so they survive restarts and are consistent across instances.
   Cloud-agnostic. See `backend/typescript/src/host/durable/`.
@@ -322,6 +375,14 @@ done
 SESSION_SECRET=$(openssl rand -hex 32)
 ADMIN_TOKEN=$(openssl rand -hex 16)
 
+# `echo -n` / `printf '%s'` is load-bearing — NOT decoration. A bare
+# `openssl rand -hex 32 | gcloud secrets create --data-file=-` stores openssl's
+# TRAILING NEWLINE, so the secret is 65 bytes and every consumer sees the `\n`.
+# `OPENWOP_BYOK_ENCRYPTION_KEY` is validated `^[0-9a-f]{64}$` and rejects it by
+# name; the admin token is not, so it just fails a length check inside
+# timingSafeEqual and every admin request 401s with nothing in the log pointing
+# at the secret. (The host now trims these at read and warns once — see
+# `src/host/secretEnv.ts` — but the stored value should still be exact.)
 echo -n "$SESSION_SECRET" | gcloud secrets create openwop-session-secret --data-file=-
 echo -n "$ADMIN_TOKEN"    | gcloud secrets create openwop-admin-token   --data-file=-
 
@@ -381,6 +442,11 @@ EOF
 #    reference deploy IS a conformance target, so it MUST opt back in here (else
 #    /.well-known/openwop stops advertising capabilities.conformance.mockAgent
 #    and black-box conformance runs fail).
+#  - OPENWOP_API_KEYS entries are `<key>` or `<key>:<tenant>` (ADR 0561). A BARE
+#    key is scoped to the `default` tenant; cross-tenant operator access must be
+#    written explicitly as `<key>:*`. Before ADR 0561 every configured key got
+#    the wildcard implicitly, so a deployment upgrading from that behaviour must
+#    append `:*` to any key it expects to read across tenants.
 #  - OPENWOP_API_KEYS: "" is correct for this cookie-per-visitor posture — the
 #    API-key path (a wildcard-tenant admin credential) stays disabled and the
 #    built-in dev-token is withdrawn in prod. /readiness stays green because the
@@ -393,12 +459,52 @@ EOF
 # table — every read/write hits storage, so instances stay consistent. (Before
 # that hardening they were a boot-hydrated in-memory cache, which required
 # pinning to `--max-instances=1`; if the live service is still pinned, restore
-# a multi-instance value with `gcloud run services update … --max-instances=10`.)
+# the RECONCILED multi-instance value with `gcloud run services update …
+# --max-instances=5` (NOT 10 — see the pg connection budget note below).
+#
+# VOICE + multi-instance (CS-VX-1, 2026-07-09): the realtime session registry
+# is durable (a Gemini /tool-call landing on a non-minting instance recovers
+# its binding), but the live AUDIO plumbing — walkie buffers, the OpenAI
+# sideband WebSocket, firewall seen-sets — is inherently instance-local. If
+# realtime voice is enabled on a multi-instance service, ALSO enable Cloud Run
+# session affinity so a call's requests stick to one instance:
+#   gcloud run services update openwop-app-backend --session-affinity \
+#     --region us-central1 --project openwop-dev
+# (Best-effort affinity; the durable registry covers the tool-call edge when
+# affinity misses.)
+# ⚠ PG CONNECTION BUDGET (ADR 0481 Gate A / ADR 0335): the pool rule is
+# OPENWOP_PG_POOL_MAX × --max-instances ≤ max_connections − ~3.
+# db-f1-micro allows ~25 connections, so the reconciled posture is
+# OPENWOP_PG_POOL_MAX=4 with --max-instances=5 (4×5=20 ≤ ~22). The default
+# poolMax is 10 — deploying with defaults at --max-instances=10 would demand
+# 100 connections, 4× the tier. Verify the LIVE posture on deploy day:
+#   gcloud run services describe openwop-app-backend --region us-central1 \
+#     --format='value(spec.template.metadata.annotations.autoscaling.knative.dev/maxScale)'
+#   (and confirm OPENWOP_PG_POOL_MAX=4 in the service env.)
+#
+# ⚠ A TAGGED REVISION COSTS A FULL POOL, EVEN AT 0% TRAFFIC. The budget above
+# counts `pool × maxScale + tags × pool`, because a tagged revision stays
+# routable and is kept warm with its own connections. MEASURED 2026-09-15 on
+# kicktodo: a single `harden` tag left on a 0%-traffic revision took the sum to
+# `4×5 + 1×4 = 24 > 22 usable` and preflight ABORTED the next deploy — correctly.
+# The tag was read as "traffic-inert", which it is for traffic and is not for
+# connections.
+#   Rule: verify an env-only revision on its tagged URL and REMOVE the tag in the
+#   SAME step (`gcloud run services update-traffic <svc> --remove-tags <tag>`),
+#   before anyone else preflights. Reads of a revision — `revisions describe`,
+#   boot logs — need no tag at all.
+#
+# ⚠ A BIGGER CLOUD SQL TIER DOES NOT RAISE `max_connections`. Upgrading
+# `db-f1-micro` → `db-custom-1-3840` (2026-09-15) left `max_connections` at 25,
+# so the usable 22 is unchanged. Capacity and connection budget are independent
+# knobs on this tier — do not treat a tier bump as headroom for more instances,
+# tags, or a larger pool. Re-read `max_connections` after any tier change rather
+# than inferring it.
 gcloud run deploy openwop-app-backend \
   --source . \
   --region us-central1 \
   --allow-unauthenticated \
-  --memory=512Mi --cpu=1 --concurrency=80 --max-instances=10 \
+  --memory=512Mi --cpu=1 --concurrency=80 --max-instances=5 \
   --port=8080 --timeout=300 \
   --env-vars-file=/tmp/openwop-env.yaml \
   --set-secrets="OPENWOP_SESSION_SECRET=openwop-session-secret:latest,OPENWOP_ADMIN_TOKEN=openwop-admin-token:latest"
@@ -420,8 +526,8 @@ so pass **no** `--env-vars-file`, `--set-env-vars`, or `--set-secrets`.
 
 | Repo-root source     | Vendored at                                  | Sync script                                       |
 |----------------------|----------------------------------------------|---------------------------------------------------|
-| `schemas/`           | `schemas/`              | `bash scripts/sync-schemas.sh`  |
-| `conformance/fixtures/` | `conformance-fixtures/` | `bash scripts/sync-fixtures.sh` |
+| `schemas/`           | `schemas/`              | `bash scripts/sync-schemas.sh --tag openwop-conformance/vX.Y.Z` (recorded in `schemas/CORPUS_TAG`, which `check-vendored-schemas.mjs` requires to match the installed suite) |
+| `conformance/fixtures/` | `conformance-fixtures/` | `bash scripts/sync-fixtures.sh --tag openwop-conformance/vX.Y.Z` — the tag whose version equals the installed `@openwop/openwop-conformance`, which is what `check-vendored-fixtures.mjs` asserts against |
 | `packs/`             | `packs/`                | `bash scripts/sync-packs.sh`    |
 | CPython-WASI runtime (pinned download) | `backend/typescript/vendor/python-3.12.0.wasm` | `bash scripts/sync-pythonwasm.sh` — **only when** enabling `OPENWOP_CODE_EXEC_RUNTIME=wasi` (ADR 0146 Phase 4a; ~25 MB, SHA-256-pinned, gitignored) |
 
@@ -429,16 +535,120 @@ The vendored copies are committed to git, so a clean checkout of `origin/main`
 already has them. Re-run the relevant sync script only when the canonical
 source changed since the last commit and the vendored copy is stale.
 
+> **Both corpus syncs read a TAG, not the sibling clone's working tree.**
+> `sync-schemas.sh` and `sync-fixtures.sh` refuse without `--tag` and then
+> `git archive` that tag into a scratch dir. So the sibling `../openwop` clone can
+> sit on any branch, any commit, dirty or clean — you never check it out at the
+> tag (it is shared with other sessions), and you do not need a throwaway
+> worktree. `git -C ../openwop fetch --tags` is the only preparation.
+>
+> **Which tag:** the one whose conformance version equals the **installed**
+> `@openwop/openwop-conformance` — `check-vendored-fixtures.mjs` asserts the
+> vendored tree against that package, and `check-vendored-schemas.mjs` asserts
+> `schemas/CORPUS_TAG` against it. When the two disagree the guards print the
+> exact command, tag included. Moving forward is a separate change: bump the pin,
+> `npm ci` in `backend/typescript`, then re-vendor at the new tag in the same commit.
+>
+> Until 2026-09-23 `sync-fixtures.sh` took no tag and copied the clone's working
+> tree. With the clone one release ahead of the pin, a failing
+> `check-vendored-fixtures` told the reader to run it, and that run vendored the
+> wrong release — failing the same guard for the opposite reason.
+
+> **Vendoring a pack is NOT shipping it.** Production runs
+> `OPENWOP_STRICT_REGISTRY=true`, so `mountLocalPacks` symlinks every vendored pack
+> in and the registry installer then OVERWRITES the ones named in
+> `OPENWOP_INSTALL_PACKS` with the pinned version. For any **pinned** pack, merging
+> to this repo changes nothing in production — **the registry publish is the ship
+> step**, followed by advancing the pin.
+>
+> This was not theoretical. A sweep on 2026-08-01 found **13** packs whose pinned
+> version differed from the vendored one — `core.openwop.ai` was six weeks behind
+> (three LLM-exchange waves, image-gen, video-gen, ADR 0458 P2, all merged and never
+> executed), `core.openwop.http` a full major version behind with 2.0.0 already
+> published, and 8 agent packs still serving prompts that named non-existent tools.
+>
+> Check it before and after a deploy:
+>
+> ```bash
+> node scripts/check-pack-pin-drift.mjs           # reads the live pins via gcloud
+> node scripts/check-pack-pin-drift.mjs --pins "core.openwop.ai@1.3.2,…"
+> ```
+>
+> It exits 1 when the repo vendors something NEWER than production runs (unshipped
+> work) and warns — without failing — when production is ahead (the repo is stale;
+> `sync-packs.sh` fixes that). It is deliberately NOT a CI gate: the pin list lives
+> in the Cloud Run service config, not in this repo, so an offline check cannot see
+> it.
+
 ```bash
 # From a CLEAN checkout of origin/main — never the shared working tree,
 # which may carry another session's uncommitted work into the build
 # context. (e.g. `git worktree add --detach /tmp/owp-deploy origin/main`)
+
+# Bake the commit into the IMAGE. Do NOT skip this: the --update-env-vars stamp
+# below is deploy CONFIG, and a bare redeploy PRESERVES the previous deploy's
+# value — so an env-only stamp can report the wrong SHA with `stamped: true`.
+#
+# Skipping it is NOT fail-safe in a REUSED deploy checkout (e.g. /tmp/owp-deploy):
+# the output is gitignored, so a leftover stamp from the last deploy persists and
+# gets baked in. Run preflight (below) — Gate 4 fails on a stamp that is absent
+# or != HEAD, which is the only thing that catches that.
+node scripts/write-build-commit.mjs
+
 gcloud run deploy openwop-app-backend \
   --source . \
   --region us-central1 \
   --project openwop-dev \
+  --update-env-vars "OPENWOP_BUILD_COMMIT=$(git rev-parse HEAD),OPENWOP_BUILD_DEPLOYED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --quiet
 ```
+
+> **`OPENWOP_BUILD_META_DIR`** overrides where the backend looks for the baked
+> stamp. It exists as a test seam and as an escape hatch for a layout the
+> resolver does not anticipate — it is NOT part of normal operation, and pointing
+> it at the wrong directory silently changes reported provenance. Leave it unset.
+>
+> **Reading provenance honestly.** `/api/readiness` reports `build.commitSource`
+> alongside `build.commit`. `image` means the SHA travelled with the artifact and
+> describes the running code. **`env` means it is a deploy-time CLAIM** that a bare
+> redeploy may have carried over from the PREVIOUS deploy — that is exactly what
+> happened on 2026-08-10, when a revision ran `e65ff6888` and reported `43b539ed2`
+> with `stamped: true`. `stamped` only answers "is there a commit at all?"; it has
+> never answered "does it describe this code". Trust `commitSource: image`, or run
+> `scripts/verify-deploy.sh`, which compares the value against your HEAD.
+
+> **Easiest path (ADR 0530):** `scripts/deploy.sh` does all of this in the right
+> order — preflight → backend → frontend → verify — and computes the commit stamp
+> so it cannot be forgotten. Copy `scripts/deploy.env.example` to
+> `scripts/deploy.env` (gitignored) and fill in your topology first. The raw
+> recipe below stays supported; if you use it, run `scripts/preflight-deploy.sh`
+> BEFORE the build and `scripts/verify-deploy.sh` after.
+
+> **The backend deploy now also CERTIFIES, and that adds ~10 minutes**
+> (ADR 0550 P4). `scripts/deploy.sh` runs the full conformance lane in strict,
+> no-quarantine mode and derives this build's public profile claims from the
+> RFC 0148 §A ledger into `build-meta/certification-bundle.json` +
+> `conformance-claims.json`, which the image serves and
+> `capabilities.conformance.certificationBundleUrl` points at.
+>
+> Two things follow, and both are deliberate:
+>
+> - **`scripts/write-build-commit.mjs` DELETES any existing pair on every run.**
+>   It cannot re-derive them (that needs a real suite run), and a leftover pair
+>   in a long-lived deploy checkout would publish a *different commit's*
+>   evidence as this build's — invisible to every other gate, because the commit
+>   stamp would still match HEAD. Absent is honest (RFC 0089 §D: "Omitting it is
+>   fully conformant"); stale is a false public claim.
+> - **A failed certify lane REFUSES the deploy.** If you need to ship without
+>   the claim, say so: `scripts/deploy.sh --skip-certify` leaves the pointer
+>   ABSENT. There is no flag that ships a stale one.
+
+> **Do not drop the `--update-env-vars` line** (ADR 0518). It is what lets
+> `/readiness` report WHICH COMMIT is running, and it is the only reliable way to
+> detect that someone else's deploy landed on top of yours. `--update-env-vars` has
+> *merge* semantics, so it is safe here — unlike `--set-env-vars`, which would wipe
+> the live config. Omit it and `scripts/verify-deploy.sh` fails with `UNSTAMPED`,
+> deliberately: a verification that passes without evidence is worse than none.
 
 This builds via Cloud Build and rolls a new revision with the new image
 + the *existing* 7 secrets, OIDC/KMS env, Cloud SQL attachment, resource
@@ -528,6 +738,27 @@ keep the container warm; without it, the idle instance gets CPU
 throttled to ~5% and the *first* request still pays a partial
 warmup cost.
 
+**Throttling costs more than a cold start — it starves DETACHED WORK.**
+This section used to describe `cpu-throttling` purely as a latency
+posture, and that omission has already cost one outage. With
+throttling on, anything the process does *after* flushing a response
+runs at ~5% CPU: a fire-and-forget `.then`, a `setImmediate`
+dispatch, a background refresh. In #3056 a detached SPA-shell refresh
+never completed over **16+ minutes despite active traffic**, and
+because the promise never settled it never rejected either — so
+nothing was logged and a latch it held was never released. `/` served
+a pruned bundle until the instances were replaced.
+
+The app's canonical run dispatch is the same shape
+(`setImmediate(() => executeRun(...))` — `host/runDispatch.ts:105`,
+`routes/runs.ts:1193`, `host/triggerIngestionService.ts:556` and two
+more), so this posture is worth understanding before changing it.
+`--no-cpu-throttling` removes the hazard as a side effect of removing
+cold starts. Rules for writing such code — clear-on-settle, a time
+bound, or finish it in-request — are in ARCHITECTURE.md's "Work that
+OUTLIVES the thing that started it" seam row, enforced by
+`backend/typescript/test/detached-latch-tripwire.test.ts`.
+
 To revert to the cost-saving posture later:
 
 ```bash
@@ -586,6 +817,54 @@ gcloud run services update openwop-app-backend \
 - **Long audio** (> ~15 MiB) auto-uploads via the Gemini File API; manual upload caps at
   200 MiB, drive-sync the same. Synced content is fenced **untrusted**.
 
+### Optional: localized public content (`capabilities.i18n` / `capabilities.content`) — RFC 0103 / ADR 0064
+
+The anonymous `/v1/content/pages/:slug` delivery negotiates its locale over **host env**
+(the operator honesty gate — `capabilities.i18n` + `capabilities.content` are advertised
+at `/.well-known/openwop` ONLY when more than one locale is configured; unset ⇒ no advert,
+byte-identical to a non-localized deploy). Per-ORG authoring locales are separate (the CMS
+"Content languages" panel, `cms-localization` toggle). Enable WITHOUT a rebuild
+(incremental update preserves all other config):
+
+```
+gcloud run services update openwop-app-backend \
+  --update-env-vars '^|^OPENWOP_I18N_LOCALES=en,es,pt-BR,fr|OPENWOP_I18N_DEFAULT_LOCALE=en' \
+  --region us-central1 --project openwop-dev
+```
+
+> **CORRECTED 2026-09-24 (ADR 0748).** This block used to read
+> `--update-env-vars OPENWOP_I18N_LOCALES=en,es,pt-BR,OPENWOP_I18N_DEFAULT_LOCALE=en`.
+> gcloud splits `--update-env-vars` on commas, so that form is not one value —
+> it is a malformed list (`es` and `pt-BR` parse as keys with no `=`). The
+> `^|^` prefix switches the delimiter to `|` so the commas stay inside the value.
+> The live value when this was written was `en,es,pt-BR,fr` (`gcloud run services
+> describe`), i.e. someone had already worked around it by hand.
+>
+> **DO NOT add `es-419` (or any tag with a numeric or script subtag) to this list while
+> the Firebase Hosting door fronts `/api` (CORRECTED 2026-09-26, ADR 0748).** Firebase
+> Hosting rewrites `Accept-Language` before Cloud Run sees it. MEASURED: `Accept-Language:
+> es-419` via `app.openwop.dev/api` gets `Content-Language: es`, while the same request
+> straight to the `*.run.app` origin gets `es-419`. So no client of the public door can
+> negotiate the tag, and advertising it there is a claim the door cannot honour. The
+> host code is correct; the witness lives on the origin-direct lanes (ADR 0748
+> § "Correction (2026-09-26b)"). The path back is a protocol origin that does not
+> rewrite headers (a Cloud Run domain mapping / LB), not this list.
+>
+> *(Superseded paragraph, kept for the trail:)* **`es-419` (RFC 0206, ADR 0748)** is the case-canonical extended tag that makes the
+> v2 row `openwop.requirement.0206.delivery-extended-locale` executable: the v2
+> `content` record then advertises a locale outside RFC 0103's `ll(-RR)` subset,
+> and the §D admin ops (`POST /content/pages`, `PUT …/sections/{id}`) author for it.
+> Error envelopes negotiated to `es-419` are answered from the `es` catalog with
+> `Content-Language: es` (the column actually used). Keep `es` in the list: an
+> `es-MX` reader negotiates to the first-declared Spanish tag.
+
+Verify: `curl -H 'Accept-Language: pt-BR' https://app.openwop.dev/api/v1/content/pages/home -i`
+→ `Content-Language: pt-BR` (falls back to the default locale for unsupported tags), and
+`/.well-known/openwop` lists `capabilities.i18n`. With `OpenWOP-Version: 2`, discovery
+carries top-level `i18n` and `content` records (without `es-419` on this deployment; see above).
+An AUTHENTICATED `GET /v1/content/pages/:slug` reads the caller's own workspace, not the
+system site (`localized-content.md` §F; ADR 0748).
+
 ## 7. Firebase Hosting + custom domain
 
 ```bash
@@ -598,6 +877,16 @@ firebase target:apply hosting app app-openwop-dev --project openwop-dev
 # frontend root and Vite auto-loads them. `vite.config.ts` asserts
 # baseUrl is non-default in production mode, so a missing `.env.production`
 # aborts the build instead of silently shipping the dev fallback.
+#
+# The in-app Network inspector's full-capture opt-in (VITE_ENABLE_NETWORK_RECORDER=1)
+# now lives in `.env.production` — this command needs NO inline override.
+# It used to live only on this line, and a deploy that forgot it silently shipped
+# the panel in liveness-only mode ("0 calls"): that regressed 2026-07-14 and
+# AGAIN 2026-07-15, so the flag moved into the showcase's own config where it
+# cannot be forgotten. It is adopter-safe there because build-whitelabel-zip.sh
+# strips every real `.env*` from the bundle; `check-network-recorder-posture.mjs`
+# (in the build chain) pins that strip, the showcase opt-in, and the adopter
+# template's silence together.
 ( cd frontend/react && npm run build )
 
 # Deploy
@@ -767,7 +1056,7 @@ gcloud run services update openwop-app-backend \
 gcloud run deploy openwop-app-backend \
   --source . \
   --region us-central1 --allow-unauthenticated \
-  --memory=512Mi --cpu=1 --concurrency=80 --max-instances=10 \
+  --memory=512Mi --cpu=1 --concurrency=80 --max-instances=5 \
   --port=8080 --timeout=300 \
   --env-vars-file=/tmp/openwop-p3-env.yaml \
   --set-secrets='OPENWOP_SESSION_SECRET=openwop-session-secret:latest,OPENWOP_ADMIN_TOKEN=openwop-admin-token:latest,OPENWOP_STORAGE_DSN=openwop-storage-dsn:latest,OPENWOP_VAPID_PUBLIC_KEY=openwop-vapid-public-key:latest,OPENWOP_VAPID_PRIVATE_KEY=openwop-vapid-private-key:latest' \
@@ -796,9 +1085,20 @@ OPENWOP_OIDC_JWKS_URL: "https://www.googleapis.com/service_accounts/v1/jwk/secur
 OPENWOP_BYOK_KMS_KEY: "projects/openwop-dev/locations/us-central1/keyRings/openwop-byok/cryptoKeys/dek-wrap"
 ```
 
+**Install command**: both Docker stages use **`npm ci`**, never `npm install`
+(#2680). `npm ci` installs the lockfile verbatim; `npm install` RE-RESOLVES, and
+npm 11.5–11.x prunes the transitive deps of an `optionalDependency` — which
+silently ships an Azure Key Vault KMS backend that cannot load. Measured in the
+image, same lockfile: npm 10.9.8 → 466 pkgs and `@azure/identity` loads; 11.6.2 →
+464 pkgs and `ERR_MODULE_NOT_FOUND`; 12.0.2 → fixed. Self-hosters get the tracked
+`package-lock.json` in the bundle and should use `npm ci` too — that is the path
+`scripts/check-whitelabel-build.sh` smoke-tests. A local `npm install` on an
+affected npm additionally rewrites the lockfile with the pruned resolution; never
+commit that churn.
+
 **Gotcha**: the bundled image's `package.json` must declare every runtime
 dependency the bundled code imports. Esbuild bundles with `--packages=external`
-+ the runtime stage does `npm install --omit=dev`, so transitive-only deps
++ the runtime stage does `npm ci --omit=dev`, so transitive-only deps
 disappear at runtime. After P3 landed, the missing one was `ajv` (used by
 `src/host/mcpServerRouter.ts` but only present transitively via
 `@openwop/openwop-conformance` dev-dep). Add `ajv` to `dependencies` in
@@ -920,6 +1220,123 @@ debug cycle.
   travel. Override with `OPENWOP_DEV_PROXY_TARGET=http://localhost:8080`
   to point at a locally-running backend.
 
+## Configuring provider OAuth clients (Connections)
+
+The Connections catalog (`Admin → Access → Connections`) renders a **Connect**
+button per OAuth provider (Google Workspace, Microsoft Graph, Slack, Dropbox,
+Box, …), but each button stays disabled — with a "not configured" hint — until
+this host has that provider's **OAuth client credentials** (ADR 0024 § host-managed
+OAuth client config). Wiring one provider takes ~10 minutes; nothing here needs a
+redeploy.
+
+### 0. One-time: the TWO base URLs (already set on the demo host)
+
+Firebase Hosting routes **only `/api/**`** to Cloud Run, so the redirect URI the
+provider calls back MUST carry the `/api` prefix. Without this env the redirect
+URI resolves to the bare app origin and every provider redirect 404s **after** a
+successful consent — the host never sees the error. And after the callback
+stores the tokens, the browser is sent back to the SPA at
+`OPENWOP_PUBLIC_BASE_URL` — when THAT is unset the redirect falls back to the
+request origin (the `*.run.app` backend), landing the user on a JSON
+`not_found` page even though the connection saved (hit live on the demo host
+2026-07-02). Set both:
+
+```bash
+gcloud run services update openwop-app-backend \
+  --update-env-vars OPENWOP_OAUTH_CALLBACK_BASE_URL=https://app.openwop.dev/api,OPENWOP_PUBLIC_BASE_URL=https://app.openwop.dev \
+  --region us-central1 --project openwop-dev
+```
+
+(Set on the demo host 2026-07-02 — callback base revision `00367-8q4`, public
+base revision `00373-szn`. Self-hosters whose backend shares the SPA origin can
+omit both — resolution falls back to the request origin, which is then correct.
+Pinned by `backend/typescript/test/oauth-callback-base.unit.test.ts`.)
+
+Every provider registration below uses the same redirect URI shape:
+
+```text
+https://app.openwop.dev/api/v1/host/openwop-app/connections/<provider-id>/callback
+```
+
+### 1. Create the OAuth app at the provider (console-only, not scriptable)
+
+**Google (`provider id: google`)** — Cloud Console → *APIs & Services*:
+1. *OAuth consent screen* — direct link:
+   `https://console.cloud.google.com/auth/overview/create?project=openwop-dev`
+   — External, app name "OpenWOP", authorized domain `openwop.dev`. Publish
+   (or add testers while in Testing).
+2. Enable the APIs the scopes touch: Drive, Calendar, Gmail.
+3. *Credentials → Create credentials → OAuth client ID → Web application*;
+   authorized redirect URI = the shape above with `<provider-id>` = `google`.
+4. Default (read) scopes requested at connect time: `drive.readonly`,
+   `calendar.readonly`, `gmail.readonly`; write scopes (`gmail.send`,
+   `calendar.events`) are a **separate re-consent** the user triggers later
+   ("Grant write") — list them all on the consent screen.
+
+**Microsoft (`provider id: microsoft-graph`)** — Entra admin center → *App
+registrations → New registration*: single-tenant or multi-tenant per your
+audience; Web platform redirect URI = the shape above with `microsoft-graph`;
+*Certificates & secrets → New client secret*. Grant **delegated** Graph
+permissions matching the manifest's scope groups: `Mail.ReadWrite` (Outlook
+drafts — deliberately never `Mail.Send`) + `offline_access` (the default
+consent), plus `Files.Read` and `Sites.Read.All` for the OneDrive/SharePoint
+read groups. Note this builtin is the *narrow* mail-drafts + files connector;
+broader Microsoft 365 reach (Teams, Calendar) is the separate
+`core.openwop.connections.microsoft365` **connection pack** (operator-installed
+via `OPENWOP_INSTALL_PACKS`), whose provider id — and env key, if you use the
+env fallback — is `microsoft365`.
+
+**Slack / Dropbox / Box / Zoom** — same pattern; the scope strings each
+manifest requests live in
+`backend/typescript/src/features/connections/providerRegistry.ts`
+(`defaultScopes` = the initial read consent).
+
+### 2. Store the client on the host (primary path: superadmin UI, no redeploy)
+
+Admin → Access → Connections → **OAuth clients** panel (superadmin only): pick
+the provider, paste client id + secret, save. The secret is sealed with the
+BYOK envelope (AES-256-GCM) at rest and is never returned by any read surface.
+The provider's Connect button lights up immediately (`oauthConfigured: true` in
+the catalog).
+
+Fallback (env, requires a config update): `OPENWOP_OAUTH_<KEY>_CLIENT_ID` /
+`OPENWOP_OAUTH_<KEY>_CLIENT_SECRET`, where `<KEY>` is the provider id
+uppercased with non-alphanumerics → `_` (`google` → `GOOGLE`,
+`microsoft-graph` → `MICROSOFT_GRAPH`). Prefer `--update-secrets` bindings over
+plaintext env; **never** `--set-env-vars`/`--set-secrets` (wipes the live
+binding set — see the §14 warning). The UI-stored client wins over env when
+both exist; configure exactly one path per provider.
+
+### Related: Microsoft SIGN-IN (identity, not connections)
+
+The auth modal's "Continue with Microsoft" button is separate from the
+Graph *connection* above — it is Firebase Auth identity, gated on a build
+flag so hosts without an Entra app never render a dead sign-in path.
+Full steps (also in README § "Microsoft sign-in"):
+
+1. Firebase console → *Authentication → Sign-in method → Add new provider →
+   **Microsoft*** → Enable. Copy the callback URL Firebase displays
+   (`https://<project>.firebaseapp.com/__/auth/handler`); keep the tab open.
+2. [Entra admin center](https://entra.microsoft.com) → *App registrations →
+   New registration*: pick the supported account types ("any organizational
+   directory + personal Microsoft accounts" for the broadest sign-in) and add
+   a **Web** redirect URI = the Firebase callback URL.
+3. Copy the **Application (client) ID**; *Certificates & secrets → New client
+   secret* → copy the secret **Value** (shown once).
+4. Paste both into the Firebase Microsoft provider dialog → Save.
+5. Build the SPA with `VITE_AUTH_MICROSOFT=true` (e.g. in
+   `frontend/react/.env.production`) and redeploy hosting
+   (`firebase deploy --only hosting:app`). Verify: the sign-in modal shows
+   "Continue with Microsoft" and a round-trip lands signed in.
+
+### 3. Verify
+
+1. Catalog: `Connect <provider>` is enabled on `/connections` (the
+   "not configured" hint disappears).
+2. Complete a real consent round-trip; the row appears with status `active`.
+3. Click **Test** on the row (the `/test` health probe) → green.
+4. `DEPLOY-SMOKE.md` § OAuth connect covers the same steps against prod.
+
 ## Roll-forward a new pack version
 
 Step 6's `PACKS=$(...)` block always resolves `latest` from the registry,
@@ -970,3 +1387,221 @@ gcloud resource-manager org-policies delete \
 gcloud secrets delete openwop-session-secret
 gcloud secrets delete openwop-admin-token
 ```
+
+## SEO crawler prerender (ADR 0384 — the platform-origin flip)
+
+The backend ships the crawler prerender complete: custom-domain document paths
+(`/` and `/p/:slug` on a bound hostname) serve prerendered semantic HTML to all
+clients as soon as the backend deploys — no operator action. The **platform
+origin** (`app.openwop.dev`) is a separate, deliberate flip because Firebase
+Hosting serves the SPA shell for document requests and crawlers never reach
+Cloud Run until the rewrite changes:
+
+1. **Prereqs (both required before the flip):**
+   - `OPENWOP_PUBLIC_SITE_ORG_ID` — the org whose published pages the platform
+     documents serve (the same org the SPA's `VITE_PUBLIC_SITE_ORG_ID` points
+     at). Unset ⇒ bots fall through to the human path (no guessing).
+   - `OPENWOP_SPA_SHELL_URL` (preferred) — normally
+     `https://app.openwop.dev/app-shell.html`. The backend fetches Hosting's STATIC
+     shell (rewrites never apply to existing static files — no loop) and caches
+     it with a TTL refresh (`OPENWOP_SPA_SHELL_TTL_S`, default **60 s** —
+     cut from 300 s on 2026-08-03 because the TTL *is* the outage window, not a
+     freshness knob). Refreshes send `If-None-Match`, but MEASURED 2026-08-03
+     Firebase does NOT honour conditional requests for this file (full 200 +
+     body), so the window reduction comes from the TTL alone here; the header
+     pays off only on a white-label host that answers 304. **CORRECTION (verified live
+     2026-08-02): this line used to claim "no stale-asset-hash hazard" — there
+     IS one, for the length of the TTL.** Hosting PRUNES the previous build's
+     **CORRECTION 2026-08-08: the TTL is a FLOOR, not a ceiling.** A starved
+     fire-and-forget refresh (Cloud Run CPU throttling) wedged the cache for
+     16+ minutes with no error logged; fixed in #3056. If `/` is stale, force
+     new instances rather than waiting, and probe with a BROWSER UA (curl gets
+     the bot prerender, cached separately for an hour).
+     assets, so within that window `/` serves a cached shell referencing a
+     bundle that no longer exists; the request falls through the SPA rewrite and
+     returns `index.html` as `200 text/html`, the browser refuses it under
+     strict MIME checking, and the SPA never boots for anonymous visitors on the
+     public home page. SPA routes are unaffected. It resolves itself when the
+     TTL lapses — so the honest posture is: expect a ≤5-minute `/` outage after
+     each frontend deploy, verify with `content_type` (never the status code —
+     the rewrite makes it a misleading `200`), and lower
+     `OPENWOP_SPA_SHELL_TTL_S` if that window is unacceptable.
+     A refresh failure serves the last-good shell; a non-HTML body is never
+     cached. (`OPENWOP_SPA_SHELL_FILE` remains for mounted-volume deploys —
+     note the image does NOT bundle `frontend/react/dist`.) Do NOT flip the
+     rewrite without one of these configured (the routes 404 humans honestly).
+2. **The flip:** the hosting `predeploy` hook (which first runs
+   `check-hosting-wire-rewrites.cjs`, so a hand-edited `firebase.json` that no
+   longer covers the v2 wire refuses to deploy even without a rebuild — ADR 0614)
+   renames the built shell
+   (`dist/index.html` → `dist/app-shell.html`) so `/` falls through to the
+   rewrite — Firebase serves an EXACT static match BEFORE rewrites, so a static
+   root `index.html` would shadow the `/` document rewrite forever. The `**`
+   catch-all targets `/app-shell.html`. Platform-origin document responses are
+   `no-store` (the Hosting CDN strips `Vary`, so UA-branched public caching
+   would be cross-audience poisonable); the backend's prerender LRU absorbs the
+   cost. Change `firebase.json` hosting rewrites so `/` and `/p/**`
+   (document requests ONLY — never `/assets/**`, `/api/**`, or the SSE URL)
+   target the Cloud Run service instead of `/index.html`, then
+   `firebase deploy --only hosting:app`. The backend UA-branches: bots get
+   prerendered HTML, humans get the shell, every response carries
+   `Vary: User-Agent` (cache-poisoning guard — never strip it).
+3. **Rollback:** revert the rewrite (humans instantly back on the CDN shell),
+   or `OPENWOP_SEO_PRERENDER_DISABLED=true` via `--update-env-vars` to disable
+   all prerendering (custom-domain documents revert to 404) without a deploy.
+
+Knobs: `OPENWOP_SEO_PRERENDER_TTL_S` (Cache-Control max-age, default 3600),
+`OPENWOP_SEO_BOT_UA_EXTRA` (comma-separated extra UA tokens),
+`OPENWOP_PUBLIC_SITE_NAME` (og:site_name/JSON-LD override; defaults to the
+org's name).
+
+## Custom domains for published content (ADR 0295 — operator infra)
+
+The app-side half (domain registration, `_openwop-verify.<host>` TXT ownership
+check, the org-pinned public-only host guard, per-domain rate limits) ships in
+the `custom-domains` feature. **TLS + routing for customer hostnames are the
+platform proxy tier — operator infrastructure, not app code.** The pinned
+reference recipe (ADR 0295 option A, GCLB certificate map):
+
+1. Reserve a global IP + create the HTTPS load balancer fronting the existing
+   Cloud Run service (serverless NEG):
+   ```
+   gcloud compute addresses create owp-domains-ip --global
+   gcloud compute network-endpoint-groups create owp-backend-neg \
+     --region=us-central1 --network-endpoint-type=serverless \
+     --cloud-run-service=openwop-app-backend
+   ```
+2. Create a certificate map; add each verified customer hostname as a
+   managed-certificate map entry — `scripts/domain-cert-commands.sh` generates
+   (or with `RUN=1` executes) these commands for the hostnames shown LIVE on
+   the app's /domains page:
+   ```
+   gcloud certificate-manager maps create owp-domains-map
+   gcloud certificate-manager certificates create cert-<name> \
+     --domains=<customer-hostname>
+   gcloud certificate-manager maps entries create entry-<name> \
+     --map=owp-domains-map --hostname=<customer-hostname> \
+     --certificates=cert-<name>
+   ```
+3. Attach the map to the HTTPS proxy; point the customer's DNS at the LB IP
+   (subdomains: a `CNAME`/`A` to the IP; apex needs the DNS host's ALIAS).
+4. The tenant adds + verifies the hostname in the app (TXT record), the sweep
+   keeps re-checking (a lost record demotes the domain to `failed` —
+   disable-don't-delete). Requests arriving on the hostname reach ONLY that
+   org's public pages/funnels/storefront (`middleware/customDomain.ts`,
+   fail-closed) with a per-domain rate budget
+   (`OPENWOP_CUSTOM_DOMAIN_REQS_PER_MIN`, default 600).
+
+The SPA's public page renderer is served from the platform origin; a customer
+domain fronting the full HTML site additionally routes `/` at the LB to the
+Firebase Hosting origin — that leg is deployment-specific and deliberately
+NOT baked into the app.
+
+## Trusted (Tier-1) plugin packs
+
+To serve openwop-team-signed plugin packs in the MAIN frame (ADR 0367): mount a
+public keyring (`OPENWOP_TRUSTED_PACK_KEYS_DIR`, e.g. the committed
+`deploy/trusted-keys/`), optionally a revocation list
+(`OPENWOP_TRUSTED_PACK_REVOCATIONS`), and enable the `trusted-plugins` toggle
+(default OFF — the runtime kill switch). Signature + revocation are re-verified
+at every serve; any miss falls back to the Tier-2 sandbox. Full review/signing/
+rotation/revocation recipe: [`docs/trusted-pack-publishing.md`](docs/trusted-pack-publishing.md).
+
+## White-label distributions (ADR 0366)
+
+A distribution manifest (`distributions/<name>.json`) composes a build: include-mode (`"bundles": ["commerce"]` — core + named bundles; the licensing-safe direction) or exclude-mode (Phase-1). Build with `OPENWOP_DISTRIBUTION=<name>` set for BOTH halves (`npm --prefix backend/typescript run build`, `npm --prefix frontend/react run build`); the generated registries tree-shake excluded features out of both artifacts, and the build REFUSES to fall back to the full registry silently. Validate every manifest + the bundle catalog with `node scripts/gen-distribution.mjs --check` (or `npm run ci:distribution`, which also builds the slim proof). Deploy per distribution exactly like the default (backend first, then hosting); the slim boot must stay green under `OPENWOP_REQUIRE_BEHAVIOR=true`.
+
+**Chunk budgets do not transfer between distributions — a SLIM build can make a chunk BIGGER (measured 2026-08-28).** `check-bundle-budget` runs after `vite build` and is calibrated against the DEFAULT build. Excluding features can *inflate* an individual chunk, so a named distribution can fail the gate with nothing actually being too big:
+
+| build | `DocumentEditorPage` |
+|---|---|
+| default | 77.9 kB raw / **27.2 kB gzip** — passes |
+| `kicktodo` | 543.0 kB raw / **172.6 kB gzip** — fails the 150 kB chunk ceiling |
+
+Same source file, **6.3× larger gzip in the smaller build**. The mechanism is co-tenant dependency sharing: in the default build (953 chunks) Rollup hoists dependencies shared by several features into common chunks; exclude those co-tenants and nothing else imports the shared code, so it inlines into the one surviving chunk.
+
+**Both obvious fixes are traps.** Raising `CHUNK_GZIP_BUDGET` (or adding a `PER_CHUNK_GZIP_BUDGET` override) hides a real signal for the default build, where that ceiling was tuned against measured chunk weights. Code-splitting the page is work against a chunk that is 27 kB in the build the budget exists to protect. **The right question is whether the feature belongs in that distribution at all** — which is how the case above resolved: `document-editor` was in the KickTodo build only through a bundle-name collision, and removing it took the chunk with it.
+
+Which half of the gate still means something on a named distribution:
+
+- **The ENTRY budget transfers and stays honest.** A slim build's entry chunk is a subset of the default's, so it should never exceed it — measured 124.6 kB (kicktodo) against 128.5 kB (default), same 130 kB ceiling. A slim build breaching the ENTRY budget is a real finding.
+- **The non-entry 150 kB chunk ceiling does NOT transfer.** It was chosen relative to default-build chunk composition (see the comments in `frontend/react/scripts/check-bundle-budget.mjs`, which cite measured default-build weights such as `documentSchema` 146.3 kB and `wardley` 141.9 kB). Under a different composition those weights change, so a breach is not evidence of a size problem until you have measured the same chunk in the default build.
+
+**So the first diagnostic step for a distribution build that reds this gate is to build the DEFAULT distribution and measure the same chunk.** If default passes, it is a composition artifact, not a size regression.
+
+**Regenerate before you measure.** `vite.config.ts` substitutes a GENERATED `src/features/registry.distribution.ts` that `scripts/gen-distribution.mjs` writes in the `prebuild` hook. Running bare `vite build` reuses whatever was generated last — so a manifest edit does not reach the artifact and the build silently measures a distribution that no longer exists. Use `npm run build` (which runs `prebuild`), or run `node scripts/gen-distribution.mjs` explicitly first. The tell is an unchanged chunk hash across builds that should have differed.
+
+**Composing a distribution (ADR 0366 P3):** the marketplace's bundle shop (`/marketplace/bundles`) browses the bundle catalog and exports an include-mode manifest. Commit it as `distributions/<name>.json` in a reviewed PR (the review IS the security gate — no runtime path mutates the build), then `OPENWOP_DISTRIBUTION=<name> npm run build:distribution` produces both artifacts. Note: `gcloud run deploy --source .` image builds always build the DEFAULT distribution (the Docker builder carries only the backend subtree); build a named distribution locally/CI and deploy its artifacts explicitly.
+
+## Chat + retention runtime knobs (operator reference)
+
+The 2026-07-14/15 incident-response work added these env knobs — all read at
+call time (no rebuild), all merge-updatable via `--update-env-vars`:
+
+- `OPENWOP_PROVIDER_429_RETRY_MS` — backoff before the ONE retry a
+  rate-limited model call gets on both chat dispatch seams (tool loop AND
+  single completion). Default `4000`; `0` disables the retry entirely.
+- `OPENWOP_GROUP_ROOM_TOOL_LOOP=true` — restores the agent TOOL LOOP for
+  group conversations (advisory boards / project convenes). Default OFF: group
+  rooms take one completion per advisor voice, because a cadence of
+  tool-looping advisors fires up to 5×N model calls back-to-back and bombards
+  provider rate limits (the 2026-07-14 silent-board incident); advisor
+  grounding rides prompt-side knowledge injection either way.
+- `OPENWOP_RETENTION_SWEEP_ENABLED=true` + `OPENWOP_RUN_RETENTION_DAYS` +
+  `OPENWOP_WEBHOOK_DELIVERY_RETENTION_DAYS` — ADR 0287 engine retention
+  (whole-run cascade incl. artifacts; hourly; audit-row tombstones). LIVE in
+  prod since 2026-07-15 at 30/14 days. `0`/unset = off (fail-safe default).
+- `OPENWOP_WEBHOOK_SECRET_ROTATION_OVERLAP_S` (default `86400`, valid
+  `60`–`604800`; anything else falls back to the default) and
+  `OPENWOP_WEBHOOK_VERIFY_PER_TENANT_PER_MIN` (default `10`, per instance) —
+  RFC 0201 / ADR 0747 Standard Webhooks: the advertised
+  `webhooks.secretRotation.overlapSeconds`, and the per-tenant budget of
+  endpoint-verification requests an opted-in registration may send. Neither
+  needs setting in production; the conformance lane sets `60` / `1000`.
+  **Reachability caveat:** an opted-in registration succeeds only if the
+  endpoint answers the verification POST within 10 s, through the same egress
+  guard deliveries use — a suite receiver on loopback is refused in prod
+  exactly as its deliveries would be (front it with `OPENWOP_WEBHOOK_RECEIVER_URL`).
+- `OPENWOP_KNOWLEDGE_SYNC_DAEMON_ENABLED` — the **kill-switch** for knowledge-sync
+  spend (ADR 0107 / ADR 0605, Drive/OneDrive/Dropbox/Box → KB, on each source's
+  schedule). **WF-KB-3 / KSWF-1 note:** the bespoke cadence *daemon* is gone — the
+  recurring sync is now a per-source scheduler job running the `knowledge-sync.run`
+  workflow (the gmailSync twin). This env var **still works, unchanged** as the
+  host-wide stop: it is now checked inside the `knowledge-sync` surface's `runOnce`
+  (`knowledgeSyncGate.ts` `syncEnabledFor`), so a fired job that finds it engaged
+  is a typed skip with **zero egress**. **Defaults ON**; set it to any of `false` /
+  `0` / `off` / `no` / `disabled` (case-insensitive) — this is the control to reach
+  for during a third-party-egress or embedding-spend incident:
+  ```
+  gcloud run services update openwop-app-backend \
+    --update-env-vars OPENWOP_KNOWLEDGE_SYNC_DAEMON_ENABLED=false \
+    --region us-central1 --project openwop-dev
+  ```
+  Because it defaults ON, its polarity is INVERTED vs the `=== 'true'` opt-ins
+  above: a value it does not recognise leaves sync RUNNING. That is why it accepts
+  the whole falsy set rather than the single literal `false` (ADR 0583 § D5).
+  Per-tenant spend is separately gated in the same `syncEnabledFor` — the
+  `knowledge-sync` toggle AND the plan entitlement, both fail-closed — so this var
+  is the blunt host-wide stop, not the per-tenant control. (Note: with the switch
+  engaged, a source's job still *fires* on cadence and immediately skips — no
+  egress, but an empty run row per source per cadence; to also stop the fires,
+  disable the sources or the feature toggle.)
+- `OPENWOP_ANON_TENANT_RETENTION_DAYS` — ADR 0372 anon-tenant lifecycle:
+  tears down `anon:*` tenants with no HUMAN activity (non-scheduler run or
+  chat update) for N days, via the account-delete teardown quartet; max 5
+  tenants per hourly tick, audit-tombstoned. `0`/unset = off (the default —
+  this deletes business kv, so enabling is an explicit operator call;
+  suggested value once wanted: `14`).
+
+## Image generation / editing (ADR 0401)
+
+- **BYOK only** — users store an OpenAI / Google / **Replicate** key (Providers page);
+  the editor affordances (Generate / Edit-with-AI on every image field) are
+  honest-off until a key exists. No operator env needed for dispatch.
+- **Spend ceiling:** images meter under the ADR 0106 media budget as a per-tenant
+  daily COUNT — env default `OPENWOP_IMAGE_MAX_PER_DAY` (50; 0 = uncapped), per-org
+  override in the superadmin Governance panel (`images` field; explicit 0 = uncapped
+  for that org).
+- Replicate output fetches are pinned to `replicate.delivery`/`api.replicate.com`
+  (https, uncredentialed, 25 MiB/image) — no other egress is possible from the
+  image path.

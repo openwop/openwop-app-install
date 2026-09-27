@@ -102,7 +102,6 @@ export const messages = {
 
   // Prompt picker input
   pickerFailedToLoad: 'Failed to load prompts: {{error}}',
-  pickerLoading: 'Loading prompts…',
   pickerNone: '— none —',
   pickerOptionWithName: '{{name}} ({{ref}})',
   pickerShowBody: 'Show template body',
@@ -112,4 +111,7 @@ export const messages = {
   lintNoOneOf: '`oneOf` — Gemini silently drops; prefer `anyOf` or discriminator union',
   lintObjectNeedsAdditionalPropertiesFalse:
     'object schema missing `additionalProperties: false` — required for OpenAI strict',
+  loadFailedTitle: "Could not load the prompt library",
+  loadFailedBody: "This is a failed read, not an empty library — your prompts are still there.",
+  retry: "Try again",
 } as const;

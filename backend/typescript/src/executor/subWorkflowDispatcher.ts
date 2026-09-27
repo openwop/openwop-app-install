@@ -30,6 +30,10 @@
 
 import { randomUUID } from 'node:crypto';
 import { insertRunWithStartContext } from '../host/runInsert.js';
+import { scoreOnlineEvalsOnTerminal } from '../host/workflowEvalOnline.js';
+import { stampRunCostOnTerminal } from '../observability/costEmitter.js';
+import { foldWorkflowSpendOnTerminal } from '../host/workflowBudgets.js';
+import { resolveLaunchWorkflow } from '../host/resolveLaunchDefinition.js';
 import type { Storage } from '../storage/storage.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { RunRecord } from '../types.js';
@@ -66,20 +70,25 @@ export interface SubWorkflowOpts {
    *  child bag with `child[k] = parent[v]`. One-shot fold; mid-run
    *  mutations to the parent bag MUST NOT propagate. */
   inputMapping?: Record<string, string>;
+  /** RFC 0126 — per-item literal child inputs for a data-parallel fan-out slot.
+   *  Merged OVER the `inputMapping` projection (per-item value wins on a key
+   *  collision — RFC 0126 G1 "most-specific-wins"). Literal values, not a
+   *  parent-variable mapping. */
+  perItemInputs?: Record<string, unknown>;
   /** Per RFC 0022 §A — `{parentVar: childVarName}`. Applied AFTER the
    *  child reaches terminal `completed`; skipped on failed/cancelled
    *  per RFC 0022 §B HVMAP-1b. */
   outputMapping?: Record<string, string>;
-  /** Per `spec/v1/node-packs.md §core.subWorkflow`. This reference host
-   *  ALWAYS awaits the child's terminal/suspended state regardless of this
-   *  flag — a deliberate, conformant choice (awaiting is a stricter superset
-   *  of fire-and-forget): it preserves the parent↔child cascade contract
-   *  (parent cancel → child cancel, child resolve → parent resume) and output
-   *  mapping, and avoids a detached child run that would be lost on a process
-   *  crash with no owner to recover it. A true non-waiting (detached) mode is
-   *  intentionally NOT implemented here; it needs durable child-ownership +
-   *  crash-recovery design first (tracked as ENG-9 in CODEBASE-ASSESSMENT.md).
-   *  The field is accepted for wire-compatibility. */
+  /** Per `spec/v1/node-packs.md §core.subWorkflow`: `false` is "reserved for a
+   *  future asynchronous variant; v1 hosts MAY refuse `false`" — and the
+   *  `core.subWorkflow` node (bootstrap/nodes.ts) now EXERCISES that MAY,
+   *  failing the node with `validation_error` before this dispatcher runs
+   *  (ENG-9 resolved by decision: refusing loudly beats the prior silent
+   *  accept-and-await, and inventing detached semantics for a reserved field
+   *  would be an unspecified wire claim). This dispatcher therefore always
+   *  awaits the child's terminal/suspended state, preserving the parent↔child
+   *  cascade contract and output mapping. Detached mode lands if/when the
+   *  spec defines the async variant. */
   waitForCompletion?: boolean;
   /** Per RFC 0022 §B HVMAP-1b — `'fail-parent' | 'continue'`. When
    *  the child terminates non-completed, decide whether the
@@ -89,6 +98,15 @@ export interface SubWorkflowOpts {
    *  carries `parentNodeId` pointing back at the parent's
    *  subWorkflow node (so a tree of runs can be reconstructed). */
   parentNodeId: string;
+  /** ADR 0706 — the parent run's `configurable.credentialRefs`, copied onto the
+   *  child run's `configurable` so `prepareRunSecrets` resolves the SAME secrets
+   *  for the child. Without this a child run starts with an EMPTY secret set
+   *  and any BYOK dispatch inside it dies `byok_required` even though the
+   *  parent was granted the key — the lesson-batch child of the Challenge
+   *  Factory did exactly that. Same tenant, same run tree, same authority; the
+   *  refs are names and are recorded on the child run record (replay-neutral).
+   *  Never widened: only refs the PARENT already carries. */
+  parentCredentialRefs?: readonly string[];
 }
 
 /** Process-local parent-node linkage. RunRecord's persisted schema
@@ -210,7 +228,9 @@ export async function dispatchSubWorkflow(
   }
 
   // Look up the child workflow definition.
-  const wf = await hostSuite.workflowCatalog.getWorkflow(opts.childWorkflowId);
+  // ADR 0474 P1b (review F1) — nested children are production launches too:
+  // published-when-present, else the parent's edit lane leaks into production.
+  const wf = await resolveLaunchWorkflow(hostSuite.workflowCatalog, opts.parentTenantId, opts.childWorkflowId);
   if (!wf) {
     throw new DispatchCreationError(
       `subWorkflow: child workflow '${opts.childWorkflowId}' not found in catalog`,
@@ -229,6 +249,10 @@ export async function dispatchSubWorkflow(
       childInputs[childKey] = parentVars[parentKey];
     }
   }
+  // RFC 0126 — per-item literal inputs override the mapping projection (G1).
+  if (opts.perItemInputs) {
+    for (const [k, v] of Object.entries(opts.perItemInputs)) childInputs[k] = v;
+  }
 
   // Spawn child run.
   const childRunId = randomUUID();
@@ -241,13 +265,15 @@ export async function dispatchSubWorkflow(
     status: 'pending',
     inputs: childInputs,
     metadata: {},
-    configurable: {},
+    configurable: opts.parentCredentialRefs && opts.parentCredentialRefs.length > 0
+      ? { credentialRefs: [...opts.parentCredentialRefs] }
+      : {},
     parentRunId: opts.parentRunId,
     createdAt: now,
     updatedAt: now,
   };
   try {
-    await insertRunWithStartContext(storage, childRun);
+    await insertRunWithStartContext(storage, childRun, { definition: wf.definition });
   } catch (err) {
     // Storage failure during insertRun is a pre-creation failure per
     // RFC 0037 §"Handoff state machine" (child run was never persisted),
@@ -287,6 +313,12 @@ export async function dispatchSubWorkflow(
     // (in case executeRun didn't update the RunRecord before throwing).
     try {
       await storage.updateRun(childRunId, { status: 'failed', updatedAt: new Date().toISOString() });
+      // ADR 0480 (code-review M1) — a child run failed by a dispatcher throw
+      // is a production outcome the executor terminal sites never saw.
+      // ADR 0482 review H2 — its spend is money: stamp + fold too.
+      void scoreOnlineEvalsOnTerminal(storage, childRunId);
+      void stampRunCostOnTerminal(storage, childRunId)
+        .then((usd) => foldWorkflowSpendOnTerminal(storage, childRunId, usd));
     } catch {
       // Update failure here doesn't change the dispatch contract — the
       // caller will read the latest snapshot via storage.getRun below.

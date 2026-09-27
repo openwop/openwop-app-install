@@ -1,0 +1,5 @@
+{
+  "_comment": "SHRINK-ONLY RATCHET (ADR 0472 Phase 0). Frozen MAX set of code-pinned builtin workflow ids. The ratchet test forbids any NEW id (no growth). Remove an id ONLY when its workflow migrates out of BackendFeature.builtinWorkflows to a chain pack / stack / re-pointed mechanism. Never add. Phase 3 deletes the field entirely (new builtins impossible at the type level); this guards Phases 0-2.",
+  "count": 0,
+  "ids": []
+}

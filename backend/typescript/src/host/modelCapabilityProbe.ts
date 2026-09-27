@@ -29,6 +29,10 @@ const PROVIDER_CAPABILITIES: Readonly<Record<string, readonly string[]>> = {
     'reasoning',
     // Multi-turn tool use loop.
     'function-calling',
+    // RFC 0031 §C / RFC 0055 `vision-input`: Claude 3.5+ accepts image content
+    // in the prompt (dispatch.ts routes images to native vision blocks). Honest
+    // host advertisement — used by the model-router attachment-eligibility gate.
+    'vision-input',
   ],
   openai: [
     // strict mode on `response_format.json_schema.strict: true` + strict tool calling.
@@ -40,6 +44,9 @@ const PROVIDER_CAPABILITIES: Readonly<Record<string, readonly string[]>> = {
     // o-series reasoning tokens.
     'reasoning',
     'function-calling',
+    // RFC 0031 §C / RFC 0055 `vision-input`: GPT-4o-class models accept image
+    // content in the prompt (dispatch.ts routes images to native vision blocks).
+    'vision-input',
   ],
   google: [
     // `responseSchema` on generateContent (Vertex AI / Gemini API).
@@ -51,6 +58,9 @@ const PROVIDER_CAPABILITIES: Readonly<Record<string, readonly string[]>> = {
     // Gemini 2.0 Flash Thinking + 2.5 Pro `thinkingBudget`.
     'reasoning',
     'function-calling',
+    // RFC 0031 §C / RFC 0055 `vision-input`: Gemini 1.5+ accepts image content
+    // in the prompt (dispatch.ts routes images to native vision blocks).
+    'vision-input',
   ],
 };
 

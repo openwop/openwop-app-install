@@ -9,6 +9,7 @@
 
 import type { BundleScope } from '../../host/inMemorySurfaces.js';
 import { surfaceStr as str, surfaceOptStr as optStr, type FeatureSurface } from '../../host/featureSurfaces.js';
+import { OpenwopError } from '../../types.js';
 import {
   listProjects,
   getProject,
@@ -25,15 +26,20 @@ import {
   listPendingActions,
   projectCommitmentToBoard,
   contentHashOf,
+  ENQUEUEABLE_ACTION_KINDS,
   type PersonRef,
   type SourceRef,
   type CommitmentStatus,
+  type EnqueueableActionKind,
 } from './assistantService.js';
 import { prioritize, PRIORITY_PROFILES, type PriorityProfile } from './prioritization.js';
 import { composeBriefing } from './briefing.js';
 import { enqueueActionWithApproval } from './actionApproval.js';
 import { getNotificationEmitter } from '../../notifications/emitter.js';
 import { sanitizeFreeText } from '../../byok/textRedaction.js';
+import { createLogger } from '../../observability/logger.js';
+
+const log = createLogger('features.assistant.surface');
 
 const INTERNAL = new Set(['tenantId', 'createdAt', 'updatedAt']);
 function project<T extends object>(o: T): Record<string, unknown> {
@@ -150,10 +156,26 @@ export function buildAssistantSurface(scope: BundleScope): FeatureSurface {
     enqueueAction: async (args) => {
       // §12 T4 — enqueue ALSO creates the PendingApproval (the single loop)
       // and the inbox notification; card metadata rides through additively.
+      // COS-9 — validate `kind` at THIS surface owner. This used to be
+      // `str(args.kind) as 'email.send'` — a bare cast over arbitrary
+      // node-supplied input, so a node pack could store any string and it only
+      // failed CLOSED later (`action_execution_workflow_missing`, which reads
+      // like a deploy problem, not bad input). Reject an unknown kind as a typed
+      // failure BEFORE anything is enqueued, using the SAME allowlist the
+      // agent-tool lane checks (`ENQUEUEABLE_ACTION_KINDS`, the one SSoT).
+      const kind = str(args.kind);
+      if (!(ENQUEUEABLE_ACTION_KINDS as readonly string[]).includes(kind)) {
+        throw new OpenwopError(
+          'validation_error',
+          `Unknown assistant action \`kind\` — must be one of: ${ENQUEUEABLE_ACTION_KINDS.join(', ')}.`,
+          400,
+          { field: 'kind', kind },
+        );
+      }
       const riskLevel = args.riskLevel === 'low' || args.riskLevel === 'medium' || args.riskLevel === 'high' ? args.riskLevel : undefined;
       const sourceRefs = Array.isArray(args.sourceRefs) ? args.sourceRefs.map((s) => sourceRefOf(s)) : undefined;
       const a = await enqueueActionWithApproval(tenantId, {
-        kind: str(args.kind) as 'email.send',
+        kind: kind as EnqueueableActionKind,
         payload: (args.payload && typeof args.payload === 'object' ? args.payload : {}) as Record<string, unknown>,
         draft: str(args.draft),
         ...(optStr(args.sourceCommitmentId) ? { sourceCommitmentId: str(args.sourceCommitmentId) } : {}),
@@ -186,8 +208,16 @@ export function buildAssistantSurface(scope: BundleScope): FeatureSurface {
             actionUrl: '/inbox',
             metadata: { generatedAt: brief.generatedAt },
           });
-        } catch {
-          /* best-effort — the brief itself is the recorded output */
+        } catch (err) {
+          // WF-COS-8 — best-effort, but NOT silent. The notification IS the
+          // morning-briefing loop's entire product: the run records the brief
+          // and reports success, so a swallowed emit means the loop looks
+          // healthy while the human is never told. That failure was previously
+          // invisible in production and user-affecting at once.
+          log.warn('assistant_briefing_notification_failed', {
+            tenantId,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
       }
       return { brief };

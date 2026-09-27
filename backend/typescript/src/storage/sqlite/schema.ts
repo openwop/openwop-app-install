@@ -35,6 +35,11 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
 
       CREATE INDEX IF NOT EXISTS idx_runs_tenant_status
         ON runs (tenant_id, status, created_at DESC);
+      -- Child-run lookup (snapshot childRuns + the cancel cascade) by parent —
+      -- replaces the O(tenant) listRuns+filter scan (see the postgres schema
+      -- for the production incident this closed).
+      CREATE INDEX IF NOT EXISTS idx_runs_parent
+        ON runs (parent_run_id) WHERE parent_run_id IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS events (
         event_id TEXT PRIMARY KEY,
@@ -759,6 +764,379 @@ export const MIGRATIONS: Record<number, (db: Database) => void> = {
     // titleable). 'auto' = LLM-titled (don't re-run), 'user' = manual rename
     // (never overwrite). Mirrors postgres mig 29.
     addColumnIfTableExists(db, 'chat_sessions', 'title_source', 'TEXT');
+  },
+  33: (db) => {
+    // ADR 0178 — per-org daily BYOK LLM chat token usage (input + output tokens),
+    // keyed by provider, for the BYOK chat spend-governance budget. Mirrors
+    // managed_provider_usage (mig 4) / media_provider_usage (mig 30): tenant =
+    // workspace = org at root (ADR 0015). `date_utc` is the UTC calendar day in
+    // YYYY-MM-DD form. Mirrors postgres mig 30.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS byok_chat_usage (
+        tenant_id TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        date_utc TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (tenant_id, provider_id, date_utc)
+      );
+    `);
+  },
+  34: (db) => {
+    // ADR 0369 — index for the runs-reference probe (`hasRunForWorkflow`):
+    // the workflow DELETE guard + promote gate look runs up by workflow_id.
+    // Mirrors postgres mig 32.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs (workflow_id);
+    `);
+  },
+  35: (db) => {
+    // ADR 0371 — run retention (mirrors postgres mig 33): removal_at +
+    // partial index + the 7-day graced backfill for pre-policy terminal runs.
+    addColumnIfTableExists(db, 'runs', 'removal_at', 'TEXT');
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_runs_removal ON runs (removal_at) WHERE removal_at IS NOT NULL;`);
+    db.exec(`
+      UPDATE runs SET removal_at = datetime('now', '+7 days')
+      WHERE removal_at IS NULL AND status IN ('completed', 'failed', 'cancelled');
+    `);
+  },
+  36: (db) => {
+    // ADR 0379 P2 (PR-A) — user_agents PK becomes COMPOSITE (tenant_id,
+    // agent_id): the prerequisite for persona-scoped ids (`user.<slug>`), and
+    // the structural fold-collision mechanism (two tenants' same-persona rows
+    // now share a per-tenant key, so the adopt fold's tenant move collides
+    // instead of duplicating). sqlite can't ALTER a PK → table rebuild.
+    // Mirrors postgres mig 34.
+    // Grade-pass hardening (same DDL, atomic + re-runnable — NOT a semantic
+    // edit of a shipped migration): better-sqlite3 exec() auto-commits each
+    // statement, so a crash mid-rebuild used to strand a half-migrated DB that
+    // wedged every subsequent boot ("user_agents_v2 already exists" — or no
+    // user_agents at all in the crash-after-DROP window). BEGIN/COMMIT makes
+    // the rebuild all-or-nothing; the DROP IF EXISTS makes a retry clean even
+    // against a DB wedged by the pre-hardening code.
+    db.exec(`
+      BEGIN;
+      DROP TABLE IF EXISTS user_agents_v2;
+      CREATE TABLE user_agents_v2 (
+        agent_id TEXT NOT NULL,
+        tenant_id TEXT NOT NULL,
+        persona TEXT NOT NULL,
+        label TEXT,
+        description TEXT,
+        model_class TEXT NOT NULL,
+        system_prompt TEXT NOT NULL,
+        tool_allowlist TEXT NOT NULL DEFAULT '[]',
+        memory_scratchpad INTEGER NOT NULL DEFAULT 0,
+        memory_conversation INTEGER NOT NULL DEFAULT 0,
+        memory_long_term INTEGER NOT NULL DEFAULT 0,
+        confidence_threshold REAL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, agent_id)
+      );
+      INSERT INTO user_agents_v2
+        SELECT agent_id, tenant_id, persona, label, description, model_class,
+               system_prompt, tool_allowlist, memory_scratchpad,
+               memory_conversation, memory_long_term, confidence_threshold,
+               created_at
+        FROM user_agents;
+      DROP TABLE user_agents;
+      ALTER TABLE user_agents_v2 RENAME TO user_agents;
+      CREATE INDEX IF NOT EXISTS idx_user_agents_tenant
+        ON user_agents (tenant_id, created_at DESC);
+      COMMIT;
+    `);
+  },
+  37: (db) => {
+    // ADR 0549 P0 — the HTTP idempotency ledger, keyed (tenant_id, endpoint_id,
+    // idempotency_key). Mirrors postgres mig 35.
+    //
+    // This is a NEW table, not an ALTER of `idempotency`. The old table keeps
+    // serving the daemons' fire-once mutex and is deliberately NOT dropped
+    // (ADR 0549 CORRECTION 4) — the two lanes are separate concepts with
+    // incompatible failure semantics, and separating them is what makes a
+    // caller-supplied key structurally unable to collide with a
+    // host-generated one.
+    //
+    // No backfill. A raw legacy key cannot be attributed to a tenant after the
+    // fact, and guessing an owner is the very defect being fixed. The
+    // consequence is real and accepted: an HTTP key in flight across the
+    // deploy loses its cache, so a client retrying mid-deploy creates a second
+    // run instead of replaying the first.
+    //
+    // The lease/state columns are created here even though P0 does not yet
+    // drive them, so that P1 turns on behavior without a second table rebuild.
+    // `state` is CHECKed rather than free text — an unknown state must be a
+    // write error, not a row nobody can interpret.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS idempotent_response (
+        tenant_id TEXT NOT NULL,
+        endpoint_id TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        request_digest TEXT NOT NULL,
+        state TEXT NOT NULL DEFAULT 'pending'
+          CHECK (state IN ('pending', 'completed', 'released')),
+        claim_token TEXT,
+        claim_expires_at TEXT,
+        response_status INTEGER,
+        response_body TEXT,
+        run_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, endpoint_id, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_idempotent_response_age
+        ON idempotent_response (created_at);
+    `);
+  },
+  38: (db) => {
+    // ADR 0551 P0 — the RFC 0059 agent workspace becomes DURABLE. Mirrors
+    // postgres mig 36.
+    //
+    // Until now the workspace lived in a module-scope `Map`
+    // (`host/workspaceStore.ts`), so it died on every process restart and was
+    // invisible to a second instance — while `spec/v1/agent-workspace.md` §9
+    // requires that "a run replayed on another host MUST observe the same
+    // workspace snapshot". A process-local Map fails that even single-instance,
+    // because the guarantee is about portability across hosts.
+    //
+    // Identity is the RFC 0048 owner triple plus the path. All three key
+    // columns are NOT NULL: SQLite otherwise permits NULLs in a PRIMARY KEY and
+    // treats multiple NULL rows as non-conflicting, which would silently break
+    // the If-Match compare-and-set on this adapter while Postgres rejected the
+    // same insert.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS workspace_files (
+        tenant_id TEXT NOT NULL,
+        workspace_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        content TEXT NOT NULL,
+        content_type TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        etag TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (tenant_id, workspace_id, path)
+      );
+      CREATE INDEX IF NOT EXISTS idx_workspace_files_owner
+        ON workspace_files (tenant_id, workspace_id, path);
+    `);
+  },
+  39: (db) => {
+    // ADR 0549 P3 — RFC 0150 §B: the Layer-2 invocation log is keyed on the
+    // LOGICAL EFFECT IDENTITY, so the column says so. Mirrors postgres mig 37.
+    //
+    // A pure RENAME, not a rebuild. `provider_key` held a bare hash of the
+    // provider request; `invocation_id` holds the §B v2 identity
+    // `base64url(sha256("openwop:activity:v2" ‖ tenant ‖ run ‖ node ‖ ordinal ‖
+    // providerKey))`, which subsumes it. Renaming preserves every existing row
+    // and the primary key, which is what makes pre-P3 records still RESOLVABLE:
+    // the executor recomputes the retired v1 provider key on a v2 miss and
+    // reads the same row through the same PK (`spec/v1/replay.md` §E
+    // dual-read). A DROP-and-recreate would have silently invalidated every
+    // in-flight run's cache and re-fired its provider calls.
+    //
+    // `attempt` deliberately STAYS. §B retired it from the IDENTITY, not from
+    // the record: the spec keeps it as telemetry, and ADR 0326 P3a's replay
+    // fidelity needs the per-attempt outcome sequence.
+    const hasLegacyColumn = db
+      .prepare(`SELECT 1 AS present FROM pragma_table_info('invocation_log') WHERE name = 'provider_key'`)
+      .get();
+    if (hasLegacyColumn) {
+      db.exec(`ALTER TABLE invocation_log RENAME COLUMN provider_key TO invocation_id;`);
+    }
+  },
+  40: (db) => {
+    // ADR 0551 P1 — the durable dispatch outbox. Mirrors postgres mig 38.
+    //
+    // Accepted work used to be handed off by `setImmediate(executeRun)`, which
+    // is process memory: a Cloud Run instance recycled between the `201` and
+    // that callback left a run `pending` with nothing durable recording that
+    // anyone meant to start it. This row IS that record, written in the same
+    // transaction as the run.
+    //
+    // `run_id` is the PRIMARY KEY, not a plain column: the ADR keys the intent
+    // by run, and a PK makes a second append for one run a write error rather
+    // than a second delivery.
+    //
+    // No backfill. Runs that predate this migration have no outbox row and
+    // never will; they keep the recovery story they were created under (the
+    // orphan sweeper). Synthesising rows for them would enqueue a re-dispatch
+    // of every historical pending run at deploy time — a stampede in exchange
+    // for nothing, since the sweeper already covers them.
+    //
+    // `status` is CHECKed rather than free text (the mig-37 idempotent_response
+    // reasoning): an unknown state must be a write error, not a row nobody can
+    // interpret. There is no 'dispatched' state — a discharged intent is
+    // DELETED, so the queue is self-bounding.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS dispatch_outbox (
+        run_id TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        workflow_id TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'pending'
+          CHECK (status IN ('pending', 'dead')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        next_attempt_at INTEGER NOT NULL,
+        claimed_by TEXT,
+        claim_expires_at INTEGER,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_dispatch_outbox_due
+        ON dispatch_outbox (status, next_attempt_at);
+    `);
+  },
+  41: (db) => {
+    // PR #3409 review fold-in — `listAudit` gained an exact-match `resource`
+    // pushdown (the twin-recall consent reader + replay guard were both
+    // newest-N-then-filter over a host-global window: the reader truncated a
+    // subject's own history behind unrelated rows, and the guard failed OPEN
+    // past its window). This index serves the per-subject read newest-first.
+    // Partial (resource IS NOT NULL): most audit rows carry no resource and a
+    // NULL never matches the exact-match pushdown. Mirrors postgres mig 39.
+    db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_audit_resource_ts
+        ON audit_log (resource, timestamp DESC)
+        WHERE resource IS NOT NULL;
+    `);
+  },
+  42: (db) => {
+    // ADR 0591 P1 — the durable effect ESCAPE ledger (RFC 0158 §C.7 /
+    // §Conformance:160). Mirrors postgres mig 40.
+    //
+    // WHY A SECOND TABLE RATHER THAN COUNTING `invocation_log`. That table is
+    // the dedup/replay MEMO, and its `INSERT OR REPLACE` over a PK containing
+    // `attempt` is correct for that job. But `attempt` is a constant (the
+    // executor's 1-based one-shot stub, `executor.ts:990`), so a second escape
+    // of the same identity REPLACES the first row instead of adding one.
+    // MEASURED against this exact schema: two writes at `('r1','effect',1,
+    // 'ord0')` → ONE row, surviving result `'second'`. A `COUNT(*)` over it
+    // therefore returns 1 whether dedup works or is entirely broken — an
+    // instrument whose PASS is ambiguous does not witness the property, it
+    // certifies its absence. Conflating "memoize the result" with "count the
+    // escapes" is what made that count look usable.
+    //
+    // THE DISCRIMINATOR IS A SURROGATE KEY, and the first draft of this
+    // migration got that wrong in a way worth recording, because the wrong
+    // version failed precisely in the scenario the table exists to witness.
+    //
+    // That draft keyed on `(run_id, node_id, invocation_id, escape_seq)` with
+    // `escape_seq` supplied by the caller. Any caller-supplied sequence is
+    // PROCESS-LOCAL — it restarts at 0 in a resumed process. RFC 0158 §C.7 is
+    // driven by killing the host mid-run, so the resumed process re-appends the
+    // same identity at seq 0 and hits the pre-kill row. MEASURED against that
+    // draft:
+    //
+    //   process A: append(r/n/ord0, seq 0)   → 1 row
+    //   process B: append(r/n/ord0, seq 0)   → UNIQUE constraint failed …
+    //                                          count STAYS 1
+    //
+    // Both halves are disqualifying. Unswallowed, it throws on the ALLOW branch
+    // of `assertEffectAllowed` — a durability instrument that breaks the
+    // production egress path. Swallowed, the count stays 1, which is the exact
+    // `invocation_log` collapse this table was built to escape, reintroduced by
+    // its replacement. Deriving the sequence from the table instead (max+1)
+    // only trades it for a read-then-write race.
+    //
+    // So the ledger does not name the escape at all: the row id is generated,
+    // every append is unconditionally a new row, and no two appends can ever
+    // address the same one. The identity columns are an INDEX, never a key.
+    // (Revised before this migration ever ran outside its own test — mig 42 has
+    // shipped nowhere, so it is corrected in place rather than stacked on.)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS effect_escape_ledger (
+        escape_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        invocation_id TEXT NOT NULL,
+        effect_kind TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_effect_escape_run
+        ON effect_escape_ledger (run_id, invocation_id);
+    `);
+  },
+
+  43: (db) => {
+    // ADR 0618 — the Layer-2 atomic claim (`idempotency.md` §"Concurrent
+    // duplicates (Layer 2)"). A SEPARATE table from `invocation_log` on purpose:
+    // the log's PK carries `attempt` and its writer is `INSERT OR REPLACE`, so it
+    // can neither key on the retry-stable identity nor report a conflict. This
+    // one is keyed exactly on the identity and is only ever inserted-if-absent.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS invocation_claim (
+        run_id TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        invocation_id TEXT NOT NULL,
+        claimed_at INTEGER NOT NULL,
+        PRIMARY KEY (run_id, node_id, invocation_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_invocation_claim_run ON invocation_claim(run_id);
+    `);
+  },
+  44: (db) => {
+    // v2 charter Phase 4 (P4-C) — THE ERA KEY.
+    // `spec/v2/core/persistence.md` §"The era key": `eventLogSchemaVersion` is a
+    // per-run key naming the vocabulary its event log is written in. `3` is the
+    // v2 era; a run this host creates from here on is stamped `3` at the storage
+    // seat (`storage/eventEraAdapter.ts`), which is the ONLY writer of it.
+    //
+    // NULLABLE WITH NO BACKFILL, DELIBERATELY. Every row that predates this
+    // migration keeps a NULL and reads as era `2` (the v1 era) under the
+    // absent-⇒-`2` rule. persistence.md is explicit that "absent stays era 2
+    // forever; it is never backfilled" and that a host "MUST NOT rewrite
+    // historical rows to add an explicit 2" — so there is no UPDATE here, and
+    // there must never be one. The snapshot's required `eventLogSchemaVersion`
+    // is SYNTHESIZED as `2` for those runs at read time; a missing stored era is
+    // not a read error.
+    //
+    // `ALTER TABLE ... ADD COLUMN` with no default rewrites no rows in sqlite,
+    // so this is O(1) on a large `runs` table.
+    addColumnIfTableExists(db, 'runs', 'event_log_schema_version', 'INTEGER');
+  },
+  45: (db) => {
+    // v2 charter Phase 4 (P4-D) — THE SUBSCRIBER'S CONTRACT MAJOR.
+    // `versioning.md` §5 + `identity.md` §5: under major 2 a runId is the
+    // tenant-bound `<tenantId>/<opaque>` projection, and `run-event.schema.json`
+    // binds `runId` to that grammar by `$ref` — so the run event nested in a v2
+    // webhook delivery is non-conformant carrying a bare uuid.
+    //
+    // A delivery is an EMISSION, not a response: there is no request header to
+    // negotiate from when the worker POSTs. So the contract is stamped on the
+    // SUBSCRIPTION at registration and read at fanout.
+    //
+    // NULLABLE WITH NO BACKFILL, and here the default is the safety property.
+    // NULL reads as major 1 (`rowToWebhook`), so every subscription registered
+    // before this column existed keeps receiving the bare id it has always
+    // received. Projecting unconditionally would silently rewrite the
+    // identifiers live v1 subscribers correlate on — the same defect this fixes
+    // (an id the receiver cannot match), aimed at the other set of receivers.
+    addColumnIfTableExists(db, 'webhooks', 'protocol_major', 'INTEGER');
+  },
+  46: (db) => {
+    // RFC 0187 §A.1 — persist the exact tenant-bound id emitted in the
+    // webhook header. NULL means the pre-RFC/major-1 raw subscription id.
+    addColumnIfTableExists(db, 'webhook_deliveries', 'wire_subscription_id', 'TEXT');
+  },
+  47: (db) => {
+    // RFC 0201 / ADR 0747 — the Standard Webhooks companion scheme. All four
+    // columns are NULLABLE WITH NO BACKFILL, and NULL is the compatibility
+    // property: a NULL `signature_algorithms` reads as `["v1"]` (today's
+    // behaviour, byte for byte — RFC 0201 §B.8), and the three rotation
+    // columns are only ever written by `rotate-secret` on an opted-in row.
+    // `previous_secret` holds the SAME at-rest form as `secret` (sealed when
+    // KMS is configured) — rotation moves the ciphertext, it never opens it.
+    addColumnIfTableExists(db, 'webhooks', 'signature_algorithms', 'TEXT');
+    addColumnIfTableExists(db, 'webhooks', 'previous_secret', 'TEXT');
+    addColumnIfTableExists(db, 'webhooks', 'previous_secret_expires_at', 'INTEGER');
+    addColumnIfTableExists(db, 'webhooks', 'rotated_at', 'INTEGER');
+  },
+  48: (db) => {
+    // RFC 0215 §A.3 / ADR 0752 P2 — the owning tenant on each delivery row
+    // (mirrors postgres mig 46). NULLABLE WITH NO BACKFILL: a NULL row predates
+    // the column, is not tenant-capped, and drains within minutes.
+    addColumnIfTableExists(db, 'webhook_deliveries', 'tenant_id', 'TEXT');
   },
 };
 

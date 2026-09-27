@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.storage",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "State primitives — kv / table / cache / blob / queue. Each node gated on its specific host capability block (host.kvStorage, host.tableStorage, host.cache, host.blobStorage, host.queue) per RFCs 0015–0019. Pack delegates to ctx.storage.* host surface. Zero npm deps.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",

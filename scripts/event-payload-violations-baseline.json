@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "ADR 0702/0722 \u2014 the SHRINK-ONLY baseline of event types whose persisted payload does not",
+    "validate against the corpus $def its own _typeIndex names. Measured by",
+    "scripts/audit-event-payloads.mjs over a full backend suite run.",
+    "A type NOT listed here that starts violating FAILS the gate (a new wire gap).",
+    "A type listed here that stops violating ALSO fails \u2014 delete its line; a stale",
+    "admission is the thing that makes a ratchet stop ratcheting.",
+    "Types, not counts: the sample count varies with test ordering and flake, and a",
+    "gate that moves for reasons unrelated to the code teaches people to re-baseline it.",
+    "ADR 0725/0726 (2026-09-18, measurement #3: 1324 host samples / 50 types): 30 -> 2 admitted; 797 -> 7 wire errors.",
+    "`approval.overridden`: a FIXTURE interrupt minted without a nodeId and with a short id (`int-gate-19`) drives the quorum",
+    "`runOrchestrator.decided`: RFC 0007 \u00a7D requires the host to emit `next-worker` THEN `terminate` in a loop",
+    "topology, and `conformance-dispatch-loop`'s fixture supplies no child workflow \u2014 so the default plan's",
+    "`next-worker` carries `nextWorkerIds: []`, which `orchestrator-decision.schema.json` refuses (`minItems: 1`).",
+    "The MUST wins over the schema nicety: collapsing the plan to a single `terminate` fixes the payload and REDS",
+    "the scenario (measured 2026-09-18). Reported to the steward as a corpus mismatch; admitted here until it is settled."
+  ],
+  "measured": "2026-09-18",
+  "types": [
+    "approval.overridden",
+    "runOrchestrator.decided"
+  ]
+}

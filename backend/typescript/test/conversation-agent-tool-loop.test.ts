@@ -90,7 +90,10 @@ describe('runChatToolLoop (shared observe→act core)', () => {
     );
 
     expect(executeTool).not.toHaveBeenCalled();
-    expect(res.events.some((e) => e.type === 'agent.toolReturned' && e.status === 'invalid_args')).toBe(true);
+    // RFC 0064 §E — validation failure surfaces as `status:'error'` + `error.code:'invalid_args'`.
+    expect(res.events.some((e) => e.type === 'agent.toolReturned'
+      && (e as { status?: string }).status === 'error'
+      && (e as { error?: { code?: string } }).error?.code === 'invalid_args')).toBe(true);
   });
 
   it('surfaces a provider error mid-loop without throwing', async () => {
@@ -123,8 +126,8 @@ describe('conversationToolTurnEligible — when a chat agent runs its tool loop'
   const run = (inputs: Record<string, unknown>): RunRecord =>
     ({ runId: 'r', tenantId: 't', inputs } as unknown as RunRecord);
 
-  it('false for a pure-persona agent (no tools)', () => {
-    expect(conversationToolTurnEligible(run({ provider: 'anthropic', credentialRef: 'byok:k' }), agent([]))).toBe(false);
+  it('TRUE even for an empty-manifest agent — the ADR 0315 default-on baseline means no agent is pure-persona', () => {
+    expect(conversationToolTurnEligible(run({ provider: 'anthropic', credentialRef: 'byok:k' }), agent([]))).toBe(true);
   });
   it('true for the managed (free) tier — MiniMax has a tool-calling round', () => {
     expect(conversationToolTurnEligible(run({ credentialRef: 'managed:openwop-free' }), agent(['search']))).toBe(true);
@@ -145,8 +148,24 @@ describe('runConversationAgentToolTurn — falls back (null) without regressing'
     ({ runId: 'r', tenantId: 't', inputs } as unknown as RunRecord);
   const base = { systemPrompt: 'sp', history: [], runId: 'r', nodeId: 'n', conversationId: 'c', policyResolver: policyStub };
 
-  it('returns null for an agent with no tools', async () => {
-    expect(await runConversationAgentToolTurn({ ...base, run: run({ provider: 'anthropic', credentialRef: 'byok:k' }), agent: agent([]) })).toBeNull();
+  it('an empty-manifest agent ENTERS the tool path (ADR 0315 baseline) — no null short-circuit', async () => {
+    // Pre-ADR-0315 this returned null before touching any store; now the loop
+    // proceeds (and in this storeless harness the first durable read throws),
+    // proving the "pure persona ⇒ single completion" bail-out is gone.
+    const { initHostExtPersistence, __resetHostExtPersistence } = await import('../src/host/hostExtPersistence.js');
+    const { openStorage } = await import('../src/storage/index.js');
+    initHostExtPersistence(await openStorage('memory://'));
+    try {
+      // With persistence available the path runs past eligibility, compiles the
+      // BASELINE tools, and reaches BYOK key resolution — unconfigured in this
+      // harness, so it throws there. Pre-0315 it resolved null before ever
+      // touching key material; getting this deep is the behavior under test.
+      await expect(
+        runConversationAgentToolTurn({ ...base, run: run({ provider: 'anthropic', credentialRef: 'byok:k' }), agent: agent([]) }),
+      ).rejects.toThrow(/secretResolver/);
+    } finally {
+      __resetHostExtPersistence();
+    }
   });
 
   it('returns null for a BYOK provider with no tool-calling path', async () => {

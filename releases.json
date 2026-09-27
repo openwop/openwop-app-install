@@ -1,23 +1,47 @@
 {
   "_comment": "ADR 0052 §D2/§D7 — machine-readable release manifest and the single source of truth for REQUIRED UPGRADE STOPS. /cut-app-release PREPENDS each immutable vX.Y.Z release into `releases` (newest first) and sets `latest`. An upgrade tool reads `releases` to compute which required stops sit between a customer's current version and the target. `latest` names the newest stable (the moving alias the /install/ download points at). The per-entry field shape is documented in `_releaseShape` — that is a SCHEMA EXAMPLE, never a real release; do not parse it as one.",
-  "latest": "0.1.0",
+  "latest": "0.2.0",
   "_releaseShape": {
     "version": "X.Y.Z",
     "date": "YYYY-MM-DD",
     "requiredStop": false,
     "requiredStopReason": null,
-    "schemaVersion": { "sqlite": 28, "postgres": 25 },
+    "schemaVersion": {
+      "sqlite": 28,
+      "postgres": 25
+    },
     "appMigrationVersion": 0,
     "breakingConfig": [],
     "notes": "CHANGELOG.md#xyz"
   },
   "releases": [
     {
+      "version": "0.2.0",
+      "date": "2026-09-27",
+      "requiredStop": false,
+      "requiredStopReason": null,
+      "schemaVersion": {
+        "sqlite": 48,
+        "postgres": 46
+      },
+      "appMigrationVersion": 21,
+      "breakingConfig": [
+        "Webhook: pre-spec `openwop-signature: t=…,v1=…` and `openwop-subscription-id` headers removed — verify with the OpenWOP-* / X-openwop-* family",
+        "OPENWOP_RATELIMIT_IP_REQS_PER_MIN is now the WRITE budget; reads use OPENWOP_RATELIMIT_IP_READ_REQS_PER_MIN (ADR 0640)",
+        "OPENWOP_INTERRUPT_TOKEN_SECRET (new) — set it; the fallback is not a secret",
+        "Not rolling-safe: stop the 0.1.0 binary before starting 0.2.0 (invocation_log column rename)"
+      ],
+      "notes": "CHANGELOG.md#020--2026-09-27"
+    },
+    {
       "version": "0.1.0",
       "date": "2026-06-30",
       "requiredStop": false,
       "requiredStopReason": null,
-      "schemaVersion": { "sqlite": 32, "postgres": 29 },
+      "schemaVersion": {
+        "sqlite": 32,
+        "postgres": 29
+      },
       "appMigrationVersion": 1,
       "breakingConfig": [],
       "notes": "CHANGELOG.md#010--2026-06-30"

@@ -14,12 +14,15 @@
  * `node.failed` / `node.suspended` delimit per-node spans.
  */
 
+import { Button } from '../ui/Button.js';
 import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { SaveIcon } from '../ui/icons/index.js';
+import { EventReadStateCard, type EventReadState } from '../streams/EventReadState.js';
 import i18n from '../i18n/index.js';
 import { formatNumber } from '../i18n/format.js';
+import { CompactionNotice, findCompactionMarkers } from './CompactionNotice.js';
 
 /** Maps a timeline segment status to its display key. */
 const SEG_STATUS_KEYS: Record<SegStatus, string> = {
@@ -35,6 +38,10 @@ interface Props {
   /** §A4 playhead — fires the selected segment's last sequence (or null on
    *  deselect) so a parent can drive synchronized inspector panels. */
   onSelectSeq?: (seq: number | null) => void;
+  /** ADR 0600 §1 — see {@link EventReadState}. */
+  readState?: EventReadState;
+  /** Offered on a FAILED read only. Omit and the failure card carries no CTA. */
+  onRetry?: () => void;
 }
 
 type SegStatus = 'running' | 'completed' | 'failed' | 'suspended';
@@ -149,7 +156,7 @@ function fmtDuration(ms: number): string {
   return i18n.t('runs:timelineDurationMinutes', { m: formatNumber(m), s: formatNumber(s) });
 }
 
-export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
+export function RunTimeline({ events, onForkFrom, onSelectSeq, readState, onRetry }: Props) {
   const { t } = useTranslation('runs');
   const { lanes, minMs, maxMs } = useMemo(() => buildSegments(events), [events]);
   // §A3(b) / RFC 0057 — per-lane memory-write attribution from `memory.written`
@@ -169,16 +176,31 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
     return m;
   }, [events]);
   const [selected, setSelected] = useState<{ nodeId: string; startSeq: number } | null>(null);
-
-  if (events.length === 0) return <div className="muted">{t('noEventsYet')}</div>;
-
-  const span = maxMs - minMs;
-  const pct = (ms: number) => ((ms - minMs) / span) * 100;
   const selectedSeg = selected
     ? lanes
         .find((l) => l.nodeId === selected.nodeId)
         ?.segments.find((s) => s.startSeq === selected.startSeq) ?? null
     : null;
+  // TOCU-1 / review M10 — one memoised pass over the selected segment instead
+  // of a full recursive payload walk per event on every streamed re-render.
+  //
+  // ABOVE the empty-events early return, deliberately. The first draft put this
+  // next to its use site, below `if (events.length === 0) return …`, so the hook
+  // count changed between renders — "Rendered more hooks than during the
+  // previous render", five red tests in two files. `tsc` and all 27 frontend
+  // build gates were GREEN on it: rules-of-hooks is not a type error, so unit
+  // tests were the only instrument that could see it.
+  const markersByEventId = useMemo(
+    () => new Map((selectedSeg?.events ?? []).map((ev) => [ev.eventId, findCompactionMarkers(ev.payload)])),
+    [selectedSeg],
+  );
+
+  if (events.length === 0) {
+    return <EventReadStateCard readState={readState} onRetry={onRetry} />;
+  }
+
+  const span = maxMs - minMs;
+  const pct = (ms: number) => ((ms - minMs) / span) * 100;
 
   return (
     <div className="run-timeline">
@@ -219,7 +241,7 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
                   <button
                     type="button"
                     key={seg.startSeq}
-                    className={`run-timeline-bar${isSel ? ' run-timeline-bar-selected' : ''}`}
+                    className={`run-timeline-bar${seg.status === 'failed' ? ' run-timeline-bar--failed' : ''}${seg.status === 'suspended' ? ' run-timeline-bar--suspended' : ''}${isSel ? ' run-timeline-bar-selected' : ''}`}
                     style={{
                       left: `${left}%`,
                       width: `${width}%`,
@@ -248,18 +270,20 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
         <div className="run-timeline-detail card">
           <div className="run-timeline-detail-head">
             <strong>{selectedSeg.nodeId}</strong>
-            <span className="status-badge" style={{ background: SEG_COLOR[selectedSeg.status] }}>
+            {/* Status class = colored TEXT, never a status-color fill (DESIGN.md
+                §3 rule 3; the old inline background over the badge's muted ink
+                failed AA — UX-ASSESSMENT BLD-2). */}
+            <span className={`status-badge ${selectedSeg.status}`}>
               {t(SEG_STATUS_KEYS[selectedSeg.status])}
             </span>
             {onForkFrom && (
-              <button
-                type="button"
-                className="secondary u-ml-auto u-pad-2x8 u-fs-11"
+              <Button
+                variant="secondary" className="u-ml-auto u-pad-2x8 u-fs-11"
                 onClick={() => onForkFrom(selectedSeg.lastSeq)}
                 title={t('timelineForkSegmentTitle')}
               >
                 {t('timelineForkFromSeq', { seq: formatNumber(selectedSeg.lastSeq) })}
-              </button>
+              </Button>
             )}
           </div>
           {selectedSeg.events.map((ev) => (
@@ -269,6 +293,15 @@ export function RunTimeline({ events, onForkFrom, onSelectSeq }: Props) {
               {ev.payload != null && Object.keys(ev.payload as object).length > 0 && (
                 <details>
                   <summary className="muted">{t('payloadSummary')}</summary>
+                  {/* TOCU-1 (ADR 0604) — the same disclosure as the step
+                      inspector; both render `ev.payload` raw, so both need it.
+                      NO `announce` (review M10): this sits inside a COLLAPSED
+                      `<details>`, whose children mount while closed, so
+                      announcing here spoke about unopened content — and, because
+                      `ui/announce.tsx` holds a single polite message, N events
+                      collapsed into one orphaned count. The step inspector owns
+                      the announcement. */}
+                  <CompactionNotice markers={markersByEventId.get(ev.eventId) ?? { elidedRows: 0, emptiedFields: [] }} />
                   <pre>{JSON.stringify(ev.payload, null, 2)}</pre>
                 </details>
               )}

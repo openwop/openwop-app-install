@@ -12,6 +12,8 @@
  */
 
 import { config, authedHeaders, fetchOpts } from './config.js';
+import { noteRequestStatus } from './entitlementRefresh.js';
+import { noteSessionRefusal } from './sessionRefusal.js';
 
 /** Structured REST failure. `status` is the HTTP status (0 for network
  *  errors). `body` is the parsed JSON error payload when the server sent one. */
@@ -102,9 +104,17 @@ export async function requestJson<T = unknown>(path: string, opts: RequestOption
   const durationMs = Date.now() - started;
   const accepted = res.ok || (okStatuses?.includes(res.status) ?? false);
   telemetry?.onRequest({ method, path, status: res.status, durationMs, ok: accepted });
+  // UI-ENT-1b — a 403 may mean the tenant's entitlement narrowed mid-session;
+  // re-resolve so the EXISTING EntitlementGuard renders the locked state instead
+  // of a generic error. Never re-sends the request.
+  noteRequestStatus(res.status);
 
   if (!accepted) {
     const body2 = await parseBody(res);
+    // ADR 0621 D5 — a 401 that REFUSED a live session (disabled / erased /
+    // revoked) runs the hard sign-out choke; the typed throw below still
+    // settles the page that made the call.
+    noteSessionRefusal(res.status, body2);
     const detail = body2 && typeof body2 === 'object'
       ? (body2 as { message?: string; error?: string }).message ?? (body2 as { error?: string }).error
       : undefined;

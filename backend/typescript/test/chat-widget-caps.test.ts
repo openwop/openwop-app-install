@@ -33,9 +33,46 @@ describe('checkWidgetTurn', () => {
     expect((await checkWidgetTurn(w, 'sC', '2026-06-25')).allowed).toBe(true);
   });
 
-  it('uncapped widget always allows', async () => {
+  it('ADR 0707 — an UNSET cap is BOUNDED by the secure default, not uncapped', async () => {
+    // THIS TEST USED TO PIN THE DEFECT. It was called "uncapped widget always allows"
+    // and asserted 20 consecutive turns on `caps: {}` — encoding `?? Infinity`, i.e.
+    // that absence is a grant, on an internet-reachable operator-BILLED surface.
+    //
+    // Two notes on why it had to be rewritten rather than left alone:
+    //  - It would have KEPT PASSING by coincidence: the new default is 20 turns and the
+    //    loop did exactly 20, so a green run would have said nothing either way.
+    //  - Its NAME would then have been false, which is how the next reader inherits the
+    //    wrong model (the ADR 0470 P3 finding next door had already ruled that a public
+    //    bound must not be operator-optional).
     const w = widget('w3', {});
-    for (let i = 0; i < 20; i++) expect((await checkWidgetTurn(w, 's', '2026-06-24')).allowed).toBe(true);
+    for (let i = 0; i < 20; i++) {
+      expect((await checkWidgetTurn(w, 's', '2026-06-24')).allowed, `turn ${i + 1} is within the default`).toBe(true);
+    }
+    const overflow = await checkWidgetTurn(w, 's', '2026-06-24'); // the 21st
+    expect(overflow.allowed, 'an unset cap is bounded by the secure default').toBe(false);
+    expect(overflow.reason).toBe('turn_cap');
+  });
+
+  it('ADR 0707 — an EXPLICIT Infinity is still a genuine opt-out (unset !== unbounded)', async () => {
+    // The distinction is the whole point, and it is copied from `checkAnonWrite`: an
+    // operator MAY choose unbounded, but they must SAY so. Absence is not consent.
+    const w = widget('w3-explicit', { maxTurnsPerSession: Infinity, maxSessionsPerDay: Infinity });
+    for (let i = 0; i < 25; i++) {
+      expect((await checkWidgetTurn(w, 's', '2026-06-24')).allowed, `turn ${i + 1} on an explicitly uncapped widget`).toBe(true);
+    }
+  });
+
+  it('ADR 0707 — the per-DAY session default bounds a visitor rotating their session id', async () => {
+    // `publicGateway.ts` states rotation is bounded by `maxSessionsPerDay` + the per-IP
+    // limit. With the old `?? Infinity` that was true only of a CONFIGURED widget; this
+    // pins it for the DEFAULT one, which is the configuration most widgets run.
+    const w = widget('w3-rotate', {});
+    let denied = 0;
+    for (let i = 0; i < 205; i++) {
+      const r = await checkWidgetTurn(w, `rotated-${i}`, '2026-06-26'); // a fresh session each time
+      if (!r.allowed) { denied += 1; expect(r.reason).toBe('session_cap'); }
+    }
+    expect(denied, 'rotation runs into the per-day session default').toBeGreaterThan(0);
   });
 
   it('PUB-3: concurrent first-turns of the SAME session count ONE session (no double-count)', async () => {

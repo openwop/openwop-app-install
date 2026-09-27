@@ -29,7 +29,7 @@ beforeAll(async () => {
   // Names + triggers the degraded-demo agent (registered at registerAgentRoutes).
   process.env.OPENWOP_DEGRADED_CAPABILITY_AGENT_ID = DEGRADED_AGENT;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));

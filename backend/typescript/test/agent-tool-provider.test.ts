@@ -115,4 +115,17 @@ describe('agent tool provider (A2)', () => {
     expect(out.isError).toBeFalsy();
     expect(JSON.parse(out.content)).toHaveProperty('chunks'); // backed by the knowledge surface (no vector store needed)
   });
+
+  it('WFAU-4 / RFC 0064 §F — a THROWN tool error preserves its structured code as errorCode (the wiring the review found dead)', async () => {
+    // Real wiring, no mock: the knowledge surface throws `knowledge_query_too_long`
+    // (Object.assign(new Error, {code})) for a query over QUERY_MAX=4000. The
+    // provider's catch must surface that code as `errorCode` — before the fix it
+    // swallowed the throw to `{content:'tool_failed: …', isError}` with the code
+    // LOST, so every capability-precondition / structured throw degraded to a
+    // generic `tool_execution_failed` with `durationMs` falsely present downstream.
+    const provider = createAgentToolProvider({ tenantId: 'tenant-a' });
+    const out = await provider.executeTool({ name: 'openwop:knowledge.search', input: { query: 'x'.repeat(5000) } });
+    expect(out.isError).toBe(true);
+    expect(out.errorCode).toBe('knowledge_query_too_long');
+  });
 });

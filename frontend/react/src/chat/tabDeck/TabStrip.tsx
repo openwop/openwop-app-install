@@ -22,7 +22,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { handleTablistKeyDown } from '../../ui/rovingTabs.js';
 import { IconButton } from '../../ui/IconButton.js';
-import { PlusIcon, XIcon, PinIcon, MonitorIcon, SearchIcon, MenuIcon } from '../../ui/icons/index.js';
+import { PlusIcon, XIcon, PinIcon, MonitorIcon, MenuIcon } from '../../ui/icons/index.js';
 import { computeDropIndex } from './dropIndex.js';
 
 export const tabButtonId = (sid: string): string => `tab-${sid}`;
@@ -41,10 +41,9 @@ export interface TabStripProps {
   onReorder: (fromSid: string, toIndex: number) => void;
   onSetPinned: (sid: string, pinned: boolean) => void;
   onNewTab: () => void;
-  /** Open the conversation library (ADR 0140 P7) — pick an existing conversation to
-   *  open as a tab. Surfaced as a strong, labeled "Conversations" launcher (ADR 0140). */
-  onOpenLibrary: () => void;
-  /** Toggle the shared Runs + Reviews rail (ADR 0140). Omit to hide the control. */
+  /** Toggle the shared Conversations + Workflow + Reviews rail (ADR 0140 amend). The
+   *  persistent Conversations list in that rail replaced the old library launcher —
+   *  browsing existing conversations is the rail's Conversations mode. */
   onToggleRail?: () => void;
   /** Whether the rail is currently open — drives the toggle's pressed state. */
   railOpen?: boolean;
@@ -67,7 +66,7 @@ export interface TabStripProps {
 }
 
 export function TabStrip({
-  tabs, activeSessionId, titleFor, onFocus, onClose, onReorder, onSetPinned, onNewTab, onOpenLibrary, onToggleRail, railOpen, railBadgeCount, renderStatus, blockedSids, onPopOut, canPopOut, onRename,
+  tabs, activeSessionId, titleFor, onFocus, onClose, onReorder, onSetPinned, onNewTab, onToggleRail, railOpen, railBadgeCount, renderStatus, blockedSids, onPopOut, canPopOut, onRename,
 }: TabStripProps): JSX.Element {
   const { t } = useTranslation('chat');
   // Inline tab rename (ADR 0140 follow-up). Mirrors the conversations-rail edit UX:
@@ -188,13 +187,7 @@ export function TabStrip({
   };
 
   return (
-    <div
-      ref={stripRef}
-      className="tabdeck-strip"
-      role="tablist"
-      aria-label={t('multiTabTablistAria')}
-      onKeyDown={onKeyDown}
-    >
+    <div ref={stripRef} className="tabdeck-strip">
       {/* Left — a hamburger that toggles the left rail (Runs/Reviews). The tab viewport
           (flex:1) grows beside it; Conversations + "+ New chat" anchor the right end. */}
       {onToggleRail ? (
@@ -231,7 +224,16 @@ export function TabStrip({
             onClick={() => scrollToBlocked('right')}
           />
         )}
-        <div ref={scrollRef} className="tabdeck-strip__scroll">
+        {/* DECK-1: the tablist role sits on the element whose children ARE the
+            tabs — the rail launcher / new-chat / blocked-cue buttons are siblings,
+            not tablist members (APG). */}
+        <div
+          ref={scrollRef}
+          className="tabdeck-strip__scroll"
+          role="tablist"
+          aria-label={t('multiTabTablistAria')}
+          onKeyDown={onKeyDown}
+        >
       {tabs.map((tab) => {
         const sid = tab.sessionId;
         const isActive = sid === activeSessionId;
@@ -313,17 +315,9 @@ export function TabStrip({
       })}
         </div>
       </div>
-      {/* Right cluster — the Conversations library launcher, then the new-chat action.
-          Both sit OUTSIDE the scroll region so they stay reachable as tabs overflow. */}
-      <button
-        type="button"
-        className="tabdeck-launcher"
-        onClick={onOpenLibrary}
-        title={t('multiTabLibraryAria')}
-      >
-        <SearchIcon size={14} />
-        <span>{t('multiTabLibraryLauncher')}</span>
-      </button>
+      {/* Right cluster — the new-chat action. Browsing existing conversations moved to
+          the persistent Conversations rail (ADR 0140 amend), so the launcher is retired.
+          This sits OUTSIDE the scroll region so it stays reachable as tabs overflow. */}
       <button
         type="button"
         className="tabdeck-launcher"

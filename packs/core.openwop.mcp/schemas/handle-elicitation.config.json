@@ -1,8 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.mcp/1.1.1/handle-elicitation.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.mcp/1.1.3/handle-elicitation.config.json",
   "title": "McpHandleElicitationConfig",
+  "description": "ADR 0553 P2 — the ask, authored on the node. Under MCP 2026-07-28 there is no inbound `elicitation/create` method (MRTR replaced server-initiated requests), so a workflow that needs input from its MCP caller declares the ask HERE and the host answers the in-flight `tools/call` with `input_required`. The legacy 2025-06-18 bridge still passes the inbound params as `inputs.request`, which wins when present.",
   "type": "object",
-  "properties": {},
+  "properties": {
+    "message": {
+      "type": "string",
+      "description": "The prompt shown to the caller."
+    },
+    "requestedSchema": {
+      "type": "object",
+      "description": "MCP flat form schema (string/number/boolean/enum) describing the answer.",
+      "additionalProperties": true
+    }
+  },
   "additionalProperties": false
 }

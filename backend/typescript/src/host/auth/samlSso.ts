@@ -119,11 +119,20 @@ function client(s: SamlSettings, storage?: Storage): SAML {
     identifierFormat: null,
     // Replay protection (SEC-1): when a durable cache is available, validate
     // the assertion's InResponseTo against minted-and-unconsumed AuthnRequest
-    // ids. `ifPresent` so SP-initiated flows (which carry InResponseTo) get
-    // replay protection while IdP-initiated flows (no InResponseTo) still work.
+    // ids. `ifPresent` (default) protects SP-initiated flows while letting
+    // IdP-initiated flows (no InResponseTo) work. (2026-07 vuln-scan) A
+    // deployment that does NOT use IdP-initiated SSO can set
+    // OPENWOP_SAML_VALIDATE_INRESPONSETO=always for full replay protection —
+    // then an assertion with no InResponseTo is rejected (an IdP-initiated
+    // assertion has no single-use record, so its residual replay window within
+    // NotOnOrAfter is closed). Follow-up: a durable per-assertion-ID one-time
+    // cache would let IdP-initiated flows keep replay protection too.
     ...(storage
       ? {
-          validateInResponseTo: ValidateInResponseTo.ifPresent,
+          validateInResponseTo:
+            process.env.OPENWOP_SAML_VALIDATE_INRESPONSETO === 'always'
+              ? ValidateInResponseTo.always
+              : ValidateInResponseTo.ifPresent,
           requestIdExpirationPeriodMs: SAML_REQUEST_TTL_MS,
           cacheProvider: createSamlReplayCache(storage),
         }
@@ -146,6 +155,17 @@ export interface SamlIdentity {
   displayName?: string;
   /** Raw IdP group attributes, verbatim (group→role mapping is ADR 0006). */
   groups: string[];
+  /** The assertion's AuthnContextClassRef, when present (grade-pass SEC-G2) —
+   *  lets the host judge whether the IdP sign-in was multi-factor instead of
+   *  assuming it. Extracted from the validated assertion XML (node-saml does
+   *  not surface it as a first-class field). */
+  authnContextClassRef?: string;
+  /** RFC 0163 §B — the assertion's `<saml:Issuer>` entityID (the SAML lane's
+   *  trust-root identity). The ACS compares this against the SCIM connection's
+   *  bound entityID before honouring a cross-lane link. Extracted from the
+   *  VALIDATED assertion XML — node-saml has already verified the signature that
+   *  covers this element, so the issuer cannot have been swapped post-signing. */
+  issuer?: string;
 }
 
 function asString(v: unknown): string | undefined {
@@ -170,7 +190,20 @@ export async function samlValidate(
   });
   if (!profile) throw new Error('SAML response carried no profile.');
   const a = profile as Record<string, unknown>;
+  const getXml = (profile as { getAssertionXml?: () => string }).getAssertionXml;
+  const assertionXml = typeof getXml === 'function' ? getXml.call(profile) : undefined;
+  const acr = assertionXml
+    ? /<(?:\w+:)?AuthnContextClassRef[^>]*>([^<]+)</.exec(assertionXml)?.[1]?.trim()
+    : undefined;
+  // RFC 0163 §B — the signed `<saml:Issuer>` (IdP entityID). node-saml also
+  // exposes it on the profile as `issuer`; prefer that, fall back to the
+  // validated assertion XML.
+  const issuer =
+    asString((a as { issuer?: unknown }).issuer) ??
+    (assertionXml ? /<(?:\w+:)?Issuer[^>]*>([^<]+)</.exec(assertionXml)?.[1]?.trim() : undefined);
   return {
+    ...(acr ? { authnContextClassRef: acr } : {}),
+    ...(issuer ? { issuer } : {}),
     nameId: profile.nameID,
     email: profile.email ?? profile.mail ?? asString(a.email) ?? (profile.nameID.includes('@') ? profile.nameID : undefined),
     displayName: asString(a.displayName) ?? asString(a.name) ?? asString(a['urn:oid:2.16.840.1.113730.3.1.241']),

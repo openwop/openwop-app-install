@@ -2,7 +2,7 @@
  * Collection hook for the chat-session sidebar (Phase 2C.1).
  *
  * Holds the list of session HEADERS (id + title + counts + timestamps)
- * fetched from the host-extension `/v1/host/openwop-app/chat/sessions`
+ * fetched from the host-extension `/host/openwop-app/chat/sessions`
  * route family. The per-session MESSAGE thread lives in `useChatSession`;
  * this hook just owns the cross-session list.
  *
@@ -17,7 +17,9 @@
  * by calling `refresh()`.
  */
 
+import { STORAGE_KEYS, getStorageSubject, scopedKey } from '../../platform/storage.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useStorageSubject } from '../../platform/useStorageSubject.js';
 import i18n from '../../i18n/index.js';
 import {
   addConversationParticipant,
@@ -35,7 +37,6 @@ import {
   type ConversationType,
 } from '../../client/chatSessionsClient.js';
 import {
-  LS_SESSION_INDEX_KEY,
   LS_SESSION_INDEX_VERSION,
 } from '../lib/storageKeys.js';
 
@@ -85,7 +86,17 @@ export interface UseChatSessionsResult {
   removeParticipant: (sessionId: string, subjectRef: string) => Promise<void>;
 }
 
-export function useChatSessions(): UseChatSessionsResult {
+export interface UseChatSessionsOptions {
+  /** Fired when ANOTHER window/tab deletes a conversation (the cross-tab
+   *  `session:deleted` broadcast — never the local delete, which the caller
+   *  already observes synchronously). The deck uses it to retire an open tab
+   *  pointing at the now-dead session (grade-pass RESIL-5); the boot-time
+   *  dead-tab prune is one-shot and restored-ids-only, so it never covers a
+   *  runtime cross-window delete. */
+  onSessionDeleted?: (sessionId: string) => void;
+}
+
+export function useChatSessions(options: UseChatSessionsOptions = {}): UseChatSessionsResult {
   const [sessions, setSessions] = useState<ChatSessionHeader[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +108,9 @@ export function useChatSessions(): UseChatSessionsResult {
   // Feature-detected — Safari + older Edge in private mode lack it; the
   // hook still works inside the originating tab, just doesn't propagate.
   const channelRef = useRef<BroadcastChannel | null>(null);
+  // Via a ref so a caller's inline callback never re-subscribes the channel.
+  const onSessionDeletedRef = useRef(options.onSessionDeleted);
+  onSessionDeletedRef.current = options.onSessionDeleted;
 
   const refresh = useCallback(async () => {
     if (inFlightRef.current) return;
@@ -142,7 +156,7 @@ export function useChatSessions(): UseChatSessionsResult {
    *  a stale shape (see lib/storageKeys.ts for the bump protocol). */
   function readLocalSessionIndex(): ChatSessionHeader[] {
     try {
-      const raw = localStorage.getItem(LS_SESSION_INDEX_KEY);
+      const raw = localStorage.getItem(scopedKey(STORAGE_KEYS.chatSessionsIndex, getStorageSubject()));
       if (!raw) return [];
       const parsed = JSON.parse(raw) as { v?: number; items?: unknown };
       if (parsed.v !== LS_SESSION_INDEX_VERSION) return [];
@@ -176,6 +190,9 @@ export function useChatSessions(): UseChatSessionsResult {
       if (kind === 'session:created' || kind === 'session:renamed' || kind === 'session:deleted') {
         void refresh();
       }
+      if (kind === 'session:deleted' && event.data.sessionId) {
+        onSessionDeletedRef.current?.(event.data.sessionId);
+      }
     };
     return () => {
       ch.close();
@@ -186,6 +203,18 @@ export function useChatSessions(): UseChatSessionsResult {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // ADR 0434 / IDN-3 — re-read when the storage subject SETTLES or changes.
+  // `readLocalSessionIndex` keys off `getStorageSubject()`, which returns null
+  // (the anonymous key) during the auth boot window. Without this, a returning
+  // signed-in user's History drawer showed the anonymous (empty) index until an
+  // unrelated event happened to refresh it. Depending on the primitive key —
+  // not the object `useStorageSubject` returns — keeps the effect stable.
+  const subjectState = useStorageSubject();
+  const subjectKey = subjectState.status === 'user' ? subjectState.subject : subjectState.status;
+  useEffect(() => {
+    void refresh();
+  }, [subjectKey, refresh]);
 
   const broadcast = useCallback((event: CrossTabEvent) => {
     try {

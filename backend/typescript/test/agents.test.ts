@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { loadAgentsFromManifest } from '../src/packs/agentLoader.js';
 import { getAgentRegistry } from '../src/executor/agentRegistry.js';
 import { runAgentDispatch, AgentNotFoundError } from '../src/host/agentDispatch.js';
+import { attestPackDir } from './setup/attestPackFixture.js';
 
 const REPO_ROOT = join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', '..');
 const SUPERVISOR_PACK = join(REPO_ROOT, 'packs', 'core.openwop.agents.supervisor');
@@ -32,6 +33,10 @@ function seedControlledAgent(): string {
       handoff: { taskSchemaRef: 'schemas/task.json', returnSchemaRef: 'schemas/return.json' },
     }],
   }));
+  // ADR 0555 P0 — the agent loader now refuses unattested packs, so a fixture
+  // in a temp dir must carry a real install marker to load. Attest LAST, after
+  // every file above is final; the marker hashes them.
+  attestPackDir(dir);
   return dir;
 }
 

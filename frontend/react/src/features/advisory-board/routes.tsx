@@ -13,13 +13,13 @@ const routes: FeatureRoute[] = [
   {
     path: '/advisors',
     element: <AdvisoryBoardPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
-      group: 'Leadership',
-      label: 'Board of Advisors',
+      group: 'Planning',
+      label: 'Board of Advisors', labelKey: 'advisoryBoardLabel',
       icon: ScaleIcon,
-      hint: 'Councils of advisor agents',
-      order: 36,
+      hint: 'Councils of advisor agents', hintKey: 'advisoryBoardHint',
+      order: 39,
       featureId: 'advisory-board',
     },
   },

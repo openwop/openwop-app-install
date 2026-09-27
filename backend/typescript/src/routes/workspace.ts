@@ -28,6 +28,8 @@ import {
   deleteWorkspaceFile,
 } from '../host/workspaceStore.js';
 import { createLogger } from '../observability/logger.js';
+import type { Storage } from '../storage/storage.js';
+import { sendError } from '../middleware/errorEnvelope.js';
 
 const log = createLogger('routes.workspace');
 
@@ -45,45 +47,46 @@ function ifMatch(req: Request): string | undefined {
 
 /** Apply one workspace op against an explicit owner. Shared by the wire
  *  endpoints (owner from auth) and the cross-owner seam (owner from body). */
-function applyOp(
+async function applyOp(
+  storage: Storage,
   res: Response,
   owner: { tenant: string; workspace: string },
   op: { kind: 'list'; prefix?: string }
     | { kind: 'get'; path: string }
     | { kind: 'put'; path: string; content: string; contentType?: string; ifMatch?: string }
     | { kind: 'delete'; path: string },
-): void {
+): Promise<void> {
   const { tenant, workspace } = owner;
   switch (op.kind) {
     case 'list':
-      res.status(200).json({ files: listWorkspaceFiles(tenant, workspace, op.prefix) });
+      res.status(200).json({ files: await listWorkspaceFiles(storage, tenant, workspace, op.prefix) });
       return;
     case 'get': {
-      const file = getWorkspaceFile(tenant, workspace, op.path);
+      const file = await getWorkspaceFile(storage, tenant, workspace, op.path);
       if (!file) {
-        res.status(404).json({ error: 'not_found' });
+        sendError(res, 404, 'not_found', 'No such workspace file.');
         return;
       }
       res.status(200).json(file);
       return;
     }
     case 'put': {
-      const outcome = putWorkspaceFile(tenant, workspace, op.path, {
+      const outcome = await putWorkspaceFile(storage, tenant, workspace, op.path, {
         content: op.content,
         ...(op.contentType !== undefined ? { contentType: op.contentType } : {}),
         ...(op.ifMatch !== undefined ? { ifMatch: op.ifMatch } : {}),
       });
       if (!outcome.ok) {
-        res.status(outcome.status).json({ error: outcome.error, details: outcome.details });
+        sendError(res, outcome.status, outcome.error, outcome.message, outcome.details);
         return;
       }
       res.status(200).json(outcome.file);
       return;
     }
     case 'delete': {
-      const existed = deleteWorkspaceFile(tenant, workspace, op.path);
+      const existed = await deleteWorkspaceFile(storage, tenant, workspace, op.path);
       if (!existed) {
-        res.status(404).json({ error: 'not_found' });
+        sendError(res, 404, 'not_found', 'No such workspace file.');
         return;
       }
       res.status(204).end();
@@ -92,34 +95,42 @@ function applyOp(
   }
 }
 
-export function registerWorkspaceRoutes(app: Express): void {
-  app.get('/v1/host/workspace/files', (req, res) => {
+export function registerWorkspaceRoutes(app: Express, storage: Storage): void {
+  app.get('/v1/host/workspace/files', async (req, res, next) => {
     const prefix = typeof req.query.prefix === 'string' ? req.query.prefix : undefined;
-    applyOp(res, ownerOf(req), { kind: 'list', ...(prefix !== undefined ? { prefix } : {}) });
+    try {
+      await applyOp(storage, res, ownerOf(req), { kind: 'list', ...(prefix !== undefined ? { prefix } : {}) });
+    } catch (err) { next(err); }
   });
 
-  app.get('/v1/host/workspace/files/:path', (req, res) => {
-    applyOp(res, ownerOf(req), { kind: 'get', path: req.params.path });
+  app.get('/v1/host/workspace/files/:path', async (req, res, next) => {
+    try {
+      await applyOp(storage, res, ownerOf(req), { kind: 'get', path: req.params.path });
+    } catch (err) { next(err); }
   });
 
-  app.put('/v1/host/workspace/files/:path', (req, res) => {
+  app.put('/v1/host/workspace/files/:path', async (req, res, next) => {
     const body = (req.body ?? {}) as { content?: unknown; contentType?: unknown };
     if (typeof body.content !== 'string') {
-      res.status(400).json({ error: 'validation_error', details: { message: 'content (string) required' } });
+      sendError(res, 400, 'validation_error', 'content (string) required');
       return;
     }
     const im = ifMatch(req);
-    applyOp(res, ownerOf(req), {
+    try {
+      await applyOp(storage, res, ownerOf(req), {
       kind: 'put',
       path: req.params.path,
       content: body.content,
       ...(typeof body.contentType === 'string' ? { contentType: body.contentType } : {}),
       ...(im !== undefined ? { ifMatch: im } : {}),
     });
+    } catch (err) { next(err); }
   });
 
-  app.delete('/v1/host/workspace/files/:path', (req, res) => {
-    applyOp(res, ownerOf(req), { kind: 'delete', path: req.params.path });
+  app.delete('/v1/host/workspace/files/:path', async (req, res, next) => {
+    try {
+      await applyOp(storage, res, ownerOf(req), { kind: 'delete', path: req.params.path });
+    } catch (err) { next(err); }
   });
 
   log.info('workspace CRUD routes registered (RFC 0059 §C: /v1/host/workspace/files)');
@@ -137,7 +148,7 @@ export function registerWorkspaceRoutes(app: Express): void {
     return;
   }
   log.warn('workspace cross-owner seam ENABLED — /v1/host/openwop-app/workspace/op accepts a body-supplied owner. NEVER enable in production.');
-  app.post('/v1/host/openwop-app/workspace/op', (req, res) => {
+  app.post('/v1/host/openwop-app/workspace/op', async (req, res, next) => {
     const body = (req.body ?? {}) as {
       tenant?: unknown;
       workspace?: unknown;
@@ -149,36 +160,44 @@ export function registerWorkspaceRoutes(app: Express): void {
       prefix?: unknown;
     };
     if (typeof body.tenant !== 'string' || typeof body.workspace !== 'string') {
-      res.status(400).json({ error: 'validation_error', details: { message: 'tenant + workspace required' } });
+      sendError(res, 400, 'validation_error', 'tenant + workspace required');
       return;
     }
     const owner = { tenant: body.tenant, workspace: body.workspace };
     const path = typeof body.path === 'string' ? body.path : '';
     switch (body.op) {
       case 'list':
-        applyOp(res, owner, { kind: 'list', ...(typeof body.prefix === 'string' ? { prefix: body.prefix } : {}) });
+        try {
+      await applyOp(storage, res, owner, { kind: 'list', ...(typeof body.prefix === 'string' ? { prefix: body.prefix } : {}) });
+    } catch (err) { next(err); }
         return;
       case 'get':
-        applyOp(res, owner, { kind: 'get', path });
+        try {
+      await applyOp(storage, res, owner, { kind: 'get', path });
+    } catch (err) { next(err); }
         return;
       case 'put':
         if (typeof body.content !== 'string') {
-          res.status(400).json({ error: 'validation_error', details: { message: 'content required for put' } });
+          sendError(res, 400, 'validation_error', 'content required for put');
           return;
         }
-        applyOp(res, owner, {
+        try {
+      await applyOp(storage, res, owner, {
           kind: 'put',
           path,
           content: body.content,
           ...(typeof body.contentType === 'string' ? { contentType: body.contentType } : {}),
           ...(typeof body.ifMatch === 'string' ? { ifMatch: body.ifMatch } : {}),
         });
+    } catch (err) { next(err); }
         return;
       case 'delete':
-        applyOp(res, owner, { kind: 'delete', path });
+        try {
+      await applyOp(storage, res, owner, { kind: 'delete', path });
+    } catch (err) { next(err); }
         return;
       default:
-        res.status(400).json({ error: 'validation_error', details: { message: 'op must be list|get|put|delete' } });
+        sendError(res, 400, 'validation_error', 'op must be list|get|put|delete');
     }
   });
 }

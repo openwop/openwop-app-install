@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/reindex-drain.output.json",
+  "title": "KbReindexDrainOutput",
+  "type": "object",
+  "required": [
+    "status",
+    "embeddedChunks",
+    "totalChunks",
+    "done"
+  ],
+  "properties": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "running",
+        "paused",
+        "done",
+        "failed",
+        "cancelled"
+      ],
+      "description": "The job's status AFTER this slice. `paused` = the daily embed budget was reached; the next scheduled fire resumes it."
+    },
+    "embeddedChunks": {
+      "type": "number",
+      "description": "Resume cursor \u2014 chunks embedded into the staging namespace so far."
+    },
+    "totalChunks": {
+      "type": "number",
+      "description": "Chunks in the whole rebuild."
+    },
+    "done": {
+      "type": "boolean",
+      "description": "True once the job reached a TERMINAL status (`done`/`failed`/`cancelled`), which is when the host tears the per-collection workflow + scheduler job down."
+    },
+    "error": {
+      "type": "string",
+      "description": "The job's last error/pause reason, when it has one."
+    }
+  },
+  "additionalProperties": false
+}

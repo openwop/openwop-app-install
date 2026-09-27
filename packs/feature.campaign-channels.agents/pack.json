@@ -1,11 +1,19 @@
 {
   "name": "feature.campaign-channels.agents",
-  "version": "1.0.0",
-  "description": "Campaign Studio channel-generation agent pack (ADR 0157 / ADR 0014) — the Channel Generator, a manifest agent whose tools are feature.campaign-channels.nodes over the brief/kernel surfaces. Generates a single channel deliverable (landing page / ads / email / creative / social) grounded in the brief, from the AI chat. Tool-allowlisted to the channel-generation nodes only.",
+  "version": "1.2.0",
+  "description": "Campaign Studio channel-generation agent pack — the Channel Generator. Reads the channel catalog + brief readiness (openwop:campaign-channels.channels) and generates a single channel deliverable (landing page / ads / email / creative / social) by igniting its channel workflow (openwop:campaign-channels.generate) — grounded in the brief, from the AI chat, with the draft approved on an inline HITL gate card.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "campaign-channels", "agent", "generation", "marketing"],
-  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "campaign-channels",
+    "agent",
+    "generation",
+    "marketing"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
   "peerDependencies": {
     "aiProviders": "supported",
     "agents.manifestRuntime": "supported"
@@ -15,16 +23,25 @@
       "agentId": "feature.campaign-channels.agents.channel-generator",
       "persona": "RESEARCH",
       "label": "Channel Generator",
-      "description": "Generates a single channel deliverable (landing page, ad variants, email sequence, creative briefs, or social posts) from a brief's messaging kernel — grounded in the KB and brand voice — and runs a content-quality check, via feature.campaign-channels.nodes. The human approves each draft.",
+      "description": "Generates a single channel deliverable (landing page, ad variants, email sequence, creative briefs, or social posts) from a brief's messaging kernel — grounded in the KB and brand voice — and runs a content-quality check, via feature.campaign-channels.nodes. For creative_briefs it can OPTIONALLY render concept images (render-concepts, ADR 0229 — honest-off when no image provider is wired; budget-capped by the host). The human approves each draft.",
       "modelClass": "research",
       "systemPromptRef": "prompts/channel-generator.md",
       "toolAllowlist": [
-        "openwop:feature.campaign-channels.nodes.generate",
-        "openwop:feature.campaign-channels.nodes.content-quality-check"
+        "openwop:campaign-channels.channels",
+        "openwop:campaign-channels.generate"
       ],
-      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
-      "confidence": { "defaultThreshold": 0.6 }
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
     }
   ],
-  "runtime": { "language": "remote", "entry": "pack.json" }
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
 }

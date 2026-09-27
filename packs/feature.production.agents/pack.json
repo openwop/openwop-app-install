@@ -1,0 +1,30 @@
+{
+  "name": "feature.production.agents",
+  "version": "1.0.1",
+  "description": "Production Intelligence agent pack — the Production Planner, a manifest agent whose tools are the host-registered openwop:production.* agent tools (get-vendors read + plan action) over the Production surface. It reads the Vendor Directory to ground its recommendations and ignites a run that generates + persists a per-asset production plan (internal/contractor/agency/hybrid with budget & timeline) from the AI chat. Tool-allowlisted to the Production surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "production", "agent", "planner", "vendor", "sourcing"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.production.agents.production-planner",
+      "persona": "RESEARCH",
+      "label": "Production Planner",
+      "description": "Recommends how each campaign asset should be produced — internal team, contractor, agency, or hybrid — with budget and timeline, ranking your team and vendors by channel fit. Reads the Vendor Directory and ignites a run that generates the plan via the openwop:production.* tools. Recommends; the human approves the plan.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/production-planner.md",
+      "toolAllowlist": [
+        "openwop:production.get-vendors",
+        "openwop:production.plan"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": { "defaultThreshold": 0.6 }
+    }
+  ],
+  "runtime": { "language": "remote", "entry": "pack.json" }
+}

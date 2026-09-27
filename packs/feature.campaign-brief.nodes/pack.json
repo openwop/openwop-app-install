@@ -1,12 +1,30 @@
 {
   "name": "feature.campaign-brief.nodes",
-  "version": "1.0.0",
-  "description": "Personas & Campaign Brief node pack (ADR 0156 / ADR 0014) — validate a brief (compute the enabled channel set) and generate the messaging kernel (the shared strategic foundation every channel echoes), grounding it in the knowledge base (kb.rag) + brand voice (ctx.features.brand) via the run-scoped provider. Drives the Campaign Studio orchestration (ADR 0158).",
+  "version": "1.5.0",
+  "description": "Personas & Campaign Brief node pack \u2014 validate a brief (compute the enabled channel set) and generate the messaging kernel (the shared strategic foundation every channel echoes), grounding it in the knowledge base (kb.rag) + brand voice (ctx.features.brand) via the run-scoped provider. Drives the Campaign Studio orchestration.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "campaign-brief", "kernel", "messaging", "marketing", "grounding"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "campaign-brief",
+    "kernel",
+    "messaging",
+    "marketing",
+    "grounding"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
   "nodes": [
+    {
+      "typeId": "feature.campaign-brief.nodes.get-brief",
+      "version": "1.0.0",
+      "label": "Campaign Brief: Get",
+      "description": "Read a campaign brief's full body (including the messaging kernel) so revisions ground on the real brief instead of a validate summary. Read-only.",
+      "category": "data",
+      "role": "action",
+      "capabilities": []
+    },
     {
       "typeId": "feature.campaign-brief.nodes.validate",
       "version": "1.0.0",
@@ -20,11 +38,106 @@
       "typeId": "feature.campaign-brief.nodes.generate-kernel",
       "version": "1.0.0",
       "label": "Brief: Generate Messaging Kernel",
-      "description": "Generates the messaging kernel (headline, supporting statement, proof points, CTAs, tone) for a brief — grounded in the KB (kb.rag citations) and the brand voice (ctx.features.brand.resolve-voice), via the run-scoped ctx.callAI — then persists it on the brief. Inputs: { briefId, provider?, model? }. Output: { kernel }.",
+      "description": "Generates the messaging kernel (headline, supporting statement, proof points, CTAs, tone) for a brief \u2014 grounded in the KB (kb.rag citations) and the brand voice (ctx.features.brand.resolve-voice), via the run-scoped ctx.callAI \u2014 then persists it on the brief. Inputs: { briefId, provider?, model? }. Output: { kernel }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.extract-seeds",
+      "version": "1.0.0",
+      "label": "Brief: Extract Seeds from KB",
+      "description": "Proposes personas/product/competitors from the bound knowledge collection with source citations (PROPOSALS \u2014 user confirms; ADR 0356 P3). Inputs: { orgId, collectionId, query?, provider?, model? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.extract-voc",
+      "version": "1.0.0",
+      "label": "Brief: Extract VOC Evidence",
+      "description": "Extracts verbatim voice-of-customer quotes (pain/desire/objection/praise) from the brief's bound KB collection and persists them as citation-carrying evidence \u2014 the node builds every sourceRef from the retrieved chunk (documentId + locator + sha256 contentHash) and verifies quotes verbatim; ungrounded candidates are dropped with findings and an all-dropped extraction is a typed failure (ADR 0403 P1). Inputs: { briefId, collectionId?, query?, topK?, provider?, model? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.generate-angles",
+      "version": "1.0.0",
+      "label": "Brief: Generate Ad Angles",
+      "description": "Generates positioning angles from the messaging kernel + the brief's stored VOC evidence \u2014 the model cites evidence by index, the node maps indexes to stored evidence ids, and the surface re-validates every proofRef closed-world; an angle with no resolvable proof is dropped with a finding and an all-dropped generation is a typed failure. Hook variants project into the ORG hook bank as candidate hooks (deterministic ids, idempotent, never demoting). Requires a kernel + stored evidence (ADR 0403 P2). Inputs: { briefId, personaId?, provider?, model? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.build-targeting",
+      "version": "1.0.0",
+      "label": "Brief: Build Targeting Pack",
+      "description": "Builds THE platform targeting pack (meta|google|linkedin|tiktok) for a brief \u2014 audiences, interests, keywords with a rationale citing the VOC evidence they derive from (model cites indexes, node maps to ids, surface re-validates). Deterministic brief+platform upsert: a re-run replaces, never duplicates. Requires stored evidence (ADR 0403 P3). Inputs: { briefId, platform, provider?, model? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.list-personas",
+      "version": "1.0.0",
+      "label": "Campaign Brief: List Personas",
+      "description": "Lists the workspace's personas over ctx.features['campaign-brief'] (tenant-scoped read; optional org/brand filter). Inputs: { orgId?, brandId? }. Output: { personas }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.list-briefs",
+      "version": "1.0.0",
+      "label": "Campaign Brief: List Briefs",
+      "description": "Lists campaign briefs over ctx.features['campaign-brief'] (tenant-scoped read). Inputs: { orgId? }. Output: { briefs }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.list-angles",
+      "version": "1.0.0",
+      "label": "Campaign Brief: List Angles",
+      "description": "Lists a brief's persisted ad angles (ADR 0403) \u2014 tenant-scoped read. Inputs: { briefId }. Output: { angles }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.list-hooks",
+      "version": "1.0.0",
+      "label": "Campaign Brief: List Hooks",
+      "description": "Reads the org hook bank (ADR 0403; promotion stays a route-only human write). Inputs: { orgId, status? }. Output: { hooks }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.get-targeting-pack",
+      "version": "1.0.0",
+      "label": "Campaign Brief: Get Targeting Pack",
+      "description": "Fetches one brief+platform targeting pack (ADR 0403; unknown platform reads as null). Inputs: { briefId, platform }. Output: { pack }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-brief.nodes.list-targeting-packs",
+      "version": "1.0.0",
+      "label": "Campaign Brief: List Targeting Packs",
+      "description": "Lists a brief's targeting packs across platforms (ADR 0403) \u2014 tenant-scoped read. Inputs: { briefId }. Output: { packs }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

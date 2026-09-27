@@ -1,0 +1,64 @@
+{
+  "name": "core.openwop.connections.google-workspace",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "Google Workspace connection pack (RFC 0095) — OAuth2 PKCE provider for Drive, Calendar, and Gmail via the Google APIs. Registry parity for the reference app's BUILT-IN `google` provider (day-1 UX P10 / C3): the app itself never loads this pack (the builtin wins by id precedence anyway — this pack deliberately uses the distinct id `google-workspace` so OTHER hosts can adopt it without shadowing semantics); it exists so packs.openwop.dev offers a Google productivity-suite connection alongside microsoft365 — previously the registry's only Google entry was google-ads. Read scopes are the day-1 consent; gmail.send / calendar.events are WRITE groups behind a separate re-consent (ADR 0024 §3). Carries NO secret; the operator supplies the OAuth client id/secret host-side (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "google-workspace",
+    "displayName": "Google Workspace",
+    "category": "email-calendar",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token": "https://oauth2.googleapis.com/token",
+        "revoke": "https://oauth2.googleapis.com/revoke"
+      },
+      "scopes": {
+        "read": [
+          {
+            "key": "drive.readonly",
+            "label": "Drive (read)",
+            "scopes": ["https://www.googleapis.com/auth/drive.readonly"]
+          },
+          {
+            "key": "calendar.readonly",
+            "label": "Calendar (read)",
+            "scopes": ["https://www.googleapis.com/auth/calendar.readonly"]
+          },
+          {
+            "key": "gmail.readonly",
+            "label": "Gmail (read)",
+            "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]
+          }
+        ],
+        "write": [
+          {
+            "key": "gmail.send",
+            "label": "Gmail (send)",
+            "scopes": ["https://www.googleapis.com/auth/gmail.send"]
+          },
+          {
+            "key": "calendar.events",
+            "label": "Calendar (write)",
+            "scopes": ["https://www.googleapis.com/auth/calendar.events"]
+          }
+        ]
+      }
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://developers.google.com/workspace"
+      }
+    },
+    "consumerNodes": ["core.openwop.http"],
+    "docsUrl": "https://developers.google.com/identity/protocols/oauth2",
+    "apiHosts": ["googleapis.com"]
+  }
+}

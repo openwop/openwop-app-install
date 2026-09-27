@@ -1,33 +1,33 @@
 /**
- * SSE stream client.
+ * SSE stream client — ONE transport, major 2 (ADR 0647).
  *
- * Dual-path subscription:
+ * `@openwop/openwop@2`'s `streamEvents()` opens `GET /runs/{runId}/events` with
+ * `OpenWOP-Version: 2.0`, `Accept: text/event-stream` and `Last-Event-ID`, and
+ * parses single and `event: batch` frames. It is driven here through a fetch
+ * that carries THIS app's auth (`credentialedFetch`): the SDK's placeholder
+ * bearer is stripped, `authedHeaders()` applied, the session cookie sent, and —
+ * when there is no bearer at all (a cookie-mode owner on the cross-origin SSE
+ * base, where the cookie cannot follow) — a run-scoped `streamToken` minted
+ * same-origin from `/host/openwop-app/runs/{id}/events/token` rides the URL. Every event's
+ * run id is unbound (`v2Wire.ts`) before it reaches a consumer.
  *
- *   - **Bearer-mode** (`config.authMode === 'bearer'`) → routes through the
- *     published SDK's `streamEvents()` (fetch + ReadableStream — `sse.ts`).
- *     The SDK sets `Authorization: Bearer ${apiKey}` as a real header, which
- *     kills the prior `?apiKey=<key>` URL query-param security smell
- *     (URL-borne credentials leak to browser history, server logs, and
- *     shared screenshots). Reconnect-with-Last-Event-ID is implemented in
- *     this wrapper since the SDK's generator is single-shot.
+ * HISTORY. This used to be two transports: bearer mode through the 1.x SDK and
+ * cookie mode through a hand-rolled fetch+ReadableStream generator, because the
+ * 1.x `streamEvents()` had no way to carry credentials. 2.0's
+ * `EventsStreamContext.fetch` is exactly the hook that comment asked for, so
+ * the second transport is gone. Reconnect-with-Last-Event-ID stays in this
+ * wrapper (`subscribeViaGenerator`): the SDK's generator is single-shot.
  *
- *   - **Cookie-mode** (`config.authMode === 'cookie'`) → stays on native
- *     `EventSource` with `withCredentials: true`. The SDK's `streamEvents()`
- *     uses raw `fetch()` without exposing a `credentials: 'include'` option,
- *     so it can't carry the `openwop.session` cookie cross-origin. A future
- *     SDK enhancement that adds either a fetch-credentials option or a
- *     custom-fetch hook to `streamEvents()` would let this path migrate
- *     too; tracked in the comments below.
- *
- * Both paths preserve the same public API (`subscribeToRun`, `Subscription`,
- * dual idle/absolute timeouts) so the 5 consumer surfaces don't need to know
- * which transport they got.
+ * The public API (`subscribeToRun`, `Subscription`, dual idle/absolute
+ * timeouts) is unchanged, so the consumer surfaces do not know which major
+ * fetched their events — that is the point.
  */
-
 import { streamEvents, type RunEventDoc, type StreamMode } from '@openwop/openwop';
 import { authedHeaders, config } from './config.js';
-import { readSseFrames } from './sseFrames.js';
 import { telemetry } from '../platform/telemetry.js';
+import { toClientEvent } from './eventVocabulary.js';
+import { VENDOR_BASE, unbindRunIds } from './v2Wire.js';
+import { bound } from './runsClient.js';
 
 export interface SubscribeOptions {
   modes?: readonly StreamMode[];
@@ -105,24 +105,23 @@ export function subscribeToRun(runId: string, opts: SubscribeOptions): Subscript
   // uses the published SDK's `streamEvents`; cookie mode uses a local twin
   // that swaps the `Authorization` header for `credentials: 'include'`
   // (the SDK's fetch can't carry the `openwop.session` cookie — see header).
-  const makeGenerator = config.authMode === 'bearer'
-    ? (lastEventId: string | undefined, signal: AbortSignal) =>
-        streamEvents(
-          { baseUrl: config.sseBaseUrl, apiKey: config.apiKey },
-          runId,
-          {
-            ...(modeOpt !== undefined ? { streamMode: modeOpt } : {}),
-            ...(lastEventId !== undefined ? { lastEventId } : {}),
-            signal,
-          },
-        )
-    : (lastEventId: string | undefined, signal: AbortSignal) =>
-        streamEventsCredentialed(config.sseBaseUrl, runId, {
+  // ADR 0647 — ONE transport for both auth modes: the SDK's `streamEvents()`
+  // (major 2: `/runs/{id}/events`, `OpenWOP-Version: 2.0`, batch frames,
+  // Last-Event-ID) driven through a fetch that carries this app's auth. The
+  // hand-rolled credentialed generator this replaces existed only because the
+  // 1.x SDK had no fetch hook; 2.0's `EventsStreamContext.fetch` is that hook.
+  const makeGenerator = (lastEventId: string | undefined, signal: AbortSignal) =>
+    unbindEvents(
+      boundStream(runId, (wireRunId) => streamEvents(
+        { baseUrl: config.sseBaseUrl, apiKey: config.apiKey, protocolVersion: V2_PROTOCOL_VERSION, fetch: credentialedFetch(runId, signal) },
+        wireRunId,
+        {
           ...(modeOpt !== undefined ? { streamMode: modeOpt } : {}),
           ...(lastEventId !== undefined ? { lastEventId } : {}),
           signal,
-        });
-
+        },
+      )),
+    );
   return subscribeViaGenerator(makeGenerator, opts, hooks);
 }
 
@@ -240,7 +239,7 @@ async function fetchRunStreamToken(runId: string, signal?: AbortSignal): Promise
   // immediately. A 5xx or a network error is worth ONE quick retry before falling
   // back to the no-token stream (which then 404s). One retry only — the mint is
   // stateless + cheap, and we must not block the live feed for long.
-  const url = `${config.baseUrl}/v1/runs/${encodeURIComponent(runId)}/events/token`;
+  const url = `${config.baseUrl}${VENDOR_BASE}/runs/${encodeURIComponent(runId)}/events/token`;
   const init = { method: 'GET', headers: authedHeaders(), credentials: 'include' as const, ...(signal ? { signal } : {}) };
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
@@ -259,71 +258,49 @@ async function fetchRunStreamToken(runId: string, signal?: AbortSignal): Promise
   return null;
 }
 
-async function* streamEventsCredentialed(
-  baseUrl: string,
-  runId: string,
-  opts: { streamMode?: StreamMode | readonly StreamMode[]; lastEventId?: string; signal?: AbortSignal },
-): AsyncGenerator<RunEventDoc, void, void> {
-  const params = new URLSearchParams();
-  if (opts.streamMode) {
-    params.set('streamMode', typeof opts.streamMode === 'string' ? opts.streamMode : opts.streamMode.join(','));
-  }
-  // Carry the SAME identity as run creation. The SSE hits config.sseBaseUrl —
-  // on prod a DIFFERENT origin (*.run.app) than the /api same-origin path — so
-  // the openwop.session cookie does NOT travel here; a credentials-only request
-  // authenticates as an unrelated cross-origin session whose tenant lags the
-  // signed-in user's. authedHeaders() adds the cached Firebase ID token (when
-  // signed in), so the backend resolves the user's real tenant and the run-read
-  // tenant gate (ADR 0088) matches on the FIRST attempt. credentials:'include'
-  // stays as the fallback.
-  const headers: Record<string, string> = {
-    ...authedHeaders(),
-    Accept: 'text/event-stream',
-    'Cache-Control': 'no-cache',
-  };
-  if (opts.lastEventId) headers['Last-Event-ID'] = opts.lastEventId;
+/** `OpenWOP-Version` the stream is requested under — pinned, not derived from
+ *  the discovery document, because this client is the thing that selects it. */
+const V2_PROTOCOL_VERSION = '2.0';
 
-  // BYOK-anon has no ID token, and an anon session can't tenant-match
-  // cross-origin (the *.run.app cookie ≠ the app-origin one). Mint a run-scoped
-  // capability SAME-ORIGIN (where the anon cookie DOES authenticate) and present
-  // it on the cross-origin stream. Skip when we already carry a bearer token
-  // (signed-in / dev) — that authenticates directly. Best-effort: on failure we
-  // open the stream anyway and let it 404 as before.
-  if (!headers.authorization) {
-    const streamToken = await fetchRunStreamToken(runId, opts.signal);
-    if (streamToken) params.set('streamToken', streamToken);
-  }
-  const qs = params.toString();
-  const url = `${baseUrl}/v1/runs/${encodeURIComponent(runId)}/events${qs ? `?${qs}` : ''}`;
-
-  const internalAbort = new AbortController();
-  const externalSignal = opts.signal;
-  if (externalSignal) {
-    if (externalSignal.aborted) internalAbort.abort();
-    else externalSignal.addEventListener('abort', () => internalAbort.abort(), { once: true });
-  }
-
-  const res = await fetch(url, { method: 'GET', headers, credentials: 'include', signal: internalAbort.signal });
-  if (!res.ok || res.body === null) {
-    throw new Error(`SSE subscribe failed: HTTP ${res.status}`);
-  }
-
-  try {
-    // Shared SSE line parser (`sseFrames.ts`) handles CRLF, cross-chunk
-    // buffering, and `: heartbeat` comments. This consumer keeps the
-    // RunEventDoc-specific concerns: the `event: batch` array envelope (S3)
-    // and skipping non-JSON keep-alive/vendor lines.
-    for await (const frame of readSseFrames(res.body, internalAbort.signal)) {
-      let parsed: RunEventDoc | RunEventDoc[];
-      try {
-        parsed = JSON.parse(frame.data) as RunEventDoc | RunEventDoc[];
-      } catch {
-        continue; // keep-alive / non-JSON vendor lines
+/**
+ * The SDK builds the URL and the SSE headers; this wraps the fetch it calls so
+ * the request carries THIS app's auth: the SDK's placeholder bearer is stripped,
+ * `authedHeaders()` applied, the session cookie sent, and — when there is no
+ * bearer at all (cookie-mode owner on the cross-origin SSE base, where the
+ * cookie cannot follow) — a run-scoped `streamToken` minted same-origin is
+ * appended, exactly as the credentialed path did before.
+ */
+function credentialedFetch(runId: string, signal: AbortSignal): typeof fetch {
+  return async (input, init) => {
+    const headers = new Headers(init?.headers);
+    headers.delete('authorization');
+    headers.delete('Authorization');
+    for (const [k, v] of Object.entries(authedHeaders())) headers.set(k, v);
+    let url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+    if (!headers.has('authorization')) {
+      const streamToken = await fetchRunStreamToken(runId, signal);
+      if (streamToken) {
+        const u = new URL(url);
+        u.searchParams.set('streamToken', streamToken);
+        url = u.toString();
       }
-      if (frame.event === 'batch' && Array.isArray(parsed)) yield* parsed;
-      else yield parsed as RunEventDoc;
     }
-  } finally {
-    internalAbort.abort();
-  }
+    return fetch(url, { ...init, headers, credentials: 'include' });
+  };
 }
+
+/** The `{runId}` the SDK puts in the path MUST be tenant-bound (identity.md
+ *  §5); the streamToken is still minted for the BARE id on the v1 token route. */
+async function* boundStream(runId: string, open: (wireRunId: string) => AsyncGenerator<RunEventDoc, void, void>): AsyncGenerator<RunEventDoc, void, void> {
+  yield* open(await bound(runId));
+}
+
+/**
+ * Every run id on the major-2 wire is tenant-bound and 36 event types carry
+ * their v2 spelling; the app keeps bare ids and its v1 dialect. Both
+ * translations happen here, once per event (`eventVocabulary.ts`).
+ */
+async function* unbindEvents(gen: AsyncGenerator<RunEventDoc, void, void>): AsyncGenerator<RunEventDoc, void, void> {
+  for await (const ev of gen) yield toClientEvent(unbindRunIds(ev));
+}
+

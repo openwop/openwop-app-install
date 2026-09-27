@@ -30,6 +30,8 @@
  * see exactly what reached the prompt.
  */
 
+import { defangAngleFence } from './untrustedContent.js';
+
 /** Input to the wrap helper. Mirrors the relevant fields of a
  *  RunEventDoc that a downstream LLM node would consume. */
 export interface PromptWrapInput {
@@ -85,7 +87,10 @@ export function wrapForLLMPrompt(input: PromptWrapInput): string {
       attrs.push(`${key}="${escapeAttr(String(v))}"`);
     }
   }
-  return `<UNTRUSTED ${attrs.join(' ')}>\n${payloadText}\n</UNTRUSTED>`;
+  // (2026-07 vuln-scan) Defang the PAYLOAD's own fence markers — attributes are
+  // escaped above, but a payload containing the literal `</UNTRUSTED>` would
+  // otherwise close the fence early (breakout). Shared helper with promptCompose.
+  return `<UNTRUSTED ${attrs.join(' ')}>\n${defangAngleFence(payloadText)}\n</UNTRUSTED>`;
 }
 
 /** Minimal attribute escape — only the closing-quote and the `<`

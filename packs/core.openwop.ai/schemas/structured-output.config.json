@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/structured-output.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/structured-output.config.json",
   "title": "StructuredOutputConfig",
   "type": "object",
   "required": [

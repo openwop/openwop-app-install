@@ -27,7 +27,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
@@ -37,10 +37,14 @@ afterAll(async () => {
 describe('RFC 0118 — live parallel-fan-out witness', () => {
   it('advertises dispatch.fanOutSupported + parallel at the discovery root', async () => {
     const doc = await (await fetch(`${BASE}/.well-known/openwop`, { headers: H })).json() as {
-      dispatch?: { supported?: boolean; fanOutSupported?: boolean; fanOutPolicies?: string[]; joinModes?: string[]; onChildFailureModes?: string[]; maxFanOut?: number };
+      dispatch?: { supported?: boolean; fanOutSupported?: boolean; fanOutPolicies?: string[]; joinModes?: string[]; onChildFailureModes?: string[]; maxFanOut?: number; perItemInput?: boolean };
     };
     expect(doc.dispatch?.fanOutSupported).toBe(true);
     expect(doc.dispatch?.fanOutPolicies).toContain('parallel');
+    // RFC 0126 is Accepted (openwop#826) → the host now advertises per-item input
+    // data-parallel fan-out honest-on at the live discovery root (no longer a
+    // dishonest wire claim). The disable escape hatch is OPENWOP_DISPATCH_PER_ITEM_INPUT=false.
+    expect(doc.dispatch?.perItemInput).toBe(true);
     // Honesty: only `wait-all` is honored end-to-end (no in-flight child cancellation yet).
     expect(doc.dispatch?.joinModes).toEqual(['wait-all']);
     // RFC 0118 §seam amendment (openwop#789): the second join axis is author-discoverable.

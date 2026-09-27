@@ -1,5 +1,7 @@
+import { Button } from '../ui/Button.js';
 import type { RunEventDoc } from '@openwop/openwop';
 import { useTranslation } from 'react-i18next';
+import { EventReadStateCard, type EventReadState } from './EventReadState.js';
 import { config } from '../client/config.js';
 import { toast } from '../ui/toast.js';
 import { PaperclipIcon } from '../ui/icons/index.js';
@@ -7,6 +9,10 @@ import { PaperclipIcon } from '../ui/icons/index.js';
 interface Props {
   events: readonly RunEventDoc[];
   onForkFrom?: (sequence: number) => void;
+  /** ADR 0600 §1 (`ISU-24`) — see {@link EventReadState}. */
+  readState?: EventReadState;
+  /** Offered on a FAILED read only. */
+  onRetry?: () => void;
 }
 
 /** Resolve a host-served asset URL (RFC 0055 §C — relative `/v1/host/...`)
@@ -51,10 +57,10 @@ function MediaEventPreview({ type, payload }: { type: string; payload: unknown }
   );
 }
 
-export function EventStreamView({ events, onForkFrom }: Props) {
+export function EventStreamView({ events, onForkFrom, readState, onRetry }: Props) {
   const { t } = useTranslation('streams');
   if (events.length === 0) {
-    return <div className="muted">{t('noEventsYet')}</div>;
+    return <EventReadStateCard readState={readState} onRetry={onRetry} />;
   }
   return (
     <div className="event-stream">
@@ -65,14 +71,14 @@ export function EventStreamView({ events, onForkFrom }: Props) {
           <span className="event-type">{ev.type}</span>
           {ev.nodeId && <span className="muted"> [{ev.nodeId}]</span>}
           {onForkFrom && (
-            <button
-              className="secondary u-ml-2 u-pad-2x6 u-fs-11"
+            <Button
+              variant="secondary" className="u-ml-2 u-pad-2x6 u-fs-11"
               onClick={() => onForkFrom(ev.sequence)}
               title={t('forkTitle')}
               aria-label={t('forkTitle')}
             >
               {t('fork')}
-            </button>
+            </Button>
           )}
           {ev.payload != null && Object.keys(ev.payload as object).length > 0 && (
             <details>
@@ -125,24 +131,22 @@ function EventStreamActions({ events }: { events: readonly RunEventDoc[] }) {
   };
   return (
     <div className="event-stream-actions">
-      <button
-        type="button"
-        className="secondary"
+      <Button
+        variant="secondary"
         onClick={copy}
         title={t('copyTitle')}
         aria-label={t('copyTitle')}
       >
         {t('copy')}
-      </button>
-      <button
-        type="button"
-        className="secondary"
+      </Button>
+      <Button
+        variant="secondary"
         onClick={exportJson}
         title={t('exportJsonTitle')}
         aria-label={t('exportJsonTitle')}
       >
         {t('exportJson')}
-      </button>
+      </Button>
       <span className="muted u-fs-12">{t('eventCount', { count: events.length })}</span>
     </div>
   );

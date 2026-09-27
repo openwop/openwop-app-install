@@ -9,15 +9,13 @@
 
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import type { RoleTheme } from './roleTemplates.js';
+import type { RoleTheme } from './roleTheme.js';
 import { ImageIcon } from '../ui/icons/index.js';
+import { Avatar, initials } from '../ui/Avatar.js';
 
-/** Initials for the avatar. Falls back to the first two chars of the name.
- *  Single source of truth — both call sites import it from here. */
-export function initials(name: string): string {
-  const parts = name.trim().split(/\s+/);
-  return ((parts[0]?.[0] ?? '') + (parts[1]?.[0] ?? '')).toUpperCase() || name.slice(0, 2).toUpperCase();
-}
+/** Re-export — `ui/Avatar` owns the helper now (ADR 0192 D8); existing
+ *  call sites (`MessageBubble`, `AgentCard`, …) keep importing from here. */
+export { initials };
 
 export function AgentAvatar({
   persona,
@@ -56,23 +54,9 @@ export function AgentAvatar({
   const badge = Math.round(size * 0.42);
   const badgeIcon = Math.max(11, Math.round(size * 0.26));
 
-  const circle = (
-    <div
-      className="agentavatar-circle"
-      style={{
-        width: size,
-        height: size,
-        fontSize: size <= 28 ? '0.7rem' : size <= 40 ? '0.95rem' : '1.1rem',
-        ...(ring ? { boxShadow: `0 0 0 2px var(--paper), 0 0 0 4px ${ring}` } : {}),
-      }}
-    >
-      {avatarUrl ? (
-        <img src={avatarUrl} alt={alt ?? ''} className="agentavatar-img" />
-      ) : (
-        initials(persona)
-      )}
-    </div>
-  );
+  // The circle itself is the shared ui/Avatar primitive (ADR 0192 D8); this
+  // component keeps the agent chrome — role badge, edit scrim, wrapper.
+  const circle = <Avatar name={persona} size={size} kind="agent" photoUrl={avatarUrl} ring={ring} alt={alt} />;
 
   return (
     <div className="agentavatar-wrap" style={{ width: size, height: size }} aria-hidden={onEdit ? undefined : true}>
@@ -87,7 +71,7 @@ export function AgentAvatar({
           title={t('avatarEditTitle')}
           aria-label={t('avatarEditAria', { persona })}
           className="agentavatar-edit-btn"
-          style={{ outline: active ? '2px solid var(--color-accent)' : 'none' }}
+          style={{ outline: active ? '2px solid var(--clay-text)' : 'none' }}
         >
           {circle}
           {/* Hover/focus scrim with a camera glyph — the "change photo" cue. */}

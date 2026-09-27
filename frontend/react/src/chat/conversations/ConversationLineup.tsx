@@ -10,18 +10,21 @@
 
 import { useTranslation } from 'react-i18next';
 import { AgentAvatar } from '../../agents/AgentAvatar.js';
-import { roleThemeForAgent } from '../../agents/roleTemplates.js';
+import { roleThemeForAgentId } from '../../agents/roleTheme.js';
 import { slugToName } from '../lib/agentMentions.js';
-import { XIcon } from '../../ui/icons/index.js';
+import { XIcon, Volume2Icon } from '../../ui/icons/index.js';
 import { DEFAULT_ASSISTANT_ID } from '../activeAgents/constants.js';
 import type { ActiveAgentRow } from '../activeAgents/types.js';
 
 export function ConversationLineup({
-  lineup, currentAgentId, thinkingAgentId, onSwitchAgent, onRemoveAgent, variant = 'rail',
+  lineup, currentAgentId, thinkingAgentId, speakingAgentId = null, onSwitchAgent, onRemoveAgent, variant = 'rail',
 }: {
   lineup: ReadonlyArray<ActiveAgentRow>;
   currentAgentId: string;
   thinkingAgentId: string | null;
+  /** ADR 0304 P2 residue — the agent whose settled turn is being VOICED right now
+   *  (the live-boardroom floor). Speaking outranks thinking on the same row. */
+  speakingAgentId?: string | null;
   onSwitchAgent: (agentId: string) => void;
   onRemoveAgent: (agentId: string) => void;
   /** `rail` = the vertical list in the sidebar's left rail (default). `strip` = a
@@ -43,6 +46,7 @@ export function ConversationLineup({
             compact={strip}
             isCurrent={row.agentId === currentAgentId}
             isThinking={row.agentId === thinkingAgentId}
+            isSpeaking={row.agentId === speakingAgentId}
             isRemovable={row.agentId !== DEFAULT_ASSISTANT_ID}
             onSwitch={() => onSwitchAgent(row.agentId)}
             onRemove={() => onRemoveAgent(row.agentId)}
@@ -62,6 +66,7 @@ function ParticipantRow({
   row,
   isCurrent,
   isThinking,
+  isSpeaking,
   isRemovable,
   onSwitch,
   onRemove,
@@ -70,6 +75,7 @@ function ParticipantRow({
   row: ActiveAgentRow;
   isCurrent: boolean;
   isThinking: boolean;
+  isSpeaking: boolean;
   isRemovable: boolean;
   onSwitch: () => void;
   onRemove: () => void;
@@ -78,14 +84,17 @@ function ParticipantRow({
   const { t } = useTranslation('chat');
   // The human name is the identity hero; the stored `persona` is the role
   // tagline (e.g. "Focus, cost mastery & team leverage"), shown muted beneath.
-  // While the advisor is generating, the tagline yields to a live "thinking…".
+  // While the advisor is generating, the tagline yields to a live "thinking…";
+  // while its settled turn is being VOICED (the live boardroom, ADR 0304), it
+  // yields to "speaking…" — speaking outranks thinking (the floor is audible).
   const name = slugToName(row.slug);
-  const roleTheme = roleThemeForAgent(row.agentId, []);
+  const roleTheme = roleThemeForAgentId(row.agentId);
+  const live = isThinking || isSpeaking;
   if (compact) {
     // Strip variant: a pill (avatar + name, live ring/dots while thinking, hover ×).
     return (
       <li>
-        <span className={`convlineup-chip${isCurrent ? ' is-current' : ''}${isThinking ? ' is-thinking' : ''}`}>
+        <span className={`convlineup-chip${isCurrent ? ' is-current' : ''}${live ? ' is-thinking' : ''}`}>
           <button
             type="button"
             onClick={onSwitch}
@@ -93,13 +102,17 @@ function ParticipantRow({
             aria-label={t('switchToPersona', { persona: name })}
             className="convlineup-chip__switch"
           >
-            <AgentAvatar persona={name} roleTheme={roleTheme} size={20} showBadge={false} alt="" {...((isThinking || isCurrent) ? { ring: 'var(--clay)' } : {})} />
+            <AgentAvatar persona={name} roleTheme={roleTheme} size={20} showBadge={false} alt="" {...((live || isCurrent) ? { ring: 'var(--clay)' } : {})} />
             <span className="convlineup-chip__name u-truncate">{name}</span>
-            {isThinking && (
-              <span className="think-dots u-gap-0-5" aria-live="polite" aria-label={t('thinkingLabel')}>
+            {isSpeaking ? (
+              <span role="status" aria-live="polite" aria-label={t('speakingLabel')} title={t('speakingLabel')}>
+                <Volume2Icon size={12} />
+              </span>
+            ) : isThinking ? (
+              <span role="status" className="think-dots u-gap-0-5" aria-live="polite" aria-label={t('thinkingLabel')}>
                 <span className="think-dot" /><span className="think-dot" /><span className="think-dot" />
               </span>
-            )}
+            ) : null}
           </button>
           {isRemovable && (
             <button
@@ -118,7 +131,7 @@ function ParticipantRow({
   }
   return (
     <li>
-      <div className={`convrail-participant${isCurrent ? ' is-current' : ''}${isThinking ? ' is-thinking' : ''}`}>
+      <div className={`convrail-participant${isCurrent ? ' is-current' : ''}${live ? ' is-thinking' : ''}`}>
         <button
           type="button"
           onClick={onSwitch}
@@ -126,12 +139,14 @@ function ParticipantRow({
           aria-label={t('switchToPersona', { persona: name })}
           className="convrail-participant-switch"
         >
-          <AgentAvatar persona={name} roleTheme={roleTheme} size={28} showBadge={false} alt="" {...((isThinking || isCurrent) ? { ring: 'var(--clay)' } : {})} />
+          <AgentAvatar persona={name} roleTheme={roleTheme} size={28} showBadge={false} alt="" {...((live || isCurrent) ? { ring: 'var(--clay)' } : {})} />
           <span className="convrail-participant-text">
             <span className="convrail-participant-name u-truncate">{name}</span>
-            {isThinking
-              ? <span className="convrail-participant-thinking" aria-live="polite">{t('thinkingLabel')}<span className="think-dots u-gap-0-5" aria-hidden><span className="think-dot" /><span className="think-dot" /><span className="think-dot" /></span></span>
-              : <span className="convrail-participant-tagline u-truncate">{row.persona}</span>}
+            {isSpeaking
+              ? <span className="convrail-participant-thinking" aria-live="polite">{t('speakingLabel')}<Volume2Icon size={12} /></span>
+              : isThinking
+                ? <span className="convrail-participant-thinking" aria-live="polite">{t('thinkingLabel')}<span className="think-dots u-gap-0-5" aria-hidden><span className="think-dot" /><span className="think-dot" /><span className="think-dot" /></span></span>
+                : <span className="convrail-participant-tagline u-truncate">{row.persona}</span>}
           </span>
         </button>
         {isRemovable && (

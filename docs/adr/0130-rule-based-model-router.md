@@ -81,6 +81,31 @@ The call-site in `dispatchReply` (ADR 0067) runs `routeTurn` **only when the fea
 
 Editing the router config = `workspace:write` on the tenant's AI-config scope; each `RouterTarget.credentialRef` is validated against the tenant's own BYOK store (can't point at another tenant's secret — the ADR 0110 validation). Tenant-scoped; uniform-404 IDOR. The classifier call (if used) bills the tenant's own provider/managed budget.
 
+> **CORRECTION (2026-08-28, ADR 0610 D4 / MRC-2·MRC-3).** The shipped `RoutingTarget`
+> is `{provider, model}` — the per-target `credentialRef` this section describes was
+> **dropped** from the schema, so a routed rule rides the RUN's existing
+> `credentialRef`, and the "credentialRef validated against the tenant's own BYOK
+> store" promise above never applied as written (MRC-3). The real risk — a
+> `workspace:write` editor routing org prompt data to an **arbitrary external
+> vendor** on that inherited credential — is instead closed by a **closed-world
+> provider allowlist** (`model-router/routableProviders.ts`, the sanctioned
+> `CHAT_BYOK_PROVIDERS` set). Two gates share the one predicate:
+> - **write** (`configService.asTarget` → typed rejection) blocks a bad target
+>   from being stored, so no fresh stamp is created from one;
+> - **read/dispatch** (`applyRoute.effectiveModelTarget`) ignores a stamp whose
+>   provider is non-routable and falls back to the run's explicit provider — this
+>   is the guard that covers an **already-durable** `run.metadata.modelRoute`
+>   stamp written before the allowlist, or copied verbatim onto a `:fork`.
+>
+> `resolveModelRoute` also refuses a non-routable target at resolve time (a belt on
+> the write gate), but the READ guard is the one that protects the durable stamp —
+> the stamp is read verbatim at every turn and on fork, NOT re-resolved. `compat`/
+> `mock` (custom/test endpoints — the arbitrary-URL egress vector) are excluded.
+>
+> _(Placement corrected 2026-08-28 after adversarial review found the first cut
+> guarded only stamp-CREATION (`resolveModelRoute`), which `maybeStampModelRoute`
+> skips on an already-stamped run — leaving the durable-read path unguarded.)_
+
 ---
 
 ## Evaluation matrix
@@ -165,3 +190,61 @@ author rules, or see that a turn was routed. This is the open Phase 5 named in t
 **Boundary check:** config is org-scoped (`requireOrgScope('workspace:write')`); no new
 wire, no second router — reuse the existing route + `model-router` toggle. Single owner
 stays `features/model-router/`.
+
+## Phase 5 — cost-router: composite `difficultyAtLeast` condition (2026-07-02)
+
+Cost-aware routing sizes each turn's difficulty and picks the model accordingly. An
+**LLM "cost judge"** per turn would be self-defeating (a call + latency to *save*
+cost) and non-deterministic (breaks `:fork` replay). Instead we add a **pure,
+deterministic difficulty heuristic** as a new router condition — the same value
+without a per-turn model call or replay risk.
+
+- **`{ kind: 'difficultyAtLeast'; level: 'low'|'medium'|'high' }`** added to
+  `RuleCondition` (`routeTurn.ts`), matching when `classifyDifficulty(features) >=
+  level`.
+- **`classifyDifficulty(features)`** — a pure fn over the EXISTING `TurnFeatures`
+  (no new inputs, no LLM, no I/O): token tiers (<500 low, <4000 medium, else high),
+  bumped one level (capped at high) by an attachment (multimodal) and by a "harder"
+  intent (`code`/`reasoning`/`analysis`/`vision`/`debug`/`refactor`).
+- Config validation extended in `configService.ts`.
+
+This lets an operator write ONE cost rule — `difficultyAtLeast:high → premium;
+always → cheap` — instead of hand-tuning `tokensOver` + `intentIs` + `attachment`.
+**No parallel router** (memory `no-parallel-architecture`): it extends the existing
+`features/model-router/` selector, rides the existing config CRUD + Phase-3 replay
+stamp, and stays pure/deterministic. Verified: `test/model-router-difficulty.test.ts`
+(token tiers, attachment/intent bumps + stacking, a single-rule route, config
+validation) + the 6 existing model-router suites green (38 total).
+
+## Phase 6 — conversation-kind condition: the board model-tier rule (2026-07-07)
+
+Born of a real incident: a Board-of-Directors group chat answered on the small
+provider-default model (Gemini Flash-Lite) and fabricated capabilities. Root
+cause: board advisors are seeded `modelClass:'reasoning'`
+(`host/advisoryBoardSeed.ts`), but the INLINE conversation path resolves models
+from `run.inputs`/the route stamp only — `modelClass` is honored solely by the
+deep-investigation `agentDispatch` branch, so the seeded tier never applied.
+
+**Decision:** a new `RuleCondition` — `{ kind: 'conversationKind', value:
+'group' | 'workspace' | 'channel' }` — matched against
+`TurnFeatures.conversationKind`, which the Phase-3c stamp site feeds
+**server-side** from the exchange's already-composed `ConversationMeta.type`
+(never client-asserted). A tenant writes "conversation is a group → my strong
+model" in the router editor (the condition ships in the admin UI with a board
+hint).
+
+**Deliberate non-ship — no host-level default rule.** A routed target is a
+static `{provider, model}` paired at dispatch with the run's existing
+`credentialRef`; a host-imposed cross-provider bump (e.g. the `reasoning` class
+default `anthropic/claude-opus-4-8`) would dispatch against a key the tenant
+may not hold and break every board turn for managed/mismatched tenants. And a
+"same-provider strongest model" target is not derivable — `providers.json`
+carries no tier field (Google's `recommended` IS flash-lite). So the rule stays
+tenant-authored. *Falsifier: if the model catalog gains a tier classification,
+revisit a host-default same-provider bump.*
+
+**Stamp semantics unchanged (replay/fork):** routed once at the first exchange,
+read verbatim after — so the rule applies to conversations group-typed at their
+first turn (canonical board chats via `ensureBoardChat`, the incident's case);
+an in-place `@@` summon into an existing chat keeps its original stamp. The
+per-exchange ModelSwitcher override still beats the stamp.

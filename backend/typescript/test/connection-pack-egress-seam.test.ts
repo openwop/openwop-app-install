@@ -38,7 +38,7 @@ describe('RFC 0120 §10 — connection-packs/egress-check seam (enabled)', () =>
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
   afterAll(async () => {
     await new Promise<void>((res) => server.close(() => res()));
@@ -108,7 +108,7 @@ describe('RFC 0120 §10 — egress-check seam is 404 when seams are disabled (pr
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 

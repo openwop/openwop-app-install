@@ -82,3 +82,40 @@ never over-claims. Each feature advertises **only the sub-levels it honors**.
 - [ ] Full `1.24.0` conformance run wiring — bump `@openwop/openwop-conformance` to
       `^1.24.0` + run `test:conformance` once the suite publishes to npm (openwop-1 pings
       the published version on the coordination bus).
+
+## Correction note — portability export/import made REAL (2026-07-03, LEAK-12 / ADR 0195 Phase 3)
+
+The RFC 0098 seam originally shipped **sample-grade**: `buildExportBundle`
+returned three hardcoded fixture items for ANY tenant, and `applyImport` only
+recorded refs. **Urgency correction:** these routes were always mounted
+(`feature.ts` serves them unconditionally; `OPENWOP_PORTABILITY_ENABLED` gates
+only the discovery advertisement) — so the fixture export was reachable by any
+production tenant, not a gated-off gap. Architect-reviewed, now real:
+
+- **KindHandler table** (`portabilityService.ts`) — one handler per
+  `ExportKind` naming the single owning service: roster→`rosterService`,
+  agent→`agentProfileService` (enumerated via the roster, its owning axis, with
+  `dependsOn` on the roster item), prompt-template→`promptLibraryService`
+  (org carried INSIDE the payload — the wire has no org concept),
+  schedule→`schedulingService`, org-chart→`orgChartService`,
+  connection-ref→`connectionsService`.
+- **Refs-only, both directions** — connections export as
+  `[REDACTED:<connectionId>]` + provider; the export SELF-CHECKS with
+  `findLiteralCredential` before leaving the host. Only workspace/org-scoped
+  connections export — user-scoped rows are personal consent grants a
+  tenant-level export must not enumerate.
+- **Inert-import posture** — imported roster members and schedules land
+  `enabled: false` (a bundle must never start firing on arrival); imported
+  org-chart members that don't resolve to a local roster entry are dropped and
+  reported; connection-refs import record-only (`skipped`, "needs re-auth").
+- **Idempotent + isolated** — dedupe by persona/(org,name)/deterministic
+  `import:<ref>` job id; per-item try/catch → additive
+  `ImportResult.items[] {ref, kind, status, message}` (`imported` now counts
+  only materialized items); one failed item never aborts the rest.
+- **Wire unchanged** — bundle shape, 422-before-403 ordering, dryRun
+  zero-writes, topo/cycle semantics identical; all six pre-existing wire tests
+  pass unmodified. `pack` kind exports an honest EMPTY set (no per-tenant
+  installed-pack enumeration seam exists yet) rather than fabricated refs.
+- **Tests** — real-export round-trip into a second tenant, inert-import
+  assertions, idempotent re-import, per-item isolation
+  (`test/portability.test.ts`, 10 total).

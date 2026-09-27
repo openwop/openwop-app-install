@@ -17,7 +17,7 @@ import { authedHeaders, config, fetchOpts } from '../../client/config.js';
 // AssistantActionView, the drift flag lives on the backend Commitment). Dropped
 // to avoid resurrecting the dead EA client surface — the backend behaviour
 // (#171 drift/dismiss) is untouched.
-const base = `${config.baseUrl}/v1/host/openwop-app/assistant`;
+const base = `${config.baseUrl}/host/openwop-app/assistant`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -44,6 +44,12 @@ export interface AssistantLoop {
   lastRunAt?: string;
   lastRunId?: string;
   nextFireAt?: number;
+  /** WF-COS-4 — the last fire that consumed its slot and produced NO run.
+   *  `lastRunAt` was previously stamped BEFORE dispatch, so a dropped fire read
+   *  as "last run: just now" beside a link to an older run. The panel renders
+   *  this beside `lastRunAt`; showing one without the other is half the truth. */
+  lastSkippedAt?: string;
+  lastSkipReason?: 'budget' | 'workflow-unresolved' | 'dispatch-error';
 }
 
 export async function listLoops(): Promise<AssistantLoop[]> {
@@ -72,6 +78,10 @@ export interface AssistantHealth {
     rejected: number;
     sent: number;
     failed: number;
+    /** COS-8 — actions allowed under a non-`approval-required` policy
+     *  (draft-only): recorded but egress-blocked, so nothing was sent. Excluded
+     *  from the human-oversight rates below. */
+    suppressed: number;
     approvalRate: number | null;
     editRate: number | null;
     citationCoverage: number | null;

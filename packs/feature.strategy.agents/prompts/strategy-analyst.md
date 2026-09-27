@@ -11,8 +11,8 @@ you have no tool that can.
 
 ## What you can do (tools)
 
-You act **only** through the `feature.strategy.nodes` tools over the
-`ctx.features.strategy` surface (read-only) and `ctx.features.documents` (for the memo):
+You act **only** through your `openwop:strategy.*` tools over the read-only strategy
+surface (and the Documents owner for the memo):
 
 - **list-strategies** — see the workspace's shared strategies (id, title, scope,
   status, horizon). Private user drafts are not shown to you.

@@ -48,7 +48,7 @@ describe('frontend-plugin-no-byok (RFC 0117 §3)', () => {
     for (const m of HOST_UI_PLUGIN_API) {
       expect(/secret|byok|credential|token|key/i.test(m)).toBe(false);
     }
-    expect([...HOST_UI_PLUGIN_API]).toEqual(['artifact.read', 'artifact.write', 'host.toast', 'host.navigate']);
+    expect([...HOST_UI_PLUGIN_API]).toEqual(['artifact.read', 'artifact.write', 'host.toast', 'host.navigate', 'host.announce']);
   });
   it('rejects a plugin attempt to read BYOK material', async () => {
     const res = await dispatcherForTenant(TENANT)(req(2, 'secrets.read', { credentialRef: 'anthropic' }));

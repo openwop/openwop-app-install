@@ -23,7 +23,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const u = getToggleDefault('users');
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
 });
@@ -156,6 +156,8 @@ describe('cms-localization — negotiated published read', () => {
     expect(r.status, JSON.stringify(r.body)).toBe(200);
     expect(r.headers.get('content-language')).toBe('pt-BR');
     expect(r.headers.get('vary')).toMatch(/Accept-Language/i);
+    // Cookie-authed org-scoped read: a shared cache must never store it (fix A5).
+    expect(r.headers.get('cache-control')).toBe('private, no-store');
     expect(r.body.page.sections[0].data.heading).toBe('Bem-vindo');
     // Delivery strips the other locales — never exposes the localizations map.
     expect(r.body.page.sections[0].localizations).toBeUndefined();

@@ -11,23 +11,24 @@
  *
  * TWO channel fan-out shapes, selected at registration by `parallelFanOutEnabled()`:
  *
- *  - SEQUENTIAL (default): five `core.subWorkflow` nodes chained — each channel
- *    child blocks the next. Correct, conservative, and the current default.
- *
- *  - PARALLEL (ADR 0158 §P1.5): a `core.orchestrator.supervisor` (RFC 0006) emits
- *    one `next-worker` decision naming all five channel workflow ids, and a single
- *    `core.dispatch` node fans them out concurrently with `fanOutPolicy:'parallel'`
- *    + `joinPolicy:{mode:'wait-all', onChildFailure:'collect'}` (RFC 0118). ~5×
+ *  - PARALLEL (ADR 0158 §P1.5 — the default on this host): a
+ *    `core.orchestrator.supervisor` (RFC 0006) emits one `next-worker` decision
+ *    naming all five channel workflow ids, and a single `core.dispatch` node fans
+ *    them out concurrently with `fanOutPolicy:'parallel'` +
+ *    `joinPolicy:{mode:'wait-all', onChildFailure:'collect'}` (RFC 0118). ~5×
  *    faster; one stalled channel no longer blocks the others.
  *
- * The host arm (RFC 0118 executor, openwop-app #994) has LANDED — the host now
- * advertises `capabilities.dispatch.fanOutSupported:true` and ACCEPTS the parallel
- * `core.dispatch` config at registration (proven by the "PARALLEL spine REGISTERS"
- * test). Parallel is therefore a LIVE opt-in: set `OPENWOP_CAMPAIGN_FANOUT_PARALLEL=true`
- * to make it the active spine (see `parallelFanOutEnabled()`). The default stays
- * SEQUENTIAL pending an operational decision to flip — both shapes share the same
- * workflowId, so flipping is a clean swap (existing runs snapshot their own def;
- * new runs use the active one — replay-safe).
+ *  - SEQUENTIAL: five `core.subWorkflow` nodes chained — each channel child
+ *    blocks the next. The conservative fallback for hosts that do not advertise
+ *    `dispatch.fanOutSupported`, and the forced shape under the ops kill-switch.
+ *
+ * RFC 0118 is Accepted and the host arm (openwop-app #994) landed — the host
+ * advertises `capabilities.dispatch.fanOutSupported:true` — so the default now
+ * DERIVES from that advertisement (`dispatchCapability()`, the single source of
+ * truth). `OPENWOP_CAMPAIGN_FANOUT_PARALLEL` stays as a two-way ops override
+ * ('true' forces parallel, 'false' forces sequential). Both shapes share the same
+ * workflowId, so the swap is clean (existing runs snapshot their own def; new
+ * runs use the active one — replay-safe).
  *
  * Selective-channel generation (only enabled channels) is the Campaign Strategist
  * agent path (ADR 0058); this spine generates the full set.
@@ -37,6 +38,7 @@
  */
 
 import type { WorkflowDefinition } from '../../executor/types.js';
+import { dispatchCapability } from '../../host/dispatchFanOut.js';
 import { CHANNEL_WORKFLOW_IDS } from '../campaign-channels/channelWorkflows.js';
 
 const VALIDATE = 'feature.campaign-brief.nodes.validate';
@@ -65,6 +67,11 @@ const prefixNodes: Node[] = [
   { nodeId: 'kernel-approve', typeId: APPROVE, config: { prompt: 'Review the messaging kernel — the foundation every channel echoes.', title: 'Approve the messaging kernel?' } },
 ];
 const suffixNodes: Node[] = [
+  // ADR 0356 P1 — the ADR 0172-designed post-merge slot: production planning
+  // runs over the merged channel set, BEFORE the consistency check. The node
+  // SKIPS honestly (success + skipped:true) when the production toggle is off,
+  // so the spine is safe unconditionally; finalize links the persisted plan.
+  { nodeId: 'production-plan', typeId: 'feature.production.nodes.plan-generate', inputs: { ...briefIdInput } },
   { nodeId: 'consistency', typeId: CONSISTENCY, inputs: { ...briefIdInput } },
   { nodeId: 'finalize', typeId: FINALIZE, inputs: { ...briefIdInput }, outputRole: 'primary' },
 ];
@@ -118,23 +125,25 @@ function buildOrchestration(parallel: boolean): WorkflowDefinition {
 }
 
 /**
- * Whether the parallel channel fan-out spine is active. The host arm (RFC 0118,
- * #994) has landed — the host advertises `capabilities.dispatch.fanOutSupported:true`
- * and accepts the parallel config — so this is a LIVE opt-in, not a blocked flag.
- * Default OFF (sequential) pending an operational decision to make parallel the
- * default; set `OPENWOP_CAMPAIGN_FANOUT_PARALLEL=true` to activate.
+ * Whether the parallel channel fan-out spine is active. The default now tracks
+ * the host's own advertisement (`dispatchCapability().fanOutSupported`, the
+ * RFC 0118 single source of truth) — the "one config flip" ADR 0158 §P1.5
+ * promised, taken once RFC 0118 reached Accepted and the host arm (#994) landed.
  *
- * TODO(follow-on): once a synchronous host-capability accessor exists, read
- * `capabilities.dispatch.fanOutSupported` here so activation can track the
- * advertisement automatically (this env switch stays as an ops override).
+ * `OPENWOP_CAMPAIGN_FANOUT_PARALLEL` remains as a two-way ops override:
+ * `'true'` forces parallel, `'false'` forces sequential (the kill-switch for a
+ * live service), unset follows the capability.
  */
 export function parallelFanOutEnabled(): boolean {
-  return process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL === 'true';
+  const override = process.env.OPENWOP_CAMPAIGN_FANOUT_PARALLEL;
+  if (override === 'true') return true;
+  if (override === 'false') return false;
+  return dispatchCapability().fanOutSupported;
 }
 
-/** Sequential spine (the default; the asserted-stable shape). */
+/** Sequential spine — the fallback shape (capability-absent hosts / ops kill-switch). */
 export const campaignOrchestrationWorkflow: WorkflowDefinition = buildOrchestration(false);
-/** Parallel spine (ADR 0158 §P1.5 / RFC 0118) — live opt-in; registers against the host (#994). */
+/** Parallel spine (ADR 0158 §P1.5 / RFC 0118) — the default on this host (#994). */
 export const campaignOrchestrationParallel: WorkflowDefinition = buildOrchestration(true);
 
 /** The registered built-in — parallel iff activated, else sequential. */

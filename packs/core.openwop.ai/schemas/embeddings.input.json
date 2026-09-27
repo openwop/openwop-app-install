@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/embeddings.input.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/embeddings.input.json",
   "title": "EmbeddingsInput",
   "type": "object",
   "required": [

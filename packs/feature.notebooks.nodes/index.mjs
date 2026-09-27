@@ -7,15 +7,30 @@
  * source's full text → a chatCompletion `messages` payload) and `store-summary`
  * (persists the LLM summary via the one justified surface write).
  *
- * Every node is `role: "action"` (each reads/writes the tenant notebook/KB store —
- * a side-effect), so the engine records its outputs in the event log and
- * replay/fork read the recorded result rather than re-running the surface call.
- *
- * Fencing + Full/Excluded/Summary context-level filtering are inherited from the
- * HOST surface (`composeKnowledgeForSubject` + the excluded-filtered
- * `searchNotebook` + the binding's extraContext); this pack NEVER reimplements
- * them. Pure-JS, Node-20 stdlib.
- */
+ * REPLAY CLASSIFICATION (ADR 0678 D1 — this docblock used to get it backwards, pack-wide).
+ * It asserted that every node being `role:"action"` means the engine records its outputs and
+ * replay/fork read the recorded result. That inference is FALSE and it is what hid the defect
+ * ADR 0678 fixes: nothing under `src/executor/` compares `role` to the string 'action'
+ * (`sideEffects.ts:193-197`). What binds is `gen-side-effect-floor.mjs:139` —
+ * `role === 'side-effect' OR capabilities includes 'side-effectful'`, a disjunction. So the
+ * FIVE durable writers below declare `capabilities:["side-effectful"]` explicitly
+ * (`store-summary`, `write-transformation`, `ingest-source`, `mcp-add-source`,
+ * `mcp-create-note`) and the other nine declare `capabilities: []` — an empty array rather
+ * than a missing key, so a read's non-classification is a reviewed decision a diff can show.
+ * `transcribe-source` and `fetch-youtube-source` are deliberately NOT classified: they write
+ * no durable app state, and declaring them would land them in the generator's invocation-log
+ * arm, where the ratchet would report a discharge that does not hold for the egress half.
+
+
+/** DEBT-3 — audio-transcription default in ONE greppable constant. Mirrors the
+ *  host's own audio default (aiProvidersHost.ts transcribeManaged →
+ *  gemini-2.5-flash), NOT the google `recommended` text model: audio capability
+ *  isn't modeled in providers.json, so the text default can't be assumed
+ *  audio-capable. The /refresh-model-catalog sweep updates it. */
+
+import { createHash } from 'node:crypto';
+
+const DEFAULT_TRANSCRIBE_MODEL = 'gemini-2.5-flash';
 
 /** Resolve the notebooks feature surface, or fail with the canonical capability
  *  error (workflow-register should refuse a workflow needing it on a host that
@@ -121,8 +136,10 @@ export async function search(ctx) {
  * short-circuits to a clean no-op instead of asking the LLM to summarize nothing.
  *
  * notebookId/sourceId come via `{type:'variable'}` inputs (merged into ctx.inputs).
- * Read-only; recorded → replay-safe.
+ * Read-only. A READ: re-executing it on a replay is harmless, which is why it is
+ * deliberately NOT in the side-effect floor (ADR 0678 D1) — "recorded" was never the reason.
  */
+
 export async function readSource(ctx) {
   const notebooks = ensureNotebooks(ctx);
   if (typeof notebooks.getSourceText !== 'function') {
@@ -160,7 +177,8 @@ export async function readSource(ctx) {
  * to the `summary` input) through the one justified surface write `setSourceSummary`,
  * which un-gates the source's `summary` context level + recomputes the binding
  * projection. notebookId/sourceId come via `{type:'variable'}` inputs. An empty
- * summary is a no-op (`stored:false`). Recorded → replay-safe.
+ * summary is a no-op (`stored:false`). Replay-SERVED because the manifest declares `capabilities:["side-effectful"]` (ADR 0678 D1);
+ * `role:"action"` confers nothing.
  */
 export async function storeSummary(ctx) {
   const notebooks = ensureNotebooks(ctx);
@@ -186,10 +204,14 @@ export async function storeSummary(ctx) {
  * artifacts, ADR 0053; the strategy create-board-memo precedent, ADR 0080).
  *
  * Inputs (orgId/title/kind/ownerSubject via `{type:'variable'}`; content via the
- * edge port): creates the Document then appends its first version. The version write
- * is idempotency-keyed off the run id + the source so a replay/fork reuses the same
- * version rather than duplicating. An empty result is a no-op (`written:false`).
- * Recorded → replay-safe.
+ * edge port): mints the Document at a CONTENT-DERIVED deterministic id, then appends its
+ * first version. CORRECTED (ADR 0678 D1b): this used to say the version write "is
+ * idempotency-keyed off the run id + the source so a replay/fork reuses the same version".
+ * It was INERT — the key embedded a fresh `runId` AND the just-minted `documentId`, so it
+ * could only collide with itself. The dedupe now happens at the MINT, which is the only
+ * place it can. An empty result is a no-op (`written:false`).
+ * Recorded → replay-safe BECAUSE the manifest declares `capabilities:["side-effectful"]`
+ * (ADR 0678 D1) — NOT because the role is "action", which confers nothing.
  */
 export async function writeTransformation(ctx) {
   const docs = ensureDocuments(ctx);
@@ -216,23 +238,47 @@ export async function writeTransformation(ctx) {
   if (!orgId || content.length === 0) {
     return { status: 'success', outputs: { written: false } };
   }
+  // ADR 0678 D1b — the dedupe has to happen at the document MINT, and the id has to be
+  // CONTENT-derived.
+  //
+  // The previous key was `notebook-transformation:${runId}:${nodeId}:${sourceId}:${documentId}`
+  // and was INERT: it embedded a `runId` that is fresh on every fork AND a `documentId` minted
+  // by the `createDocument` on the line above, so it could only ever collide with itself — on a
+  // fork or a plain retry. `addVersion`'s lookup is scoped to
+  // `listVersions(tenant, org, documentId)` (`documentsService.ts:483-486`), so against a
+  // freshly-minted document it searches an EMPTY list and no key can match. Its comment cited
+  // "the strategy create-board-memo precedent" — the very pattern ADR 0676 D1 corrected as a
+  // no-op one iteration earlier, so the defect propagated by citation.
+  //
+  // NOT routed through `ctx.features.documents.createDraftDocument` (the ADR 0166 owner, and
+  // what ADR 0676 D1 used for strategy) for a measured reason: that surface does NOT accept
+  // `ownerSubject` (`features/documents/surface.ts:69-92`), so routing through it would
+  // silently drop the ADR 0084 cross-subject hardening enforced twenty lines above — closing an
+  // idempotency gap by opening an attribution one. `createDocument` short-circuits on an
+  // explicit id (`documentsService.ts:326-329`), which is the same dedupe with the owner intact,
+  // and is what `features/strategy/agentTools.ts:266-272` already does correctly.
+  //
+  // Scope: this converges a `mode:'branch'` fork too, where classification does NOT apply —
+  // `sourceOutcomes` is populated only for `mode:'replay'` (`routes/runs.ts:1725`).
+  const sourceId = strInput(ctx, 'sourceId');
+  const idemBase = createHash('sha256')
+    .update(`${orgId}\u0000${kind}\u0000${sourceId}\u0000${title}\u0000${content}`)
+    .digest('hex')
+    .slice(0, 32);
+  const documentId = `doc:notebook-transformation:${idemBase}`;
   const { document } = await docs.createDocument({
     orgId,
+    documentId,
     title,
     kind,
     format: 'markdown',
     ...(ownerSubject ? { ownerSubject } : {}),
   });
-  // Stable idempotency key from the run + node + source so a fork/retry reuses the
-  // version (the strategy create-board-memo + canvas-materialize precedent).
-  const runId = typeof ctx.runId === 'string' ? ctx.runId : 'run';
-  const nodeId = typeof ctx.nodeId === 'string' ? ctx.nodeId : 'node';
-  const sourceId = strInput(ctx, 'sourceId');
   await docs.addVersion({
     orgId,
     documentId: document.documentId,
     content,
-    idempotencyKey: `notebook-transformation:${runId}:${nodeId}:${sourceId}:${document.documentId}`,
+    idempotencyKey: `notebook-transformation:${idemBase}`,
   });
   return { status: 'success', outputs: { written: true, documentId: document.documentId, title } };
 }
@@ -291,7 +337,7 @@ export async function transcribeSource(ctx) {
   }
   const cfg = ctx.config ?? {};
   const provider = typeof cfg.provider === 'string' && cfg.provider.length > 0 ? cfg.provider : 'google';
-  const model = typeof cfg.model === 'string' && cfg.model.length > 0 ? cfg.model : 'gemini-2.5-flash';
+  const model = typeof cfg.model === 'string' && cfg.model.length > 0 ? cfg.model : DEFAULT_TRANSCRIBE_MODEL;
   const instruction =
     'Transcribe this recording verbatim into plain text. Output ONLY the transcript — no preamble, ' +
     'commentary, or timestamps.' + (language ? ` The spoken language is ${language}.` : '');
@@ -514,7 +560,7 @@ export async function fetchYoutubeSource(ctx) {
   if (bytes.length === 0) throw noTranscript('The audio stream was empty.');
   const cfg = ctx.config ?? {};
   const provider = typeof cfg.provider === 'string' && cfg.provider.length > 0 ? cfg.provider : 'google';
-  const model = typeof cfg.model === 'string' && cfg.model.length > 0 ? cfg.model : 'gemini-2.5-flash';
+  const model = typeof cfg.model === 'string' && cfg.model.length > 0 ? cfg.model : DEFAULT_TRANSCRIBE_MODEL;
   const result = await ctx.callAI({
     provider,
     model,
@@ -541,7 +587,8 @@ export async function fetchYoutubeSource(ctx) {
  * Inputs: `notebookId` + `title` + optional `sourceType` (audio|video|youtube, woven
  * into the title for provenance) via `{type:'variable'}`; `text` arrives via an edge
  * port from the upstream transcribe/fetch node's `transcript` output. Empty text ⇒
- * no-op (`ingested:false`). Recorded → replay-safe.
+ * no-op (`ingested:false`). Replay-SERVED because the manifest declares `capabilities:["side-effectful"]` (ADR 0678 D1);
+ * `role:"action"` confers nothing.
  *
  * SECURITY: this node is wired ONLY into the host-built-in ingest workflows the
  * upload ROUTE enqueues (RBAC workspace:write); it is deliberately NOT in the
@@ -573,7 +620,8 @@ export async function ingestSource(ctx) {
  * `ctx.features.notebooks` read so a `notebooks.mcp.*` expose-tool workflow has a
  * terminal node whose output becomes the CallToolResult. All org-visibility +
  * tenant scoping is the HOST surface's job (inherited, never reimplemented here).
- * Read-only → recorded → replay-safe.
+ * Read-only. A READ: re-executing it on a replay is harmless, which is why it is
+ * deliberately NOT in the side-effect floor (ADR 0678 D1) — "recorded" was never the reason.
  */
 export async function listNotebooks(ctx) {
   const notebooks = ensureNotebooks(ctx);
@@ -619,7 +667,8 @@ export async function listNotesNode(ctx) {
  * (`declined:true`). This makes the human approval load-bearing: an untrusted MCP
  * client cannot mutate the workspace until a workspace member approves. The writes
  * land through the same narrow surface methods the host already exposes (untrusted
- * content fenced downstream). Recorded → replay-safe.
+ * content fenced downstream). Replay-SERVED because the manifest declares `capabilities:["side-effectful"]` (ADR 0678 D1);
+ * `role:"action"` confers nothing.
  */
 export async function mcpAddSource(ctx) {
   const notebooks = ensureNotebooks(ctx);

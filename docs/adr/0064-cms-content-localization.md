@@ -282,7 +282,44 @@ Workflow surface (exposes the above to workflows — no new content capability):
 - [x] `feature.cms.agents.localizer` agent — tool-allowlisted to the CMS nodes only; the
       chat-drivable path (no separate `content.translate` envelope seam in this host — agent +
       nodes IS that path, per ADR 0058).
-- [ ] ROADMAP + FEATURES rows landed in lockstep; ADR marked `implemented` on ship.
+- [x] ROADMAP + FEATURES rows landed in lockstep; ADR marked `implemented` on ship.
+      *(Checked retroactively 2026-07-03 — the rows shipped with PR #428 but this box was
+      left unticked; CMS gap-analysis fix A4.)*
+
+## Correction + amendment (2026-07-03 — CMS gap analysis Phase A)
+
+**Correction — the node pack ships THREE nodes, not two.** The Status line and the Phase-4
+row above say `get-page` + `translate-section`; the shipped `feature.cms.nodes` v1.1.0 also
+contains **`list-pages`** (an org's published pages via `ctx.features.cms.listPages` —
+pageId/slug/title/status, published-only). The pack manifest's own prose carried the same
+drift and has been fixed. The original text is left as written per the correct-don't-rewrite
+rule.
+
+**Amendment — `autoTranslateOnPublish` is now honored, at SUBMIT time.** D4 shipped the flag
+but nothing read it (a silent no-op in the settings UI). Semantics, per the Phase-A
+architecture review:
+
+- **Submit-time, not publish-time:** when a page is submitted for review, the host drafts AI
+  overlays for every *(section, supported locale)* pair that has base content but **no stored
+  overlay** (missing-only — human/AI overlays are never overwritten). Publish-time was
+  rejected on governance grounds: it would inject unreviewed AI content *after* the reviewer
+  approved the page. Submit-time means the `cms-approval-gate` reviews AI output BEFORE
+  publish; the approval `proposal` names the AI-drafted overlay counts per locale, and the
+  submit response carries an `autoTranslated: Record<locale, count>` field.
+- **Gate stack:** runs only when the tenant's `cms-localization` toggle is ON **and** the
+  org's `autoTranslateOnPublish` is true **and** `supportedLocales` is non-empty (the flag
+  can outlive the toggle; toggle OFF stays byte-identical).
+- **Best-effort + bounded:** a provider failure never fails the submit (partial results are
+  kept); the sweep is capped at `AUTO_TRANSLATE_MAX_CALLS = 20` provider calls per submit
+  (sections × locales can reach 50×N — an unbounded synchronous fan-out would self-DoS the
+  managed provider).
+- **No state-machine coupling:** the sweep lives in the submit ROUTE; `transitionPage` stays
+  pure (it has three callers today — direct routes and the ADR 0066 approval decide handler —
+  and future scheduler/node callers must not inherit provider calls inside the CAS +
+  compensating-reopen critical section). Overlays persist through the EXISTING validated
+  write path (`updatePage` → `validateSections`), so sanitation and the version bump are
+  identical to an editor save. Durable AI-provenance is deferred to the CMS audit trail
+  (gap-analysis C5), which is its long-term owner.
 
 ## References
 

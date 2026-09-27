@@ -166,6 +166,33 @@ of change that should get a `/architect` + security pass before Phase 2 code lan
 - **Cross-tenant twin** — a user whose twin agent lives in another tenant. Out of scope (CTI-1
   forbids); would need explicit cross-tenant federation, a separate ADR.
 
+> **CORRECTION 2026-08-20 (ADR 0589; the reasoning above is left intact deliberately).**
+> Two premises in this ADR are **false on any ADR 0015 shared-workspace host**, and the code
+> shipped against them:
+>
+> 1. **"Intra-tenant"** (FEATURES.md:186 repeats it) — the twin LINK hangs off a roster agent,
+>    which lives in the workspace it was created in, while the owner's memory notes and the
+>    `Profile` row holding `knowledge.collectionIds` live in the owner's **home** tenant
+>    (`profilesService.ts:121` keys `Profile` by `userId` alone, so a person's profile exists in
+>    exactly ONE tenant). In a `ws:` workspace those are different tenants **by construction** —
+>    not an exception, the normal case.
+> 2. **"Cross-tenant twin … out of scope"** — the split above means the *default* deployment
+>    shape already crosses a tenant boundary. What CTI-1 forbids is one organization's tenant
+>    reaching another's data; a person reaching their own home-tenant corpus, through an agent
+>    they consented to, in a workspace they are a member of, is a different thing and is what
+>    ADR 0589 §D1b authorizes explicitly.
+>
+> Consequence while unfixed: the grant was **un-issuable** in every shared workspace (a 404
+> from `twinService.ts:111-114`), so the feature was dead on arrival in exactly the shape it
+> was designed for.
+>
+> **§Audience — the dimension this ADR never enumerated.** §2's granularity question asks
+> per-agent vs. blanket, and both answers are about *which agent*. Neither bounds **who may
+> address it**: with no caller in the `BorrowedRecallResolver` signature, every tenant member
+> addressing a granted twin received answers grounded in one named person's private memory.
+> ADR 0589 §D2 decides owner-only, deny-by-default, and records the additive `audience` scope
+> as the follow-up.
+
 ## Implementation status
 
 | Phase | Status |

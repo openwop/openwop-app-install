@@ -5,6 +5,13 @@
  * outputs recorded, replay-safe. Pure-JS, Node-20 stdlib only.
  */
 
+/** DEBT-3 — pack-local mirror of the providers.json SSoT default (the
+ *  anthropic `recommended: true` model; src/providers/catalog.ts
+ *  getDefaultModel). ctx.callAI REQUIRES an explicit model and standalone
+ *  .mjs packs cannot import the catalog, so the default lives in this ONE
+ *  greppable constant — the /refresh-model-catalog sweep updates it. */
+const DEFAULT_MODEL = 'claude-sonnet-4-6';
+
 function ensureStudio(ctx) {
   const cs = ctx.features && ctx.features['campaign-orchestration'];
   if (!cs || typeof cs.finalizeFromBrief !== 'function') {
@@ -48,11 +55,53 @@ export async function consistencyCheck(ctx) {
     if (hit) echoed += 1;
     else divergences.push({ channel: str(d && d.channel) || 'unknown', severity: 'medium', description: 'Draft does not visibly echo the kernel headline/CTA/proof points.' });
   }
-  const score = Math.round((echoed / drafts.length) * 100);
+  const echoScore = Math.round((echoed / drafts.length) * 100);
+
+  // ADR 0356 P5 — blend a semantic LLM-judge leg (40%) with the deterministic
+  // token echo (60%) — the exact brand-scorer pattern, degrading to
+  // deterministic-only when no provider is available.
+  let judgeScore = null;
+  if (typeof ctx.callAI === 'function') {
+    try {
+      const ai = await ctx.callAI({
+        provider: str(i.provider) || 'anthropic',
+        model: str(i.model) || DEFAULT_MODEL,
+        systemPrompt: 'You judge cross-channel campaign consistency. Given the messaging kernel and the channel drafts, score 0-100 how consistently the drafts carry the SAME core message, promise, and call to action (not word-for-word — semantically). Reply with strict JSON only.',
+        messages: [{ role: 'user', content: `KERNEL:\n${JSON.stringify(kernel)}\n\nDRAFTS:\n${JSON.stringify(drafts).slice(0, 20000)}` }],
+        responseSchema: { type: 'object', additionalProperties: false, required: ['score'], properties: { score: { type: 'number' }, rationale: { type: 'string' } } },
+      });
+      const v = ai && typeof ai === 'object' && ai.data ? Number(ai.data.score) : NaN;
+      if (Number.isFinite(v)) judgeScore = Math.max(0, Math.min(100, Math.round(v)));
+    } catch { /* judge optional — deterministic leg stands alone */ }
+  }
+  const score = judgeScore === null ? echoScore : Math.round(echoScore * 0.6 + judgeScore * 0.4);
+  const dimensions = [{ name: 'kernelEcho', score: echoScore, description: `${echoed}/${drafts.length} drafts echo the kernel.` }];
+  if (judgeScore !== null) dimensions.push({ name: 'semanticJudge', score: judgeScore, description: 'LLM-judged semantic consistency (40% of the blend).' });
   return {
     status: 'success',
-    outputs: { report: { score, dimensions: [{ name: 'kernelEcho', score, description: `${echoed}/${drafts.length} drafts echo the kernel.` }], divergences, passesThreshold: score >= 80, checkedAt: new Date().toISOString() } },
+    outputs: { report: { score, dimensions, divergences, passesThreshold: score >= 80, checkedAt: new Date().toISOString() } },
   };
+}
+
+/** ADR 0356 P4 — the setup gate check (the CS-008 assetDecisionGate semantic,
+ *  composed — no engine primitive): reports which campaign assets the brief
+ *  still lacks (brand / personas / kb). A brief carrying the refs AUTO-RESOLVES
+ *  (missing: []) — campaign #2 sails through; the spine's optional approval
+ *  gate prompts only when something is missing. */
+export async function setupCheck(ctx) {
+  const i = ctx.inputs ?? {};
+  const cb = ctx.features && ctx.features['campaign-brief'];
+  if (!cb || typeof cb.getBrief !== 'function') {
+    return { status: 'failed', error: { code: 'host_capability_missing', message: 'campaign-brief surface unavailable' } };
+  }
+  const b = await cb.getBrief({ briefId: str(i.briefId) });
+  if (!b || !b.brief) return { status: 'failed', error: { code: 'brief_not_found', message: `Brief not found: ${str(i.briefId)}` } };
+  const brief = b.brief;
+  const missing = [];
+  if (!brief.brandId) missing.push({ slot: 'brand', hint: 'Bind a brand so voice + guardrails apply.' });
+  if (!Array.isArray(brief.personaIds) || brief.personaIds.length === 0) missing.push({ slot: 'persona', hint: 'Pick at least one persona to target.' });
+  if (!brief.kbCollectionId) missing.push({ slot: 'kb', hint: 'Bind a knowledge collection so generation is grounded.' });
+  return { status: 'success', outputs: { missing, ready: missing.length === 0, prompt: missing.length === 0 ? 'All campaign assets are bound.' : `Missing setup: ${missing.map((x) => x.slot).join(', ')} — use existing assets or create them, then re-run.` } };
 }
 
 export async function finalize(ctx) {
@@ -106,6 +155,7 @@ function campaignToCanvas(campaign) {
 
 export const nodes = {
   'feature.campaign-orchestration.nodes.consistency-check': consistencyCheck,
+  'feature.campaign-orchestration.nodes.setup-check': setupCheck,
   'feature.campaign-orchestration.nodes.finalize': finalize,
 };
 

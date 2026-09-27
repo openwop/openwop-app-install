@@ -11,7 +11,7 @@
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { IconButton } from '../../ui/IconButton.js';
-import { ImageIcon, TrashIcon } from '../../ui/icons/index.js';
+import { ImageIcon, LinkIcon, TrashIcon, PencilIcon } from '../../ui/icons/index.js';
 import { formatBytes, formatNumber } from '../../i18n/format.js';
 import { absoluteServeUrl, type MediaAsset } from './mediaClient.js';
 
@@ -47,10 +47,20 @@ function AssetUsage({ a, t }: { a: MediaAsset; t: TFunction }): JSX.Element {
   );
 }
 
-function AssetChips({ a }: { a: MediaAsset }): JSX.Element {
+/** ADR 0363 P1 — an alt-text status chip for image assets (color-never-alone:
+ *  the label carries the meaning; the variant only reinforces it). */
+function AltStatusChip({ a, t }: { a: MediaAsset; t: TFunction }): JSX.Element | null {
+  if (!isImage(a)) return null;
+  if (a.altTextSource === 'decorative') return <span className="chip chip--muted">{t('altDecorativeChip')}</span>;
+  if (a.altText && a.altText.trim().length > 0) return <span className="chip chip--success">{t('altPresentLabel')}</span>;
+  return <span className="chip chip--warning">{t('altMissingLabel')}</span>;
+}
+
+function AssetChips({ a, t }: { a: MediaAsset; t: TFunction }): JSX.Element {
   return (
     <>
       <span className="chip chip--muted">{assetFormat(a)}</span>
+      <AltStatusChip a={a} t={t} />
       {a.tags.map((tag) => (
         <span key={tag} className="chip">{tag}</span>
       ))}
@@ -61,9 +71,15 @@ function AssetChips({ a }: { a: MediaAsset }): JSX.Element {
 export function MediaAssetCard({
   asset: a,
   onDelete,
+  onShowUsage,
+  onEditAltText,
 }: {
   asset: MediaAsset;
   onDelete: () => void;
+  /** Open the "used by" list (ADR 0206 B4 usage refs). */
+  onShowUsage?: () => void;
+  /** ADR 0363 P1 — open the alt-text editor (image assets only). */
+  onEditAltText?: () => void;
 }): JSX.Element {
   const { t } = useTranslation('media');
   return (
@@ -73,11 +89,15 @@ export function MediaAssetCard({
       </div>
       <span className="media-asset-name" title={a.name}>{a.name}</span>
       <div className="u-flex u-wrap u-gap-1">
-        <AssetChips a={a} />
+        <AssetChips a={a} t={t} />
       </div>
       <div className="action-bar u-justify-between">
         <AssetUsage a={a} t={t} />
-        <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} />
+        <span className="u-flex u-gap-1">
+          {onEditAltText && isImage(a) ? <IconButton label={t('altEditLabel')} icon={<PencilIcon />} className="btn-ghost" onClick={onEditAltText} /> : null}
+          {onShowUsage ? <IconButton label={t('usedByLabel')} icon={<LinkIcon />} className="btn-ghost" onClick={onShowUsage} /> : null}
+          <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} />
+        </span>
       </div>
     </div>
   );
@@ -86,9 +106,15 @@ export function MediaAssetCard({
 export function MediaAssetRow({
   asset: a,
   onDelete,
+  onShowUsage,
+  onEditAltText,
 }: {
   asset: MediaAsset;
   onDelete: () => void;
+  /** Open the "used by" list (ADR 0206 B4 usage refs). */
+  onShowUsage?: () => void;
+  /** ADR 0363 P1 — open the alt-text editor (image assets only). */
+  onEditAltText?: () => void;
 }): JSX.Element {
   const { t } = useTranslation('media');
   return (
@@ -103,10 +129,12 @@ export function MediaAssetRow({
         </span>
       </div>
       <div className="list-row-meta">
-        <AssetChips a={a} />
+        <AssetChips a={a} t={t} />
         <AssetUsage a={a} t={t} />
       </div>
       <div className="list-row-actions action-bar">
+        {onEditAltText && isImage(a) ? <IconButton label={t('altEditLabel')} icon={<PencilIcon />} className="btn-ghost" onClick={onEditAltText} /> : null}
+        {onShowUsage ? <IconButton label={t('usedByLabel')} icon={<LinkIcon />} className="btn-ghost" onClick={onShowUsage} /> : null}
         <IconButton label={t('deleteAssetLabel')} icon={<TrashIcon />} className="btn-ghost" onClick={onDelete} />
       </div>
     </div>

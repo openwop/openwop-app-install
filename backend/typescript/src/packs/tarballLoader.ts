@@ -19,9 +19,12 @@ import { join } from 'node:path';
 import { createHash, verify as verifySig, KeyObject, createPublicKey } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import type { NodeModule } from '../executor/types.js';
+import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { SuspendSignal } from '../executor/suspendSignal.js';
 import { createLogger } from '../observability/logger.js';
 import { isInstalledPack, verifyInstalledPack } from './registryInstaller.js';
+import { classifyPackDir, type PackTrustVerdict } from '../host/packTrust.js';
+import { packNodeEligibility } from '../host/packIsolationPolicy.js';
 
 const log = createLogger('packs.tarballLoader');
 
@@ -30,6 +33,9 @@ interface PackManifest {
   version: string;
   nodes?: Array<{ typeId: string; version: string }>;
   runtime?: { format?: string; entry?: string };
+  /** RFC 0072 §C capability declarations. ADR 0555 P1 reads this to decide
+   *  isolation eligibility (`secrets.resolveInPack` ⇒ ineligible). */
+  peerDependencies?: Record<string, unknown>;
   /** Optional signature metadata. When present, loadPackFromManifest verifies. */
   signature?: {
     /** Path to the public key file relative to the pack dir. */
@@ -92,6 +98,36 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
     log.info('pack signature verified', { packDir });
   }
 
+  // ── ADR 0555 P0: trust gate ─────────────────────────────────────────────
+  //
+  // This runs BEFORE the dynamic import below, and that ordering is the whole
+  // control. `await import(url)` EXECUTES the module's top level — a pack that
+  // is malicious has already run by the time any `execute()` wrapper could
+  // refuse it. "Load it but don't dispatch it" is not a boundary for ES
+  // modules; refusing the import is.
+  //
+  // Refusing to import does NOT hide the pack: `host/nodeCatalogBuilder.ts`
+  // builds the palette by scanning `pack.json` from disk, independent of the
+  // node registry. So the ADR's "installable but not dispatchable" holds — the
+  // pack stays visible, its nodes stay listed, and only execution is denied.
+  //
+  // We register a REFUSAL STUB for each manifest-declared typeId rather than
+  // registering nothing. Registering nothing makes the executor report an
+  // unknown node type, which sends whoever debugs it looking for a missing
+  // pack instead of a rejected one — a misleading error is its own defect.
+  const trust = classifyPackDir(packDir);
+  if (!trust.dispatchable) {
+    log.error('pack is not dispatchable — refusing to import its code (ADR 0555 P0)', {
+      packDir,
+      pack: trust.packName,
+      version: trust.version,
+      tier: trust.tier,
+      reason: trust.reason,
+      ...(trust.detail ? { detail: trust.detail } : {}),
+    });
+    return registerRefusalStubs(manifest, trust);
+  }
+
   const entry = manifest.runtime?.entry ?? './index.mjs';
   const entryPath = join(packDir, entry);
   const moduleUrl = pathToFileURL(entryPath).toString();
@@ -106,13 +142,26 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
 
   const first: NodeModule | null = null;
   let firstReturned: NodeModule | null = first;
-  const { getNodeRegistry } = await import('../executor/nodeRegistry.js');
   const registry = getNodeRegistry();
   for (const [typeId, fn] of Object.entries(loaded.nodes)) {
     if (typeof fn !== 'function') continue;
     const module: NodeModule = {
       typeId,
       version: manifest.version,
+      // ADR 0555 P1 — provenance + isolation eligibility travel WITH the
+      // registered module. The executor cannot re-derive either at dispatch
+      // time (it holds a typeId and a function, not a pack dir), and a second
+      // lookup keyed on typeId would be a second source of truth about which
+      // pack a node came from.
+      packOrigin: {
+        packName: manifest.name,
+        packVersion: manifest.version,
+        packDir,
+        entryUrl: moduleUrl,
+        typeId,
+        tier: trust.tier,
+        isolation: packNodeEligibility(manifest, typeId),
+      },
       async execute(ctx) {
         // Forward the spec-defined NodeContext surface to the pack.
         // Packs receive `inputs` + `config` (the static node config)
@@ -147,15 +196,62 @@ export async function loadPackFromManifest(packDir: string): Promise<NodeModule 
               : rawMessage;
           return { status: 'failure', error: { code, message } };
         }
-        const r = result as { status?: string; outputs?: unknown };
+        const r = result as { status?: string; outputs?: unknown; error?: { code?: unknown; message?: unknown } };
         if (r.status === 'success') {
           return { status: 'success', outputs: r.outputs };
         }
-        return { status: 'failure', error: { code: 'pack_node_error', message: 'Pack node returned non-success outcome' } };
+        // CHAINX-5: a node that signals failure by RETURNING `{status:'failed',
+        // error}` (vs throwing) keeps its OWN error.code/message — same as the
+        // throw path above. Previously this discarded it into a generic
+        // `pack_node_error`, hiding canonical codes (not_eligible /
+        // already_enrolled / connector_no_connection) from the run event log.
+        const returnedCode = typeof r.error?.code === 'string' ? r.error.code : 'pack_node_error';
+        const returnedMessage =
+          typeof r.error?.message === 'string' ? r.error.message : 'Pack node returned non-success outcome';
+        return { status: 'failure', error: { code: returnedCode, message: returnedMessage } };
       },
     };
     registry.register(module);
     if (!firstReturned) firstReturned = module;
+  }
+  return firstReturned;
+}
+
+/**
+ * Register a non-executing stub for every typeId a non-dispatchable pack
+ * declares, so a workflow referencing one fails with the REAL reason.
+ *
+ * Codes are distinct per tier because they mean different things to an
+ * operator: `pack_revoked` is a security action they (or their steward) took;
+ * `pack_untrusted` is missing attestation they can fix by installing the pack
+ * properly or regenerating the steward manifest.
+ */
+function registerRefusalStubs(
+  manifest: PackManifest,
+  trust: PackTrustVerdict,
+): NodeModule | null {
+  const code = trust.tier === 'revoked' ? 'pack_revoked' : 'pack_untrusted';
+  const message =
+    trust.tier === 'revoked'
+      ? `Pack '${trust.packName}'${trust.version ? `@${trust.version}` : ''} is REVOKED and will not execute (ADR 0555).`
+      : `Pack '${trust.packName}'${trust.version ? `@${trust.version}` : ''} is untrusted (${trust.reason})`
+        + ` and will not execute. It is neither steward-attested in packs/.steward-manifest.json`
+        + ` nor verified by an install marker.`;
+
+  const registry = getNodeRegistry();
+  let firstReturned: NodeModule | null = null;
+  for (const declared of manifest.nodes ?? []) {
+    if (!declared || typeof declared.typeId !== 'string') continue;
+    const stub: NodeModule = {
+      typeId: declared.typeId,
+      version: declared.version ?? manifest.version,
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async execute() {
+        return { status: 'failure', error: { code, message } };
+      },
+    };
+    registry.register(stub);
+    if (!firstReturned) firstReturned = stub;
   }
   return firstReturned;
 }

@@ -7,6 +7,9 @@
  *   - Leaves other tenants' data untouched
  *   - Refuses anon and unauthenticated callers
  *   - Writes an audit_log entry
+ *   - KB-2 R2 (review F9): reports the VECTOR-MIRROR purge outcome per backend in
+ *     BOTH the response and the ADR 0284 audit payload, and does so in a way that
+ *     distinguishes "a backend failed" from "no vector backend is configured"
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -18,6 +21,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { authMiddleware, _resetOidcVerifier } from '../src/middleware/auth.js';
+import { registerPersonalTenantSessionAuthority, registerSessionAuthority } from '../src/host/sessionAuthority.js';
+import { usersPersonalTenantSessionAuthority, usersSessionAuthority } from '../src/features/users/feature.js';
 import { registerAccountRoutes } from '../src/routes/account.js';
 import { openStorage } from '../src/storage/index.js';
 import { initHostExtPersistence, __resetHostExtPersistence } from '../src/host/hostExtPersistence.js';
@@ -42,6 +47,11 @@ import {
   createLocalAesKmsClient,
   _resetKmsForTesting,
 } from '../src/byok/kmsEncryption.js';
+import {
+  registerVectorTenantPurger,
+  registeredVectorPurgeBackends,
+  _resetVectorTenantPurgersForTest,
+} from '../src/host/vector/vectorTenantPurge.js';
 import type { Storage } from '../src/storage/storage.js';
 
 function b64url(buf: Buffer | string): string {
@@ -64,13 +74,18 @@ beforeAll(async () => {
   const jwks = { keys: [{ ...pubJwk, kid, alg: 'RS256', use: 'sig' }] };
   const issuerApp = express();
   issuerApp.get('/.well-known/jwks.json', (_req, res) => res.json(jwks));
-  issuerServer = await new Promise<http.Server>((r) => { const s = issuerApp.listen(0, () => r(s)); });
+  issuerServer = await new Promise<http.Server>((r) => { const s = issuerApp.listen(0, '127.0.0.1', () => r(s)); });
   const issuerPort = (issuerServer.address() as { port: number }).port;
   issuer = `http://127.0.0.1:${issuerPort}`;
 
   process.env.OPENWOP_OIDC_ISSUER = issuer;
   process.env.OPENWOP_OIDC_AUDIENCE = 'openwop-test-aud';
   process.env.OPENWOP_OIDC_JWKS_URL = `${issuer}/.well-known/jwks.json`;
+  // ADR 0621 rev. 2 — the unbound OIDC lane now consults the session authority
+  // (no permissive default on the seam); this harness has host-ext persistence,
+  // so register the users feature's real reads.
+  registerSessionAuthority(usersSessionAuthority);
+  registerPersonalTenantSessionAuthority(usersPersonalTenantSessionAuthority);
   _resetOidcVerifier();
 
   storage = await openStorage('memory://');
@@ -92,7 +107,7 @@ beforeAll(async () => {
       ...(e.details ? { details: e.details } : {}),
     });
   });
-  appServer = await new Promise<http.Server>((r) => { const s = app.listen(0, () => r(s)); });
+  appServer = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
   appPort = (appServer.address() as { port: number }).port;
 });
 
@@ -236,6 +251,56 @@ describe('P3.6.5 account hard-delete', () => {
     expect((await listMembers(ws.tenantId, ws.orgId)).some((m) => m.subject === subject)).toBe(true);
   });
 
+  /**
+   * CONS-4 / review F2 — the LEGAL HOLD gate on the WHOLE-TENANT lane.
+   *
+   * ADR 0586 D2 was titled "gates every destructive lane" and this route
+   * contained ZERO hold references, while being strictly more destructive than
+   * the per-subject consent lane that PR did gate.
+   *
+   * And it is not merely a missed lane, it is a SPOLIATION lane: `retention-
+   * hold` is a `DurableCollection` with a `tenantOf`, so `purgeTenantHostExt`
+   * deletes the hold's own row in the same pass. Ungated, the destruction
+   * removed its own evidence — self-service, no trace. That is what the second
+   * half of this test pins: the hold row must still be there afterwards.
+   */
+  it('refuses to delete an account under LEGAL HOLD (409) — and does not destroy the hold row itself', async () => {
+    const { setRetentionHold, clearRetentionHold, getRetentionHold } = await import('../src/host/retentionHold.js');
+    const sub = 'firebase-uid-held';
+    const tenantId = await personalTenantOfSub(sub);
+    const now = new Date().toISOString();
+    await storage.insertRun({
+      runId: 'r-held-1', workflowId: 'wf', tenantId,
+      status: 'completed', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
+    });
+    await setRetentionHold(tenantId, 'litigation: Acme v. Foo');
+
+    const res = await callDelete(mintToken(sub));
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string; message: string; details?: { held?: boolean; reason?: string; since?: string } };
+    expect(body.error).toBe('legal_hold');
+    // The refusal names the cause AND the exit — a hold the operator cannot
+    // see a way past is its own defect.
+    expect(body.details?.held).toBe(true);
+    expect(body.details?.reason).toBe('litigation: Acme v. Foo');
+    expect(typeof body.details?.since).toBe('string');
+    expect(body.message).toMatch(/lifted/i);
+
+    // NOTHING was wiped — asserted before the mutation, so the account is intact.
+    expect(await storage.getRun('r-held-1')).not.toBeNull();
+    // THE SPOLIATION ASSERTION: the hold row survives. `purgeTenantHostExt`
+    // would have deleted it in the same pass that deleted everything else, so
+    // an ungated delete destroyed the only evidence the hold ever existed.
+    expect(await getRetentionHold(tenantId)).not.toBeNull();
+
+    // BOTH HALVES: lifting the hold restores the lane. A gate with no exit
+    // would be a different defect wearing this one's fix.
+    await clearRetentionHold(tenantId);
+    const after = await callDelete(mintToken(sub));
+    expect(after.status).toBe(200);
+    expect(await storage.getRun('r-held-1')).toBeNull();
+  });
+
   // Atomic ≥1-owner guard: concurrent removal of a workspace's last two owners
   // can never leave it ownerless (post-write re-check + compensating restore —
   // the race a pre-write count→delete would lose). Exercised at the service
@@ -304,5 +369,120 @@ describe('P3.6.5 account hard-delete', () => {
     const grp = (await listGroups(personalTenant, personalTenant))[0]!;
     expect(grp.memberIds).toContain(newOwnerId);
     expect(grp.memberIds).not.toContain(ownerBefore.memberId);
+  });
+});
+
+/**
+ * KB-2 R2 (review F9) — the VECTOR-MIRROR outcome at the API BOUNDARY.
+ *
+ * THE DEFECT THIS PINS. `purgeTenantVectors` has always named a failing backend in
+ * its return value, and the route has always logged it — but the route then replied
+ * `{deleted:true, …counts}` with no vector fields at all, and the ADR 0284 audit row
+ * carried none either. So the PR's claim ("a backend that FAILS is named in the
+ * result and logged rather than folded into the success count") was true inside the
+ * process and FALSE everywhere an operator can see: the caller was told the same
+ * thing whether the mirror was reclaimed or not, and the durable audit record — the
+ * artifact a GDPR erasure claim actually rests on — could not tell the two apart.
+ *
+ * `purgeTenantVectors` is covered on its own in `kb-vector-tenant-teardown.test.ts`;
+ * what is asserted HERE is the propagation, in both directions, plus the property
+ * that makes the report usable at all: a FAILURE must be distinguishable from
+ * NO BACKEND CONFIGURED. Both are "zero rows purged"; only one is an incomplete
+ * erasure. (F3 made this signal meaningful by registering the pgvector purger only
+ * when that backend is selected/configured — before it, every default deployment
+ * reported a failure on every delete.)
+ */
+describe('KB-2 R2 — the account-delete response + audit report the vector mirror', () => {
+  interface VectorReport {
+    deleted: boolean;
+    vectorRows: number;
+    vectorBackends: string[];
+    vectorBackendsFailed: string[];
+  }
+
+  async function deleteAndRead(sub: string): Promise<{ body: VectorReport; audit: Record<string, unknown> }> {
+    const res = await callDelete(mintToken(sub));
+    expect(res.status, await res.clone().text()).toBe(200);
+    const body = await res.json() as VectorReport;
+    const tenantId = await personalTenantOfSub(sub);
+    const rows = await storage.listAudit({ actionPrefix: 'account.delete' });
+    const row = rows.find((r) => r.resource === tenantId);
+    expect(row, 'the ADR 0284 audit row for this tenant').toBeTruthy();
+    return { body, audit: row!.payload as Record<string, unknown> };
+  }
+
+  let noneConfigured: VectorReport;
+
+  afterAll(() => { _resetVectorTenantPurgersForTest(); });
+
+  it('NO vector backend configured — an empty backend list, zero rows, no failures', async () => {
+    _resetVectorTenantPurgersForTest();
+    expect(registeredVectorPurgeBackends(), 'the precondition being modelled').toEqual([]);
+
+    const { body, audit } = await deleteAndRead('firebase-uid-vec-none');
+    noneConfigured = body;
+    expect(body.deleted).toBe(true);
+    expect(body.vectorBackends).toEqual([]);
+    expect(body.vectorBackendsFailed).toEqual([]);
+    expect(body.vectorRows).toBe(0);
+    expect(audit.vectorBackends).toEqual([]);
+    expect(audit.vectorBackendsFailed).toEqual([]);
+    expect(audit.vectorRows).toBe(0);
+  });
+
+  it('a backend that PURGES is counted in both the response and the audit payload', async () => {
+    _resetVectorTenantPurgersForTest();
+    registerVectorTenantPurger('probe-ok', async () => 7);
+
+    const { body, audit } = await deleteAndRead('firebase-uid-vec-ok');
+    expect(body.vectorBackends).toEqual(['probe-ok']);
+    expect(body.vectorBackendsFailed).toEqual([]);
+    expect(body.vectorRows).toBe(7);
+    expect(audit.vectorBackends).toEqual(['probe-ok']);
+    expect(audit.vectorBackendsFailed).toEqual([]);
+    expect(audit.vectorRows).toBe(7);
+  });
+
+  it('a FAILING backend is named in the response AND the audit — and is distinguishable from "none configured"', async () => {
+    _resetVectorTenantPurgersForTest();
+    registerVectorTenantPurger('probe-pg', async () => { throw new Error('pgvector unreachable'); });
+    registerVectorTenantPurger('probe-ok', async () => 2);
+
+    const { body, audit } = await deleteAndRead('firebase-uid-vec-fail');
+
+    // Named, not swallowed — in the reply the operator/SPA actually sees…
+    expect(body.vectorBackendsFailed).toEqual(['probe-pg']);
+    expect(body.vectorBackends, 'a failing backend is not also counted as having run').toEqual(['probe-ok']);
+    expect(body.vectorRows, 'the healthy backend still reports its rows').toBe(2);
+    // …and in the DURABLE audit record.
+    expect(audit.vectorBackendsFailed).toEqual(['probe-pg']);
+    expect(audit.vectorBackends).toEqual(['probe-ok']);
+
+    // THE DISCRIMINATOR. Both this case and "no backend configured" are a 200 with
+    // `deleted:true`; row counts alone cannot separate them (a healthy host with an
+    // empty mirror also purges 0 rows). `vectorBackendsFailed` is what does.
+    expect(noneConfigured.deleted).toBe(body.deleted);
+    expect(noneConfigured.vectorBackendsFailed, 'the two outcomes MUST NOT read alike')
+      .not.toEqual(body.vectorBackendsFailed);
+  });
+
+  it('the failure is reported WITHOUT aborting the rest of the teardown', async () => {
+    // A vector backend being down must not strand the tenant's own rows — the
+    // reason `deleted` stays true. Seed a run, fail the mirror, assert the run is
+    // still gone and the failure is still reported.
+    _resetVectorTenantPurgersForTest();
+    registerVectorTenantPurger('probe-pg', async () => { throw new Error('pgvector unreachable'); });
+    const sub = 'firebase-uid-vec-partial';
+    const tenantId = await personalTenantOfSub(sub);
+    const now = new Date().toISOString();
+    await storage.insertRun({
+      runId: 'r-vec-partial', workflowId: 'wf', tenantId,
+      status: 'completed', inputs: null, metadata: {}, configurable: {}, createdAt: now, updatedAt: now,
+    });
+
+    const { body } = await deleteAndRead(sub);
+    expect(body.deleted).toBe(true);
+    expect(body.vectorBackendsFailed).toEqual(['probe-pg']);
+    expect(await storage.getRun('r-vec-partial'), 'the tenant\'s own rows ARE reclaimed').toBeNull();
   });
 });

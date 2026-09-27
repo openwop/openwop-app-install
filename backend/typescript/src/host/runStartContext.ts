@@ -22,6 +22,29 @@ export interface RunStartContext {
   tenantId: string;
   /** The dispatched/owning agent, when a run is agent-attributed (for per-agent config). */
   agentId?: string;
+  /**
+   * ADR 0604 (TOCWF-1) — TRUE when this run's `metadata` is a VERBATIM COPY of
+   * an existing run's (the `:fork`/replay lane), rather than a fresh blob.
+   *
+   * WHY A CONTRIBUTOR NEEDS THIS, AND WHY THE MERGE RULE IS NOT ENOUGH. The
+   * "never overwrite an existing key" rule below preserves a decision the
+   * source WAS born with — but it is silent on the source that was born
+   * WITHOUT one. Absence is not a hole to fill: on a copied blob it is
+   * INHERITED STATE, and re-resolving it hands the fork a decision the source
+   * never had. A run born while a toggle was off, forked after that toggle
+   * flips on, acquired live compaction it was never created under — which is
+   * exactly the replay non-determinism the freeze exists to prevent.
+   *
+   * A contributor that freezes a PER-RUN DECISION (compaction, and any future
+   * sibling) MUST therefore contribute NOTHING when this is set: the copied
+   * metadata is authoritative in both directions, present and absent.
+   *
+   * A contributor that mints per-CALLER facts (the authority block, which the
+   * `:fork` route re-derives against the FORKING caller's scopes) deliberately
+   * ignores this flag — re-deriving is the point there. The flag is advisory
+   * per contributor, never applied by this module.
+   */
+  derivedFromRun?: boolean;
 }
 
 /**

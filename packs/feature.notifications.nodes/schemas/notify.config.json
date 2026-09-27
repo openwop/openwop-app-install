@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.notifications.nodes/1.0.0/notify.config.json",
+  "title": "NotifyConfig",
+  "description": "Authoring-time configuration. `audience` is REQUIRED and never inferred: the run's acting user is absent for schedule/webhook runs, so inferring it would silently change who is notified based on how the run started.",
+  "type": "object",
+  "required": ["audience"],
+  "properties": {
+    "audience": {
+      "type": "string",
+      "pattern": "^(tenant|self|role:[A-Za-z0-9_-]+)$",
+      "description": "Who sees this. `tenant` = everyone in the workspace. `self` = the run's acting user (REFUSES on a run with no human, e.g. a schedule or webhook). `role:<name>` = holders of that role only (default-deny)."
+    },
+    "type": {
+      "type": "string",
+      "maxLength": 60,
+      "description": "Notification type key for filtering/preferences. Defaults to `workflow.notice`."
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["low", "normal", "high", "urgent"],
+      "description": "Delivery priority. Defaults to `normal`."
+    }
+  },
+  "additionalProperties": false
+}

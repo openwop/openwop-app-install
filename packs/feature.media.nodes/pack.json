@@ -1,0 +1,33 @@
+{
+  "name": "feature.media.nodes",
+  "version": "1.0.0",
+  "description": "Media-library feature node pack — the ADR 0352 P4 weighted image selection over ctx.features.media (facet=full weight, tag=half, 5-level fallback, `needsAsset` when nothing matches), so a campaign/content workflow can pick on-brand library imagery. role:action (recorded ⇒ replay reads the recorded selection). The createAssetFromServeUrl write stays covered by its consumer pack (feature.campaign-channels.nodes render-concepts).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "media",
+    "assets",
+    "image-selection"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.media.nodes.select",
+      "version": "1.0.0",
+      "label": "Media: Select Assets",
+      "description": "Deterministic weighted selection over the org's image library via ctx.features.media.select (ADR 0352 P4). Inputs: { orgId, product?, industry?, useCase?, personaIds?, collectionId?, limit? }. Output: { assets, fallbackLevel, needsAsset? }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

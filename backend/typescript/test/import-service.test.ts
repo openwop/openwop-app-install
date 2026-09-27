@@ -47,7 +47,7 @@ describe('importConversation', () => {
 
   it('caps turns + content length', async () => {
     const big = { title: 'Big', turns: Array.from({ length: 3000 }, () => ({ role: 'user', content: 'x'.repeat(200_000) })) };
-    const r = await importConversation(T, undefined, big);
+    const r = await importConversation(T, 'user:alice', big);
     expect(r.imported).toBeLessThanOrEqual(2000);
     const msgs = await hostExtStorage().listChatSessionMessages(r.sessionId);
     expect(msgs[0]!.content.length).toBeLessThanOrEqual(100_000);

@@ -23,6 +23,7 @@
 
 import type { BundleScope, VectorSurface } from '../inMemorySurfaces.js';
 import { registerSurfaceAdapter, resolveBackendId } from '../surfaceBackends.js';
+import { registerVectorTenantPurger, registerVectorNamespacePurger } from './vectorTenantPurge.js';
 
 /** Minimal runner so the adapter is testable without a live pg client. */
 export type SqlRunner = (sql: string, params: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
@@ -55,6 +56,27 @@ export function nearestSql(table: string): string {
 }
 export function deleteSql(table: string): string {
   return `DELETE FROM ${ident(table)} WHERE tenant = $1 AND namespace = $2 AND id = ANY($3)`;
+}
+/**
+ * KB-2 — the TENANT-wide delete account teardown needs.
+ *
+ * `deleteAllTenantData` enumerates public tables whose column is literally
+ * `tenant_id`; this table's column is `tenant`, so it was never enumerated — and on
+ * a separate `OPENWOP_VECTOR_PG_DSN` it would not have been reachable even if it
+ * were. KB chunk rows carry the chunk's full text in `metadata`, so without this a
+ * deleted tenant's document text survived account deletion forever.
+ *
+ * Deliberately NOT exposed through `VectorSurface` (the pack-facing RFC 0018
+ * surface); it is reached through the host-internal `vectorTenantPurge` registry.
+ */
+export function purgeTenantSql(table: string): string {
+  return `DELETE FROM ${ident(table)} WHERE tenant = $1`;
+}
+
+/** ADR 0664 D1 — the namespace-scoped sibling. Both predicates are bound parameters;
+ *  only the table name is interpolated, through `ident()`, as above. */
+export function purgeNamespaceSql(table: string): string {
+  return `DELETE FROM ${ident(table)} WHERE tenant = $1 AND namespace = $2`;
 }
 
 interface VectorEntry { id: string; vector: number[]; metadata?: Record<string, unknown> }
@@ -132,6 +154,40 @@ export function registerPgVectorAdapter(): void {
       run: async (sql, params) => (await getRunner())(sql, params),
     }),
   );
+
+  // KB-2 — teardown reachability. Registered beside the adapter so the two can never
+  // drift apart: if this backend can be WRITTEN to on this host, it can be purged.
+  //
+  // KB-3 R2 (CORRECTION). This registration was UNCONDITIONAL, and `registerPgVectorAdapter()`
+  // itself is called unconditionally from `index.ts`. So on a DEFAULT deployment — no
+  // `OPENWOP_SURFACE_VECTOR`, no DSN — the first account delete built
+  // `new Pool({ connectionString: undefined })`, ran `CREATE TABLE … vector(NaN)`, threw,
+  // and landed 'pgvector' in `failed`: `routes/account.ts` then logged "vector mirror not
+  // fully reclaimed" on EVERY delete and EVERY anon teardown sweep, forever
+  // (`runnerPromise` memoizes the REJECTED promise, so it never recovers). That turned the
+  // one honest signal this seam exists to produce into permanent false noise — and where
+  // `PGHOST`/`PGDATABASE` happen to be set in the environment, into an unintended
+  // CREATE TABLE at account-delete time.
+  //
+  // A purger is registered when this backend is SELECTED or CONFIGURED. The
+  // "register every backend, not just the selected one" rationale in
+  // `vectorTenantPurge.ts` is about a host that SWITCHED backends and still holds
+  // residue in the old one — which needs the DSN to reach it anyway, so a configured
+  // DSN is exactly the right condition, and an unconfigured host has no pgvector
+  // residue by construction.
+  if (resolveBackendId('vector') === 'pgvector' || dsn) {
+    registerVectorTenantPurger('pgvector', async (tenantId) => {
+      const { rows } = await (await getRunner())(`${purgeTenantSql(table)} RETURNING id`, [tenantId]);
+      return rows.length;
+    });
+    // ADR 0664 D1 — the namespace purge registers under the SAME condition, for the same
+    // reason: a host that switched backends still holds this agent's residue in the old
+    // one, and reaching it needs the DSN either way.
+    registerVectorNamespacePurger('pgvector', async (tenantId, namespace) => {
+      const { rows } = await (await getRunner())(`${purgeNamespaceSql(table)} RETURNING id`, [tenantId, namespace]);
+      return rows.length;
+    });
+  }
 
   if (resolveBackendId('vector') === 'pgvector') {
     const missing = [

@@ -32,6 +32,12 @@ export function ProfileKnowledgeTab(): JSX.Element {
         emptyBody: t('knowledgeEmptyBody'),
         searchTitle: t('knowledgeSearchTitle'),
         searchPlaceholder: t('knowledgeSearchPlaceholder'),
+        // ADR 0666 D6 (`PKWF-8`) — the personal lane's audience, at the create door. The intro
+        // above used to end "Private to you.", which was false for the documents: a personal
+        // collection carries no subject binding, so any workspace reader can open it. The RULE
+        // is a documented cross-feature decision (ADR 0042) and is unchanged; only the promise
+        // is corrected.
+        createAudience: t('knowledgeAudience'),
       }}
     />
   );

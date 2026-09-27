@@ -1,5 +1,5 @@
 /**
- * Agent guardrails panel (ADR 0101) — the slimmed successor to the old Profile
+ * Agent guardrails panel (ADR 0493) — the slimmed successor to the old Profile
  * tab. Folded into the Instructions tab as a "Guardrails" section (and reused in
  * the admin Roster modal). Surfaces ONLY the `agentProfile` fields that are
  * enforced or actively being wired up:
@@ -20,9 +20,10 @@
  * `configParameters` is carried through on save so its functional `.compaction`
  * key (per-agent tool-output compaction) is never silently wiped.
  *
- * NON-NORMATIVE host-local product config under `/v1/host/openwop-app/*`.
+ * NON-NORMATIVE host-local product config under `/host/openwop-app/*`.
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -116,7 +117,7 @@ export function AgentGuardrailsPanel({
   rosterId: string;
   roleKey?: string | undefined;
   persona: string;
-  /** The roster member's autonomy level — the single source of truth (ADR 0101). */
+  /** The roster member's autonomy level — the single source of truth (ADR 0493). */
   autonomyLevel?: AgentRosterLevel | undefined;
   startEditing?: boolean;
 }): JSX.Element {
@@ -212,9 +213,9 @@ export function AgentGuardrailsPanel({
           title={t('guardrailsNoneTitle')}
           body={t('guardrailsNoneBody', { persona })}
           action={
-            <button type="button" className="primary" onClick={() => { setForm(toForm(null)); setEditing(true); }}>
+            <Button variant="primary" onClick={() => { setForm(toForm(null)); setEditing(true); }}>
               {t('guardrailsAdd')}
-            </button>
+            </Button>
           }
         />
       </div>
@@ -230,19 +231,19 @@ export function AgentGuardrailsPanel({
   return (
     <div className="agentprofile-root">
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
 
       <div className="action-bar u-justify-between u-items-center u-mb-3">
         <p className="muted u-fs-13 u-m-0">{t('guardrailsLede', { persona })}</p>
         {editing ? (
           <div className="action-bar">
-            <button type="button" className="secondary" onClick={onCancel} disabled={saving}>{t('newCancel')}</button>
-            <button type="button" className="primary" onClick={() => void onSave()} disabled={saving}>
+            <Button variant="secondary" onClick={onCancel} disabled={saving}>{t('newCancel')}</Button>
+            <Button variant="primary" onClick={() => void onSave()} disabled={saving}>
               {saving ? t('profileSaving') : t('profileSaveProfile')}
-            </button>
+            </Button>
           </div>
         ) : (
-          <button type="button" className="secondary" onClick={() => setEditing(true)}>{t('profileEditProfile')}</button>
+          <Button variant="secondary" onClick={() => setEditing(true)}>{t('profileEditProfile')}</Button>
         )}
       </div>
 
@@ -258,7 +259,7 @@ export function AgentGuardrailsPanel({
             editing ? (
               <Field label={t('profileWithinPolicy')} help={t('profileWithinPolicyHelp')}>
                 {(w) => (
-                  <textarea {...w} rows={3} value={form.withinPolicyActions} onChange={(e) => set('withinPolicyActions', e.target.value)} placeholder={'sendReminder\ncreateDraft'} />
+                  <textarea {...w} rows={3} value={form.withinPolicyActions} onChange={(e) => set('withinPolicyActions', e.target.value)} placeholder={t('phWithinPolicy')} />
                 )}
               </Field>
             ) : (
@@ -272,9 +273,9 @@ export function AgentGuardrailsPanel({
           <SectionHead icon={<ShieldIcon size={16} />} title={t('profileSectionPermissions')} hint={t('profilePermissionsHintEdit')} />
           {editing ? (
             <>
-              <ListField label={t('profilePermNever')} value={form.permNever} onChange={(v) => set('permNever', v)} placeholder={'email.send'} />
-              <ListField label={t('profilePermWrite')} value={form.permWrite} onChange={(v) => set('permWrite', v)} placeholder={'tasks\ndrafts'} />
-              <ListField label={t('profilePermRead')} value={form.permRead} onChange={(v) => set('permRead', v)} placeholder={'crm\ndocs'} />
+              <ListField label={t('profilePermNever')} value={form.permNever} onChange={(v) => set('permNever', v)} placeholder={t('phPermNever')} />
+              <ListField label={t('profilePermWrite')} value={form.permWrite} onChange={(v) => set('permWrite', v)} placeholder={t('phPermWrite')} />
+              <ListField label={t('profilePermRead')} value={form.permRead} onChange={(v) => set('permRead', v)} placeholder={t('phPermRead')} />
             </>
           ) : (
             <>
@@ -290,9 +291,9 @@ export function AgentGuardrailsPanel({
           <SectionHead icon={<LifeBuoyIcon size={16} />} title={t('profileSectionHitl')} />
           {editing ? (
             <>
-              <ListField label={t('profileAlwaysApprovalEdit')} value={form.hitl} onChange={(v) => set('hitl', v)} placeholder={'email.send\npayment.instruction'} />
-              <ListField label={t('profileEscContacts')} value={form.escContacts} onChange={(v) => set('escContacts', v)} placeholder={'manager@example.com'} />
-              <ListField label={t('profileEscTriggers')} value={form.escTriggers} onChange={(v) => set('escTriggers', v)} placeholder={'deal-value-over-threshold'} />
+              <ListField label={t('profileAlwaysApprovalEdit')} value={form.hitl} onChange={(v) => set('hitl', v)} placeholder={t('phHitl')} />
+              <ListField label={t('profileEscContacts')} value={form.escContacts} onChange={(v) => set('escContacts', v)} placeholder={t('phEscContacts')} />
+              <ListField label={t('profileEscTriggers')} value={form.escTriggers} onChange={(v) => set('escTriggers', v)} placeholder={t('phEscTriggers')} />
             </>
           ) : (
             <>
@@ -307,7 +308,7 @@ export function AgentGuardrailsPanel({
         <div className="surface-card agentprofile-card">
           <SectionHead icon={<PlugIcon size={16} />} title={t('profileSectionConnections')} hint={t('profileConnectionsHintEdit')} />
           {editing ? (
-            <ListField label={t('profileProviders')} value={form.requiredConnections} onChange={(v) => set('requiredConnections', v)} placeholder={'google\nslack'} />
+            <ListField label={t('profileProviders')} value={form.requiredConnections} onChange={(v) => set('requiredConnections', v)} placeholder={t('phProviders')} />
           ) : (
             <ReadRow label={t('profileProviders')}><ChipList values={profile?.requiredConnections} tone="chip--accent" /></ReadRow>
           )}
@@ -317,7 +318,7 @@ export function AgentGuardrailsPanel({
         <div className="surface-card agentprofile-card">
           <SectionHead icon={<ActivityIcon size={16} />} title={t('profileSectionMetrics')} />
           {editing ? (
-            <ListField label={t('profileMetrics')} value={form.metrics} onChange={(v) => set('metrics', v)} placeholder={'tickets_resolved\nresponse_latency'} />
+            <ListField label={t('profileMetrics')} value={form.metrics} onChange={(v) => set('metrics', v)} placeholder={t('phMetrics')} />
           ) : (
             <ReadRow label={t('profileMetrics')}><ChipList values={profile?.metrics} /></ReadRow>
           )}

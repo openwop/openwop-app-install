@@ -56,14 +56,101 @@ function toDate(value: Date | string | number): Date {
   return value instanceof Date ? value : new Date(value);
 }
 
+/**
+ * True when `value` parses to a real instant.
+ *
+ * DESIGN.md §4.5 rule 10 — "if the store can't date it, the UI doesn't claim
+ * it" — needs a way to ASK, so a cell with no timestamp can render NOTHING
+ * rather than a stray `UNDATED` glyph where a real time belongs.
+ *
+ * This is the caller's half of a two-layer guard. The formatters below no
+ * longer throw (they fall back to `UNDATED` — see `guardDate`), so skipping
+ * this check is no longer fatal; it is merely less honest. Ask here when the
+ * field is genuinely optional; rely on the fallback only for data that is
+ * supposed to be there and isn't.
+ */
+export function isDatable(value: unknown): boolean {
+  if (value == null || value === '') return false;
+  if (typeof value !== 'string' && typeof value !== 'number' && !(value instanceof Date)) return false;
+  return Number.isFinite(toDate(value).getTime());
+}
+
+/**
+ * What a date formatter renders when its input cannot be parsed. The app
+ * already uses this glyph for "no value" in data cells (funnel conversion,
+ * experiment verdicts), so it reads as absence rather than as a wrong answer.
+ */
+export const UNDATED = '—';
+
+/**
+ * The last line of defence for the date formatters below.
+ *
+ * THE TRADE-OFF, made explicitly. Silent fallbacks are a known trap — they
+ * swallow failures and let a broken app look healthy — so the app's default
+ * posture is to fail loudly (see the failed-read canon in DESIGN.md §4.6).
+ * These helpers are the deliberate exception, because of WHERE they fail:
+ * `Intl.*Format` throws a `RangeError` on an unparseable date, and a throw
+ * inside a render unmounts the React tree. That is failing loud AT THE
+ * CUSTOMER — the one audience for whom loudness has no value. It surfaces as a
+ * blank page, not as a stack trace anyone acts on, and the largest caller
+ * cluster is the dashboard tiles on the ALWAYS-ON home route.
+ *
+ * So a malformed date degrades to `UNDATED` instead of taking the page with
+ * it. The loudness is not discarded, it is MOVED: `formatterFallback.test.ts`
+ * asserts this path exists and that callers with genuinely optional dates use
+ * `isDatable()` to render nothing at all (rule 10) rather than a stray glyph.
+ * A wrong-looking dash in one cell is recoverable; a white screen is not.
+ */
+function guardDate<T>(value: unknown, format: () => T): T | string {
+  if (!isDatable(value)) return UNDATED;
+  try { return format(); } catch { return UNDATED; }
+}
+
 /** Locale-grouped number, e.g. `1,234,567` (en) / `1.234.567` (de). */
 export function formatNumber(value: number, options?: Intl.NumberFormatOptions): string {
   return numberFmt(options).format(value);
 }
 
-/** Currency amount; symbol/separators/placement localize, the amount stays in `currency`. */
+/**
+ * Currency amount; symbol/separators/placement localize, the amount stays in
+ * `currency`.
+ *
+ * GUARDED, for the same reason the date formatters are (see `guardDate`): a
+ * throw inside a render unmounts the React tree, and `Intl.NumberFormat` throws
+ * `RangeError` on any `currency` that is not a well-formed ISO-4217 code —
+ * `'dollars'`, `'$'`, `'US$'`, `'EUROS'` all do. That matters wherever the code
+ * is not host-authored: production plan budgets carry a MODEL-EMITTED currency
+ * (validated only as a ≤8-char string), so a plan whose model wrote "dollars"
+ * would take the whole page down rather than render an ugly label. Falling back
+ * to `1,234 dollars` is exactly what the un-localized code did before, which is
+ * ugly and never fatal.
+ */
 export function formatCurrency(value: number, currency = 'USD', options?: Intl.NumberFormatOptions): string {
-  return numberFmt({ style: 'currency', currency, ...options }).format(value);
+  try {
+    return numberFmt({ style: 'currency', currency, ...options }).format(value);
+  } catch {
+    return `${formatNumber(value, options)} ${currency}`;
+  }
+}
+
+/** Currency amount given in MINOR units (AP2 / cents). Derives the currency's own
+ *  decimal count so JPY (0) / BHD (3) format correctly — not a bare `/100`. */
+export function formatCurrencyMinor(minor: number, currency = 'USD'): string {
+  const dp = numberFmt({ style: 'currency', currency }).resolvedOptions().maximumFractionDigits ?? 2;
+  return formatCurrency(minor / 10 ** dp, currency);
+}
+
+/**
+ * USD money renderer shared by every cost surface (chat turn cost, run cost
+ * panel, builder cost badges/chips). Small numbers get more decimals so
+ * sub-cent model costs stay legible; large ones round to cents. Lifted from
+ * `chat/lib/cost.ts` (ux-11) so builder + runs + chat render money one way.
+ */
+export function formatUsd(usd: number): string {
+  if (usd === 0) return formatCurrency(0, 'USD', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+  if (usd < 0.001) return formatCurrency(usd, 'USD', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
+  if (usd < 1) return formatCurrency(usd, 'USD', { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+  return formatCurrency(usd, 'USD', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 /** Percentage from a 0–1 ratio, e.g. `formatPercent(0.42)` → `42%`. */
@@ -71,23 +158,31 @@ export function formatPercent(ratio: number, options?: Intl.NumberFormatOptions)
   return numberFmt({ style: 'percent', ...options }).format(ratio);
 }
 
-/** Date only (medium by default), locale-ordered. */
+/** Date only (medium by default), locale-ordered. `UNDATED` if unparseable. */
 export function formatDate(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
-  return dateFmt(options ?? { dateStyle: 'medium' }).format(toDate(value));
+  return guardDate(value, () => dateFmt(options ?? { dateStyle: 'medium' }).format(toDate(value)));
 }
 
 /** Time only. 12/24-hour follows the locale unless overridden. */
 export function formatTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
-  return dateFmt(options ?? { timeStyle: 'short' }).format(toDate(value));
+  return guardDate(value, () => dateFmt(options ?? { timeStyle: 'short' }).format(toDate(value)));
 }
 
 /** Combined date + time, locale-ordered. */
 export function formatDateTime(value: Date | string | number, options?: Intl.DateTimeFormatOptions): string {
-  return dateFmt(options ?? { dateStyle: 'medium', timeStyle: 'short' }).format(toDate(value));
+  return guardDate(value, () => dateFmt(options ?? { dateStyle: 'medium', timeStyle: 'short' }).format(toDate(value)));
+}
+
+/** A localized weekday name from a 0–6 index (0 = Sunday). `style` defaults to the
+ *  full name ('long'). Uses a fixed UTC reference week so the index never shifts. */
+export function formatWeekday(dayIndex: number, style: 'long' | 'short' = 'long'): string {
+  const ref = new Date(Date.UTC(1970, 0, 4 + ((dayIndex % 7) + 7) % 7)); // 1970-01-04 = Sunday (UTC)
+  return dateFmt({ weekday: style, timeZone: 'UTC' }).format(ref);
 }
 
 /** Human relative time from now (`"in 3 days"`, `"5 minutes ago"`). Past is negative. */
 export function formatRelativeTime(value: Date | string | number, now: Date | string | number = new Date()): string {
+  if (!isDatable(value) || !isDatable(now)) return UNDATED;
   const deltaMs = toDate(value).getTime() - toDate(now).getTime();
   const sec = deltaMs / 1000;
   const abs = Math.abs(sec);
@@ -129,10 +224,13 @@ export function formatDurationMs(ms: number, fractionDigits = 1): string {
 export const format = {
   number: formatNumber,
   currency: formatCurrency,
+  currencyMinor: formatCurrencyMinor,
+  usd: formatUsd,
   percent: formatPercent,
   date: formatDate,
   time: formatTime,
   dateTime: formatDateTime,
+  weekday: formatWeekday,
   relativeTime: formatRelativeTime,
   list: formatList,
   bytes: formatBytes,

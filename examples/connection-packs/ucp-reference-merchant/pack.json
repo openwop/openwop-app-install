@@ -1,0 +1,32 @@
+{
+  "name": "core.openwop.connections.ucp-reference-merchant",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "UCP reference-merchant connection pack (RFC 0095) — declares the TARGET shape of a reach:'mcp' merchant the UCP BUYER shops to validate the ucp.<op> convention (ADR 0258/0260): a bearer-auth MCP server exposing the tools ucp.discover / ucp.search / ucp.checkout / ucp.order-status, each returning a BARE structured JSON result (no content wrapper). Category is `other`: the normative `category` enum has no `commerce-merchant` value and the buyer resolves by provider `id`, not category — no wire/RFC change. The `url` here is a placeholder for a REAL merchant (https-only per RFC 0095 §B.5); the in-repo DEMO merchant is wired instead by the `ucp-reference-merchant` example-data seeder (ADR 0260), which registers a loopback dev route (POST /v1/host/openwop-app/dev/ucp-merchant/mcp, enabled by OPENWOP_UCP_REF_MERCHANT_ENABLED) and a workspace Connection so the buyer can be pointed at it. The demo merchant moves NO money (checkout creates a PENDING, unpaid order). Carries NO secret (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "demo-ucp-merchant",
+    "displayName": "UCP Reference Merchant",
+    "category": "other",
+    "auth": {
+      "kind": "bearer",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "mcp": {
+        "server": {
+          "url": "https://ucp-merchant.example/mcp",
+          "transport": "http"
+        }
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.mcp"
+    ],
+    "docsUrl": "https://openwop.dev/docs/ucp"
+  }
+}

@@ -14,12 +14,14 @@
  * (`aiProvidersHost`) maps an over-budget result to its `AiProviderError` so this
  * module stays free of that dependency (no import cycle).
  */
+import { managedUsageBucket } from '../providers/managedUsageScope.js';
 import type { Storage } from '../storage/storage.js';
+import { DurableCollection } from '../host/hostExtPersistence.js';
 import { createLogger } from '../observability/logger.js';
 
 const log = createLogger('aiProviders.mediaBudget');
 
-export type MediaKind = 'tts' | 'stt';
+export type MediaKind = 'tts' | 'stt' | 'images' | 'video';
 
 let storageRef: Storage | null = null;
 
@@ -28,7 +30,7 @@ let storageRef: Storage | null = null;
  *  no cycle). Returns the tenant's `mediaBudget` override (or null/absent ⇒ fall
  *  to the env default). A present field — INCLUDING `0` — overrides the env (0 =
  *  uncapped for that org). */
-export type MediaBudgetOverrideResolver = (tenantId: string) => Promise<{ ttsChars?: number; sttBytes?: number } | null>;
+export type MediaBudgetOverrideResolver = (tenantId: string) => Promise<{ ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: number } | null>;
 let overrideResolver: MediaBudgetOverrideResolver | null = null;
 
 /** Inject the durable store + (optionally) the per-org override resolver
@@ -61,11 +63,26 @@ function envBudget(key: string): number {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
 }
 
-/** The configured per-org daily budgets (0 ⇒ that kind is uncapped). */
-export function mediaDailyBudget(): { tts: number; stt: number } {
+/** ADR 0401 P4 — the images unit converges here from the retired
+ *  `host/imageGenBudget.ts`. Env default stays `OPENWOP_IMAGE_MAX_PER_DAY`
+ *  (DEFAULT **50** — unlike tts/stt this kind ships capped, the ADR 0115
+ *  posture carried over; 0/negative ⇒ uncapped). */
+function imagesEnvBudget(): number {
+  const raw = process.env.OPENWOP_IMAGE_MAX_PER_DAY;
+  if (raw === undefined || raw === '') return 50;
+  const v = Number(raw);
+  return Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/** The configured per-org daily budgets (0 ⇒ that kind is uncapped). ADR 0404 —
+ *  `video` (jobs/day) ships DEFAULT-OFF (env 0): AI video is the most expensive
+ *  media kind, so a host must opt in (`OPENWOP_MEDIA_DAILY_VIDEO_JOBS`). */
+export function mediaDailyBudget(): { tts: number; stt: number; images: number; video: number } {
   return {
     tts: envBudget('OPENWOP_MEDIA_DAILY_TTS_CHARS'),
     stt: envBudget('OPENWOP_MEDIA_DAILY_STT_BYTES'),
+    images: imagesEnvBudget(),
+    video: envBudget('OPENWOP_MEDIA_DAILY_VIDEO_JOBS'),
   };
 }
 
@@ -74,10 +91,10 @@ export function mediaDailyBudget(): { tts: number; stt: number } {
  *  is authoritative; an absent one falls through to env. Fail-soft — a resolver
  *  error logs and falls back to the env default (a governance-read outage must
  *  not block a paid media call). */
-export async function resolveBudget(tenantId: string): Promise<{ tts: number; stt: number }> {
+export async function resolveBudget(tenantId: string): Promise<{ tts: number; stt: number; images: number; video: number }> {
   const env = mediaDailyBudget();
   if (!overrideResolver || !tenantId) return env;
-  let override: { ttsChars?: number; sttBytes?: number } | null = null;
+  let override: { ttsChars?: number; sttBytes?: number; images?: number; videoJobs?: number } | null = null;
   try {
     override = await overrideResolver(tenantId);
   } catch (err) {
@@ -87,7 +104,55 @@ export async function resolveBudget(tenantId: string): Promise<{ tts: number; st
   return {
     tts: override?.ttsChars != null ? Math.max(0, Math.floor(override.ttsChars)) : env.tts,
     stt: override?.sttBytes != null ? Math.max(0, Math.floor(override.sttBytes)) : env.stt,
+    images: override?.images != null ? Math.max(0, Math.floor(override.images)) : env.images,
+    video: override?.videoJobs != null ? Math.max(0, Math.floor(override.videoJobs)) : env.video,
   };
+}
+
+/** Resolve the effective cap for a kind. */
+function capForKind(resolved: { tts: number; stt: number; images: number; video: number }, kind: MediaKind): number {
+  return kind === 'tts' ? resolved.tts : kind === 'stt' ? resolved.stt : kind === 'images' ? resolved.images : resolved.video;
+}
+
+// ── The images counter (ADR 0401 P4, absorbed from host/imageGenBudget.ts) ───
+// KV daily count, NOT a media_usage SQL column — the kb embed-budget precedent
+// (a count does not justify a 2-adapter storage migration; ADR correction).
+// Collection name + key shape unchanged (`imagegen:budget`, `${tenant}:${day}`)
+// so existing rows, the GEN-6 tenant purge, and the GEN-1b fold keep working.
+interface ImageCount { key: string; tenantId: string; count: number }
+const imageCounts = new DurableCollection<ImageCount>('imagegen:budget', (c) => c.key);
+
+async function imagesUsedToday(tenantId: string): Promise<number> {
+  return (await imageCounts.get(`${tenantId}:${todayUtc()}`))?.count ?? 0;
+}
+
+async function recordImagesUsed(tenantId: string, n: number): Promise<void> {
+  const key = `${tenantId}:${todayUtc()}`;
+  // MKP-3: atomic increment via bounded CAS — best-effort post-success
+  // accounting; on contention exhaustion, under-count rather than throw.
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const existing = await imageCounts.get(key);
+    const next: ImageCount = { key, tenantId, count: (existing?.count ?? 0) + n };
+    if (await imageCounts.compareAndSwap(existing ?? null, next)) return;
+  }
+}
+
+// ── The video counter (ADR 0404) — KV daily job count, the images precedent
+// (a count does not justify an SQL migration). Video is metered per JOB. ──
+interface VideoCount { key: string; tenantId: string; count: number }
+const videoCounts = new DurableCollection<VideoCount>('creative-video:budget', (c) => c.key);
+
+async function videoUsedToday(tenantId: string): Promise<number> {
+  return (await videoCounts.get(`${tenantId}:${todayUtc()}`))?.count ?? 0;
+}
+
+async function recordVideoUsed(tenantId: string, n: number): Promise<void> {
+  const key = `${tenantId}:${todayUtc()}`;
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const existing = await videoCounts.get(key);
+    const next: VideoCount = { key, tenantId, count: (existing?.count ?? 0) + n };
+    if (await videoCounts.compareAndSwap(existing ?? null, next)) return;
+  }
 }
 
 /** UTC calendar day (YYYY-MM-DD) — the roll-up window, mirroring managed usage. */
@@ -104,6 +169,9 @@ export interface MediaBudgetCheck {
   /** What the total would be if this call proceeds. */
   nextTotal: number;
   kind: MediaKind;
+  /** Head-room under the cap (Infinity when uncapped) — the images path clamps
+   *  its request count by this. */
+  remaining: number;
 }
 
 /**
@@ -113,20 +181,41 @@ export interface MediaBudgetCheck {
  * read error (a usage-read outage must not block a paid feature the operator is
  * paying for) — logged for visibility.
  */
-export async function checkMediaBudget(tenantId: string, kind: MediaKind, size: number): Promise<MediaBudgetCheck> {
+export async function checkMediaBudget(tenantId: string, kind: MediaKind, size: number, actingSubject?: string): Promise<MediaBudgetCheck> {
   const resolved = await resolveBudget(tenantId);
-  const cap = kind === 'tts' ? resolved.tts : resolved.stt;
-  if (cap <= 0 || !storageRef || !tenantId) return { exceeded: false, cap, used: 0, nextTotal: size, kind };
+  const cap = capForKind(resolved, kind);
+  // images + video counters are KV-backed (no storageRef needed); tts/stt ride media_usage.
+  const kvBacked = kind === 'images' || kind === 'video';
+  if (cap <= 0 || !tenantId || (!kvBacked && !storageRef)) {
+    return { exceeded: false, cap, used: 0, nextTotal: size, kind, remaining: Infinity };
+  }
   let used = 0;
   try {
-    const usage = await storageRef.getMediaUsage(tenantId, todayUtc());
-    used = kind === 'tts' ? usage.ttsChars : usage.sttBytes;
+    if (kind === 'images') {
+      used = await imagesUsedToday(tenantId);
+    } else if (kind === 'video') {
+      used = await videoUsedToday(tenantId);
+    } else {
+      // ADR 0693 phase 3 — read the same bucket the charge is written to. A
+      // personal tenant's bucket IS the tenant, so this is byte-identical there;
+      // a shared workspace gets the acting participant's own allowance instead
+      // of one pooled across everyone in it. images/video are NOT routed: they
+      // use separate counters (`imagesUsedToday`/`videoUsedToday`), so they
+      // never touched `getMediaUsage` and phase 3 does not reach them.
+      const usage = await storageRef!.getMediaUsage(managedUsageBucket(tenantId, actingSubject), todayUtc());
+      used = kind === 'tts' ? usage.ttsChars : usage.sttBytes;
+    }
   } catch (err) {
     log.warn('media_budget_read_failed', { tenantId, kind, error: err instanceof Error ? err.message : String(err) });
-    return { exceeded: false, cap, used: 0, nextTotal: size, kind }; // fail-open
+    // Video is the MOST EXPENSIVE kind — fail CLOSED on a usage-read outage so a read
+    // blip can't wave through unlimited paid renders (ADR 0404 grade-code CV-4). The
+    // cheaper kinds fail-open (a read outage must not block a paid feature the
+    // operator is paying for).
+    if (kind === 'video') return { exceeded: true, cap, used: cap, nextTotal: cap + Math.max(0, size), kind, remaining: 0 };
+    return { exceeded: false, cap, used: 0, nextTotal: size, kind, remaining: Infinity }; // fail-open
   }
   const nextTotal = used + Math.max(0, size);
-  return { exceeded: nextTotal > cap, cap, used, nextTotal, kind };
+  return { exceeded: nextTotal > cap, cap, used, nextTotal, kind, remaining: Math.max(0, cap - used) };
 }
 
 /**
@@ -135,13 +224,24 @@ export async function checkMediaBudget(tenantId: string, kind: MediaKind, size: 
  * configured — so an off-by-default host writes nothing. Best-effort: a write
  * failure is logged, never thrown (it must not fail a call that already succeeded).
  */
-export async function recordMediaUsage(tenantId: string, kind: MediaKind, size: number): Promise<void> {
-  if (!storageRef || !tenantId || size <= 0) return;
+export async function recordMediaUsage(tenantId: string, kind: MediaKind, size: number, actingSubject?: string): Promise<void> {
+  if (!tenantId || size <= 0) return;
   const resolved = await resolveBudget(tenantId);
-  if ((kind === 'tts' ? resolved.tts : resolved.stt) <= 0) return; // uncapped for this org ⇒ don't accumulate
+  if (capForKind(resolved, kind) <= 0) return; // uncapped ⇒ don't accumulate
+  if (kind === 'images') {
+    await recordImagesUsed(tenantId, Math.floor(size));
+    return;
+  }
+  if (kind === 'video') {
+    await recordVideoUsed(tenantId, Math.floor(size));
+    return;
+  }
+  if (!storageRef) return;
   try {
     await storageRef.incrementMediaUsage(
-      tenantId,
+      // ADR 0693 phase 3 — same bucket as the cap read above. Reading one and
+      // writing the other would cap a participant on a total they never accrued.
+      managedUsageBucket(tenantId, actingSubject),
       todayUtc(),
       kind === 'tts' ? Math.floor(size) : 0,
       kind === 'stt' ? Math.floor(size) : 0,

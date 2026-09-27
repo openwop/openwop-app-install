@@ -101,7 +101,7 @@ export const CheckboxField = forwardRef<HTMLInputElement, FieldShell & React.Inp
     const describedBy = [helpId, errorId].filter(Boolean).join(' ') || undefined;
     return (
       <div {...(className ? { className } : {})} {...(containerStyle ? { style: containerStyle } : {})}>
-        <label className="u-flex u-items-center u-gap-2 u-fs-13" htmlFor={id}>
+        <label className="field-check-label u-flex u-items-center u-gap-2 u-fs-13" htmlFor={id}>
           <input
             type="checkbox"
             id={id}

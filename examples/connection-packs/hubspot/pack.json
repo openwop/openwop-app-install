@@ -1,0 +1,44 @@
+{
+  "name": "core.openwop.connections.hubspot",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "HubSpot connection pack (RFC 0095) — OAuth2 (authorization-code) provider for the HubSpot CRM v3 REST API (contacts, companies, deals, tickets). ADR 0033 DEPLOY-GATED. Reach is `openapi` against HubSpot's documented REST surface (api.hubapi.com): HubSpot ships no first-party hosted MCP server, so the documented API is the honest day-1 reach (ADR 0033 §4). HubSpot was the top CRM absence vs the market-standard app surface in the ADR 0190 template research. Carries NO secret; the operator supplies the app client id/secret host-side (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "provider": {
+    "id": "hubspot",
+    "displayName": "HubSpot",
+    "category": "crm",
+    "auth": {
+      "kind": "oauth2",
+      "authFlow": "pkce",
+      "scopeModel": "groups",
+      "endpoints": {
+        "authorize": "https://app.hubspot.com/oauth/authorize",
+        "token": "https://api.hubapi.com/oauth/v1/token"
+      },
+      "scopes": {
+        "read": [
+          { "key": "contacts.read", "label": "Read contacts", "scopes": ["crm.objects.contacts.read"] },
+          { "key": "companies.read", "label": "Read companies", "scopes": ["crm.objects.companies.read"] },
+          { "key": "deals.read", "label": "Read deals", "scopes": ["crm.objects.deals.read"] },
+          { "key": "identity", "label": "Basic account identity", "scopes": ["oauth"] }
+        ],
+        "write": [
+          { "key": "contacts.write", "label": "Create + update contacts", "scopes": ["crm.objects.contacts.write"] },
+          { "key": "companies.write", "label": "Create + update companies", "scopes": ["crm.objects.companies.write"] },
+          { "key": "deals.write", "label": "Create + update deals", "scopes": ["crm.objects.deals.write"] },
+          { "key": "tickets", "label": "Read + write CRM tickets", "scopes": ["tickets"] }
+        ]
+      }
+    },
+    "apiHosts": ["hubapi.com", "hubspot.com"],
+    "reach": {
+      "openapi": {
+        "ref": "https://developers.hubspot.com/docs/api/crm/understanding-the-crm"
+      }
+    },
+    "consumerNodes": ["core.openwop.http"],
+    "docsUrl": "https://developers.hubspot.com/docs/api/working-with-oauth"
+  }
+}

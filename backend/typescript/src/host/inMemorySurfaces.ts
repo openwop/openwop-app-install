@@ -26,6 +26,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
+import { assertEffectAllowed } from './runEffectContext.js';
 import Database from 'better-sqlite3';
 import { createLogger } from '../observability/logger.js';
 import { registerHostSurface } from '../bootstrap/hostSurfaceRegistry.js';
@@ -33,12 +34,19 @@ import {
   resolveSurface,
   effectiveImplementation,
   assertSelectedBackendsAvailable,
+  assertDurableSurfacesInEnterprise,
   type SurfaceKey,
 } from './surfaceBackends.js';
-import { redactForCompaction } from '../byok/textRedaction.js';
+import { redactForCompaction, redactRunSecretsForMemory } from '../byok/textRedaction.js';
+import { getRunSecrets } from '../byok/ephemeralRunSecrets.js';
+// `import type` only — erased at compile time, so this cannot form a runtime
+// cycle with turnRunDispatch's own imports (conversation/exchange modules).
+import type { TurnRunDispatchSink } from './turnRunDispatch.js';
 import { budgetByChars } from './memoryBudget.js';
+import { MEMORY_UNTRUSTED_TAG, isUntrustedMemoryRow } from './memoryTrust.js';
 import { DurableCollection } from './hostExtPersistence.js';
 import { createA2aSurface, type A2aSurface } from './a2aSurface.js';
+import type { TraceContext } from './traceContext.js';
 import { createKanbanSurface, type KanbanSurface } from './kanbanSurface.js';
 import { createKnowledgeSurface, type KnowledgeSurface } from './knowledgeSurface.js';
 import { buildFeatureSurfaces, type FeatureSurface } from './featureSurfaces.js';
@@ -46,6 +54,7 @@ import { createChatSurface, type ChatSurface } from './chatSurface.js';
 import { createCanvasSurface, type CanvasSurface } from './canvasSurface.js';
 import { createWebResearchSurface, type WebResearchSurface } from './webResearchSurface.js';
 import { createLaunchStudioSurface, type LaunchStudioSurface } from './launchStudioSurface.js';
+import { registerVectorTenantPurger, registerVectorNamespacePurger } from './vector/vectorTenantPurge.js';
 
 const log = createLogger('host.inMemorySurfaces');
 
@@ -227,11 +236,71 @@ export type ObservabilitySurface = {
 export interface BundleScope {
   tenantId: string;
   scopeId?: string;
+  /** RFC 0207 §B — the W3C trace context the RUN was created under
+   *  (`ctx.traceContext`, from the reserved `run.metadata.traceContext` key).
+   *  `createA2aSurface` carries a CHILD of it on every outbound message, in
+   *  `Message.metadata.openwop.traceparent` and in the HTTP header.
+   *  Correlation only; never authority. Absent for surface-direct callers and
+   *  for runs started with no inbound trace. */
+  traceContext?: TraceContext;
   /** The current run's id. Surfaces that spawn child runs (host.canvas
    *  crossCanvasInvoke) use it as the child's `parentRunId` + to walk the
    *  ancestor chain for the recursion/depth guard. Absent for surface-direct
    *  (non-run) callers. */
   runId?: string;
+  /** The run owner's DURABLE principal (ADR 0024 §4 — the same value as
+   *  `ctx.actingUserId`, stamped on `run.metadata.actingUserId` at creation
+   *  and re-stamped on `:fork`). Absent for system runs (schedule / inbound
+   *  webhook — no human), which is the correct fail-closed signal. Surfaces
+   *  use it to apply MEMBER-scoped narrowing filters (e.g. the CMS translator
+   *  locale grants, ADR 0205) to workflow writes exactly as the HTTP editor
+   *  path does. */
+  actingUserId?: string;
+  /** ADR 0627 D3 (review S2) — the run owner's OWN personal tenant
+   *  (`anon:<sid>` / `user:<hash>`), the value the auth middleware set as
+   *  `req.personalTenant` on the creating request and `routes/runs.ts` stamped
+   *  on `run.metadata.personalTenant` (host-authoritative, a reserved key —
+   *  never client-supplied). Threaded on the TOOL lane only — the chat tool
+   *  loop reads it off the run row, the voice bridge off the mint-time session,
+   *  redrive/debug runs stamp it from their request; the executor does NOT
+   *  thread it into in-run node scopes (review N2). A req-less tenant
+   *  gate (`assertTenantScope`) uses it for the implicit-owner short-circuit
+   *  the HTTP lane gets from `isOwnPersonalWorkspace(req)`; an anon session's
+   *  principal (`session:<sid>`) has no user row, so this is the ONLY way the
+   *  tool lane can know the caller owns the `anon:` sandbox it is acting in.
+   *  Absent for system runs, API-key bearers, and surface-direct callers. */
+  personalTenant?: string;
+  /** ADR 0617 D1a — the executing run's WORKFLOW id (`run.workflowId`), so a
+   *  feature surface that emits a host event from inside a run can stamp
+   *  `origin.workflowId` and the dispatcher can refuse to start a second run of
+   *  the very workflow that is executing (the self-trigger guard). Absent for
+   *  surface-direct (non-run) callers, like `runId`. */
+  workflowId?: string;
+  /** ADR 0617 D1a (review BLOCKER-1) — the chain the executing run's definition
+   *  was expanded from (`definition.metadata.expandedFrom.chainId`), so a
+   *  surface-emitted host event can carry `origin.chainId` and the dispatcher
+   *  can refuse to start a SIBLING from-chain instance of the same chain (one
+   *  instance is minted per parameter set — per departing employee for
+   *  `people-hr.offboarding`). Absent for authored workflows and non-run callers. */
+  chainId?: string;
+  /** ADR 0277 P2 — the EXECUTING agent's profile id (the rosterId for standing
+   *  agents), when a tool call runs on behalf of a specific agent. The
+   *  knowledge tools use it to scope retrieval to the agent's bound
+   *  collections (`agentProfile.knowledge.collectionIds` — the advisory-board
+   *  "Shared knowledge" grant); absent ⇒ tenant-wide retrieval (agent-less
+   *  workflow nodes, unchanged legacy behavior). */
+  agentProfileId?: string;
+  /** ADR 0309 — the chat conversation (sessionId) a tool call runs inside, when
+   *  it runs inside one (threaded from `run.metadata.chatSessionId` by the
+   *  conversation tool loop). The schedule-followup tool uses it as the ONLY
+   *  delivery destination — unforgeable because it is never a tool input. */
+  conversationId?: string;
+  /** The turn-scoped sink a tool records an ignited workflow run on, so the
+   *  EXCHANGE (the one turnIndex allocator + the owner of the response)
+   *  materializes the `workflow_run` bubble instead of the tool racing it
+   *  out-of-band. Present only on the conversation transport; absent ⇒ the
+   *  tool falls back to a direct append. See `host/turnRunDispatch.ts`. */
+  onRunDispatched?: TurnRunDispatchSink;
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -247,6 +316,19 @@ class TenantMap<V> {
     let b = this.inner.get(tenantId);
     if (!b) { b = new Map(); this.inner.set(tenantId, b); }
     return b;
+  }
+  /** ADR 0395 — read-only iteration for the operator DLQ snapshot. */
+  tenants(): IterableIterator<[string, Map<string, V>]> {
+    return this.inner.entries();
+  }
+  /** KB-2 — drop a tenant's whole bucket (account teardown). Returns the number of
+   *  entries removed so teardown can report what it actually reclaimed. */
+  drop(tenantId: string): number {
+    const b = this.inner.get(tenantId);
+    if (!b) return 0;
+    const n = b.size;
+    this.inner.delete(tenantId);
+    return n;
   }
 }
 
@@ -466,6 +548,48 @@ export function resolvePresignToken(token: string, now: number = Date.now()):
   if (entry.expiresAtMs <= now) return { ok: false, reason: 'expired' };
   return { ok: true, entry };
 }
+/**
+ * ADR 0563 — route blob WRITES through the ADR 0531 effect chokepoint.
+ *
+ * THE GAP THIS CLOSES. `core.storage.blob-put` (a shipped pack node, declared
+ * `role: "side-effect"` in its own manifest) reaches `ctx.storage.blob.put` and,
+ * on the `s3` backend, performs a real presigned `PUT`. Nothing stopped it on
+ * replay: no `assertEffectAllowed` call anywhere in the blob path, and no entry
+ * in `executor/sideEffects.ts`, so BOTH the ADR 0341 fast path and the ADR 0531
+ * backstop were blind. A replay or fork re-executed a live external write in
+ * silence. `examples/workflow-chain-packs/starters` ships a chain that sits on
+ * this node, so it was reachable, not theoretical.
+ *
+ * WRAPPED AT THE SEAM, NOT IN EACH ADAPTER, deliberately. The guard belongs
+ * where the surface is RESOLVED so a future adapter (GCS, R2) inherits it by
+ * construction instead of having to remember. Guarding `s3Blob.put` alone would
+ * make effect coverage depend on which backend an operator selected — exactly
+ * the conditional coverage ADR 0531 exists to eliminate.
+ *
+ * THE MEMORY BACKEND IS GUARDED TOO, and that is a real trade rather than an
+ * oversight. Its writes are process-local, so counting them slightly inflates
+ * the ADR 0533 effect tally. The alternative — guard only "real" egress — makes
+ * the invariant backend-conditional and re-opens the same hole for the next
+ * adapter. A uniform guard is the property worth having; a marginally
+ * over-counted tally is the price.
+ *
+ * READS ARE NOT GUARDED. `get`/`presign` do not mutate external state and are
+ * safe to re-run on replay. (`presign` hands out a URL that may already have
+ * been used, which is a compensation concern for ADR 0554 — it is not a write.)
+ */
+function guardBlobWrites(surface: BlobSurface): BlobSurface {
+  return {
+    ...surface,
+    async put(args) {
+      // First statement, before any I/O — the shape `smtpEgress`/`webhookEgressGuard`
+      // use. Outside a run this is a no-op, so the retention sweeper and the
+      // test-seam route are unaffected.
+      assertEffectAllowed('blob-write', 'storage.blob.put');
+      return surface.put(args);
+    },
+  };
+}
+
 function createBlob(state: TenantMap<BlobEntry>, scope: BundleScope): BlobSurface {
   const bucket = () => state.bucket(scope.tenantId);
   return {
@@ -1040,6 +1164,101 @@ const _blobState = new TenantMap<BlobEntry>();
 const _queueState = new TenantMap<QueueEntry[]>();
 const _busState = new TenantMap<BusMessage[]>();
 const _vectorState = new TenantMap<Map<string, VectorEntry>>();
+
+/**
+ * KB-2 — the in-memory/durable-default vector backend's tenant purger.
+ *
+ * Registered unconditionally at module load, exactly like the state it clears. On a
+ * host running the ephemeral backend the residue dies with the process anyway, so
+ * this is mostly about the invariant being TESTABLE with both backends rather than
+ * pgvector-only (which would be a coverage claim resting on an environment CI does
+ * not have). Counts the namespaces dropped, not the individual vectors — the bucket
+ * is one Map per namespace.
+ */
+// ADR 0664 D1 — the namespace-scoped sibling of the tenant purge below. Counts the
+// individual vectors dropped (not namespaces), because the caller reports "what was
+// reclaimed for this agent" and a namespace count would always be 1 or 0.
+registerVectorNamespacePurger('memory', async (tenantId, namespace) => {
+  const ns = _vectorState.bucket(tenantId).get(namespace);
+  if (!ns) return 0;
+  const rows = ns.size;
+  _vectorState.bucket(tenantId).delete(namespace);
+  return rows;
+});
+
+registerVectorTenantPurger('memory', async (tenantId) => {
+  let rows = 0;
+  const bucket = _vectorState.tenants();
+  for (const [t, namespaces] of bucket) {
+    if (t !== tenantId) continue;
+    for (const ns of namespaces.values()) rows += ns.size;
+  }
+  _vectorState.drop(tenantId);
+  return rows;
+});
+
+// ── ADR 0395 Phase B — operator DLQ snapshot + gated replay ─────────────────
+// Reads/writes THIS instance's RFC 0017 bus state (the surface is in-memory —
+// per-instance, point-in-time; the panel renders that honestly, OQ-3). The
+// snapshot projects depth + reason + ids ONLY — never message payloads (they
+// may carry tenant PII). Replay re-publishes the ORIGINAL payload back onto
+// the base subject through the same array the surface `publish` uses.
+
+export interface DlqSubjectSnapshot {
+  tenantId: string;
+  /** The dead-letter subject (`<base>.dlq`). */
+  subject: string;
+  depth: number;
+  /** Distinct dead-letter reasons present (bounded). */
+  reasons: string[];
+  /** Message ids only (bounded) — payloads never leave the surface. */
+  messageIds: string[];
+}
+
+const DLQ_SNAPSHOT_LIMIT = 50;
+
+export function snapshotDlqSubjects(tenantId?: string): DlqSubjectSnapshot[] {
+  const out: DlqSubjectSnapshot[] = [];
+  for (const [t, bucket] of _busState.tenants()) {
+    if (tenantId !== undefined && t !== tenantId) continue;
+    for (const [subject, messages] of bucket) {
+      if (!subject.endsWith('.dlq') || messages.length === 0) continue;
+      const reasons = new Set<string>();
+      for (const m of messages) {
+        const p = m.payload as { deadLetterReason?: unknown } | null;
+        if (p && typeof p === 'object' && typeof p.deadLetterReason === 'string') reasons.add(p.deadLetterReason);
+        if (reasons.size >= 10) break;
+      }
+      out.push({
+        tenantId: t,
+        subject,
+        depth: messages.length,
+        reasons: [...reasons],
+        messageIds: messages.slice(0, DLQ_SNAPSHOT_LIMIT).map((m) => m.id),
+      });
+    }
+  }
+  return out.sort((a, b) => a.tenantId.localeCompare(b.tenantId) || a.subject.localeCompare(b.subject));
+}
+
+/** Re-publish one dead-lettered message onto its base subject (the D4 gated
+ *  replay). Idempotent per call — the message leaves the DLQ; a second call
+ *  with the same id is `not_found`. */
+export function replayDlqMessage(tenantId: string, dlqSubject: string, messageId: string): { replayed: boolean; reason?: 'not_found' | 'bad_subject' } {
+  if (!dlqSubject.endsWith('.dlq')) return { replayed: false, reason: 'bad_subject' };
+  const bucket = _busState.bucket(tenantId);
+  const messages = bucket.get(dlqSubject);
+  const idx = messages?.findIndex((m) => m.id === messageId) ?? -1;
+  if (!messages || idx < 0) return { replayed: false, reason: 'not_found' };
+  const [msg] = messages.splice(idx, 1);
+  const base = dlqSubject.slice(0, -'.dlq'.length);
+  const payload = msg!.payload as { original?: unknown } | null;
+  const original = payload && typeof payload === 'object' && 'original' in payload ? payload.original : msg!.payload;
+  let arr = bucket.get(base);
+  if (!arr) { arr = []; bucket.set(base, arr); }
+  arr.push({ id: msg!.id, payload: original, subject: base, deliveryCount: msg!.deliveryCount + 1 });
+  return { replayed: true };
+}
 const _searchState = new TenantMap<Map<string, SearchDoc>>();
 const _nosqlState = new TenantMap<Map<string, NoSqlDoc>>();
 const _sqlPool = new Map<string, Database.Database>();
@@ -1073,7 +1292,7 @@ export function initInMemorySurfaces(deps: { dataDir: string }): void {
   registerHostSurface({ name: 'host.kvStorage', supported: true, implementation: impl('kv', inmem), note: 'Demo only. Restarts wipe state.' });
   registerHostSurface({ name: 'host.tableStorage', supported: true, implementation: impl('table', inmem), note: 'Demo only. No indexes; query is O(n).' });
   registerHostSurface({ name: 'host.cache', supported: true, implementation: impl('cache', inmem) });
-  registerHostSurface({ name: 'host.blobStorage', supported: true, implementation: impl('blob', inmem), note: 'presign() returns a synthetic data: URL.' });
+  registerHostSurface({ name: 'host.blobStorage', supported: true, implementation: impl('blob', inmem), note: 'In-memory tier: presign() returns a synthetic data: URL (select OPENWOP_SURFACE_BLOB=s3 for real SigV4 presigns; the enterprise/auth posture boot guard requires a real backend).' });
   registerHostSurface({ name: 'host.queue', supported: true, implementation: impl('queue', inmem) });
   registerHostSurface({ name: 'host.fs', supported: true, implementation: impl('fs', 'sandboxed-local-fs'), note: `Sandboxed under ${_fsRoot}.` });
   registerHostSurface({ name: 'host.db.sql', supported: true, implementation: impl('sql', 'sqlite-in-memory'), note: 'better-sqlite3, one in-memory DB per tenant.' });
@@ -1082,16 +1301,27 @@ export function initInMemorySurfaces(deps: { dataDir: string }): void {
   registerHostSurface({ name: 'host.db.nosql', supported: true, implementation: impl('nosql', 'nested-map-document-store'), note: 'tenant → datasource/collection → doc. Exact-match filters only ($-operators refused); $set/$unset updates. Real impls use MongoDB / DynamoDB / Firestore / CosmosDB.' });
   registerHostSurface({ name: 'host.messaging', supported: true, implementation: impl('queueBus', inmem) });
   registerHostSurface({ name: 'host.observability', supported: true, implementation: impl('observability', 'structured-logger'), note: 'Routes through the workflow-engine logger.' });
-  registerHostSurface({ name: 'host.memory', supported: true, implementation: inmem, note: 'Demo only. RFC 0004 read-side (list/get); host writes a run-summary on completion. Restarts wipe state.' });
+  registerHostSurface({
+    name: 'host.memory', supported: true, implementation: impl('memory', inmem),
+    note: effectiveImplementation('memory', inmem) === inmem
+      ? 'RFC 0004 read-side (list/get); host writes a run-summary on completion. In-memory tier: restarts wipe state (select OPENWOP_SURFACE_MEMORY=durable to persist).'
+      : 'RFC 0004 read-side (list/get); host writes a run-summary on completion. Durable: survives restarts (DUR-2, ADR 0195).',
+  });
 
   // Fail fast if a deployment selected a real backend (OPENWOP_SURFACE_*) that
   // has no registered adapter — never silently serve the ephemeral demo store
   // when production durability was requested.
-  assertSelectedBackendsAvailable([
+  const DURABILITY_REQUIRED_SURFACES: readonly SurfaceKey[] = [
     'kv', 'table', 'cache', 'blob', 'queue',
     'sql', 'vector', 'search', 'nosql',
-    'fs', 'queueBus', 'observability',
-  ]);
+    'fs', 'queueBus', 'observability', 'memory',
+  ];
+  assertSelectedBackendsAvailable(DURABILITY_REQUIRED_SURFACES);
+  // LEAK-2 / ADR 0195 + ADR 0636: in the enterprise (auth) posture, refuse to boot on the
+  // ephemeral in-memory tier — tenant data would silently reset on restart. Only
+  // surfaces that HAVE a registered durable adapter are asserted; the acknowledgement
+  // (OPENWOP_ALLOW_INMEMORY_SURFACES) names surfaces, or `true` for all.
+  assertDurableSurfacesInEnterprise(DURABILITY_REQUIRED_SURFACES);
 
   _initialized = true;
 }
@@ -1144,6 +1374,46 @@ const MEMORY_HARD_MAX = 500;
  *  unaffected; curated notes are separately count-capped at the feature layer. */
 const MEMORY_SCOPE_HARD_CAP = 2000;
 
+/** Upper bound on a `memoryRef` string. Generous enough for every ref this host
+ *  mints (the longest is `agent:<uuid>:no-actor`) while refusing a payload-sized
+ *  ref, which per CTI-1(1) is one of the named malformed shapes. */
+const MEMORY_REF_MAX_LENGTH = 512;
+
+/**
+ * CTI-1(1) — `memoryRef` SHAPE validation at resolution time (normative).
+ *
+ * > *"Hosts validate `memoryRef` path shape at resolution time. Malformed refs
+ * > (path traversal, embedded null, oversize) MUST return `[]` / `null` rather
+ * > than fall through to a permissive lookup."*
+ * > — `spec/v1/agent-memory.md` §CTI-1
+ *
+ * The `memoryRef` is an OPAQUE host-defined string (§"`memoryRef` resolution"),
+ * so this validator is deliberately a SHAPE check and not a grammar: it refuses
+ * the three malformed classes the spec names and accepts everything else. It
+ * MUST stay permissive enough for every ref this host actually mints —
+ * `MEMORY_DEMO_REF` (`tenant-memory`), `subjectScope` (`agent:<id>` /
+ * `user:<id>`), the fail-closed `agent:<id>:no-actor` sentinel
+ * (`agentMemoryAdapter.ts`), and the corpus fixtures' slash-bearing refs
+ * (`conformance/agent-memory-roundtrip`). So colons and slashes are both legal;
+ * only traversal SEGMENTS are refused, never a bare `..` inside a name.
+ *
+ * Pinned by `test/memory-ref-validation.test.ts`, which derives the accept-set
+ * by exercising the real minters rather than restating a list of literals.
+ */
+export function isWellFormedMemoryRef(memoryRef: string): boolean {
+  if (typeof memoryRef !== 'string') return false;
+  if (memoryRef.length === 0 || memoryRef.length > MEMORY_REF_MAX_LENGTH) return false;
+  // Embedded null + any other C0/C1 control character. A NUL in particular
+  // truncates in several storage backends, which is how a "valid" ref reaches a
+  // different key than the one that was authorized.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(memoryRef)) return false;
+  // Path traversal. Split on BOTH separators — a backslash form must not slip
+  // past a forward-slash-only check on a host whose store is path-backed.
+  if (memoryRef.split(/[/\\]/).some((segment) => segment === '..')) return false;
+  return true;
+}
+
 function memoryBucket(tenantId: string): Map<string, MemoryRow[]> {
   return _memoryState.bucket(tenantId);
 }
@@ -1154,56 +1424,170 @@ function notExpired(row: MemoryRow, nowMs: number): boolean {
   return !Number.isFinite(t) || t > nowMs;
 }
 
-/** Host-internal write. Appends a tenant-scoped entry under `memoryRef`. */
-export function writeMemoryEntry(
+/**
+ * DUR-2 (ADR 0195) — the dumb-rows storage seam behind the memory API. ALL
+ * policy (TTL filter, ranking, RFC 0113 budget, cap eviction, compaction
+ * redaction) stays in THIS module — the store only reads/replaces the ordered
+ * row array for one (tenant, memoryRef) scope. Two impls: the in-memory
+ * default below, and `host/durable/durableMemory.ts` over the shared Storage
+ * (selected via OPENWOP_SURFACE_MEMORY / OPENWOP_SURFACE_BACKEND — the same
+ * seam as every other surface, so the boot guard + honest advertisement apply).
+ */
+export interface MemoryScopeStore {
+  getRows(memoryRef: string): Promise<MemoryRow[]>;
+  /** Atomic read-modify-write of a scope's rows. The mutator MUST be pure —
+   *  the durable impl re-invokes it on CAS retry. Returns the new rows. */
+  mutateRows(memoryRef: string, mutator: (rows: MemoryRow[]) => MemoryRow[]): Promise<MemoryRow[]>;
+  /** Drop the whole scope; returns the number of rows removed. */
+  clearScope(memoryRef: string): Promise<number>;
+}
+
+function createInMemoryMemoryStore(scope: BundleScope): MemoryScopeStore {
+  const bucket = () => memoryBucket(scope.tenantId);
+  return {
+    async getRows(memoryRef) {
+      return bucket().get(memoryRef) ?? [];
+    },
+    async mutateRows(memoryRef, mutator) {
+      const next = mutator(bucket().get(memoryRef) ?? []);
+      bucket().set(memoryRef, next);
+      return next;
+    },
+    async clearScope(memoryRef) {
+      const n = bucket().get(memoryRef)?.length ?? 0;
+      bucket().delete(memoryRef);
+      return n;
+    },
+  };
+}
+
+/** Per-call store resolution (cheap closure build; same pattern as the bundle
+ *  surfaces, just invoked from the module-level API instead of a run bundle). */
+function memoryStore(tenantId: string): MemoryScopeStore {
+  return resolveSurface('memory', createInMemoryMemoryStore, { tenantId });
+}
+
+/** The write-side input shape. `expiresAt` (RFC 3339 UTC) is the ABSOLUTE form
+ *  of `ttlSeconds`; supply at most one. Absolute is required to write an entry
+ *  that is ALREADY expired — which no relative `ttlSeconds` can express, and
+ *  which is exactly what a TTL read-side witness has to construct. When both are
+ *  present the absolute value wins (it is the more specific instruction). */
+export interface MemoryWriteInput {
+  content: string;
+  tags?: string[];
+  ttlSeconds?: number;
+  expiresAt?: string;
+  id?: string;
+  createdAt?: string;
+}
+
+function resolveExpiresAt(input: MemoryWriteInput, nowMs: number): { expiresAt: string } | Record<string, never> {
+  if (typeof input.expiresAt === 'string' && Number.isFinite(Date.parse(input.expiresAt))) {
+    return { expiresAt: input.expiresAt };
+  }
+  if (typeof input.ttlSeconds === 'number' && input.ttlSeconds > 0) {
+    return { expiresAt: new Date(nowMs + input.ttlSeconds * 1000).toISOString() };
+  }
+  return {};
+}
+
+/** Host-internal write. Appends a tenant-scoped entry under `memoryRef`.
+ *  IDEMPOTENT on an explicit `id`: a row with the same id is REPLACED, not
+ *  duplicated — so a crash-retry / re-dispatch (e.g. the executor's
+ *  `runsummary:<runId>` completion write) never accretes duplicates in the
+ *  durable store.
+ *
+ *  SR-1: a write made DURING A RUN must go through `writeMemoryEntryRedacted`
+ *  instead — see that function. This bare form stays for writes with no run in
+ *  scope (curated notes, seeds), where there is no per-run keyring to redact
+ *  against. Enforced by the call-site ratchet in
+ *  `test/memory-sr1-chokepoint.test.ts`. */
+export async function writeMemoryEntry(
   tenantId: string,
   memoryRef: string,
-  input: { content: string; tags?: string[]; ttlSeconds?: number; id?: string; createdAt?: string },
-): MemoryRow {
+  input: MemoryWriteInput,
+): Promise<MemoryRow> {
   if (!_initialized) throw new Error('initInMemorySurfaces() must be called first');
   const now = Date.now();
   const row: MemoryRow = {
     // An explicit `id`/`createdAt` lets a durable-backed caller (subject-memory
-    // notes, ADR 0041) keep the in-memory recall row aligned with its durable
+    // notes, ADR 0041) keep the recall row aligned with its durable
     // source-of-truth row, so a later delete hits the same id across both stores.
     id: input.id ?? `mem_${randomUUID().slice(0, 12)}`,
     content: input.content,
     tags: input.tags ?? [],
     createdAt: input.createdAt ?? new Date(now).toISOString(),
-    ...(typeof input.ttlSeconds === 'number' && input.ttlSeconds > 0
-      ? { expiresAt: new Date(now + input.ttlSeconds * 1000).toISOString() }
-      : {}),
+    ...resolveExpiresAt(input, now),
   };
-  const bucket = memoryBucket(tenantId);
-  const entries = bucket.get(memoryRef) ?? [];
-  entries.push(row);
-  // Bound unbounded per-scope growth (turn summaries accrue every run): retain the
-  // most-recent MEMORY_SCOPE_HARD_CAP, evicting oldest (a heap backstop above the
-  // read cap; user-curated notes are additionally count-capped at the feature layer).
-  if (entries.length > MEMORY_SCOPE_HARD_CAP) entries.splice(0, entries.length - MEMORY_SCOPE_HARD_CAP);
-  bucket.set(memoryRef, entries);
+  await memoryStore(tenantId).mutateRows(memoryRef, (rows) => {
+    // Upsert on explicit id (idempotency); append otherwise.
+    const next = input.id ? rows.filter((r) => r.id !== row.id) : [...rows];
+    next.push(row);
+    // Bound unbounded per-scope growth (turn summaries accrue every run): retain the
+    // most-recent MEMORY_SCOPE_HARD_CAP, evicting oldest (a heap backstop above the
+    // read cap; user-curated notes are additionally count-capped at the feature layer).
+    return next.length > MEMORY_SCOPE_HARD_CAP ? next.slice(next.length - MEMORY_SCOPE_HARD_CAP) : next;
+  });
   return row;
+}
+
+/**
+ * SR-1 CHOKEPOINT (`agent-memory.md` §SR-1, normative) — the form EVERY memory
+ * write made during a run must use.
+ *
+ * > *"When a memory write would persist content containing a value the run's
+ * > BYOK vault resolved during the run, the persisted entry MUST carry
+ * > `[REDACTED:<secretId>]` in place of the plaintext."*
+ *
+ * This is the spec's `writeAgentMemoryRedacted` reference pattern, wired to the
+ * registry this host already had: `byok/ephemeralRunSecrets.ts` IS the spec's
+ * `MemorySecretRegistry` (*"in-process map keyed by `runId`"*), so no second
+ * registry was introduced. The substitution rules (substring not regex,
+ * descending value length, 8-char floor) live in `byok/textRedaction.ts` with
+ * the spec citation.
+ *
+ * Redaction happens at WRITE time, before persistence — which is what makes the
+ * read side safe by construction rather than by a second check: a budgeted or
+ * ranked read (RFC 0113 clause 4) ranks over already-redacted content and
+ * therefore cannot leak plaintext, and `MemoryAdapter.get`/`list` surface the
+ * redacted form because it is the only form that was ever stored.
+ *
+ * An unknown/absent `runId` yields an empty keyring, so this degrades to
+ * `writeMemoryEntry` rather than failing the write — SR-1 constrains what may be
+ * PERSISTED, and a run with no resolved secrets has nothing to redact.
+ */
+export async function writeMemoryEntryRedacted(
+  tenantId: string,
+  memoryRef: string,
+  input: MemoryWriteInput,
+  runId: string,
+): Promise<MemoryRow> {
+  const secrets = getRunSecrets(runId);
+  const content = redactRunSecretsForMemory(input.content, secrets);
+  return writeMemoryEntry(tenantId, memoryRef, { ...input, content });
 }
 
 /** Host-internal: drop an ENTIRE memory scope (all entries under `memoryRef`).
  *  Tenant-scoped (CTI-1). Used by cascade delete (a roster agent's `agent:<id>`
  *  namespace when the agent is removed) so memory does not orphan. Returns the
  *  number of entries removed. */
-export function clearMemoryScope(tenantId: string, memoryRef: string): number {
-  const bucket = memoryBucket(tenantId);
-  const n = bucket.get(memoryRef)?.length ?? 0;
-  bucket.delete(memoryRef);
-  return n;
+export async function clearMemoryScope(tenantId: string, memoryRef: string): Promise<number> {
+  return memoryStore(tenantId).clearScope(memoryRef);
 }
 
 /** RFC 0004 read side. Tenant-scoped; TTL-filtered; newest first. */
-export function listMemoryEntries(
+export async function listMemoryEntries(
   tenantId: string,
   memoryRef: string,
   opts: MemoryListOpts = {},
-): MemoryRow[] {
+): Promise<MemoryRow[]> {
+  // CTI-1(1) — refuse a malformed ref here, at RESOLUTION time, rather than
+  // letting it fall through to a permissive store lookup. Fail CLOSED: `[]`,
+  // never an error carrying the ref back to the caller (CTI-1(3): errors must
+  // not leak). Placed before the store call so no backend ever sees the ref.
+  if (!isWellFormedMemoryRef(memoryRef)) return [];
   const now = Date.now();
-  const all = (memoryBucket(tenantId).get(memoryRef) ?? []).filter((r) => notExpired(r, now));
+  const all = (await memoryStore(tenantId).getRows(memoryRef)).filter((r) => notExpired(r, now));
   const tagged = opts.tag ? all.filter((r) => r.tags.includes(opts.tag!)) : all;
   // Recency rank (newest first). `rank` only honors 'recency' (see MemoryListOpts).
   const sorted = [...tagged].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -1215,15 +1599,25 @@ export function listMemoryEntries(
   // (write-time redaction + tenant bucket), and budgeting only NARROWS the set,
   // so neither invariant is widened.
   if (typeof opts.tokenBudget === 'number' && opts.tokenBudget > 0) {
-    return budgetByChars(limited, opts.tokenBudget, (r) => r.content.length);
+    // `keepAtLeastOne: false` is REQUIRED here, not a preference. RFC 0113
+    // clause 1: "A single entry exceeding the budget on its own MUST be omitted
+    // (not truncated mid-entry)." The primitive's DEFAULT is the ADR 0148 A4
+    // soft budget (never starve a turn of context), which is the right policy
+    // for knowledge retrieval and the wrong one for a capability this host
+    // advertises as `memory.injectionBudget.supported: true`. See H49's
+    // correction note on `budgetByChars`.
+    return budgetByChars(limited, opts.tokenBudget, (r) => r.content.length, { keepAtLeastOne: false });
   }
   return limited;
 }
 
 /** RFC 0004 read side. Single tenant-scoped entry, or null when absent/expired. */
-export function getMemoryEntry(tenantId: string, memoryRef: string, memoryId: string): MemoryRow | null {
+export async function getMemoryEntry(tenantId: string, memoryRef: string, memoryId: string): Promise<MemoryRow | null> {
+  // CTI-1(1) — same fail-closed shape check as the list side, returning `null`
+  // (this surface's empty) rather than falling through to the store.
+  if (!isWellFormedMemoryRef(memoryRef)) return null;
   const now = Date.now();
-  const row = (memoryBucket(tenantId).get(memoryRef) ?? []).find((r) => r.id === memoryId);
+  const row = (await memoryStore(tenantId).getRows(memoryRef)).find((r) => r.id === memoryId);
   return row && notExpired(row, now) ? row : null;
 }
 
@@ -1236,15 +1630,14 @@ export function getMemoryEntry(tenantId: string, memoryRef: string, memoryId: st
  * cross a tenant boundary (CTI-1). Demo-only convenience for the CLI/inspector;
  * the agent-memory wire contract keeps writes/deletes host-internal.
  */
-export function removeMemoryEntry(tenantId: string, memoryRef: string, memoryId: string): boolean {
-  const bucket = memoryBucket(tenantId);
-  const entries = bucket.get(memoryRef);
-  if (!entries) return false;
-  const idx = entries.findIndex((r) => r.id === memoryId);
-  if (idx === -1) return false;
-  entries.splice(idx, 1);
-  bucket.set(memoryRef, entries);
-  return true;
+export async function removeMemoryEntry(tenantId: string, memoryRef: string, memoryId: string): Promise<boolean> {
+  let removed = false;
+  await memoryStore(tenantId).mutateRows(memoryRef, (rows) => {
+    const next = rows.filter((r) => r.id !== memoryId);
+    removed = next.length !== rows.length;
+    return next;
+  });
+  return removed;
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -1256,14 +1649,30 @@ export function removeMemoryEntry(tenantId: string, memoryRef: string, memoryId:
 // archive MUST NOT re-expose a source-side leak (RFC 0012 §D). The distilled
 // entry carries a `compacted-from:<id>` provenance tag (§C). These helpers
 // back the `/v1/test/memory/{seed,compact}` conformance seam.
+//
+// AGMEM-3 (ADR 0587 §6) — TRUST carry-forward, the other half of SR-1
+// carry-forward. This block used to name only the SR-1 half, which is exactly why
+// the missing half read as covered: the archive was built with
+// `tags: ['compacted-from:<id>', 'compacted']`, DISCARDING every source's
+// `derived-from-untrusted` marker. N entries of which any were untrusted-derived
+// collapsed into ONE entry that `trustOf` reads as TRUSTED — re-opening at the
+// compaction layer the exact second-order launder the ADR 0038 §C review fix
+// closed in `agentDispatch`. Trust is MONOTONE under compaction: if ANY source is
+// untrusted, the archive is untrusted, because the archive's content is derived
+// from all of them and nothing can un-derive it.
+//
+// Reachability, stated honestly: `compactMemory` has exactly one non-test caller,
+// the env-gated conformance seam (`routes/memoryCompactionSeam.ts`, default off),
+// so this was LATENT rather than live. Fixed at the primitive anyway — the next
+// caller inherits whatever this does.
 // ───────────────────────────────────────────────────────────────────
 
 /** Host-internal write with a caller-supplied id (compaction seed seam). */
-export function seedMemoryEntry(
+export async function seedMemoryEntry(
   tenantId: string,
   memoryRef: string,
   input: { id: string; content: string; tags?: string[] },
-): MemoryRow {
+): Promise<MemoryRow> {
   if (!_initialized) throw new Error('initInMemorySurfaces() must be called first');
   const row: MemoryRow = {
     id: input.id,
@@ -1271,10 +1680,7 @@ export function seedMemoryEntry(
     tags: input.tags ?? [],
     createdAt: new Date().toISOString(),
   };
-  const bucket = memoryBucket(tenantId);
-  const entries = bucket.get(memoryRef) ?? [];
-  entries.push(row);
-  bucket.set(memoryRef, entries);
+  await memoryStore(tenantId).mutateRows(memoryRef, (rows) => [...rows, row]);
   return row;
 }
 
@@ -1297,35 +1703,60 @@ export interface CompactionResult {
  * SR-1-redacted distilled entry, replacing the sources. Returns null when
  * there is nothing to compact.
  */
-export function compactMemory(tenantId: string, memoryRef: string): CompactionResult | null {
+export async function compactMemory(tenantId: string, memoryRef: string): Promise<CompactionResult | null> {
   if (!_initialized) throw new Error('initInMemorySurfaces() must be called first');
-  const bucket = memoryBucket(tenantId);
   const now = Date.now();
-  const sources = (bucket.get(memoryRef) ?? []).filter((r) => notExpired(r, now));
-  if (sources.length === 0) return null;
-
-  const sourceIds = sources.map((r) => r.id);
-  // §D: redact derived content through the BYOK harness — never echo a
-  // source-side leak, never silently strip it.
-  const outputContent = redactForCompaction(sources.map((r) => r.content).join('\n'));
   const compactionId = `cmp_${randomUUID().slice(0, 12)}`;
   const outputId = `mem_${randomUUID().slice(0, 12)}`;
-  const archive: MemoryRow = {
-    id: outputId,
-    content: outputContent,
-    // §C provenance tag — lets consumers detect compacted entries without
-    // the event stream. Shape: `compacted-from:<id>` (no whitespace).
-    tags: [`compacted-from:${compactionId}`, 'compacted'],
-    createdAt: new Date(now).toISOString(),
-  };
-  bucket.set(memoryRef, [archive]);
-  return {
-    outputId,
-    sourceCount: sourceIds.length,
-    sourceIds,
-    byteSize: Buffer.byteLength(outputContent, 'utf8'),
-    outputContent,
-  };
+  // Result captured from inside the mutator — on a CAS retry the mutator
+  // recomputes against the fresh rows (redaction is a pure transform), so the
+  // captured value always reflects the attempt that actually committed.
+  let result: CompactionResult | null = null;
+  await memoryStore(tenantId).mutateRows(memoryRef, (rows) => {
+    const sources = rows.filter((r) => notExpired(r, now));
+    if (sources.length === 0) {
+      result = null;
+      return rows; // nothing to compact — leave the scope untouched
+    }
+    const sourceIds = sources.map((r) => r.id);
+    // §D: redact derived content through the BYOK harness — never echo a
+    // source-side leak, never silently strip it.
+    const outputContent = redactForCompaction(sources.map((r) => r.content).join('\n'));
+    // AGMEM-3 — trust is MONOTONE under compaction: any untrusted source makes the
+    // derived archive untrusted. Carried as the same tag the recall fences read, so
+    // no consumer needs to learn a new shape.
+    //
+    // BOTH halves of untrustedness, via the shared `isUntrustedMemoryRow` (review
+    // finding F2). Reading the tag alone was not merely incomplete here, it was
+    // DESTRUCTIVE: a pre-0587 legacy row is fenced ONLY by the `[auto-extracted] `
+    // content prefix, and this function joins source contents — so unless the
+    // legacy row happened to sort first, the archive no longer STARTS with the
+    // prefix and was written with no tag either. The one signal such a row will
+    // ever have was destroyed by the same operation that dropped its fence, and a
+    // permanently-trusted row is not recoverable. Compaction is the only path in
+    // the codebase that can do this, which is exactly why it must ask the whole
+    // question.
+    const anyUntrusted = sources.some((r) => isUntrustedMemoryRow(r.tags, r.content));
+    const archive: MemoryRow = {
+      id: outputId,
+      content: outputContent,
+      // §C provenance tag — lets consumers detect compacted entries without
+      // the event stream. Shape: `compacted-from:<id>` (no whitespace).
+      tags: anyUntrusted
+        ? [`compacted-from:${compactionId}`, 'compacted', MEMORY_UNTRUSTED_TAG]
+        : [`compacted-from:${compactionId}`, 'compacted'],
+      createdAt: new Date(now).toISOString(),
+    };
+    result = {
+      outputId,
+      sourceCount: sourceIds.length,
+      sourceIds,
+      byteSize: Buffer.byteLength(outputContent, 'utf8'),
+      outputContent,
+    };
+    return [archive];
+  });
+  return result;
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -1351,6 +1782,8 @@ export function compactMemory(tenantId: string, memoryRef: string): CompactionRe
 // ───────────────────────────────────────────────────────────────────
 
 interface MediaAssetEntry {
+  /** ADR 0579 — when the bytes landed (absent on pre-0579 rows). */
+  storedAtMs?: number;
   /** The capability token — also the durable row id (`idOf`). */
   token: string;
   tenantId: string;
@@ -1411,6 +1844,17 @@ function maybeSweepExpiredMediaAssets(): void {
 
 /** Store an asset for `tenantId` and mint a tenant-scoped capability URL.
  *  Returns the relative serve URL + decoded byte size + expiry. */
+/** ADR 0579 — tenant-scoped byte enumeration for the media orphan sweep.
+ *  Returns token + size + the STORED-AT the sweep's grace window needs
+ *  (derived from expiresAtMs − ttl is unreliable across ttls, so entries now
+ *  carry storedAtMs; legacy rows without it report null and the sweep treats
+ *  them as OLD — a pre-0579 orphan has waited long enough). */
+export async function listMediaAssetTokens(tenantId: string): Promise<Array<{ token: string; bytes: number; storedAtMs: number | null }>> {
+  return (await _mediaAssets.list())
+    .filter((e) => e.tenantId === tenantId)
+    .map((e) => ({ token: e.token, bytes: e.bytes, storedAtMs: e.storedAtMs ?? null }));
+}
+
 export async function storeMediaAsset(
   tenantId: string,
   input: { contentBase64: string; contentType: string; ttlSeconds?: number },
@@ -1422,7 +1866,7 @@ export async function storeMediaAsset(
       ? input.ttlSeconds * 1000
       : MEDIA_ASSET_DEFAULT_TTL_MS;
   const expiresAtMs = Date.now() + ttlMs;
-  await _mediaAssets.put({ token, tenantId, contentBase64: input.contentBase64, contentType: input.contentType, bytes, expiresAtMs });
+  await _mediaAssets.put({ token, tenantId, contentBase64: input.contentBase64, contentType: input.contentType, bytes, expiresAtMs, storedAtMs: Date.now() });
   maybeSweepExpiredMediaAssets();
   return { token, url: `/v1/host/openwop-app/assets/${token}`, bytes, expiresAt: new Date(expiresAtMs).toISOString() };
 }
@@ -1454,6 +1898,34 @@ export async function resolveMediaAsset(token: string): Promise<MediaAssetEntry 
   return e;
 }
 
+/** PROF-1 — extend a stored asset's expiry IN PLACE (tenant-checked, monotonic:
+ *  never shortens). Keeping the SAME token is what makes promotion idempotent —
+ *  a re-minted token would break token-keyed idempotent adds and remove-by-token
+ *  routes (the caller still holds the original token). Returns false when the
+ *  token is unknown, expired, or foreign-tenant (fail-closed). */
+export async function extendMediaAssetExpiry(tenantId: string, token: string, expiresAtMs: number): Promise<boolean> {
+  const e = await resolveMediaAsset(token); // also migrates a legacy-prefix row
+  if (!e || e.tenantId !== tenantId) return false;
+  if (e.expiresAtMs >= expiresAtMs) return true; // already at/past the target — monotonic no-op
+  await _mediaAssets.put({ ...e, expiresAtMs });
+  return true;
+}
+
+/** PROF-1 review F1 — the DOCUMENTED demote exception to the monotonic rule
+ *  above: CAP a stored asset's expiry (never lengthen). The byte-reclaim lane
+ *  for promoted refs the last referent let go of — capping back to a scratch
+ *  window (instead of hard-deleting) means bytes die naturally unless someone
+ *  re-references them in the window, and a referent this host failed to
+ *  enumerate gets a grace window instead of an instantly broken image.
+ *  Tenant-guarded; returns false for an unknown/expired/foreign token. */
+export async function capMediaAssetExpiry(tenantId: string, token: string, expiresAtMs: number): Promise<boolean> {
+  const e = await resolveMediaAsset(token);
+  if (!e || e.tenantId !== tenantId) return false;
+  if (e.expiresAtMs <= expiresAtMs) return true; // already at/under the cap
+  await _mediaAssets.put({ ...e, expiresAtMs });
+  return true;
+}
+
 /** Explicitly free a stored asset's bytes (the media library deletes durable
  *  assets on demand rather than waiting for TTL expiry). Tenant-checked: a token
  *  is only removable by its owning tenant. No-op for an unknown/foreign token. */
@@ -1482,7 +1954,7 @@ export function buildHostSurfaceBundle(scope: BundleScope): HostSurfaceBundle {
       kv: resolveSurface('kv', (s) => createKv(_kvState, s), scope),
       table: resolveSurface('table', (s) => createTable(_tableState, s), scope),
       cache: resolveSurface('cache', (s) => createCache(_cacheState, s), scope),
-      blob: resolveSurface('blob', (s) => createBlob(_blobState, s), scope),
+      blob: guardBlobWrites(resolveSurface('blob', (s) => createBlob(_blobState, s), scope)),
       queue: resolveSurface('queue', (s) => createQueue(_queueState, s), scope),
     },
     db: {

@@ -1,7 +1,7 @@
 {
   "name": "feature.forms.agents",
-  "version": "1.0.0",
-  "description": "Forms feature agent pack (ADR 0014) — a manifest agent whose tools are feature.forms.nodes over the ctx.features.forms surface. Summarizes captured submissions into lead insights; tool-allowlisted to the Forms feature surface only, and READ-ONLY (it reports, it does not mutate forms or contacts). Mirrors feature.kb.agents.",
+  "version": "1.1.1",
+  "description": "Forms feature agent pack — a manifest agent whose tools are feature.forms.nodes over the ctx.features.forms surface. Summarizes captured submissions into lead insights; tool-allowlisted to the Forms feature surface only, and READ-ONLY (it reports, it does not mutate). Treats a CRM-linked contactId as an optional signal, not a presumed outcome (ADR 0330). Mirrors feature.kb.agents.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "forms", "agent", "leads", "submissions"],
@@ -15,12 +15,12 @@
       "agentId": "feature.forms.agents.lead-insights",
       "persona": "RESEARCH",
       "label": "Forms Lead Insights",
-      "description": "Summarizes a form's captured submissions into lead insights — volume, common answers, and follow-up suggestions — grounded via feature.forms.nodes.list-submissions over ctx.features.forms. Read-only: it reports, it never edits forms or contacts.",
+      "description": "Summarizes a form's captured submissions into lead insights — volume, common answers, and follow-up suggestions — grounded via the openwop:forms.list-forms / openwop:forms.list-submissions chat tools. Read-only: it reports, it never edits forms or contacts.",
       "modelClass": "research",
       "systemPromptRef": "prompts/forms-lead-insights.md",
       "toolAllowlist": [
-        "openwop:feature.forms.nodes.list-forms",
-        "openwop:feature.forms.nodes.list-submissions"
+        "openwop:forms.list-forms",
+        "openwop:forms.list-submissions"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }

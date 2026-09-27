@@ -19,7 +19,9 @@ import { getToggleDefault } from '../src/host/featureToggles/registry.js';
 import { getBoard, createCard, listCardsAssignedToUser } from '../src/host/kanbanService.js';
 import { createMember } from '../src/host/accessControlService.js';
 import { listJobsForSubject, scheduleSubject } from '../src/host/schedulingService.js';
-import { getConversationMeta } from '../src/host/conversationStore.js';
+import { getConversationMeta, ensureConversationMeta, subjectConversationId } from '../src/host/conversationStore.js';
+import { projectSubject } from '../src/features/projects/projectsService.js';
+import { MAX_MULTI_PARTY_PARTICIPANTS } from '../src/host/multiPartyConversation.js';
 
 let BASE: string;
 let server: http.Server;
@@ -31,7 +33,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'kb']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -537,6 +539,39 @@ describe('projects — group chat (ADR 0054 Phase 3)', () => {
     expect((await viewer.get(`${CHAT}/${sessionId}/messages`)).status).toBe(200);
     expect((await viewer.del(`${CHAT}/${sessionId}`)).status).toBe(403);
   });
+
+  it('deleting the project destroys the chat — it does not merely UNLOCK it (PRJ2-M1)', async () => {
+    const CHAT = '/v1/host/openwop-app/chat/sessions';
+    const tenantId = `org:pcx-${Date.now()}-${n++}`;
+    const owner = client();
+    await owner.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcx-owner'), tenantId });
+    const orgId = (await owner.post('/v1/host/openwop-app/orgs', { name: 'WarCo' })).body.orgId;
+    const id = (await owner.post(P, { orgId, name: 'Private room' })).body.id;
+    const { sessionId } = (await owner.post(`${P}/${id}/chat`)).body;
+    await owner.post(`${CHAT}/${sessionId}/messages`, { messageId: `m-${n++}`, role: 'user', content: 'confidential' });
+    await owner.patch(`${P}/${id}/visibility`, { visibility: 'private' });
+
+    // A co-tenant stranger: denied BEFORE the delete. This is the control that
+    // makes the assertion after the delete mean something.
+    const stranger = client();
+    await stranger.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcx-stranger'), tenantId });
+    expect((await stranger.get(`${CHAT}/${sessionId}/messages`)).status).toBe(404);
+
+    const del = await owner.del(`${P}/${id}`);
+    expect(del.status, JSON.stringify(del.body)).toBe(200);
+    expect(del.body.conversationsDeleted).toBe(1);
+
+    // THE DEFECT THIS PINS. The first version of PRJ2-M1 cascaded only
+    // `deleteConversationMeta` — the one piece the service layer could reach.
+    // But the meta is what makes an owned conversation private
+    // (`conversationVisibility`: no meta ⇒ "legacy / unowned — tenant-visible"),
+    // so the session and its messages survived with the lock removed and this
+    // stranger got a 200 on a private project's history. Measured, not
+    // theorised. Deleting nothing would have been safer than deleting the meta.
+    expect((await stranger.get(`${CHAT}/${sessionId}/messages`)).status).toBe(404);
+    expect((await owner.get(`${CHAT}/${sessionId}`)).status).toBe(404);
+    expect((await owner.get(`${CHAT}/${sessionId}/messages`)).status).toBe(404);
+  });
 });
 
 describe('projects — chat cadence (ADR 0054 Phase 4 / D6)', () => {
@@ -572,5 +607,120 @@ describe('projects — chat cadence (ADR 0054 Phase 4 / D6)', () => {
     const vId = (await viewer.post('/v1/host/openwop-app/test/login', { email: uniqEmail('pcad-viewer'), tenantId: (await c.get(`${P}/${id}`)).body.tenantId })).body.user.userId;
     await createMember({ tenantId: (await c.get(`${P}/${id}`)).body.tenantId, orgId, subject: vId, displayName: 'V', roles: ['viewer'] });
     expect((await viewer.patch(`${P}/${id}`, { turnPolicy: { rounds: 2 } })).status).toBe(403);
+  });
+});
+
+describe('projects — group chat seats cap at the advertised multi-party ceiling (CPWF-3)', () => {
+  // Seed N distinct roster agents and add each as a project agent member, in order.
+  // `COLWF-1` — the SEATED ref is now the agent's chat-callable projection
+  // (`agent:<agentRef.agentId>`), not the member ref (`agent:<rosterId>`), so the RFC 0101
+  // speaker rule can match the id that actually answers. These legs assert the SEAT, so they
+  // track the seat ref.
+  //
+  // The fixture now gives each member a DISTINCT `agentRef.agentId`. It previously gave all of
+  // them `core.openwop.agents.brief-writer`, which was fine while seats were per-roster-member
+  // and is not fine now: two members sharing one registry agent legitimately collapse to ONE
+  // seat (the speaker rule cannot tell them apart either way), so nine identical agents would
+  // have made a cap-of-eight test assert against one seat. Distinct agents is also the
+  // production shape for distinct project members.
+  async function seatAgents(c: Client, id: string, count: number): Promise<{ ref: string; rosterId: string; seatRef: string }[]> {
+    const out: { ref: string; rosterId: string; seatRef: string }[] = [];
+    for (let i = 1; i <= count; i++) {
+      const persona = `Cap Agent ${Date.now()}-${n++}`;
+      const agentId = `core.openwop.agents.cap-${Date.now()}-${n++}`;
+      const rosterId = (await c.post('/v1/host/openwop-app/roster', { persona, agentRef: { agentId } })).body.rosterId;
+      const ref = `agent:${rosterId}`;
+      expect((await c.post(`${P}/${id}/members`, { ref, role: 'contributor' })).status).toBe(201);
+      out.push({ ref, rosterId, seatRef: `agent:${agentId}` });
+    }
+    return out;
+  }
+
+  it('a NEW room with more agent members than the cap seats exactly the cap, moderator-first', async () => {
+    const { c, orgId } = await ownerWithOrg();
+    const proj = (await c.post(P, { orgId, name: 'Overfull room' })).body;
+    const id = proj.id; const tenantId = proj.tenantId;
+
+    // One over the cap: 9 agent members for a cap of 8.
+    const refs = await seatAgents(c, id, MAX_MULTI_PARTY_PARTICIPANTS + 1);
+    // Make the LAST-declared agent the moderator so moderator-first is observable:
+    // absent chair-priority it would be the one dropped (last in declared order).
+    const chair = refs[refs.length - 1]!;
+    const chairRosterId = chair.rosterId;
+    expect((await c.patch(`${P}/${id}`, { moderatorRosterId: chairRosterId })).body.moderatorRosterId).toBe(chairRosterId);
+
+    const r = await c.post(`${P}/${id}/chat`);
+    expect(r.status, JSON.stringify(r.body)).toBe(201);
+
+    const meta = await getConversationMeta(tenantId, r.body.sessionId);
+    const seated = (meta?.participants ?? []).map((pp) => pp.subjectRef).filter((s) => s.startsWith('agent:'));
+    // Born-red: before the cap the reconcile seated ALL 9 agent members, exceeding the
+    // advertised `multiPartyConversation.maxParticipants`. Now it seats exactly the cap.
+    expect(seated.length).toBe(MAX_MULTI_PARTY_PARTICIPANTS);
+    // The chair is seated (moderator-first), and one non-chair overflow agent is NOT.
+    expect(seated).toContain(chair.seatRef);
+    expect(refs.filter((x) => !seated.includes(x.seatRef)).length).toBe(1);
+  });
+
+  it('a GRANDFATHERED room already over the cap is neither trimmed nor rejected (no silent unseat)', async () => {
+    const { c, orgId } = await ownerWithOrg();
+    const proj = (await c.post(P, { orgId, name: 'Legacy overfull' })).body;
+    const id = proj.id; const tenantId = proj.tenantId;
+    const refs = await seatAgents(c, id, MAX_MULTI_PARTY_PARTICIPANTS + 1);
+
+    // Pre-seed the conversation meta OVER the cap, as a room opened before the cap
+    // existed would look. `ensureConversationMeta` is create-or-return, so this stands
+    // in for the historical state the reconcile must NOT break.
+    const sessionId = subjectConversationId(tenantId, projectSubject(id));
+    await ensureConversationMeta(tenantId, sessionId, { type: 'group', ownerSubject: projectSubject(id), participants: refs.map((x) => x.seatRef) });
+
+    const r = await c.post(`${P}/${id}/chat`);
+    expect(r.status, JSON.stringify(r.body)).toBe(201); // never a 4xx on a grandfathered room
+    const meta = await getConversationMeta(tenantId, r.body.sessionId);
+    const seated = (meta?.participants ?? []).map((pp) => pp.subjectRef).filter((s) => s.startsWith('agent:'));
+    // All members still members ⇒ zero pruned; already at/over cap ⇒ zero added.
+    expect(seated.length).toBe(refs.length);
+  });
+
+  it('a member swapped in at the cap is seated in ONE reconcile (churn does not under-seat)', async () => {
+    // Finding-1 regression guard: a room at exactly the cap, then one member removed
+    // and one added in the same window. The ADD loop runs before the PRUNE loop, so
+    // counting the soon-pruned agent toward the cap would block the new member for the
+    // whole session. The seat count must stay at the cap after a SINGLE re-open.
+    const { c, orgId } = await ownerWithOrg();
+    const proj = (await c.post(P, { orgId, name: 'Churn room' })).body;
+    const id = proj.id; const tenantId = proj.tenantId;
+    const refs = await seatAgents(c, id, MAX_MULTI_PARTY_PARTICIPANTS); // exactly the cap
+    expect((await c.post(`${P}/${id}/chat`)).status).toBe(201); // seats all cap agents
+
+    // Swap: remove one seated member, add a fresh one — membership still == cap.
+    expect((await c.del(`${P}/${id}/members/${encodeURIComponent(refs[0]!.ref)}`)).status).toBe(204);
+    const added = (await seatAgents(c, id, 1))[0]!;
+
+    const r = await c.post(`${P}/${id}/chat`);
+    expect(r.status).toBe(201);
+    const meta = await getConversationMeta(tenantId, r.body.sessionId);
+    const seated = (meta?.participants ?? []).map((pp) => pp.subjectRef).filter((s) => s.startsWith('agent:'));
+    expect(seated.length).toBe(MAX_MULTI_PARTY_PARTICIPANTS); // not cap-1
+    expect(seated).toContain(added.seatRef);      // the swapped-in member IS seated
+    expect(seated).not.toContain(refs[0]!.seatRef); // the swapped-out member is gone
+  });
+
+  it('the prune arm still unseats a REMOVED member even under the cap', async () => {
+    const { c, orgId } = await ownerWithOrg();
+    const proj = (await c.post(P, { orgId, name: 'Small room' })).body;
+    const id = proj.id; const tenantId = proj.tenantId;
+    const refs = await seatAgents(c, id, 3); // well under the cap
+
+    // Open the room (seats all three), then remove one member and re-open.
+    expect((await c.post(`${P}/${id}/chat`)).status).toBe(201);
+    expect((await c.del(`${P}/${id}/members/${encodeURIComponent(refs[0]!.ref)}`)).status).toBe(204);
+    const r = await c.post(`${P}/${id}/chat`);
+    expect(r.status).toBe(201);
+
+    const meta = await getConversationMeta(tenantId, r.body.sessionId);
+    const seated = (meta?.participants ?? []).map((pp) => pp.subjectRef).filter((s) => s.startsWith('agent:'));
+    expect(seated.length).toBe(2);
+    expect(seated).not.toContain(refs[0]!.seatRef); // the removed member was unseated
   });
 });

@@ -21,7 +21,9 @@
  *   POST   /:id/sources/:sid/transform    {templateId} enqueue notebooks.transform run [workspace:write]
  *   GET    /:id/transformations           list the notebook's transformation Documents [workspace:read]
  *   GET    /:id/transformations/templates the transformation catalog [workspace:read]
- *   POST   /:id/notes         {text} add a note                 [workspace:write]
+ *   POST   /:id/notes         {text, origin} add a note         [workspace:write]
+ *                             `origin:'authored'` (a human composed it) ⇒ trusted;
+ *                             anything else / absent ⇒ third-party ⇒ FENCED (ADR 0601)
  *   GET    /:id/notes         list notes                        [workspace:read]
  *   POST   /:id/search        {query, topK?} semantic search    [workspace:read]
  *
@@ -30,6 +32,7 @@
 
 import type { Request } from 'express';
 import { OpenwopError } from '../../types.js';
+import { PREAUTHORIZED_CALLER } from '../../host/subjectAccess.js'; // KBC-1 (ADR 0643 D2 precondition) — an in-process lane that owns these rows / gates at its own door
 import { createLogger } from '../../observability/logger.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { requireFeatureEnabled, requireString, optionalString } from '../featureRoute.js';
@@ -39,10 +42,11 @@ import {
   subjectConversationId, ensureConversationMeta, getConversationMeta,
   addParticipant, agentRef,
 } from '../../host/conversationStore.js';
+import { deleteConversationCompletely } from '../../host/conversationCascade.js';
 import {
   createNotebook, ensureNotebookForProject, getNotebook, listNotebooks, deleteNotebook,
   addSource, listSources, setSourceContextLevel, addNote, listNotes, searchNotebook,
-  getSourceSummary, listTransformations,
+  getSourceSummary, listTransformations, type NoteContentOrigin,
 } from './notebooksService.js';
 import { getDocument } from '../kb/kbService.js';
 import { startWorkflowRun } from '../../host/runStarter.js';
@@ -182,9 +186,56 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
   app.delete(`${BASE}/:id`, async (req, res, next) => {
     try {
       await requireNotebook(req, 'workspace:write');
-      const result = await deleteNotebook(tenantOf(req), req.params.id);
-      log.info('notebook_deleted', { tenantId: tenantOf(req), id: req.params.id, deleted: result.deleted });
-      res.json(result);
+      const tenantId = tenantOf(req);
+      // WF-PRJ-1 — a notebook IS a project with a group conversation at the SAME
+      // deterministic id, and `DELETE /projects/:id` cascades that conversation
+      // (`projects/routes.ts`). This door skipped it, orphaning the session +
+      // messages + meta under a deleted project — retained, unreachable chat data
+      // with no delete path short of tenant teardown. Cascaded HERE (not in the
+      // service) for the same PRJ2-M1 reason as the projects door: the FULL
+      // cascade needs `deps.storage`, and a partial one (meta only) would strip
+      // the privacy lock off a surviving session.
+      //
+      // ADR 0601 / NBC-1 — the ROW DELETE NOW RUNS FIRST. It used to run second,
+      // which made a validation failure inside `deleteNotebook` destructive: the
+      // conversation was already gone, and the response was HTTP 200
+      // `{"deleted":false, …, "conversationsDeleted":1}` — a body actively telling
+      // the user nothing had been destroyed. Validation must not follow an
+      // irreversible write.
+      //
+      // The comment this replaces justified the old order as "so a crash mid-way
+      // cannot leave a lockless conversation under a deleted project". That trade
+      // does not hold up: the surviving conversation keeps its OWN meta (we have
+      // not touched it), so it is orphaned, not lockless — recoverable data,
+      // against a GUARANTEED irrecoverable loss on every failed validation. And
+      // the window is a crash, not a branch.
+      //
+      // CORRECTED (ADR 0601 § Corrections / MEDIUM-6) — the ORDER stays; the
+      // `result.deleted ? … : 0` GATE that rode in with it is gone.
+      //
+      // The gate bought the invariant "`deleted:false` ⇒ `conversationsDeleted:0`"
+      // by making the cascade UNREACHABLE in the one branch that needs it. Both
+      // doors re-read the project between the guard and the delete, so
+      // `deleted:false` is exactly the concurrent-delete race: a peer removed the
+      // row after `requireNotebook` authorized us. Under the gate that request
+      // walked away from an orphaned conversation and reported a clean zero — the
+      // WF-PRJ-1 shape the reorder was added to close, re-entering by the door
+      // the fix installed. It also silently retired the stranded-meta self-heal
+      // documented at `conversationCascade.ts:34` (`deleteConversationCompletely`
+      // cleans the meta even when no session exists), leaving it with no caller.
+      //
+      // Unconditional + TRUTHFUL is the honest shape. The invariant was never
+      // "the number must be zero"; it was "the body must report what actually
+      // happened", and a body saying `{deleted:false, conversationsDeleted:1}`
+      // when a peer deleted the row and we cleaned up its conversation is a true
+      // statement, not the original defect (which claimed nothing was destroyed
+      // while a conversation had just been irrecoverably destroyed).
+      const result = await deleteNotebook(tenantId, req.params.id);
+      const conversationsDeleted = (await deleteConversationCompletely(
+        deps.storage, tenantId, subjectConversationId(tenantId, projectSubject(req.params.id)),
+      )) ? 1 : 0;
+      log.info('notebook_deleted', { tenantId, id: req.params.id, deleted: result.deleted, conversationsDeleted });
+      res.json({ ...result, conversationsDeleted });
     } catch (err) { next(err); }
   });
 
@@ -345,7 +396,7 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       const nb = await requireNotebook(req, 'workspace:write');
       const tenantId = tenantOf(req);
       const sid = req.params.sid;
-      const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sid);
+      const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sid, PREAUTHORIZED_CALLER); // KBC-1 — `requireNotebook` above is this lane's door
       if (!doc) throw new OpenwopError('not_found', 'Source not found.', 404, { id: nb.id, sourceId: sid });
       const runId = await startWorkflowRun(
         { storage: deps.storage, hostSuite: deps.hostSuite },
@@ -407,7 +458,7 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
       if (!tpl) {
         throw new OpenwopError('validation_error', `Unknown transformation templateId \`${templateId}\`.`, 400, { templateId });
       }
-      const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sid);
+      const doc = await getDocument(tenantId, nb.orgId, nb.collectionId, sid, PREAUTHORIZED_CALLER); // KBC-1 — `requireNotebook` above is this lane's door
       if (!doc) throw new OpenwopError('not_found', 'Source not found.', 404, { id: nb.id, sourceId: sid });
       if ((doc.text ?? '').trim().length === 0) {
         throw new OpenwopError('validation_error', 'Source has no text to transform.', 400, { sourceId: sid });
@@ -442,11 +493,26 @@ export function registerNotebooksRoutes(deps: RouteDeps): void {
   });
 
   // POST /:id/notes — add a note (subject memory in the project:<id> scope).
+  //
+  // ADR 0601 — the body carries the note's CONTENT ORIGIN, and the mapping is
+  // FAIL-CLOSED: only the exact literal `'authored'` yields a trusted note.
+  // Anything else — `'third-party'`, a typo, a hostile value, or the field being
+  // ABSENT — reads as third-party and is fenced. Absent must be the untrusted
+  // side: a caller that says nothing about provenance is exactly the caller that
+  // shipped the laundering blocker, and a `?? 'authored'` here would re-open it
+  // for every client that never learns about the field.
+  //
+  // Accepting the client's word for `'authored'` grants no new capability: the
+  // caller already holds `workspace:write` on this notebook and could type the
+  // same bytes into the composer. The threat this closes is third-party CONTENT
+  // reaching the agent unfenced, not a `workspace:write` holder lying about
+  // authorship.
   app.post(`${BASE}/:id/notes`, async (req, res, next) => {
     try {
       await requireNotebook(req, 'workspace:write');
-      const body = (req.body ?? {}) as { text?: unknown };
-      const notes = await addNote(tenantOf(req), req.params.id, requireString(body.text, 'text'));
+      const body = (req.body ?? {}) as { text?: unknown; origin?: unknown };
+      const origin: NoteContentOrigin = body.origin === 'authored' ? 'authored' : 'third-party';
+      const notes = await addNote(tenantOf(req), req.params.id, requireString(body.text, 'text'), origin);
       res.status(201).json({ notes });
     } catch (err) { next(err); }
   });

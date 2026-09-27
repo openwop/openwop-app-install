@@ -59,6 +59,20 @@ export function buildPodcastsSurface(scope: BundleScope): FeatureSurface {
      * Document ids + the ordered synthesized clips, as the pipeline's nodes produce
      * them. Merges (never clears); a no-op for a missing episode. The run remains the
      * status source of truth — this only persists the durable result artifacts.
+     *
+     * PODC-1 (ADR 0603): "never clears" now holds for `clips` too. Every string field
+     * below rides `surfaceOptStr`, which is falsy for `''` — so an absent value is
+     * DROPPED. `clips` takes the raw-array path, where the identical-looking
+     * `x ? {x} : {}` idiom silently INVERTS (`[]` is truthy). The service-side write
+     * is length-gated, so an empty list read off a node's inputs no longer erases a
+     * recorded one.
+     *
+     * `M2` (ADR 0603 R1) — THIS validation is the one that can reduce a non-empty
+     * caller list to `[]` (the `flatMap` drops any clip without a string
+     * `url`/`voiceId`), which the node cannot see. The service result now reports
+     * `applied`/`dropped`/`clipsRecorded` rather than an unconditional
+     * `{ recorded: true }`, and it is returned to the node unchanged so the node can
+     * refuse to publish audio for clips the store never accepted.
      */
     recordEpisodeResult: async (args) => {
       const episodeId = surfaceStr(args.episodeId);

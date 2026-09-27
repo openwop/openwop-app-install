@@ -1,7 +1,9 @@
 /**
  * Site-config host-extension routes (ADR 0027) — the on/off switch for the public
  * front page. The CONTENT is always the host-level system home page
- * (`host/systemSite.ts`), edited by the super admin via `/v1/host/openwop-app/site-page`.
+ * (`host/systemSite.ts`), edited by the super admin through the standard CMS
+ * routes on the reserved `host-site` org (via `requireCmsScope`) — the "Front
+ * page" surface collapsed into the CMS Page Builder.
  *
  *   GET  /v1/host/openwop-app/public-site-config   public front-page pointer   [PUBLIC]
  *   GET  /v1/host/openwop-app/site-config          { enabled } (admin read)    [superadmin]

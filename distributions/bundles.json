@@ -1,0 +1,184 @@
+{
+  "description": "ADR 0366 Phase 4 \u2014 the full feature-composition catalog. THREE tiers: (1) `core` = the always-included substrate a distribution can never exclude (auth/orgs/chat/workflow-engine/billing/design-system + the always-on/graduated features); (2) `bundles` = sellable feature GROUPINGS (one per toggle `category`) an include-mode manifest selects by name; (3) STANDALONE = every registered feature that is neither core nor bundled \u2014 DERIVED (not listed here), individually selectable in an include-mode manifest's `features[]`. Phase-4 include semantics (a correction to P2's 'core = unbundled by construction'): the excludable universe is `registered \u2212 core`, so a standalone feature defaults OUT and is opted IN \u2014 the licensing-safe direction. INVARIANTS (gen-distribution --check enforces all): every core/bundle id is registered; no id is in two places; `core` is dependsOn-CLOSED (no core feature hard-depends on a non-core one \u2014 so every bundle/standalone the shop offers is actually buildable); an always-on feature (no toggleDefault) MUST be core. A new feature is auto-standalone-selectable unless added to core or a bundle.",
+  "core": [
+    "access-hub",
+    "agent-knowledge",
+    "ambient-work-graph",
+    "assistant",
+    "billing",
+    "brand",
+    "capability-firewall",
+    "channels",
+    "chat-autotitle",
+    "chat-deployment",
+    "chat-export",
+    "chat-widget",
+    "cms",
+    "code-exec",
+    "connections",
+    "context-economy",
+    "conversation-search",
+    "conversation-tools",
+    "dashboard",
+    "developer-keys",
+    "developer-tools",
+    "entities",
+    "environments",
+    "evals",
+    "goals",
+    "heartbeat-admin",
+    "intent-ledger",
+    "interactive-artifacts",
+    "kb",
+    "manual-tests",
+    "marketplace",
+    "media",
+    "memory-auto-extract",
+    "model-router",
+    "models",
+    "multi-tab-chat",
+    "navigation-settings",
+    "notifications",
+    "operations",
+    "orgs",
+    "portability",
+    "profile-memory",
+    "profiles",
+    "projects",
+    "prompts",
+    "proposals",
+    "publishing",
+    "run-input-forms",
+    "runtime-posture",
+    "scheduled-agent-chats",
+    "scheduled-chats",
+    "settings",
+    "sharing",
+    "task-deck",
+    "tool-output-compaction",
+    "tutorials",
+    "usage-analytics",
+    "users",
+    "walkthroughs",
+    "widgets",
+    "workflow-author"
+  ],
+  "bundles": {
+    "sales": {
+      "label": "Sales",
+      "features": [
+        "territories",
+        "sales-commissions",
+        "dealers",
+        "sales-maps"
+      ]
+    },
+    "commerce": {
+      "label": "Commerce",
+      "features": [
+        "commerce",
+        "commerce-ucp",
+        "commerce-ucp-buyer",
+        "recommendations",
+        "promotions",
+        "discovery"
+      ]
+    },
+    "crm": {
+      "label": "CRM",
+      "features": [
+        "crm",
+        "csm",
+        "analytics",
+        "email"
+      ]
+    },
+    "marketing": {
+      "label": "Marketing",
+      "features": [
+        "campaigns",
+        "campaign-brief",
+        "campaign-channels",
+        "campaign-connectors",
+        "campaign-intel",
+        "campaign-orchestration",
+        "creative-briefs",
+        "custom-domains",
+        "funnels",
+        "webinars"
+      ]
+    },
+    "customer-data-platform": {
+      "label": "Customer Data Platform",
+      "features": [
+        "cdp",
+        "campaign-journeys",
+        "consent",
+        "destination-sync"
+      ]
+    },
+    "content": {
+      "label": "Content",
+      "features": [
+        "comments",
+        "docs",
+        "knowledge-sync",
+        "accessibility"
+      ]
+    },
+    "editors": {
+      "label": "Editors",
+      "features": [
+        "cad",
+        "campaign-studio",
+        "document-editor",
+        "drawings",
+        "slides"
+      ]
+    },
+    "studio": {
+      "label": "Studio",
+      "features": [
+        "documents",
+        "notebooks",
+        "podcasts",
+        "production"
+      ]
+    },
+    "canvases": {
+      "label": "Canvases",
+      "features": [
+        "app-builder",
+        "canvas-packs",
+        "creative-video"
+      ]
+    },
+    "agents": {
+      "label": "Agents",
+      "features": [
+        "advisory-board",
+        "insights-suite",
+        "twin"
+      ]
+    },
+    "leadership": {
+      "label": "Leadership",
+      "features": [
+        "priority-matrix",
+        "strategy"
+      ]
+    },
+    "integrations": {
+      "label": "Integrations",
+      "features": [
+        "whatsapp"
+      ]
+    },
+    "job-search": {
+      "label": "Job search",
+      "features": [
+        "job-search"
+      ]
+    }
+  }
+}

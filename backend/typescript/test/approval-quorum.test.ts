@@ -15,7 +15,7 @@
  *     first vote — the 40 existing approval tests are the regression guard).
  */
 
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, afterAll} from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -26,6 +26,7 @@ import { initHostExtPersistence } from '../src/host/hostExtPersistence.js';
 import {
   createContentApproval,
   registerContentApprovalHandler,
+  getContentApprovalHandler,
   getApproval,
   type PendingApproval,
 } from '../src/host/approvalService.js';
@@ -48,12 +49,29 @@ const CAROL = 'user:carol';
 // A content-publish approval gives a clean, registered finalize (no roster/run
 // setup): the handler just reports the page approved.
 let published: Array<{ approvalId: string; outcome: string; by?: string }> = [];
+// ADR 0672 D6 (`CMSAWF-9`) — this stub is registered on a PROCESS-GLOBAL slot
+// (`registerContentApprovalHandler` assigns a module-level variable). Without a restore it
+// outlives this file, so any suite sharing the worker afterwards decides content-publish
+// rows through a handler that RESOLVES NOTHING. Captured and restored below.
+//
+// Standing limitation, recorded rather than papered over: because the stub never resolves,
+// every content-publish assertion in THIS file is an assertion about the stub, not about
+// `decideContentPublish`. That is `CMSAWF-9`. What the file does still witness honestly is
+// the quorum TALLY in `evaluateQuorum` — which is why it is kept rather than deleted. The
+// claim that no production lane can reach that path is pinned separately, over the real
+// call sites, in `approval-quorum-cms-lanes.test.ts`.
+let priorHandler: ReturnType<typeof getContentApprovalHandler> = null;
 beforeAll(() => {
+  priorHandler = getContentApprovalHandler();
   registerContentApprovalHandler(async (_tenantId, approvalId, outcome, opts) => {
     published.push({ approvalId, outcome, by: opts.decidedByUserId });
     const approval = (await getApproval(approvalId)) as PendingApproval;
     return { approval: { ...approval, status: 'approved' }, changed: true };
   });
+});
+
+afterAll(() => {
+  if (priorHandler) registerContentApprovalHandler(priorHandler);
 });
 
 beforeEach(async () => {

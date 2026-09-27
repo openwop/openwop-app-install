@@ -35,12 +35,21 @@ export interface ProjectSchedule {
   timezone?: string;
   enabled: boolean;
   lastRunAt?: string;
+  /** Paired with `lastRunAt` — the run it links to (never one without the other). */
+  lastRunId?: string;
+  /** WF-PRJ-2 — a fire that consumed its slot and produced NO run. The daemon
+   *  records these honestly (`recordJobSkipped`); dropping them here made a
+   *  typo'd schedule look healthy forever (enabled, `nextFireAt` advancing,
+   *  `lastRunAt` empty, no reason) — the ADR 0491 "log the SURFACING" class. */
+  lastSkippedAt?: string;
+  lastSkipReason?: ScheduledJob['lastSkipReason'];
   nextFireAt?: number;
   createdAt?: string;
 }
 
 /** Project the durable job onto the safe, project-facing view (no tenant/owner
- *  internals, no free-form metadata). */
+ *  internals, no free-form metadata — but EVERY outcome field the daemon
+ *  records, so a dead schedule is visible; WF-PRJ-2). */
 function toView(j: ScheduledJob): ProjectSchedule {
   return {
     jobId: j.jobId,
@@ -49,6 +58,9 @@ function toView(j: ScheduledJob): ProjectSchedule {
     ...(j.workflowId !== undefined ? { workflowId: j.workflowId } : {}),
     ...(j.timezone !== undefined ? { timezone: j.timezone } : {}),
     ...(j.lastRunAt !== undefined ? { lastRunAt: j.lastRunAt } : {}),
+    ...(j.lastRunId !== undefined ? { lastRunId: j.lastRunId } : {}),
+    ...(j.lastSkippedAt !== undefined ? { lastSkippedAt: j.lastSkippedAt } : {}),
+    ...(j.lastSkipReason !== undefined ? { lastSkipReason: j.lastSkipReason } : {}),
     ...(j.nextFireAt !== undefined ? { nextFireAt: j.nextFireAt } : {}),
     ...(j.createdAt !== undefined ? { createdAt: j.createdAt } : {}),
   };

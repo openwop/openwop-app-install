@@ -11,12 +11,13 @@
  *    support/triage.
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
+import { Notice } from '../ui/Notice.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import type { AuditVerifyResult, RunEventDoc } from '@openwop/openwop';
-import { getSdkClient, getCapabilities } from '../client/runsClient.js';
-import { authedHeaders, config, fetchOpts } from '../client/config.js';
+import { getDebugBundle, getSdkClient, getCapabilities } from '../client/runsClient.js';
 import { formatNumber } from '../i18n/format.js';
 
 interface Props {
@@ -27,6 +28,8 @@ interface Props {
 export function RunOpsPanel({ runId, events }: Props) {
   const { t } = useTranslation('runs');
   const [auditProfile, setAuditProfile] = useState<boolean | null>(null);
+  /** UX-RUN-1 — the capability read failed; we know nothing about the host. */
+  const [capsFailed, setCapsFailed] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [result, setResult] = useState<AuditVerifyResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -41,7 +44,11 @@ export function RunOpsPanel({ runId, events }: Props) {
         const profiles = ((caps.auth as { profiles?: string[] } | undefined)?.profiles) ?? [];
         if (!cancelled) setAuditProfile(profiles.includes('openwop-audit-log-integrity'));
       })
-      .catch(() => { if (!cancelled) setAuditProfile(false); });
+      // UX-RUN-1 (sibling of RunAuditPage) — the `false` arm renders "Host does
+      // not advertise the openwop-audit-log-integrity profile; verification
+      // unavailable." A failed capability READ must not make that claim about
+      // the host. Leave `auditProfile` null and flag the failure separately.
+      .catch(() => { if (!cancelled) setCapsFailed(true); });
     return () => { cancelled = true; };
   }, []);
 
@@ -65,12 +72,12 @@ export function RunOpsPanel({ runId, events }: Props) {
     setDownloading(true);
     setError(null);
     try {
-      const res = await fetch(
-        `${config.baseUrl}/v1/runs/${encodeURIComponent(runId)}/debug-bundle`,
-        fetchOpts({ headers: authedHeaders({ accept: 'application/json' }) }),
-      );
-      if (!res.ok) throw new Error(`debug-bundle returned ${res.status}`);
-      const blob = await res.blob();
+      // ADR 0730 C.1 — the ONE debug-bundle reader, which addresses the
+      // host-extension twin. The operation has no v2 path, so the v1 spelling
+      // this panel used would have died with the v1 surface, and it was a
+      // SECOND copy of a read `runsClient` already owns.
+      const bundle = await getDebugBundle(runId);
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -90,18 +97,18 @@ export function RunOpsPanel({ runId, events }: Props) {
     <div className="card">
       <h2>{t('operations')}</h2>
       <div className="button-row">
-        <button type="button" className="secondary" onClick={onDownloadBundle} disabled={downloading}>
+        <Button variant="secondary" onClick={onDownloadBundle} disabled={downloading}>
           {downloading ? t('preparing') : t('downloadDebugBundle')}
-        </button>
+        </Button>
         {auditProfile && (
-          <button type="button" className="secondary" onClick={onVerify} disabled={verifying}>
+          <Button variant="secondary" onClick={onVerify} disabled={verifying}>
             {verifying ? t('verifying') : t('verifyAuditIntegrity')}
-          </button>
+          </Button>
         )}
         {auditProfile && (
           <Link
             to={`/runs/${runId}/audit`}
-            className="secondary runops-audit-link"
+            className="btn secondary"
             title={t('viewFullAuditLogTitle')}
           >
             {t('viewFullAuditLog')}
@@ -113,7 +120,9 @@ export function RunOpsPanel({ runId, events }: Props) {
           {t('auditProfileUnavailablePre')}<code>openwop-audit-log-integrity</code>{t('auditProfileUnavailablePost')}
         </p>
       )}
-      {error && <div className="alert error">{error}</div>}
+      {/* UX-RUN-1 — unknown, not unsupported. */}
+      {capsFailed && <p className="muted u-fs-12">{t('auditCapsUnknown')}</p>}
+      {error && <Notice variant="error">{error}</Notice>}
       {result && (
         <div className="audit-result u-mt-2">
           <div className="u-flex u-items-center u-gap-2">

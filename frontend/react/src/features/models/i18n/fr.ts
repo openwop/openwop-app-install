@@ -7,6 +7,7 @@ export const messages = {
   lede: 'Choisissez quel modèle répond à chaque tour de conversation et voyez ceux que votre équipe préfère.',
 
   tablistLabel: 'Sections des modèles',
+  panelRegion: 'Panneau de modèles {{panel}}',
 
   'tab_model-router': 'Routage',
   tab_leaderboard: 'Classement',

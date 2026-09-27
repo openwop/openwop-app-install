@@ -2,7 +2,8 @@
  * SCIM provisioning seam + minimal SCIM 2.0 endpoints (RFC 0050 §B —
  * `openwop-auth-scim`).
  *
- *   POST /v1/host/openwop-app/auth/scim/provision   { scimUrl, op, user?, group? }
+ *   POST /v1/host/openwop-app/auth/scim/provision   { scimUrl, op, externalId?, userName?,
+ *                                                     email?, displayName?, group?, idpUrl? }
  *   POST   /scim/v2/Users                       create/upsert a principal
  *   PATCH  /scim/v2/Users/:id   { active }      deactivate/reactivate
  *   DELETE /scim/v2/Users/:id                   deactivate (leaver)
@@ -15,6 +16,13 @@
  * toggle) so the advertised `openwop-auth-scim` capability is always reachable
  * (finding C1); it 404s only when no SCIM endpoint is configured
  * (`OPENWOP_TEST_SCIM_URL` unset), which is how the conformance leg soft-skips.
+ *
+ * NEVER set `OPENWOP_TEST_SCIM_URL` on a host that will later get a production
+ * SP. The seam's `deactivate-user` writes `denyLinkedSubject` rows under the
+ * SCIM link realm (`scimLinkRealm()`), and that realm is exactly what the
+ * production SAML ACS consults once the realms are aligned (`USERS-13`) — so
+ * deny rows pre-seeded through the test seam become live SSO denials the day
+ * the SP is configured. The seam is a conformance fixture, not a staging tool.
  *
  * The `/scim/v2/{Users,Groups}` endpoints satisfy the §B MUST "expose SCIM
  * endpoints"; they delegate to the same service. (Advanced SCIM — filtering,
@@ -32,18 +40,23 @@ import { timingSafeEqual } from 'node:crypto';
 import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
 import { createLogger } from '../observability/logger.js';
+import { appendAudit } from '../host/auditChainService.js';
+import { samlConfigured } from '../host/auth/samlSso.js';
+import { scimLinkRealm } from '../host/auth/subjectLinkService.js';
 import {
   DEFAULT_SCIM_USER,
   SCIM_OPS,
   assignGroup,
   deactivateUser,
   isPrincipalResolvable,
-  provisionUser,
+  provisionUserWithOutcome,
   resolveScimUser,
   scimUserNameOf,
   setScimActive,
   type ScimOp,
 } from '../host/auth/scimProvisioningService.js';
+import { extractSamlIssuer } from '../host/auth/samlValidationService.js';
+import { isAllowedIdpUrl } from '../host/auth/samlSeamOrigins.js';
 
 const log = createLogger('auth.scim');
 
@@ -68,7 +81,97 @@ function str(value: unknown): string | undefined {
  * bearer can't collide with another auth path's records.
  */
 function scimTenant(): string {
-  return process.env.OPENWOP_SCIM_TENANT ?? 'scim';
+  return scimLinkRealm();
+}
+
+/**
+ * USERS-16 — the IdP-driven leaver on the ADR 0301 audit chain. Ids only
+ * (`userId`, never `userName`/`externalId`/email); actor is the literal `scim`
+ * (a bearer, not a person). Best-effort: the chain never blocks provisioning.
+ */
+async function auditScimLifecycle(tenantId: string, userId: string, active: boolean): Promise<void> {
+  await appendAudit(tenantId, `users.lifecycle.${active ? 'enable' : 'disable'}`, {
+    tenantId,
+    userId,
+    status: active ? 'active' : 'disabled',
+    actor: 'scim',
+  }).catch(() => { /* audit is best-effort */ });
+}
+
+/**
+ * USERS-16 (review NIT-1) — a SCIM-created account is on the chain like an
+ * admin-created one (`users.lifecycle.create`, ids only, `actor: 'scim'`);
+ * only a NEW row is a create — a mover re-provision refreshes the profile and
+ * appends nothing here. Best-effort, like every lifecycle row.
+ */
+async function auditScimCreate(tenantId: string, user: { userId: string; source: string; groups: string[] }): Promise<void> {
+  await appendAudit(tenantId, 'users.lifecycle.create', {
+    tenantId,
+    userId: user.userId,
+    source: user.source,
+    groupCount: user.groups.length,
+    actor: 'scim',
+  }).catch(() => { /* audit is best-effort */ });
+}
+
+/**
+ * USERS-14 — an externalId-addressed seam op (`create-user` / `deactivate-user`
+ * with `externalId`) resolves in the DETERMINISTIC SCIM realm, not the caller's
+ * tenant, and a deactivation there writes the cross-lane deny the PRODUCTION
+ * SAML ACS consults. With `OPENWOP_TEST_SCIM_URL` set and NO bearer configured
+ * the seam is otherwise open to any (even anonymous) caller — so on a host where
+ * a production SAML SP exists, an unauthenticated caller could provision then
+ * deactivate an arbitrary externalId and deny that NameID's real SSO login.
+ * Refused 403 unless a SCIM bearer is configured (and then presented — the
+ * `requireScimBearer` line above). A pure-conformance host (no production SP:
+ * the only SAML lane is the validate seam, driven by the same suite) keeps the
+ * open posture the RFC 0159 scenario needs; that residual is stated, not hidden.
+ */
+function requireBearerForLinkRealmWrite(externalId: string | undefined): void {
+  if (!externalId || process.env.OPENWOP_SCIM_BEARER || !samlConfigured()) return;
+  throw new OpenwopError(
+    'forbidden',
+    'An externalId-addressed SCIM op writes the subject-link realm a production SAML SP consults; configure OPENWOP_SCIM_BEARER (and present it) to use it on this host.',
+    403,
+    { reason: 'scim_bearer_required' },
+  );
+}
+
+/**
+ * RFC 0163 §B — resolve the IdP entityID (SAML `<saml:Issuer>`) this SCIM
+ * connection is bound to, so the SAML decision path can trust-root-scope the
+ * cross-lane link.
+ *
+ * TWO binding paths, per the RFC ("bind each SCIM client credential to exactly
+ * one IdP entityID at configuration time and MUST NOT infer it from the request"):
+ *   - the conformance seam supplies an `idpUrl` naming the synthetic IdP that
+ *     feeds this connection's lane; the entityID is the `<saml:Issuer>` that IdP
+ *     signs into its assertions. We resolve it by fetching the IdP once at
+ *     provision time — SSRF-guarded to the configured synthetic-IdP allowlist
+ *     (never an arbitrary body URL).
+ *   - the real `/scim/v2` lane carries no `idpUrl` (it authenticates by bearer),
+ *     so the entityID is the config-bound `OPENWOP_SCIM_IDP_ENTITY_ID`.
+ * Returns `undefined` when neither is available (an unbound connection — the
+ * SAML path then falls back to the RFC 0159 deny-only contract).
+ */
+async function resolveScimIdpEntityId(idpUrl: string | undefined): Promise<string | undefined> {
+  const configured = process.env.OPENWOP_SCIM_IDP_ENTITY_ID;
+  if (idpUrl) {
+    if (!isAllowedIdpUrl(idpUrl)) {
+      throw new OpenwopError('forbidden', 'idpUrl does not match a configured synthetic IdP.', 403, {});
+    }
+    try {
+      const res = await fetch(`${idpUrl}?variant=${encodeURIComponent('valid')}`);
+      if (res.ok) {
+        const { assertion } = (await res.json()) as { assertion?: string };
+        const issuer = typeof assertion === 'string' ? extractSamlIssuer(assertion) : null;
+        if (issuer) return issuer;
+      }
+    } catch {
+      /* fall through to the config seat — never fail provisioning on an IdP fetch */
+    }
+  }
+  return configured && configured.length > 0 ? configured : undefined;
 }
 
 function requireScimBearer(req: Request): string {
@@ -97,6 +200,28 @@ function activeFromValue(value: unknown): boolean | undefined {
   return undefined;
 }
 
+/** The provision seam's closed-world body keys (CLNP-7). `scimUrl` is the conformance
+ *  driver's own routing hint — sent on every call, read by nobody here. */
+const SEAM_BODY_KEYS: ReadonlySet<string> = new Set([
+  'scimUrl', 'op', 'externalId', 'userName', 'email', 'displayName', 'group', 'linkKey', 'idpUrl',
+]);
+
+export function assertSeamBodyShape(body: unknown): void {
+  if (body === undefined || body === null) return; // an empty POST reaches the `op` check → 400
+  if (typeof body !== 'object' || Array.isArray(body)) {
+    throw new OpenwopError('validation_error', 'The SCIM provision seam body MUST be a JSON object.', 400, {});
+  }
+  const unknownKeys = Object.keys(body).filter((k) => !SEAM_BODY_KEYS.has(k));
+  if (unknownKeys.length > 0) {
+    throw new OpenwopError(
+      'validation_error',
+      `Unknown field(s) on the SCIM provision seam: ${unknownKeys.join(', ')}. Every field rides the top level (no nested \`user\`); a raw RFC 7643 User belongs on POST /scim/v2/Users.`,
+      400,
+      { unknown: unknownKeys, allowed: [...SEAM_BODY_KEYS] },
+    );
+  }
+}
+
 /** Read the desired `active` value from a flat `{active}` body OR an RFC 7644
  *  PatchOp — BOTH the `{path:'active', value}` and the path-less
  *  `{value:{active}}` shapes real IdPs send (review finding #2). Exported for
@@ -120,9 +245,22 @@ export function readActive(body: unknown): boolean | undefined {
   return undefined;
 }
 
+/** RFC 0159 §A.2 — a cross-lane link key MUST be an OPAQUE, IdP-stable id
+ *  (`externalId`), never a mutable/PII attribute. Anything on this list is
+ *  rejected: it would let a leaver keep SSO access by rotating the mutable value,
+ *  or let a mutable key drive a cross-lane deny on the wrong subject. */
+const MUTABLE_LINK_KEYS = new Set(['email', 'username', 'phone', 'phonenumber', 'name', 'displayname', 'givenname', 'familyname']);
+
 export function registerScimAuthRoutes(app: Express): void {
   // ---- Conformance seam ----
-  app.post('/v1/host/openwop-app/auth/scim/provision', async (req, res, next) => {
+  // BOTH spellings, unconditionally (the multiPartyConversationSeam idiom): the
+  // pinned suite drives `/v1/host/sample/*`, and the testSeam namespace rewrite
+  // that would map it onto the product path only runs under
+  // OPENWOP_TEST_SEAM_ENABLED — but the RFC 0159 legs opt in on
+  // OPENWOP_TEST_SAML_IDP_URL + OPENWOP_TEST_SCIM_URL alone, so the `sample`
+  // alias must be reachable whether or not the rewrite is active. The handler
+  // 404s without OPENWOP_TEST_SCIM_URL, so registering both is production-safe.
+  app.post(['/v1/host/openwop-app/auth/scim/provision', '/v1/host/sample/auth/scim/provision'], async (req, res, next) => {
     try {
       if (!process.env.OPENWOP_TEST_SCIM_URL) {
         throw new OpenwopError('not_found', 'SCIM test seam not configured (set OPENWOP_TEST_SCIM_URL).', 404, {});
@@ -132,41 +270,110 @@ export function registerScimAuthRoutes(app: Express): void {
       // /scim/v2/* surface (review finding #1). Pure-conformance deployments
       // (no bearer configured) leave it open + tenant-isolated to the caller.
       if (process.env.OPENWOP_SCIM_BEARER) requireScimBearer(req);
-      const body = (req.body ?? {}) as { op?: unknown; user?: Record<string, unknown>; group?: unknown };
+      // USERS-21 — ONE body shape. Every field rides the TOP LEVEL, which is both
+      // what the vendored conformance scenario sends and what real SCIM 2.0 does
+      // (`{schemas, userName, displayName, …}` is flat; nothing nests under `user`).
+      // The legacy nested `user:{}` fallback is GONE: it was the sole carrier of
+      // `displayName`, which is why it survived earlier sweeps, so lifting that field
+      // here is what made the fallback removable. Safe because this seam is a
+      // conformance fixture — it 404s unless `OPENWOP_TEST_SCIM_URL` is set, and the
+      // header of this file forbids setting that on a host with a production SP.
+      // CLNP-7 — the ONE shape is ENFORCED, not just sent. Every field below is optional
+      // and `userName` falls back to the default principal, so an unrecognised key used to
+      // be silently dropped: a legacy nested `user:{}`, a case-typo `UserName`, and a
+      // literal RFC 7643 body (`schemas`, `emails[]`, `name{}`) all got 201 WITH THE
+      // DEFAULT PRINCIPAL — a success that provisioned someone the caller never named.
+      // Closed world instead. Trade-off, accepted on purpose: a future suite that sends a
+      // new key now gets a loud 400 rather than a quiet wrong answer. Real SCIM bodies
+      // belong on `POST /scim/v2/Users`, which reads the RFC 7643 shape.
+      assertSeamBodyShape(req.body);
+      const body = (req.body ?? {}) as { op?: unknown; group?: unknown; externalId?: unknown; userName?: unknown; email?: unknown; displayName?: unknown; linkKey?: unknown; idpUrl?: unknown };
       const op = body.op as ScimOp | undefined;
       if (op === undefined || !(SCIM_OPS as readonly string[]).includes(op)) {
         throw new OpenwopError('validation_error', `Field \`op\` MUST be one of ${SCIM_OPS.join(', ')}.`, 400, { allowed: SCIM_OPS });
       }
-      const tenantId = tenantOf(req);
-      const u = body.user ?? {};
-      const userName = str(u.userName) ?? DEFAULT_SCIM_USER.userName;
+      const externalId = str(body.externalId);
+      const email = str(body.email);
+      const userName = str(body.userName) ?? DEFAULT_SCIM_USER.userName;
+      const callerTenant = tenantOf(req);
+      // RFC 0159 (ADR 0613) — a subject-link op (addressed by the opaque
+      // externalId) resolves in the DETERMINISTIC SCIM realm (OPENWOP_SCIM_TENANT),
+      // so create/deactivate and the pre-auth SAML-validate consult all agree on
+      // one tenant with no session to derive it from. A plain userName op keeps
+      // the caller's tenant (unchanged behavior).
+      const linkTenant = scimTenant();
+      requireBearerForLinkRealmWrite(externalId); // USERS-14
 
       switch (op) {
         case 'create-user': {
-          const principal = await provisionUser({
+          const tenantId = externalId ? linkTenant : callerTenant;
+          // RFC 0163 §B — bind the connection's trust-root entityID (from the
+          // seam's idpUrl, or the config seat) so the SAML lane can trust-root-
+          // scope the link. Only meaningful for a linkable (externalId) record.
+          const idpEntityId = externalId ? await resolveScimIdpEntityId(str(body.idpUrl)) : undefined;
+          const { user: principal, created } = await provisionUserWithOutcome({
             tenantId,
             userName,
-            ...(str(u.externalId) ? { externalId: str(u.externalId)! } : {}),
-            ...(str(u.email) ? { email: str(u.email)! } : {}),
-            ...(str(u.displayName) ? { displayName: str(u.displayName)! } : { displayName: DEFAULT_SCIM_USER.displayName }),
+            ...(externalId ? { externalId } : {}),
+            ...(idpEntityId ? { idpEntityId } : {}),
+            ...(email ? { email } : {}),
+            displayName: str(body.displayName) ?? DEFAULT_SCIM_USER.displayName,
           });
-          log.info('scim_user_provisioned', { userName });
+          if (created) await auditScimCreate(tenantId, principal);
+          // USERS-15 — ids only: `userName` is an email in practice.
+          log.info('scim_user_provisioned', { userId: principal.userId, tenantId, linked: Boolean(externalId) });
           res.status(201).json({ op, principal, resolvable: await isPrincipalResolvable(tenantId, userName) });
           return;
         }
         case 'assign-group': {
           const group = str(body.group) ?? 'scim-group';
-          const principal = await assignGroup({ tenantId, userName, group });
+          const principal = await assignGroup({ tenantId: callerTenant, userName, group });
           if (!principal) throw new OpenwopError('not_found', 'SCIM user not found; provision it first.', 404, { userName });
           res.status(200).json({ op, principal, groups: principal.groups });
           return;
         }
         case 'deactivate-user': {
-          const principal = await deactivateUser({ tenantId, userName });
+          // Addressed by the opaque externalId (subject-link leaver) → resolve +
+          // disable in the deterministic realm AND write the cross-lane deny
+          // (deactivateUser owns the deny write). Fail-closed if unresolved.
+          if (externalId) {
+            const principal = await deactivateUser({ tenantId: linkTenant, externalId });
+            if (!principal) throw new OpenwopError('not_found', 'SCIM user not found.', 404, { externalId });
+            log.info('scim_user_deactivated', { userId: principal.userId, tenantId: linkTenant, linked: true });
+            await auditScimLifecycle(linkTenant, principal.userId, false); // USERS-16
+            res.status(200).json({ op, principal, resolvable: false });
+            return;
+          }
+          // RFC 0159 §A.2 — a deactivation addressed only by a mutable/PII key
+          // (email) MUST NOT write an externalId-keyed cross-lane deny. There is
+          // no opaque subject to act on; acknowledge without a link effect.
+          if (email && !userName) {
+            res.status(200).json({ op, linked: false, note: 'RFC 0159 §A.2: no opaque externalId; no cross-lane deny written' });
+            return;
+          }
+          const principal = await deactivateUser({ tenantId: callerTenant, userName });
           if (!principal) throw new OpenwopError('not_found', 'SCIM user not found.', 404, { userName });
-          log.info('scim_user_deactivated', { userName });
+          log.info('scim_user_deactivated', { userId: principal.userId, tenantId: callerTenant, linked: false }); // USERS-15
+          await auditScimLifecycle(callerTenant, principal.userId, false); // USERS-16
           // Fail-closed: the principal is no longer resolvable to an active id.
-          res.status(200).json({ op, principal, resolvable: await isPrincipalResolvable(tenantId, userName) });
+          res.status(200).json({ op, principal, resolvable: await isPrincipalResolvable(callerTenant, userName) });
+          return;
+        }
+        case 'link': {
+          // RFC 0159 §A.2 — reject a mutable/PII link key; form NO cross-lane
+          // link from it. (The legitimate link is IMPLICIT: externalId ==
+          // persistent SAML NameID, established at provision time — the host
+          // never mints a separate link record from a `link` op.)
+          const linkKey = str(body.linkKey);
+          if (!linkKey || MUTABLE_LINK_KEYS.has(linkKey.toLowerCase())) {
+            throw new OpenwopError(
+              'validation_error',
+              'RFC 0159 §A.2: a cross-lane link key MUST be an opaque, IdP-stable id (externalId), not a mutable/PII attribute.',
+              400,
+              { linkKey: linkKey ?? null },
+            );
+          }
+          res.status(200).json({ op, linked: false, note: 'cross-lane link is implicit via externalId==NameID; no mutable-key link formed' });
           return;
         }
       }
@@ -183,21 +390,28 @@ export function registerScimAuthRoutes(app: Express): void {
       const userName = str(body.userName);
       if (!userName) throw new OpenwopError('validation_error', 'SCIM `userName` is required.', 400, {});
       const emails = Array.isArray(body.emails) ? (body.emails as Array<{ value?: unknown }>) : [];
-      const principal = await provisionUser({
+      // RFC 0163 §B — the real /scim/v2 lane carries no idpUrl (bearer-authed),
+      // so the connection's trust root is the config-bound entityID.
+      const idpEntityId = str(body.externalId) ? await resolveScimIdpEntityId(undefined) : undefined;
+      const { user: principal, created } = await provisionUserWithOutcome({
         tenantId,
         userName,
         ...(str(body.externalId) ? { externalId: str(body.externalId)! } : {}),
+        ...(idpEntityId ? { idpEntityId } : {}),
         ...(str(body.displayName) ? { displayName: str(body.displayName)! } : {}),
         ...(str(emails[0]?.value) ? { email: str(emails[0]!.value)! } : {}),
       });
+      if (created) await auditScimCreate(tenantId, principal);
       res.status(201).json({ schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'], id: principal.userId, userName, active: principal.status === 'active' });
     } catch (err) {
       next(err);
     }
   });
 
-  // Lifecycle: `:id` is EITHER the durable id returned by create (`user:<uuid>`)
-  // OR the SCIM userName (review finding #4). PATCH carries an explicit `active`
+  // Lifecycle: `:id` is EITHER the durable id returned by create
+  // (`user:<sha256-prefix>` — the deterministic `userIdFor` hash, NOT a UUID;
+  // this comment used to say `user:<uuid>`) OR the SCIM userName (review
+  // finding #4). PATCH carries an explicit `active`
   // (flat or RFC 7644 PatchOp) so reactivate (true) and deactivate (false) both
   // work (review finding #5); DELETE is always deactivate.
   for (const handler of ['patch', 'delete'] as const) {
@@ -212,7 +426,8 @@ export function registerScimAuthRoutes(app: Express): void {
           throw new OpenwopError('validation_error', 'PATCH MUST set `active` (flat or via Operations).', 400, {});
         }
         const updated = await setScimActive(user, active);
-        log.info('scim_user_lifecycle', { id: user.userId, active });
+        log.info('scim_user_lifecycle', { userId: user.userId, active });
+        await auditScimLifecycle(tenantId, user.userId, active); // USERS-16 — the IdP-driven leaver on the chain
         // Echo the REAL userName, not the addressed id (review finding #8).
         res.status(200).json({ id: user.userId, userName: scimUserNameOf(user), active: updated?.status === 'active' });
       } catch (err) {

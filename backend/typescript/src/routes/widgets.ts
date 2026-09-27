@@ -28,6 +28,7 @@ import {
   type WidgetMutation,
 } from '../host/examples/widgetService.js';
 import { OpenwopError } from '../types.js';
+import { sendError } from '../middleware/errorEnvelope.js';
 
 function tenantOf(req: Request): string {
   return (req as { tenantId?: string }).tenantId ?? 'default';
@@ -43,14 +44,12 @@ function respondMutation(res: Response, result: WidgetMutation): void {
     return;
   }
   if (result.reason === 'not_found') {
-    res.status(404).json({ error: 'not_found', message: 'No such widget for this tenant.' });
+    sendError(res, 404, 'not_found', 'No such widget for this tenant.');
     return;
   }
-  res.status(409).json({
-    error: 'conflict',
-    reason: result.reason,
-    message: 'The widget is not in a state that allows this mutation.',
-  });
+  // H27-b — `reason` was a NEW TOP-LEVEL key; `additionalProperties: false`
+  // means the machine-readable discriminator rides `details`.
+  sendError(res, 409, 'conflict', 'The widget is not in a state that allows this mutation.', { reason: result.reason });
 }
 
 export function registerWidgetRoutes(app: Express): void {

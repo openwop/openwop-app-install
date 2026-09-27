@@ -1,6 +1,6 @@
 /**
  * Frontend client for the host-extension chat-session routes added
- * in Phase 2C.1. Wraps the seven `/v1/host/openwop-app/chat/sessions/*`
+ * in Phase 2C.1. Wraps the seven `/host/openwop-app/chat/sessions/*`
  * endpoints with typed return shapes that mirror the BE's
  * `ChatSessionRecord` + `ChatMessageRecord`.
  *
@@ -25,6 +25,20 @@ export interface ConversationParticipant {
   role: 'owner' | 'member';
   addedAt: string;
   lastReadAt?: string;
+  /** ADR 0192 D6 — the session messageCount at this participant's last read;
+   *  unread = header.messageCount − readMessageCount (differencing). */
+  readMessageCount?: number;
+  /** ADR 0192 D6 — unseen mentions (`@channel`) for this participant; elided
+   *  when 0. */
+  mentionCount?: number;
+  /** ADR 0192 — TRUE on the row that is the CALLER. Derive unread/mention
+   *  state from this row, never from the `role === 'owner'` heuristic (wrong
+   *  for every non-owner member). */
+  isSelf?: boolean;
+  /** ADR 0192 D1 — an AGENT member's mention token (what `@` inserts). */
+  mentionSlug?: string;
+  /** ADR 0192 D1 — an AGENT member's display label at add-time. */
+  displayLabel?: string;
 }
 
 export interface ChatSessionHeader {
@@ -50,6 +64,14 @@ export interface ChatSessionHeader {
   participants?: ConversationParticipant[];
 }
 
+/** ADR 0195 D3 — the curated reaction vocabulary (mirrors the backend
+ *  `REACTION_EMOJI`; the server rejects anything else). Emoji are CONTENT
+ *  (a user's expression), not iconography. */
+export const REACTION_EMOJI = ['👍', '✅', '👀', '🎉', '❤️', '😄', '🚀', '🤔'] as const;
+
+/** ADR 0195 D3 — a message's public reaction aggregate (viewer-aware `mine`). */
+export interface ReactionAggregate { emoji: string; count: number; mine: boolean }
+
 export interface ChatMessagePersisted {
   messageId: string;
   sessionId: string;
@@ -58,9 +80,37 @@ export interface ChatMessagePersisted {
   content: string;
   meta: string | null;
   createdAt: string;
+  /** Server-stamped author subjectRef (ADR 0102/0192) — drives channel
+   *  attribution + own-message alignment. Null for legacy/host-written rows. */
+  authorSubject?: string | null;
+  /** ADR 0195 D3 — present on multi-party threads when the message has
+   *  reactions. */
+  reactions?: ReactionAggregate[];
 }
 
-const PATH = '/v1/host/openwop-app/chat/sessions';
+const PATH = '/host/openwop-app/chat/sessions';
+
+/** ADR 0195 D1 — edit a message in place (author or channel owner; the server
+ *  stamps `editedAt` when the content actually changed). */
+export async function editChatMessage(sessionId: string, messageId: string, content: string): Promise<void> {
+  await http<unknown>(`${PATH}/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`, {
+    method: 'PUT', body: JSON.stringify({ content }),
+  });
+}
+
+/** ADR 0195 D2 — tombstone-delete a message (author or channel owner). */
+export async function deleteChatMessage(sessionId: string, messageId: string): Promise<void> {
+  await http<unknown>(`${PATH}/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`, { method: 'DELETE' });
+}
+
+/** ADR 0195 D3 — toggle the caller's reaction. Returns the updated aggregate. */
+export async function setMessageReaction(sessionId: string, messageId: string, emoji: string, on: boolean): Promise<ReactionAggregate[]> {
+  const res = await http<{ reactions: ReactionAggregate[] }>(
+    `${PATH}/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}/reactions/${encodeURIComponent(emoji)}`,
+    { method: on ? 'PUT' : 'DELETE' },
+  );
+  return res.reactions ?? [];
+}
 
 async function http<T>(
   path: string,
@@ -111,7 +161,7 @@ export async function fetchModelCapabilities(): Promise<ProviderCapabilities[]> 
   // cachedRead, so a failed load (incl. a 429) is never cached — it self-heals.
   try {
     return await cachedRead('chat.model-capabilities', 300_000, async () => {
-      const r = await http<{ providers: ProviderCapabilities[] }>('/v1/host/openwop-app/chat/model-capabilities');
+      const r = await http<{ providers: ProviderCapabilities[] }>('/host/openwop-app/chat/model-capabilities');
       return r.providers ?? [];
     });
   } catch {
@@ -119,7 +169,7 @@ export async function fetchModelCapabilities(): Promise<ProviderCapabilities[]> 
   }
 }
 
-const SEARCH_PATH = '/v1/host/openwop-app/chat/search';
+const SEARCH_PATH = '/host/openwop-app/chat/search';
 
 /** Server-side full-text search over the caller's conversations + messages
  *  (ADR 0112). Returns `[]` when the `conversation-search` toggle is off (the
@@ -161,7 +211,7 @@ export async function openConversation(opts: {
   subjectRef: string;
   title?: string;
 }): Promise<ChatSessionHeader> {
-  return http<ChatSessionHeader>('/v1/host/openwop-app/chat/conversations/open', {
+  return http<ChatSessionHeader>('/host/openwop-app/chat/conversations/open', {
     method: 'POST',
     body: JSON.stringify(opts),
   });
@@ -174,7 +224,7 @@ export async function attachBoardToConversation(
   opts: { boardId: string; participants: string[] },
 ): Promise<ChatSessionHeader> {
   return http<ChatSessionHeader>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/board`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/board`,
     { method: 'POST', body: JSON.stringify(opts) },
   );
 }
@@ -184,19 +234,19 @@ export async function attachBoardToConversation(
  *  Lives on the assistant feature's surface (it resolves the assistant agent).
  *  Throws (with `not_found`) when no workspace assistant is configured. */
 export async function openWorkspaceConversation(): Promise<ChatSessionHeader> {
-  return http<ChatSessionHeader>('/v1/host/openwop-app/assistant/workspace-conversation', { method: 'POST' });
+  return http<ChatSessionHeader>('/host/openwop-app/assistant/workspace-conversation', { method: 'POST' });
 }
 
 export async function listConversationParticipants(sessionId: string): Promise<ConversationParticipant[]> {
   const r = await http<{ participants: ConversationParticipant[] }>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/participants`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/participants`,
   );
   return r.participants;
 }
 
 export async function addConversationParticipant(sessionId: string, subjectRef: string): Promise<ConversationParticipant[]> {
   const r = await http<{ participants: ConversationParticipant[] }>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/participants`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/participants`,
     { method: 'PUT', body: JSON.stringify({ subjectRef }) },
   );
   return r.participants;
@@ -204,7 +254,7 @@ export async function addConversationParticipant(sessionId: string, subjectRef: 
 
 export async function removeConversationParticipant(sessionId: string, subjectRef: string): Promise<ConversationParticipant[]> {
   const r = await http<{ participants: ConversationParticipant[] }>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(subjectRef)}`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/participants/${encodeURIComponent(subjectRef)}`,
     { method: 'DELETE' },
   );
   return r.participants;
@@ -212,18 +262,18 @@ export async function removeConversationParticipant(sessionId: string, subjectRe
 
 /** Mark the caller's read position in a conversation (ADR 0043 Phase 3). */
 export async function markConversationRead(sessionId: string): Promise<void> {
-  await http<void>(`/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/read`, {
+  await http<void>(`/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/read`, {
     method: 'POST',
   });
 }
 
 export async function getChatSession(sessionId: string): Promise<ChatSessionHeader> {
-  return http<ChatSessionHeader>(`/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`);
+  return http<ChatSessionHeader>(`/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`);
 }
 
 export async function renameChatSession(sessionId: string, title: string): Promise<ChatSessionHeader> {
   return http<ChatSessionHeader>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`,
     {
       method: 'PATCH',
       body: JSON.stringify({ title }),
@@ -232,7 +282,7 @@ export async function renameChatSession(sessionId: string, title: string): Promi
 }
 
 export async function deleteChatSession(sessionId: string): Promise<void> {
-  await http<void>(`/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`, {
+  await http<void>(`/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}`, {
     method: 'DELETE',
   });
 }
@@ -241,7 +291,7 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
  *  conversation (seeded with the parent's first `fromSeq` messages). Omit
  *  `fromSeq` to branch from the end. The caller navigates to the child. */
 export async function branchConversation(sessionId: string, fromSeq?: number): Promise<ChatSessionHeader> {
-  return http<ChatSessionHeader>(`/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/branch`, {
+  return http<ChatSessionHeader>(`/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/branch`, {
     method: 'POST',
     body: JSON.stringify(fromSeq === undefined ? {} : { fromSeq }),
   });
@@ -249,7 +299,7 @@ export async function branchConversation(sessionId: string, fromSeq?: number): P
 
 export async function listChatSessionMessages(sessionId: string): Promise<ChatMessagePersisted[]> {
   const r = await http<{ messages: ChatMessagePersisted[] }>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
   );
   return r.messages;
 }
@@ -275,7 +325,7 @@ export async function listChatSessionMessagesPage(
   const params = new URLSearchParams({ limit: String(opts.limit) });
   if (opts.before) params.set('before', opts.before);
   return http<ChatMessagePage>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages?${params.toString()}`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages?${params.toString()}`,
   );
 }
 
@@ -284,7 +334,7 @@ export async function appendChatMessage(
   msg: { messageId: string; role: string; content: string; meta?: string },
 ): Promise<ChatMessagePersisted> {
   return http<ChatMessagePersisted>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages`,
     {
       method: 'POST',
       body: JSON.stringify(msg),
@@ -302,7 +352,7 @@ export async function updateChatMessage(
   body: { content: string; meta?: string },
 ): Promise<void> {
   await http<void>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/messages/${encodeURIComponent(messageId)}`,
     { method: 'PUT', body: JSON.stringify(body) },
   );
 }
@@ -312,7 +362,7 @@ export async function updateChatMessage(
  *  (`up`/`down`/`neutral`). Best-effort; the caller merges onto restored messages. */
 export async function getSessionFeedback(sessionId: string): Promise<Record<string, 'up' | 'down' | 'neutral'>> {
   const r = await http<{ feedback?: Record<string, 'up' | 'down' | 'neutral'> }>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/feedback`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/feedback`,
   );
   return r.feedback ?? {};
 }
@@ -321,7 +371,7 @@ export async function getSessionFeedback(sessionId: string): Promise<Record<stri
  *  later open reuses the same suspended run. Best-effort; 204 No Content. */
 export async function setConversationRun(sessionId: string, conversationRunId: string): Promise<void> {
   await http<void>(
-    `/v1/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/conversation-run`,
+    `/host/openwop-app/chat/sessions/${encodeURIComponent(sessionId)}/conversation-run`,
     { method: 'PUT', body: JSON.stringify({ conversationRunId }) },
   );
 }

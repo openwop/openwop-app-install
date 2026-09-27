@@ -17,7 +17,11 @@ let BASE: string;
 const TOKEN = 'dev-token';
 
 // catalog 0.9.1 components only (text / field.* / action.button).
-const SURFACE_A = {
+// Per host-sample-test-seams.md §15 the seam's `surface` field is the FULL
+// `ui.a2ui-surface` payload (`{ catalogVersion, surface }`), not the inner
+// surface object — this test previously pinned the inner shape, masking a seam
+// bug that 422'd every spec-shaped (conformance-suite) request.
+const INNER_A = {
   title: 'Schedule',
   components: [
     { component: 'text', text: 'Pick a time.' },
@@ -25,14 +29,16 @@ const SURFACE_A = {
     { component: 'action.button', id: 'go', label: 'Confirm', action: { target: 'resume' } },
   ],
 };
-const SURFACE_B = { ...SURFACE_A, components: SURFACE_A.components.map((c, i) => (i === 0 ? { ...c, text: 'Reschedule.' } : c)) };
+const INNER_B = { ...INNER_A, components: INNER_A.components.map((c, i) => (i === 0 ? { ...c, text: 'Reschedule.' } : c)) };
+const SURFACE_A = { catalogVersion: '0.9.1', surface: INNER_A };
+const SURFACE_B = { catalogVersion: '0.9.1', surface: INNER_B };
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true'; // mounts the emit-surface seam + advert
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -63,10 +69,22 @@ function readSse(path: string, ms: number): Promise<Array<{ event: string; data:
   });
 }
 
+/** A real, OPEN run to emit surfaces onto — parked at a conversation gate, so
+ *  it is readable and never terminal. It used to be a COMPLETED run, and RFC
+ *  0194 closes a terminal run's log to anything but compensation / dead-letter
+ *  records, so the seam's append onto it was (correctly) refused. The suite's
+ *  own scenario never emits onto a finished run either. The helper name is
+ *  kept so the call sites read unchanged. */
+let gateRegistered = false;
 async function completedRun(): Promise<string> {
-  const c = await jf<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId: 'openwop-app.uppercase', inputs: { text: 'hi' } }) });
+  const workflowId = 'openwop-app.a2ui-delta-open-run';
+  if (!gateRegistered) {
+    await jf('/v1/host/openwop-app/workflows', { method: 'POST', body: JSON.stringify({ workflowId, nodes: [{ nodeId: 'gate', typeId: 'core.conversationGate', config: { prompt: 'hold' } }], edges: [] }) });
+    gateRegistered = true;
+  }
+  const c = await jf<{ runId: string }>('/v1/runs', { method: 'POST', body: JSON.stringify({ workflowId, inputs: {}, tenantId: '_anon' }) });
   const runId = c.body.runId;
-  for (let i = 0; i < 30; i++) { await new Promise((r) => setTimeout(r, 40)); const s = await jf<{ status: string }>(`/v1/runs/${runId}`); if (['completed', 'failed', 'cancelled'].includes(s.body.status)) break; }
+  for (let i = 0; i < 50; i++) { await new Promise((r) => setTimeout(r, 40)); const s = await jf<{ status: string }>(`/v1/runs/${runId}`); if (String(s.body.status).startsWith('waiting')) break; }
   return runId;
 }
 
@@ -91,11 +109,11 @@ describe('RFC 0114 — emit-surface seam + delta transport (end to end)', () => 
     // First a2ui surface delivered full; second as a delta frame.
     expect(fulls.length).toBe(1);
     expect(deltas.length).toBe(1);
-    expect(fulls[0]!.data.payload.surface).toEqual(SURFACE_A);
+    expect(fulls[0]!.data.payload.surface).toEqual(INNER_A);
     const frame = deltas[0]!.data;
     expect(frame.surfaceRef).toBe(a.body.surfaceRef); // baseline full event id
-    // Reconstruct: applying the patch to surface A yields the materialized full B.
-    expect(applyPatch(SURFACE_A, frame.patch)).toEqual(SURFACE_B);
+    // Reconstruct: applying the patch to inner tree A yields the materialized full B.
+    expect(applyPatch(INNER_A, frame.patch)).toEqual(INNER_B);
   });
 
   it('a default (non-negotiating) subscriber gets BOTH surfaces full — never a delta', async () => {
@@ -109,7 +127,9 @@ describe('RFC 0114 — emit-surface seam + delta transport (end to end)', () => 
 
   it('fail-closed: an out-of-catalog surface is rejected at emit (422)', async () => {
     const runId = await completedRun();
-    const bad = { title: 'x', components: [{ component: 'script', src: 'evil.js' }] }; // not in catalog 0.9.1
+    // Wrapped in the spec payload shape so the rejection exercises the CATALOG
+    // gate (unknown component), not a wrapper-shape violation.
+    const bad = { catalogVersion: '0.9.1', surface: { title: 'x', components: [{ component: 'script', src: 'evil.js' }] } };
     const res = await jf('/v1/host/sample/a2ui/emit-surface', { method: 'POST', body: JSON.stringify({ runId, surface: bad }) });
     expect(res.status).toBe(422);
   });

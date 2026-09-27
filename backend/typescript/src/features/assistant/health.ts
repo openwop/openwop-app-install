@@ -24,7 +24,17 @@ export interface AssistantHealth {
     rejected: number;
     sent: number;
     failed: number;
-    /** approved+sent / decided — how often the assistant's drafts are accepted. */
+    /**
+     * COS-8 — actions allowed under a NON-`approval-required` policy
+     * (`draft-only`): the human decision is recorded but the policy blocked
+     * egress, so nothing was sent. Counted separately and EXCLUDED from the
+     * human-oversight metrics below (it is neither a human accept nor a human
+     * decision — the approval gate was a no-op under that policy).
+     */
+    suppressed: number;
+    /** approved+sent / decided — how often the assistant's drafts are accepted.
+     *  Human oversight only: policy-`suppressed` actions are excluded from both
+     *  the numerator (accepted) and the denominator (decided) — see COS-8. */
     approvalRate: number | null;
     /** Fraction of decided actions the principal edited first. */
     editRate: number | null;
@@ -51,7 +61,12 @@ export async function buildAssistantHealth(tenantId: string, nowMs: number = Dat
   ]);
 
   const byStatus = (s: string): number => allActions.filter((a) => a.status === s).length;
-  const decided = allActions.filter((a) => a.status !== 'pending');
+  // COS-8 — `decided` is HUMAN oversight decisions only. `pending` has no
+  // decision yet; `suppressed` was allowed by a non-`approval-required` policy,
+  // where the human approval gate was a no-op — counting it would let a lenient
+  // policy inflate the oversight numbers. Excluded from BOTH numerator and
+  // denominator (out of `decided` ⇒ out of `accepted`, which filters `decided`).
+  const decided = allActions.filter((a) => a.status !== 'pending' && a.status !== 'suppressed');
   const accepted = decided.filter((a) => a.status === 'approved' || a.status === 'sent');
   const cited = allActions.filter((a) => (a.sourceRefs ?? []).length > 0);
   const stale = open.filter((c) => {
@@ -68,6 +83,7 @@ export async function buildAssistantHealth(tenantId: string, nowMs: number = Dat
       rejected: byStatus('rejected'),
       sent: byStatus('sent'),
       failed: byStatus('failed'),
+      suppressed: byStatus('suppressed'),
       approvalRate: rate(accepted.length, decided.length),
       editRate: rate(decided.filter((a) => a.editedAt !== undefined).length, decided.length),
       citationCoverage: rate(cited.length, allActions.length),

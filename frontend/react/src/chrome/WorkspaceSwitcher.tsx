@@ -14,11 +14,12 @@
  * @see ../client/workspaceClient.ts, ../../../backend/typescript/src/routes/workspaces.ts
  */
 import { useEffect, useState } from 'react';
+import { fireAuthChanged } from '../client/config.js';
 import { useTranslation } from 'react-i18next';
 import { Link } from 'react-router-dom';
 import { useBrand } from '../brand/BrandProvider.js';
 import { BuildingIcon, ChevronRightIcon, SettingsIcon } from '../ui/icons/index.js';
-import { listMyWorkspaces, switchWorkspace, createWorkspace, type WorkspaceSummary } from '../client/workspaceClient.js';
+import { listMyWorkspaces, switchWorkspace, createAndEnterWorkspace, type WorkspaceSummary } from '../client/workspaceClient.js';
 
 const NEW = '__new__';
 
@@ -43,6 +44,13 @@ export function WorkspaceSwitcher(): JSX.Element {
     setBusy(true);
     try {
       await fn();
+      // Deferred Phase D (SHELL-8, staged): broadcast the tenant change so
+      // every registered tenant-keyed cache resets in-app… and then STILL
+      // reload. The reload fallback stays until the SSE-bound stores
+      // (notifications, review status) and the builder canvas grow real
+      // tenant-reset paths — removing it before then risks a half-reset
+      // showing the prior tenant's data (store inventory, PLAN-DEFERRED D.1).
+      fireAuthChanged();
       window.location.reload();
     } catch {
       setBusy(false); // surface stays usable; the failed call already logged
@@ -58,10 +66,9 @@ export function WorkspaceSwitcher(): JSX.Element {
   const submitCreate = (): void => {
     const name = newName.trim();
     if (!name || busy) return;
-    void reloadInto(async () => {
-      const ws = await createWorkspace({ name });
-      await switchWorkspace(ws.workspaceId);
-    });
+    // ADR 0015 — create+enter is ONE behaviour (`createAndEnterWorkspace`), shared
+    // with the Organizations page so the two entry points cannot drift.
+    void reloadInto(async () => { await createAndEnterWorkspace(name); });
   };
   const cancelCreate = (): void => { if (!busy) { setCreating(false); setNewName(''); } };
 
@@ -95,7 +102,7 @@ export function WorkspaceSwitcher(): JSX.Element {
           >
             {workspaces.map((w) => (
               <option key={w.workspaceId} value={w.workspaceId}>
-                {w.name}{w.kind === 'personal' ? ` · ${t('personal')}` : ''}
+                {w.name}
               </option>
             ))}
             <option value={NEW}>{t('newWorkspaceOption')}</option>

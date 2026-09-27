@@ -1,6 +1,6 @@
 # Demo / Sample → openwop-app Rename Map (canonical)
 
-Companion to `demo-sample-purge-audit.md`. This is the authoritative target-string
+Companion to `docs/steward/demo-sample-purge-audit.md`. This is the authoritative target-string
 map the productionization uses. Driver: make this a credible white-label app — no
 "demo"/"sample"/"not-production-hardened" framing; a neutral, honest vendor identity.
 

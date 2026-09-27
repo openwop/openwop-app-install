@@ -1,7 +1,7 @@
 {
   "name": "feature.cms.nodes",
-  "version": "1.1.0",
-  "description": "CMS feature node pack (ADR 0064 Phase 3 / RFC 0103) — workflow nodes over the `ctx.features.cms` surface shipped by the CMS feature (ADR 0009). `get-page` reads a published page resolved for a target locale (exact → language-family → base); `translate-section` drafts a sparse per-locale overlay for a section's base data via the run-scoped provider (ctx.callAI). Both are role:action — get-page reads the tenant CMS store; translate-section is generative — so their outputs are recorded and replay/fork read the recorded result. Generation stays in the node (run-scoped), never in the read-only surface. The overlay is sanitized on persist (the page PATCH write path), not here.",
+  "version": "1.5.0",
+  "description": "CMS feature node pack (write verbs C6) — workflow nodes over the `ctx.features.cms` surface shipped by the CMS feature. Reads: `get-page` (published page resolved for a target locale, exact → language-family → base) and `list-pages`. Generative: `translate-section` (sparse per-locale overlay via the run-scoped ctx.callAI). Governed writes: `update-section-draft` (DRAFT-only section patch, sanitized like an editor save) and `submit-page` (the SAME approval-gate composition as the editor submit — a node can draft and submit but NEVER publish). Reads are role:action (outputs recorded; replay/fork read the recorded result). The three WRITERS are role:side-effect (ADR 0668 D5): `update-section-draft` and `submit-page` mutate the pages store and are replay-SERVED; `translate-section` also writes and is additionally NON-DETERMINISTIC (it calls the model), so the generator holds it back from the served set as an ai-invocation-log and it re-executes on replay by design — RFC 0041 §B divergence injection depends on that, and the ADR 0326 invocation log is its discharge. Overlays are sanitized on persist.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "cms", "content", "localization", "i18n", "rfc-0103"],
@@ -26,11 +26,35 @@
     },
     {
       "typeId": "feature.cms.nodes.translate-section",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "CMS Translate Section",
-      "description": "Draft a sparse per-locale overlay for a section's base data via the run-scoped provider (ctx.callAI), structure-preserving JSON-in/JSON-out. Inputs: { data, targetLocale, provider?, model?, maxTokens? }. Output: { overlay, targetLocale } — a draft the editor reviews before saving; the page PATCH write path sanitizes it (anti-XSS / open-redirect).",
+      "description": "Draft a sparse per-locale overlay for a section's base data via the run-scoped provider (ctx.callAI), structure-preserving JSON-in/JSON-out. Inputs: { data, targetLocale, provider?, model?, maxTokens? }. Output: { overlay, targetLocale } — a draft the editor reviews before saving; the page PATCH write path sanitizes it (anti-XSS / open-redirect). Invalid/empty model output FAILS TYPED (error code invalid_model_output) after ONE bounded error-fed repair attempt (ADR 0592 §7) — never success-with-empty; empty INPUT data returns an empty overlay (nothing to translate).",
+      "category": "integration",
+      "role": "side-effect"
+    },
+    {
+      "typeId": "feature.cms.nodes.get-draft-page",
+      "version": "1.0.0",
+      "label": "CMS Get Draft Page (raw)",
+      "description": "A DRAFT/in-review page's RAW sections (base data + which overlay locales exist) via ctx.features.cms.getDraftPage (ADR 0204 C6) — the edit-then-submit read. Inputs: { orgId, pageId }. Output: { page } (null when absent). A tenant-scoped run reads like an org member; anonymous delivery stays published-only.",
       "category": "integration",
       "role": "action"
+    },
+    {
+      "typeId": "feature.cms.nodes.update-section-draft",
+      "version": "1.1.0",
+      "label": "CMS Update Section (draft)",
+      "description": "Patch a DRAFT page's section — its base data or one per-locale overlay — via ctx.features.cms.updateSectionDraft (ADR 0204 C6). Inputs: { orgId, pageId, sectionId, data, locale? }. Output: { updated, locale? }. A REFUSAL is a node FAILURE, not a success with `updated:false` — the error code is the reason (`not_found`, `section_not_found`, or `empty` when every key was dropped by the closed-world sanitizer), so a chain that continues past this node has genuinely written. Draft-only (409 otherwise); the surface sanitizes through the same overlay cleaner as an editor save.",
+      "category": "integration",
+      "role": "side-effect"
+    },
+    {
+      "typeId": "feature.cms.nodes.submit-page",
+      "version": "1.1.0",
+      "label": "CMS Submit Page (for review)",
+      "description": "Submit a DRAFT page for editorial review via ctx.features.cms.submitPage (ADR 0204 C6) — the SAME approval-gate composition as the editor's submit: an ApprovalsInbox row is queued UNCONDITIONALLY (ADR 0593 C1 — under both toggle states; the toggle gates whether a direct publish is refused, not whether the review row exists); a node can draft and submit but NEVER publish. Inputs: { orgId, pageId }. Output: { submitted, status }. A REFUSAL is a node FAILURE with `not_found` as the error code — a green step here means an approval row really exists.",
+      "category": "integration",
+      "role": "side-effect"
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

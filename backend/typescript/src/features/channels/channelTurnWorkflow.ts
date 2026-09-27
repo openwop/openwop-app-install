@@ -12,10 +12,27 @@
  * Channels-owned (no feature→feature import) but reuses the CORE agent-runner +
  * managed provider + run engine — NO parallel dispatch/run model. Registered
  * idempotently at channels feature boot.
+ *
+ * WHAT CHANGED AND WHY (ADR 0703). This used to build an in-tree `WorkflowDefinition`
+ * literal and hand it to the RAW `registerWorkflow()` — instance #3 of the `SCWF-1`
+ * class and one of the entries in `test/workflow-pin-site-ratchet.test.ts`'s
+ * `PIN_SITE_QUARANTINE`, the shape `CLAUDE.md` § "Workflows — never hard-code" forbids:
+ * a code-pinned workflow is invisible to `/builder` and the `/` picker and is not
+ * tenant-editable.
+ *
+ * The graph now ships as `core.openwop.workflows.channel-turn`
+ * (`examples/workflow-chain-packs/channel-turn`) and registers CHAIN-BACKED under the
+ * SAME workflowId, so `channelAgentDispatch.ts`'s `startWorkflowRun` and every run
+ * stamp keep resolving — the drain assistant (7→5), `workflowAuthorSeed` (5→4) and
+ * scheduled-agent-chats (4→3) performed before it.
+ *
+ * The per-post values still work because `registerChainBackedWorkflow` expands with
+ * `deferred: true` (RFC 0124): the chain's `parameters` become run-overridable
+ * `variables[]` with their BARE launch-contract names restored, so the node still reads
+ * `{type:'variable', variableName:'agentId'}` and the dispatch's `configurable`
+ * (`channelAgentDispatch.ts:114`) still drives it per post.
  */
-import { registerWorkflow, getRegisteredWorkflow } from '../../host/workflowsRegistry.js';
-import { AGENT_RUNNER_TYPE_ID } from '../../host/agentRunnerNode.js';
-import type { WorkflowDefinition } from '../../executor/types.js';
+import { registerChainBackedWorkflow, getChainBackedWorkflow } from '../../host/chainBackedWorkflows.js';
 
 export const CHANNEL_TURN_WORKFLOW_ID = 'openwop-app.channel.turn';
 
@@ -23,30 +40,10 @@ export const CHANNEL_TURN_WORKFLOW_ID = 'openwop-app.channel.turn';
  *  no user/BYOK at post time, mirroring the scheduled-chat boundary). */
 export const CHANNEL_MANAGED_CREDENTIAL_REF = 'managed:openwop-free';
 
-const DEF: WorkflowDefinition = {
-  workflowId: CHANNEL_TURN_WORKFLOW_ID,
-  nodes: [{
-    nodeId: 'run',
-    typeId: AGENT_RUNNER_TYPE_ID,
-    inputs: {
-      agentId: { type: 'variable', variableName: 'agentId' },
-      task: { type: 'variable', variableName: 'task' },
-      credentialRef: { type: 'variable', variableName: 'credentialRef' },
-      // The agent-runner posts its reply into this conversation (the channel).
-      conversationId: { type: 'variable', variableName: 'conversationId' },
-    },
-    outputRole: 'primary',
-  }],
-  variables: [
-    { name: 'agentId', type: 'string', description: 'The addressed agent member to run.', required: true },
-    { name: 'task', type: 'string', description: 'The channel post the agent responds to.', required: true },
-    { name: 'credentialRef', type: 'string', description: 'The host-owned managed credential (system-fired — no BYOK).', required: false },
-    { name: 'conversationId', type: 'string', description: 'The channel the reply posts into.', required: false },
-  ],
-  edges: [],
-};
 
 /** Register the channel turn-workflow once (idempotent — safe at every boot). */
 export function seedChannelTurnWorkflow(): void {
-  if (!getRegisteredWorkflow(CHANNEL_TURN_WORKFLOW_ID)) registerWorkflow(DEF);
+  if (!getChainBackedWorkflow(CHANNEL_TURN_WORKFLOW_ID)) {
+    registerChainBackedWorkflow(CHANNEL_TURN_WORKFLOW_ID);
+  }
 }

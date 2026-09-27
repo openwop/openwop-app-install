@@ -3,14 +3,9 @@
  * verdict bands + signals, plus a route test that the `GET /strategy/health`
  * endpoint rolls up a linked project's charter health (RBAC-filtered, live).
  */
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { computeStrategyHealth } from '../src/features/strategy/strategyHealth.js';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, type Client } from './planningHarness.js';
 
 describe('computeStrategyHealth (pure)', () => {
   const entry = (over: Partial<Parameters<typeof computeStrategyHealth>[0]>) =>
@@ -69,32 +64,17 @@ describe('computeStrategyHealth (pure)', () => {
 });
 
 // ── route ──
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 let n = 0;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  for (const id of ['strategy']) { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); }
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
+  await enableToggle('strategy', 'on');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res> }
-function client(): Client {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    return { status: res.status, body: res.status === 204 ? undefined : await res.json().catch(() => undefined) };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b) };
-}
+const client = (): Client => makeClient(() => BASE);
 
 describe('GET /strategy/health (route)', () => {
   const S = '/v1/host/openwop-app/strategy';
@@ -139,10 +119,10 @@ describe('GET /strategy/health (route)', () => {
   });
 
   it('404s when the strategy toggle is off', async () => {
-    const d = getToggleDefault('strategy'); if (d) await saveConfig({ ...d, status: 'off' }, 'test');
+    await enableToggle('strategy', 'off');
     const c = client();
     await c.post('/v1/host/openwop-app/test/login', { email: `h2-${Date.now()}-${n++}@x.test` });
     expect((await c.get(`${S}/health`)).status).toBe(404);
-    if (d) await saveConfig({ ...d, status: 'on' }, 'test');
+    await enableToggle('strategy', 'on');
   });
 });

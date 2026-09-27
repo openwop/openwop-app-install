@@ -17,4 +17,8 @@ export const messages = {
   exportJsonTitle: 'Descargar el registro completo de eventos en JSON',
   eventCount_one: '{{count}} evento',
   eventCount_other: '{{count}} eventos',
+  noEventsYetBody: 'Los eventos aparecen aquí en vivo mientras se ejecuta la ejecución.',
+  eventsUnreadableTitle: 'No se pudieron cargar los eventos de esta ejecución.',
+  eventsUnreadableBody: 'El registro de eventos no se cargó, así que no podemos decir qué hizo esta ejecución. Esto no es lo mismo que la ejecución no haya producido nada.',
+  eventsLoadingTitle: 'Cargando eventos…',
 } as const;

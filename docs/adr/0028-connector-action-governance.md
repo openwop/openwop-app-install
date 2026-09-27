@@ -46,8 +46,14 @@ GovernancePolicy {
                                        //   'draft-only' for send/invite/reschedule
   groupAccess?: { [provider]: orgId[] }, // narrows connections:use grants
   retention?: { assistantGraphDays?, sourceDerivedDays? },
+  brandCompliance?: { blockPublish, blockThreshold?, defaultBrandId? }, // BRAND-CODE-6 (ADR 0354): tenant-default brand policy governing UNBRIEFED publishAd; sources rules from defaultBrandId, fail-open when absent
   updatedAt, updatedByUserId }
 ```
+
+> Note: the store has since grown further additive optional fields as enforcement
+> seams were configured — `mediaBudget` (ADR 0106), `byokChatBudget` (ADR 0178),
+> `adSpend`, `commerce`, `brandCompliance` (ADR 0354). All are optional; zero
+> migration on the generic `DurableCollection`.
 
 ### How each rule is enforced (the load-bearing table)
 

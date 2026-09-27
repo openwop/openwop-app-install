@@ -16,7 +16,7 @@
  *                                       lives here)
  */
 
-import type { ChatSessionHeader, ConversationType } from '../../client/chatSessionsClient.js';
+import type { ChatSessionHeader, ConversationParticipant, ConversationType } from '../../client/chatSessionsClient.js';
 
 export type ConversationSection = 'Agents' | 'Channels' | 'Groups' | 'Workspace';
 
@@ -45,21 +45,51 @@ export function sectionOf(type?: ConversationType): ConversationSection {
 }
 
 /**
- * Whether a conversation has unread activity for its owner (ADR 0043 Phase 3).
- * Compares the conversation's `updatedAt` (bumped on every message append)
- * against the owner participant's `lastReadAt` read marker — the same shape
- * Slack/Discord drive their unread dot from.
+ * The CALLER's participant row (ADR 0192). The backend stamps `isSelf: true`
+ * on the row matching the authenticated caller; the pre-0192 `role === 'owner'`
+ * heuristic remains ONLY as a legacy fallback (it reads the wrong marker for
+ * every non-owner channel/group member).
+ */
+export function selfParticipant(c: ChatSessionHeader): ConversationParticipant | undefined {
+  const participants = c.participants ?? [];
+  return participants.find((p) => p.isSelf) ?? participants.find((p) => p.role === 'owner');
+}
+
+/**
+ * Exact unread count by differencing (ADR 0192 D6):
+ * `messageCount − readMessageCount` from the caller's OWN row. Null when the
+ * marker predates counting (no `readMessageCount` yet) — callers fall back to
+ * the boolean `isUnread` dot.
+ */
+export function unreadCountOf(c: ChatSessionHeader): number | null {
+  const self = selfParticipant(c);
+  if (!self || self.readMessageCount === undefined) return null;
+  return Math.max(0, c.messageCount - self.readMessageCount);
+}
+
+/** Unseen mentions for the caller (`@channel` tier, ADR 0192 D6). */
+export function mentionCountOf(c: ChatSessionHeader): number {
+  return selfParticipant(c)?.mentionCount ?? 0;
+}
+
+/**
+ * Whether a conversation has unread activity for the CALLER (ADR 0043 Phase 3,
+ * re-based on the caller's own row per ADR 0192). Prefers the exact count
+ * differencing; falls back to the `lastReadAt < updatedAt` comparison — the
+ * same shape Slack/Discord drive their unread dot from.
  *
  * Conservative by design: an empty conversation is never unread (you just made
- * it), and a legacy session with no owner participant can't be computed so it
- * reads as read (no false dot). ISO-8601 timestamps compare lexicographically.
+ * it), and a legacy session with no derivable self row reads as read (no false
+ * dot). ISO-8601 timestamps compare lexicographically.
  */
 export function isUnread(c: ChatSessionHeader): boolean {
   if (c.messageCount === 0) return false;
-  const owner = (c.participants ?? []).find((p) => p.role === 'owner');
-  if (!owner) return false; // legacy / unknown owner — don't guess
-  if (!owner.lastReadAt) return true; // owner has activity but has never read it
-  return owner.lastReadAt < c.updatedAt;
+  const count = unreadCountOf(c);
+  if (count !== null) return count > 0;
+  const self = selfParticipant(c);
+  if (!self) return false; // legacy / unknown caller — don't guess
+  if (!self.lastReadAt) return true; // caller has activity but has never read it
+  return self.lastReadAt < c.updatedAt;
 }
 
 /**

@@ -11,11 +11,19 @@
 
 import i18n from '../../i18n/index.js';
 import type { ChatSession } from '../types.js';
+import { STORAGE_KEYS, getStorageSubject, scopedKey } from '../../platform/storage.js';
 import {
-  LS_CURRENT_SESSION_KEY as LS_KEY,
-  LS_SESSION_INDEX_KEY as LS_INDEX_KEY,
   LS_SESSION_INDEX_VERSION,
 } from './storageKeys.js';
+
+/** ADR 0434 Phase 3 — the chat caches are subject-scoped: signed in they live
+ *  at `<key>:<uid>`, anonymously at the bare key (where all pre-Phase-3 data
+ *  already sits, so nothing needs migrating). Without this, the next person to
+ *  use a shared browser saw the previous user's message thread. Computed per
+ *  call rather than cached, because the subject changes on sign-in/out. */
+const LS_KEY = (): string => scopedKey(STORAGE_KEYS.chatSession, getStorageSubject());
+const LS_INDEX_KEY = (): string => scopedKey(STORAGE_KEYS.chatSessionsIndex, getStorageSubject());
+
 
 /** Max session headers retained in the local index — bounded for quota. */
 export const LOCAL_INDEX_MAX = 50;
@@ -35,7 +43,7 @@ interface LocalSessionIndexEnvelope {
 
 export function readSessionIndex(): LocalSessionHeader[] {
   try {
-    const raw = localStorage.getItem(LS_INDEX_KEY);
+    const raw = localStorage.getItem(LS_INDEX_KEY());
     if (!raw) return [];
     const parsed = JSON.parse(raw) as Partial<LocalSessionIndexEnvelope>;
     // Drop payloads from a different version — shape may have drifted.
@@ -54,7 +62,7 @@ export function writeSessionIndex(items: readonly LocalSessionHeader[]): void {
       v: LS_SESSION_INDEX_VERSION,
       items: [...items],
     };
-    localStorage.setItem(LS_INDEX_KEY, JSON.stringify(envelope));
+    localStorage.setItem(LS_INDEX_KEY(), JSON.stringify(envelope));
   } catch {
     /* over-quota; silently drop */
   }
@@ -109,7 +117,7 @@ function isPlaceholderTitle(title: string): boolean {
 
 export function loadSession(): ChatSession {
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = localStorage.getItem(LS_KEY());
     if (raw) return JSON.parse(raw) as ChatSession;
   } catch {
     /* fall through to fresh */
@@ -131,7 +139,7 @@ export function persistSession(session: ChatSession, opts: { writeCurrentCache?:
   const writeCurrentCache = opts.writeCurrentCache !== false;
   if (writeCurrentCache) {
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify(session));
+      localStorage.setItem(LS_KEY(), JSON.stringify(session));
     } catch {
       /* over-quota; silently drop */
     }

@@ -31,7 +31,7 @@ describe('Host OAuth client config (superadmin surface)', () => {
     await __resetConnectionsStore();
     await __resetOAuthClientStore();
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
   });
   afterAll(async () => {

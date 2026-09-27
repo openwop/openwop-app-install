@@ -14,50 +14,27 @@
  *     hard-delete a user-scoped draft ⇒ 204
  */
 
-import http from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { getSetCookies } from './headerCookies.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createApp } from '../src/index.js';
-import { saveConfig } from '../src/host/featureToggles/service.js';
-import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { bootPlanningApp, makeClient, enableToggle, uniqEmail, type Client } from './planningHarness.js';
 
-let BASE: string;
-let server: http.Server;
+let BASE = '';
+let closeApp: () => Promise<void>;
 let n = 0;
 
 beforeAll(async () => {
-  process.env.OPENWOP_STORAGE_DSN = 'memory://';
-  process.env.OPENWOP_SESSION_SECRET = 'test-session-secret-at-least-32-characters-long';
-  process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
-  delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
-  const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
-  await enable('on');
+  const h = await bootPlanningApp(); BASE = h.base; closeApp = h.close;
+  await enableToggle('strategy', 'on');
 });
-afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
+afterAll(async () => { await closeApp(); });
 
-interface Res<T = any> { status: number; body: T }
-interface Client { get: (p: string) => Promise<Res>; post: (p: string, b?: unknown) => Promise<Res>; patch: (p: string, b?: unknown) => Promise<Res>; put: (p: string, b?: unknown) => Promise<Res>; del: (p: string) => Promise<Res> }
-function client(): Client {
-  let cookie = '';
-  const call = async (method: string, path: string, body?: unknown): Promise<Res> => {
-    const res = await fetch(`${BASE}${path}`, { method, headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) }, ...(body !== undefined ? { body: JSON.stringify(body) } : {}) });
-    for (const ck of getSetCookies(res.headers) as string[]) { const m = /(__session=[^;]+)/.exec(ck); if (m) cookie = m[1]; }
-    const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
-    return { status: res.status, body: out };
-  };
-  return { get: (p) => call('GET', p), post: (p, b) => call('POST', p, b), patch: (p, b) => call('PATCH', p, b), put: (p, b) => call('PUT', p, b), del: (p) => call('DELETE', p) };
-}
+const client = (): Client => makeClient(() => BASE);
 
-const uniqEmail = (who: string): string => `${who}-${Date.now()}-${n++}@acme.test`;
 async function signup(c: Client, opts: { tenantId?: string } = {}): Promise<{ userId: string }> {
   const r = await c.post('/v1/host/openwop-app/test/login', { email: uniqEmail('strat'), ...(opts.tenantId ? { tenantId: opts.tenantId } : {}) });
   expect(r.status, JSON.stringify(r.body)).toBe(201);
   return r.body.user;
 }
-const enable = async (status: 'on' | 'off'): Promise<void> => { const d = getToggleDefault('strategy'); if (d) await saveConfig({ ...d, status }, 'test'); };
-const enableToggle = async (id: string): Promise<void> => { const d = getToggleDefault(id); if (d) await saveConfig({ ...d, status: 'on' }, 'test'); };
+const enable = (status: 'on' | 'off'): Promise<void> => enableToggle('strategy', status);
 
 const S = '/v1/host/openwop-app/strategy';
 const mkOrg = (c: Client, name: string) => c.post('/v1/host/openwop-app/orgs', { name });
@@ -276,5 +253,51 @@ describe('strategy — links + context projection', () => {
     expect(readerCtx.status).toBe(200);
     const entry = readerCtx.body.strategies.find((x: any) => x.id === s.id);
     if (entry) expect(entry.linkedProjects.map((p: any) => p.id)).not.toContain(proj.id);
+  });
+});
+
+describe('strategy — GET /:id/context (strategy-gap A3)', () => {
+  it('returns the resolved packet for ONE strategy — linked idea title/rank in one fetch', async () => {
+    const { owner, orgId } = await ownerWithOrg(freshTenant());
+    await enableToggle('priority-matrix');
+    const PM = '/v1/host/openwop-app/priority-matrix';
+    const list = (await owner.post(`${PM}/lists`, { orgId, name: 'Bets', presetId: 'weighted' })).body;
+    await owner.post(`${PM}/lists/${encodeURIComponent(list.id)}/ideas`, { title: 'Expand to EU' });
+    const ranked = (await owner.get(`${PM}/lists/${encodeURIComponent(list.id)}/ideas`)).body.ideas;
+    const cardId = ranked[0].card.id;
+
+    const proj = (await owner.post('/v1/host/openwop-app/projects', { orgId, name: 'Apollo' })).body;
+    const s = (await owner.post(S, {
+      orgId, title: 'Growth', scope: 'org',
+      objectives: [{ title: 'Grow ARR', keyResults: [{ title: 'ARR 10M', target: '10M' }] }],
+    })).body;
+    expect((await owner.put(`${S}/${s.id}/links`, {
+      links: [
+        { kind: 'priority-idea', listId: list.id, cardId },
+        { kind: 'project', projectId: proj.id },
+      ],
+    })).status).toBe(200);
+
+    const ctx = await owner.get(`${S}/${s.id}/context`);
+    expect(ctx.status, JSON.stringify(ctx.body)).toBe(200);
+    expect(ctx.body.strategy.id).toBe(s.id);
+    expect(ctx.body.strategy.objectives[0].keyResults[0].title).toBe('ARR 10M');
+    const lp = ctx.body.strategy.linkedPriorities.find((x: any) => x.cardId === cardId);
+    expect(lp?.title).toBe('Expand to EU');
+    expect(lp?.rank).toBe(1); // resolved via listRankedIdeas — the score/rank the detail page renders
+    expect(ctx.body.strategy.linkedProjects.map((p: any) => p.id)).toContain(proj.id);
+  });
+
+  it('is read-gated with a uniform 404 (no existence leak) like GET /:id', async () => {
+    const tenantId = freshTenant();
+    const owner = client(); await signup(owner, { tenantId });
+    const other = client(); await signup(other, { tenantId });
+    const orgId = (await mkOrg(owner, 'Acme')).body.orgId;
+    // a user-scoped private draft — only the creator reads it
+    const s = (await owner.post(S, { orgId, title: 'Secret bet', scope: 'user' })).body;
+    expect((await owner.get(`${S}/${s.id}/context`)).status).toBe(200);
+    const denied = await other.get(`${S}/${s.id}/context`);
+    expect(denied.status).toBe(404); // uniform not_found, indistinguishable from a dead id
+    expect((await other.get(`${S}/does-not-exist/context`)).status).toBe(404);
   });
 });

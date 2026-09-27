@@ -24,13 +24,13 @@ Choose via `task.shape`. Each shape has its own structural rules in the prompt.
 
 ## RAG grounding
 
-Optional. When `task.knowledgeSourceIds` is non-empty, the agent retrieves from those sources via `openwop:core.rag.retrieve` and grounds claims in the retrieved content. Citations are returned in `sources`.
+Optional. When `task.knowledgeSourceIds` is non-empty, the agent retrieves from those sources via `openwop:core.rag.retriever-basic` and grounds claims in the retrieved content. Citations are returned in `sources`.
 
 When unset, the agent writes from its training and the `task.sourceMaterial` content. No tool calls.
 
 ## Writing to disk
 
-When `task.outputPath` is set, the agent writes the final document via `openwop:core.files.fs-write` and returns the path. When unset, the document is returned only in the response payload.
+When `task.outputPath` is set, the agent writes the final document via `openwop:core.files.write` and returns the path. When unset, the document is returned only in the response payload.
 
 ## Handoff schemas
 

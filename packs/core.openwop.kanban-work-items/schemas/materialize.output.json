@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/core.openwop.kanban-work-items/1.1.0/materialize.output.json",
+  "title": "KanbanWorkItemsMaterializeOutput",
+  "type": "object",
+  "required": ["dryRun", "workItems", "cards"],
+  "properties": {
+    "dryRun": { "type": "boolean" },
+    "workItems": { "type": "array" },
+    "cards": { "type": "array" }
+  },
+  "additionalProperties": false
+}

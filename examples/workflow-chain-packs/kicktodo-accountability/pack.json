@@ -1,0 +1,48 @@
+{
+  "name": "core.openwop.workflows.kicktodo-accountability",
+  "version": "1.0.0",
+  "kind": "workflow-chain",
+  "description": "Migrated from deprecated builtins (ADR 0472 P4).",
+  "keywords": [
+    "KickTodo"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "openwop-app.kicktodo.session-reminder",
+      "version": "1.0.0",
+      "label": "Session reminder",
+      "description": "Send a participant the reminder for their upcoming accountability session.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "circleId": {
+            "type": "string"
+          },
+          "atIso": {
+            "type": "string"
+          },
+          "conversationId": {
+            "type": "string"
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "remind",
+            "typeId": "feature.kicktodo.nodes.session-reminder",
+            "inputs": {
+              "circleId": "{{params.circleId}}",
+              "atIso": "{{params.atIso}}",
+              "conversationId": "{{params.conversationId}}"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

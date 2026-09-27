@@ -26,6 +26,11 @@ export interface ConfirmOptions {
   danger?: boolean;
   /** Optional leading icon for the affirmative button. */
   confirmIcon?: ReactNode;
+  /** SET-R2-1 — the user must TYPE this exact value to arm the destructive
+   *  button (the Vercel/GitHub danger-zone convention). Reserve for deletions
+   *  whose blast radius exceeds the row under the pointer (an org, a
+   *  workspace); plain `danger` stays right for single-record deletes. */
+  typeToConfirm?: string;
 }
 
 interface Pending extends ConfirmOptions { resolve: (ok: boolean) => void }
@@ -61,6 +66,7 @@ export function ConfirmRoot(): JSX.Element | null {
       confirmLabel={pending.confirmLabel ?? t('confirm')}
       confirmIcon={pending.confirmIcon}
       danger={pending.danger ?? false}
+      {...(pending.typeToConfirm !== undefined ? { typeToConfirm: pending.typeToConfirm } : {})}
       onConfirm={() => settle(true)}
       onCancel={() => settle(false)}
     />

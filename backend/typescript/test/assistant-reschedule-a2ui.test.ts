@@ -34,7 +34,7 @@ describe('Assistant calendar.reschedule A2UI clarification (ADR 0051 §3/§5)', 
     process.env.OPENWOP_STORAGE_DSN = 'memory://';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await new Promise<void>((res) => {
-      server = app.listen(0, res);
+      server = app.listen(0, '127.0.0.1', res);
     });
     await __resetAssistantStore();
     nodes = (await import('../../../packs/feature.assistant.nodes/index.mjs')).nodes;

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/create-contact.input.json",
+  "title": "CrmCreateContactInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) — chain-authored config and DAG-forwarded inputs are both legal sources, so nothing is `required` here; the SURFACE refuses a missing key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "contactId": {
+      "type": "string",
+      "description": "Explicit `crm:`-prefixed id (ADR 0162). Omitted, the node derives `crm:${runId}:${nodeId}` — a PER-RUN dedupe key (a retried node converges), not a cross-run fork guard; the `side-effect` classification is the guard.",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "name": {
+      "type": "string",
+      "description": "Display name."
+    },
+    "email": {
+      "type": "string",
+      "description": "Primary email; the identity-resolution key."
+    },
+    "company": {
+      "type": "string",
+      "description": "Free-text company name."
+    },
+    "stage": {
+      "type": "string",
+      "description": "Lifecycle stage (`lead`/`qualified`/`customer`/`churned`)."
+    },
+    "owner": {
+      "type": "string",
+      "description": "Owning subject id (RFC 0048)."
+    }
+  },
+  "additionalProperties": true
+}

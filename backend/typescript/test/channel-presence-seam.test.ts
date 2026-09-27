@@ -25,7 +25,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   await enableChannels();
   const r = await j('/v1/host/openwop-app/channels', { method: 'POST', body: JSON.stringify({ name: 'eng', visibility: 'public' }) });
   (globalThis as Record<string, unknown>).__chId = (r.body as { channel: { conversationId: string } }).channel.conversationId;

@@ -1,11 +1,19 @@
 {
   "name": "feature.priority-matrix.nodes",
-  "version": "1.1.0",
-  "description": "Priority Matrix feature node pack (ADR 0058 / ADR 0014) — read + write nodes over the ctx.features['priority-matrix'] surface shipped by the Priority Matrix feature package. Lets a workflow (or a chat agent via the agent pack) capture ideas, score them, read the ranking, and generate a planning agenda.",
+  "version": "1.5.0",
+  "description": "Priority Matrix feature node pack — read + write nodes over the ctx.features['priority-matrix'] surface shipped by the Priority Matrix feature package. Lets a workflow (or a chat agent via the agent pack) capture ideas, score them, read the ranking, and generate a planning agenda.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
-  "keywords": ["feature", "priority-matrix", "scoring", "ranking", "prioritization"],
-  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "keywords": [
+    "feature",
+    "priority-matrix",
+    "scoring",
+    "ranking",
+    "prioritization"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
   "nodes": [
     {
       "typeId": "feature.priority-matrix.nodes.list-lists",
@@ -36,12 +44,12 @@
     },
     {
       "typeId": "feature.priority-matrix.nodes.submit-idea",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "label": "Priority Matrix: Submit Idea",
       "description": "Submits a new idea/request into a priority list (lands in the New status) over ctx.features['priority-matrix']. Tenant-guarded.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.priority-matrix.nodes.score-idea",
@@ -58,7 +66,7 @@
       "label": "Priority Matrix: Generate Planning Agenda",
       "description": "Generates a planning-session agenda from a list's top-N ideas over ctx.features['priority-matrix']. Tenant-guarded.",
       "category": "integration",
-      "role": "action",
+      "role": "side-effect",
       "capabilities": []
     },
     {
@@ -69,7 +77,54 @@
       "category": "integration",
       "role": "action",
       "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.propose-scenario",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Propose a Scenario",
+      "description": "Proposes a named what-if scenario (selection + optional maxItems/maxBudget constraints) on a planning session, stamped proposedBy:'agent' (ADR 0235). A scenario is inert until a human selects it as plan of record — the AI arm drafts, never decides.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.get-intake",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Get Idea Intake",
+      "description": "Reads an idea's intake overlay (requester/source/estimated value/notes) + its evidence pointers (ADR 0232). Read-only.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.update-intake",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Update Idea Intake",
+      "description": "Updates an idea's intake fields (requester/sourceChannel/estimatedValue/estimatedValueUnit/notes) — the same content-metadata class as submit-idea; audited (ADR 0232). No promote verb (promotion stays human/route-only).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ]
+    },
+    {
+      "typeId": "feature.priority-matrix.nodes.add-evidence",
+      "version": "1.0.0",
+      "label": "Priority Matrix: Add Idea Evidence",
+      "description": "Attaches an evidence pointer (document/kb/url reference — never content) to an idea (ADR 0232). URL evidence must be http(s).",
+      "category": "integration",
+      "role": "action",
+      "capabilities": [
+        "side-effectful"
+      ]
     }
   ],
-  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
 }

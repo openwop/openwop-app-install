@@ -48,6 +48,10 @@ export function reviewReason(r: RunReview): string {
 interface RunAnnotations {
   byRun: Map<string, readonly Annotation[]>;
   feedbackOn: boolean;
+  /** RUN-R2-1 — true when ≥1 per-run annotation read FAILED this pass. The
+   *  flagged count is then a floor, not a fact; the index says so instead of
+   *  rendering a confident "flagged (0)". */
+  degraded: boolean;
 }
 
 // Per-run annotation cache (GAP-ANALYSIS E3). The Runs index fans out one
@@ -56,6 +60,9 @@ interface RunAnnotations {
 // Short TTL keeps the flagged queue fresh while collapsing repeat loads.
 const ANN_TTL_MS = 60_000;
 const annCache = new Map<string, { value: readonly Annotation[]; at: number }>();
+// RUN-R2-1 — a FAILED read is never cached: the old client fabricated `[]` on
+// any failure and this cache then served that lie for a full TTL. Only a real
+// answer may enter the cache; a rejection propagates to the caller.
 async function listAnnotationsCached(runId: string): Promise<readonly Annotation[]> {
   const hit = annCache.get(runId);
   if (hit && Date.now() - hit.at < ANN_TTL_MS) return hit.value;
@@ -69,6 +76,7 @@ async function listAnnotationsCached(runId: string): Promise<readonly Annotation
 export function useRunAnnotations(runIds: readonly string[]): RunAnnotations {
   const [byRun, setByRun] = useState<Map<string, readonly Annotation[]>>(new Map());
   const [feedbackOn, setFeedbackOn] = useState(false);
+  const [degraded, setDegraded] = useState(false);
   const key = runIds.join(',');
 
   useEffect(() => {
@@ -80,19 +88,30 @@ export function useRunAnnotations(runIds: readonly string[]): RunAnnotations {
       if (!cap || ids.length === 0) {
         setFeedbackOn(false);
         setByRun(new Map());
+        setDegraded(false);
         return;
       }
       setFeedbackOn(true);
-      const lists = await Promise.all(ids.map((id) => listAnnotationsCached(id)));
+      // RUN-R2-1 — allSettled, not all: one failed read must neither sink the
+      // whole fan-out nor masquerade as "no annotations". Fulfilled runs keep
+      // their real answer; any rejection marks the pass degraded so the index
+      // reports the flagged count as a floor, not a fact.
+      const lists = await Promise.allSettled(ids.map((id) => listAnnotationsCached(id)));
       if (cancelled) return;
       const next = new Map<string, readonly Annotation[]>();
-      ids.forEach((id, i) => next.set(id, lists[i] ?? []));
+      let anyFailed = false;
+      ids.forEach((id, i) => {
+        const r = lists[i]!;
+        if (r.status === 'fulfilled') next.set(id, r.value);
+        else anyFailed = true;
+      });
       setByRun(next);
+      setDegraded(anyFailed);
     })();
     return () => {
       cancelled = true;
     };
   }, [key]);
 
-  return { byRun, feedbackOn };
+  return { byRun, feedbackOn, degraded };
 }

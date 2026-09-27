@@ -17,7 +17,8 @@
  * is RFC 0104; here the refs live in host-extension records (`ApprovalPolicy`).
  */
 
-import { getUsersByGroup, getMembersWithRole } from './accessControlService.js';
+import { getUsersByGroup, getMembersWithRole, resolveEffectiveAccess } from './accessControlService.js';
+import { activeDelegations } from './approvalDelegations.js';
 import { OpenwopError } from '../types.js';
 
 export interface ApproverRefs {
@@ -30,8 +31,13 @@ export interface ApproverRefs {
 }
 
 export interface EligibleApprovers {
-  /** The deduped, expanded set of eligible subjects. Empty when `openGate`. */
+  /** The deduped, expanded set of eligible subjects (including active
+   *  delegates — ADR 0198). Empty when `openGate`. */
   subjects: string[];
+  /** ADR 0198 — delegate subject → the principal(s) whose active delegation
+   *  admitted them. Empty when no delegation applies. A subject present here
+   *  AND directly eligible votes as THEMSELVES (see `consumeVoteIdentity`). */
+  delegates: Record<string, string[]>;
   /** True iff NO refs of any kind were configured — an intentionally open gate.
    *  Each call site applies its own open-gate policy (open vs scope-gated). */
   openGate: boolean;
@@ -55,6 +61,7 @@ function clean(refs: readonly string[] | undefined): string[] {
 export async function resolveEligibleApprovers(
   refs: ApproverRefs,
   ctx: { tenantId: string; orgId?: string },
+  opts: { includeDelegates?: boolean } = {},
 ): Promise<EligibleApprovers> {
   const subjectRefs = clean(refs.approverRefs);
   const groupRefs = clean(refs.approverGroupRefs);
@@ -75,7 +82,35 @@ export async function resolveEligibleApprovers(
     for (const s of found) subjects.add(s);
   }
 
-  return { subjects: [...subjects], openGate, unresolved };
+  // ── Delegation expansion (ADR 0198) — the ONE join site (§D1). ──
+  // Every eligible PRINCIPAL with an active delegation adds their delegate(s)
+  // to the eligible set (the principal stays eligible — no lockout). Window +
+  // revocation are evaluated live here, so decide-time re-resolution fails
+  // closed on expiry. Delegation is one hop only: a delegate's own delegations
+  // never chain (we expand from the ref-resolved principals, not recursively).
+  // Notification fan-out inherits delegates automatically because it resolves
+  // through this same function. Open gates skip it (everyone is eligible as
+  // themselves; coverage adds nothing).
+  const delegates: Record<string, string[]> = {};
+  if (!openGate && subjects.size > 0 && (opts.includeDelegates ?? true)) {
+    const { byPrincipal } = await activeDelegations(ctx.tenantId);
+    if (byPrincipal.size > 0) {
+      for (const principal of [...subjects]) {
+        for (const delegate of byPrincipal.get(principal) ?? []) {
+          // Fail closed on membership drift: with an org in scope, a delegate
+          // who is not (or no longer) a member of that org is not added.
+          if (ctx.orgId) {
+            const access = await resolveEffectiveAccess(ctx.tenantId, { subject: delegate, orgId: ctx.orgId });
+            if ((access.scopes as readonly string[]).length === 0) continue;
+          }
+          subjects.add(delegate);
+          delegates[delegate] = [...new Set([...(delegates[delegate] ?? []), principal])];
+        }
+      }
+    }
+  }
+
+  return { subjects: [...subjects], openGate, unresolved, delegates };
 }
 
 /**
@@ -141,7 +176,7 @@ export async function isEligibleApprover(
   reviewerRef: string,
   refs: ApproverRefs,
   ctx: { tenantId: string; orgId?: string },
-): Promise<{ eligible: boolean; openGate: boolean }> {
+): Promise<{ eligible: boolean; openGate: boolean; viaPrincipals?: string[] }> {
   const directSubjects = clean(refs.approverRefs);
   const groupRefs = clean(refs.approverGroupRefs);
   const roleRefs = clean(refs.approverRoleRefs);
@@ -150,10 +185,17 @@ export async function isEligibleApprover(
   }
   // Rule 1 — raw direct-subject match (authoritative, unchanged).
   if (directSubjects.includes(reviewerRef)) return { eligible: true, openGate: false };
-  // Rule 2 — group/role members, canonicalized to userId.
+  // Rule 2 — group/role members, canonicalized to userId. Delegation is
+  // EXCLUDED here (rule 3 owns it) so a delegate is never mistaken for a
+  // directly-eligible member — that distinction is what keeps a
+  // principal+delegate pair from counting twice (ADR 0198 §identity).
+  const me = await canonicalReviewerUserId(ctx.tenantId, reviewerRef);
   if (groupRefs.length > 0 || roleRefs.length > 0) {
-    const expanded = await resolveEligibleApprovers({ approverGroupRefs: groupRefs, approverRoleRefs: roleRefs }, ctx);
-    const me = await canonicalReviewerUserId(ctx.tenantId, reviewerRef);
+    const expanded = await resolveEligibleApprovers(
+      { approverGroupRefs: groupRefs, approverRoleRefs: roleRefs },
+      ctx,
+      { includeDelegates: false },
+    );
     for (const subject of expanded.subjects) {
       if (subject === reviewerRef) return { eligible: true, openGate: false }; // member subject already == reviewer
       const mapped = subjectToUserId ? await subjectToUserId(ctx.tenantId, subject) : null;
@@ -161,7 +203,68 @@ export async function isEligibleApprover(
       if (userId && userId === me) return { eligible: true, openGate: false };
     }
   }
+  // Rule 3 — active delegation (ADR 0198): the reviewer covers an eligible
+  // principal. Matched raw AND canonicalized (a delegation may name either
+  // form). `viaPrincipals` feeds `consumeVoteIdentity` — a rule-3 approver
+  // votes AS a principal, never as themselves.
+  const full = await resolveEligibleApprovers(
+    { approverRefs: directSubjects, approverGroupRefs: groupRefs, approverRoleRefs: roleRefs },
+    ctx,
+  );
+  const viaPrincipals = new Set<string>();
+  for (const [delegate, principals] of Object.entries(full.delegates)) {
+    if (delegate !== reviewerRef) {
+      const mapped = subjectToUserId ? await subjectToUserId(ctx.tenantId, delegate) : null;
+      const delegateUserId = mapped ?? (delegate.includes(':') ? null : delegate);
+      if (!delegateUserId || delegateUserId !== me) continue;
+    }
+    for (const p of principals) viaPrincipals.add(p);
+  }
+  if (viaPrincipals.size > 0) {
+    return { eligible: true, openGate: false, viaPrincipals: [...viaPrincipals] };
+  }
   return { eligible: false, openGate: false };
+}
+
+/**
+ * The IDENTITY a vote consumes (ADR 0198 §identity) — the anti-double-count
+ * rule for delegated approvals. Exactly one identity per vote:
+ *   - open gate, or directly eligible (rules 1-2) → the reviewer themselves;
+ *   - eligible only via delegation → the ONE principal they act for —
+ *     `actedFor` REQUIRED (validation_error) when they cover several;
+ *   - not eligible → forbidden (same error the plain eligibility path throws).
+ * The quorum ledger dedups on the returned `countAs`, so principal + delegate
+ * can never count twice; `actedBy` preserves the real voter for the audit
+ * trail. Callers pass the SAME refs/ctx they authorize with, so this can
+ * never disagree with eligibility (§D1).
+ */
+export async function consumeVoteIdentity(
+  reviewerRef: string,
+  refs: ApproverRefs,
+  ctx: { tenantId: string; orgId?: string },
+  actedFor?: string,
+): Promise<{ countAs: string; actedBy?: string }> {
+  const res = await isEligibleApprover(reviewerRef, refs, ctx);
+  if (res.openGate) return { countAs: reviewerRef };
+  if (res.eligible && !res.viaPrincipals) return { countAs: reviewerRef };
+  if (res.eligible && res.viaPrincipals) {
+    if (actedFor) {
+      if (!res.viaPrincipals.includes(actedFor)) {
+        throw new OpenwopError('forbidden', 'You do not hold an active delegation from that approver.', 403, { actedFor });
+      }
+      return { countAs: actedFor, actedBy: reviewerRef };
+    }
+    if (res.viaPrincipals.length === 1) {
+      return { countAs: res.viaPrincipals[0]!, actedBy: reviewerRef };
+    }
+    throw new OpenwopError(
+      'validation_error',
+      'You cover several approvers — pass `actedFor` to say whose approval this is.',
+      400,
+      { principals: res.viaPrincipals },
+    );
+  }
+  throw new OpenwopError('forbidden', 'You are not an eligible approver for this gate.', 403, {});
 }
 
 // ── Pre-flight resolvability (ADR 0075 §D4) ─────────────────────────────────────

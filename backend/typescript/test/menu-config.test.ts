@@ -24,7 +24,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_FEATURE_TOGGLES_DEV_OPEN;
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://localhost:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -57,9 +57,14 @@ async function normalClient(): Promise<(method: string, path: string, body?: unk
 const BASE_PATH = '/v1/host/openwop-app/menu-config';
 
 describe('menu-config — authentication', () => {
-  it('GET requires a signed-in caller (401 anonymous)', async () => {
+  it('GET for an anonymous caller returns its own (empty) tenant layer — never a 401', async () => {
+    // Day-1 UX P2: the nav rail reads this on every paint; anonymous sessions
+    // used to 401 here (pure console/network noise, swallowed client-side).
+    // An anonymous caller reads only its OWN tenant layer; writes stay gated.
     const res = await fetch(`${BASE}${BASE_PATH}`);
-    expect(res.status).toBe(401);
+    expect(res.status).toBe(200);
+    const body = await j<{ tenant: unknown }>(res);
+    expect(body.tenant).toEqual({ items: {}, headers: [] });
   });
 
   it('returns empty layers for a fresh caller', async () => {

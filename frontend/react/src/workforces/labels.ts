@@ -8,18 +8,24 @@
  */
 import type { AutonomyLevel, WorkforceStatus } from '../client/workforcesClient.js';
 
-/** Lifecycle status → catalog keys for its operator label + one-line gloss. */
-const STATUS_KEYS: Record<WorkforceStatus, { label: string; gloss: string }> = {
-  shadow: { label: 'statusShadowLabel', gloss: 'statusShadowGloss' },
-  piloting: { label: 'statusPilotingLabel', gloss: 'statusPilotingGloss' },
-  production: { label: 'statusProductionLabel', gloss: 'statusProductionGloss' },
+/** Lifecycle status → the catalog key for its operator label.
+ *  The `gloss` half was dropped with `statusGlossKey` (Phase D, no callers). Leaving the
+ *  literals behind would have been worse than dead data: `check-i18n` harvests any quoted
+ *  identifier, so they kept its orphan pass quiet about catalog entries nothing renders. */
+const STATUS_KEYS: Record<WorkforceStatus, { label: string }> = {
+  shadow: { label: 'statusShadowLabel' },
+  piloting: { label: 'statusPilotingLabel' },
+  production: { label: 'statusProductionLabel' },
 };
 
-/** Autonomy level → catalog keys for its operator label + one-line gloss. */
-const AUTONOMY_KEYS: Record<AutonomyLevel, { label: string; gloss: string }> = {
-  review: { label: 'autonomyReviewLabel', gloss: 'autonomyReviewGloss' },
-  guided: { label: 'autonomyGuidedLabel', gloss: 'autonomyGuidedGloss' },
-  auto: { label: 'autonomyAutoLabel', gloss: 'autonomyAutoGloss' },
+/** Autonomy level → catalog keys for its operator label + one-line gloss.
+ *  The label WORDS are the canonical autonomy vocabulary (DESIGN.md §5.3) —
+ *  Supervised / Guided / Autonomous — kept in lockstep with the agent meter's
+ *  `agents/i18n/*` `autonomy{Supervised,Guided,Autonomous}` keys. */
+const AUTONOMY_KEYS: Record<AutonomyLevel, { label: string }> = {
+  review: { label: 'autonomyReviewLabel' },
+  guided: { label: 'autonomyGuidedLabel' },
+  auto: { label: 'autonomyAutoLabel' },
 };
 
 /** Journey stage → catalog keys for its operator label + one-line gloss. */
@@ -32,14 +38,8 @@ const JOURNEY_KEYS: Record<WorkforceStatus, { label: string; gloss: string }> = 
 export function statusLabelKey(s: WorkforceStatus): string {
   return STATUS_KEYS[s]?.label ?? s;
 }
-export function statusGlossKey(s: WorkforceStatus): string {
-  return STATUS_KEYS[s]?.gloss ?? '';
-}
 export function autonomyLabelKey(a: AutonomyLevel): string {
   return AUTONOMY_KEYS[a]?.label ?? a;
-}
-export function autonomyGlossKey(a: AutonomyLevel): string {
-  return AUTONOMY_KEYS[a]?.gloss ?? '';
 }
 export function journeyLabelKey(s: WorkforceStatus): string {
   return JOURNEY_KEYS[s]?.label ?? s;

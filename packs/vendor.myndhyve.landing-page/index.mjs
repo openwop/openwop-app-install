@@ -89,37 +89,10 @@ function parseJSONFromAI(content) {
 
 /* ─── 1. landing.content.generate ───────────────────────── */
 
-const DEFAULT_HEADLINES = [
-  { id: '', text: 'Transform Your Business Today', angle: 'outcome' },
-  { id: '', text: 'The Smarter Way to Launch', angle: 'benefit' },
-  { id: '', text: 'Join 10,000+ Successful Founders', angle: 'social-proof' },
-];
-
-const DEFAULT_SECTIONS = [
-  { id: '', type: 'hero', content: { headline: 'Transform Your Business Today', subheadline: 'Launch faster, convert better.', ctaText: 'Get Started' }, variants: [] },
-  { id: '', type: 'features', content: { title: 'Everything You Need', features: [
-    { icon: 'zap', title: 'Fast', description: 'Launch in minutes, not months' },
-    { icon: 'shield', title: 'Secure', description: 'Enterprise-grade security' },
-    { icon: 'chart', title: 'Analytics', description: 'Track what matters' },
-  ] }, variants: [] },
-  { id: '', type: 'testimonials', content: { title: 'Loved by Founders', testimonials: [] }, variants: [] },
-  { id: '', type: 'pricing', content: { title: 'Simple Pricing', plans: [] }, variants: [] },
-  { id: '', type: 'cta', content: { headline: 'Ready to Launch?', ctaText: 'Start Free Trial' }, variants: [] },
-];
-
-const DEFAULT_CTAS = [
-  { id: '', text: 'Get Started Free', style: 'primary' },
-  { id: '', text: 'Start Your Trial', style: 'primary' },
-  { id: '', text: 'Book a Demo', style: 'secondary' },
-];
-
-const DEFAULT_SEO = {
-  title: 'Launch Your Startup | MyndHyve',
-  description: 'The AI-powered platform for launching your startup. Create landing pages, run campaigns, and track results.',
-  keywords: ['startup', 'launch', 'landing page', 'marketing'],
-  ogTitle: 'Launch Your Startup | MyndHyve',
-  ogDescription: 'The AI-powered platform for launching your startup.',
-};
+// XCH-LP-1 (LLM-EXCHANGE-AUDIT Wave 2): the branded DEFAULT_HEADLINES /
+// DEFAULT_SECTIONS / DEFAULT_CTAS / DEFAULT_SEO placeholder library is GONE.
+// A failed generation is a typed failure; optional pieces (CTAs, SEO) are
+// DERIVED from the model's real content, never fabricated boilerplate.
 
 export async function contentGenerate(ctx) {
   ensureCallAI(ctx);
@@ -132,81 +105,129 @@ export async function contentGenerate(ctx) {
     personaCount: inputs.personaIds?.length ?? 0,
   });
 
-  let headlines = DEFAULT_HEADLINES.map((h) => ({ ...h, id: Ids.headline() }));
-  let sections = DEFAULT_SECTIONS.map((s) => ({ ...s, id: Ids.section() }));
-  let ctaVariants = DEFAULT_CTAS.map((c) => ({ ...c, id: Ids.cta() }));
-  let seoMetadata = { ...DEFAULT_SEO };
+  let headlines = [];
+  let sections = [];
+  let ctaVariants = [];
+  let seoMetadata = null;
 
   try {
-    const blueprintContext = inputs.blueprintId ? `Blueprint ID: ${inputs.blueprintId}` : '';
-    const personaContext = inputs.personaIds?.length
-      ? `Target personas: ${inputs.personaIds.join(', ')}`
-      : '';
+    // XCH-LP-1 grounding (Wave 4): prefer FULL objects when the workflow
+    // supplies them (`blueprint`, `personas`) — a bare id gives the model
+    // nothing to write from. Ids remain accepted for compatibility, with the
+    // weak grounding named in the prompt so the model hedges accordingly.
+    const blueprintContext = inputs.blueprint && typeof inputs.blueprint === 'object'
+      ? `Blueprint (full):\n${JSON.stringify(inputs.blueprint).substring(0, 3000)}`
+      : inputs.blueprintId ? `Blueprint ID (unresolved — you have NO blueprint details): ${inputs.blueprintId}` : '';
+    const personaContext = Array.isArray(inputs.personas) && inputs.personas.length
+      ? `Target personas (full):\n${JSON.stringify(inputs.personas).substring(0, 3000)}`
+      : inputs.personaIds?.length
+        ? `Target persona IDs (unresolved — you have NO persona details): ${inputs.personaIds.join(', ')}`
+        : '';
     const pillarsContext = inputs.messagePillars
-      ? `Message pillars: ${JSON.stringify(inputs.messagePillars).substring(0, 500)}`
+      ? `Message pillars: ${JSON.stringify(inputs.messagePillars).substring(0, 2000)}`
       : '';
 
-    const result = await ctx.callAI({
-      provider: config.provider,
-      model: config.model,
-      systemPrompt: `You are a landing page copywriter. Generate landing page content. Return ONLY JSON with keys:
+    const SYSTEM = `You are a landing page copywriter. Generate landing page content. Return ONLY JSON with keys:
 - "headlines": array of { "text": string, "angle": "outcome"|"benefit"|"social-proof"|"urgency"|"curiosity" }
 - "sections": array of { "type": "hero"|"features"|"testimonials"|"pricing"|"cta"|"faq", "content": object with relevant fields }
 - "ctaVariants": array of { "text": string, "style": "primary"|"secondary" }
-- "seoMetadata": { "title": string, "description": string, "keywords": string[], "ogTitle": string, "ogDescription": string }`,
-      messages: [{
-        role: 'user',
-        content: `Generate landing page content for:\n${blueprintContext}\n${personaContext}\n${pillarsContext}\n\nGenerate 3 headlines, 5 sections, 3 CTA variants, and SEO metadata.`,
-      }],
+- "seoMetadata": { "title": string, "description": string, "keywords": string[], "ogTitle": string, "ogDescription": string }
+Ground every claim in the provided blueprint/personas/pillars; where they are unresolved ids, write neutral copy and NEVER invent product facts.`;
+    const promptMessages = [{
+      role: 'user',
+      content: `Generate landing page content for:\n${blueprintContext}\n${personaContext}\n${pillarsContext}\n\nGenerate 3 headlines, 5 sections, 3 CTA variants, and SEO metadata.`,
+    }];
+    const result = await ctx.callAI({
+      provider: config.provider,
+      model: config.model,
+      systemPrompt: SYSTEM,
+      messages: promptMessages,
       temperature: 0.7,
       maxTokens: 3000,
+      responseSchema: { type: 'object' },
     });
 
-    const parsed = parseJSONFromAI(result?.content);
-    if (parsed) {
-      if (Array.isArray(parsed.headlines) && parsed.headlines.length > 0) {
-        headlines = parsed.headlines.slice(0, 5).map((h) => ({
-          id: Ids.headline(),
-          text: String(h.text ?? ''),
-          angle: String(h.angle ?? 'benefit'),
-        }));
-      }
-      if (Array.isArray(parsed.sections) && parsed.sections.length > 0) {
-        sections = parsed.sections.slice(0, RATE_LIMITS.MAX_SECTIONS_PER_PAGE).map((s) => ({
-          id: Ids.section(),
-          type: String(s.type ?? 'hero'),
-          content: (s.content && typeof s.content === 'object') ? s.content : {},
-          variants: [],
-        }));
-      }
-      if (Array.isArray(parsed.ctaVariants) && parsed.ctaVariants.length > 0) {
-        ctaVariants = parsed.ctaVariants.slice(0, 5).map((c) => ({
-          id: Ids.cta(),
-          text: String(c.text ?? ''),
-          style: String(c.style ?? 'primary'),
-        }));
-      }
-      if (parsed.seoMetadata && typeof parsed.seoMetadata === 'object') {
-        const seo = parsed.seoMetadata;
-        seoMetadata = {
-          title: String(seo.title ?? seoMetadata.title),
-          description: String(seo.description ?? seoMetadata.description),
-          keywords: Array.isArray(seo.keywords)
-            ? seo.keywords.filter((k) => typeof k === 'string')
-            : seoMetadata.keywords,
-          ogTitle: String(seo.ogTitle ?? seo.title ?? seoMetadata.ogTitle),
-          ogDescription: String(seo.ogDescription ?? seo.description ?? seoMetadata.ogDescription),
-        };
-      }
-      log.info('AI content generation succeeded', {
-        headlineCount: headlines.length,
-        sectionCount: sections.length,
-      });
+    let parsed = (result && typeof result.data === 'object' && result.data !== null) ? result.data : parseJSONFromAI(result?.content);
+    if (!parsed) {
+      // XCH-MI-1 (Wave 4): ONE bounded repair before the typed failure.
+      log.warn('AI response could not be parsed as JSON — attempting one bounded repair');
+      try {
+        const retry = await ctx.callAI({
+          provider: config.provider,
+          model: config.model,
+          systemPrompt: SYSTEM,
+          messages: [
+            ...promptMessages,
+            { role: 'assistant', content: String(result?.content ?? '') },
+            { role: 'user', content: 'Your previous reply was not parseable JSON. Return ONLY the JSON object the instructions describe — no prose, no code fences.' },
+          ],
+          temperature: 0,
+          responseSchema: { type: 'object' },
+        });
+        parsed = (retry && typeof retry.data === 'object' && retry.data !== null) ? retry.data : parseJSONFromAI(retry?.content);
+      } catch { /* fall through to the typed failure */ }
     }
+    if (!parsed) {
+      log.warn('AI response could not be parsed as JSON — failing typed (was: silent branded-placeholder fallback)');
+      return { status: 'error', error: { code: 'AI_OUTPUT_UNPARSEABLE', message: 'AI response could not be parsed as JSON', retryable: true } };
+    }
+    if (!Array.isArray(parsed.headlines) || parsed.headlines.length === 0 || !Array.isArray(parsed.sections) || parsed.sections.length === 0) {
+      return { status: 'error', error: { code: 'AI_OUTPUT_UNPARSEABLE', message: 'AI reply parsed but is missing the required headlines/sections content', retryable: true } };
+    }
+    headlines = parsed.headlines.slice(0, 5).map((h) => ({
+      id: Ids.headline(),
+      text: String(h.text ?? ''),
+      angle: String(h.angle ?? 'benefit'),
+    }));
+    sections = parsed.sections.slice(0, RATE_LIMITS.MAX_SECTIONS_PER_PAGE).map((s) => ({
+      id: Ids.section(),
+      type: String(s.type ?? 'hero'),
+      content: (s.content && typeof s.content === 'object') ? s.content : {},
+      variants: [],
+    }));
+    if (Array.isArray(parsed.ctaVariants) && parsed.ctaVariants.length > 0) {
+      ctaVariants = parsed.ctaVariants.slice(0, 5).map((c) => ({
+        id: Ids.cta(),
+        text: String(c.text ?? ''),
+        style: String(c.style ?? 'primary'),
+      }));
+    } else {
+      // Derive from the model's REAL content — a hero/cta section's ctaText —
+      // never from a placeholder library.
+      const derived = sections
+        .map((s) => (s.content && typeof s.content.ctaText === 'string' ? s.content.ctaText : null))
+        .filter((t) => t && t.trim());
+      ctaVariants = derived.slice(0, 3).map((text) => ({ id: Ids.cta(), text, style: 'primary' }));
+    }
+    if (parsed.seoMetadata && typeof parsed.seoMetadata === 'object') {
+      const seo = parsed.seoMetadata;
+      seoMetadata = {
+        title: String(seo.title ?? headlines[0].text),
+        description: String(seo.description ?? ''),
+        keywords: Array.isArray(seo.keywords) ? seo.keywords.filter((k) => typeof k === 'string') : [],
+        ogTitle: String(seo.ogTitle ?? seo.title ?? headlines[0].text),
+        ogDescription: String(seo.ogDescription ?? seo.description ?? ''),
+      };
+    } else {
+      const hero = sections.find((s) => s.type === 'hero');
+      const heroSub = hero && typeof hero.content.subheadline === 'string' ? hero.content.subheadline : '';
+      seoMetadata = {
+        title: headlines[0].text,
+        description: heroSub,
+        keywords: [],
+        ogTitle: headlines[0].text,
+        ogDescription: heroSub,
+      };
+    }
+    log.info('AI content generation succeeded', {
+      headlineCount: headlines.length,
+      sectionCount: sections.length,
+    });
   } catch (err) {
-    log.warn('AI content generation failed, using defaults', {
+    log.warn('AI content generation failed — failing typed (was: silent branded-placeholder fallback)', {
       error: err instanceof Error ? err.message : String(err),
     });
+    return { status: 'error', error: { code: 'AI_GENERATION_FAILED', message: err instanceof Error ? err.message : String(err), retryable: true } };
   }
 
   if (sections.length > RATE_LIMITS.MAX_SECTIONS_PER_PAGE) {
@@ -301,6 +322,10 @@ export async function variantsGenerate(ctx) {
   for (const personaId of personaIds) {
     const variantId = Ids.variant(personaId);
     let variantName = `Variant for Persona ${personaId}`;
+    // XCH-LP-1: when the AI leg fails, the variant is an IDENTITY COPY of the
+    // page — real content, but NOT persona-customized. Say so instead of
+    // presenting an uncustomized copy as an optimized variant.
+    let customized = false;
     const variantSections = inputSections.map((s) => ({
       ...s,
       id: Ids.section(),
@@ -335,12 +360,16 @@ export async function variantsGenerate(ctx) {
                 ...variantSections[idx],
                 content: { ...variantSections[idx].content, ...o.content },
               };
+              customized = true;
             }
           }
         }
+      } else {
+        log.warn('persona variant AI reply unparseable — emitting an UNCUSTOMIZED identity copy', { personaId });
       }
-    } catch {
+    } catch (err) {
       // identity copy already in variantSections
+      log.warn('persona variant AI leg failed — emitting an UNCUSTOMIZED identity copy', { personaId, error: err instanceof Error ? err.message : String(err) });
     }
 
     variants.push({
@@ -350,6 +379,7 @@ export async function variantsGenerate(ctx) {
       personaId,
       sections: variantSections,
       trafficPercentage: trafficPerPersona,
+      customized,
     });
     variantIds.push(variantId);
     personaMapping[personaId] = variantId;
@@ -608,7 +638,7 @@ export async function pagePublish(ctx) {
 
 /* ─── default export ────────────────────────────────────── */
 
-const nodes = {
+export const nodes = {
   'landing.content.generate': contentGenerate,
   'landing.structure.create': structureCreate,
   'landing.variants.generate': variantsGenerate,

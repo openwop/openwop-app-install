@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.agents.doc-writer/1.0.0/doc-writer.return.schema.json",
+  "$id": "https://packs.openwop.dev/core.openwop.agents.doc-writer/1.0.1/doc-writer.return.schema.json",
   "title": "DocWriterReturn",
   "type": "object",
   "required": [

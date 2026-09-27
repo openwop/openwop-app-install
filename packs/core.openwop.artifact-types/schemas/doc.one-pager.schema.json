@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/core.openwop.artifact-types/1.0.0/doc.one-pager.schema.json",
+  "type": "object",
+  "required": [
+    "content"
+  ],
+  "properties": {
+    "content": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": true
+}

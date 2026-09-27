@@ -1,0 +1,7 @@
+{
+  "alg": "ed25519",
+  "keyId": "community-openwop-team-demo-1",
+  "manifest": "pack.json",
+  "signatureFile": "pack.json.sig",
+  "note": "Detached Ed25519 signature over the exact bytes of pack.json (base64). Verify with the community-openwop-team-demo-1 public key. RFC 0117 §Signing."
+}

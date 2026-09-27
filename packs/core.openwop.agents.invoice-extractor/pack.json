@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.invoice-extractor",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Invoice extraction agent. OCR-aware structured extraction of vendor, line items, totals, tax, payment terms from PDF or scanned-image invoices. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -29,10 +29,7 @@
       "description": "Extracts structured fields (vendor, line items, totals, tax, payment terms) from invoice PDFs or text. Returns confidence per field and flags anomalies (math doesn't add up, missing fields, suspicious vendor patterns).",
       "modelClass": "classification",
       "systemPromptRef": "prompts/invoice-extractor.md",
-      "toolAllowlist": [
-        "openwop:core.files.pdf-extract-text",
-        "openwop:core.files.read"
-      ],
+      "toolAllowlist": [],
       "memoryShape": {
         "scratchpad": false,
         "conversation": false,

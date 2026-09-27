@@ -14,22 +14,33 @@
  * A "literal" = a px/rem value on a spacing/radius property that isn't a
  * sanctioned exception (0, 1–3px hairlines, 999px pill, var()/%/calc).
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { readGateBaseline } from './gateBaseline.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const CSS = join(__dirname, '..', 'src', 'styles', 'global.css');
+// ADR 0510 Phase 3 (DSA-012): EVERY authored stylesheet is in scope, not just
+// global.css — a literal doesn't stop being debt by moving files.
+const SRC = join(__dirname, '..', 'src');
+const walkCss = (dir, acc = []) => {
+  for (const e of readdirSync(dir, { withFileTypes: true })) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) walkCss(p, acc);
+    else if (e.name.endsWith('.css')) acc.push(p);
+  }
+  return acc;
+};
 
 /** Lower this whenever a cleanup removes literals; it must never be raised. */
-const BASELINE = Number(process.env.OPENWOP_SPACING_BASELINE ?? '702');
+const BASELINE = readGateBaseline('check-spacing-literals', 'OPENWOP_SPACING_BASELINE', 401);
 
 const PROPS = /(?:^|[;{]\s*)(gap|row-gap|column-gap|margin|margin-(?:top|right|bottom|left)|padding|padding-(?:top|right|bottom|left)|border-radius)\s*:\s*([^;}]+)/g;
 // A length literal that is NOT a sanctioned exception.
 const LITERAL = /(?<![\w.#-])(\d*\.?\d+)(px|rem)\b/g;
 const ALLOW = new Set(['0px', '1px', '2px', '3px', '999px']);
 
-const css = readFileSync(CSS, 'utf8');
+const css = walkCss(SRC).map((f) => readFileSync(f, 'utf8')).join('\n');
 let count = 0;
 const samples = [];
 for (const m of css.matchAll(PROPS)) {

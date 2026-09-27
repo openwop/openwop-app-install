@@ -95,6 +95,64 @@ export function redactForCompaction(content: string): string {
 }
 
 /**
+ * SR-1 minimum secret length. Values shorter than this do NOT redact.
+ *
+ * `agent-memory.md` §SR-1 reference-impl notes: *"8-character minimum-length
+ * floor — values shorter than 8 chars don't redact (gitleaks / TruffleHog
+ * convention)."* The floor is not cosmetic: SR-1 redaction is SUBSTRING
+ * replacement, so without it a 2-character secret would shred every unrelated
+ * occurrence of those characters out of the persisted content.
+ */
+export const SR1_MIN_SECRET_LENGTH = 8;
+
+/**
+ * SR-1 (`agent-memory.md` §SR-1, normative) — redact BYOK-resolved plaintext out
+ * of content that is about to be PERSISTED as a memory entry.
+ *
+ * > **SR-1.** When a memory write would persist content containing a value the
+ * > run's BYOK vault resolved during the run, the persisted entry MUST carry
+ * > `[REDACTED:<secretId>]` in place of the plaintext.
+ *
+ * `secrets` is the run's resolved keyring — `credentialRef → plaintext`, i.e.
+ * exactly the shape `byok/ephemeralRunSecrets.ts#getRunSecrets` returns. That
+ * module IS this host's per-run registry (the spec's `MemorySecretRegistry`:
+ * *"in-process map keyed by `runId`"*); there is deliberately no second one.
+ *
+ * All three reference-impl rules from the spec are implemented literally, and
+ * each is load-bearing:
+ *
+ *  - **Substring, not regex** (`split`/`join`) — a secret containing regex
+ *    metacharacters can neither trigger ReDoS nor partially match.
+ *  - **Descending value length** — a longer secret that CONTAINS a shorter one
+ *    must redact whole; processing the short one first would leave a mangled
+ *    tail of the long one in the persisted content.
+ *  - **8-char floor** (`SR1_MIN_SECRET_LENGTH`) — see above.
+ *
+ * Idempotent: content already carrying `[REDACTED:…]` markers is unaffected,
+ * because a marker cannot contain the plaintext it replaced.
+ *
+ * SCOPE (spec §SR-1): SR-1 binds to BYOK-resolved **non-platform** plaintext.
+ * Platform-scope env-var fallbacks and host-internal service-account
+ * credentials never enter the per-run registry, so they never reach this
+ * function — the scope boundary is enforced by what gets registered, not here.
+ *
+ * @see spec/v1/agent-memory.md §"SR-1 — Secret-Redaction Invariant (normative)"
+ */
+export function redactRunSecretsForMemory(content: string, secrets: Readonly<Record<string, string>>): string {
+  // Sort by DESCENDING plaintext length so a longer secret containing a shorter
+  // one is substituted first and redacts whole.
+  const canaries = Object.entries(secrets)
+    .filter(([, value]) => typeof value === 'string' && value.length >= SR1_MIN_SECRET_LENGTH)
+    .sort((a, b) => b[1].length - a[1].length);
+  let out = content;
+  for (const [secretId, value] of canaries) {
+    if (!out.includes(value)) continue;
+    out = out.split(value).join(`[REDACTED:${secretId}]`);
+  }
+  return out;
+}
+
+/**
  * Local type guard — narrows `unknown` to `Record<string, unknown>`.
  *
  * Without this, the recursive walk above needs an `as Record<string,

@@ -24,7 +24,7 @@
 import { OpenwopError } from '../../types.js';
 import type { RouteDeps } from '../../routes/registerAllRoutes.js';
 import { resolveCallerUser } from '../users/usersGuards.js';
-import { addSubjectNote, listSubjectNotes, removeSubjectNote, type MemorySubject } from '../../host/subjectMemory.js';
+import { addSubjectNote, listSubjectNotes, removeSubjectNote, countRecallOnlyEntries, type MemorySubject } from '../../host/subjectMemory.js';
 
 export function registerProfileMemoryRoutes(deps: RouteDeps): void {
   const { app } = deps;
@@ -36,7 +36,12 @@ export function registerProfileMemoryRoutes(deps: RouteDeps): void {
   app.get(BASE, async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
-      res.json({ notes: await listSubjectNotes(user.tenantId, selfSubject(user.userId)) });
+      const [notes, recallOnlyCount] = await Promise.all([
+        listSubjectNotes(user.tenantId, selfSubject(user.userId)),
+        // MEM-UX-1 — what the assistant recalls but this list does not show.
+        countRecallOnlyEntries(user.tenantId, selfSubject(user.userId)),
+      ]);
+      res.json({ notes, recallOnlyCount });
     } catch (err) { next(err); }
   });
 
@@ -54,9 +59,16 @@ export function registerProfileMemoryRoutes(deps: RouteDeps): void {
   app.delete(`${BASE}/:noteId`, async (req, res, next) => {
     try {
       const user = await resolveCallerUser(req);
-      const removed = await removeSubjectNote(user.tenantId, selfSubject(user.userId), req.params.noteId);
-      if (!removed) throw new OpenwopError('not_found', 'Memory not found.', 404, { noteId: req.params.noteId });
-      res.status(204).end();
+      const outcome = await removeSubjectNote(user.tenantId, selfSubject(user.userId), req.params.noteId);
+      if (!outcome.removed) throw new OpenwopError('not_found', 'Memory not found.', 404, { noteId: req.params.noteId });
+      // ADR 0666 D2 follow-up — 204 only when the recall index was ALSO cleared. When it was
+      // not, the note is deleted but the assistant may still recall it until the index catches
+      // up, and a bare 204 would be the same unqualified success the eraser stopped claiming.
+      // 200 + the flag rather than an error: the durable delete SUCCEEDED, so failing the
+      // request would be a second lie (a retry would 404 and the person could never finish).
+      // The client rendering of this is filed as `PKWF-15` — the wire is honest first.
+      if (outcome.recallCleared) { res.status(204).end(); return; }
+      res.status(200).json({ removed: true, recallCleared: false });
     } catch (err) { next(err); }
   });
 }

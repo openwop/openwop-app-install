@@ -2,7 +2,7 @@
  * Memory ledger (app-ux §A3).
  *
  * Read-only view of the tenant's RFC 0004 memory entries (host-extension
- * GET /v1/host/openwop-app/memory), tied to the run you're looking at.
+ * GET /host/openwop-app/memory), tied to the run you're looking at.
  *
  * Attribution (RFC 0057). When the host advertises
  * `capabilities.memory.attribution.emitsWriteEvents`, this panel reads the
@@ -21,6 +21,7 @@
  */
 
 import { useEffect, useMemo, useState } from 'react';
+import { Notice } from '../ui/Notice.js';
 import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { listMemory, getCapabilities, type MemoryEntry } from '../client/runsClient.js';
@@ -212,7 +213,7 @@ export function RunMemoryPanel({ runId, events, status }: Props) {
         {useEvents ? t('memoryHighlightAttributed') : t('memoryHighlightSimple')}
       </p>
       {error ? (
-        <div className="alert error">{error}</div>
+        <Notice variant="error">{error}</Notice>
       ) : (
         <DataTable<MemoryEntry>
           caption={t('memoryTableCaption')}

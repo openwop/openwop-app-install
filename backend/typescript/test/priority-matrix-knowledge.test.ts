@@ -25,7 +25,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['priority-matrix', 'kb', 'projects']) await enableToggle(id);
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -80,6 +80,36 @@ describe('ADR 0100 P2 — priority matrix indexes lists + ideas', () => {
 
     const cols = await owner.get(`/v1/host/openwop-app/kb/orgs/${encodeURIComponent(orgId)}/collections`);
     expect((cols.body.collections as Array<any>).find((c) => c.collectionId === `mgd-priority-matrix-${orgId}`)?.managed).toBe('priority-matrix');
+  });
+
+  it('ADR 0667 D5(a) — deleting the CARD through kanban\'s own door EVICTS the idea doc', async () => {
+    // The harm this closes: `DELETE …/kanban/cards/:cardId` ran no priority-matrix
+    // cascade, and `indexIdea` (the eviction) has no caller outside the feature — so a
+    // deleted idea kept being RETRIEVED from the org's managed PM collection, which is
+    // shareable to advisory boards.
+    const { owner, orgId } = await ownerWithOrg();
+    const list = (await owner.post(L, { orgId, name: 'Launch priorities' })).body;
+    const base = `${L}/${encodeURIComponent(list.id)}`;
+    const idea = (await owner.post(`${base}/ideas`, { title: 'Ship onboarding' })).body;
+    await owner.put(`${base}/ideas/${encodeURIComponent(idea.id)}/scores`, { scores: { 'strategic-alignment': 9, roi: 8, urgency: 7, 'compliance-risk': 5, cost: 3 } });
+    expect(await kbDocIds(owner, orgId), 'precondition: the idea is indexed').toContain(`pm-idea:${idea.id}`);
+
+    // Delete via KANBAN, not via the priority-matrix door.
+    const del = await owner.del(`/v1/host/openwop-app/kanban/cards/${encodeURIComponent(idea.id)}`);
+    expect(del.status).toBe(204);
+
+    expect(await kbDocIds(owner, orgId), 'the deleted idea must not still be retrievable').not.toContain(`pm-idea:${idea.id}`);
+    expect(await kbDocIds(owner, orgId), 'and the list doc is untouched').toContain(`pm-list:${list.id}`);
+  });
+
+  it('ADR 0667 D5(b) — deleting the BOARD under a priority list is refused (409), not silently emptying it', async () => {
+    const { owner, orgId } = await ownerWithOrg();
+    const list = (await owner.post(L, { orgId, name: 'Launch priorities' })).body;
+    const res = await owner.del(`/v1/host/openwop-app/kanban/boards/${encodeURIComponent(list.boardId)}`);
+    expect(res.status, 'the kanban route needs only workspace:write; the list needs more').toBe(409);
+    expect(JSON.stringify(res.body)).toContain('priority-matrix');
+    // And the list still works — the refusal protected it rather than stranding it.
+    expect((await owner.get(`${L}/${encodeURIComponent(list.id)}`)).status).toBe(200);
   });
 
   it('does NOT index a PROJECT-scoped list or its ideas — the RBAC carve-out', async () => {

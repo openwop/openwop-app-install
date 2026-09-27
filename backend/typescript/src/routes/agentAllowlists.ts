@@ -20,11 +20,14 @@ import { getAgentRegistry, type ResolvedAgentManifest } from '../executor/agentR
 import { getNodeRegistry } from '../executor/nodeRegistry.js';
 import { hostExtStorage } from '../host/hostExtPersistence.js';
 import { builtinAgentToolIds } from '../host/agentToolProvider.js';
+import { agentVisibleToTenant } from '../host/agentVisibility.js';
 import {
   listAgentToolAllowlistOverrides,
   getAgentToolAllowlistOverride,
   upsertAgentToolAllowlistOverride,
   clearAgentToolAllowlistOverride,
+  DEFAULT_ON_AGENT_TOOL_IDS,
+  effectiveToolAllowlist,
   type AgentToolAllowlistOverride,
 } from '../host/agentToolAllowlistService.js';
 
@@ -41,14 +44,18 @@ function requireSuperadmin(req: Request): void {
 }
 
 /** Agents a tenant can dispatch: global pack agents (no `ownerTenant`) + this
- *  tenant's own user agents. Mirrors routes/agents.ts `visibleTo`. */
+ *  tenant's own user agents. ADR 0379 P1 — delegates to the ONE shared rule
+ *  (this file's copy had already drifted from routes/agents.ts on wildcards). */
 function visibleTo(a: ResolvedAgentManifest, tenant: string): boolean {
-  return !a.ownerTenant || a.ownerTenant === tenant;
+  return agentVisibleToTenant(a, tenant);
 }
 
 /** The catalog of tool ids an agent COULD be allowlisted to: the built-in agent
- *  tools + every installed node typeId (as `openwop:<typeId>`). Sorted + deduped. */
-function buildToolCatalog(): string[] {
+ *  tools + every installed node typeId (as `openwop:<typeId>`). Sorted + deduped.
+ *  The SINGLE catalog builder — exported so the chat-widget grant editor (ADR 0469
+ *  Phase B) reads the SAME list a workspace member can grant to an anon surface,
+ *  never a drifting second copy. */
+export function buildToolCatalog(): string[] {
   const ids = new Set<string>(builtinAgentToolIds());
   for (const t of getNodeRegistry().listTypeIds()) ids.add(`openwop:${t}`);
   return [...ids].sort((a, b) => a.localeCompare(b));
@@ -74,7 +81,7 @@ function validateAllowlist(value: unknown): string[] {
 /** Resolve a dispatchable agent visible to the caller's tenant, or 404 (no
  *  existence leak of another tenant's user agent; an unknown id is also 404). */
 function loadVisibleAgent(req: Request): ResolvedAgentManifest {
-  const agent = getAgentRegistry().get(req.params.agentId);
+  const agent = getAgentRegistry().get(req.params.agentId, tenantOf(req));
   if (!agent || !visibleTo(agent, tenantOf(req))) {
     throw new OpenwopError('not_found', 'Agent not found.', 404, { agentId: req.params.agentId });
   }
@@ -118,14 +125,30 @@ export function registerAgentAllowlistRoutes(app: Express): void {
       const agent = loadVisibleAgent(req);
       const override = await getAgentToolAllowlistOverride(tenantOf(req), agent.agentId);
       const manifestAllowlist = agent.toolAllowlist ?? [];
+      const toolCatalog = buildToolCatalog();
+      // Only tag as "default-on" the baseline tools actually REGISTERED on this
+      // host — a feature-registered tool (documents.draft, email.draft, notify-me,
+      // schedule-followup) whose feature isn't loaded is inert and shouldn't read
+      // as an offered tool in the panel (it's dropped at dispatch by the same
+      // filter). Static-core baseline tools (kanban.add-todo, ai.research.web)
+      // are always present.
+      const registered = new Set(toolCatalog);
+      const baseline = DEFAULT_ON_AGENT_TOOL_IDS.filter((id) => registered.has(id));
       res.json({
         agentId: agent.agentId,
         label: agent.label ?? agent.agentId,
         persona: agent.persona,
         manifestAllowlist,
         override,
-        effective: override ? override.toolAllowlist : manifestAllowlist,
-        toolCatalog: buildToolCatalog(),
+        // ADR 0315 — the panel's read model MUST reflect what the agent is
+        // actually offered: manifest ∪ the default-on baseline (or the override
+        // verbatim when set). Using the SAME resolver the dispatch chokepoints
+        // use means the checklist pre-checks the default-on tools, so a
+        // full-replace save can't silently strip them. `baseline` lets the UI
+        // tag them "default-on" (and warn that saving pins the agent).
+        baseline,
+        effective: effectiveToolAllowlist(manifestAllowlist, override?.toolAllowlist),
+        toolCatalog,
       });
     } catch (err) { next(err); }
   });

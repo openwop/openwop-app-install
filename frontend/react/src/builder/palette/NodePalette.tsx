@@ -11,16 +11,18 @@
  * string; the canvas's onDrop creates a node at the drop point.
  *
  * The palette merges the local static catalog with whatever the backend's
- * `/v1/host/openwop-app/node-catalog` endpoint advertises — that pulls in registry
+ * `/host/openwop-app/node-catalog` endpoint advertises — that pulls in registry
  * packs (core.openwop.ai, core.openwop.http, …) installed at boot. The
  * "Registry" button opens the live pack browser (all published packs).
  */
 
-import { useEffect, useMemo, useState } from 'react';
+import { Button } from '../../ui/Button.js';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import { useTranslation } from 'react-i18next';
 import { type NodeCatalogEntry } from './nodeCatalog.js';
 import { loadDynamicCatalog, useCatalog, catalogEntryByTypeId } from './catalogRegistry.js';
+import { expandQuery } from './searchAliases.js';
 import { PALETTE_MIME } from '../canvas/BuilderCanvas.js';
 import type { NodeCategory } from '../schema/workflow.js';
 import { useBuilderStore } from '../store/builderStore.js';
@@ -61,17 +63,22 @@ function subsectionLabel(key: string): string {
 interface Filtered {
   byCategory: Map<NodeCategory, Map<string, NodeCatalogEntry[]>>;
   totalMatches: number;
+  /** Brand tokens that contributed alias terms (drives the explainer line). */
+  aliasedBrands: readonly string[];
 }
 
 function filterAndGroup(catalog: NodeCatalogEntry[], query: string): Filtered {
-  const q = query.trim().toLowerCase();
+  // Brand-alias recall (day-1 UX P4): "gmail"/"outlook"/"jira" expand to the
+  // capability terms the provider-agnostic catalog actually uses (ADR 0186) —
+  // an entry matches when ANY expanded term hits. Raw query always kept.
+  const { terms, brands } = expandQuery(query);
   const byCategory = new Map<NodeCategory, Map<string, NodeCatalogEntry[]>>();
   for (const c of CATEGORY_ORDER) byCategory.set(c, new Map());
   let totalMatches = 0;
   for (const entry of catalog) {
-    if (q) {
+    if (terms.length > 0) {
       const haystack = `${entry.label} ${entry.typeId} ${entry.description} ${entry.packName ?? ''}`.toLowerCase();
-      if (!haystack.includes(q)) continue;
+      if (!terms.some((term) => haystack.includes(term))) continue;
     }
     const cat = byCategory.get(entry.category);
     if (!cat) continue;
@@ -84,7 +91,7 @@ function filterAndGroup(catalog: NodeCatalogEntry[], query: string): Filtered {
     arr.push(entry);
     totalMatches++;
   }
-  return { byCategory, totalMatches };
+  return { byCategory, totalMatches, aliasedBrands: brands };
 }
 
 export function NodePalette() {
@@ -95,6 +102,18 @@ export function NodePalette() {
 
   const catalog = useCatalog();
   const [query, setQuery] = useState('');
+  // UX_UPGRADE-workflows-builder P2 — the '/' shortcut (BuilderShell) requests
+  // focus here via a store nonce (the NodeConnections focusRequest pattern,
+  // baselined at mount so a stale nonce never replays and steals focus).
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const focusReq = useBuilderStore((s) => s.paletteSearchFocusRequest);
+  const lastFocusReq = useRef(focusReq);
+  useEffect(() => {
+    if (focusReq === lastFocusReq.current) return;
+    lastFocusReq.current = focusReq;
+    searchRef.current?.focus();
+    searchRef.current?.select();
+  }, [focusReq]);
   const [browserOpen, setBrowserOpen] = useState(false);
   const installedTypeIds = useMemo(() => new Set(catalog.map((e) => e.typeId)), [catalog]);
   // §A6 — "use in builder": drop an installed pack node onto the canvas.
@@ -106,7 +125,7 @@ export function NodePalette() {
   const [expandedCategories, setExpandedCategories] = useState<Set<string>>(() => new Set());
   const [expandedPacks, setExpandedPacks] = useState<Set<string>>(() => new Set());
 
-  const { byCategory, totalMatches } = useMemo(() => filterAndGroup(catalog, query), [catalog, query]);
+  const { byCategory, totalMatches, aliasedBrands } = useMemo(() => filterAndGroup(catalog, query), [catalog, query]);
 
   const trimmedQuery = query.trim();
   const searching = trimmedQuery.length > 0;
@@ -134,21 +153,22 @@ export function NodePalette() {
       <div className="builder-palette-header">
         <div className="u-flex u-items-center u-gap-2">
           <h3 className="builder-palette-title u-flex-1">{t('nodes')}</h3>
-          <button
-            type="button"
-            className="secondary u-pad-2x8 u-fs-11 u-minh-0"
+          <Button
+            variant="secondary" className="u-pad-2x8 u-fs-11 u-minh-0"
             onClick={() => setBrowserOpen(true)}
             title={t('registryTitle')}
           >
             {t('registry')}
-          </button>
+          </Button>
         </div>
         <p className="builder-palette-hint muted">{t('dragOntoCanvas')}</p>
         <div className="builder-palette-search">
           <input
+            ref={searchRef}
             type="search"
             className="builder-palette-search-input"
             placeholder={t('searchNodesPlaceholder')}
+            aria-label={t('searchNodesPlaceholder')}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             spellCheck={false}
@@ -168,6 +188,11 @@ export function NodePalette() {
         {searching ? (
           <p className="builder-palette-search-summary muted">
             {t('matchCount', { count: totalMatches })}
+          </p>
+        ) : null}
+        {searching && aliasedBrands.length > 0 && totalMatches > 0 ? (
+          <p className="builder-palette-search-summary muted" role="status">
+            {t('aliasHint', { brand: aliasedBrands.join(', ') })}
           </p>
         ) : null}
       </div>
@@ -311,6 +336,7 @@ function PaletteItem({ entry, onAdd }: { entry: NodeCatalogEntry; onAdd: () => v
       <span className="builder-palette-item-label">{entry.label}</span>
       {blocked ? (
         <span
+          role="img"
           className="builder-palette-item-host-warn"
           aria-label={t('paletteItemHostWarnAria', { caps: missing.join(', ') })}
         >

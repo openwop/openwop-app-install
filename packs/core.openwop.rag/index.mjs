@@ -203,8 +203,10 @@ export async function retrieverBasic(ctx) {
 export async function retrieverMultiQuery(ctx) {
   if (typeof ctx.callAI !== 'function') throw Object.assign(new Error('host does not implement ctx.callAI'), { code: 'HOST_CAPABILITY_MISSING' });
   const n = ctx.config.variants ?? 3;
-  const r = await ctx.callAI({ systemPrompt: `Generate ${n} alternative search queries for the following intent. Return one per line, no numbering, no preamble.`, messages: [{ role: 'user', content: ctx.inputs.query }] });
-  const variants = (r.text ?? '').split(/\n/).map((s) => s.trim()).filter(Boolean).slice(0, n);
+  // XCH-RAG-1 (LLM-EXCHANGE-AUDIT round 2): responseSchema engages provider-
+  // native JSON mode; the line-split stays as the text fallback.
+  const r = await ctx.callAI({ systemPrompt: `Generate ${n} alternative search queries for the following intent. Return a JSON array of ${n} strings.`, messages: [{ role: 'user', content: ctx.inputs.query }], responseSchema: { type: 'array', items: { type: 'string' } } });
+  const variants = (Array.isArray(r.data) ? r.data.filter((s) => typeof s === 'string') : (r.text ?? '').split(/\n/)).map((s) => s.trim()).filter(Boolean).slice(0, n);
   const all = new Map();
   for (const q of [ctx.inputs.query, ...variants]) {
     const hits = await ragVectorQuery({ ...ctx, inputs: { query: q } });

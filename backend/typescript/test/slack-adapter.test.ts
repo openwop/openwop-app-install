@@ -35,7 +35,7 @@ describe('Slack egress adapter (ADR 0024 §4 Phase 3)', () => {
         res.end(JSON.stringify(nextResponse));
       });
     });
-    await new Promise<void>((r) => slackApi.listen(0, r));
+    await new Promise<void>((r) => slackApi.listen(0, '127.0.0.1', r));
     process.env.OPENWOP_SLACK_API_BASE = `http://127.0.0.1:${(slackApi.address() as AddressInfo).port}`;
 
     await upsertOAuthConnection({ tenantId: 'tslack', provider: 'slack', userId: 'u1', tokens: { accessToken: 'xoxb-TESTTOKEN', tokenType: 'Bearer', scopes: ['chat:write'] } });
@@ -73,11 +73,16 @@ describe('Slack egress adapter (ADR 0024 §4 Phase 3)', () => {
     expect(otherUser).toEqual({ ok: false, error: 'slack_not_connected' });
   });
 
-  it('refuses to send the token over a non-https base unless private egress is allowed', async () => {
+  it('fails closed (as an envelope, not a throw) over a private non-https base in the production posture', async () => {
     delete process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE; // production posture
     try {
+      // ADR 0187: the egress firewall now refuses 127.0.0.1 BEFORE the https
+      // check ever runs — an even earlier fail-closed than the original
+      // insecure_slack_base expectation. The adapter maps the firewall's
+      // throw back into its {ok:false} envelope contract (it used to leak
+      // the exception to callers — the CI-baseline root-cause fix).
       const out = await adapter('u1').postMessage({ channel: 'C1', text: 'x' }); // base is http://127.0.0.1
-      expect(out).toEqual({ ok: false, error: 'insecure_slack_base' });
+      expect(out).toEqual({ ok: false, error: 'slack_egress_blocked' });
     } finally {
       process.env.OPENWOP_WEBHOOK_ALLOW_PRIVATE = 'true'; // restore for any later tests
     }

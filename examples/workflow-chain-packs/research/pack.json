@@ -1,0 +1,46 @@
+{
+  "name": "core.openwop.workflows.research",
+  "version": "1.0.4",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0190 Phase 5) — the Research cluster: turn a question into a short, cited web brief. Rides the ADR 0101 unified web search (core.web.search → the host.webResearch surface): live results when a search key is configured (BYOK secret 'web-search' on the keys page, or the host's OPENWOP_WEBSEARCH_API_KEY), an honest demo placeholder when not — the synthesis says so plainly instead of pretending. For deep, multi-source, long-horizon research use the Deep Research AGENT in chat; this chain is the quick-brief shape. All tenant values are run parameters (replay-deterministic).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": ["Research"],
+  "chains": [
+    {
+      "chainId": "research.web-brief",
+      "version": "1.0.1",
+      "label": "Cited Web Brief",
+      "description": "Ask a question and get a short brief synthesized from live web results, with every claim tied to a source URL. Without a search key it says the results are placeholders (add a 'web-search' key on the keys page to go live) — it never fakes research. For deep multi-source investigations, use the Deep Research agent in chat.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "description": "The question to research." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "search", "typeId": "core.web.search", "name": "Search the web", "position": { "x": 0, "y": 0 }, "config": { "maxResults": 8 }, "inputs": { "query": "{{params.query}}" } },
+          { "id": "synthesize", "typeId": "core.ai.chatCompletion", "name": "Synthesize cited brief", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "You are a research writer answering: {{params.query}}. Synthesize a short brief (under 250 words) from the search results, citing the source URL for every claim. If the results' engine field is 'demo' or 'stub', do NOT treat them as findings — say plainly that live web search is not configured (a 'web-search' key on the keys page unlocks it) and answer only from general knowledge, clearly labeled as such.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Deliver brief", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Cited Web Brief" } }
+        ],
+        "edges": [
+          { "from": "search", "to": "synthesize" },
+          { "from": "synthesize", "to": "notify" }
+        ]
+      },
+      "outputs": {
+        "brief": { "type": "string", "description": "The cited brief (or the clearly-labeled no-live-search answer)." }
+      }
+    }
+  ]
+}

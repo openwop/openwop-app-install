@@ -73,3 +73,64 @@ describe('evaluateComposition (ADR 0135 P1)', () => {
     expect(evaluateComposition(new Set(), keys({ safetyTier: 'read', scopes: ['workspace:read'] }), [rule])).toEqual({ decision: 'allow' });
   });
 });
+
+// ADR 0135 Phase 5 — the reserved fan-out class + the countAtLeast (composition-VOLUME) predicate.
+describe('fan-out class round-trip (ADR 0135 P5)', () => {
+  it('classKey / classesOf handle { kind: fan-out }', () => {
+    expect(classKey({ kind: 'fan-out' })).toBe('kind:fan-out');
+    expect(classesOf({ safetyTier: 'exec', kind: 'fan-out' })).toEqual(['safetyTier:exec', 'kind:fan-out']);
+  });
+});
+
+describe('evaluateComposition — countAtLeast (ADR 0135 P5)', () => {
+  const egKey = classKey({ egress: 'host-mediated' });
+  const VOL: CapabilityRule = {
+    id: 'egress-volume', description: '',
+    when: { countAtLeast: { class: { egress: 'host-mediated' }, threshold: 3, window: 'turn' } },
+    verdict: 'require-approval', reason: 'too many off-host sends this turn',
+  };
+
+  it('BELOW threshold (2 prior + this = would-be 3? no — 1 prior + this = 2) ⇒ allow', () => {
+    const counts = new Map([[egKey, 1]]);
+    expect(evaluateComposition(new Set([egKey]), [egKey], [VOL], counts)).toEqual({ decision: 'allow' });
+  });
+
+  it('AT threshold (2 prior + this call = 3) ⇒ require-approval', () => {
+    const counts = new Map([[egKey, 2]]);
+    expect(evaluateComposition(new Set([egKey]), [egKey], [VOL], counts)).toMatchObject({ decision: 'require-approval', ruleId: 'egress-volume' });
+  });
+
+  it('OVER threshold (5 prior + this = 6) ⇒ require-approval', () => {
+    const counts = new Map([[egKey, 5]]);
+    expect(evaluateComposition(new Set([egKey]), [egKey], [VOL], counts)).toMatchObject({ decision: 'require-approval' });
+  });
+
+  it('the about-to-run call itself counts (0 prior + this = 1, threshold 1) ⇒ fires', () => {
+    const rule: CapabilityRule = { id: 'one', description: '', when: { countAtLeast: { class: { egress: 'host-mediated' }, threshold: 1, window: 'turn' } }, verdict: 'deny', reason: 'r' };
+    expect(evaluateComposition(new Set(), [egKey], [rule])).toMatchObject({ decision: 'deny' });
+  });
+
+  it('a different class does not accrue toward the count', () => {
+    const counts = new Map([[classKey({ safetyTier: 'read' }), 9]]);
+    expect(evaluateComposition(new Set(), [egKey], [VOL], counts)).toEqual({ decision: 'allow' });
+  });
+});
+
+describe('evaluateComposition — expression predicate (ADR 0135 P6)', () => {
+  it('seed rule as an expression: seen.read && next.egress:host-mediated', () => {
+    const rule: CapabilityRule = { id: 'e', description: '', when: { expression: 'seen.read && next.egress:host-mediated' }, verdict: 'require-approval', reason: 'r' };
+    const seen = new Set(keys(read));
+    expect(evaluateComposition(seen, keys(egress), [rule])).toMatchObject({ decision: 'require-approval', ruleId: 'e' });
+    // no prior read ⇒ no match
+    expect(evaluateComposition(new Set(), keys(egress), [rule])).toEqual({ decision: 'allow' });
+  });
+
+  it('count comparison as an expression: count.egress:host-mediated >= 3', () => {
+    const rule: CapabilityRule = { id: 'c', description: '', when: { expression: 'count.egress:host-mediated >= 3' }, verdict: 'deny', reason: 'r' };
+    const egKey = classKey({ egress: 'host-mediated' });
+    // 2 prior + this call = 3 ⇒ fires
+    expect(evaluateComposition(new Set([egKey]), [egKey], [rule], new Map([[egKey, 2]]))).toMatchObject({ decision: 'deny' });
+    // 1 prior + this call = 2 ⇒ allow
+    expect(evaluateComposition(new Set([egKey]), [egKey], [rule], new Map([[egKey, 1]]))).toEqual({ decision: 'allow' });
+  });
+});

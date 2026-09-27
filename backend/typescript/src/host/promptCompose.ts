@@ -41,6 +41,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { resolveSecret, type SecretScope } from '../byok/secretResolver.js';
+import { defangAngleFence } from './untrustedContent.js';
 import { locateRepoDir } from './_repoPath.js';
 
 export interface PromptVariableDecl {
@@ -49,6 +50,12 @@ export interface PromptVariableDecl {
   required?: boolean;
   source?: 'input' | 'variable' | 'secret' | 'context';
   defaultValue?: unknown;
+  /** RFC 0124 §Security — a secret-class variable (from a chain param's
+   *  `x-openwop-sensitive` hint, carried through the G3 lift). Its resolved value
+   *  is still delivered to the model, but REDACTED to `[REDACTED:<name>]` in the
+   *  observability payload (`prompt.composed` / debug), per SR-1. Distinct from
+   *  `source:"secret"`, whose value is a credentialRef never delivered at all. */
+  sensitive?: boolean;
 }
 
 export interface PromptTemplate {
@@ -61,6 +68,12 @@ export interface PromptTemplate {
 
 export interface ComposeRequest {
   templateId: string;
+  /** RFC 0124 G3 — compose THIS template object directly instead of resolving
+   *  `templateId` from the host's built-in fixtures map. The inline-prompt-body
+   *  lift mints host PromptTemplates (host/promptStore) that are NOT fixtures, so
+   *  the run-path resolves the minted template (getTemplate) and passes it here.
+   *  When present, `templateId` is used only for the payload's `refs`. */
+  template?: PromptTemplate;
   /** Variable name → bound value. Secret-source variables MUST be
    *  bound to a credentialRef (e.g., `openwop-conformance-canary-secret`)
    *  rather than the plaintext value; the composer resolves the secret
@@ -70,8 +83,10 @@ export interface ComposeRequest {
   /** Per-binding trust tags. When a binding is `untrusted`, the
    *  substituted segment in the composed body is wrapped in
    *  `<UNTRUSTED>...</UNTRUSTED>` markers and the payload's top-level
-   *  `contentTrust` is set to `"untrusted"`. Missing entries default to
-   *  `trusted`. */
+   *  `contentTrust` is set to `"untrusted"`. A MISSING entry derives from
+   *  the variable's declared `source` (RFC 0143: `variable`/`context` ⇒
+   *  untrusted, `input`/`secret` ⇒ trusted) — an explicit entry always
+   *  wins. */
   bindingTrust?: Record<string, 'trusted' | 'untrusted'>;
   /** Per-request observability override; falls back to the host-wide
    *  `capabilities.prompts.observability` advertised at discovery. */
@@ -193,15 +208,28 @@ async function resolveBinding(
   // the composed body wraps it in <UNTRUSTED>...</UNTRUSTED> markers
   // per RFC 0027 §E + threat-model-prompt-injection.md.
   const stringified = typeof raw === 'string' ? raw : raw === undefined ? '' : JSON.stringify(raw);
-  const wrapped = trust === 'untrusted' ? `<UNTRUSTED>${stringified}</UNTRUSTED>` : stringified;
-  return { displayValue: wrapped, observabilityValue: stringified };
+  // (2026-07 vuln-scan H5) Defang the payload's own fence markers BEFORE wrapping —
+  // an untrusted value containing the literal `</UNTRUSTED>` would otherwise close
+  // the fence and inject trusted prompt structure (fence breakout). Shared with
+  // wrapForLLMPrompt so the two injection boundaries can't drift.
+  const wrapped = trust === 'untrusted' ? `<UNTRUSTED>${defangAngleFence(stringified)}</UNTRUSTED>` : stringified;
+  // RFC 0124 §Security (SR-1) — a `sensitive` variable (from x-openwop-sensitive via
+  // the G3 lift) is delivered to the model in `displayValue` but REDACTED in the
+  // observability payload. Combines with the untrusted fence (R1): a deferred
+  // per-run prompt value is both untrusted (injection) AND secret (leak), and both
+  // markers apply — orthogonal, not either/or.
+  return {
+    displayValue: wrapped,
+    observabilityValue: decl.sensitive ? `[REDACTED:${decl.name}]` : stringified,
+  };
 }
 
 const REDACTED_FLAG = Symbol('redacted');
 
 export async function composePromptTemplate(req: ComposeRequest): Promise<PromptComposedPayload> {
-  const map = loadTemplates();
-  const template = map.get(req.templateId);
+  // RFC 0124 G3 — an inline `template` (a minted host template) composes directly;
+  // otherwise resolve the id from the built-in fixtures map.
+  const template = req.template ?? loadTemplates().get(req.templateId);
   if (!template) {
     throw new Error(`template_not_found: '${req.templateId}'`);
   }
@@ -229,7 +257,17 @@ export async function composePromptTemplate(req: ComposeRequest): Promise<Prompt
       throw new Error(`prompt_variable_unresolved: required variable '${name}' has no binding`);
     }
     const value = raw === undefined ? decl.defaultValue : raw;
-    const trust = (req.bindingTrust?.[name] ?? 'trusted') as 'trusted' | 'untrusted';
+    // RFC 0143 (trust meet-semilattice) — a MISSING bindingTrust entry derives
+    // from the variable's declared SOURCE instead of defaulting to trusted:
+    // `variable` (run-produced) and `context` (run-ambient) values may carry
+    // attacker-influenced content, so their omission must fail CLOSED. An
+    // EXPLICIT entry always wins (the compose seam's conformance drivers set
+    // it). `input` (caller-typed) and `secret` (redacted, never delivered raw)
+    // keep the trusted default. This closes the fail-open where a caller that
+    // passed no map (routes/prompts.ts `:render`) composed run-produced values
+    // as trusted — the same missing-entry shape as #2982's lookup-level hole.
+    const trust = (req.bindingTrust?.[name]
+      ?? (decl.source === 'variable' || decl.source === 'context' ? 'untrusted' : 'trusted')) as 'trusted' | 'untrusted';
     if (trust === 'untrusted') aggregateTrust = 'untrusted';
     const resolved = await resolveBinding(decl, value, trust, req.secretScope);
     bindings[name] = { display: resolved.displayValue, observability: String(resolved.observabilityValue) };

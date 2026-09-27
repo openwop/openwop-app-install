@@ -4,7 +4,9 @@
  * pattern as MembersPanel). State + handlers stay lifted in OrgsPage.
  */
 
+import { Button } from '../ui/Button.js';
 import type { Dispatch, FormEvent, SetStateAction } from 'react';
+import { StateCard } from '../ui/StateCard.js';
 import { useTranslation } from 'react-i18next';
 import type { Group, OrgMember } from '../client/accessClient.js';
 import { LockIcon, PencilIcon, TrashIcon } from '../ui/icons/index.js';
@@ -50,16 +52,16 @@ export function GroupsPanel({
         <input value={groupName} onChange={(e) => setGroupName(e.target.value)} placeholder={t('newGroupPlaceholder')} aria-label={t('newGroupAriaLabel')} />
         <span className="action-bar u-gap-1-5">
           {assignableRoleIds.map((role) => (
-            <label key={role} className={`${NEUTRAL_CHIP} groups-chip-toggle`} style={{ opacity: groupRoles.has(role) ? 1 : 0.6 }}>
+            <label key={role} className={`${NEUTRAL_CHIP} groups-chip-toggle${groupRoles.has(role) ? '' : ' u-dim-unselected'}`}>
               <input type="checkbox" checked={groupRoles.has(role)} onChange={() => setGroupRoles((s) => toggleStr(s, role))} className="u-mr-1" />
               {roleLabel(role)}
             </label>
           ))}
         </span>
-        <button type="submit" className="primary" disabled={!groupName.trim() || !can('host:groups:manage')} title={can('host:groups:manage') ? undefined : t('addGroupRequiresScope')}>{t('addGroup')}</button>
+        <Button variant="primary" type="submit" disabled={!groupName.trim() || !can('host:groups:manage')} title={can('host:groups:manage') ? undefined : t('addGroupRequiresScope')}>{t('addGroup')}</Button>
       </form>
       {groups.length === 0 ? (
-        <p className="groups-muted">{t('noGroupsYet')}</p>
+        <StateCard title={t('noGroupsYet')} />
       ) : (
         groups.map((g) => (
           <div key={g.groupId} className="surface-card u-mb-2">
@@ -68,12 +70,12 @@ export function GroupsPanel({
                 <LockIcon size={14} /> <strong>{g.name}</strong>
               </span>
               <span className="action-bar">
-                <button type="button" className="secondary" disabled={!can('host:groups:manage')} onClick={() => startEditGroup(g)} aria-label={t('editGroupMembersAriaLabel', { name: g.name })}>
+                <Button variant="secondary" disabled={!can('host:groups:manage')} onClick={() => startEditGroup(g)} aria-label={t('editGroupMembersAriaLabel', { name: g.name })}>
                   <PencilIcon size={13} /> {t('membersButton')}
-                </button>
-                <button type="button" className="secondary" disabled={!can('host:groups:manage')} onClick={() => void onDeleteGroup(g)} aria-label={t('deleteGroupAriaLabel', { name: g.name })}>
+                </Button>
+                <Button variant="secondary" disabled={!can('host:groups:manage')} onClick={() => void onDeleteGroup(g)} aria-label={t('deleteGroupAriaLabel', { name: g.name })}>
                   <TrashIcon size={13} />
-                </button>
+                </Button>
               </span>
             </div>
             <div className="u-flex u-wrap u-gap-1-5 u-mt-1-5">
@@ -89,7 +91,7 @@ export function GroupsPanel({
                   <span className="groups-muted">{t('addMembersToOrgFirst')}</span>
                 ) : (
                   members.map((m) => (
-                    <label key={m.memberId} className={`${NEUTRAL_CHIP} groups-chip-toggle`} style={{ opacity: draftGroupMembers.has(m.memberId) ? 1 : 0.6 }}>
+                    <label key={m.memberId} className={`${NEUTRAL_CHIP} groups-chip-toggle${draftGroupMembers.has(m.memberId) ? '' : ' u-dim-unselected'}`}>
                       <input
                         type="checkbox"
                         checked={draftGroupMembers.has(m.memberId)}
@@ -100,8 +102,8 @@ export function GroupsPanel({
                     </label>
                   ))
                 )}
-                <button type="button" className="primary" onClick={() => void onSaveGroupMembers(g)}>{t('common:save')}</button>
-                <button type="button" className="secondary" onClick={() => setEditingGroupId(null)}>{t('common:cancel')}</button>
+                <Button variant="primary" onClick={() => void onSaveGroupMembers(g)}>{t('common:save')}</Button>
+                <Button variant="secondary" onClick={() => setEditingGroupId(null)}>{t('common:cancel')}</Button>
               </div>
             ) : null}
           </div>

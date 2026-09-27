@@ -38,7 +38,7 @@ beforeAll(async () => {
   // would normally come in via OIDC, but the wildcard bearer is a
   // proxy: same code path past the auth boundary, just with an
   // explicitly-set body.tenantId).
-  process.env.OPENWOP_API_KEYS = 'preflight-test-admin';
+  process.env.OPENWOP_API_KEYS = 'preflight-test-admin:*'; // ADR 0561 — this suite needs the wildcard bearer (it posts arbitrary body.tenantId)
   const app = await createApp({
     port: 0,
     storageDsn: 'memory://',
@@ -47,7 +47,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 

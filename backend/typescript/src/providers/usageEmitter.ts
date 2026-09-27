@@ -11,8 +11,10 @@
  *
  * Per RFC 0026 §B: emit BEFORE the corresponding `node.completed`.
  * Per RFC 0026 §D: payload MUST NOT carry credentialRef strings or
- * prompt/response substrings — this module's extract* functions read
- * ONLY the documented usage fields from each provider response.
+ * prompt/response substrings. The per-provider `extract*Usage` helpers this
+ * docblock used to name were removed once their only caller went: the live
+ * emitter (`aiProviders/aiProvidersHost.ts`) passes already-counted tokens to
+ * `buildProviderUsagePayloadFromTokens`, which never sees a raw response.
  */
 
 /** Canonical RFC 0026 `providerUsage` payload shape. */
@@ -121,41 +123,6 @@ export function computeCostUsd(model: string, inputTokens: number, outputTokens:
   return (inputTokens * rate.input + outputTokens * rate.output) / 1_000_000;
 }
 
-/** Extract Anthropic usage from a response. Anthropic returns
- *  `{ usage: { input_tokens, output_tokens } }`. */
-export function extractAnthropicUsage(response: unknown, _model: string): { inputTokens: number; outputTokens: number } | null {
-  if (!response || typeof response !== 'object') return null;
-  const u = (response as { usage?: { input_tokens?: number; output_tokens?: number } }).usage;
-  if (!u || typeof u.input_tokens !== 'number' || typeof u.output_tokens !== 'number') return null;
-  return { inputTokens: u.input_tokens, outputTokens: u.output_tokens };
-}
-
-/** Extract OpenAI usage. OpenAI returns
- *  `{ usage: { prompt_tokens, completion_tokens, total_tokens } }`. */
-export function extractOpenAIUsage(response: unknown, _model: string): { inputTokens: number; outputTokens: number; totalTokens?: number } | null {
-  if (!response || typeof response !== 'object') return null;
-  const u = (response as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } }).usage;
-  if (!u || typeof u.prompt_tokens !== 'number' || typeof u.completion_tokens !== 'number') return null;
-  return {
-    inputTokens: u.prompt_tokens,
-    outputTokens: u.completion_tokens,
-    ...(typeof u.total_tokens === 'number' ? { totalTokens: u.total_tokens } : {}),
-  };
-}
-
-/** Extract Gemini usage. Gemini returns
- *  `{ usageMetadata: { promptTokenCount, candidatesTokenCount, totalTokenCount } }`. */
-export function extractGeminiUsage(response: unknown, _model: string): { inputTokens: number; outputTokens: number; totalTokens?: number } | null {
-  if (!response || typeof response !== 'object') return null;
-  const u = (response as { usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number } }).usageMetadata;
-  if (!u || typeof u.promptTokenCount !== 'number' || typeof u.candidatesTokenCount !== 'number') return null;
-  return {
-    inputTokens: u.promptTokenCount,
-    outputTokens: u.candidatesTokenCount,
-    ...(typeof u.totalTokenCount === 'number' ? { totalTokens: u.totalTokenCount } : {}),
-  };
-}
-
 /** Build the canonical `providerUsage` payload from already-extracted
  *  token counts (the normalized shape `providers/dispatch.ts` returns
  *  to its callers). Use this at emission sites that consume
@@ -198,46 +165,3 @@ export function buildProviderUsagePayloadFromTokens(
   return payload;
 }
 
-/** Build the canonical `providerUsage` payload from a provider's response.
- *
- *  Per RFC 0026 §A:
- *  - `provider` + `model` + `inputTokens` + `outputTokens` are required.
- *  - `costEstimateUsd` is OPTIONAL; computed from a static rate table.
- *    Omitted when the model isn't in the table (don't guess).
- *  - The payload MUST NOT carry credentialRef, prompt/response substrings,
- *    or tool call args/results. This function reads ONLY from the
- *    response's `usage`/`usageMetadata` block — payload content is never
- *    referenced here.
- *
- *  @param providerId canonical id (`anthropic`/`openai`/`gemini`)
- *  @param model      provider-stamped model id
- *  @param response   the raw provider response
- *  @param opts       optional `nodeId` + `traceId` + `cacheHit` overrides */
-export function buildProviderUsagePayload(
-  providerId: string,
-  model: string,
-  response: unknown,
-  opts: { nodeId?: string; traceId?: string; cacheHit?: boolean } = {},
-): ProviderUsagePayload | null {
-  let usage: { inputTokens: number; outputTokens: number; totalTokens?: number } | null = null;
-  switch (providerId) {
-    case 'anthropic':
-      usage = extractAnthropicUsage(response, model);
-      break;
-    case 'openai':
-      usage = extractOpenAIUsage(response, model);
-      break;
-    case 'gemini':
-    case 'google':
-      usage = extractGeminiUsage(response, model);
-      break;
-    default:
-      return null;
-  }
-  if (!usage) return null;
-
-  return buildProviderUsagePayloadFromTokens(providerId, model, usage.inputTokens, usage.outputTokens, {
-    ...(usage.totalTokens !== undefined ? { totalTokens: usage.totalTokens } : {}),
-    ...opts,
-  });
-}

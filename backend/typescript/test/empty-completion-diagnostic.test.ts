@@ -1,5 +1,5 @@
 /**
- * ENG-10 (CODEBASE-ASSESSMENT.md): the empty-completion diagnostic, extracted
+ * ENG-10 (docs/steward/CODEBASE-ASSESSMENT.md): the empty-completion diagnostic, extracted
  * from the bootstrap/nodes.ts god module, is now independently testable.
  */
 import { describe, it, expect } from 'vitest';

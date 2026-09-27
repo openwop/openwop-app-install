@@ -1,0 +1,356 @@
+{
+  "name": "core.openwop.workflows.customer-onboarding",
+  "version": "1.1.0",
+  "kind": "workflow-chain",
+  "description": "Customer-onboarding chains (RFC 0013): the post-sale first-mile — a warm welcome, a personalized kickoff checklist, and a scheduled 30-day health check. All external sends sit behind a human approval gate; tenant values are run parameters (replay-deterministic).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "Customer onboarding"
+  ],
+  "chains": [
+    {
+      "chainId": "onboarding.welcome-sequence",
+      "version": "1.0.0",
+      "label": "New Customer → Welcome Email",
+      "description": "A new customer signs up (webhook) and gets a warm, personalized welcome email drafted from their signup details — reviewed by a human before it sends.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recipientEmail", "senderEmail"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "default": "our product",
+            "description": "Product name referenced in the welcome copy."
+          },
+          "tone": {
+            "type": "string",
+            "default": "friendly",
+            "description": "Voice for the welcome email."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "webhookPath": { "type": "string", "default": "/welcome-sequence", "description": "URL path segment this workflow listens on (e.g. `ci-failure`)." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "Welcome aboard", "description": "Subject line for the sent email." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "signup",
+            "typeId": "core.trigger.webhook",
+            "name": "New signup",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "path": "{{params.webhookPath}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "draft",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Draft welcome",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Write a warm, {{params.tone}} welcome email for a new customer of {{params.product}}. Reference their signup details, set expectations for the first week, and point to one clear next step. Under 150 words. No invented promises.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Review welcome",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the welcome email before it sends",
+              "artifactType": "email.body",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no welcome sent",
+            "position": {
+              "x": 840,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.integration.email-send",
+            "name": "Send welcome",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "to": "{{params.recipientEmail}}",
+              "subject": "{{params.emailSubject}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "signup",
+            "to": "draft"
+          },
+          {
+            "from": "draft.content",
+            "to": "gate.artifact"
+          },
+          {
+            "from": "gate.artifact",
+            "to": "send.text",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "gate",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    },
+    {
+      "chainId": "onboarding.kickoff-checklist",
+      "version": "1.0.0",
+      "label": "Kickoff → Personalized Checklist",
+      "description": "Turns a new account's context into a tailored onboarding checklist and posts it to the team as an in-app notification so the CSM can act on it.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["triggerEventName"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "default": "our product",
+            "description": "Product name."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Account created",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "plan",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Build checklist",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "You are an onboarding specialist for {{params.product}}. From this account's context, produce a numbered kickoff checklist (5-8 concrete first-week tasks) tailored to their use case and segment. Each item is one actionable line.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.notifications.nodes.notify",
+            "name": "Notify CSM",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": { "audience": "tenant" },
+            "inputs": { "title": "Kickoff → Personalized Checklist" }
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "plan"
+          },
+          {
+            "from": "plan",
+            "to": "notify"
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    },
+    {
+      "chainId": "onboarding.health-check-30d",
+      "version": "1.0.0",
+      "label": "30-Day Check-In (Scheduled)",
+      "description": "A scheduled check-in that drafts a personalized 30-day health-check email — reviewed by a human — asking how the rollout is going and offering help.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recipientEmail", "scheduleCron", "senderEmail"],
+        "properties": {
+          "product": {
+            "type": "string",
+            "default": "our product",
+            "description": "Product name."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "scheduleCron": { "type": "string", "description": "Cron expression for when this workflow runs (e.g. `0 9 * * 1` = Mondays 09:00)." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "How are things going?", "description": "Subject line for the sent email." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "cron",
+            "typeId": "core.trigger.schedule",
+            "name": "Every 30 days",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "cron": "{{params.scheduleCron}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "draft",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Draft check-in",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Draft a brief, genuine 30-day check-in email for a customer of {{params.product}}. Ask how the rollout is going, invite one blocker to share, and offer a specific next resource. Warm, not salesy. Under 120 words.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Review check-in",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the 30-day check-in before sending",
+              "artifactType": "email.body",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no check-in sent",
+            "position": {
+              "x": 840,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.integration.email-send",
+            "name": "Send check-in",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "to": "{{params.recipientEmail}}",
+              "subject": "{{params.emailSubject}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "cron",
+            "to": "draft"
+          },
+          {
+            "from": "draft.content",
+            "to": "gate.artifact"
+          },
+          {
+            "from": "gate.artifact",
+            "to": "send.text",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "gate",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    }
+  ]
+}

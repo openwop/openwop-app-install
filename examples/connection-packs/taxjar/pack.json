@@ -1,0 +1,32 @@
+{
+  "name": "core.openwop.connections.taxjar",
+  "version": "1.0.0",
+  "kind": "connection",
+  "description": "TaxJar connection pack (RFC 0095) — api_key provider for the commerce tax-quote seam (ADR 0238 DEF-1). Category is `other` (the openai-images precedent): the normative `category` enum has no `tax` value and the seam resolves this provider by `id` (`taxjar`), not category — no wire/RFC change. When a merchant configures a TaxJar connection, `features/commerce/taxShipping.ts` calls the Sales Tax API (POST https://api.taxjar.com/v2/taxes) at checkout; ANY error/timeout falls back to the flat/manual governance rate — a provider hiccup never blocks a sale. READ quotes (not money movement), so NO commerce-spend gate. Credentials stay host-side, resolved per-call through the Connections authorization choke point; the request carries only the destination address + line amount, never customer contact details. Carries NO secret (ADR 0024 §7).",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "provider": {
+    "id": "taxjar",
+    "displayName": "TaxJar",
+    "category": "other",
+    "auth": {
+      "kind": "api_key",
+      "authFlow": "none",
+      "scopeModel": "coarse"
+    },
+    "reach": {
+      "openapi": {
+        "ref": "https://developer.taxjar.com/api/reference/"
+      }
+    },
+    "consumerNodes": [
+      "core.openwop.http"
+    ],
+    "docsUrl": "https://developer.taxjar.com/api/guides/",
+    "apiHosts": [
+      "api.taxjar.com"
+    ]
+  }
+}

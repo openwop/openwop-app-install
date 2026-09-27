@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.integration",
-  "version": "1.1.0",
+  "version": "1.2.1",
   "description": "Integration-layer primitives. v1.0 (email-send, slack-message) plus v1.1 (chat-message-generic, sms-send, voice-call-place, voice-call-tts-greet, notification-push) — provider-neutral cross-cutting integration helpers.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -14,14 +14,14 @@
     "communication"
   ],
   "engines": {
-    "openwop": ">=1.0.0 <2.0.0"
+    "openwop": ">=1.0.0 <3.0.0"
   },
   "nodes": [
     {
       "typeId": "core.openwop.integration.email-send",
       "version": "1.0.0",
       "label": "Email Send",
-      "description": "Sends an email via the host's email adapter. Provider-agnostic — host routes to SMTP / SES / Resend / SendGrid / whatever it advertises in `Capabilities.email.providers`. Side-effectful + cacheable. Deterministic Idempotency-Key derivation (SHA-256 over runId+nodeId+to+subject+body) so the engine's Layer-2 cache prevents duplicate sends on replay.",
+      "description": "Sends an email via the host's email adapter. Provider-agnostic — host routes to SMTP / SES / Resend / SendGrid / whatever it advertises in `Capabilities.email.providers`. Side-effectful + cacheable. Deterministic Idempotency-Key derivation (SHA-256 over nodeId+to+subject+body — no runId, so it is fork-stable and the host sent-ledger dedups a :fork re-send) so duplicate sends are prevented on replay and fork.",
       "category": "integration",
       "role": "side-effect",
       "capabilities": [
@@ -128,5 +128,6 @@
     "format": "esm",
     "entry": "./index.mjs",
     "minRuntimeVersion": "node>=20"
-  }
+  },
+  "kind": "node"
 }

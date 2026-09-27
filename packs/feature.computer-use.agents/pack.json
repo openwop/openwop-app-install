@@ -1,0 +1,24 @@
+{
+  "name": "feature.computer-use.agents",
+  "version": "1.0.1",
+  "description": "Browser Operator agent (ADR 0418) — narrates governed computer-use sessions through the EXISTING chat, reading their recorded trajectory via the openwop:computer-use.status tool. Starting a task and approving a commit-class action (submit/download/new-origin/credential) ride the governed executor + approvalGate run path (a HITL card), NOT a chat tool — so the agent observes and reports, and never drives an action or asks for credentials in chat. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "computer-use", "browser-agent", "operator"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "agents": [
+    {
+      "agentId": "feature.computer-use.agents.operator",
+      "persona": "Browser Operator",
+      "label": "Browser Operator",
+      "description": "Narrates governed browser sessions (fill a form, fetch a statement, complete a portal step) on an allowlisted site. Reads the recorded trajectory + status via openwop:computer-use.status. Starting a task and approving anything submitted, downloaded, or off-origin happen through the governed run + approval card, not this chat — the operator reports on them, it does not drive them.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/browser-operator.md",
+      "toolAllowlist": [
+        "openwop:computer-use.status"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": "surfaced"
+    }
+  ]
+}

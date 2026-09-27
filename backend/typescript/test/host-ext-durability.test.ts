@@ -109,9 +109,9 @@ describe('host-ext durability: read-through across instances', () => {
     await __resetRosterStore();
     const a = await createRosterEntry({ tenantId: 't', persona: 'A', agentRef: { agentId: 'x.y.z.a' } });
     const b = await createRosterEntry({ tenantId: 't', persona: 'B', agentRef: { agentId: 'x.y.z.b' } });
-    expect(await deleteRosterEntry(a.rosterId)).toBe(true);
-    expect(await getRosterEntry(a.rosterId)).toBeNull();
-    expect((await getRosterEntry(b.rosterId))?.persona).toBe('B');
+    expect(await deleteRosterEntry(a.tenantId, a.rosterId)).toBe(true);
+    expect(await getRosterEntry(a.tenantId, a.rosterId)).toBeNull();
+    expect((await getRosterEntry(b.tenantId, b.rosterId))?.persona).toBe('B');
     expect(await listRoster('t')).toHaveLength(1);
     await s.close();
   });

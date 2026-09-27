@@ -2,8 +2,13 @@
  * Reviewable-learning proposals routes (RFC 0096) — host-sample seam under
  * `/v1/host/openwop-app/proposals`, per `host-sample-test-seams.md §11`.
  *
- * Conformance-only surface (Production safety §: a production host 404s these
- * unless an env-gate enables them). Tenant-scoped to the caller. The `apply`
+ * CORRECTED (ADR 0736): this header used to say "a production host 404s these
+ * unless an env-gate enables them". It does not. `feature.ts:6-9` is the accurate
+ * account and says the opposite — the seam is served UNCONDITIONALLY (always-on
+ * substrate); `OPENWOP_PROPOSALS_ENABLED` gates only the CAPABILITY ADVERTISEMENT
+ * in `discovery.ts:1872`. MEASURED: zero `process.env` reads in this file or in
+ * `feature.ts`. So the surface is UNADVERTISED BUT REACHABLE, which is why the
+ * mutation gate below exists. Tenant-scoped to the caller. The `apply`
  * action is fail-closed on the `packs:publish` scope (installing the
  * materialized artifact is a pack-publish-class mutation) — an unseeded caller
  * resolves to zero scopes and is denied 403, satisfying the
@@ -35,6 +40,38 @@ function paramId(req: Request): string {
     throw new OpenwopError('validation_error', 'Invalid proposal id.', 400, { id });
   }
   return id;
+}
+
+/**
+ * ADR 0736 — mutating a proposal needs authority. Before this, revise/reject/
+ * archive read only `tenantOf(req)` and the id: any member of the tenant could
+ * swap the `artifact` of a proposal someone else raised, and `artifact` is "the
+ * byte image last persisted … installed verbatim at apply" (`types.ts:46`). So
+ * the applied thing need not be the reviewed thing — the approve-what-you-see
+ * property ADR 0473 protects with `expectedDefinitionHash`.
+ *
+ * D1 baseline: `workspace:write`, via the SAME resolver `assertCanApply` uses.
+ * D2: when the row carries an `owner.principal` that is not the caller, refuse.
+ * D3 exits, both deliberate — `host:members:manage` may act on any row (an admin
+ * must be able to archive a departed member's proposal), and a row with NO
+ * `owner.principal` (the demo seeder, `proposalsService.ts:256`) stays mutable by
+ * any writer, because there is no owner to defer to and refusing would strand it.
+ */
+async function assertCanMutate(req: Request, proposal: { owner?: { principal?: string } }): Promise<void> {
+  const subject = callerSubject(req);
+  const tenant = tenantOf(req);
+  const scopes = subject ? (await resolveSubjectScopesUnion(tenant, subject)).scopes : [];
+  if (!scopes.includes('workspace:write')) {
+    throw new OpenwopError('forbidden_scope', 'Changing a proposal requires the `workspace:write` scope.', 403, {
+      requiredScope: 'workspace:write',
+    });
+  }
+  const owner = proposal.owner?.principal;
+  if (owner && owner !== subject && !scopes.includes('host:members:manage')) {
+    throw new OpenwopError('forbidden', 'Only the proposer may change this proposal.', 403, {
+      reason: 'not-proposer',
+    });
+  }
 }
 
 /** Fail-closed: applying a proposal requires `packs:publish` (installs an artifact). */
@@ -90,6 +127,9 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
       if (typeof body.title === 'string') patch.title = body.title;
       if (typeof body.rationale === 'string') patch.rationale = body.rationale;
       if (body.artifact && typeof body.artifact === 'object') patch.artifact = body.artifact as Record<string, unknown>;
+      const existing = await getProposal(tenantOf(req), paramId(req));
+      if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);
+      await assertCanMutate(req, existing);
       const p = await reviseProposal(tenantOf(req), paramId(req), patch);
       if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
       res.json(p);
@@ -120,6 +160,9 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
   app.post(
     '/v1/host/openwop-app/proposals/:id/reject',
     wrap(async (req, res) => {
+      const existing = await getProposal(tenantOf(req), paramId(req));
+      if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);
+      await assertCanMutate(req, existing);
       const p = await rejectProposal(tenantOf(req), paramId(req));
       if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
       res.json(p);
@@ -130,6 +173,9 @@ export function registerProposalsRoutes(deps: RouteDeps): void {
   app.delete(
     '/v1/host/openwop-app/proposals/:id',
     wrap(async (req, res) => {
+      const existing = await getProposal(tenantOf(req), paramId(req));
+      if (!existing) throw new OpenwopError('not_found', 'Proposal not found.', 404);
+      await assertCanMutate(req, existing);
       const p = await archiveProposal(tenantOf(req), paramId(req));
       if (!p) throw new OpenwopError('not_found', 'Proposal not found.', 404);
       res.json(p);

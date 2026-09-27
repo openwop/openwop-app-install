@@ -1,7 +1,10 @@
 /**
  * Eval leaderboard routes (ADR 0123 Phase 2) — host-extension, org-scoped + RBAC.
  * `GET /v1/host/openwop-app/evals/orgs/:orgId/leaderboard` — per-model win-rate +
- * Elo over the tenant's MessageFeedback. Toggle-gated, workspace:read.
+ * Elo over the tenant's MessageFeedback. ADMIN-tier reads (EVC-1): the leaderboard +
+ * arena/rating gate on `host:members:manage`, not the `workspace:read` VIEWER scope —
+ * the `evals` toggle graduated always-on (ADR 0134), so it is not a gate here.
+ * `arena/match` stays `workspace:write` (an editor casting a verdict).
  *
  * @see docs/adr/0123-eval-feedback-leaderboard.md
  */
@@ -39,8 +42,8 @@ export function registerEvalsRoutes(deps: RouteDeps): void {
   const { app } = deps;
   app.get('/v1/host/openwop-app/evals/orgs/:orgId/leaderboard', async (req, res, next) => {
     try {
-      const { user } = await requireOrgScope(req, 'workspace:read');
-      const leaderboard = await buildTenantLeaderboard(user.tenantId, metaModelResolver());
+      const { tenantId } = await requireOrgScope(req, 'host:members:manage'); // EVC-1: admin-tier read
+      const leaderboard = await buildTenantLeaderboard(tenantId, metaModelResolver());
       res.json({ leaderboard });
     } catch (err) { next(err); }
   });
@@ -51,14 +54,14 @@ export function registerEvalsRoutes(deps: RouteDeps): void {
   // them); this records the verdict + updates both models' head-to-head Elo.
   app.post('/v1/host/openwop-app/evals/orgs/:orgId/arena/match', async (req, res, next) => {
     try {
-      const { user } = await requireOrgScope(req, 'workspace:write');
+      const { user, tenantId } = await requireOrgScope(req, 'workspace:write');
       const b = (req.body ?? {}) as { modelA?: unknown; modelB?: unknown; winner?: unknown };
       if (typeof b.modelA !== 'string' || typeof b.modelB !== 'string') {
         throw new OpenwopError('validation_error', '`modelA` and `modelB` are required.', 400, {});
       }
       const winner = b.winner === 'A' || b.winner === 'B' || b.winner === 'tie' ? b.winner : undefined;
       if (!winner) throw new OpenwopError('validation_error', '`winner` MUST be A | B | tie.', 400, { field: 'winner' });
-      const result = await recordArenaMatch(user.tenantId, {
+      const result = await recordArenaMatch(tenantId, {
         matchId: randomUUID(), modelA: b.modelA, modelB: b.modelB, winner,
         raterSubject: `user:${user.userId}`, createdAt: new Date().toISOString(),
       });
@@ -68,10 +71,10 @@ export function registerEvalsRoutes(deps: RouteDeps): void {
 
   app.get('/v1/host/openwop-app/evals/orgs/:orgId/arena/rating', async (req, res, next) => {
     try {
-      const { user } = await requireOrgScope(req, 'workspace:read');
+      const { tenantId } = await requireOrgScope(req, 'host:members:manage'); // EVC-1: admin-tier read
       const model = typeof req.query.model === 'string' ? req.query.model : '';
       if (!model) throw new OpenwopError('validation_error', '`model` query param is required.', 400, { field: 'model' });
-      res.json({ model, elo: await getArenaRating(user.tenantId, model) });
+      res.json({ model, elo: await getArenaRating(tenantId, model) });
     } catch (err) { next(err); }
   });
 }

@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../client/interruptsClient.js';
@@ -33,10 +34,10 @@ export function CancellationBanner({ runId, nodeId, data, onResolved }: Props) {
     <div className="card">
       <h2>{t('cancellationRequested')}</h2>
       <div className="alert warning">{reason}</div>
-      {error && <div className="alert error">{error}</div>}
+      {error && <div role="alert" className="alert error">{error}</div>}
       <div className="button-row">
-        <button onClick={() => ack(true)} disabled={submitting}>{t('confirmCancel')}</button>
-        <button className="secondary" onClick={() => ack(false)} disabled={submitting}>{t('declineCancel')}</button>
+        <Button variant="primary" onClick={() => ack(true)} disabled={submitting}>{t('confirmCancel')}</Button>
+        <Button variant="secondary" onClick={() => ack(false)} disabled={submitting}>{t('declineCancel')}</Button>
       </div>
     </div>
   );

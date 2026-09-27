@@ -10,13 +10,14 @@
  * MULTI-INSTANCE: every fleet instance runs this loop. `warmRefreshConnection`
  * is idempotent (a redundant mint is harmless), but to avoid N instances hitting
  * a provider's token endpoint at once we guard each refresh with
- * `claimIdempotency((connectionId, expiresAt-slot))` — the same fire-once lease
+ * `claimOnce((connectionId, expiresAt-slot))` — the same fire-once lease
  * `scheduleDaemon` uses. The claim row is pruned by age each tick.
  *
  * @see src/host/scheduleDaemon.ts — the daemon pattern this follows.
  */
 
 import type { Storage } from '../../storage/storage.js';
+import { runUnderWorkerContract } from '../../storage/eventEraAdapter.js';
 import { createLogger } from '../../observability/logger.js';
 import { getInstanceId } from '../../host/instanceId.js';
 import { listExpiringOAuthConnections, warmRefreshConnection } from './connectionsService.js';
@@ -42,7 +43,7 @@ export async function processExpiringConnections(storage: Storage, now: number =
   for (const connection of due) {
     const slot = connection.expiresAt ?? connection.updatedAt;
     const claimKey = `${CLAIM_KEY_PREFIX}${connection.connectionId}:${slot}`;
-    const claim = await storage.claimIdempotency(claimKey, new Date(now).toISOString());
+    const claim = await storage.claimOnce(claimKey, new Date(now).toISOString());
     if (!claim.claimed) continue; // another instance owns this slot
     try {
       const status = await warmRefreshConnection(connection);
@@ -70,7 +71,7 @@ export function startConnectionsRefreshDaemon(storage: Storage): RefreshDaemon {
       // GC abandoned OAuth consent flows so the pending-auth store stays bounded.
       await sweepExpiredPendingAuth().catch(() => undefined);
       await storage
-        .pruneIdempotencyByPrefix(CLAIM_KEY_PREFIX, new Date(Date.now() - CLAIM_PRUNE_AGE_MS).toISOString())
+        .pruneOnceByPrefix(CLAIM_KEY_PREFIX, new Date(Date.now() - CLAIM_PRUNE_AGE_MS).toISOString())
         .catch(() => undefined);
     } catch (err) {
       log.warn('connections refresh tick error', { error: err instanceof Error ? err.message : String(err) });
@@ -78,7 +79,7 @@ export function startConnectionsRefreshDaemon(storage: Storage): RefreshDaemon {
       running = false;
     }
   };
-  const timer = setInterval(() => void tick(), POLL_INTERVAL_MS);
+  const timer = setInterval(() => void runUnderWorkerContract(tick), POLL_INTERVAL_MS);
   if (typeof timer.unref === 'function') timer.unref();
   log.info('connections refresh daemon started', { pollIntervalMs: POLL_INTERVAL_MS, instanceId: getInstanceId() });
   return { stop: () => clearInterval(timer) };

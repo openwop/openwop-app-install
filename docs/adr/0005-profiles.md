@@ -154,6 +154,17 @@ a per-skill endorse affordance. Registered in `FRONTEND_FEATURES`; the canonical
   secret-shaped tokens before persistence, reusing the existing redaction the
   annotations route uses.
 
+> **Addendum (2026-07-12 fold-in) — `ctx.features.profiles` workflow surface.**
+> Added a read-only ADR-0014 surface (`features/profiles/surface.ts`) exposing
+> `listProfiles` + `getProfile` so a workflow node can read the team roster through
+> `ctx` (closing the ADR 0172 sibling-service-import gap). Always-on/ungated
+> (profiles has no `toggleDefault`, so `featureSurfaces.gate()` returns it
+> unwrapped). **DESCRIPTIVE-only** — no ranking (that stays Production's concern,
+> `buildProductionContext`); internal columns (`tenantId`/`updatedBy`) stripped.
+> Production's own surface keeps its in-process `listProfiles` read — surfaces are
+> peers, not composable within a builder, so this is for node-drivability, not a
+> re-wire.
+
 ## Alternatives considered
 
 1. **Put profile fields on the `User` record.** Rejected — bloats the identity

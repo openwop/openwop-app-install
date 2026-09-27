@@ -38,7 +38,7 @@ const TRANSCRIPT = 'feature.podcasts.nodes.transcript';
 const SYNTHESIZE = 'feature.podcasts.nodes.synthesize';
 const MIX = 'feature.podcasts.nodes.mix';
 
-export const generateWorkflowDefinition: WorkflowDefinition = {
+const generateWorkflowDefinition: WorkflowDefinition = {
   workflowId: PODCASTS_GENERATE_ID,
   nodes: [
     { nodeId: 'select', typeId: SELECT, inputs: { episodeId: { type: 'variable', variableName: 'episodeId' } } },

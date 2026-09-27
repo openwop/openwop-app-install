@@ -22,7 +22,13 @@
  */
 
 import { getAgentProfile } from './agentProfileService.js';
-import { listConnections, type ConnectionStatus } from '../features/connections/connectionsService.js';
+import { listConnections, resolveProviderForCapability, type ConnectionStatus } from '../features/connections/connectionsService.js';
+
+/** A `requiredConnections` entry may be a concrete provider id OR a capability
+ *  token `capability:<category>` (e.g. `capability:hr`) that is satisfied by ANY
+ *  configured provider of that category — so an agent declares "needs an HRIS
+ *  connection", not a specific vendor. */
+const CAPABILITY_PREFIX = 'capability:';
 
 /** Per-provider readiness for one `requiredConnections` entry. */
 export interface ConnectionReadinessEntry {
@@ -85,14 +91,24 @@ export async function resolveConnectionReadiness(
     if (c.status === 'active' || prev === undefined) bestStatusByProvider.set(c.provider, c.status);
   }
 
-  const entries: ConnectionReadinessEntry[] = required.map((provider) => {
+  const entries: ConnectionReadinessEntry[] = await Promise.all(required.map(async (provider) => {
+    // Capability token → satisfied by any configured provider of that category.
+    if (provider.startsWith(CAPABILITY_PREFIX)) {
+      const capability = provider.slice(CAPABILITY_PREFIX.length);
+      const resolved = await resolveProviderForCapability({ tenantId, capability, actingUserId });
+      return {
+        provider,
+        configured: resolved !== null,
+        ...(resolved !== null ? { status: 'active' as ConnectionStatus } : {}),
+      };
+    }
     const status = bestStatusByProvider.get(provider);
     return {
       provider,
       configured: status === 'active',
       ...(status !== undefined ? { status } : {}),
     };
-  });
+  }));
   const missing = entries.filter((e) => !e.configured).map((e) => e.provider);
   return { required, entries, allConfigured: missing.length === 0, missing };
 }

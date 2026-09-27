@@ -25,7 +25,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, res); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -59,10 +59,11 @@ describe('feature-surface gate — always-on carve-out (ADR 0027)', () => {
   );
 
   it('still DENIES a default-OFF toggled surface (the gate is not neutered)', async () => {
-    // priority-matrix is a real feature whose toggle defaults OFF; a tenant that
-    // never enabled it must get the uniform refusal on its surface.
+    // forms is a real feature whose toggle defaults OFF; a tenant that never
+    // enabled it must get the uniform refusal on its surface. (Was
+    // priority-matrix, which ADR 0229 flipped ON by default.)
     const bundle = buildHostSurfaceBundle({ tenantId: 'gate-tenant' });
-    const surface = bundle.features['priority-matrix'] as Record<string, (a: Record<string, unknown>) => Promise<unknown>>;
+    const surface = bundle.features['forms'] as Record<string, (a: Record<string, unknown>) => Promise<unknown>>;
     expect(surface).toBeTruthy();
     const code = await callFirstMethod(surface);
     expect(code).toBe('host_capability_disabled');

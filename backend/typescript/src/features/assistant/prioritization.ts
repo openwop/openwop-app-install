@@ -4,9 +4,17 @@
  * the assistant may HANDLE silently, and what it DEFERS.
  *
  * Pure + deterministic (so a run's decision is replay-stable). The coarse knob is
- * a PROFILE (conservative│balanced│aggressive) — a toggle variant binding, stamped
- * into run.metadata.featureVariant at run creation. The fine knob is per-tenant
- * weights/thresholds. Both are passed in here; this module owns only the math.
+ * a PROFILE (conservative│balanced│aggressive); the fine knob is per-tenant
+ * weights/thresholds. Both are passed in here as explicit arguments (the profile
+ * defaults to `balanced`); this module owns only the math.
+ *
+ * COS-17 — this used to describe the profile as "a toggle variant binding, stamped
+ * into run.metadata.featureVariant at run creation." That is no longer true: the
+ * toggle was GRADUATED (feature.ts § Correction, 2026-06-12) precisely because
+ * nothing in the assistant ever READ that variant — `composeBriefing`, the
+ * `prioritize` surface, and the board projection all take the profile as an
+ * explicit argument. The variant binding was vestigial and is gone; the profile is
+ * a plain argument, not a variant.
  */
 
 export type PriorityBucket = 'surface' | 'handle' | 'defer';

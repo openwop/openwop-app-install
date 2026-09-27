@@ -14,10 +14,12 @@
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { getSetCookies } from './headerCookies.js';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../src/index.js';
+import type { DurableCollection as DurableCollectionType } from '../src/host/hostExtPersistence.js';
 import { saveConfig } from '../src/host/featureToggles/service.js';
 import { getToggleDefault } from '../src/host/featureToggles/registry.js';
+import { createMember } from '../src/host/accessControlService.js';
 
 let BASE: string;
 let server: http.Server;
@@ -29,7 +31,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   // `users` must be on (signup). `profiles` graduated to always-on (no toggle).
   const u = getToggleDefault('users');
@@ -107,6 +109,11 @@ async function sameTenantPair(): Promise<{ alice: Client; aliceId: string; bob: 
   const a = await signup(alice, { tenantId });
   const bob = client();
   const b = await signup(bob, { tenantId });
+  // USERS-19 (ADR 0617 D2): an `org:` tenant is NOT a personal shape, so the
+  // second co-tenant no longer inherits implicit OWNER authority from the
+  // collapsed seam cookie (that was exactly the SAML-shaped hole). Bob is the
+  // admin actor in the PROF-2 / directory tests, so seat him explicitly.
+  await createMember({ tenantId, orgId: tenantId, subject: b.userId, displayName: 'Bob', roles: ['admin'] });
   return { alice, aliceId: a.userId, bob, bobId: b.userId };
 }
 
@@ -423,23 +430,26 @@ describe('profiles Phase 3 — skills + endorsements', () => {
     // Bob endorses Alice's TypeScript.
     const end = await bob.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
     expect(end.status, JSON.stringify(end.body)).toBe(200);
-    expect(aliceSkill(end.body, 'TypeScript').endorsements).toContain(bobId);
+    // ADR 0624 D7 — the route view projects endorsements as { count, endorsedByMe, endorserUserIds }.
+    expect(aliceSkill(end.body, 'TypeScript').endorsements).toEqual({ count: 1, endorsedByMe: true, endorserUserIds: [bobId] });
 
     // Idempotent re-endorse (still one).
     const again = await bob.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
-    expect(aliceSkill(again.body, 'TypeScript').endorsements.filter((e: string) => e === bobId)).toHaveLength(1);
+    expect(aliceSkill(again.body, 'TypeScript').endorsements.endorserUserIds.filter((e: string) => e === bobId)).toHaveLength(1);
+    expect(aliceSkill(again.body, 'TypeScript').endorsements.count).toBe(1);
 
     // Editing the skill list PRESERVES endorsements on a surviving skill and drops a removed one.
     const edited = await alice.put('/v1/host/openwop-app/profiles/me/skills', {
       skills: [{ name: 'TypeScript', proficiency: 4 }, { name: 'Go', proficiency: 2 }],
     });
-    expect(aliceSkill(edited.body, 'TypeScript').endorsements).toContain(bobId); // preserved
+    expect(aliceSkill(edited.body, 'TypeScript').endorsements.endorserUserIds).toContain(bobId); // preserved
+    expect(aliceSkill(edited.body, 'TypeScript').endorsements.endorsedByMe).toBe(false); // Alice is the owner, not an endorser
     expect(aliceSkill(edited.body, 'TypeScript').proficiency).toBe(4); // updated
     expect(aliceSkill(edited.body, 'Rust')).toBeUndefined(); // removed
 
     // Un-endorse.
     const un = await bob.del(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
-    expect(aliceSkill(un.body, 'TypeScript').endorsements).not.toContain(bobId);
+    expect(aliceSkill(un.body, 'TypeScript').endorsements).toEqual({ count: 0, endorsedByMe: false, endorserUserIds: [] });
 
     // Self-endorsement is forbidden.
     const selfEnd = await alice.post(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}/skills/TypeScript/endorse`);
@@ -612,5 +622,182 @@ describe('profiles followup — review hardening', () => {
     const dir = await bob.get('/v1/host/openwop-app/profiles');
     expect(dir.status).toBe(200);
     expect(dir.body.profiles.some((p: { userId: string }) => p.userId === aliceId)).toBe(false);
+  });
+});
+
+describe('PROF-2 — admin user-delete cascades the profile PII', () => {
+  it('delete user → profile 404 by-id + Team Portfolio KB doc gone', async () => {
+    const { alice, aliceId, bob } = await sameTenantPair();
+    // The KB indexer is gated on the `production` toggle (the consumer).
+    const prod = getToggleDefault('production');
+    expect(prod, 'the production toggle must exist for the KB half of this test').toBeTruthy();
+    await saveConfig({ ...prod!, status: 'on' }, 'test');
+
+    const patch = await alice.patch('/v1/host/openwop-app/profiles/me', { bio: 'Cascade test bio', jobTitle: 'Engineer' });
+    expect(patch.status, JSON.stringify(patch.body)).toBe(200);
+    const tenantId = patch.body.tenantId as string;
+
+    // `indexProfile` is fire-and-forget on the PATCH — poll until the doc lands.
+    const { getDocument } = await import('../src/features/kb/kbService.js');
+    const docId = `profile:${aliceId}`;
+    let doc = null;
+    for (let i = 0; i < 100 && !doc; i += 1) {
+      doc = await getDocument(tenantId, '_team', `mgd-team-${tenantId}`, docId);
+      if (!doc) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc, 'precondition: the Team Portfolio KB doc must exist before the delete').not.toBeNull();
+
+    const del = await bob.del(`/v1/host/openwop-app/users/users/${encodeURIComponent(aliceId)}`);
+    expect(del.status, JSON.stringify(del.body)).toBe(204);
+
+    // The by-id read no longer serves the orphaned PII…
+    const read = await bob.get(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}`);
+    expect(read.status).toBe(404);
+    // …and the KB doc died with it.
+    expect(await getDocument(tenantId, '_team', `mgd-team-${tenantId}`, docId)).toBeNull();
+  });
+
+  it('a KB-cascade failure BLOCKS the delete; the retry succeeds (review F3)', async () => {
+    const { alice, aliceId, bob } = await sameTenantPair();
+    const prod = getToggleDefault('production');
+    expect(prod).toBeTruthy();
+    await saveConfig({ ...prod!, status: 'on' }, 'test');
+
+    const patch = await alice.patch('/v1/host/openwop-app/profiles/me', { bio: 'F3 retryability', jobTitle: 'Engineer' });
+    expect(patch.status).toBe(200);
+    const tenantId = patch.body.tenantId as string;
+    const { getDocument } = await import('../src/features/kb/kbService.js');
+    let doc = null;
+    for (let i = 0; i < 100 && !doc; i += 1) {
+      doc = await getDocument(tenantId, '_team', `mgd-team-${tenantId}`, `profile:${aliceId}`);
+      if (!doc) await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(doc, 'precondition: the KB doc must exist so its delete can fail').not.toBeNull();
+
+    // Sabotage the KB doc's row delete only (doc rows key `<tenant>:_team:profile:<user>`;
+    // the profile ROW key is the bare userId, so it stays deletable).
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const origDelete = DurableCollection.prototype.delete;
+    const spy = vi.spyOn(DurableCollection.prototype, 'delete').mockImplementation(function (this: DurableCollectionType<unknown>, id: string) {
+      if (id.includes(':_team:profile:')) return Promise.reject(new Error('kb delete sabotage'));
+      return origDelete.call(this, id);
+    });
+    try {
+      const del = await bob.del(`/v1/host/openwop-app/users/users/${encodeURIComponent(aliceId)}`);
+      expect(del.status, JSON.stringify(del.body)).toBe(500); // refused — NOT a silent partial delete
+      // Nothing was deleted: the strict KB removal runs FIRST, so the profile
+      // row (and the user) survive for the retry.
+      const stillThere = await bob.get(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}`);
+      expect(stillThere.status).toBe(200);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The retry (sabotage lifted) completes the whole cascade.
+    const retry = await bob.del(`/v1/host/openwop-app/users/users/${encodeURIComponent(aliceId)}`);
+    expect(retry.status, JSON.stringify(retry.body)).toBe(204);
+    expect((await bob.get(`/v1/host/openwop-app/profiles/${encodeURIComponent(aliceId)}`)).status).toBe(404);
+    expect(await getDocument(tenantId, '_team', `mgd-team-${tenantId}`, `profile:${aliceId}`)).toBeNull();
+  });
+});
+
+describe('PROF-3 — tenant reads ride the armed index, never a full scan', () => {
+  it('listProfiles never calls DurableCollection.list()', async () => {
+    const { alice } = await sameTenantPair();
+    const me = await alice.get('/v1/host/openwop-app/profiles/me');
+    expect(me.status).toBe(200);
+    const tenantId = me.body.tenantId as string;
+
+    const svc = await import('../src/features/profiles/profilesService.js');
+    // Warm pass: the ONE-TIME index backfill (sentinel-guarded) may legitimately
+    // scan; the pin below is about the steady state.
+    await svc.listProfiles(tenantId);
+
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const listSpy = vi.spyOn(DurableCollection.prototype, 'list');
+    try {
+      const rows = await svc.listProfiles(tenantId);
+      expect(rows.some((p) => p.userId === me.body.userId)).toBe(true); // non-vacuous: real rows came back
+      expect(listSpy).not.toHaveBeenCalled(); // the no-scan pin
+    } finally {
+      listSpy.mockRestore();
+    }
+  });
+});
+
+describe('PROF-4 — concurrent endorsements are CAS-protected', () => {
+  it('three concurrent endorsers all land (no lost update)', async () => {
+    const svc = await import('../src/features/profiles/profilesService.js');
+    const tenantId = `org:cas-${Date.now()}-${n++}`;
+    const target = `user:cas-target-${n}`;
+    await svc.getOrCreateProfile(tenantId, target);
+    await svc.setOwnSkills(tenantId, target, [{ name: 'TypeScript', proficiency: 4 }]);
+
+    // All three read the same baseline before any write commits (each runs to
+    // its first await synchronously), so a blind read-modify-write put drops
+    // endorsements here; the CAS loser must retry and merge.
+    const endorsers = [`user:e1-${n}`, `user:e2-${n}`, `user:e3-${n}`];
+    await Promise.all(endorsers.map((e) => svc.setEndorsement(tenantId, target, 'TypeScript', e, true)));
+
+    const p = await svc.getProfile(tenantId, target);
+    expect(new Set(p!.skills[0]!.endorsements)).toEqual(new Set(endorsers));
+  });
+
+  it('a skills edit racing an endorsement loses NEITHER (review F6 — all writers CAS)', async () => {
+    const svc = await import('../src/features/profiles/profilesService.js');
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const tenantId = `org:cas-race-${Date.now()}-${n++}`;
+    const target = `user:cas-race-${n}`;
+    const endorser = `user:cas-race-endorser-${n}`;
+    await svc.getOrCreateProfile(tenantId, target);
+    await svc.setOwnSkills(tenantId, target, [{ name: 'Go', proficiency: 3 }]);
+
+    // DETERMINISTIC interleave (a bare Promise.all race is scheduling-dependent
+    // and stayed green under a blind-put sabotage — a vacuous probe): commit the
+    // endorsement INSIDE the skills edit's baseline read, so the edit's read is
+    // stale by construction. A blind put then clobbers the endorsement; the CAS
+    // retry re-reads and merges.
+    const origGet = DurableCollection.prototype.get;
+    let armed = true;
+    const spy = vi.spyOn(DurableCollection.prototype, 'get').mockImplementation(async function (this: DurableCollectionType<unknown>, id: string) {
+      const row = await origGet.call(this, id);
+      if (armed && id === target) {
+        armed = false; // only the skills edit's FIRST baseline read
+        await svc.setEndorsement(tenantId, target, 'Go', endorser, true);
+      }
+      return row;
+    });
+    try {
+      await svc.setOwnSkills(tenantId, target, [{ name: 'Go', proficiency: 5 }]);
+    } finally {
+      spy.mockRestore();
+    }
+
+    const p = await svc.getProfile(tenantId, target);
+    const skill = p!.skills.find((s) => s.name === 'Go');
+    expect(skill?.proficiency).toBe(5); // the edit landed…
+    expect(skill?.endorsements).toContain(endorser); // …and so did the endorsement
+  });
+
+  it('the endorsement write is a compare-and-swap, not a blind put', async () => {
+    const svc = await import('../src/features/profiles/profilesService.js');
+    const { DurableCollection } = await import('../src/host/hostExtPersistence.js');
+    const tenantId = `org:cas-pin-${Date.now()}-${n++}`;
+    const target = `user:cas-pin-${n}`;
+    await svc.getOrCreateProfile(tenantId, target);
+    await svc.setOwnSkills(tenantId, target, [{ name: 'Rust', proficiency: 3 }]);
+
+    const putSpy = vi.spyOn(DurableCollection.prototype, 'put');
+    const casSpy = vi.spyOn(DurableCollection.prototype, 'compareAndSwap');
+    try {
+      const updated = await svc.setEndorsement(tenantId, target, 'Rust', `user:pin-${n}`, true);
+      expect(updated?.changed).toBe(true);
+      expect(updated?.profile.skills[0]?.endorsements).toContain(`user:pin-${n}`);
+      expect(casSpy).toHaveBeenCalled();
+      expect(putSpy).not.toHaveBeenCalled();
+    } finally {
+      putSpy.mockRestore();
+      casSpy.mockRestore();
+    }
   });
 });

@@ -21,7 +21,10 @@ vi.mock('undici', async (importActual) => {
       captured.push(opts);
       const isSse = String(_url).includes('chat/completions');
       const body = isSse ? 'data: [DONE]\n\n' : JSON.stringify({ images: [{ base64: 'aGVsbG8=', mimeType: 'image/png' }] });
-      return Promise.resolve(new actual.Response(body, { status: 200, headers: { 'content-type': 'application/json' } }));
+      // The chat stub answers SSE, so it must SAY so: since the ADR 0756 follow-up the
+      // OpenAI-compatible dispatcher honours a declared `application/json` as a
+      // non-stream completion, and an SSE body mislabelled as JSON is a broken server.
+      return Promise.resolve(new actual.Response(body, { status: 200, headers: { 'content-type': isSse ? 'text/event-stream' : 'application/json' } }));
     }),
   };
 });

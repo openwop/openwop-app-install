@@ -138,3 +138,48 @@ describe('ADR 0151 — autotitleOnFirstExchange', () => {
     expect((await storage.getChatSession(TENANT, SID))?.title).toBe('User Won The Race');
   });
 });
+
+/**
+ * ATC-3/4 — the auto-title write is now a `title_source`-gated CAS at the STORE layer,
+ * so the sub-ms window between the binding's re-read and its write (and a concurrent
+ * second autotitle pass) cannot clobber a manual rename. Tested directly against real
+ * sqlite so the atomicity is real, not mocked.
+ */
+describe('ATC-3/4 — casChatSessionTitle (atomic, title_source-gated)', () => {
+  const store = openSqliteStorage(':memory:'); // own instance — the block above closes `storage`
+  const seed = async (over: Partial<ChatSessionRecord> = {}): Promise<void> => {
+    const now = new Date().toISOString();
+    await store.createChatSession({ sessionId: SID, tenantId: TENANT, title: 'placeholder', createdAt: now, updatedAt: now, messageCount: 1, ...over });
+  };
+  beforeEach(async () => { await store.deleteChatSession(TENANT, SID); });
+  afterAll(async () => { await store.close(); });
+
+  it('WINS on a fresh session (title_source NULL matches the default precondition)', async () => {
+    await seed(); // no titleSource → stored NULL, read as "default"
+    const won = await store.casChatSessionTitle(
+      TENANT, SID, { title: 'Auto Title', titleSource: 'auto', updatedAt: new Date().toISOString() }, 'default',
+    );
+    expect(won).toBe(true);
+    const s = await store.getChatSession(TENANT, SID);
+    expect(s?.title).toBe('Auto Title');
+    expect(s?.titleSource).toBe('auto');
+  });
+
+  it('is REFUSED (false, no clobber) when a manual rename already flipped title_source to user', async () => {
+    await seed({ title: 'User Renamed', titleSource: 'user' });
+    const won = await store.casChatSessionTitle(
+      TENANT, SID, { title: 'Auto Title', titleSource: 'auto', updatedAt: new Date().toISOString() }, 'default',
+    );
+    expect(won).toBe(false); // precondition failed
+    const s = await store.getChatSession(TENANT, SID);
+    expect(s?.title).toBe('User Renamed'); // untouched
+    expect(s?.titleSource).toBe('user');
+  });
+
+  it('returns false for an absent session', async () => {
+    const won = await store.casChatSessionTitle(
+      TENANT, SID, { title: 'X', titleSource: 'auto', updatedAt: new Date().toISOString() }, 'default',
+    );
+    expect(won).toBe(false);
+  });
+});

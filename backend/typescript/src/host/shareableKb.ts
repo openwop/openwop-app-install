@@ -49,7 +49,43 @@ export function getShareableKbProvider(kind: string): ShareableKbProvider | unde
   return providers.get(kind);
 }
 
-/** Test-only: clear the registry. */
-export function __resetShareableKb(): void {
-  providers.clear();
+/**
+ * ADR 0608 D5 (`CPC-3`) — a reconciler that runs when a SOURCE feature changes
+ * something that alters which collections a kind resolves to (today: a project
+ * flipping `org` <-> `private`).
+ *
+ * The visibility carve-out in `resolveCollectionIds` was applied at SHARE TIME
+ * ONLY. Nothing re-ran it, so flipping a shared project to `private` left every
+ * advisor still bound to its collection — retrieving the now-private corpus on
+ * every turn, for any user who can chat with that agent — while the board's
+ * shared-knowledge panel reported `shared:true, exists:false, count:0`. The
+ * unbind machinery already existed (`forUnshare`); only the trigger was missing.
+ *
+ * The dependency still points the right way: the SOURCE feature announces "my
+ * shareable set changed for this (org, kind)" through this core seam, and the
+ * CONSUMER (advisory-board) registers the reconciliation. Projects never imports
+ * advisory-board.
+ */
+export type ShareableKbReconciler = (tenantId: string, orgId: string, kind: string) => Promise<void>;
+
+const reconcilers: ShareableKbReconciler[] = [];
+
+/** Register a reconciler (call at boot). */
+export function registerShareableKbReconciler(fn: ShareableKbReconciler): void {
+  reconcilers.push(fn);
 }
+
+/**
+ * Announce that `kind`'s shareable set may have changed for `orgId`. FAULT-ISOLATED
+ * and best-effort by design: a reconcile failure must never fail the source
+ * feature's own write (a visibility flip must land even if a board is unreachable),
+ * and both bind and unbind are idempotent so the next trigger re-converges. The
+ * caller MUST persist its change BEFORE calling — the reconciler re-resolves
+ * through the provider and would otherwise see the pre-change state.
+ */
+export async function notifyShareableKbSourceChanged(tenantId: string, orgId: string, kind: string): Promise<void> {
+  for (const fn of reconcilers) {
+    try { await fn(tenantId, orgId, kind); } catch { /* best-effort; re-converges on the next trigger */ }
+  }
+}
+

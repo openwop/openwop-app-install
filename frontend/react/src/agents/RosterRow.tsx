@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import type { TFunction } from 'i18next';
 import { workflowName, roleThemeForAgent } from './roleTemplates.js';
@@ -93,15 +94,15 @@ export function RosterRow({ view, busy, onOpen, onCheckNow, onChat }: {
       </span>
 
       <div className="roster-actions action-bar">
-        <button type="button" className="secondary btn-sm" title={t('checkNowTitle')} aria-label={t('checkAgentNow', { persona: entry.persona })} disabled={busy || !entry.enabled} onClick={onCheckNow}>
+        <Button variant="secondary" size="sm" title={t('checkNowTitle')} aria-label={t('checkAgentNow', { persona: entry.persona })} disabled={busy || !entry.enabled} onClick={onCheckNow}>
           <PlayIcon size={14} aria-hidden />
-        </button>
-        <button type="button" className="secondary btn-sm" title={t('chatWithPersona', { persona: entry.persona })} aria-label={t('chatWithPersona', { persona: entry.persona })} onClick={onChat}>
+        </Button>
+        <Button variant="secondary" size="sm" title={t('chatWithPersona', { persona: entry.persona })} aria-label={t('chatWithPersona', { persona: entry.persona })} onClick={onChat}>
           <MessageSquareIcon size={14} aria-hidden />
-        </button>
-        <button type="button" className={status === 'waiting' ? 'btn-accent btn-sm' : 'secondary btn-sm'} onClick={() => onOpen(action.tab)}>
+        </Button>
+        <Button variant={status === 'waiting' ? 'accent' : 'secondary'} size="sm" onClick={() => onOpen(action.tab)}>
           <ActionIcon size={14} aria-hidden /> {action.label}
-        </button>
+        </Button>
       </div>
     </div>
   );

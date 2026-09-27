@@ -11,15 +11,21 @@
  * <Modal>; form wiring (label↔control, aria) from the <Field> primitives.
  */
 
+import { Button } from '../ui/Button.js';
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Modal } from '../ui/Modal.js';
 import { TextField, TextareaField, SelectField } from '../ui/Field.js';
 import { updateRosterEntry, type RosterEntry } from './rosterClient.js';
 
-/** Heartbeat cadence presets (ms). 0 ⇒ manual-only (no autonomous heartbeat). */
+/** Heartbeat cadence presets (ms). ADR 0313: 0 ⇒ host-default cadence (NOT
+ *  off — the daemon runs it on the host default); -1 ⇒ explicit off. */
 const HEARTBEAT_PRESETS: ReadonlyArray<{ ms: number; labelKey: string }> = [
-  { ms: 0, labelKey: 'editHbManual' },
+  // ADR 0313 D1 — `0` means "not configured": the HOST DEFAULT cadence applies
+  // (stored 0s from previously-saved forms activate too — the ADR correction);
+  // `-1` is the explicit opt-out the old 0 was mistaken for.
+  { ms: 0, labelKey: 'editHbHostDefault' },
+  { ms: -1, labelKey: 'editHbOff' },
   { ms: 15 * 60_000, labelKey: 'editHb15m' },
   { ms: 30 * 60_000, labelKey: 'editHb30m' },
   { ms: 60 * 60_000, labelKey: 'editHb1h' },
@@ -147,10 +153,10 @@ export function AgentDetailsEditor({
       </div>
 
       <div className="u-flex u-gap-2 u-mt-4 u-justify-end">
-        <button type="button" className="secondary" onClick={onClose} disabled={saving}>{t('newCancel')}</button>
-        <button type="button" className="primary" onClick={() => void onSave()} disabled={saving || nameEmpty}>
+        <Button variant="secondary" onClick={onClose} disabled={saving}>{t('newCancel')}</Button>
+        <Button variant="primary" onClick={() => void onSave()} disabled={saving || nameEmpty}>
           {saving ? t('editSaving') : t('editSave')}
-        </button>
+        </Button>
       </div>
     </Modal>
   );

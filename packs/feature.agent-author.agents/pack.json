@@ -1,0 +1,50 @@
+{
+  "name": "feature.agent-author.agents",
+  "version": "1.1.0",
+  "description": "Agent Author agent pack (ADR 0514) — a manifest agent whose tools are feature.agent-author.nodes over the ctx.features['agent-author'] surface. From the AI chat it reads the closed-world catalog (agents, workflows, roster, autonomy levels), drafts a roster-entry, validates it, and creates it through the SHARED wizard path — the created agent lands DISABLED for human review. Tool-allowlisted to the agent-author surface only.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "agent-author",
+    "agent",
+    "roster",
+    "describe-to-create"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.agent-author.agents.agent-author",
+      "persona": "RESEARCH",
+      "label": "Agent Author",
+      "description": "Turns a natural-language description into a roster agent: reads the closed-world catalog (legal agent ids, workflow ids, existing personas), drafts a roster entry, validates it, and creates it through the same path the manual wizard uses — grounded via feature.agent-author.nodes over ctx.features['agent-author']. Never invents ids; the created agent lands DISABLED for the human to review and enable in its workspace (ADR 0514).",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/agent-author.md",
+      "toolAllowlist": [
+        "openwop:schema.lookup",
+        "openwop:feature.agent-author.nodes.get",
+        "openwop:feature.agent-author.nodes.draft",
+        "openwop:feature.agent-author.nodes.validate",
+        "openwop:feature.agent-author.nodes.persist"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

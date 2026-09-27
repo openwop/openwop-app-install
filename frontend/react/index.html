@@ -16,6 +16,24 @@
         var t = localStorage.getItem('openwop.theme') || defMode;
         if (t === 'dark') document.documentElement.classList.add('theme-dark');
         else if (t === 'light') document.documentElement.classList.add('theme-light');
+        // ADR 0363 P4 — pre-paint the a11y overrides (reduce-motion / contrast) so
+        // there is no flash of animation/low-contrast before hydration. Mirrors
+        // src/ui/a11yPrefs.ts (this inline script can't import it).
+        var rm = localStorage.getItem('openwop.reduceMotion');
+        if (rm === 'reduce') document.documentElement.setAttribute('data-reduce-motion', rm);
+        var ct = localStorage.getItem('openwop.contrast');
+        if (ct === 'more') document.documentElement.setAttribute('data-contrast', ct);
+        // ADR 0396 P2 — pre-paint the depth prefs (font scale / focus style /
+        // density) so nothing reflows after hydration. Mirrors src/ui/a11yPrefs.ts.
+        var fs = localStorage.getItem('openwop.fontScale');
+        if (fs === '110' || fs === '125' || fs === '140') {
+          document.documentElement.setAttribute('data-font-scale', fs);
+          document.documentElement.style.setProperty('--font-scale', String(Number(fs) / 100));
+        }
+        var fo = localStorage.getItem('openwop.focusStyle');
+        if (fo === 'bold') document.documentElement.setAttribute('data-focus-style', fo);
+        var dn = localStorage.getItem('openwop.density');
+        if (dn === 'compact') document.documentElement.setAttribute('data-density', dn);
         // ADR 0170 — pre-paint the cached runtime brand (super-admin override) so a
         // re-branded install paints its colors/title/favicon with no flash. The
         // BrandProvider refreshes this from /public-brand after load.
@@ -40,7 +58,12 @@
             };
             var st = document.createElement('style');
             st.id = 'openwop-brand-theme';
-            st.textContent = mk(':root', tk.light) + mk(':root.theme-dark', tk.dark);
+            // Same three blocks + over-specified selectors as applyGeneratedTokens
+            // (DS-1): the media block covers the default `system` mode on a dark
+            // OS, and `:root:root…` beats the stock global.css blocks on the
+            // specificity tie this early-in-<head> element would otherwise lose.
+            st.textContent = mk(':root:root', tk.light) + mk(':root:root.theme-dark', tk.dark) +
+              '@media (prefers-color-scheme: dark){' + mk(':root:root:not(.theme-light)', tk.dark) + '}';
             document.head.appendChild(st);
           }
         } catch (e2) {}
@@ -69,7 +92,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link rel="stylesheet" href="{{BRAND_FONTS_HREF}}" />
 
-    <link rel="stylesheet" href="/src/styles/global.css" />
+    <link rel="stylesheet" href="/src/styles/index.css" />
     <!-- White-label override layer — loads AFTER global.css so its tokens
          win the cascade without editing the synced editorial palette. -->
     <link rel="stylesheet" href="/src/brand/brand.css" />

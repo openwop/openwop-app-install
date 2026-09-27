@@ -24,8 +24,8 @@ Pack uses every parameter in the spec contract. Hosts that advertise the sub-cap
 
 | Field | Notes |
 |---|---|
-| `assets[]` | Generated images across all prompts. Each: `url? / base64? / mimeType / width / height / seed? / safetyFiltered / metadata.{promptIndex, enhancedPrompt, ...}`. |
-| `totalGenerated` | Sum of `assets.length` across prompts. |
+| `images[]` | Generated images across all prompts (host media-output convention, minted as Library assets). Each: `url? / contentBase64? / mimeType / width / height / seed? / safetyFiltered / metadata.{promptIndex, enhancedPrompt, ...}`. |
+| `totalGenerated` | Sum of `images.length` across prompts. |
 | `filteredCount` | Total safety-filtered images. |
 | `perPromptStats[]` | Per-prompt: `{ promptIndex, generated, filtered, batchTimeMs }`. |
 | `dimensions` | Resolved output dimensions used for all prompts. |

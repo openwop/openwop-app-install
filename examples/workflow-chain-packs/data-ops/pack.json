@@ -1,0 +1,158 @@
+{
+  "name": "core.openwop.workflows.data-ops",
+  "version": "1.1.5",
+  "kind": "workflow-chain",
+  "description": "Real-work workflow pack (RFC 0013, ADR 0200/0201) — the Data Ops cluster, the one shape-family the Zapier/n8n and Microsoft canons don't cover (surfaced by the Make/Workato research): collapsing many records into one output (the aggregator canon), one-way movement of records between systems, and content routing (send a record down the right branch). Roll Up, Records → Table, Records → System (one-way upsert behind a human sign-off), and Content Router (route a record to the matching branch by a field predicate — the Make router shape, gated via edge conditions, ADR 0201). Uses only shipped, executable nodes (core.flow.aggregate-{numeric,text,table} + core.flow.router + core.ai.chatCompletion + core.chat.approvalGate + core.openwop.http.openapi-call + core.openwop.integration.notification-push). The write is ONE-WAY movement keyed on an external id (re-runs update, never duplicate) behind a human approval — it is NOT a bidirectional sync. All tenant values are run parameters (replay-deterministic).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0 <3.0.0" },
+  "keywords": ["Data Ops"],
+  "chains": [
+    {
+      "chainId": "data-ops.rollup",
+      "version": "1.0.0",
+      "label": "Roll Up a List of Records",
+      "description": "Turn a list of records (orders, line items, expenses…) into one narrated summary: sum a numeric field, format each record into a readable line, and write a short digest. The 'collapse many rows into one output' shape — paste a JSON array or pipe one from another workflow.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "description": "The records to roll up (a JSON array of objects)." },
+          "amountField": { "type": "string", "default": "amount", "description": "The numeric field to sum across records." },
+          "lineTemplate": { "type": "string", "default": "- {{name}}: {{amount}}", "description": "How to format each record into a line ({{field}} references)." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          { "id": "total", "typeId": "core.flow.aggregate-numeric", "name": "Sum the amount", "position": { "x": 0, "y": 0 }, "config": { "op": "sum", "path": "{{params.amountField}}" }, "inputs": { "items": "{{params.items}}" } },
+          { "id": "list", "typeId": "core.flow.aggregate-text", "name": "Format each record", "position": { "x": 0, "y": 160 }, "config": { "template": "{{params.lineTemplate}}", "separator": "\n" }, "inputs": { "items": "{{params.items}}" } },
+          { "id": "digest", "typeId": "core.ai.chatCompletion", "name": "Write the digest", "position": { "x": 300, "y": 80 }, "config": { "systemPrompt": "You are a reporting assistant. You are given a summed total and a formatted list of records. Write a short digest (under 120 words): lead with the total, then the notable items, then one observation. Do not invent numbers beyond what you are given.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Deliver digest", "position": { "x": 560, "y": 80 }, "config": { "audience": "tenant" }, "inputs": { "title": "Roll Up a List of Records" } }
+        ],
+        "edges": [
+          { "from": "total", "to": "digest.total" },
+          { "from": "list", "to": "digest.list" },
+          { "from": "digest", "to": "notify" }
+        ]
+      },
+      "outputs": {
+        "digest": { "type": "string", "description": "The narrated roll-up (total + formatted records)." }
+      }
+    },
+    {
+      "chainId": "data-ops.to-table",
+      "version": "1.0.0",
+      "label": "Records → Table + Anomaly Scan",
+      "description": "Reshape a list of records into a clean name/value table, then have AI scan it for outliers, gaps, and things worth a second look — delivered as a notification. Paste a JSON array of records. The column set is fixed (name, value) — a chain-level `{{params.*}}` config token only substitutes STRINGS (the host's per-run config interpolation is a string-replace over the token; an array/object param collapses to its `String(...)` form, e.g. '[object Object]'), so an array-typed `columns` parameter cannot be threaded through this node's `config.columns` — it needs the real array, not a stringified one.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["items"],
+        "properties": {
+          "items": { "type": "array", "description": "The records to tabulate (a JSON array of objects)." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          { "id": "table", "typeId": "core.flow.aggregate-table", "name": "Build the table", "position": { "x": 0, "y": 0 }, "config": { "columns": [{ "path": "name", "label": "Name" }, { "path": "value", "label": "Value" }] }, "inputs": { "items": "{{params.items}}" } },
+          { "id": "scan", "typeId": "core.ai.chatCompletion", "name": "Scan for anomalies", "position": { "x": 300, "y": 0 }, "config": { "systemPrompt": "You are a data analyst. Given a table of rows and columns, call out outliers, missing/empty values, and rows worth a second look. Be specific (cite the row). If the table looks clean, say so.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "notify", "typeId": "feature.notifications.nodes.notify", "name": "Deliver findings", "position": { "x": 560, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Records \u2192 Table + Anomaly Scan" } }
+        ],
+        "edges": [
+          { "from": "table", "to": "scan" },
+          { "from": "scan", "to": "notify" }
+        ]
+      },
+      "outputs": {
+        "findings": { "type": "string", "description": "The table plus the anomaly scan." }
+      }
+    },
+    {
+      "chainId": "data-ops.records-to-system",
+      "version": "1.0.1",
+      "label": "Records → System (one-way)",
+      "description": "One-way movement: read records from a source system, reshape them with AI, review, and upsert them into a destination — keyed on an external id so re-runs update the same records instead of duplicating them. It is one-way, not a sync: it does not read the destination back, propagate deletes, or reconcile conflicts. The write step needs a connection with write scope (if you added that scope after connecting, re-authorize the connection) and an upsert-by-external-key operation (e.g. Salesforce upsert, HubSpot upsert) — pointed at a plain create it will duplicate. Every write waits on your approval.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceConnectionRef", "readOperationId", "destConnectionRef", "upsertOperationId", "keyField"],
+        "properties": {
+          "sourceConnectionRef": { "type": "string", "description": "The source connection to read from (e.g. core.openwop.connections.salesforce)." },
+          "readOperationId": { "type": "string", "description": "The read/list operation on the source (e.g. listContacts)." },
+          "destConnectionRef": { "type": "string", "description": "The destination connection to write to (e.g. core.openwop.connections.hubspot)." },
+          "upsertOperationId": { "type": "string", "description": "An upsert-by-external-key operation on the destination (not a plain create, which would duplicate on re-run)." },
+          "keyField": { "type": "string", "description": "The external-id field the upsert keys on (so re-runs update, not duplicate)." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "read", "typeId": "core.openwop.http.openapi-call", "name": "Read source records", "position": { "x": 0, "y": 0 }, "config": { "connectionRef": "{{params.sourceConnectionRef}}", "operationId": "{{params.readOperationId}}" }, "inputs": {} },
+          { "id": "reshape", "typeId": "core.ai.chatCompletion", "name": "Reshape for the destination", "position": { "x": 280, "y": 0 }, "config": { "systemPrompt": "You map source records to the destination's shape. Return a JSON array; for every field you cannot determine from the source, output the string \"unknown\" — never guess or invent a value that would be written to a system of record. Preserve the external key ({{params.keyField}}) on every record.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "approve", "typeId": "core.chat.approvalGate", "name": "Review before write", "position": { "x": 560, "y": 0 }, "config": { "title": "Review the reshaped records before upserting into the destination", "artifactType": "data.records", "actions": ["approve", "reject"] }, "inputs": {} },
+          { "id": "gate-reject", "typeId": "core.flow.noop", "name": "Rejected — nothing written", "position": { "x": 840, "y": 160 }, "config": {}, "inputs": {} },
+          { "id": "upsert", "typeId": "core.openwop.http.openapi-call", "name": "Upsert into destination", "position": { "x": 840, "y": 0 }, "config": { "connectionRef": "{{params.destConnectionRef}}", "operationId": "{{params.upsertOperationId}}" }, "inputs": {} }
+        ],
+        "edges": [
+          { "from": "read", "to": "reshape" },
+          { "from": "reshape", "to": "approve.artifact" },
+          { "from": "approve", "to": "upsert", "condition": { "type": "truthy", "left": "approved" } },
+          { "from": "approve", "to": "gate-reject", "condition": { "type": "falsy", "left": "approved" } }
+        ]
+      },
+      "outputs": {
+        "result": { "type": "string", "description": "The approved, upserted records (one-way, keyed on the external id)." }
+      }
+    },
+    {
+      "chainId": "data-ops.content-router",
+      "version": "1.0.0",
+      "label": "Content Router",
+      "description": "Route a record to the right branch by one of its fields: match on the field's value (e.g. priority high / normal / low) and only the matching branch fires its notification. Set the field to switch on; the three example branches match high, normal, and low.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["value"],
+        "properties": {
+          "value": { "type": "object", "description": "The record to route (a JSON object)." },
+          "routeField": { "type": "string", "default": "priority", "description": "The field on the record to route by." }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          { "id": "route", "typeId": "core.flow.router", "name": "Route by field", "position": { "x": 0, "y": 120 }, "config": { "mode": "first-match", "defaultLabel": "normal", "routes": [ { "label": "high", "predicate": { "path": "{{params.routeField}}", "op": "eq", "value": "high" } }, { "label": "low", "predicate": { "path": "{{params.routeField}}", "op": "eq", "value": "low" } }, { "label": "normal", "predicate": { "path": "{{params.routeField}}", "op": "eq", "value": "normal" } } ] }, "inputs": { "value": "{{params.value}}" } },
+          { "id": "high", "typeId": "feature.notifications.nodes.notify", "name": "High-priority branch", "position": { "x": 320, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Content Router" } },
+          { "id": "normal", "typeId": "feature.notifications.nodes.notify", "name": "Normal branch", "position": { "x": 320, "y": 120 }, "config": { "audience": "tenant" }, "inputs": { "title": "Content Router" } },
+          { "id": "low", "typeId": "feature.notifications.nodes.notify", "name": "Low-priority branch", "position": { "x": 320, "y": 240 }, "config": { "audience": "tenant" }, "inputs": { "title": "Content Router" } }
+        ],
+        "edges": [
+          { "from": "route", "to": "high", "condition": { "type": "contains", "left": "branches", "right": "high" } },
+          { "from": "route", "to": "normal", "condition": { "type": "contains", "left": "branches", "right": "normal" } },
+          { "from": "route", "to": "low", "condition": { "type": "contains", "left": "branches", "right": "low" } }
+        ]
+      },
+      "outputs": {
+        "routed": { "type": "string", "description": "The branch the record was routed to." }
+      }
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import i18n from '../i18n/index.js';
+import { useFeatureAccess } from '../featureToggles/FeatureAccessContext.js';
 import { getCapabilities } from '../client/runsClient.js';
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
 import { McpToolsPanel } from '../mcp/McpToolsPanel.js';
@@ -15,10 +17,30 @@ import { CheckIcon, CircleIcon, BoxesIcon, ZapIcon, ImageIcon, ShieldIcon } from
 /** Render an advertised boolean as a tri-state glyph. `undefined` means the
  *  host hasn't declared the field; that's distinct from `false` (declared off). */
 function boolGlyph(v: boolean | undefined): JSX.Element {
-  if (v === true) return <span className="u-text-success"><CheckIcon size={14} /></span>;
-  if (v === false) return <span className="u-ink-3"><CircleIcon size={14} /></span>;
-  return <span className="muted">—</span>;
+  // UX-GOV-4 — the tri-state above is carefully preserved in the DATA and was
+  // then thrown away at the surface: `CheckIcon`/`CircleIcon` render
+  // `aria-hidden`, and these spans carried only a colour class. To a screen
+  // reader `true` announced NOTHING, `false` announced NOTHING, and `undefined`
+  // announced "—" — so the very distinction this function exists to make was
+  // invisible to assistive tech, and true/false were indistinguishable from each
+  // other and from an empty cell.
+  //
+  // This is also the app's OWN rule, already written down on the ops console:
+  // "pass/fail is a WORD in the chip, never color alone (WCAG 1.4.1)".
+  // `sr-only` text carries the state; the glyph stays the visual shorthand.
+  const label = v === true ? i18n.t('discovery:capDeclaredOn')
+    : v === false ? i18n.t('discovery:capDeclaredOff')
+      : i18n.t('discovery:capUndeclared');
+  if (v === true) return <span className="u-text-success"><CheckIcon size={14} /><span className="sr-only">{label}</span></span>;
+  if (v === false) return <span className="u-ink-3"><CircleIcon size={14} /><span className="sr-only">{label}</span></span>;
+  // aria-hidden goes on the DASH, not the wrapper — hiding the wrapper would
+  // hide the sr-only label with it.
+  return <span className="muted"><span aria-hidden>—</span><span className="sr-only">{label}</span></span>;
 }
+
+/** Test seam (UX-GOV-4): `boolGlyph` is module-private, but its tri-state a11y
+ *  contract is worth pinning directly rather than through a full panel render. */
+export const renderCapBoolGlyph = boolGlyph;
 
 interface HostSurfaceAd {
   name: string;
@@ -112,6 +134,8 @@ interface CatalogResp {
 }
 
 export function CapabilitiesPanel() {
+  // Gate B (ADR 0196): the raw wire dump is an engineering surface.
+  const devTools = useFeatureAccess('developer-tools');
   const { t } = useTranslation('discovery');
   const [caps, setCaps] = useState<Caps | null>(null);
   const [catalog, setCatalog] = useState<CatalogResp | null>(null);
@@ -124,7 +148,7 @@ export function CapabilitiesPanel() {
     let cancelled = false;
     Promise.all([
       getCapabilities() as Promise<Caps>,
-      fetch(`${config.baseUrl}/v1/host/openwop-app/node-catalog`, fetchOpts({
+      fetch(`${config.baseUrl}/host/openwop-app/node-catalog`, fetchOpts({
         headers: authedHeaders(),
       })).then((r) => r.json() as Promise<CatalogResp>),
     ])
@@ -157,7 +181,7 @@ export function CapabilitiesPanel() {
   const blockedRows = [...blockedBySurface.entries()].map(([surface, count]) => ({ surface, nodes: count }));
 
   return (
-    <section className="page-stack">
+    <section data-walkthrough="capabilities.page" className="page-stack">
       <PageHeader
         eyebrow={t('eyebrow')}
         title={t('title')}
@@ -346,6 +370,7 @@ export function CapabilitiesPanel() {
       <McpToolsPanel />
       <A2APeerPanel />
 
+      {devTools.enabled && (
       <div className="surface-card">
         <h2>{t('rawAdvertisement')}</h2>
         <p className="muted">
@@ -358,6 +383,7 @@ export function CapabilitiesPanel() {
           !error && <SkeletonRows rows={5} columns={['80%', '60%', '70%', '50%', '65%']} />
         )}
       </div>
+      )}
     </section>
   );
 }
@@ -427,6 +453,37 @@ function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
   const authProfiles = caps?.capabilities?.auth?.profiles ?? [];
   const allProfiles = [...new Set([...interruptProfiles, ...authProfiles])].sort();
   const badge = matchBadgeFor(impl.name);
+  const identityRows = [
+    {
+      key: 'implementation',
+      label: t('implementationLabel'),
+      value: caps ? (
+        <>
+          {impl.name ? <code>{impl.name}</code> : <span className="muted">{t('emDash')}</span>}
+          {impl.version ? <> <span className="muted">{t('versionPrefix', { version: impl.version })}</span></> : null}
+          {impl.vendor ? <> <span className="muted">{t('vendorPrefix', { vendor: impl.vendor })}</span></> : null}
+        </>
+      ) : <span className="muted">{t('emDash')}</span>,
+    },
+    {
+      key: 'profiles',
+      label: t('profilesClaimed', { count: allProfiles.length }),
+      value: allProfiles.length === 0 ? <span className="muted">{t('noneAdvertised')}</span> : (
+        <div className="cap-chip-list">{allProfiles.map((p) => <span key={p} className="chip chip--accent">{p}</span>)}</div>
+      ),
+    },
+    {
+      key: 'badge',
+      label: t('referenceHostBadge'),
+      value: badge ? (
+        <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer" title={t(badge.labelKey)}>
+          <img className="cap-badge-img" src={badge.url} alt={t('badgeAlt', { label: t(badge.labelKey) })} />
+        </a>
+      ) : (
+        <span className="muted">{t('noBadgePrefix')}<a href={LEADERBOARD_URL} target="_blank" rel="noreferrer">{t('leaderboard')}</a>{' '}{t('noBadgeSuffix')}</span>
+      ),
+    },
+  ];
   return (
     <div className="surface-card">
       <h2 className="u-flex u-gap-2 u-items-center"><span className="u-ink-3" aria-hidden="true"><ShieldIcon size={18} /></span> {t('conformanceAndProfiles')}</h2>
@@ -439,52 +496,17 @@ function ConformanceProfilesCard({ caps }: { caps: Caps | null }): JSX.Element {
         </a>{' '}
         {t('conformanceHelpSuffix')}
       </p>
-      <table className="cap-table">
-        <tbody>
-          <tr>
-            <th className="cap-table-label">{t('implementationLabel')}</th>
-            <td>
-              {caps ? (
-                <>
-                  {impl.name ? <code>{impl.name}</code> : <span className="muted">{t('emDash')}</span>}
-                  {impl.version ? <> <span className="muted">{t('versionPrefix', { version: impl.version })}</span></> : null}
-                  {impl.vendor ? <> <span className="muted">{t('vendorPrefix', { vendor: impl.vendor })}</span></> : null}
-                </>
-              ) : <span className="muted">{t('emDash')}</span>}
-            </td>
-          </tr>
-          <tr>
-            <th className="cap-table-label">{t('profilesClaimed', { count: allProfiles.length })}</th>
-            <td>
-              {allProfiles.length === 0 ? (
-                <span className="muted">{t('noneAdvertised')}</span>
-              ) : (
-                <div className="cap-chip-list">
-                  {allProfiles.map((p) => (
-                    <span key={p} className="chip chip--accent">{p}</span>
-                  ))}
-                </div>
-              )}
-            </td>
-          </tr>
-          <tr>
-            <th className="cap-table-label">{t('referenceHostBadge')}</th>
-            <td>
-              {badge ? (
-                <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer" title={t(badge.labelKey)}>
-                  <img className="cap-badge-img" src={badge.url} alt={t('badgeAlt', { label: t(badge.labelKey) })} />
-                </a>
-              ) : (
-                <span className="muted">
-                  {t('noBadgePrefix')}
-                  <a href={LEADERBOARD_URL} target="_blank" rel="noreferrer">{t('leaderboard')}</a>{' '}
-                  {t('noBadgeSuffix')}
-                </span>
-              )}
-            </td>
-          </tr>
-        </tbody>
-      </table>
+      {caps ? <DataTable
+        stack
+        density="compact"
+        caption={t('conformanceAndProfiles')}
+        rows={identityRows}
+        rowKey={(row) => row.key}
+        columns={[
+          { key: 'label', header: t('colSurface'), rowHeader: true, render: (row) => row.label, cellClassName: 'cap-table-label' },
+          { key: 'value', header: t('colValue'), render: (row) => row.value },
+        ]}
+      /> : <SkeletonRows rows={3} columns={['28%', '64%']} />}
     </div>
   );
 }

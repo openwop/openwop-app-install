@@ -1,0 +1,290 @@
+{
+  "name": "core.openwop.workflows.sales-outreach",
+  "version": "1.2.0",
+  "kind": "workflow-chain",
+  "description": "Sales-outreach chains (RFC 0013): research-grounded, human-gated outreach — a personalized first-touch from live research, and a polite quiet-thread nudge. Every send is reviewed by a human first. Replay-deterministic.",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "Sales outreach"
+  ],
+  "chains": [
+    {
+      "chainId": "outreach.researched-firsttouch",
+      "version": "1.1.0",
+      "label": "Prospect → Researched First-Touch",
+      "description": "Researches a prospect with live search, drafts a genuinely personalized first-touch email, and holds it at a human gate before sending.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recipientEmail", "senderEmail", "triggerEventName"],
+        "properties": {
+          "company": {
+            "type": "string",
+            "default": "",
+            "description": "Prospect's company."
+          },
+          "product": {
+            "type": "string",
+            "default": "our product",
+            "description": "What you're selling."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "Quick question", "description": "Subject line for the sent email." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "New prospect",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "search",
+            "typeId": "core.web.search",
+            "name": "Research prospect",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "draft",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Draft outreach",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Write a short, personalized first-touch email to a prospect at {{params.company}} for {{params.product}}. Open with a SPECIFIC observation from the research (never a generic flatter), connect it to one concrete value, and end with a low-friction ask. Under 90 words. Never fabricate a fact about them. If the search results' `engine` field is 'demo' or 'stub' they are PLACEHOLDERS, not research: do not treat them as findings or invent specifics from them — say plainly that live web search is not configured (a 'web-search' key on the keys page unlocks it) and stop there. Never fabricate the specific observation — with no real research, return the honest not-configured note INSTEAD of an email.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Review outreach",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the outreach email before it sends",
+              "artifactType": "email.body",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no outreach sent",
+            "position": {
+              "x": 840,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.integration.email-send",
+            "name": "Send outreach",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "to": "{{params.recipientEmail}}",
+              "subject": "{{params.emailSubject}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "search"
+          },
+          {
+            "from": "search",
+            "to": "draft"
+          },
+          {
+            "from": "draft.content",
+            "to": "gate.artifact"
+          },
+          {
+            "from": "gate.artifact",
+            "to": "send.text",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "gate",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    },
+    {
+      "chainId": "outreach.quiet-thread-nudge",
+      "version": "1.0.0",
+      "label": "Quiet Thread → Polite Nudge",
+      "description": "Drafts a brief, respectful follow-up to a thread that's gone quiet — restating the single ask and offering an easy out — reviewed before it sends.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["recipientEmail", "senderEmail", "triggerEventName"],
+        "properties": {
+          "daysQuiet": {
+            "type": "string",
+            "default": "5",
+            "description": "Days the thread has been quiet."
+          },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." },
+          "triggerEventName": { "type": "string", "description": "Host event name that starts this workflow (e.g. `crm.deal.won`)." },
+          "senderEmail": { "type": "string", "description": "Verified sender address these emails are sent from." },
+          "recipientEmail": { "type": "string", "description": "The address this email is sent to." },
+          "emailSubject": { "type": "string", "default": "Following up", "description": "Subject line for the sent email." }
+        }
+      },
+      "capabilities": [
+        "side-effectful"
+      ],
+      "dag": {
+        "nodes": [
+          {
+            "id": "start",
+            "typeId": "core.trigger.event",
+            "name": "Thread quiet",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {
+              "eventName": "{{params.triggerEventName}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "draft",
+            "typeId": "core.ai.chatCompletion",
+            "name": "Draft nudge",
+            "position": {
+              "x": 280,
+              "y": 0
+            },
+            "config": {
+              "systemPrompt": "Draft a short, polite follow-up to a sales thread quiet for {{params.daysQuiet}} days: restate the single ask in one sentence, offer an easy out ('if now isn't the time, no problem'), and keep it warm. Under 60 words.",
+              "provider": "{{params.provider}}",
+              "model": "{{params.model}}"
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate",
+            "typeId": "core.chat.approvalGate",
+            "name": "Review nudge",
+            "position": {
+              "x": 560,
+              "y": 0
+            },
+            "config": {
+              "title": "Review the follow-up before it sends",
+              "artifactType": "email.body",
+              "actions": ["approve", "reject"]
+            },
+            "inputs": {}
+          },
+          {
+            "id": "gate-reject",
+            "typeId": "core.flow.noop",
+            "name": "Rejected — no nudge sent",
+            "position": {
+              "x": 840,
+              "y": 160
+            },
+            "config": {},
+            "inputs": {}
+          },
+          {
+            "id": "send",
+            "typeId": "core.openwop.integration.email-send",
+            "name": "Send nudge",
+            "position": {
+              "x": 840,
+              "y": 0
+            },
+            "config": {
+              "from": "{{params.senderEmail}}"
+            },
+            "inputs": {
+              "to": "{{params.recipientEmail}}",
+              "subject": "{{params.emailSubject}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "start",
+            "to": "draft"
+          },
+          {
+            "from": "draft.content",
+            "to": "gate.artifact"
+          },
+          {
+            "from": "gate.artifact",
+            "to": "send.text",
+            "condition": { "type": "truthy", "left": "approved" }
+          },
+          {
+            "from": "gate",
+            "to": "gate-reject",
+            "condition": { "type": "falsy", "left": "approved" }
+          }
+        ]
+      },
+      "outputs": {
+        "result": {
+          "type": "string",
+          "description": "The chain's terminal output."
+        }
+      }
+    }
+  ]
+}

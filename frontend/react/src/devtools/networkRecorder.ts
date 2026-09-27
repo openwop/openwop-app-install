@@ -46,6 +46,7 @@ const MAX_RESPONSE_BYTES = 16 * 1024;
 const STORAGE_KEY = 'openwop.networkRecorder.v1';
 const PERSIST_MAX = 50;
 const PERSIST_RESPONSE_BYTES = 4 * 1024;
+const PERSIST_SSE_EVENTS = 20;
 
 export type NetworkEntryKind = 'rest' | 'sse';
 
@@ -67,6 +68,14 @@ export interface NetworkEntry {
   error?: string;
   /** For SSE entries, captured event deltas appear here in order. */
   sseEvents?: Array<{ at: number; data: string }>;
+  /** The tap stopped RECORDING events at its per-entry cap. The stream itself runs on;
+   *  its row still finishes when the stream really ends. */
+  sseEventsTruncated?: boolean;
+  /** How many captured events the sessionStorage mirror dropped (it keeps the FIRST
+   *  `PERSIST_SSE_EVENTS`); only ever set on a row restored after a reload. */
+  sseEventsDropped?: number;
+  /** The page reloaded while this request was still open, so its end is unknown. */
+  unfinishedAtReload?: boolean;
 }
 
 type Listener = (entries: readonly NetworkEntry[]) => void;
@@ -95,11 +104,18 @@ function schedulePersist(): void {
   setTimeout(() => {
     persistScheduled = false;
     try {
-      const trimmed = entries.slice(-PERSIST_MAX).map((e) =>
-        e.responseBody && e.responseBody.length > PERSIST_RESPONSE_BYTES
+      const trimmed = entries.slice(-PERSIST_MAX).map((e) => {
+        let out = e.responseBody && e.responseBody.length > PERSIST_RESPONSE_BYTES
           ? { ...e, responseBody: e.responseBody.slice(0, PERSIST_RESPONSE_BYTES), responseTruncated: true }
-          : e,
-      );
+          : e;
+        // The live timeline can hold 100 × 2 KB; the mirror keeps its FIRST events (the
+        // panel's labels say "first N") and records how many it dropped, so a restored
+        // row can say it is partial instead of silently shrinking.
+        if (out.sseEvents && out.sseEvents.length > PERSIST_SSE_EVENTS) {
+          out = { ...out, sseEvents: out.sseEvents.slice(0, PERSIST_SSE_EVENTS), sseEventsDropped: (out.sseEventsDropped ?? 0) + out.sseEvents.length - PERSIST_SSE_EVENTS };
+        }
+        return out;
+      });
       window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(trimmed));
     } catch {
       // QuotaExceededError / serialization failure — discard the persisted
@@ -120,7 +136,10 @@ function hydrateFromStorage(): void {
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return;
     for (const e of parsed as NetworkEntry[]) {
-      if (e && typeof e.id === 'string' && typeof e.url === 'string') entries.push(e);
+      if (!e || typeof e.id !== 'string' || typeof e.url !== 'string') continue;
+      // A request still open when the page unloaded (an event stream usually is) has
+      // no end we can know. Restored as-is it would read "still running" forever.
+      entries.push(e.finishedAt === undefined && e.error === undefined ? { ...e, unfinishedAtReload: true } : e);
     }
   } catch {
     /* corrupt persisted state — ignore and start fresh */
@@ -168,9 +187,16 @@ function bodyToString(body: BodyInit | null | undefined): string | undefined {
 /** Routes whose request body carries plaintext credential material and must
  *  NEVER enter the recorder buffer or its sessionStorage mirror
  *  (threat-model-secret-leakage). Matched against the origin-relative path;
- *  the optional `/api/` prefix covers the Firebase Hosting rewrite. */
+ *  the optional `/api/` prefix covers the Firebase Hosting rewrite, and the
+ *  optional `v1/` covers the retiring twin alongside the canonical RFC 0181
+ *  root. BOTH must match: this is a redaction ALLOWLIST, so a spelling it
+ *  fails to recognise is plaintext credential material entering the recorder
+ *  buffer — the failure is silent and in the unsafe direction. The SPA moved to
+ *  `/host/openwop-app/…` in one pass and these regexes did NOT move with it,
+ *  because they spell the path with escapes rather than as a literal; the
+ *  redaction tests are what caught it. */
 const SECRET_REQUEST_PATHS: readonly RegExp[] = [
-  /^\/(?:api\/)?v1\/host\/(?:openwop-app|sample)\/byok\/secrets(?:$|\/|\?)/,
+  /^\/(?:api\/)?(?:v1\/)?host\/(?:openwop-app|sample)\/byok\/secrets(?:$|\/|\?)/,
 ];
 
 /** Response paths whose body COULD carry credential material. The host's
@@ -181,7 +207,7 @@ const SECRET_REQUEST_PATHS: readonly RegExp[] = [
  *  response bodies are mirrored too — so they get the same redaction discipline
  *  as request bodies, not a trust-the-backend assumption. */
 const SECRET_RESPONSE_PATHS: readonly RegExp[] = [
-  /^\/(?:api\/)?v1\/host\/(?:openwop-app|sample)\/byok\/secrets(?:$|\/|\?)/,
+  /^\/(?:api\/)?(?:v1\/)?host\/(?:openwop-app|sample)\/byok\/secrets(?:$|\/|\?)/,
 ];
 
 /** Conservative field-name denylist applied to any *other* captured body —
@@ -343,12 +369,17 @@ export function installNetworkRecorder(): void {
     try {
       const res = await nativeFetch(input, init);
       const finishedAt = Date.now();
+      // CLNP-2(c) — a live event stream is decided by what the server SENT, not by
+      // the path guess above (which also matches JSON `/events` lists). Only these
+      // are tapped, and only these stay open: their row finishes when the STREAM
+      // ends, not when the headers arrive.
+      const streaming = res.body !== null && (res.headers.get('content-type') ?? '').includes('text/event-stream');
       // Clone the response to read the body without consuming it for
       // the caller. SSE responses are streams — don't clone-read those
       // (it'd block until the stream ends).
       let responseBody: string | undefined;
       let responseTruncated = false;
-      if (!isSse) {
+      if (!isSse && !streaming) {
         try {
           const clone = res.clone();
           const text = await clone.text();
@@ -362,8 +393,7 @@ export function installNetworkRecorder(): void {
         }
       }
       update(id, {
-        finishedAt,
-        durationMs: finishedAt - startedAt,
+        ...(streaming ? { kind: 'sse' as const } : { finishedAt, durationMs: finishedAt - startedAt }),
         status: res.status,
         ok: res.ok,
         ...(responseBody !== undefined ? { responseBody } : {}),
@@ -376,6 +406,7 @@ export function installNetworkRecorder(): void {
       if (res.status > 0 && res.status < 500) {
         recordLastSuccess(finishedAt);
       }
+      if (streaming) return await tapEventStream(res, id, path, startedAt);
       return res;
     } catch (err) {
       const finishedAt = Date.now();
@@ -406,21 +437,44 @@ export function subscribeNetworkEntries(listener: Listener): () => void {
   return () => { listeners.delete(listener); };
 }
 
-/** Append an SSE event onto an in-flight entry. Used by the streams
- *  client wrapper so the network panel can show the event timeline
- *  inside the SSE row's detail view. */
-export function appendSseEvent(requestUrl: string, data: string): void {
-  // Find the most-recently-started SSE entry whose URL matches.
-  // (We don't have a direct id link from the streams client; the
-  // url-match heuristic is fine for the bounded buffer.)
-  for (let i = entries.length - 1; i >= 0; i--) {
-    const e = entries[i]!;
-    if (e.kind !== 'sse' || e.url !== requestUrl) continue;
-    if (e.finishedAt !== undefined) break; // closed; stop scanning
-    const events = e.sseEvents ? [...e.sseEvents] : [];
-    events.push({ at: Date.now(), data });
-    entries[i] = { ...e, sseEvents: events };
-    notify();
-    break;
+/** Per-entry bounds on the SSE timeline: a run stream can emit thousands of events. */
+const MAX_SSE_EVENTS = 100;
+const MAX_SSE_EVENT_CHARS = 2048;
+
+/** Append one SSE event onto the entry with this id. Returns `false` once the entry
+ *  is full or gone (evicted from the ring buffer) — the tap then stops reading. It
+ *  used to be an exported URL-matching helper with no caller (CLNP-2(c)); keyed by
+ *  id now, because the recorder that owns the entry is also the one tapping it. */
+function appendSseEvent(id: string, data: string): boolean {
+  const idx = entries.findIndex((e) => e.id === id);
+  if (idx < 0) return false;
+  const e = entries[idx]!;
+  const events = e.sseEvents ? [...e.sseEvents] : [];
+  if (events.length >= MAX_SSE_EVENTS) return false;
+  events.push({ at: Date.now(), data: data.length > MAX_SSE_EVENT_CHARS ? `${data.slice(0, MAX_SSE_EVENT_CHARS)}…` : data });
+  const full = events.length >= MAX_SSE_EVENTS;
+  entries[idx] = { ...e, sseEvents: events, ...(full ? { sseEventsTruncated: true } : {}) };
+  notify();
+  return !full;
+}
+
+/** Hand the caller the tapped stream and record its events. Lazy so the tap costs the
+ *  production entry chunk nothing (it only ever runs with capture on). If the chunk
+ *  fails to load, the row still closes and the caller still gets its response. */
+async function tapEventStream(res: Response, id: string, path: string, startedAt: number): Promise<Response> {
+  const close = (error?: string): void => {
+    const at = Date.now();
+    update(id, { finishedAt: at, durationMs: at - startedAt, ...(error ? { error } : {}) });
+  };
+  try {
+    const { tapSseResponse } = await import('./sseCapture.js');
+    return tapSseResponse(res, {
+      // Event payloads are response bytes: the same credential redaction applies.
+      onEvent: (data) => appendSseEvent(id, redactResponseBody(path, data) ?? data),
+      onEnd: close,
+    });
+  } catch {
+    close();
+    return res;
   }
 }

@@ -16,7 +16,12 @@ import type { Project, ProjectStatus, ProjectHealth } from './projectsClient.js'
 // Status/health are project lifecycle markers, not run-states — but the §5.3
 // chip families read naturally here (text label + tone, so colour is never the
 // sole signal): paused→warning, off-track→danger, active/on-track→success.
-const STATUS_CHIP: Record<ProjectStatus, string> = {
+// PROJ-UX-3 — exported as THE one mapping: the Overview strip used to carry its
+// own divergent palette (active→accent, paused→muted, done→success), so the
+// same project's `active` chip changed family between the card you clicked and
+// the detail it opened. §5.3: "reuse these mappings so a state looks identical
+// everywhere".
+export const STATUS_CHIP: Record<ProjectStatus, string> = {
   planning: 'chip--muted',
   active: 'chip--success',
   paused: 'chip--warning',
@@ -30,7 +35,7 @@ const STATUS_KEY: Record<ProjectStatus, string> = {
   done: 'statusDone',
   archived: 'statusArchived',
 };
-const HEALTH_CHIP: Record<ProjectHealth, string> = {
+export const HEALTH_CHIP: Record<ProjectHealth, string> = {
   'on-track': 'chip--success',
   'at-risk': 'chip--warning',
   'off-track': 'chip--danger',
@@ -43,7 +48,7 @@ const HEALTH_KEY: Record<ProjectHealth, string> = {
 
 /** The contextual one-liner from REAL fields — the charter goal/brief, else a
  *  no-charter fallback. Shared by Card + Row. */
-export function projectSubLine(p: Project, t: TFunction): string {
+function projectSubLine(p: Project, t: TFunction): string {
   return p.charter?.goal || p.charter?.brief || t('subNoCharter');
 }
 
@@ -105,7 +110,7 @@ export function ProjectRow({ project: p }: { project: Project }): JSX.Element {
         <ProjectCounts p={p} t={t} />
       </div>
       <div className="list-row-actions action-bar">
-        <Link to={href} className="secondary btn-sm">{t('openProjectAction')}</Link>
+        <Link to={href} className="btn secondary btn-sm">{t('openProjectAction')}</Link>
       </div>
     </div>
   );

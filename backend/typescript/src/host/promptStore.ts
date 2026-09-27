@@ -47,6 +47,10 @@ export interface PromptTemplate {
     extractPath?: string;
     defaultValue?: unknown;
     description?: string;
+    /** RFC 0124 §Security — secret-class marking carried from a chain param's
+     *  `x-openwop-sensitive` hint through the G3 inline-body lift. A `sensitive`
+     *  variable redacts to `[REDACTED:<id>]` in `prompt.composed` (SR-1). */
+    sensitive?: boolean;
   }>;
   modelHints?: {
     modelClass?: string;
@@ -217,6 +221,46 @@ export function getTemplate(
     return { template: host.template, etag: host.etag, source: 'host' };
   }
   return null;
+}
+
+/**
+ * RFC 0124 G3 — register a host-resident PromptTemplate MINTED at chain expansion
+ * (the inline-prompt-body lift: an inline `config.systemPrompt` carrying a
+ * `{{params.x}}` is lifted into a template whose `text` holds a `{{varName}}` slot,
+ * and the node points a `*PromptRef` at it). Idempotent + deterministic: the
+ * template id is derived from (chainId, expansionId, node, kind), so re-expanding
+ * the same chain+params re-mints byte-identically — a second call with the same id
+ * is a no-op rather than a duplicate/conflict. Host layer (not user/pack): the
+ * minted template is host-owned, matching how `getTemplate` resolves a `prompt:<id>`
+ * ref. Returns true if newly registered, false if the id already existed.
+ */
+export function registerMintedTemplate(template: PromptTemplate): boolean {
+  ensurePromptStoreInitialized();
+  if (hostTemplates.has(template.templateId)) return false; // deterministic re-mint → no-op
+  hostTemplates.set(template.templateId, buildStored({
+    ...template,
+    meta: { ...(template.meta ?? {}), source: 'host' },
+  }));
+  return true;
+}
+
+/**
+ * RFC 0124 G3 — re-register the PromptTemplates a deferred-mode workflow carries on
+ * `metadata.mintedPromptTemplates` (self-containment) into the host store. The mint
+ * at `from-chain` time only populated the EXPANDING instance's in-memory Map; a run
+ * may execute on a different instance (Cloud Run is multi-instance) or after a
+ * restart, so run-start MUST re-register them or the lifted `*PromptRef` resolves to
+ * nothing and the prompt body composes empty. Idempotent per templateId. Tolerant of
+ * a malformed/absent field (returns silently) so it is safe to call for every run.
+ */
+export function ensureMintedTemplatesRegistered(metadata: unknown): void {
+  const minted = (metadata as { mintedPromptTemplates?: unknown } | null | undefined)?.mintedPromptTemplates;
+  if (!Array.isArray(minted)) return;
+  for (const t of minted) {
+    if (t && typeof t === 'object' && typeof (t as PromptTemplate).templateId === 'string') {
+      registerMintedTemplate(t as PromptTemplate);
+    }
+  }
 }
 
 export type CreateOutcome =

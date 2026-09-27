@@ -79,7 +79,3 @@ export function clearRunAgent(runId: string): void {
   }
 }
 
-/** Test-only: drop EVERY run's agent stamp. */
-export function __resetAllRunAgentsForTests(): void {
-  runAgents.clear();
-}

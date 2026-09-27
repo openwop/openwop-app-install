@@ -19,6 +19,10 @@ export async function exportConversationAsDocument(
   orgId: string,
   actor: string,
   sessionId: string,
+  /** Optional deterministic idempotency (the agent-tool path passes a run-scoped
+   *  key so an exact re-export reuses the same document + version instead of
+   *  minting a duplicate transcript). The HTTP route omits it. */
+  idempotency?: { documentId: string; idempotencyKey: string },
 ): Promise<{ documentId: string }> {
   const session = await hostExtStorage().getChatSession(tenantId, sessionId);
   if (!session) throw new OpenwopError('not_found', 'Conversation not found.', 404, { sessionId });
@@ -32,10 +36,12 @@ export async function exportConversationAsDocument(
     format: 'markdown',
     provenance: { producedBy: { kind: 'user', id: actor } },
     createdBy: actor,
+    ...(idempotency ? { documentId: idempotency.documentId } : {}),
   });
   await addVersion(tenantId, orgId, doc.documentId, {
     content: markdown,
     producedBy: { kind: 'user', id: actor },
+    ...(idempotency ? { idempotencyKey: idempotency.idempotencyKey } : {}),
   });
   return { documentId: doc.documentId };
 }

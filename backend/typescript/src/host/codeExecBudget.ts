@@ -9,7 +9,13 @@
  */
 import { DurableCollection } from './hostExtPersistence.js';
 
-interface ExecCount { key: string; count: number }
+// GEN-6: `tenantId` is carried in CONTENT (not just the `${tenantId}:${day}` key) so
+// tenant teardown (`purgeTenantRows`'s content-match) can find and reap these rows —
+// without it the daily counters survived account-delete forever (double-blind). No
+// `tenantOf`/secondary index: this collection is point-read (`get(${tenant}:${day})`)
+// and never listed by tenant, so a marker would be pure write-amplification. The fold
+// already moves these via GEN-1b's key-rewrite (the tenant is in the key).
+interface ExecCount { key: string; tenantId: string; count: number }
 const counts = new DurableCollection<ExecCount>('codeexec:budget', (c) => c.key);
 
 export function codeExecMaxPerDay(): number {
@@ -35,7 +41,7 @@ export async function recordCodeExec(tenantId: string, day: string): Promise<voi
   // never fails a run that already executed).
   for (let attempt = 0; attempt < 12; attempt++) {
     const existing = await counts.get(key);
-    const next: ExecCount = { key, count: (existing?.count ?? 0) + 1 };
+    const next: ExecCount = { key, tenantId, count: (existing?.count ?? 0) + 1 };
     if (await counts.compareAndSwap(existing ?? null, next)) return;
   }
 }

@@ -40,7 +40,7 @@ describe('feature variant — replay/fork safety', () => {
     await __clearToggleStore();
     await __resetCrmStore();
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
     // A real catalog workflow id — fork 404s on an unknown workflow.
     const disco = await jf<{ fixtures?: string[] }>('/.well-known/openwop');

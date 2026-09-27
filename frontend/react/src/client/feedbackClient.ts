@@ -7,7 +7,7 @@
  * plans/app-ux-enhancements.md Track C — gated on the capability handshake.
  */
 import { WopError } from '@openwop/openwop';
-import { client, getCapabilities } from './runsClient.js';
+import { client, getCapabilities, bound } from './runsClient.js';
 
 export interface FeedbackCapability {
   supported: boolean;
@@ -61,22 +61,21 @@ export interface Annotation {
 
 /** GET /v1/runs/{runId}/annotations (RFC 0056 §C) via `client.runs.listAnnotations`.
  *  Resolves to `[]` when the host doesn't advertise feedback (the SDK maps
- *  404/501 to `null`) so callers can aggregate across runs without a per-run
- *  try/catch. Throws only on unexpected failures. */
+ *  404/501 to `null`). THROWS on unexpected failures (network/5xx) — RUN-R2-1:
+ *  a catch-all here used to fabricate `[]`, so a transient failure rendered as
+ *  "no annotations" and the review queue confidently under-reported. Callers
+ *  own the failure (RunDetailPage degrades its quality strip; useRunAnnotations
+ *  exposes `degraded` so the runs index can say signals are unavailable). */
 export async function listAnnotations(runId: string): Promise<Annotation[]> {
-  try {
-    const res = await client.runs.listAnnotations(runId);
-    return res ? [...res] : []; // SDK returns a readonly array or null
-  } catch {
-    return []; // network/discovery unreachable — treat as no annotations
-  }
+  const res = await client.runs.listAnnotations(await bound(runId));
+  return res ? [...res] : []; // SDK returns a readonly array or null
 }
 
 /** POST /v1/runs/{runId}/annotations (RFC 0056 §C) via `client.runs.createAnnotation`.
  *  `runId` rides the path, so it's dropped from the request-body `target`. */
 export async function recordAnnotation(runId: string, input: AnnotationInput): Promise<void> {
   try {
-    await client.runs.createAnnotation(runId, {
+    await client.runs.createAnnotation(await bound(runId), {
       target: {
         ...(input.target.eventId !== undefined ? { eventId: input.target.eventId } : {}),
         ...(input.target.nodeId !== undefined ? { nodeId: input.target.nodeId } : {}),

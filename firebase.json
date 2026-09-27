@@ -1,24 +1,290 @@
 {
   "hosting": {
     "target": "app",
+    "predeploy": [
+      "node frontend/react/scripts/check-hosting-wire-rewrites.cjs",
+      "node frontend/react/scripts/prepare-hosting-shell.cjs"
+    ],
     "public": "frontend/react/dist",
-    "ignore": ["firebase.json", "**/.*", "**/node_modules/**"],
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
     "rewrites": [
       {
         "source": "/api/**",
-        "run": { "serviceId": "openwop-app-backend", "region": "us-central1" }
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
       },
-      { "source": "**", "destination": "/index.html" }
+      {
+        "source": "/.well-known/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/v1/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/conformance/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/p/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/llms.txt",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/agents",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/agents/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/audit",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/audit/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/content",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/content/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/host",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/host/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/interrupts",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/interrupts/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/openapi.json",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/openapi.json/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/prompts",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/prompts/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/prompts:render",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/runs",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/runs/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/runs:bulk-cancel",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/tools",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/tools/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/trigger-subscriptions",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/trigger-subscriptions/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/webhooks",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/webhooks/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/workflows",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "/workflows/**",
+        "run": {
+          "serviceId": "openwop-app-backend",
+          "region": "us-central1"
+        }
+      },
+      {
+        "source": "**",
+        "destination": "/app-shell.html"
+      }
     ],
     "headers": [
       {
         "source": "**/!(*.@(js|css|svg|png|jpg|jpeg|webp|avif|ico|woff|woff2|map))",
         "headers": [
-          { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" },
-          { "key": "Cross-Origin-Opener-Policy", "value": "same-origin-allow-popups" },
-          { "key": "X-Content-Type-Options", "value": "nosniff" },
-          { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
-          { "key": "Content-Security-Policy", "value": "default-src 'self'; connect-src 'self' https://*.run.app https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://packs.openwop.dev https://openwop.dev; frame-src 'self' https://apis.google.com https://accounts.google.com https://*.firebaseapp.com; img-src 'self' data: blob: https://openwop.dev https://*.googleusercontent.com https://avatars.githubusercontent.com; font-src 'self' data: https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' https://apis.google.com 'sha256-9QUENF3J8Uro4eDWEtSlYn1u+7KCYD6ZCwI0FFMGU40='; base-uri 'self'; object-src 'none'; frame-ancestors 'none'" }
+          {
+            "key": "Cache-Control",
+            "value": "no-cache, no-store, must-revalidate"
+          },
+          {
+            "key": "Cross-Origin-Opener-Policy",
+            "value": "same-origin-allow-popups"
+          },
+          {
+            "key": "X-Content-Type-Options",
+            "value": "nosniff"
+          },
+          {
+            "key": "Referrer-Policy",
+            "value": "strict-origin-when-cross-origin"
+          },
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'self'; connect-src 'self' https://*.run.app https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://packs.openwop.dev https://openwop.dev wss://generativelanguage.googleapis.com; media-src 'self' data: blob:; frame-src 'self' https://apis.google.com https://accounts.google.com https://*.firebaseapp.com; img-src 'self' data: blob: https://openwop.dev https://*.googleusercontent.com https://avatars.githubusercontent.com; font-src 'self' data: https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' https://apis.google.com 'sha256-xaVS4T+p/HdK+b1MWA67YdBJ4IPqA5m6wG7UEXKwtAc='; base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+          }
+        ]
+      },
+      {
+        "source": "/api/v1/host/openwop-app/ui-plugin/packs/**/entry",
+        "headers": [
+          {
+            "key": "Content-Security-Policy",
+            "value": "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:"
+          },
+          {
+            "key": "X-Content-Type-Options",
+            "value": "nosniff"
+          }
         ]
       }
     ]

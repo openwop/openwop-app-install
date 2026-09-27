@@ -1,0 +1,17 @@
+{
+  "name": "vendor.openwop.trusted-demo",
+  "version": "1.0.0",
+  "kind": "frontend-plugin",
+  "description": "Reference ADR 0367 Tier-1 partner pack: openwop-team-signed main-frame plugin with an honest Tier-2 sandbox fallback.",
+  "author": "OpenWOP Team",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "uiPlugins": [
+    {
+      "pluginId": "trusted-demo",
+      "surface": "artifact-viewer",
+      "entry": "entry.html",
+      "hostApi": ["host.toast"]
+    }
+  ]
+}

@@ -5,7 +5,7 @@
  * agent in source. The operating-rhythm capability (structured memory graph +
  * perception loops + action drafting/approval, ADR 0023) historically embodied
  * by the Chief of Staff (Iris) was *fused* to `roleKey === 'chief-of-staff'`
- * (`chiefOfStaff.ts ensureChiefOfStaff`, the loops, the action-approval
+ * (`ensureAssistantAgent` (this module), the loops, the action-approval
  * attribution) — a violation. It now lives here as a CORE capability that any
  * agent activates via `AgentProfile.capabilities` (ADR 0031). Iris is just an
  * agent with it activated; Executive Operations is another. There is no "Iris's
@@ -19,7 +19,10 @@ import { listRoster, type RosterEntry } from '../../host/rosterService.js';
 import { ensureSeededAgentByRole, findSeededAgentByRole } from '../../host/exampleDataSeed.js';
 import { hostExtStorage } from '../../host/hostExtPersistence.js';
 import { getAgentProfile, activateAgentCapability } from '../../host/agentProfileService.js';
-import type { AgentCapabilityId } from '../../types.js';
+import { createLogger } from '../../observability/logger.js';
+import { OpenwopError, type AgentCapabilityId } from '../../types.js';
+
+const log = createLogger('features.assistant.capability');
 
 /** The operating-rhythm capability id (memory graph + loops + action drafting). */
 export const ASSISTANT_CAPABILITY: AgentCapabilityId = 'assistant';
@@ -80,9 +83,26 @@ export async function ensureAssistantAgent(tenantId: string): Promise<RosterEntr
   // capability — not by this fallback.
   const entry = await ensureSeededAgentByRole(tenantId, hostExtStorage(), DEFAULT_ASSISTANT_SEED_ROLE);
   if (!entry) {
-    throw Object.assign(
-      new Error(`no '${DEFAULT_ASSISTANT_SEED_ROLE}' agent spec to bootstrap the assistant capability`),
-      { code: 'assistant_capability_bootstrap_missing' },
+    // COS-13 — a bootstrap failure is where "draft an action" / "enable a loop"
+    // 500s on a white-label install with no seedable agent (COS-15); it must
+    // never be silent.
+    log.error('assistant_capability_bootstrap_failed', { tenantId, roleKey: DEFAULT_ASSISTANT_SEED_ROLE });
+    // COS-15 — a TYPED refusal, not a bare Error. This is the shape a white-label
+    // install hits: seeding is capability-gated under the enterprise posture, so
+    // `ensureSeededAgentByRole` returns null and every attempt to draft an action
+    // (`enqueueActionWithApproval`) or enable a loop (`loops.ts enableLoop`) reached
+    // the generic handler as an opaque 500 with no operator guidance. An
+    // `OpenwopError` with a 409 (`conflict`) status bubbles through the HTTP lane
+    // as a typed envelope naming the remedy — matching how the agent-tool lane
+    // already degrades gracefully (`agentTools.ts` reads `e.code`). `conflict` is a
+    // real member of `OpenwopErrorCode` (the tracker's suggested `failed_precondition`
+    // is not — same substitution the COS-5 fix made): the workspace state (no
+    // seedable/activated assistant agent) conflicts with the requested action.
+    throw new OpenwopError(
+      'conflict',
+      `No assistant-capability agent exists for this workspace and no '${DEFAULT_ASSISTANT_SEED_ROLE}' agent could be seeded to bootstrap one. Activate the 'assistant' capability on a roster agent (or seed one) before drafting actions or enabling loops.`,
+      409,
+      { capability: ASSISTANT_CAPABILITY, roleKey: DEFAULT_ASSISTANT_SEED_ROLE },
     );
   }
   await activateAgentCapability(tenantId, entry.rosterId, ASSISTANT_CAPABILITY, {
@@ -92,11 +112,20 @@ export async function ensureAssistantAgent(tenantId: string): Promise<RosterEntr
   return entry;
 }
 
-/** True if this roster entry has the assistant capability activated. */
-export async function agentHasAssistantCapability(tenantId: string, rosterId: string): Promise<boolean> {
-  const profile = await getAgentProfile(tenantId, rosterId);
-  return Boolean(profile?.capabilities?.includes(ASSISTANT_CAPABILITY));
-}
+// ADR 0662 D4 — `agentHasAssistantCapability` was DELETED here (zero callers).
+//
+// It read like a permission gate and was not one. Per ADR 0023 §Correction the
+// capability's runtime contract is agent RESOLUTION — "the runtime (loops/approvals)
+// resolves the acting/writing agent by this capability, never by `roleKey`" — and that
+// mechanism is `findAssistantAgent` / `listCapabilityAgents` below, consumed by
+// `actionApproval.ts` and `loops.ts`. It is wired and load-bearing.
+//
+// Wiring the deleted predicate as a gate (this ADR's first draft) would have been
+// BREAKING: the read lane's caller is a human, so there is no rosterId to test; the tool
+// lane already has its ADR 0458 parity gate with reads failing empty; and it would have
+// revoked reads for exactly the white-label tenants documented above as having no
+// seedable agent. A predicate that reads like a gate and is not one is worse than none,
+// because the next reader trusts it.
 
 // Back-compat: a read-only lookup that does not bootstrap (used by tests +
 // surfaces that only want to know if an assistant agent already exists).

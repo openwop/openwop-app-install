@@ -4,7 +4,9 @@
  * Surface under `/v1/host/openwop-app/kanban/*`:
  *   GET    /boards                       list the caller's boards
  *   POST   /boards                       create a board (default To Do/Doing/Done lanes)
- *   GET    /boards/:boardId              board + its cards
+ *   GET    /boards/:boardId              board + cards + redacted core work items
+ *   POST   /boards/:boardId/work-items/:workItemId/run
+ *                                        manually starts an eligible core work item
  *   DELETE /boards/:boardId              delete a board (cascades cards)
  *   POST   /boards/:boardId/cards        create a card in a column
  *   PATCH  /cards/:cardId                update a card; a `columnId` change MOVES it,
@@ -21,46 +23,45 @@
  * attribution RFC 0086 §C standardizes). Tenant-scoped per board ownership
  * (the RFC 0074 carry-forward): a caller only sees + mutates its own boards.
  *
- * @see src/host/kanbanService.ts — the process-local store + pure move logic
+ * @see src/host/kanbanService.ts — the durable store + core move logic
  * @see RFCS/0086-standing-agent-roster-and-workflow-portfolio.md §C/§D/§E
  */
 
-import type { Express, Request } from 'express';
 import { randomUUID } from 'node:crypto';
-import { insertRunWithStartContext } from '../host/runInsert.js';
+import type { Express, Request } from 'express';
 import { OpenwopError } from '../types.js';
-import type { RunRecord } from '../types.js';
 import type { HostAdapterSuite } from '../host/index.js';
 import type { Storage } from '../storage/storage.js';
-import { executeRun } from '../executor/executor.js';
-import { getEventLog } from '../executor/eventLog.js';
-import { recordRunAttribution } from '../host/agentRunActivityIndex.js';
-import { createLogger } from '../observability/logger.js';
 import {
+  applyBoardCommand,
   createBoard,
   createCard,
+  claimEligibleWorkItemExecution,
   deleteBoard,
   deleteCard,
   ensurePersonalBoard,
   getBoard,
   getCard,
+  getWorkItem,
   listBoards,
   listBoardsWithCards,
   isTerminalColumn,
   listCards,
   listCardsAssignedToUser,
-  moveCard,
+  listWorkItemProjectionsForBoard,
   notifyBoardChanged,
   renameBoard,
   setCardLastRun,
+  setColumnWipLimit,
   subscribeBoardChanges,
   updateCardFields,
   boardSubject,
+  boardDeleteClaim,
   KANBAN_CARD_SOURCES,
   type KanbanBoard,
   type KanbanCard,
   type KanbanCardSource,
-  type KanbanTriggerDirective,
+  toKanbanWorkItemProjection,
 } from '../host/kanbanService.js';
 import { getRosterEntry } from '../host/rosterService.js';
 import { openSseChannel } from '../host/sseChannel.js';
@@ -73,14 +74,19 @@ import {
   emitAssignmentNotification,
   withdrawAssignmentNotification,
 } from '../host/kanbanAssignmentNotify.js';
-import { deliver, makeDedupKey, registerSubscription } from '../host/triggerBridgeService.js';
-
-const log = createLogger('routes.kanban');
+import { startKanbanTriggerRun } from '../host/kanbanTriggerDelivery.js';
+import { deliverReservedWorkItem } from '../host/kanbanWorkItemDelivery.js';
+import { recordKanbanWorkItemDelivery } from '../observability/metricSeams.js';
 
 interface Deps {
   storage: Storage;
   hostSuite: HostAdapterSuite;
 }
+
+/** One legacy v1 route root while the protocol overlap remains active. Keeping
+ * it centralized means Kanban has one migration point on the v1 retirement
+ * date, rather than every operation carrying an independent path dependency. */
+const KANBAN_ROUTE_ROOT = '/v1/host/openwop-app/kanban';
 
 // tenantOf moved to the shared host/tenantGuard (DATA-2).
 
@@ -95,6 +101,19 @@ function parseCardSource(input: unknown): KanbanCardSource | undefined {
 
 function parseCardPriority(input: unknown): 'low' | 'normal' | 'high' | undefined {
   return input === 'low' || input === 'normal' || input === 'high' ? input : undefined;
+}
+
+/** Translate the deliberately transport-agnostic core command errors at the
+ * one HTTP boundary. Keeping these codes out of the service lets canvases use
+ * the same command without inheriting REST-shaped exceptions. */
+function rethrowCardCommandError(err: unknown): never {
+  const code = err && typeof err === 'object' ? (err as { code?: unknown }).code : undefined;
+  if (code === 'kanban_card_invalid' || code === 'kanban_command_invalid' || code === 'kanban_column_not_found') {
+    throw new OpenwopError('validation_error', err instanceof Error ? err.message : 'Invalid card update.', 400);
+  }
+  if (code === 'kanban_card_not_found') throw new OpenwopError('not_found', 'Card not found.', 404);
+  if (code === 'kanban_card_conflict') throw new OpenwopError('conflict', err instanceof Error ? err.message : 'Card changed concurrently.', 409);
+  throw err;
 }
 
 /** The caller's RESOLVED access level for a board's owning subject, or null when
@@ -176,130 +195,12 @@ async function callerRolesIn(workspaceId: string, subject: string | undefined): 
   return members.find((m) => m.subject === subject)?.roles ?? [];
 }
 
-/** Resolve the trigger's workflow, create + dispatch a run, and emit the
- *  attribution event. Returns the new runId, or null if the workflow is
- *  unknown (the move still succeeds — a dangling trigger is logged, not
- *  fatal, mirroring how a misconfigured schedule node is non-fatal). */
-async function startKanbanRun(
-  deps: Deps,
-  tenantId: string,
-  trigger: KanbanTriggerDirective,
-): Promise<{ runId: string; attribution: Record<string, unknown> } | null> {
-  const { storage, hostSuite } = deps;
-  const wf = await hostSuite.workflowCatalog.getWorkflow(trigger.workflowId);
-  if (!wf) {
-    log.warn('kanban_trigger_workflow_not_found', {
-      workflowId: trigger.workflowId,
-      boardId: trigger.boardId,
-      cardId: trigger.cardId,
-    });
-    return null;
-  }
-
-  // RFC 0086 §C attribution: if the board is owned by a roster member,
-  // attribute the run to that named agent (rosterId + persona + the
-  // manifest agentId it instantiates). Content-free — ids/persona only.
-  const board = await getBoard(trigger.boardId);
-  const roster = board?.rosterId ? await getRosterEntry(board.rosterId) : null;
-  // RFC 0086 §A: a disabled roster member's portfolio triggers are inert.
-  // When a board is bound to a member that is missing or `enabled: false`,
-  // the card move does NOT start a run.
-  if (board?.rosterId && (!roster || !roster.enabled)) {
-    log.info('kanban_trigger_skipped_disabled_roster', {
-      boardId: trigger.boardId,
-      rosterId: board.rosterId,
-      reason: roster ? 'disabled' : 'missing',
-    });
-    return null;
-  }
-  const attribution: Record<string, unknown> = {
-    boardId: trigger.boardId,
-    cardId: trigger.cardId,
-    fromColumnId: trigger.fromColumnId,
-    toColumnId: trigger.toColumnId,
-    workflowId: trigger.workflowId,
-  };
-  if (roster) {
-    attribution.rosterId = roster.rosterId;
-    attribution.persona = roster.persona;
-    attribution.agentId = roster.agentRef.agentId;
-  } else if (board?.ownerUserId) {
-    // ADR 0025 — a personal (human-owned) board attributes its card→run fires to
-    // the user, so they appear in the profile Activity feed (the user-side mirror
-    // of an agent's attributed activity).
-    attribution.ownerUserId = board.ownerUserId;
-  }
-
-  // RFC 0083: the card→run firing goes through a durable trigger subscription
-  // (dedup → retry → dead-letter → causation), not a direct executeRun. One
-  // `queue`-source subscription backs each board (§E: a vendor work surface
-  // bridges as the closest source kind).
-  const subscriptionId = `host:kanban:${trigger.boardId}`;
-  await registerSubscription({ subscriptionId, tenantId, source: 'queue', label: `Kanban board ${trigger.boardId}` });
-  const dedupKey = makeDedupKey(subscriptionId, trigger.cardId, trigger.toColumnId);
-  attribution.triggerSource = 'queue';
-  attribution.triggerSubscriptionId = subscriptionId;
-
-  const result = await deliver({
-    subscriptionId,
-    dedupKey,
-    fire: async (deliveryId) => {
-      const runId = randomUUID();
-      const now = new Date().toISOString();
-      const run: RunRecord = {
-        runId,
-        workflowId: trigger.workflowId,
-        tenantId,
-        status: 'pending',
-        inputs: null,
-        // Attribution block — the proto-`roster.run.initiated` payload
-        // (RFC 0086 §C). Content-free: ids + column names + persona only.
-        metadata: { kanban: attribution },
-        // RFC 0083 §C-3: the delivery id is the run's causationId so
-        // /ancestry resolves delivery → run.
-        causationId: deliveryId,
-        configurable: {},
-        createdAt: now,
-        updatedAt: now,
-      };
-      await insertRunWithStartContext(storage, run);
-      // Index the kanban attribution so it shows in fleet/per-agent activity.
-      await recordRunAttribution(storage, run);
-      // Host-extension-namespaced attribution event (RFC 0086 §E).
-      await getEventLog().append({ runId, type: 'host.kanban.card.moved', payload: attribution });
-      // Dispatch inline (single-instance) — same posture as POST /v1/runs.
-      setImmediate(() => {
-        executeRun(storage, run, wf.definition, { policyResolver: hostSuite.providerPolicyResolver }).catch((err) => {
-          log.error('kanban_trigger_dispatch_failed', { runId, error: err instanceof Error ? err.message : String(err) });
-        });
-      });
-      return runId;
-    },
-  });
-
-  if ((result.outcome === 'delivered' || result.outcome === 'deduped') && result.runId) {
-    if (result.outcome === 'delivered') {
-      // RFC 0083 §C: the content-free delivery event on the new run's stream
-      // (subscription id + opaque dedup key + attempt + outcome + runId only).
-      await getEventLog().append({
-        runId: result.runId,
-        type: 'trigger.delivery.attempted',
-        payload: { subscriptionId, dedupKey, attempt: result.attempts, outcome: 'delivered', runId: result.runId },
-      });
-    }
-    // `deduped` returns the prior run (effectively-once) — no new run/event.
-    return { runId: result.runId, attribution };
-  }
-  // `skipped` (paused subscription) or `dead-lettered` (retries exhausted, no run).
-  return null;
-}
-
 export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // Live board refresh (SSE): clients subscribe to a board's change stream
   // and refetch on `board.changed`. Tenant-scoped at subscribe time. A plain
   // text/event-stream with heartbeats; the payload is just the boardId — the
   // client refetches GET /boards/:id (no card bodies on the wire here).
-  app.get('/v1/host/openwop-app/kanban/boards/:boardId/events', async (req, res, next) => {
+  app.get(`${KANBAN_ROUTE_ROOT}/boards/:boardId/events`, async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId);
       if (!board) {
@@ -329,7 +230,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
 
   // --- boards ---
 
-  app.get('/v1/host/openwop-app/kanban/boards', async (req, res, next) => {
+  app.get(`${KANBAN_ROUTE_ROOT}/boards`, async (req, res, next) => {
     try {
       // `?include=cards` returns each board with its cards attached in a single
       // round trip — lets the agents dashboard render lane previews without an
@@ -346,7 +247,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.post('/v1/host/openwop-app/kanban/boards', async (req, res, next) => {
+  app.post(`${KANBAN_ROUTE_ROOT}/boards`, async (req, res, next) => {
     try {
       const body = (req.body ?? {}) as {
         name?: unknown;
@@ -376,8 +277,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
             field: 'rosterId',
           });
         }
-        const entry = await getRosterEntry(body.rosterId);
-        if (!entry || entry.tenantId !== tenantOf(req)) {
+        const entry = await getRosterEntry(tenantOf(req), body.rosterId);
+        if (!entry) {
           throw new OpenwopError('validation_error', 'Field `rosterId` does not name a roster entry in this tenant.', 400, {
             field: 'rosterId',
           });
@@ -408,7 +309,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // it is the human's own board regardless of which workspace is active. This
   // makes a human a board-owning orchestration principal, mirroring how an agent
   // board is surfaced on the agent profile.
-  app.get('/v1/host/openwop-app/kanban/boards/personal', async (req, res, next) => {
+  app.get(`${KANBAN_ROUTE_ROOT}/boards/personal`, async (req, res, next) => {
     try {
       const subject = callerSubject(req);
       const personal = personalTenantOf(req);
@@ -437,7 +338,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // boards render — no copies — so edits/completion sync both ways for free.
   // Private to the caller (and admins via their own membership). MUST be
   // registered before `/boards/:boardId` so `assigned` isn't parsed as a boardId.
-  app.get('/v1/host/openwop-app/kanban/assigned', async (req, res, next) => {
+  app.get(`${KANBAN_ROUTE_ROOT}/assigned`, async (req, res, next) => {
     try {
       const subject = callerSubject(req);
       if (!subject || !isDurableCaller(req)) {
@@ -464,13 +365,74 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.get('/v1/host/openwop-app/kanban/boards/:boardId', async (req, res, next) => {
+  app.get(`${KANBAN_ROUTE_ROOT}/boards/:boardId`, async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId);
       if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
       }
-      res.json({ board, cards: await listCards(board.id) });
+      res.json({
+        board,
+        cards: await listCards(board.id),
+        workItems: await listWorkItemProjectionsForBoard(board.tenantId, board.id),
+      });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  /** Explicit human dispatch for a generic WorkItem. The board, authorization,
+   * readiness claim, and dynamic workflow lookup all remain core Kanban
+   * concerns; a producer/canvas only supplied the original work proposal. */
+  app.post(`${KANBAN_ROUTE_ROOT}/boards/:boardId/work-items/:workItemId/run`, async (req, res, next) => {
+    try {
+      const board = await authorizeBoard(req, req.params.boardId, 'workspace:write');
+      if (!board) {
+        throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
+      }
+      const workItem = await getWorkItem(req.params.workItemId);
+      if (!workItem || workItem.tenantId !== board.tenantId || workItem.boardId !== board.id) {
+        // The board boundary is already authorized; retain a uniform local 404
+        // rather than allowing a direct aggregate id to cross board/tenant scope.
+        throw new OpenwopError('not_found', 'Work item not found.', 404, { workItemId: req.params.workItemId });
+      }
+      const reservation = await claimEligibleWorkItemExecution(
+        board.tenantId,
+        workItem.workItemId,
+        `kanban-manual-${randomUUID()}`,
+        'manual',
+      );
+      if (reservation.kind === 'skip') {
+        recordKanbanWorkItemDelivery('manual', 'not-eligible');
+        throw new OpenwopError('conflict', 'This work item is not ready to run.', 409, { workItemId: workItem.workItemId });
+      }
+      if (reservation.kind === 'defer') {
+        recordKanbanWorkItemDelivery('manual', 'deferred');
+        throw new OpenwopError('conflict', 'This work item is already being started. Try again shortly.', 409, {
+          workItemId: workItem.workItemId,
+          retryAt: reservation.availableAt,
+        });
+      }
+      let runId: string | null;
+      try {
+        runId = await deliverReservedWorkItem(deps, reservation);
+      } catch (err) {
+        recordKanbanWorkItemDelivery('manual', 'failed');
+        throw err;
+      }
+      if (!runId) {
+        recordKanbanWorkItemDelivery('manual', 'workflow-unresolved');
+        throw new OpenwopError('conflict', 'The selected workflow is no longer available. Choose another workflow in the Workflow Builder, then try again.', 409, {
+          workItemId: workItem.workItemId,
+          workflowId: workItem.workflowId,
+        });
+      }
+      recordKanbanWorkItemDelivery('manual', 'started');
+      const updated = await getWorkItem(workItem.workItemId);
+      res.status(202).json({
+        workItem: toKanbanWorkItemProjection(updated ?? reservation.item),
+        runId,
+      });
     } catch (err) {
       next(err);
     }
@@ -479,7 +441,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // Rename only (architect memo 2026-06-05): `rosterId` rebinding and column
   // edits are deliberately rejected — owner changes alter run attribution
   // (RFC 0086 §C) and column changes alter trigger semantics.
-  app.patch('/v1/host/openwop-app/kanban/boards/:boardId', async (req, res, next) => {
+  app.patch(`${KANBAN_ROUTE_ROOT}/boards/:boardId`, async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId, 'workspace:write');
       if (!board) {
@@ -503,11 +465,28 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/kanban/boards/:boardId', async (req, res, next) => {
+  app.delete(`${KANBAN_ROUTE_ROOT}/boards/:boardId`, async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId, 'workspace:write');
       if (!board) {
         throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
+      }
+      // ADR 0667 D5(b) (PMXWF-10) — a board can BE another feature's aggregate (a
+      // priority-matrix idea IS a card, ADR 0058). This route needs only
+      // `workspace:write`, while that feature's own delete door needs creator-or-org-admin
+      // authority — so without this, an editor who cannot delete a priority list could
+      // delete the board underneath it and the list would render empty, with every score,
+      // vote, intake and evidence row intact and no signal anywhere.
+      //
+      // Refuse HERE, at the route, and ONLY here: `deleteBoard` itself is what tenant
+      // teardown, the roster cascade, projects and the owning feature's own delete all
+      // call, and a refusal inside it would be a gate with no exit.
+      //
+      // The predicate arrives through a registry, so this core route never imports a
+      // feature package (ADR 0001).
+      const claim = await boardDeleteClaim(board.id);
+      if (claim) {
+        throw new OpenwopError('conflict', `This board belongs to ${claim.feature} ("${claim.ownerLabel}"). Delete it from that feature, which applies its own ownership rules.`, 409, { boardId: board.id, ownedBy: claim.feature });
       }
       await deleteBoard(board.id);
       res.status(204).end();
@@ -516,9 +495,38 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
+  // KB-R2-5 — the ONE mutable column field: the soft WIP limit. A dedicated
+  // narrow route (NOT the board PATCH, which deliberately rejects column
+  // edits — trigger/terminal semantics stay immutable per the 2026-06-05
+  // memo). The limit is a visual signal only; nothing anywhere blocks on it.
+  app.patch(`${KANBAN_ROUTE_ROOT}/boards/:boardId/columns/:columnId/limit`, async (req, res, next) => {
+    try {
+      const board = await authorizeBoard(req, req.params.boardId, 'workspace:write');
+      if (!board) {
+        throw new OpenwopError('not_found', 'Board not found.', 404, { boardId: req.params.boardId });
+      }
+      const body = (req.body ?? {}) as { wipLimit?: unknown };
+      const raw = body.wipLimit;
+      let wipLimit: number | null;
+      if (raw === null || raw === undefined) wipLimit = null;
+      else if (typeof raw === 'number' && Number.isInteger(raw) && raw >= 1 && raw <= 999) wipLimit = raw;
+      else {
+        throw new OpenwopError('validation_error', '`wipLimit` must be an integer 1–999, or null to clear.', 400, { wipLimit: raw });
+      }
+      const updated = await setColumnWipLimit(board.id, req.params.columnId, wipLimit);
+      if (!updated) {
+        throw new OpenwopError('not_found', 'Column not found.', 404, { columnId: req.params.columnId });
+      }
+      notifyBoardChanged(board.id);
+      res.json(updated);
+    } catch (err) {
+      next(err);
+    }
+  });
+
   // --- cards ---
 
-  app.post('/v1/host/openwop-app/kanban/boards/:boardId/cards', async (req, res, next) => {
+  app.post(`${KANBAN_ROUTE_ROOT}/boards/:boardId/cards`, async (req, res, next) => {
     try {
       const board = await authorizeBoard(req, req.params.boardId, 'workspace:write');
       if (!board) {
@@ -569,7 +577,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.patch('/v1/host/openwop-app/kanban/cards/:cardId', async (req, res, next) => {
+  app.patch(`${KANBAN_ROUTE_ROOT}/cards/:cardId`, async (req, res, next) => {
     try {
       const cardId = req.params.cardId;
       const existing = await getCard(cardId);
@@ -586,6 +594,8 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         description?: unknown;
         workflowId?: unknown;
         columnId?: unknown;
+        beforeCardId?: unknown;
+        afterCardId?: unknown;
         source?: unknown;
         sourceLabel?: unknown;
         priority?: unknown;
@@ -599,7 +609,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
       // PROGRESS the work (move/complete via `columnId`) but not edit the card's
       // content/config — that belongs to the origin board's members.
       if (scope === 'assignment') {
-        const contentFields = Object.keys(body).filter((k) => k !== 'columnId');
+        const contentFields = Object.keys(body).filter((k) => k !== 'columnId' && k !== 'beforeCardId' && k !== 'afterCardId');
         if (contentFields.length > 0) {
           throw new OpenwopError(
             'forbidden',
@@ -610,46 +620,61 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         }
       }
 
-      // Field updates first (title/description/workflowId + demo metadata).
-      await updateCardFields(cardId, {
-        title: typeof body.title === 'string' ? body.title : undefined,
-        description: typeof body.description === 'string' ? body.description : undefined,
-        workflowId: typeof body.workflowId === 'string' ? body.workflowId : undefined,
-        source: parseCardSource(body.source),
-        sourceLabel: typeof body.sourceLabel === 'string' ? body.sourceLabel : undefined,
-        priority: parseCardPriority(body.priority),
-        dueAt: typeof body.dueAt === 'string' ? body.dueAt : undefined,
-        createdBy: typeof body.createdBy === 'string' ? body.createdBy : undefined,
-        assignmentReason: typeof body.assignmentReason === 'string' ? body.assignmentReason : undefined,
-        blockerNote: typeof body.blockerNote === 'string' ? body.blockerNote : undefined,
-      });
+      const requestedColumnId = typeof body.columnId === 'string' && body.columnId !== existing.columnId
+        ? body.columnId
+        : undefined;
+      if (requestedColumnId && !board.columns.some((column) => column.id === requestedColumnId)) {
+        throw new OpenwopError('validation_error', 'Field `columnId` MUST name a column on this board.', 400, {
+          field: 'columnId',
+        });
+      }
+
+      // One CAS-backed command validates the whole intent BEFORE persisting it:
+      // a bad lane can no longer leave a valid title/metadata edit behind.
+      let mutation;
+      try {
+        mutation = await applyBoardCommand({
+          type: 'card.patch', tenantId: board.tenantId, boardId: board.id, cardId,
+          ...(requestedColumnId ? { columnId: requestedColumnId } : {}),
+          ...(typeof body.beforeCardId === 'string' ? { beforeCardId: body.beforeCardId } : {}),
+          ...(typeof body.afterCardId === 'string' ? { afterCardId: body.afterCardId } : {}),
+          patch: {
+            title: typeof body.title === 'string' ? body.title : undefined,
+            description: typeof body.description === 'string' ? body.description : undefined,
+            workflowId: typeof body.workflowId === 'string' ? body.workflowId : undefined,
+            source: parseCardSource(body.source),
+            sourceLabel: typeof body.sourceLabel === 'string' ? body.sourceLabel : undefined,
+            priority: parseCardPriority(body.priority),
+            dueAt: typeof body.dueAt === 'string' ? body.dueAt : undefined,
+            createdBy: typeof body.createdBy === 'string' ? body.createdBy : undefined,
+            assignmentReason: typeof body.assignmentReason === 'string' ? body.assignmentReason : undefined,
+            blockerNote: typeof body.blockerNote === 'string' ? body.blockerNote : undefined,
+          },
+        });
+      } catch (err) {
+        rethrowCardCommandError(err);
+      }
 
       // A columnId change is a move — and a move into a trigger column
       // starts a run.
       let triggeredRunId: string | null = null;
       let attribution: Record<string, unknown> | null = null;
-      if (typeof body.columnId === 'string' && body.columnId !== existing.columnId) {
-        const destColumn = board.columns.find((c) => c.id === body.columnId);
-        if (!destColumn) {
-          throw new OpenwopError('validation_error', 'Field `columnId` MUST name a column on this board.', 400, {
-            field: 'columnId',
-          });
-        }
-        const moved = await moveCard(cardId, body.columnId);
+      if (requestedColumnId) {
+        const destColumn = board.columns.find((column) => column.id === requestedColumnId);
         // ADR 0049 — completing the work resolves the inbox item: moving the
         // card into a terminal lane withdraws the assignee's assignment notice.
-        if (isTerminalColumn(board, destColumn.id) && existing.assigneeId) {
+        if (destColumn && isTerminalColumn(board, destColumn.id) && existing.assigneeId) {
           await withdrawAssignmentNotification({
             tenantId: board.tenantId,
             cardId,
             recipientUserId: existing.assigneeId,
           });
         }
-        if (moved?.trigger) {
+        if (mutation.trigger) {
           // Attribute the run to the BOARD's tenant, not the caller's active
           // workspace — so a personal board's card→run fires into the owner's
           // personal tenant even when accessed from another workspace.
-          const started = await startKanbanRun(deps, board.tenantId, moved.trigger);
+          const started = await startKanbanTriggerRun(deps, board.tenantId, mutation.trigger);
           if (started) {
             triggeredRunId = started.runId;
             attribution = started.attribution;
@@ -658,9 +683,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
         }
       }
 
-      const card = await getCard(cardId);
-      notifyBoardChanged(board.id);
-      res.json({ card, triggeredRunId, attribution });
+      res.json({ card: mutation.card, triggeredRunId, attribution });
     } catch (err) {
       next(err);
     }
@@ -671,7 +694,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   //       person; { assigneeId: null } to unassign; { assigneeRole: "<role>" }
   //       to address an unclaimed role. The card NEVER leaves its origin board —
   //       assignment is a reference. Only a board member may assign (write).
-  app.post('/v1/host/openwop-app/kanban/cards/:cardId/assign', async (req, res, next) => {
+  app.post(`${KANBAN_ROUTE_ROOT}/cards/:cardId/assign`, async (req, res, next) => {
     try {
       const cardId = req.params.cardId;
       const existing = await getCard(cardId);
@@ -742,7 +765,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
   // member need not be); claiming requires only workspace membership + the card
   // being role-addressed. No origin-board membership is required (the claimer
   // gains card-scoped access as the assignee).
-  app.post('/v1/host/openwop-app/kanban/cards/:cardId/claim', async (req, res, next) => {
+  app.post(`${KANBAN_ROUTE_ROOT}/cards/:cardId/claim`, async (req, res, next) => {
     try {
       const cardId = req.params.cardId;
       const subject = callerSubject(req);
@@ -772,7 +795,7 @@ export function registerKanbanRoutes(app: Express, deps: Deps): void {
     }
   });
 
-  app.delete('/v1/host/openwop-app/kanban/cards/:cardId', async (req, res, next) => {
+  app.delete(`${KANBAN_ROUTE_ROOT}/cards/:cardId`, async (req, res, next) => {
     try {
       const card = await getCard(req.params.cardId);
       if (!card) {

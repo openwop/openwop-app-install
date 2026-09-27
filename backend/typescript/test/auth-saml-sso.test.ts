@@ -73,7 +73,7 @@ describe('SAML SSO routes — 404 when unconfigured', () => {
       const e = err as { httpStatus?: number; code?: string };
       res.status(e.httpStatus ?? 500).json({ error: e.code ?? 'internal_error' });
     });
-    server = await new Promise<http.Server>((r) => { const s = app.listen(0, () => r(s)); });
+    server = await new Promise<http.Server>((r) => { const s = app.listen(0, '127.0.0.1', () => r(s)); });
     port = (server.address() as { port: number }).port;
   });
   afterAll(async () => { await new Promise<void>((r) => server.close(() => r())); clearSamlEnv(); });

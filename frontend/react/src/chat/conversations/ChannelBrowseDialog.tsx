@@ -5,11 +5,14 @@
  * every PUBLIC channel (+ your private memberships) and lets you self-join one.
  * Composes the shared Modal + channelsClient.
  */
+import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { StateCard } from '../../ui/StateCard.js';
 import { Modal } from '../../ui/Modal.js';
 import { HashIcon } from '../../ui/icons/index.js';
 import { listJoinableChannels, joinChannel, type ChannelListEntry } from '../../client/channelsClient.js';
+import { formatRelativeTime } from '../../i18n/format.js';
 
 interface Props {
   onClose: () => void;
@@ -45,20 +48,33 @@ export function ChannelBrowseDialog({ onClose, onOpen, onJoined }: Props): JSX.E
     <Modal onClose={onClose} label={t('browseChannelsTitle')} showClose loading={rows === null} {...(error ? { error } : {})}>
       <h2 className="u-mt-0 u-fs-16">{t('browseChannelsTitle')}</h2>
       {rows && rows.length === 0 ? (
-        <p className="muted u-fs-12">{t('noPublicChannels')}</p>
+        <StateCard title={t('noPublicChannels')} body={t('noPublicChannelsBody')} />
       ) : (
         <ul className="u-list-none u-m-0 u-p-0">
           {(rows ?? []).map((r) => (
             <li key={r.conversationId} className="u-flex u-items-center u-justify-between u-gap-2 u-pad-1-2">
-              <span className="u-flex u-items-center u-gap-1-5 u-fs-13">
-                <span aria-hidden className="u-iflex muted"><HashIcon size={13} /></span>
-                {r.channel?.name ?? r.conversationId}
-                {r.channel?.visibility === 'private' ? <span className="muted u-fs-11">· {t('visibilityPrivate')}</span> : null}
+              <span className="u-flex u-flex-col u-minw-0">
+                <span className="u-flex u-items-center u-gap-1-5 u-fs-13">
+                  <span aria-hidden className="u-iflex muted"><HashIcon size={13} /></span>
+                  <span className="u-truncate">{r.channel?.name ?? r.conversationId}</span>
+                  {r.channel?.visibility === 'private' ? <span className="muted u-fs-11">· {t('visibilityPrivate')}</span> : null}
+                </span>
+                {/* ADR 0192 D8 — reasons to join: what the room is for + who's in it. */}
+                {r.channel?.description && <span className="muted u-fs-12 u-truncate">{r.channel.description}</span>}
+                {(r.memberCount !== undefined || r.agentCount !== undefined) && (
+                  <span className="muted u-fs-11 u-mono">
+                    {[
+                      r.memberCount !== undefined ? t('channelMemberCount', { count: r.memberCount }) : null,
+                      r.agentCount ? t('channelAgentCount', { count: r.agentCount }) : null,
+                      r.lastActivityAt ? t('channelLastActivity', { time: formatRelativeTime(r.lastActivityAt) }) : null,
+                    ].filter(Boolean).join(' · ')}
+                  </span>
+                )}
               </span>
               {r.joined ? (
-                <button type="button" className="secondary btn-sm" onClick={() => { onOpen(r.conversationId); onClose(); }}>{t('openChannelCta')}</button>
+                <Button variant="secondary" size="sm" onClick={() => { onOpen(r.conversationId); onClose(); }}>{t('openChannelCta')}</Button>
               ) : (
-                <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => onJoin(r.conversationId)}>{t('joinChannelCta')}</button>
+                <Button variant="primary" size="sm" disabled={busy} onClick={() => onJoin(r.conversationId)}>{t('joinChannelCta')}</Button>
               )}
             </li>
           ))}

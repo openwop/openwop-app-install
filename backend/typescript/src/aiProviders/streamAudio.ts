@@ -43,7 +43,3 @@ export function getStreamAudioResolver(): StreamAudioResolver | null {
   return resolver;
 }
 
-/** Whether a live streaming-transcription path is wired (drives honest advertisement). */
-export function liveTranscriptionWired(): boolean {
-  return resolver !== null;
-}

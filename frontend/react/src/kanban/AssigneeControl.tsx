@@ -9,43 +9,43 @@
  * refresh then repaints this card. Pointer events are stopped so interacting
  * with the control never starts a drag.
  *
- * Members are loaded once per active workspace (module-cached) — the first card
- * that opens its picker pays the fetch; the rest reuse it.
+ * Members come from the shared org-member loader (`orgs/orgMembers.ts`, active
+ * workspace root org): one cache with in-flight dedupe, a TTL, and invalidation on
+ * member mutations. This file used to keep a second, never-invalidated copy of it.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { UserIcon, XIcon } from '../ui/icons/index.js';
-import { listMembers, type OrgMember } from '../client/accessClient.js';
-import { listMyWorkspaces } from '../client/workspaceClient.js';
+import type { OrgMember } from '../client/accessClient.js';
+import { loadOrgMembers } from '../orgs/orgMembers.js';
 import { assignCard } from './kanbanClient.js';
-
-let membersCache: { workspaceId: string; members: OrgMember[] } | null = null;
-
-async function loadWorkspaceMembers(): Promise<OrgMember[]> {
-  const active = (await listMyWorkspaces()).active;
-  if (membersCache && membersCache.workspaceId === active) return membersCache.members;
-  // The workspace-root org id equals the active workspace/tenant id (ADR 0015).
-  const members = await listMembers(active);
-  membersCache = { workspaceId: active, members };
-  return members;
-}
-
-/** Drop the cache so a freshly-assigned member list reloads (e.g. after invites). */
-export function invalidateMembersCache(): void {
-  membersCache = null;
-}
 
 export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assigneeId: string | undefined }): JSX.Element {
   const { t } = useTranslation('kanban');
   const [open, setOpen] = useState(false);
   const [members, setMembers] = useState<OrgMember[] | null>(null);
   const [busy, setBusy] = useState(false);
+  // 'loading' disables the select, so a list that is being replaced cannot be picked
+  // from (a member removed since the last open stays offered for that window
+  // otherwise). 'failed' is a designed state — distinct from an empty workspace.
+  const [load, setLoad] = useState<'loading' | 'ready' | 'failed'>('ready');
 
+  // Re-read on EVERY open, not once per mount: a picker that latched its first list
+  // kept offering a member removed since (CLNP-2(d)). The members themselves come from
+  // the shared cached loader; the active-workspace lookup is one extra read.
+  // On failure the PREVIOUS list is kept — wiping it would make the card fall back to
+  // the raw assignee id and never recover — and the failure is said, not swallowed.
   useEffect(() => {
-    if (!open || members) return;
-    void loadWorkspaceMembers().then(setMembers).catch(() => setMembers([]));
-  }, [open, members]);
+    if (!open) return;
+    let live = true;
+    setLoad('loading');
+    loadOrgMembers()
+      .then((m) => { if (live) { setMembers(m); setLoad('ready'); } })
+      .catch(() => { if (live) setLoad('failed'); });
+    return () => { live = false; };
+  }, [open]);
 
   const assignee = members?.find((m) => m.subject === assigneeId);
   const label = assignee?.displayName ?? (assigneeId ? assigneeId : t('unassigned'));
@@ -63,21 +63,24 @@ export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assign
   // Resolve a name for an already-assigned card without opening the picker.
   useEffect(() => {
     if (assigneeId && !members) {
-      void loadWorkspaceMembers().then(setMembers).catch(() => undefined);
+      void loadOrgMembers().then(setMembers).catch(() => undefined);
     }
   }, [assigneeId, members]);
 
   if (!open) {
     return (
-      <button
-        type="button"
-        className={assigneeId ? 'kb-person' : 'muted u-fs-12'}
+      <Button
+        variant="quiet"
+        size="sm"
+        /* quiet, not primary — kb-person keeps the 12px ink-2 person
+           treatment the card's other people use. */
+        className="kb-person"
         onPointerDown={(e) => e.stopPropagation()}
         onClick={(e) => { e.stopPropagation(); setOpen(true); }}
         title={t('assignCardTitle')}
       >
         <UserIcon size={12} aria-hidden /> {label}
-      </button>
+      </Button>
     );
   }
 
@@ -89,11 +92,12 @@ export function AssigneeControl({ cardId, assigneeId }: { cardId: string; assign
       <select
         className="u-fs-12"
         defaultValue={assigneeId ?? ''}
-        disabled={busy || members === null}
+        disabled={busy || load === 'loading' || (load === 'failed' && members === null)}
         onClick={(e) => e.stopPropagation()}
         onChange={(e) => void onPick(e.target.value)}
         aria-label={t('assignTo')}
       >
+        {load === 'failed' ? <option value="" disabled>{t('membersLoadFailed')}</option> : null}
         <option value="">{t('unassigned')}</option>
         {(members ?? []).map((m) => (
           <option key={m.memberId} value={m.subject ?? m.memberId}>

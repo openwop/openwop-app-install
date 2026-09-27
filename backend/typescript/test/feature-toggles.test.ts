@@ -171,6 +171,40 @@ describe('durable store + effective config', () => {
     expect((await listEffectiveConfigs()).find((c) => c.id === 'a.feature')?.status).toBe('on');
   });
 
+  it('a stored override never shadows the compiled DECLARED metadata (category/label) — the store-first bug', async () => {
+    // The current code declares category 'Canvases' + label 'Canvas'. The stored row
+    // was saved earlier — before the feature was categorized — so it carries NO
+    // category (and a since-changed label) and only flips status off→on. The effective
+    // config MUST take the admin choice (status) from the row but the declared metadata
+    // (category/label/bucketUnit/salt) from CODE, so it still groups under Canvases.
+    registerToggleDefault({ ...AB, id: 'canvas.feature', status: 'off', category: 'Canvases', label: 'Canvas' });
+    const staleRow: ToggleConfig = { id: 'canvas.feature', status: 'on', bucketUnit: 'user', salt: 's1' }; // no category, no label
+    await saveConfig(staleRow, 'admin');
+
+    const eff = await getEffectiveConfig('canvas.feature');
+    expect(eff?.status).toBe('on'); // admin choice, from the store
+    expect(eff?.category).toBe('Canvases'); // declared metadata, from CODE — not the stale row
+    expect(eff?.label).toBe('Canvas');
+
+    const listed = (await listEffectiveConfigs()).find((c) => c.id === 'canvas.feature');
+    expect(listed?.category).toBe('Canvases'); // groups correctly on the admin page
+    expect(listed?.status).toBe('on');
+  });
+
+  it('saveConfig stores only admin choices — declared display metadata is not persisted (data hygiene)', async () => {
+    // Data-hygiene: a save carrying a stale/divergent category+label (as an older FE
+    // would send) must NOT leave that dead metadata in the row. The SAVE RETURN merges
+    // the code-declared metadata back, so the stale values never surface, and the row
+    // stays lean (choices only) — no drift for the read path to have to defend against.
+    registerToggleDefault({ ...AB, id: 'grp.feature', status: 'off', category: 'Canvases', label: 'Canvas' });
+    const stale: ToggleConfig = { id: 'grp.feature', status: 'on', bucketUnit: 'user', salt: 'x', category: 'Stale', label: 'Old' };
+    const saved = await saveConfig(stale, 'admin');
+    expect(saved.status).toBe('on'); // admin choice kept
+    expect(saved.category).toBe('Canvases'); // code metadata, not the stale 'Stale'
+    expect(saved.label).toBe('Canvas');
+    expect((await getEffectiveConfig('grp.feature'))?.category).toBe('Canvases');
+  });
+
   it('resolveOne returns null for an unknown toggle', async () => {
     expect(await resolveOne('nope', { tenantId: 't1' })).toBeNull();
   });

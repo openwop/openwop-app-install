@@ -25,6 +25,7 @@
  */
 import { DurableCollection } from './hostExtPersistence.js';
 import { resolveSecret } from '../byok/secretResolver.js';
+import { registerCredentialRefConsumer } from './credentialRefRegistry.js';
 
 /** A tenant-configured compat endpoint. The `baseUrl` is host-only (§D). */
 export interface CompatEndpoint {
@@ -67,6 +68,20 @@ const endpoints = new DurableCollection<CompatEndpoint>('compat:endpoint', (e) =
 export async function getCompatEndpoint(tenantId: string, id: string): Promise<CompatEndpoint | null> {
   return endpoints.get(`${tenantId}:${id}`);
 }
+
+// ADR 0499 — the endpoint mints and owns `compat-key:<id>`, but the vault lists
+// every tenant ref, so a superadmin CAN delete it out from under the endpoint.
+// The ref is persisted on the row, so match the field rather than the naming
+// convention (an older row may predate the convention).
+registerCredentialRefConsumer({
+  id: 'compat:endpoint',
+  async describe(tenantId, ref) {
+    const rows = await endpoints.listForTenant(tenantId);
+    return rows
+      .filter((e) => e.credentialRef === ref)
+      .map((e) => `OpenAI-compatible endpoint "${e.label || e.id}"`);
+  },
+});
 
 /** All compat endpoints in `orgId` for `tenantId` (tenant-bounded scan + org filter). */
 export async function listCompatEndpoints(tenantId: string, orgId: string): Promise<CompatEndpoint[]> {

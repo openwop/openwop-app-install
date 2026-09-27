@@ -10,17 +10,26 @@
  *
  * @see docs/adr/0136-intent-ledger.md
  */
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 import { Modal } from '../ui/Modal.js';
 import { Notice } from '../ui/Notice.js';
 import { toast } from '../ui/toast.js';
 import { CheckIcon, XIcon } from '../ui/icons/index.js';
 import { confirm } from '../ui/confirm.js';
-import { getLedger, draftLedger, draftLedgerFromConversation, decideLedger, getReckoning, type IntentLedger, type LedgerReckoning } from './intentLedgerClient.js';
+import { stageComposerDraft } from '../chat/composerSeed.js';
+import { getLedger, draftLedger, decideLedger, getReckoning, type IntentLedger, type LedgerReckoning } from './intentLedgerClient.js';
+
+// The existing governance agent (its allowlist carries intent-ledger.get +
+// intent-ledger.draft-contract). "Capability at core, not a named agent" — this is
+// just the deep-link target, not new behavior.
+const CHIEF_OF_STAFF_AGENT_ID = 'feature.assistant.agents.chief-of-staff';
 
 export default function IntentLedgerPanel({ sessionId, onClose, lastUserMessage }: { sessionId: string; onClose: () => void; lastUserMessage?: string }): JSX.Element {
   const { t } = useTranslation('intentLedger');
+  const navigate = useNavigate();
   const [ledger, setLedger] = useState<IntentLedger | null>(null);
   const [reckoning, setReckoning] = useState<LedgerReckoning | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -47,12 +56,14 @@ export default function IntentLedgerPanel({ sessionId, onClose, lastUserMessage 
       setGoal(''); setCriteria('');
     } catch (e) { toast.error(e instanceof Error ? e.message : t('draftFailed', { defaultValue: 'Failed to draft the mission.' })); } finally { setBusy(false); }
   };
-  const autoDraft = async (): Promise<void> => {
-    if (!lastUserMessage?.trim()) return;
-    setBusy(true);
-    try { setLedger(await draftLedgerFromConversation(sessionId, lastUserMessage)); }
-    catch (e) { toast.error(e instanceof Error ? e.message : t('autoDraftFailed', { defaultValue: 'Could not draft from this conversation.' })); }
-    finally { setBusy(false); }
+  // CFP A13 — chat-first drafting: instead of a REST button that hid a managed-LLM
+  // extractor, hand the ONE chat a seeded prompt and scope it to the governance
+  // agent, whose intent-ledger.draft-contract tool authors the draft in-conversation
+  // for the owner to Approve here. No second chat, no bespoke model call.
+  const draftWithAssistant = (): void => {
+    stageComposerDraft(t('draftWithAssistantSeed', { defaultValue: 'Draft a mission contract for this conversation — I will review and approve it before it takes effect.' }));
+    onClose();
+    navigate(`/?agent=${encodeURIComponent(CHIEF_OF_STAFF_AGENT_ID)}`);
   };
   const decide = async (d: 'approve' | 'reject'): Promise<void> => {
     setBusy(true);
@@ -83,9 +94,9 @@ export default function IntentLedgerPanel({ sessionId, onClose, lastUserMessage 
               <input type="text" value={goal} onChange={(e) => setGoal(e.target.value)} placeholder={t('goalPlaceholder', { defaultValue: 'Goal (what should the agent accomplish?)' })} aria-label={t('goal', { defaultValue: 'Goal' })} className="u-fs-12" />
               <textarea value={criteria} onChange={(e) => setCriteria(e.target.value)} placeholder={t('criteriaPlaceholder', { defaultValue: 'Success criteria, one per line (optional)' })} aria-label={t('criteria', { defaultValue: 'Success criteria' })} rows={3} className="u-fs-12" />
               <div className="u-flex u-gap-2">
-                <button type="button" className="u-fs-12" disabled={busy} onClick={create}>{t('createDraft', { defaultValue: 'Create draft' })}</button>
+                <Button variant="primary" className="u-fs-12" disabled={busy} onClick={create}>{t('createDraft', { defaultValue: 'Create draft' })}</Button>
                 {lastUserMessage?.trim() && (
-                  <button type="button" className="secondary u-fs-12" disabled={busy} onClick={autoDraft}>{t('autoDraft', { defaultValue: 'Draft from conversation' })}</button>
+                  <Button variant="secondary" className="u-fs-12" disabled={busy} onClick={draftWithAssistant}>{t('draftWithAssistant', { defaultValue: 'Draft with the assistant' })}</Button>
                 )}
               </div>
             </section>
@@ -104,15 +115,15 @@ export default function IntentLedgerPanel({ sessionId, onClose, lastUserMessage 
 
               {ledger.status === 'draft' && (
                 <div className="u-flex u-gap-2">
-                  <button type="button" className="u-fs-12" disabled={busy} onClick={() => decide('approve')}><CheckIcon size={14} /> {t('approve', { defaultValue: 'Approve' })}</button>
-                  <button type="button" className="secondary u-fs-12" disabled={busy} onClick={() => decide('reject')}><XIcon size={14} /> {t('reject', { defaultValue: 'Reject' })}</button>
+                  <Button variant="primary" className="u-fs-12" disabled={busy} onClick={() => decide('approve')}><CheckIcon size={14} /> {t('approve', { defaultValue: 'Approve' })}</Button>
+                  <Button variant="secondary" className="u-fs-12" disabled={busy} onClick={() => decide('reject')}><XIcon size={14} /> {t('reject', { defaultValue: 'Reject' })}</Button>
                 </div>
               )}
               {ledger.status === 'approved' && (
                 <>
-                  <button type="button" className="secondary u-fs-11 u-self-start" disabled={busy} onClick={() => void revoke()}>{t('revoke', { defaultValue: 'Revoke mission' })}</button>
+                  <Button variant="secondary" className="u-fs-11 u-self-start" disabled={busy} onClick={() => void revoke()}>{t('revoke', { defaultValue: 'Revoke mission' })}</Button>
                   {reckoning && (
-                    <div className="surface-card u-pad-2 u-flex u-flex-col u-gap-1" aria-labelledby="il-reck">
+                    <div role="region" className="surface-card u-pad-2 u-flex u-flex-col u-gap-1" aria-labelledby="il-reck">
                       <div className="u-flex u-items-center u-justify-between">
                         <h4 id="il-reck" className="u-fs-12">{t('reckoning', { defaultValue: 'Progress' })}</h4>
                         <span className={`chip u-fs-11 ${reckoning.withinMandate ? 'chip--accent' : 'chip--danger'}`}>{reckoning.withinMandate ? t('inMandate', { defaultValue: 'in mandate' }) : t('outOfMandate', { defaultValue: 'blocked attempts' })}</span>

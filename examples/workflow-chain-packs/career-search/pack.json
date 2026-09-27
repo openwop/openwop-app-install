@@ -1,0 +1,263 @@
+{
+ "name": "core.openwop.workflows.career-search",
+ "version": "1.1.0",
+ "kind": "workflow-chain",
+ "description": "Career search + apply (ADR 0543 P2/P3). `career.search` scores and screens a posting; `career.apply` checks a proposed résumé rewrite for fabrication and then STARTS a browser session carrying the apply-grant context. Neither chain submits: the ADR 0541 commit gate owns that decision, so an edited chain cannot route around the grant.",
+ "author": "OpenWOP App",
+ "license": "Apache-2.0",
+ "keywords": [
+  "job-search",
+  "career",
+  "scoring",
+  "eligibility"
+ ],
+ "engines": {
+  "openwop": ">=1.0.0 <2.0.0"
+ },
+ "chains": [
+  {
+   "chainId": "career.search",
+   "version": "1.0.0",
+   "label": "Career: score & screen a role",
+   "description": "Scores a job posting against your profile and checks it against any bar the posting STATES. Ends with a verdict you can act on — it never applies to anything, because submitting is bounded by an apply grant you issue separately. Parameters are OPTIONAL with `{}` defaults (ADR 0504): a required whole-value `{{params.X}}` would freeze to undefined when instantiated without params and fail mid-run naming an internal node instead of the parameter.",
+   "capabilities": [],
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "digest": {
+      "type": "object",
+      "default": {},
+      "description": "The job posting: title, companyName, skills[], location, remote, sponsorship and any stated citizenship/clearance requirement."
+     },
+     "profile": {
+      "type": "object",
+      "default": {},
+      "description": "What you are looking for: skills[], targetTitles[], salaryFloor, wantsRemote."
+     },
+     "applicant": {
+      "type": "object",
+      "default": {},
+      "description": "What you can clear: requiresSponsorship, meetsCitizenshipRequirement, holdsRequiredClearance. Absent means 'needs nothing', so only a bar the posting STATES can disqualify."
+     }
+    }
+   },
+   "dag": {
+    "nodes": [
+     {
+      "id": "score",
+      "typeId": "feature.job-search.nodes.score-fit",
+      "name": "Score fit",
+      "position": {
+       "x": -160,
+       "y": 0
+      },
+      "config": {},
+      "inputs": {
+       "digest": "{{params.digest}}",
+       "profile": "{{params.profile}}"
+      }
+     },
+     {
+      "id": "eligibility",
+      "typeId": "feature.job-search.nodes.check-eligibility",
+      "name": "Check eligibility",
+      "position": {
+       "x": 120,
+       "y": 0
+      },
+      "config": {},
+      "inputs": {
+       "digest": "{{params.digest}}",
+       "applicant": "{{params.applicant}}"
+      }
+     }
+    ],
+    "edges": []
+   },
+   "outputs": {
+    "eligible": {
+     "type": "boolean",
+     "description": "Whether a JD-STATED bar disqualifies this role for this applicant. True unless a stated bar fires."
+    },
+    "reason": {
+     "type": "string",
+     "description": "Why it was disqualified, or empty when eligible."
+    },
+    "quote": {
+     "type": "string",
+     "description": "The posting's OWN words backing a disqualification — what makes a skip checkable rather than something to trust."
+    },
+    "matchScore": {
+     "type": "number",
+     "description": "Weighted fit score against the applicant's profile, recorded at decision time."
+    }
+   }
+  },
+  {
+   "chainId": "career.apply",
+   "version": "1.0.0",
+   "label": "Career: prepare & start an application",
+   "description": "Checks a proposed résumé rewrite against its source for fabricated numbers, employers and dates, then starts a browser session to fill the application. It does NOT submit — the commit gate consults your apply grant and, without one, stops and asks you first.",
+   "capabilities": [
+    "side-effectful"
+   ],
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+     "original": {
+      "type": "string",
+      "default": "",
+      "description": "The résumé bullet as written on your CV."
+     },
+     "reworded": {
+      "type": "string",
+      "default": "",
+      "description": "The tailored rewrite to check before it is used."
+     },
+     "allowedEmployers": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "default": [],
+      "description": "Employers you genuinely have, umbrella names included."
+     },
+     "orgId": {
+      "type": "string",
+      "default": "",
+      "description": "The organization this application belongs to."
+     },
+     "applyUrl": {
+      "type": "string",
+      "default": "",
+      "description": "The posting's application URL."
+     },
+     "allowedOrigins": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      },
+      "default": [],
+      "description": "Origins the session may reach — the grant is scoped to these too."
+     },
+     "applyContext": {
+      "type": "object",
+      "default": {},
+      "description": "subjectId + campaignId + tier. Without it the commit gate has nothing to consult and every submission asks you first."
+     }
+    }
+   },
+   "dag": {
+    "nodes": [
+     {
+      "id": "guard",
+      "typeId": "feature.job-search.nodes.guard-rewrite",
+      "name": "Guard the rewrite",
+      "position": {
+       "x": -160,
+       "y": 0
+      },
+      "config": {},
+      "inputs": {
+       "original": "{{params.original}}",
+       "reworded": "{{params.reworded}}",
+       "allowedEmployers": "{{params.allowedEmployers}}"
+      }
+     },
+     {
+      "id": "session",
+      "typeId": "feature.computer-use.nodes.task",
+      "name": "Start the application session",
+      "position": {
+       "x": 140,
+       "y": 0
+      },
+      "config": {},
+      "inputs": {
+       "orgId": "{{params.orgId}}",
+       "task": "Fill in this job application using the applicant's profile. Do not submit; the host decides that.",
+       "startUrl": "{{params.applyUrl}}",
+       "allowedOrigins": "{{params.allowedOrigins}}",
+       "applyContext": "{{params.applyContext}}"
+      }
+     }
+    ],
+    "edges": [
+     {
+      "from": "guard.ok",
+      "to": "session.guardOk",
+      "triggerRule": "all_success",
+      "condition": {
+       "type": "equals",
+       "left": "ok",
+       "right": true
+      }
+     }
+    ]
+   },
+   "outputs": {
+    "sessionId": {
+     "type": "string",
+     "description": "The browser session. Its status is `awaiting_approval` whenever no grant covers the submission."
+    },
+    "guardOk": {
+     "type": "boolean",
+     "description": "False when the rewrite introduced a fact the source does not support — the session is not started."
+    },
+    "violations": {
+     "type": "array",
+     "description": "What the guard rejected, each naming the offending token."
+    }
+   }
+  },
+  {
+   "chainId": "career.campaign",
+   "version": "1.0.0",
+   "label": "Career: run a campaign pass",
+   "description": "Runs one pass of your standing job-search campaign: every stored listing is screened, scored and — where a board ships a submit lane and your apply grant allows it — applied to, under the grant's ceiling, hourly pace and your daily cap. Takes no parameters by design: targeting comes from your steering policy, authority from grants you issued, answers from your answer bank. The output is the pass digest — what was applied, parked, and skipped, each with its reason. Registered under its stable id so the career agent's board cards can name it (WF-JS-1 / ADR 0543 D3).",
+   "capabilities": [
+    "side-effectful"
+   ],
+   "parameters": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+   },
+   "producedVariables": [],
+   "dag": {
+    "nodes": [
+     {
+      "id": "pass",
+      "typeId": "feature.job-search.nodes.run-campaign",
+      "config": {}
+     }
+    ],
+    "edges": []
+   },
+   "outputs": {
+    "ranGrants": {
+     "type": "number",
+     "description": "Active grants the pass ran under."
+    },
+    "listings": {
+     "type": "number",
+     "description": "Stored listings considered."
+    },
+    "skippedNoSubmitLane": {
+     "type": "number",
+     "description": "Listings whose board ships no submit lane yet — the coverage gap as a number."
+    },
+    "skippedDailyCap": {
+     "type": "number",
+     "description": "Items not attempted because the day's cap was already spent."
+    },
+    "results": {
+     "type": "array",
+     "description": "Per-grant digest: applied dealIds, parked count, and every skip with its reason."
+    }
+   }
+  }
+ ]
+}

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.orgs.nodes/1.0.0/revoke-invitation.input.json",
+  "title": "OrgsRevokeInvitationInput",
+  "description": "Runtime target. `inviteId` (e.g. the `inviteId` port of an upstream `feature.orgs.nodes.invite`, or the `host.orgs.invitation.*` trigger payload forwarded by an edge) wins over config.",
+  "type": "object",
+  "properties": {
+    "inviteId": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "orgId": {
+      "type": "string",
+      "maxLength": 200
+    }
+  },
+  "additionalProperties": true
+}

@@ -8,6 +8,7 @@
  * what needs a human (DESIGN.md §4.5 rule 2); per-workforce metrics + governance
  * are fetched best-effort.
  */
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
@@ -20,6 +21,7 @@ import { BoxesIcon, AlertIcon } from '../ui/icons/index.js';
 import { IllustrativeBadge } from '../ui/IllustrativeBadge.js';
 import { ViewToggle, useViewMode } from '../ui/ViewToggle.js';
 import { WorkforceCard, WorkforceRow, type WfSignals } from './WorkforceViews.js';
+import { useDemoMode } from '../client/useDemoMode.js';
 import {
   getWorkforceGovernance,
   getWorkforceMetrics,
@@ -30,6 +32,16 @@ import {
 interface WfRow {
   wf: Workforce;
   signals: WfSignals | null; // null when metrics + governance both failed
+  /**
+   * WF-G1 — which of the two reads failed. When only ONE fails the row still
+   * built `signals`, and the MISSING side's numbers fell back to 0 — so a failed
+   * governance read rendered "0 policy violations" and a failed metrics read
+   * rendered "0 open approvals". Those zeroes then fed `nothingNeedsYou`, i.e.
+   * this console told an admin the fleet was clear using numbers it had not
+   * read. A governance surface may say "we could not check"; it may not say
+   * "zero".
+   */
+  unknown: { metrics: boolean; governance: boolean };
 }
 
 type FilterKey = 'all' | 'approvals' | 'eligible' | 'violations';
@@ -46,12 +58,20 @@ function rowMatches(row: WfRow, filter: FilterKey): boolean {
 export function WorkforcesGalleryPage(): JSX.Element {
   const { t } = useTranslation('workforces');
   const navigate = useNavigate();
+  // Gate A (ADR 0196 / DEMO-11): the empty state's CTA forks on demo mode —
+  // the showcase offers "Load example data"; a clean install gets a real
+  // create path ("hire your first agent" → /agents, where workforces are
+  // actually born — there is no create-workforce route by design).
+  const demo = useDemoMode();
   const [rows, setRows] = useState<WfRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<FilterKey>('all');
   const [showcase, setShowcase] = useState(false);
   const [viewMode, setViewMode] = useViewMode('workforces', 'grid');
+  // §4.5 collection kit (DESIGN.md rule 13): a gated name search alongside the
+  // key-figure filter, both narrowing the same visible list.
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -71,7 +91,7 @@ export function WorkforcesGalleryPage(): JSX.Element {
               handledShare: m && m.totalRuns > 0 ? Math.max(0, 1 - m.escalationRate) : null,
             } : null;
             if ((m?.source ?? g?.source) === 'showcase' && (m?.totalRuns ?? 0) > 0 && !cancelled) setShowcase(true);
-            return { wf: w, signals };
+            return { wf: w, signals, unknown: { metrics: !m, governance: !g } };
           }),
         );
         if (!cancelled) { setRows(built); setError(null); }
@@ -88,11 +108,18 @@ export function WorkforcesGalleryPage(): JSX.Element {
     violations: rows.filter((r) => (r.signals?.policyViolations ?? 0) > 0).length,
   };
   const haveSignals = rows.some((r) => r.signals !== null);
-  const nothingNeedsYou = haveSignals && figures.approvals === 0 && figures.eligible === 0 && figures.violations === 0;
-  const visible = rows.filter((r) => rowMatches(r, filter));
+  // WF-G1 — a row whose metrics OR governance read failed cannot contribute a
+  // trustworthy zero to any of the three figures, so it cannot support an
+  // all-clear either.
+  const unreadable = rows.filter((r) => r.signals === null || r.unknown.metrics || r.unknown.governance).length;
+  const nothingNeedsYou =
+    haveSignals && unreadable === 0
+    && figures.approvals === 0 && figures.eligible === 0 && figures.violations === 0;
+  const q = query.trim().toLowerCase();
+  const visible = rows.filter((r) => rowMatches(r, filter) && (!q || r.wf.name.toLowerCase().includes(q)));
 
   return (
-    <div>
+    <div data-walkthrough="workforces.page">
       <PageHeader
         eyebrow={t('eyebrow')}
         title={t('galleryTitle')}
@@ -100,6 +127,12 @@ export function WorkforcesGalleryPage(): JSX.Element {
       />
 
       {error ? <Notice variant="error">{t('loadError', { error })}</Notice> : null}
+      {/* WF-G1 — the counts below are computed over the rows we could read.
+          Saying so is the difference between "nothing needs you" and "nothing
+          that we could check needs you". */}
+      {!error && unreadable > 0 ? (
+        <Notice variant="warning">{t('signalsUnreadable', { count: unreadable })}</Notice>
+      ) : null}
 
       {showcase ? (
         <Notice variant="info">
@@ -117,8 +150,10 @@ export function WorkforcesGalleryPage(): JSX.Element {
         <StateCard
           icon={<BoxesIcon />}
           title={t('noneTitle')}
-          body={t('noneBody')}
-          action={<button type="button" className="btn-accent-solid" onClick={() => navigate('/example-data')}>{t('loadExampleData')}</button>}
+          body={t(demo ? 'noneBody' : 'noneBodyClean')}
+          action={demo
+            ? <Button variant="accent-solid" onClick={() => navigate('/example-data')}>{t('loadExampleData')}</Button>
+            : <Button variant="accent-solid" onClick={() => navigate('/agents')}>{t('hireFirstAgent')}</Button>}
         />
       ) : (
         <>
@@ -151,7 +186,17 @@ export function WorkforcesGalleryPage(): JSX.Element {
               the end of the one filterbar row, right-aligned. The key-figure
               band above is the page's filter (r2); this row just switches the
               grid/list rendering. */}
-          <div className="filterbar">
+          <div className="filterbar" role="group" aria-label={t('filterGroup')}>
+            {rows.length > 3 ? (
+              <input
+                type="search"
+                className="ui-input filterbar-search"
+                placeholder={t('searchPlaceholder')}
+                aria-label={t('searchAria')}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            ) : null}
             <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
           </div>
 
@@ -160,7 +205,7 @@ export function WorkforcesGalleryPage(): JSX.Element {
               icon={<BoxesIcon />}
               title={t('emptyFilterTitle')}
               body={t('emptyFilterBody')}
-              action={<button type="button" className="secondary" onClick={() => setFilter('all')}>{t('showAll')}</button>}
+              action={<Button variant="secondary" onClick={() => { setFilter('all'); setQuery(''); }}>{t('showAll')}</Button>}
             />
           ) : viewMode === 'grid' ? (
             <div className="card-grid">

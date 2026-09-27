@@ -13,15 +13,18 @@ const routes: FeatureRoute[] = [
   {
     path: '/campaign-performance',
     element: <CampaignConnectorsPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Performance',
+      label: 'Performance', labelKey: 'campaignConnectorsLabel',
       icon: ActivityIcon,
-      hint: 'Ad performance import & KPIs',
+      hint: 'Ad performance import & KPIs', hintKey: 'campaignConnectorsHint',
       order: 40,
       featureId: 'campaign-connectors',
+      // ADR 0200 Phase 2 — collapse into the Campaign Studio console when `campaigns` is on.
+      hiddenWhenFeature: 'campaigns',
     },
+    hubTab: { hub: 'campaigns', order: 3, featureId: 'campaign-connectors' },
   },
 ];
 

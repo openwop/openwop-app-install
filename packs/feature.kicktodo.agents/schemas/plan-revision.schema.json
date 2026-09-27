@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KickTodo plan-revision commands",
+  "description": "The typed, closed-world revision the Replan Composer returns (ADR 0459 P1). It is composed ONLY from the ADR 0429/0496 flexibility lanes — a schedule-preference change, a publisher-declared substitution, a missed-window recovery collapse, or a day move within the plan's window — from the participant's stated intent grounded in the enrollment's REAL state the composer read. It commits NO domain state: the commands flow into the replan builtin, are validated closed-world against the enrollment's challenge version, pass the participant's own approval gate, and only THEN apply through the governed surfaces. An intent the composer cannot honestly express in these lanes yields an EMPTY commands array with the rationale saying so — never a forced or invented command. ASK XOR ACT (ADR 0463): when the intent DOES fall in the lanes but is under-specified (e.g. \"move my rest day\" without saying which day), the composer returns an EMPTY `commands` array PLUS an optional `clarification` object — a single structured question (a day `select` or a `date`) plus the `pendingCommand` shell to complete with the participant's answer — instead of guessing. `clarification` is present ONLY when `commands` is empty; a non-empty `commands` and a `clarification` are mutually exclusive (act, or ask — never both). Closed-world: an object that is not exactly this shape is a typed failure, never success-with-empty.",
+  "type": "object",
+  "required": [
+    "commands",
+    "rationale"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "commands": {
+      "type": "array",
+      "description": "Zero to five revision commands, applied in order. An EMPTY array is a first-class, honest result: it says the participant's intent cannot be expressed in the ADR 0429/0496 lanes (see `rationale`) — it is never an omission or a failure to try. Never pad the array to look thorough.",
+      "minItems": 0,
+      "maxItems": 5,
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Schedule-preference lane: move the participant's daily headline to a daypart, or clear the preference (null).",
+            "required": [
+              "lane",
+              "daypart"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "lane": {
+                "const": "schedule"
+              },
+              "daypart": {
+                "description": "The preferred daypart, or null to clear an existing preference.",
+                "enum": [
+                  "morning",
+                  "afternoon",
+                  "evening",
+                  null
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Substitution lane: swap today's action for a PUBLISHER-DECLARED alternative (the closed set the host enforces — the composer never invents an alternative).",
+            "required": [
+              "lane",
+              "cardId",
+              "alternativeId"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "lane": {
+                "const": "substitute"
+              },
+              "cardId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The action card being substituted."
+              },
+              "alternativeId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "The publisher-declared alternative's id."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Recovery lane: apply the challenge's missed-window recovery collapse for the enrollment (the deterministic host policy — the composer never authors the recovery itself).",
+            "required": [
+              "lane"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "lane": {
+                "const": "recovery"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Move lane (ADR 0496): re-date ONE challenge day (1-based) to an explicit local date within the plan's window. The host enforces the window (never the past — that is the recovery lane; never beyond the natural end + 14 days) and refuses a day that is already checked in or already missed. The composer never invents dates: `toDate` comes from the participant's stated intent or a clarification answer.",
+            "required": [
+              "lane",
+              "day",
+              "toDate"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "lane": {
+                "const": "move"
+              },
+              "day": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "The 1-based challenge day being moved."
+              },
+              "toDate": {
+                "type": "string",
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                "description": "The explicit local date (YYYY-MM-DD) the day moves to."
+              }
+            }
+          }
+        ]
+      }
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A short plain-language explanation, in the participant's terms, of why these commands (or why none) answer the stated intent. For an empty commands array this MUST honestly say the intent falls outside the schedule/substitution/recovery/move lanes — OR, when a `clarification` is present, that the composer needs one answer before it can compose the change."
+    },
+    "clarification": {
+      "type": "object",
+      "description": "ADR 0463 — the ASK arm (present ONLY when `commands` is empty; mutually exclusive with a non-empty `commands`). Emitted when the intent falls in the ADR 0429 lanes but is under-specified and the composer needs exactly ONE structured answer to proceed (a day the participant means, a target date). It carries the question, a single day-1-catalog field (a `select` or a `date`), and the `pendingCommand` shell — a lane command with ONE slot left unfilled — to be completed by the participant's answer keyed at `field.id`. The replan builtin raises this as an A2UI clarification interrupt in the participant's own conversation; the collected value fills the pending command's `field.id` slot and the completed command becomes the sole revision command.",
+      "required": [
+        "question",
+        "field",
+        "pendingCommand"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The single plain-language question to put to the participant, in their terms (e.g. \"Which day is your rest day?\")."
+        },
+        "field": {
+          "type": "object",
+          "description": "The ONE day-1-catalog input that captures the missing value. Its `id` MUST equal the key of the unfilled slot in `pendingCommand`.",
+          "required": [
+            "id",
+            "type",
+            "label"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The field id — MUST match the key of the single unfilled slot in `pendingCommand`; the participant's answer fills that slot."
+            },
+            "type": {
+              "description": "The day-1-catalog input kind: a constrained `select` (one of `options`) or a `date` picker. Nothing else.",
+              "enum": [
+                "select",
+                "date"
+              ]
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The field's human label shown on the clarification form."
+            },
+            "options": {
+              "type": "array",
+              "description": "The allowed choices, REQUIRED for a `select` field (omit for a `date`). Each is a value the composer read from real state — never an invented option.",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minItems": 1
+            }
+          }
+        },
+        "pendingCommand": {
+          "description": "A single revision command (one of the schedule / substitute / recovery lane shapes) with EXACTLY ONE slot left unfilled — the slot whose key === `field.id`. On resume the participant's answer is written into that slot and the completed command becomes the sole entry of the applied revision's `commands`. XCH-KT-2: it is a PARTIAL lane command, so only `lane` is required — but the lane discriminator and the per-lane KEY SET are closed here (a typo'd key or unknown lane fails at composer-return time instead of only downstream at apply-time validateCommand). The apply-time closed-world validator remains the authority on the COMPLETED command.",
+          "oneOf": [
+            {
+              "type": "object",
+              "required": [
+                "lane"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "lane": {
+                  "const": "schedule"
+                },
+                "daypart": {
+                  "enum": [
+                    "morning",
+                    "afternoon",
+                    "evening",
+                    null
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "lane"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "lane": {
+                  "const": "substitute"
+                },
+                "cardId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "alternativeId": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "lane"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "lane": {
+                  "const": "recovery"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "required": [
+                "lane"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "lane": {
+                  "const": "move"
+                },
+                "day": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "toDate": {
+                  "type": "string",
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}

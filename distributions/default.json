@@ -1,0 +1,5 @@
+{
+  "name": "default",
+  "description": "The full build — every first-party feature. This is the no-op path: when OPENWOP_DISTRIBUTION is unset or 'default', NO generated registry is produced and the checked-in registries are used byte-identically.",
+  "exclude": []
+}

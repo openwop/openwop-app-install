@@ -76,12 +76,14 @@ import {
   isProtocolScope,
   PROTOCOL_SCOPES,
   type Scope,
+  ACT_AS_HEADER,
 } from '../host/accessControlService.js';
 import {
   isAuthorizationEnforced,
   decideProtocolAuthorization,
 } from '../host/protocolAuthorization.js';
 import { callerSubject, tenantOf, isOwnPersonalWorkspace } from '../host/requestSubject.js';
+import { isSuperadmin } from '../host/superadmin.js';
 
 /**
  * Reference-host DEMO SEAM: `x-openwop-act-as: <memberId>` lets the tenant
@@ -97,7 +99,6 @@ import { callerSubject, tenantOf, isOwnPersonalWorkspace } from '../host/request
  * membership in the org being acted on (ADR 0006 Phase 2 — no implicit
  * tenant-owner for an authenticated non-member).
  */
-const ACT_AS_HEADER = 'x-openwop-act-as';
 
 function actingMemberId(req: Request): string | undefined {
   const v = req.header(ACT_AS_HEADER);
@@ -260,7 +261,18 @@ export function registerAccessControlRoutes(app: Express): void {
       const subject = explicitSubject ?? (memberId ? undefined : callerSubject(req));
       const orgId = typeof req.query.orgId === 'string' ? req.query.orgId : undefined;
       const access = await resolveEffectiveAccess(tenantOf(req), { memberId, subject, orgId });
-      res.json(access);
+      // The env-bound superadmin (OPENWOP_SUPERADMIN_TENANTS / wildcard bearer /
+      // the dev-open switch — `host/superadmin.ts`, the SAME predicate every
+      // admin route gates on) is a different authority from membership, and it
+      // was never projected here. So a pure superadmin with no org role resolved
+      // `basis:'none'` and the SPA hid the Admin entry while every admin route
+      // would have answered 200 — MEASURED 2026-09-06 on a white-label first
+      // bring-up: the binding was live, and the only way to learn that from the
+      // UI was to type /admin by hand. Projected ONLY for the caller's OWN
+      // resolution: a ?memberId / ?subject / act-as preview describes someone
+      // else, and superadmin is the caller's property, not theirs.
+      const ownResolution = memberId === undefined && explicitSubject === undefined;
+      res.json(ownResolution ? { ...access, superadmin: isSuperadmin(req) } : access);
     } catch (err) {
       next(err);
     }
@@ -358,6 +370,12 @@ export function registerAccessControlRoutes(app: Express): void {
       await loadOrgOwned(req, req.params.orgId);
       await requireScope(req, 'host:org:manage');
       const counts = await deleteOrg(req.params.orgId);
+      if (counts.blocked) {
+        // RI-7 — refuse-while-populated: deleting an org that still holds
+        // business rows would orphan them all. Clean up (or delete the tenant)
+        // first; the count makes the 409 actionable.
+        throw new OpenwopError('conflict', 'This workspace still holds business data. Delete or move its content first.', 409, { rows: counts.blocked.rows });
+      }
       res.status(200).json({ deleted: counts });
     } catch (err) {
       next(err);

@@ -1,0 +1,33 @@
+{
+  "name": "feature.cdp.nodes",
+  "version": "1.1.0",
+  "description": "CDP feature node pack \u2014 the identity-resolution read over ctx.features.cdp (ADR CDP-A): a golden-record lookup by identifier so a workflow can branch on a resolved contact. Tenant-guarded; internal columns projected out. role:action (recorded) so replay/fork read the recorded result.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "cdp",
+    "identity",
+    "golden-record"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.cdp.nodes.resolve-identity",
+      "version": "1.1.0",
+      "label": "CDP: Resolve Identity",
+      "description": "Resolves an identifier to the tenant golden record over ctx.features.cdp.resolveIdentity. Inputs: { type, value }. Output: { resolved: { contact, identifiers, resolvedBy } | null, masked }. PII values are MASKED (CLNP-3): the result is recorded into the run event log, so no pii-read grant applies; contactId stays clear for branching. Tenant-guarded.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

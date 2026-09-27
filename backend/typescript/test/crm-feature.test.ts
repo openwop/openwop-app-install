@@ -41,7 +41,7 @@ describe('CRM feature (sqlite memory app)', () => {
     await __clearToggleStore();
     await __resetCrmStore();
     await new Promise<void>((res) => {
-      server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+      server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
     });
     // A real catalog workflow — triage 422s on an unresolvable workflow.
     workflowId = (await jf<{ fixtures?: string[] }>('/.well-known/openwop')).body.fixtures?.[0] ?? 'openwop-app.uppercase';
@@ -77,6 +77,11 @@ describe('CRM feature (sqlite memory app)', () => {
   }
 
   it('the surface 404s while CRM is off (backend authority)', async () => {
+    // ADR 0191 flipped the crm toggle DEFAULT to ON (the lighthouse templates
+    // read ctx.features.crm), so an unconfigured tenant resolves enabled — the
+    // pre-0191 expectation of 404-by-default made this the suite's permanent
+    // "known failure". Backend authority is proven by configuring OFF first.
+    await setCrm('off');
     const r = await jf('/v1/host/openwop-app/crm/contacts');
     expect(r.status).toBe(404);
   });
@@ -117,6 +122,36 @@ describe('CRM feature (sqlite memory app)', () => {
     expect(stamp.body.featureVariant?.feature).toBe('crm');
     expect(stamp.body.featureVariant?.variant).toBe(triage.body.variant);
     expect(stamp.body.crm?.contactId).toBe(contact.body.contactId);
+
+    // B3a (ADR 0008 amendment): the contact carries the denormalized
+    // last-triage stamp (variant + runId + at) — the run stays the SSoT.
+    const after = await jf<{ lastTriage?: { variant: string | null; runId: string; at: string } }>(
+      `/v1/host/openwop-app/crm/contacts/${contact.body.contactId}`,
+    );
+    expect(after.status).toBe(200);
+    expect(after.body.lastTriage?.runId).toBe(triage.body.runId);
+    expect(after.body.lastTriage?.variant).toBe(triage.body.variant);
+    expect(typeof after.body.lastTriage?.at).toBe('string');
+  });
+
+  it('contact owner: set on create, patch, and clear (ADR 0008 amendment)', async () => {
+    await setCrm('on');
+    const created = await jf<{ contactId: string; owner?: string }>('/v1/host/openwop-app/crm/contacts', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Owned Contact', owner: 'user:bob' }),
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.owner).toBe('user:bob');
+    const patched = await jf<{ owner?: string }>(`/v1/host/openwop-app/crm/contacts/${created.body.contactId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ owner: 'user:carol' }),
+    });
+    expect(patched.body.owner).toBe('user:carol');
+    const cleared = await jf<{ owner?: string }>(`/v1/host/openwop-app/crm/contacts/${created.body.contactId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ owner: null }),
+    });
+    expect(cleared.body.owner).toBeUndefined();
   });
 
   it('flipping CRM off makes the surface 404 again', async () => {

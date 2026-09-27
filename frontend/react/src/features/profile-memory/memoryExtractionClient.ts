@@ -1,6 +1,6 @@
 /**
  * Memory auto-extraction consent client (ADR 0120) — drives the caller's OWN
- * opt-in grant at /v1/host/openwop-app/profiles/me/memory-extraction.
+ * opt-in grant at /host/openwop-app/profiles/me/memory-extraction.
  *
  * The grant is the fail-closed gate for the whole feature: extraction only runs
  * for a subject that has explicitly opted in. The extracted facts land as
@@ -13,8 +13,10 @@
  * @see docs/adr/0120-chat-memory-auto-extraction.md
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
+import { apiErrorFrom } from '../../client/errorEnvelope.js';
+import i18n from '../../i18n/index.js';
 
-const PATH = `${config.baseUrl}/v1/host/openwop-app/profiles/me/memory-extraction`;
+const PATH = `${config.baseUrl}/host/openwop-app/profiles/me/memory-extraction`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 export interface ExtractionGrant { granted: boolean; updatedAt: string | null }
@@ -23,7 +25,8 @@ export interface ExtractionGrant { granted: boolean; updatedAt: string | null }
 export async function getExtractionGrant(): Promise<ExtractionGrant | null> {
   const res = await fetch(PATH, fetchOpts({ headers: authedHeaders() }));
   if (res.status === 404) return null;
-  if (!res.ok) throw new Error(`getExtractionGrant failed (${res.status})`);
+  // TWIN-UX-6 — localized at the throw site; the server's prose wins when present.
+  if (!res.ok) throw await apiErrorFrom(res, i18n.t('profile-memory:consentError'));
   return (await res.json()) as ExtractionGrant;
 }
 
@@ -32,6 +35,8 @@ export async function setExtractionGrant(granted: boolean): Promise<ExtractionGr
   const res = granted
     ? await fetch(PATH, fetchOpts({ method: 'PUT', headers: jsonHeaders() }))
     : await fetch(PATH, fetchOpts({ method: 'DELETE', headers: authedHeaders() }));
-  if (!res.ok && res.status !== 204) throw new Error(`setExtractionGrant failed (${res.status})`);
+  // TWIN-DEBT-4 — `!res.ok && res.status !== 204` was an unreachable condition:
+  // 204 IS ok, so the second clause never fired. Kept honest as a plain !ok.
+  if (!res.ok) throw await apiErrorFrom(res, i18n.t('profile-memory:consentError'));
   return granted ? ((await res.json()) as ExtractionGrant) : { granted: false, updatedAt: null };
 }

@@ -16,6 +16,7 @@
 import { createLogger } from '../observability/logger.js';
 import { stampConnectionUse } from './connectionInjection.js';
 import { brokeredPost, type BrokeredEgressDeps } from './brokeredEgress.js';
+import { OpenwopError } from '../types.js';
 
 const log = createLogger('connections.slack');
 
@@ -61,7 +62,19 @@ export function makeSlackAdapter(deps: SlackAdapterDeps): SlackAdapter {
       if (args.threadTs !== undefined) body.thread_ts = args.threadTs;
       if (args.broadcast !== undefined) body.reply_broadcast = args.broadcast;
 
-      const r = await brokeredPost(deps, { provider: 'slack', url: `${chatPostMessageBase()}/api/chat.postMessage`, body: JSON.stringify(body) });
+      let r: Awaited<ReturnType<typeof brokeredPost>>;
+      try {
+        r = await brokeredPost(deps, { provider: 'slack', url: `${chatPostMessageBase()}/api/chat.postMessage`, body: JSON.stringify(body) });
+      } catch (err) {
+        // The ADR 0187 egress firewall THROWS (egress_blocked) before the
+        // brokered outcome envelope forms — without this map the adapter broke
+        // its own {ok:false, error} contract and leaked the exception to
+        // callers (caught by the CI-baseline root-cause pass).
+        if (err instanceof OpenwopError && err.code === 'egress_blocked') {
+          return { ok: false, error: 'slack_egress_blocked' };
+        }
+        throw err;
+      }
       if (r.outcome === 'no_connection') return { ok: false, error: 'slack_not_connected' };
       if (r.outcome === 'insecure_base') return { ok: false, error: 'insecure_slack_base' };
       if (r.outcome === 'request_failed') return { ok: false, error: r.timedOut ? 'slack_timeout' : 'slack_request_failed' };

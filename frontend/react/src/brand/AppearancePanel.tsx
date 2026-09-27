@@ -1,7 +1,7 @@
 /**
  * Appearance (ADR 0170 + ADR 0171) — the SUPER-ADMIN surface to set the white-label
  * app identity at runtime, no rebuild. It edits the reserved app brand via
- * `/v1/host/openwop-app/app-brand` (host authority, never org-scoped).
+ * `/host/openwop-app/app-brand` (host authority, never org-scoped).
  *
  * ADR 0171: theming is GENERATIVE, not preset-picking. The operator sets a small
  * input set — an accent seed (+ optional neutral seed), contrast level, corner
@@ -12,10 +12,12 @@
  * tokens are applied to the live `:root` (+ cached for the next pre-paint), so the
  * chrome re-skins without a reload. Non-superadmins see a read-only notice.
  *
- * i18n: this admin panel currently ships English copy (a tracked follow-up to add
- * the `appearance` catalog across locales — non-fatal per the check-i18n gate).
+ * i18n: localized via the `appearance` namespace (4 locales; core catalog —
+ * the `brand` ns belongs to the features/brand Brand & Guardrails package), XC-3/ADM-4.
  */
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useTranslation, Trans } from 'react-i18next';
 import { PageHeader } from '../ui/PageHeader.js';
 import { Notice } from '../ui/Notice.js';
 import { confirm } from '../ui/confirm.js';
@@ -23,8 +25,9 @@ import { Field } from '../ui/Field.js';
 import { Skeleton } from '../ui/Skeleton.js';
 import { toast } from '../ui/toast.js';
 import { AlertIcon, CheckIcon, SaveIcon, SparklesIcon } from '../ui/icons/index.js';
+import { StateCard } from '../ui/StateCard.js';
 import { ApiError } from '../client/requestJson.js';
-import { getAppBrand, putAppBrand } from './appBrandClient.js';
+import { getAppBrand, postAppBrandAsset, putAppBrand } from './appBrandClient.js';
 import {
   applyBrandIdentity,
   applyGeneratedTokens,
@@ -33,6 +36,7 @@ import {
   clearGeneratedTokens,
   hasGenerativeTheme,
   hydrateBrandSingleton,
+  splitGeneratorOwnedOverride,
   toThemeInputs,
   type PublicBrandIdentity,
 } from './applyBrand.js';
@@ -57,28 +61,82 @@ function previewStyle(map: Record<string, string>, override: Record<string, stri
 /** A color seed control: a native swatch + a free-text field (so oklch/hex/rgb all
  *  work, while the swatch stays friendly). Both edit the same seed string. */
 function SeedField({ label, help, value, onChange }: { label: string; help?: string; value: string; onChange: (v: string) => void }): JSX.Element {
+  const { t } = useTranslation('appearance');
   const hex = useMemo(() => rgbToHex(parseColorToRgb(value || STOCK_ACCENT) ?? [0, 0, 0]), [value]);
   return (
     <Field label={label} help={help}>
       {(p) => (
         <div className="u-flex u-gap-2 u-items-center">
-          <input type="color" aria-label={`${label} swatch`} value={hex} onChange={(e) => onChange(e.target.value)} style={{ width: 38, height: 32, padding: 0, background: 'none' }} />
-          <input {...p} value={value} onChange={(e) => onChange(e.target.value)} placeholder="any CSS color — hex, rgb or oklch" />
+          <input type="color" aria-label={t('swatchLabel', { label })} value={hex} onChange={(e) => onChange(e.target.value)} className="appearance-swatch" />
+          <input {...p} value={value} onChange={(e) => onChange(e.target.value)} placeholder={t('seedPlaceholder')} />
         </div>
       )}
     </Field>
   );
 }
 
+/** ADR 0511 — per-slot brand-asset upload: reads the file, publishes it through
+ *  the copy-on-select endpoint (raster-only, magic-byte-validated server-side),
+ *  and hands back the copy's capability URL for the identity field. The
+ *  file-input rides a label.btn-ghost (the CAD-import affordance pattern —
+ *  :focus-within carries the ring). */
+function AssetUpload({ slot, onUploaded }: { slot: string; onUploaded: (url: string) => void }): JSX.Element {
+  const { t } = useTranslation('appearance');
+  const [busy, setBusy] = useState(false);
+  const onFile = async (file: File | undefined): Promise<void> => {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let bin = '';
+      for (const b of buf) bin += String.fromCharCode(b);
+      const { url } = await postAppBrandAsset({ slot, contentBase64: btoa(bin), contentType: file.type });
+      onUploaded(url);
+      toast.success(t('assetUploaded'));
+    } catch (err) {
+      // Server messages are actionable (type mismatch, SVG rejection, size cap).
+      toast.error(err instanceof Error ? err.message : t('actionFailed'));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <label className={`btn-ghost btn-sm u-self-start${busy ? ' u-dim-disabled' : ''}`} aria-busy={busy || undefined}>
+      <input
+        type="file"
+        className="sr-only"
+        accept="image/png,image/jpeg,image/webp,image/gif,image/x-icon"
+        disabled={busy}
+        onChange={(e) => { void onFile(e.target.files?.[0]); e.target.value = ''; }}
+      />
+      {busy ? t('assetUploading') : t('assetUpload')}
+    </label>
+  );
+}
+
 export function AppearancePanel(): JSX.Element {
+  const { t } = useTranslation('appearance');
   const [loading, setLoading] = useState(true);
   const [denied, setDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // 'App identity' is a PLACEHOLDER, not a value the tenant chose. On a failed
+  // read it used to sit in the name field of a form whose Save is a full
+  // `putAppBrand` replacement — one click renamed the white-labelled product to
+  // this string and wiped every logo/colour/font override.
   const [name, setName] = useState('App identity');
+  /** The brand read FAILED — the form below must not offer to overwrite what it
+   *  could not read. Distinct from `denied` (a 403, which hides the panel). */
+  const [loadFailed, setLoadFailed] = useState(false);
+  /** Bumped by the retry — the effect below is the only place the brand is read. */
+  const [reload, setReload] = useState(0);
   const [id, setId] = useState<Id>({});
   const [jsonDraft, setJsonDraft] = useState('');
   const [jsonError, setJsonError] = useState<string | null>(null);
+  /** Generator-owned tokens found in an override (a legacy save or a pasted JSON).
+   *  The server drops them (ADR 0510 §5) — name them visibly so the editor never
+   *  pretends they will persist. */
+  const [droppedTokens, setDroppedTokens] = useState<string[]>([]);
 
   useEffect(() => {
     let live = true;
@@ -87,17 +145,29 @@ export function AppearancePanel(): JSX.Element {
         const brand = await getAppBrand();
         if (!live) return;
         setName(brand.name);
-        setId(brand.identity ?? {});
+        // A pre-ADR-0510 brand may hold overrides for tokens that are now
+        // generator-owned. Strip them from the editor state (they no longer
+        // survive a save) and say so, instead of previewing a theme the next
+        // save silently changes.
+        const identity = brand.identity ?? {};
+        const { kept, dropped } = splitGeneratorOwnedOverride(identity.theme?.override);
+        if (dropped.length && identity.theme) {
+          identity.theme = { ...identity.theme };
+          if (kept) identity.theme.override = kept; else delete identity.theme.override;
+        }
+        setDroppedTokens(dropped);
+        setId(identity);
+        setLoadFailed(false);
       } catch (err) {
         if (!live) return;
         if (err instanceof ApiError && err.status === 403) setDenied(true);
-        else setError(err instanceof Error ? err.message : String(err));
+        else { setLoadFailed(true); setError(err instanceof Error ? err.message : t('actionFailed')); }
       } finally {
         if (live) setLoading(false);
       }
     })();
     return () => { live = false; };
-  }, []);
+  }, [t, reload]);
 
   /** Shallow-merge a patch into the identity (nested objects merged one level). */
   const patch = useCallback((p: Partial<Id>) => {
@@ -157,33 +227,58 @@ export function AppearancePanel(): JSX.Element {
       toast.success(successMsg);
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) { setDenied(true); return; }
-      toast.error(err instanceof Error ? err.message : 'Save failed');
+      toast.error(err instanceof Error ? err.message : t('actionFailed'));
     } finally {
       setSaving(false);
     }
-  }, [name]);
+  }, [name, t]);
 
   const applyJson = useCallback(() => {
     setJsonError(null);
     try {
       const parsed = JSON.parse(jsonDraft) as ThemeIn;
-      if (!parsed || typeof parsed !== 'object') throw new Error('Expected a theme object');
-      patch({ theme: parsed });
-      toast.success('Theme JSON applied — review the preview, then Save.');
+      if (!parsed || typeof parsed !== 'object') throw new Error(t('jsonExpectedObject'));
+      // Reject generator-owned tokens VISIBLY (ADR 0510 §5) — the server drops
+      // them, so applying them to the preview would show a theme that can't save.
+      const { kept, dropped } = splitGeneratorOwnedOverride(parsed.override);
+      const next: ThemeIn = { ...parsed };
+      if (kept) next.override = kept; else delete next.override;
+      setDroppedTokens(dropped);
+      patch({ theme: next });
+      toast.success(t('jsonApplied'));
     } catch (err) {
-      setJsonError(err instanceof Error ? err.message : 'Invalid JSON');
+      setJsonError(err instanceof Error ? err.message : t('jsonInvalid'));
     }
-  }, [jsonDraft, patch]);
+  }, [jsonDraft, patch, t]);
 
   if (loading) return <div className="u-p-4"><Skeleton /></div>;
+
+  // Everything below this point edits brand identity and saves a FULL
+  // `putAppBrand` replacement. None of it may render over a brand we failed to
+  // read: the name field would show the 'App identity' placeholder and one Save
+  // would rename the white-labelled product and wipe every token override.
+  // Mirrors the `denied` early return directly below.
+  if (loadFailed) {
+    return (
+      <div className="u-grid u-gap-3">
+        <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('ledeShort')} />
+        <StateCard
+          announce
+          icon={<AlertIcon size={26} />}
+          title={t('brandLoadFailedTitle')}
+          body={t('brandLoadFailedBody')}
+          action={<Button variant="secondary" onClick={() => setReload((n) => n + 1)}>{t('brandRetry')}</Button>}
+        />
+      </div>
+    );
+  }
 
   if (denied) {
     return (
       <div className="u-grid u-gap-3">
-        <PageHeader eyebrow="Brand" title="Appearance" lede="Set the app's white-label identity." />
+        <PageHeader eyebrow={t('eyebrow')} title={t('title')} lede={t('ledeShort')} />
         <Notice variant="warning">
-          Appearance is a <strong>super-admin</strong> surface. Add your tenant id to{' '}
-          <code>OPENWOP_SUPERADMIN_TENANTS</code> to edit the app brand.
+          <Trans i18nKey="deniedNotice" ns="appearance" components={{ 1: <strong />, 3: <code /> }} />
         </Notice>
       </div>
     );
@@ -193,98 +288,108 @@ export function AppearancePanel(): JSX.Element {
   const theme = id.theme ?? {};
 
   return (
-    <div className="u-grid u-gap-4">
+    <div className="u-grid u-gap-4" data-walkthrough="appearance.page">
       <PageHeader
-        eyebrow="Brand"
-        title="Appearance"
-        lede="Set this installation's colors, type, logo, and name. The accent generates a full, accessible light + dark theme — changes apply live, no rebuild."
+        eyebrow={t('eyebrow')}
+        title={t('title')}
+        lede={t('ledeFull')}
         actions={
           <div className="action-bar">
-            <button
-              type="button"
-              className="btn"
+            <Button
+              variant="secondary"
               disabled={saving}
               onClick={() => void (async () => {
                 const ok = await confirm({
-                  title: 'Reset appearance to default?',
-                  body: 'This clears the logo, colors, fonts, and name — for everyone using this install.',
+                  title: t('resetTitle'),
+                  body: t('resetBody'),
                   danger: true,
-                  confirmLabel: 'Reset',
+                  confirmLabel: t('resetLabel'),
                 });
-                if (ok) await persist({}, 'Reset to the default identity.');
+                if (ok) await persist({}, t('resetSuccess'));
               })()}
             >
-              Reset to default
-            </button>
-            <button type="button" className="btn primary" disabled={saving} onClick={() => void persist(id, 'Appearance saved.')}>
-              <SaveIcon size={15} /> {saving ? 'Saving…' : 'Save'}
-            </button>
+              {t('resetToDefault')}
+            </Button>
+            <Button variant="primary"
+              disabled={saving}
+              onClick={() => void (async () => {
+                // ADR 0510 §5: AA is a persistence invariant — there is no path
+                // that saves a failing theme. The button stays ENABLED so the
+                // refusal is REACHABLE and announced (ADR 0482 ux-6 doctrine:
+                // never a silent dead button); the warning Notice above names
+                // the failing pairs.
+                if (!report.pass) { toast.error(t('contrastBelowAA')); return; }
+                await persist(id, t('saveSuccess'));
+              })()}
+            >
+              <SaveIcon size={15} /> {saving ? t('saving') : t('save')}
+            </Button>
           </div>
         }
       />
       {error ? <Notice variant="error">{error}</Notice> : null}
 
       <section className="surface-card u-grid u-gap-3 u-p-4">
-        <h2 className="u-fs-16 u-m-0"><SparklesIcon size={15} /> Quick start</h2>
-        <p className="u-m-0 u-fs-13 u-text-muted">A starting point, not a fixed theme — change anything after.</p>
+        <h2 className="u-fs-16 u-m-0"><SparklesIcon size={15} /> {t('quickStart')}</h2>
+        <p className="u-m-0 u-fs-13 muted">{t('quickStartHint')}</p>
         <div className="action-bar">
           {BRAND_PRESETS.map((p) => (
-            <button key={p.id} type="button" className="btn" onClick={() => applyPreset(p.id)}>{p.name}</button>
+            <Button key={p.id} variant="secondary" onClick={() => applyPreset(p.id)}>{p.name}</Button>
           ))}
         </div>
       </section>
 
       {gen.warnings.length ? (
         <Notice variant="warning">
-          <strong>Contrast:</strong> {gen.warnings.join('; ')}. Lower the contrast target or pick a different accent.
+          <strong>{t('contrastLabel')}</strong> {gen.warnings.join('; ')}. {t('contrastAdvice')}
         </Notice>
       ) : null}
       {!report.pass && !gen.warnings.length ? (
         <Notice variant="warning">
-          <strong>Contrast check:</strong> a token pair falls below WCAG AA — see the Contrast panel. Generated colors are auto-adjusted; advanced overrides are not.
+          <strong>{t('contrastCheckLabel')}</strong> {t('contrastBelowAA')}
         </Notice>
       ) : null}
 
       <div className="builder-two-col u-grid u-gap-4">
-        <div className="u-grid u-gap-4">
+        <div className="u-grid u-gap-4" data-walkthrough="appearance.page">
           <section className="surface-card u-grid u-gap-3 u-p-4">
-            <h2 className="u-fs-16 u-m-0">Theme</h2>
-            <SeedField label="Brand color" help="Used for buttons, links, and highlights — kept exact, with a readable text shade derived for you." value={theme.accentSeed ?? id.colors?.accent ?? ''} onChange={(v) => patchTheme({ accentSeed: v })} />
-            <SeedField label="Background tint" help="Optional — gives page surfaces a subtle hue. Leave empty for the default warm grey." value={theme.neutralSeed ?? ''} onChange={(v) => patchTheme({ neutralSeed: v })} />
-            <div className="u-grid u-gap-2" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
-              <Field label="Contrast">
+            <h2 className="u-fs-16 u-m-0">{t('themeHeading')}</h2>
+            <SeedField label={t('brandColorLabel')} help={t('brandColorHelp')} value={theme.accentSeed ?? id.colors?.accent ?? ''} onChange={(v) => patchTheme({ accentSeed: v })} />
+            <SeedField label={t('bgTintLabel')} help={t('bgTintHelp')} value={theme.neutralSeed ?? ''} onChange={(v) => patchTheme({ neutralSeed: v })} />
+            <div className="u-grid-3">
+              <Field label={t('contrastFieldLabel')}>
                 {(p) => (
                   <select {...p} value={theme.contrastLevel ?? 'standard'} onChange={(e) => patchTheme({ contrastLevel: e.target.value as 'standard' | 'medium' | 'high' })}>
-                    <option value="standard">Standard (AA)</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
+                    <option value="standard">{t('contrastStandard')}</option>
+                    <option value="medium">{t('contrastMedium')}</option>
+                    <option value="high">{t('contrastHigh')}</option>
                   </select>
                 )}
               </Field>
-              <Field label="Corners">
+              <Field label={t('cornersLabel')}>
                 {(p) => (
-                  <select {...p} value={theme.radius ?? ''} onChange={(e) => setId((prev) => { const t = { ...prev.theme }; const v = e.target.value; if (v) t.radius = v as 'sm' | 'md' | 'lg'; else delete t.radius; return { ...prev, theme: t }; })}>
-                    <option value="">Default</option>
-                    <option value="sm">Sharp</option>
-                    <option value="md">Medium</option>
-                    <option value="lg">Round</option>
+                  <select {...p} value={theme.radius ?? ''} onChange={(e) => setId((prev) => { const th = { ...prev.theme }; const v = e.target.value; if (v) th.radius = v as 'sm' | 'md' | 'lg'; else delete th.radius; return { ...prev, theme: th }; })}>
+                    <option value="">{t('cornersDefault')}</option>
+                    <option value="sm">{t('cornersSharp')}</option>
+                    <option value="md">{t('cornersMedium')}</option>
+                    <option value="lg">{t('cornersRound')}</option>
                   </select>
                 )}
               </Field>
-              <Field label="Default theme">
+              <Field label={t('defaultThemeLabel')}>
                 {(p) => (
                   <select {...p} value={theme.defaultMode ?? 'system'} onChange={(e) => patchTheme({ defaultMode: e.target.value as 'system' | 'light' | 'dark' })}>
-                    <option value="system">System</option>
-                    <option value="light">Light</option>
-                    <option value="dark">Dark</option>
+                    <option value="system">{t('themeSystem')}</option>
+                    <option value="light">{t('themeLight')}</option>
+                    <option value="dark">{t('themeDark')}</option>
                   </select>
                 )}
               </Field>
             </div>
-            <Field label="Font pairing">
+            <Field label={t('fontPairingLabel')}>
               {(p) => (
                 <select {...p} value={FONT_PAIRINGS.find((f) => f.serif === id.typography?.serif)?.id ?? ''} onChange={(e) => applyPairing(e.target.value)}>
-                  <option value="">Custom / unchanged</option>
+                  <option value="">{t('fontCustom')}</option>
                   {FONT_PAIRINGS.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
                 </select>
               )}
@@ -292,69 +397,92 @@ export function AppearancePanel(): JSX.Element {
           </section>
 
           <section className="surface-card u-grid u-gap-3 u-p-4">
-            <h2 className="u-fs-16 u-m-0">Identity</h2>
-            <Field label="Product name">{(p) => <input {...p} value={id.productName ?? ''} onChange={(e) => patch({ productName: e.target.value })} />}</Field>
-            <div className="u-grid u-gap-2" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
-              <Field label="Wordmark — pre">{(p) => <input {...p} value={wm.pre} onChange={(e) => patch({ wordmark: { ...wm, pre: e.target.value } })} />}</Field>
-              <Field label="emphasis">{(p) => <input {...p} value={wm.emphasis} onChange={(e) => patch({ wordmark: { ...wm, emphasis: e.target.value } })} />}</Field>
-              <Field label="sub">{(p) => <input {...p} value={wm.sub} onChange={(e) => patch({ wordmark: { ...wm, sub: e.target.value } })} />}</Field>
+            <h2 className="u-fs-16 u-m-0">{t('identityHeading')}</h2>
+            <Field label={t('productNameLabel')}>{(p) => <input {...p} value={id.productName ?? ''} onChange={(e) => patch({ productName: e.target.value })} />}</Field>
+            <div className="u-grid-3">
+              <Field label={t('wordmarkPreLabel')}>{(p) => <input {...p} value={wm.pre} onChange={(e) => patch({ wordmark: { ...wm, pre: e.target.value } })} />}</Field>
+              <Field label={t('wordmarkEmphasisLabel')}>{(p) => <input {...p} value={wm.emphasis} onChange={(e) => patch({ wordmark: { ...wm, emphasis: e.target.value } })} />}</Field>
+              <Field label={t('wordmarkSubLabel')}>{(p) => <input {...p} value={wm.sub} onChange={(e) => patch({ wordmark: { ...wm, sub: e.target.value } })} />}</Field>
             </div>
-            <Field label="Document title">{(p) => <input {...p} value={id.documentTitle ?? ''} onChange={(e) => patch({ documentTitle: e.target.value })} />}</Field>
+            <Field label={t('documentTitleLabel')}>{(p) => <input {...p} value={id.documentTitle ?? ''} onChange={(e) => patch({ documentTitle: e.target.value })} />}</Field>
           </section>
 
           <section className="surface-card u-grid u-gap-3 u-p-4">
-            <h2 className="u-fs-16 u-m-0">Logo</h2>
-            <Field label="Logo / mark URL" help="An https URL, a /relative path, or a data:image URI. Upload arrives with Media (ADR 0007).">
-              {(p) => <input {...p} value={id.logo?.markSrc ?? ''} onChange={(e) => patch({ logo: { markSrc: e.target.value } })} placeholder="/brand/logo.svg" />}
+            <h2 className="u-fs-16 u-m-0">{t('logoHeading')}</h2>
+            <Field label={t('logoUrlLabel')} help={t('logoUrlHelp')}>
+              {(p) => (
+                <div className="u-grid u-gap-1">
+                  <input {...p} value={id.logo?.markSrc ?? ''} onChange={(e) => patch({ logo: { markSrc: e.target.value } })} placeholder="/brand/logo.svg" />
+                  <AssetUpload slot="mark" onUploaded={(url) => patch({ logo: { markSrc: url } })} />
+                </div>
+              )}
             </Field>
-            <Field label="Favicon URL">
-              {(p) => <input {...p} value={id.logo?.faviconSrc ?? ''} onChange={(e) => patch({ logo: { faviconSrc: e.target.value } })} placeholder="data:image/svg+xml,…" />}
+            <Field label={t('logoDarkUrlLabel')} help={t('logoDarkUrlHelp')}>
+              {(p) => (
+                <div className="u-grid u-gap-1">
+                  <input {...p} value={id.logo?.markSrcDark ?? ''} onChange={(e) => patch({ logo: { markSrcDark: e.target.value } })} placeholder="/brand/logo-dark.svg" />
+                  <AssetUpload slot="markDark" onUploaded={(url) => patch({ logo: { markSrcDark: url } })} />
+                </div>
+              )}
+            </Field>
+            <Field label={t('faviconLabel')}>
+              {(p) => (
+                <div className="u-grid u-gap-1">
+                  <input {...p} value={id.logo?.faviconSrc ?? ''} onChange={(e) => patch({ logo: { faviconSrc: e.target.value } })} placeholder="data:image/svg+xml,…" />
+                  <AssetUpload slot="favicon" onUploaded={(url) => patch({ logo: { faviconSrc: url } })} />
+                </div>
+              )}
             </Field>
           </section>
 
           <details className="surface-card u-p-4">
-            <summary className="u-fs-16 u-fw-600" style={{ cursor: 'pointer' }}>Advanced — token override (JSON)</summary>
+            <summary className="u-fs-16 u-fw-600 appearance-summary">{t('advancedSummary')}</summary>
             <div className="u-grid u-gap-2 u-mt-3">
-              <p className="u-m-0 u-fs-13 u-text-muted">Export the current theme inputs, or paste a theme JSON to apply. Per-token overrides go under <code>override.light</code> / <code>override.dark</code> (allowlisted tokens only — others are dropped on save).</p>
+              <p className="u-m-0 u-fs-13 muted"><Trans i18nKey="advancedHint" ns="appearance" components={{ 1: <code />, 3: <code /> }} /></p>
               <div className="action-bar">
-                <button type="button" className="btn" onClick={() => setJsonDraft(JSON.stringify(id.theme ?? {}, null, 2))}>Export current</button>
-                <button type="button" className="btn" disabled={!jsonDraft.trim()} onClick={applyJson}>Apply JSON</button>
+                <Button variant="secondary" onClick={() => setJsonDraft(JSON.stringify(id.theme ?? {}, null, 2))}>{t('exportCurrent')}</Button>
+                <Button variant="secondary" disabled={!jsonDraft.trim()} onClick={applyJson}>{t('applyJsonBtn')}</Button>
               </div>
-              <Field label="Theme JSON">
-                {(p) => <textarea {...p} rows={8} value={jsonDraft} onChange={(e) => setJsonDraft(e.target.value)} spellCheck={false} placeholder='{ "accentSeed": "…", "override": { "light": { "--clay": "…" } } }' />}
+              <Field label={t('themeJsonLabel')}>
+                {(p) => <textarea {...p} rows={8} value={jsonDraft} onChange={(e) => setJsonDraft(e.target.value)} spellCheck={false} placeholder='{ "accentSeed": "…", "override": { "light": { "--cat-ai": "…" } } }' />}
               </Field>
               {jsonError ? <Notice variant="error">{jsonError}</Notice> : null}
+              {droppedTokens.length ? (
+                <Notice variant="warning">
+                  {t('generatorOwnedDropped', { tokens: droppedTokens.join(', ') })}
+                </Notice>
+              ) : null}
             </div>
           </details>
         </div>
 
-        <div className="u-grid u-gap-4" style={{ position: 'sticky', top: '1rem', alignSelf: 'start' }}>
+        <div className="u-grid u-gap-4 appearance-preview-col">
           <section className="surface-card u-grid u-gap-3 u-p-4">
-            <h2 className="u-fs-16 u-m-0">Live preview</h2>
-            <span className="u-label-sm">Light</span>
+            <h2 className="u-fs-16 u-m-0">{t('livePreviewHeading')}</h2>
+            <span className="u-label-sm">{t('lightLabel')}</span>
             <div className="theme-light brand-preview surface-card u-grid u-gap-2 u-p-3" style={previewStyle(gen.light, theme.override?.light, id.typography)}>
               <PreviewContent wm={wm} name={id.productName} logo={id.logo?.markSrc} />
             </div>
-            <span className="u-label-sm">Dark</span>
+            <span className="u-label-sm">{t('darkLabel')}</span>
             <div className="theme-dark brand-preview surface-card u-grid u-gap-2 u-p-3" style={previewStyle(gen.dark, theme.override?.dark, id.typography)}>
               <PreviewContent wm={wm} name={id.productName} logo={id.logo?.markSrc} />
             </div>
           </section>
 
           <section className="surface-card u-grid u-gap-2 u-p-4">
-            <h2 className="u-fs-16 u-m-0">Contrast <span className="u-text-muted u-fs-12">· WCAG AA · APCA advisory</span></h2>
+            <h2 className="u-fs-16 u-m-0">{t('contrastHeading')} <span className="muted u-fs-12">{t('contrastHeadingSub')}</span></h2>
             {report.pairs.length === 0 ? (
-              <p className="u-m-0 u-fs-13 u-text-muted">Stock theme — surfaces meet AA (axe-verified).</p>
+              <p className="u-m-0 u-fs-13 muted">{t('stockThemeNote')}</p>
             ) : (
               report.pairs.map((p) => (
                 <div key={`${p.mode}-${p.label}`} className="u-flex u-justify-between u-items-center u-fs-13">
-                  <span>{p.label} <span className="u-text-muted">· {p.mode}</span></span>
+                  <span>{p.label} <span className="muted">· {p.mode}</span></span>
                   <span className="u-flex u-gap-2 u-items-center">
-                    <span>{numStr(p.ratio, 1)}:1</span>
-                    <span className={`u-flex ${p.pass ? 'u-text-success' : 'u-text-danger'}`} aria-label={p.pass ? 'meets AA' : 'below AA'}>
+                    <span title={p.issue ? `${p.issue}: ${p.foreground} / ${p.background}` : undefined}>{numStr(p.ratio, 1)}:1</span>
+                    <span role="img" aria-label={p.pass ? t('meetsAA') : t('belowAA')}>
                       {p.pass ? <CheckIcon size={14} /> : <AlertIcon size={14} />}
                     </span>
-                    <span className="u-text-muted u-fs-12">Lc {numStr(Math.abs(p.apca), 0)}</span>
+                    <span className="muted u-fs-12">Lc {numStr(Math.abs(p.apca), 0)}</span>
                   </span>
                 </div>
               ))
@@ -367,6 +495,7 @@ export function AppearancePanel(): JSX.Element {
 }
 
 function PreviewContent({ wm, name, logo }: { wm: { pre: string; emphasis: string; sub: string }; name: string | undefined; logo: string | undefined }): JSX.Element {
+  const { t } = useTranslation('appearance');
   // Illustrative only — `aria-hidden` + non-interactive <span>s so the sample isn't
   // a dead tab-stop or announced as real controls to assistive tech. Exercises the
   // surfaces an operator can't otherwise see: the secondary surface, a rule, muted
@@ -374,7 +503,7 @@ function PreviewContent({ wm, name, logo }: { wm: { pre: string; emphasis: strin
   return (
     <div aria-hidden="true" className="u-grid u-gap-2">
       {logo ? (
-        <img src={logo} alt="" style={{ maxHeight: 30, maxWidth: 180, objectFit: 'contain', alignSelf: 'start' }} />
+        <img src={logo} alt="" className="appearance-preview-logo" />
       ) : (
         <span className="brand-mark u-m-0" style={{ fontFamily: 'var(--serif)' }}>
           {wm.pre || name || 'OpenWOP'}{wm.emphasis ? <em>{wm.emphasis}</em> : null}{' '}
@@ -382,15 +511,15 @@ function PreviewContent({ wm, name, logo }: { wm: { pre: string; emphasis: strin
         </span>
       )}
       <div className="action-bar">
-        <span className="btn primary">Primary action</span>
-        <span className="btn">Secondary</span>
-        <span className="chip">Status</span>
+        <Button variant="primary" disabled tabIndex={-1}>{t('previewPrimary')}</Button>
+        <Button variant="secondary" disabled tabIndex={-1}>{t('previewSecondary')}</Button>
+        <span className="chip">{t('previewStatus')}</span>
       </div>
-      <div className="u-grid u-gap-1 u-p-2" style={{ background: 'var(--paper-2)', border: '1px solid var(--rule)', borderRadius: 'var(--radius)' }}>
-        <span className="u-fs-12" style={{ color: 'var(--ink-3)' }}>Secondary surface</span>
-        <span className="u-fs-13">A card on <code>--paper-2</code> with a <code>--rule</code> border.</span>
+      <div className="u-grid u-gap-1 u-p-2 appearance-preview-surface">
+        <span className="u-fs-12 appearance-preview-muted">{t('previewSurfaceEyebrow')}</span>
+        <span className="u-fs-13"><Trans i18nKey="previewCardLine" ns="appearance" components={{ 1: <code />, 3: <code /> }} /></span>
       </div>
-      <p className="u-m-0 u-fs-13">Body text in the brand sans, with an <span style={{ color: 'var(--clay-text)' }}>accent link</span>.</p>
+      <p className="u-m-0 u-fs-13"><Trans i18nKey="previewBody" ns="appearance" components={{ 1: <span style={{ color: 'var(--clay-text)' }} /> }} /></p>
     </div>
   );
 }

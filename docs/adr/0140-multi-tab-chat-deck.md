@@ -1,5 +1,52 @@
 # ADR 0140 — Multi-tab chat deck (a bounded working set of live, independent chat sessions)
 
+> **Correction (2026-07-05) — the deck rail now carries a persistent Conversations panel.**
+> P7 originally gave the deck's `LeftRail` **Workflow + Reviews only** and hid conversation
+> browsing behind an ephemeral "Conversations" launcher (the `TabLibraryPicker` modal), on the
+> reasoning that "the tab strip + library picker own conversations." A design + competitive pass
+> (Slack/Discord/Teams all converge on a persistent *mode rail + list column*) overturned that:
+> the deck now mounts the shared `ConversationsRail` as a **persistent** panel — Zone-1 lineup
+> omitted, since each tab owns its own — open on Conversations by default (except mobile, where
+> the rail overlays the chat). The `TabLibraryPicker` modal and the strip's "Conversations"
+> launcher are **retired** (folded into the persistent panel). The `LeftRail` chrome is also
+> restructured from a horizontal tabstrip into a skinny **vertical mode rail** (icon + persistent
+> micro-label, active marked by a clay left-edge tick) — icon-only was rejected (WCAG/NN/g:
+> abstract modes need labels). Row selection is a quiet **echo** of the tab strip, which still
+> owns "what's open" (`selectionEcho`). Frontend-only, still `multi-tab-chat`-gated, no OpenWOP
+> wire change. Files: `chat/leftRail/LeftRail.tsx`, `chat/conversations/ConversationsRail.tsx`,
+> `chat/tabDeck/TabChatDeck.tsx`, `chat/tabDeck/TabStrip.tsx`, `styles/global.css`.
+
+> **Follow-on (2026-07-05) — the active tab's participant list moves to a RIGHT-docked members pane.**
+> A proposed follow-on wanted the active tab's agent lineup lifted into the deck's LEFT-rail Zone-1
+> (for "full ChatSidebar parity"). Competitive research vetoed the *left-rail* placement: the active
+> conversation's member list lives in a **right contextual pane** in Discord, Slack, Teams and Zoom
+> (4/5), opened from a header affordance; **zero** put it in the left rail. Left-rail placement also
+> collides two axes (the conversation *list* vs *this conversation's* members — the list-detail
+> anti-pattern the vertical-mode-rail redesign just fixed). Notably the deck's existing tab-body
+> presence **strip** was already the industry-standard placement; `ChatSidebar`'s left-rail Zone-1 is
+> the outlier — so "parity" would have adopted the weaker pattern. Decision: **do not lift into the
+> left rail.** Instead the tab keeps a top-right **members toggle** (`UsersIcon` + count) that opens a
+> **`TabMembersPane`** — a right-docked roster (reusing `ConversationLineup`/`ChannelRosterPanel`,
+> rail variant) rendered **per-tab** (each tab drives it from its own `activeAgents`/channel roster —
+> **no cross-tab state lifting**, preserving the keep-alive memo boundary of ADR 0140 G2). Default
+> closed (progressive disclosure); mobile overlays. Frontend-only, `multi-tab-chat`-gated, no wire
+> change. Files: `chat/tabDeck/TabMembersPane.tsx` (new), `chat/tabDeck/TabSession.tsx`,
+> `styles/global.css`, `chat/i18n/*`.
+
+> **Follow-on 2 (2026-07-05) — `ChatSidebar` adopts the same right pane; the rail is now list-only for BOTH surfaces.**
+> The above shipped the right pane in the deck but left the *standalone* `ChatSidebar` (the default,
+> non-toggled surface) showing participants in its **left-rail Zone-1** — i.e. the two surfaces
+> diverged, and the default one kept the outlier placement. Resolved by converging on the researched
+> convention everywhere: the pane was promoted to a **shared** `chat/conversations/MembersPane.tsx`
+> (renamed from `TabMembersPane`), and `ChatSidebar` now renders it as a right-docked pane opened by a
+> **members toggle in `ChatHeader`** (the Slack/Teams header entry-point). Consequently the Zone-1
+> block + its props were **removed from `ConversationsRail` entirely** — it is now a pure conversation
+> LIST for both the deck and the sidebar; participants live only in the right pane. Also removed 11
+> orphaned `multiTabLibrary*` i18n keys (dead since the launcher retirement). Frontend-only, no wire
+> change. Files: `chat/conversations/MembersPane.tsx` (moved), `chat/conversations/ConversationsRail.tsx`
+> (Zone-1 removed), `chat/ChatSidebar.tsx`, `chat/ChatHeader.tsx`, `chat/tabDeck/TabSession.tsx`,
+> `styles/global.css`, `chat/i18n/*`.
+
 **Status:** implemented — all 7 phases (2026-06-25), behind the default-OFF
 `multi-tab-chat` toggle. Each phase shipped with an `/architect` GO + `/code-review`
 CLEAR + (for the UI phases) a `/ux-review`, fixes applied. **Phase → commit:**

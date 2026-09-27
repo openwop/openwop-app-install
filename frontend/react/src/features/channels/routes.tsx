@@ -20,8 +20,8 @@ function ChannelDeepLinkRedirect(): JSX.Element {
 
 const routes: FeatureRoute[] = [
   // Reachable routes with no `nav` — redirect shims, not menu destinations.
-  { path: '/channels', element: <Navigate to="/" replace />, tier: 'workspace' },
-  { path: '/channels/:channelId', element: <ChannelDeepLinkRedirect />, tier: 'workspace' },
+  { path: '/channels', element: <Navigate to="/" replace />, tier: 'workspace' , archetype: 'standard-index',},
+  { path: '/channels/:channelId', element: <ChannelDeepLinkRedirect />, tier: 'workspace' , archetype: 'detail',},
 ];
 
 export const channelsFeature: FrontendFeature = { id: 'channels', routes };

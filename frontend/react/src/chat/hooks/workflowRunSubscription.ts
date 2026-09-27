@@ -21,6 +21,7 @@ import type { SubscribeOptions } from '../../client/streamsClient.js';
 import { mergeOpenInterrupts, removeInterruptByNode } from '../lib/interruptResolution.js';
 import { isRecord } from '../lib/typeGuards.js';
 import type { ChatMessage, ChatSession, WorkflowRunState } from '../types.js';
+import { isInterruptResolvedEvent } from '../lib/interruptResolvedEvent';
 
 /** Dependencies the workflow-run SSE handler closes over. Threaded through
  *  instead of capturing the whole `session` so the handler can live outside
@@ -349,7 +350,7 @@ export function makeWorkflowRunHandlers(
         // and was previously never written — the whole card vanished on reopen.
         // `persistMessage` upserts, so this append/updates the run-backed message.
         persistRunMessageSnapshot(ctx);
-      } else if (ev.type === 'node.interrupt.resolved') {
+      } else if (isInterruptResolvedEvent(ev.type)) {
         // Clear ONLY the resolved node's interrupt — sibling gates from
         // a parallel fan-out stay open until each is individually
         // resolved. Nulling the whole set here was the stuck-run bug.

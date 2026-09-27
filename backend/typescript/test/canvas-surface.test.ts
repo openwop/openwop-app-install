@@ -11,6 +11,7 @@ import type { AddressInfo } from 'node:net';
 import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { buildHostSurfaceBundle } from '../src/host/inMemorySurfaces.js';
+import { createCanvasForTenant } from '../src/host/canvasSurface.js';
 
 let server: http.Server;
 let BASE: string;
@@ -20,7 +21,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -47,6 +48,19 @@ async function runNode(workflowId: string, typeId: string, config: Record<string
   const ev = (bundle.body.events ?? []).find((e) => e.type === 'node.completed' && e.nodeId === 'op');
   return { __status: status, ...((ev?.payload?.outputs as Record<string, unknown>) ?? {}) };
 }
+
+describe('durable CAS idempotency (CODEBASE-ASSESSMENT CAS-adoption pass)', () => {
+  it('two CONCURRENT same-key creates converge on one canvas; a later retry reuses it', async () => {
+    const args = { canvasTypeId: 'doc', idempotencyKey: 'race-key-1' };
+    const [a, b] = await Promise.all([
+      createCanvasForTenant('t-cas', args),
+      createCanvasForTenant('t-cas', args),
+    ]);
+    expect(a.canvasId).toBe(b.canvasId);
+    const c = await createCanvasForTenant('t-cas', args);
+    expect(c.canvasId).toBe(a.canvasId);
+  });
+});
 
 describe('host.canvas: create → write → read through the pack nodes', () => {
   it('a canvas created by one node is mutated + read by others', async () => {

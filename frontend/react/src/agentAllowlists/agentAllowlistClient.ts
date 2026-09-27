@@ -1,6 +1,6 @@
 /**
  * Agent tool-allowlist admin client (ADR 0104) — the super-admin surface under
- * /v1/host/openwop-app/agent-allowlists/admin/*. Reads an agent's manifest vs
+ * /host/openwop-app/agent-allowlists/admin/*. Reads an agent's manifest vs
  * override vs effective tool list + the tool catalog, and sets/clears a per-agent
  * override the dispatcher applies. Backend is authority (super-admin gated there).
  */
@@ -25,9 +25,13 @@ export interface AgentAllowlistRow {
 export interface AgentAllowlistDetail extends AgentAllowlistRow {
   effective: string[];
   toolCatalog: string[];
+  /** ADR 0315 — the default-on platform tools every agent is offered without a
+   *  grant. Present in `effective` (unless an override revokes one); the editor
+   *  tags them "default-on". */
+  baseline: string[];
 }
 
-const base = `${config.baseUrl}/v1/host/openwop-app/agent-allowlists/admin`;
+const base = `${config.baseUrl}/host/openwop-app/agent-allowlists/admin`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {

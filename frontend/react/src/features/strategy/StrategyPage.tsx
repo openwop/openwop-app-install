@@ -1,71 +1,88 @@
 /**
- * Strategy (Strategic Planning) page (ADR 0079). The executive strategy
- * portfolio: a Portfolio tab (all strategies, filterable by horizon/status/scope)
- * + a per-strategy detail editor (Overview / Objectives / Initiatives / Alignment).
+ * Strategy (Strategic Planning) portfolio page (ADR 0079 — see the routing
+ * correction note). Lists all strategies (filterable by horizon/status/scope)
+ * as grid/list cells that LINK to each strategy's own URL
+ * (`/strategy/:strategyId` → `StrategyDetailPage`); this page no longer hosts
+ * an in-page Portfolio/<title> tablist.
  *
  * Composes the shared ui/ cohesion layer (PageHeader / Notice / StateCard / Field
  * / Modal / chips) — no bespoke chrome, no inline color. Toggle-off (a direct
  * deep-link while `strategy` is off) renders a clean "not enabled" state.
  */
+import { Button } from '../../ui/Button.js';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { PageHeader } from '../../ui/PageHeader.js';
-import { handleTablistKeyDown } from '../../ui/rovingTabs.js';
 import { Notice } from '../../ui/Notice.js';
 import { StateCard } from '../../ui/StateCard.js';
 import { Modal } from '../../ui/Modal.js';
-import { ConfirmDialog } from '../../ui/ConfirmDialog.js';
 import { TextField, TextareaField, SelectField } from '../../ui/Field.js';
 import { ViewToggle, useViewMode } from '../../ui/ViewToggle.js';
-import { FlagIcon, PlusIcon, TrashIcon, LinkIcon, CheckIcon, XIcon } from '../../ui/icons/index.js';
+import { useLiveRegion } from '../../ui/announce.js';
+import { FlagIcon, PlusIcon } from '../../ui/icons/index.js';
 import { StrategyCard, StrategyRow } from './StrategyViews.js';
+// SPU-2 — `toast.success` routes through `ui/toast.tsx:69` -> `announce()`, so one
+// call reaches the screen AND assistive tech. See the note at the create form.
+import { toast } from '../../ui/toast.js';
 import {
-  listStrategies, createStrategy, updateStrategy, archiveStrategy, deleteStrategy,
-  replaceLinks, listOrgs, listProjects, getStrategyHealth, FeatureDisabledError,
-  type Strategy, type StrategyScope, type PlanningHorizon, type StrategyStatus, type StrategyConfidence,
-  type StrategyRisk, type StrategyObjective, type StrategyInitiative, type StrategyLink,
-  type OrgRef, type ProjectRef, type StrategyHealthState,
+  listStrategies, createStrategy, listOrgs, getStrategyHealth, FeatureDisabledError,
+  type Strategy, type StrategyScope, type PlanningHorizon,
+  type StrategyObjective, type StrategyInitiative,
+  type OrgRef, type StrategyHealthState,
 } from './strategyClient.js';
+import { SCOPES, HORIZONS, STATUSES, uid, type TFn } from './strategyShared.js';
 import { STRATEGY_TEMPLATES, type StrategyTemplate } from './strategyTemplates.js';
-
-const SCOPES: StrategyScope[] = ['user', 'workspace', 'org'];
-const HORIZONS: PlanningHorizon[] = ['quarter', 'half-year', 'annual', 'multi-year', 'custom'];
-const STATUSES: StrategyStatus[] = ['draft', 'active', 'paused', 'completed', 'archived'];
-const CONFIDENCES: StrategyConfidence[] = ['high', 'medium', 'low'];
-const RISKS: StrategyRisk[] = ['low', 'medium', 'high'];
-
-const STATUS_CHIP: Record<StrategyStatus, string> = { draft: 'chip--muted', active: 'chip--success', paused: 'chip--warning', completed: 'chip--accent', archived: 'chip--muted' };
-// Linked-project health → chip (mirrors the projects feature's mapping, ADR 0054).
-const PROJECT_HEALTH_CHIP: Record<string, string> = { 'on-track': 'chip--success', 'at-risk': 'chip--warning', 'off-track': 'chip--danger' };
-// Strategy health (ADR 0080) — the portfolio Card/Row chip lives in StrategyViews;
-// the detail editor only needs the health-OVERRIDE option list.
-const HEALTH_STATES: StrategyHealthState[] = ['on-track', 'at-risk', 'off-track'];
-
-const uid = (): string => `tmp-${Math.random().toString(36).slice(2, 10)}`;
 
 export function StrategyPage(): JSX.Element {
   const { t } = useTranslation('strategy');
+  const navigate = useNavigate();
   const [strategies, setStrategies] = useState<Strategy[] | null>(null);
   const [orgs, setOrgs] = useState<OrgRef[]>([]);
-  const [projects, setProjects] = useState<ProjectRef[]>([]);
   const [disabled, setDisabled] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [view, setView] = useState<string>('portfolio'); // 'portfolio' | strategyId
   const [createOpen, setCreateOpen] = useState(false);
+  const [orgsFailed, setOrgsFailed] = useState(false);
+  const [listFailed, setListFailed] = useState(false);
+  const [query, setQuery] = useState('');
   const [fScope, setFScope] = useState<string>('');
   const [fStatus, setFStatus] = useState<string>('');
   const [fHorizon, setFHorizon] = useState<string>('');
-  // ADR 0080 — per-strategy health rollup (fetched once, fail-soft: empty map ⇒ no chip).
+  // ADR 0080 — per-strategy health rollup.
+  // R2 STR2-B1 — "fail-soft: empty map ⇒ no chip" reads as harmless and is not: an EMPTY
+  // map says "nothing here is at risk", which is a positive claim, on the one column an
+  // exec scans. Round 1's own doctrine, on the page round 1 did not open.
+  //
+  // CORRECTION (review): an earlier version of this comment said a missing chip "cannot
+  // arise naturally". It can — `GET /health` reads `includeArchived: false` while this
+  // page lists with `includeArchived: true`, so every archived row legitimately has a
+  // blank chip. The disclosure is keyed on the CATCH, not on emptiness, so the fix is
+  // unaffected; the reasoning was wrong and is worth not leaving in the file.
   const [health, setHealth] = useState<Map<string, StrategyHealthState>>(new Map());
+  const [healthFailed, setHealthFailed] = useState(false);
   const refreshHealth = useCallback(async () => {
-    try { setHealth(new Map((await getStrategyHealth()).map((r) => [r.id, r.health]))); }
-    catch { setHealth(new Map()); }
+    try {
+      setHealth(new Map((await getStrategyHealth()).map((r) => [r.id, r.health])));
+      setHealthFailed(false);
+    } catch { setHealth(new Map()); setHealthFailed(true); }
   }, []);
 
   const refresh = useCallback(async () => {
-    try { setStrategies(await listStrategies({ includeArchived: true })); setDisabled(false); }
+    // SPU-3 / SPC-13 — `setError(null)` appeared NOWHERE in this feature, and the
+    // consequence is not "a banner lingers": it is a banner that MOUNTS FOR THE
+    // FIRST TIME ON SUCCESS. While the read is failing, `error && !listFailed`
+    // hides it (the StateCard owns the failure); a SUCCESSFUL retry flips
+    // `listFailed` false with `error` still set, so the red Notice appears over a
+    // correctly-loaded portfolio — and because it carries `announce`, it fires an
+    // ASSERTIVE screen-reader interrupt reading a raw server error that is no
+    // longer true. Clearing on success is the whole cure.
+    try { setStrategies(await listStrategies({ includeArchived: true })); setDisabled(false); setListFailed(false); setError(null); }
     catch (e) {
       if (e instanceof FeatureDisabledError) { setDisabled(true); setStrategies([]); return; }
+      // R2 STR2-M1 — the catch left `strategies === null`, so the page rendered the error
+      // Notice AND an eternal `<StateCard loading />` at the same time, forever.
+      setListFailed(true);
+      setStrategies([]);
       setError(e instanceof Error ? e.message : t('loadFailed'));
     }
   }, [t]);
@@ -73,15 +90,17 @@ export function StrategyPage(): JSX.Element {
   useEffect(() => {
     void refresh();
     void refreshHealth();
-    void listOrgs().then(setOrgs).catch(() => {});
-    void listProjects().then(setProjects).catch(() => {});
+    // R2 STR2-B2 — a bare swallow left `orgs: []`, which renders the option
+    // "No organizations available" and disables Create (`!orgId`) with no error anywhere
+    // on screen. The user is told their workspace has no orgs and files a bug against
+    // Access Control.
+    void listOrgs().then((o) => { setOrgs(o); setOrgsFailed(false); }).catch(() => { setOrgsFailed(true); });
   }, [refresh, refreshHealth]);
 
-  const selected = useMemo(() => strategies?.find((s) => s.id === view) ?? null, [strategies, view]);
-
   const filtered = useMemo(() => (strategies ?? []).filter((s) =>
-    (!fScope || s.scope === fScope) && (!fStatus || s.status === fStatus) && (!fHorizon || s.planningHorizon === fHorizon),
-  ), [strategies, fScope, fStatus, fHorizon]);
+    (!query.trim() || s.title.toLowerCase().includes(query.trim().toLowerCase()))
+    && (!fScope || s.scope === fScope) && (!fStatus || s.status === fStatus) && (!fHorizon || s.planningHorizon === fHorizon),
+  ), [strategies, query, fScope, fStatus, fHorizon]);
 
   if (disabled) {
     return (
@@ -93,119 +112,130 @@ export function StrategyPage(): JSX.Element {
   }
 
   return (
-    <div>
+    <div data-walkthrough="strategy.page">
       <PageHeader
         eyebrow={t('eyebrow')}
         title={t('title')}
         lede={t('lede')}
-        actions={strategies && strategies.length > 0 ? <button type="button" className="btn-primary btn-sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('newStrategy')}</button> : undefined}
+        actions={strategies && strategies.length > 0 ? <Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('newStrategy')}</Button> : undefined}
       />
-      {error ? <Notice variant="error">{error}</Notice> : null}
+      {/* R2 STR2-M3 — round 1 added `announce` to exactly one Notice; every OTHER error on
+          this feature is conditionally mounted, which per `Notice`'s own docblock means
+          the region arrives complete and announces nothing. */}
+      {error && !listFailed ? <Notice variant="error" announce={error}>{error}</Notice> : null}
+      {/* R2 STR2-B1 — say the health column could not be loaded, so a screen with no
+          danger chips is not read as a portfolio with no danger. */}
+      {healthFailed ? <Notice variant="warning" announce={t('healthLoadFailed')}>{t('healthLoadFailed')} <Button variant="link" onClick={() => void refreshHealth()}>{t('common:retry')}</Button></Notice> : null}
 
       {createOpen ? (
         <Modal label={t('createModalLabel')} onClose={() => setCreateOpen(false)}>
           <h2 className="u-mt-0">{t('createModalHeading')}</h2>
           <CreateStrategyForm
             orgs={orgs}
-            onCreated={async (s) => { await refresh(); setView(s.id); setCreateOpen(false); }}
+            orgsFailed={orgsFailed}
+            onCreated={(s) => navigate(`/strategy/${encodeURIComponent(s.id)}`)}
             onError={setError}
           />
         </Modal>
       ) : null}
 
-      {strategies === null ? (
+      {listFailed ? (
+        /* R2 STR2-M1 — NOT the empty state: a failed list is not "no strategies yet". */
+        <StateCard announce icon={<FlagIcon size={22} />} title={t('listFailedTitle')} body={t('listFailedBody')} action={<Button variant="primary" size="sm" onClick={() => void refresh()}>{t('common:retry')}</Button>} />
+      ) : strategies === null ? (
         <StateCard icon={<FlagIcon size={20} />} title={t('loading')} loading />
       ) : strategies.length === 0 ? (
         <StateCard
           icon={<FlagIcon size={22} />}
           title={t('emptyTitle')}
           body={t('emptyBody')}
-          action={<button type="button" className="btn-primary btn-sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('createFirst')}</button>}
+          action={<Button variant="primary" size="sm" onClick={() => setCreateOpen(true)}><PlusIcon size={13} /> {t('createFirst')}</Button>}
         />
       ) : (
-        <>
-          <div className="tabs u-mb-4" role="tablist" aria-label={t('tablistLabel')} onKeyDown={handleTablistKeyDown}>
-            <button type="button" role="tab" aria-selected={view === 'portfolio'} tabIndex={view === 'portfolio' ? 0 : -1} className="tab" onClick={() => setView('portfolio')}>{t('tabPortfolio')}</button>
-            {selected ? <button type="button" role="tab" aria-selected={view !== 'portfolio'} tabIndex={view === 'portfolio' ? -1 : 0} className="tab">{selected.title}</button> : null}
-          </div>
-
-          {view === 'portfolio' || !selected ? (
-            <PortfolioSection
-              strategies={filtered}
-              health={health}
-              fScope={fScope} fStatus={fStatus} fHorizon={fHorizon}
-              setFScope={setFScope} setFStatus={setFStatus} setFHorizon={setFHorizon}
-              onOpen={(id) => setView(id)}
-              t={t}
-            />
-          ) : (
-            <StrategyDetail
-              key={selected.id}
-              strategy={selected}
-              projects={projects}
-              onChanged={refresh}
-              onClosed={async () => { setView('portfolio'); await refresh(); }}
-              onError={setError}
-              t={t}
-            />
-          )}
-        </>
+        <PortfolioSection
+          strategies={filtered}
+          total={strategies.length}
+          health={health}
+          query={query} setQuery={setQuery}
+          fScope={fScope} fStatus={fStatus} fHorizon={fHorizon}
+          setFScope={setFScope} setFStatus={setFStatus} setFHorizon={setFHorizon}
+          t={t}
+        />
       )}
     </div>
   );
 }
 
-type TFn = ReturnType<typeof useTranslation>['t'];
-
-function ScopeChip({ scope, t }: { scope: StrategyScope; t: TFn }): JSX.Element {
-  return <span className="chip chip--muted">{t(`scope_${scope}`)}</span>;
-}
-function StatusChip({ status, t }: { status: StrategyStatus; t: TFn }): JSX.Element {
-  return <span className={`chip ${STATUS_CHIP[status]}`}>{t(`status_${status}`)}</span>;
-}
-
 function PortfolioSection(props: {
   strategies: Strategy[];
+  /** Unfiltered count — gates the search input (shown past 3 strategies). */
+  total: number;
   health: Map<string, StrategyHealthState>;
+  query: string; setQuery: (v: string) => void;
   fScope: string; fStatus: string; fHorizon: string;
   setFScope: (v: string) => void; setFStatus: (v: string) => void; setFHorizon: (v: string) => void;
-  onOpen: (id: string) => void; t: TFn;
+  t: TFn;
 }): JSX.Element {
-  const { strategies, health, fScope, fStatus, fHorizon, setFScope, setFStatus, setFHorizon, onOpen, t } = props;
+  const { strategies, total, health, query, setQuery, fScope, fStatus, fHorizon, setFScope, setFStatus, setFHorizon, t } = props;
   // ADR 0100 transparency: shared strategies are retrievable by agents only when
   // KB is on; user-scoped strategies are NEVER indexed (private).
   const kbEnabled = true; // KB always-on (toggle removed)
   const [viewMode, setViewMode] = useViewMode('strategy', 'grid');
+  // ADR 0235 §D3 — the parent-lens grouping: resolve each child's parent title
+  // from the CURRENT (readable, filtered) list; a parent that isn't present
+  // (archived / filtered / unreadable) yields no chip — the silent-ungroup
+  // posture the backend guarantees.
+  const parentTitleById = useMemo(() => {
+    const byId = new Map(strategies.map((s) => [s.id, s.title]));
+    return (s: Strategy): string | undefined => (s.parentStrategyId ? byId.get(s.parentStrategyId) : undefined);
+  }, [strategies]);
   return (
     <div>
-      <div className="action-bar u-mb-4 u-gap-2 u-flex-wrap">
-        <SelectField label={t('filterScope')} value={fScope} onChange={(e) => setFScope(e.target.value)}>
-          <option value="">{t('filterAll')}</option>
+      <div className="filterbar u-mb-4" role="group" aria-label={t('filterGroup')}>
+        {total > 3 ? (
+          <input
+            type="search"
+            className="ui-input filterbar-search"
+            placeholder={t('filterPlaceholder')}
+            aria-label={t('filterAria')}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        ) : null}
+        {/* Facet selects self-describe via their "All …" option (the marketplace
+            filterbar pattern) — an eyebrow label would break the one-row baseline. */}
+        <select className="ui-input filterbar-select" value={fScope} onChange={(e) => setFScope(e.target.value)} aria-label={t('filterScope')}>
+          <option value="">{t('filterAllScopes')}</option>
           {SCOPES.map((s) => <option key={s} value={s}>{t(`scope_${s}`)}</option>)}
-        </SelectField>
-        <SelectField label={t('filterStatus')} value={fStatus} onChange={(e) => setFStatus(e.target.value)}>
-          <option value="">{t('filterAll')}</option>
+        </select>
+        <select className="ui-input filterbar-select" value={fStatus} onChange={(e) => setFStatus(e.target.value)} aria-label={t('filterStatus')}>
+          <option value="">{t('filterAllStatuses')}</option>
           {STATUSES.map((s) => <option key={s} value={s}>{t(`status_${s}`)}</option>)}
-        </SelectField>
-        <SelectField label={t('filterHorizon')} value={fHorizon} onChange={(e) => setFHorizon(e.target.value)}>
-          <option value="">{t('filterAll')}</option>
+        </select>
+        <select className="ui-input filterbar-select" value={fHorizon} onChange={(e) => setFHorizon(e.target.value)} aria-label={t('filterHorizon')}>
+          <option value="">{t('filterAllHorizons')}</option>
           {HORIZONS.map((h) => <option key={h} value={h}>{t(`horizon_${h}`)}</option>)}
-        </SelectField>
+        </select>
         <ViewToggle value={viewMode} onChange={setViewMode} className="u-ml-auto" />
       </div>
 
       {strategies.length === 0 ? (
-        <StateCard icon={<FlagIcon size={20} />} title={t('noMatchTitle')} body={t('noMatchBody')} />
+        <StateCard
+          icon={<FlagIcon size={20} />}
+          title={t('noMatchTitle')}
+          body={t('noMatchBody')}
+          action={<Button variant="secondary" onClick={() => { setQuery(''); setFScope(''); setFStatus(''); setFHorizon(''); }}>{t('clearSearch')}</Button>}
+        />
       ) : viewMode === 'grid' ? (
         <div className="card-grid">
           {strategies.map((s) => (
-            <StrategyCard key={s.id} s={s} health={health} kbEnabled={kbEnabled} onOpen={onOpen} />
+            <StrategyCard key={s.id} s={s} health={health} kbEnabled={kbEnabled} {...(parentTitleById(s) ? { parentTitle: parentTitleById(s)! } : {})} />
           ))}
         </div>
       ) : (
         <div className="surface-card list-view">
           {strategies.map((s) => (
-            <StrategyRow key={s.id} s={s} health={health} kbEnabled={kbEnabled} onOpen={onOpen} />
+            <StrategyRow key={s.id} s={s} health={health} kbEnabled={kbEnabled} {...(parentTitleById(s) ? { parentTitle: parentTitleById(s)! } : {})} />
           ))}
         </div>
       )}
@@ -213,7 +243,7 @@ function PortfolioSection(props: {
   );
 }
 
-function CreateStrategyForm({ orgs, onCreated, onError }: { orgs: OrgRef[]; onCreated: (s: Strategy) => void | Promise<void>; onError: (m: string) => void }): JSX.Element {
+function CreateStrategyForm({ orgs, orgsFailed, onCreated, onError }: { orgs: OrgRef[]; /** R2 STR2-B2 — the orgs READ failed, so an empty list is not "you have none". */ orgsFailed: boolean; onCreated: (s: Strategy) => void | Promise<void>; onError: (m: string) => void }): JSX.Element {
   const { t } = useTranslation('strategy');
   const [orgId, setOrgId] = useState(orgs[0]?.orgId ?? '');
   const [title, setTitle] = useState('');
@@ -228,9 +258,38 @@ function CreateStrategyForm({ orgs, onCreated, onError }: { orgs: OrgRef[]; onCr
   const [scaffold, setScaffold] = useState<{ rationale?: string; objectives: StrategyObjective[]; initiatives: StrategyInitiative[] }>({ objectives: [], initiatives: [] });
   useEffect(() => { if (!orgId && orgs[0]) setOrgId(orgs[0].orgId); }, [orgs, orgId]);
 
+  /**
+   * SPU-8 — this confirmation had three defects in one line, all in the FIRST
+   * thing a new user sees in the create modal:
+   *
+   *  1. it interpolated `{{n}}`, not i18next's magic `count`, so NO plural
+   *     resolution happened in any of the four locales — and `portfolio-bet` and
+   *     `working-backwards` each scaffold exactly ONE objective, so picking
+   *     either rendered "Pre-filled 1 objectives" (and worse in fr/es/pt-BR,
+   *     where the noun and adjective both disagree);
+   *  2. it never named WHICH template was applied, so switching between those two
+   *     one-objective templates produced BYTE-IDENTICAL text — the DOM did not
+   *     mutate and a live region only speaks on mutation, so a screen-reader user
+   *     could not tell the switch took effect;
+   *  3. re-picking the SAME template is still identical text, which is why the
+   *     region is on `useLiveRegion()` — it alternates an invisible marker so a
+   *     repeat is a distinct string and gets re-read.
+   */
+  const [tplAnnounce, setTplAnnounce] = useLiveRegion();
   const applyTemplate = (tpl: StrategyTemplate | null): void => {
     setTemplateId(tpl?.id ?? 'blank');
-    if (!tpl) { setScaffold({ objectives: [], initiatives: [] }); return; }
+    // ADR 0598 §Correction 11 — "Blank" DISCARDS the scaffolded objectives and
+    // initiatives, and it used to `setTplAnnounce('')`: the most destructive
+    // choice in the picker was the only one that said nothing. SPU-8 fixed the
+    // three defects in the APPLIED message and left the CLEAR arm at the empty
+    // string, so the row read as closed while half the control was still silent.
+    //
+    // The copy names what actually happens and what does NOT. `summary` and
+    // `horizon` are deliberately KEPT (a user who typed over the template's
+    // summary must not lose it), so the message says so rather than implying a
+    // full reset — an announcement that overstates is the same family of defect
+    // as one that is absent.
+    if (!tpl) { setScaffold({ objectives: [], initiatives: [] }); setTplAnnounce(t('templateCleared')); return; }
     const s = tpl.scaffold;
     setHorizon(s.horizon);
     setSummary(t(s.summaryKey));
@@ -239,6 +298,7 @@ function CreateStrategyForm({ orgs, onCreated, onError }: { orgs: OrgRef[]; onCr
       objectives: s.objectives.map((o) => ({ id: uid(), title: t(o.titleKey), keyResults: o.keyResults.map((k) => ({ id: uid(), title: t(k.titleKey) })) })),
       initiatives: s.initiatives.map((i) => ({ id: uid(), title: t(i.titleKey) })),
     });
+    setTplAnnounce(t('templateApplied', { count: s.objectives.length, template: t(tpl.labelKey) }));
   };
 
   const submit = async (e: React.FormEvent): Promise<void> => {
@@ -253,6 +313,11 @@ function CreateStrategyForm({ orgs, onCreated, onError }: { orgs: OrgRef[]; onCr
         ...(scaffold.objectives.length ? { objectives: scaffold.objectives } : {}),
         ...(scaffold.initiatives.length ? { initiatives: scaffold.initiatives } : {}),
       }));
+      // SPU-2 — the create flow NAVIGATES to the new strategy, so the modal simply
+      // disappears. `<Toaster>` is at the app shell, so this survives the route
+      // change and is the only thing that distinguishes "created" from "the modal
+      // closed on me". It announces via `ui/toast.tsx:69`.
+      toast.success(t('toastStrategyCreated'));
     }
     catch (err) { onError(err instanceof Error ? err.message : t('createFailed')); }
     finally { setBusy(false); }
@@ -268,10 +333,12 @@ function CreateStrategyForm({ orgs, onCreated, onError }: { orgs: OrgRef[]; onCr
             <button key={tpl.id} type="button" className={`chip ${templateId === tpl.id ? 'chip--accent' : 'chip--muted'}`} aria-pressed={templateId === tpl.id} title={t(tpl.descKey)} onClick={() => applyTemplate(tpl)}>{t(tpl.labelKey)}</button>
           ))}
         </div>
-        <span className="muted u-fs-12" role="status" aria-live="polite">{templateId !== 'blank' ? t('templateApplied', { n: scaffold.objectives.length }) : ''}</span>
+        <span className="muted u-fs-12" role="status" aria-live="polite" aria-atomic="true">{tplAnnounce}</span>
       </div>
       <SelectField label={t('fieldOrg')} required value={orgId} onChange={(e) => setOrgId(e.target.value)}>
-        {orgs.length === 0 ? <option value="">{t('noOrgs')}</option> : null}
+        {/* R2 STR2-B2 — "No organizations available" is a claim about the workspace; a
+            failed read only justifies "we could not load them". */}
+        {orgs.length === 0 ? <option value="">{orgsFailed ? t('orgsUnavailable') : t('noOrgs')}</option> : null}
         {orgs.map((o) => <option key={o.orgId} value={o.orgId}>{o.name}</option>)}
       </SelectField>
       <TextField label={t('fieldTitle')} required value={title} onChange={(e) => setTitle(e.target.value)} placeholder={t('fieldTitlePlaceholder')} />
@@ -285,288 +352,8 @@ function CreateStrategyForm({ orgs, onCreated, onError }: { orgs: OrgRef[]; onCr
       </div>
       <TextareaField label={t('fieldSummary')} value={summary} onChange={(e) => setSummary(e.target.value)} rows={3} />
       <div className="action-bar">
-        <button type="submit" className="btn-primary btn-sm" disabled={busy || !title.trim() || !orgId}>{busy ? t('common:saving') : t('common:create')}</button>
+        <Button type="submit" variant="primary" size="sm" disabled={busy || !title.trim() || !orgId}>{busy ? t('common:saving') : t('common:create')}</Button>
       </div>
     </form>
-  );
-}
-
-function StrategyDetail(props: {
-  strategy: Strategy; projects: ProjectRef[];
-  onChanged: () => void | Promise<void>; onClosed: () => void | Promise<void>; onError: (m: string) => void; t: TFn;
-}): JSX.Element {
-  const { strategy, projects, onChanged, onClosed, onError, t } = props;
-  const [tab, setTab] = useState<'overview' | 'objectives' | 'initiatives' | 'alignment'>('overview');
-
-  return (
-    <div className="surface-card">
-      <h2 className="u-mt-0 u-mb-2">{strategy.title}</h2>
-      <div className="u-flex u-items-center u-justify-between u-gap-2 u-mb-3">
-        <div className="u-flex u-gap-2 u-flex-wrap u-items-center">
-          <ScopeChip scope={strategy.scope} t={t} />
-          <StatusChip status={strategy.status} t={t} />
-          <span className="chip chip--muted">{t(`horizon_${strategy.planningHorizon}`)}</span>
-        </div>
-        <button type="button" className="ghost btn-sm" onClick={() => void onClosed()}>{t('backToPortfolio')}</button>
-      </div>
-
-      <div className="tabs u-mb-4" role="tablist" aria-label={t('detailTablistLabel')} onKeyDown={handleTablistKeyDown}>
-        <button type="button" role="tab" aria-selected={tab === 'overview'} tabIndex={tab === 'overview' ? 0 : -1} className="tab" onClick={() => setTab('overview')}>{t('detailOverview')}</button>
-        <button type="button" role="tab" aria-selected={tab === 'objectives'} tabIndex={tab === 'objectives' ? 0 : -1} className="tab" onClick={() => setTab('objectives')}>{t('detailObjectives')}</button>
-        <button type="button" role="tab" aria-selected={tab === 'initiatives'} tabIndex={tab === 'initiatives' ? 0 : -1} className="tab" onClick={() => setTab('initiatives')}>{t('detailInitiatives')}</button>
-        <button type="button" role="tab" aria-selected={tab === 'alignment'} tabIndex={tab === 'alignment' ? 0 : -1} className="tab" onClick={() => setTab('alignment')}>{t('detailAlignment')}</button>
-      </div>
-
-      {tab === 'overview' ? <OverviewEditor strategy={strategy} onChanged={onChanged} onClosed={onClosed} onError={onError} t={t} /> : null}
-      {tab === 'objectives' ? <ObjectivesEditor strategy={strategy} onChanged={onChanged} onError={onError} t={t} /> : null}
-      {tab === 'initiatives' ? <InitiativesEditor strategy={strategy} onChanged={onChanged} onError={onError} t={t} /> : null}
-      {tab === 'alignment' ? <AlignmentEditor strategy={strategy} projects={projects} onChanged={onChanged} onError={onError} t={t} /> : null}
-    </div>
-  );
-}
-
-function OverviewEditor({ strategy, onChanged, onClosed, onError, t }: { strategy: Strategy; onChanged: () => void | Promise<void>; onClosed: () => void | Promise<void>; onError: (m: string) => void; t: TFn }): JSX.Element {
-  const [title, setTitle] = useState(strategy.title);
-  const [summary, setSummary] = useState(strategy.summary ?? '');
-  const [rationale, setRationale] = useState(strategy.rationale ?? '');
-  const [scope, setScope] = useState(strategy.scope);
-  const [horizon, setHorizon] = useState(strategy.planningHorizon);
-  const [status, setStatus] = useState(strategy.status);
-  const [confidence, setConfidence] = useState<string>(strategy.confidence ?? '');
-  const [risk, setRisk] = useState<string>(strategy.risk ?? '');
-  const [healthOverride, setHealthOverride] = useState<string>(strategy.healthOverride ?? '');
-  const [owner, setOwner] = useState(strategy.ownerUserId ?? '');
-  const [exec, setExec] = useState(strategy.accountableExecutive ?? '');
-  const [busy, setBusy] = useState(false);
-  // Which destructive action is awaiting confirmation (replaces window.confirm).
-  const [confirm, setConfirm] = useState<null | 'archive' | 'delete'>(null);
-
-  const save = async (): Promise<void> => {
-    setBusy(true);
-    try {
-      await updateStrategy(strategy.id, {
-        title: title.trim(), summary, rationale, scope, planningHorizon: horizon, status,
-        confidence: (confidence as StrategyConfidence) || null,
-        risk: (risk as StrategyRisk) || null,
-        healthOverride: (healthOverride as StrategyHealthState) || null,
-        ownerUserId: owner, accountableExecutive: exec,
-      });
-      await onChanged();
-    } catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
-    finally { setBusy(false); }
-  };
-
-  const archive = async (): Promise<void> => {
-    setBusy(true);
-    try { await archiveStrategy(strategy.id); await onClosed(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); setConfirm(null); }
-    finally { setBusy(false); }
-  };
-  const hardDelete = async (): Promise<void> => {
-    setBusy(true);
-    try { await deleteStrategy(strategy.id); await onClosed(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); setConfirm(null); }
-    finally { setBusy(false); }
-  };
-
-  return (
-    <div className="u-flex u-flex-col u-gap-3">
-      <TextField label={t('fieldTitle')} value={title} onChange={(e) => setTitle(e.target.value)} />
-      <TextareaField label={t('fieldSummary')} value={summary} onChange={(e) => setSummary(e.target.value)} rows={2} />
-      <TextareaField label={t('fieldRationale')} help={t('fieldRationaleHelp')} value={rationale} onChange={(e) => setRationale(e.target.value)} rows={4} />
-      <div className="u-flex u-gap-3 u-flex-wrap">
-        <SelectField label={t('fieldScope')} value={scope} onChange={(e) => setScope(e.target.value as StrategyScope)}>
-          {SCOPES.map((s) => <option key={s} value={s}>{t(`scope_${s}`)}</option>)}
-        </SelectField>
-        <SelectField label={t('fieldHorizon')} value={horizon} onChange={(e) => setHorizon(e.target.value as PlanningHorizon)}>
-          {HORIZONS.map((h) => <option key={h} value={h}>{t(`horizon_${h}`)}</option>)}
-        </SelectField>
-        <SelectField label={t('fieldStatus')} value={status} onChange={(e) => setStatus(e.target.value as StrategyStatus)}>
-          {STATUSES.map((s) => <option key={s} value={s}>{t(`status_${s}`)}</option>)}
-        </SelectField>
-      </div>
-      <div className="u-flex u-gap-3 u-flex-wrap">
-        <SelectField label={t('fieldConfidence')} value={confidence} onChange={(e) => setConfidence(e.target.value)}>
-          <option value="">{t('common:none')}</option>
-          {CONFIDENCES.map((c) => <option key={c} value={c}>{t(`level_${c}`)}</option>)}
-        </SelectField>
-        <SelectField label={t('fieldRisk')} value={risk} onChange={(e) => setRisk(e.target.value)}>
-          <option value="">{t('common:none')}</option>
-          {RISKS.map((r) => <option key={r} value={r}>{t(`level_${r}`)}</option>)}
-        </SelectField>
-        <SelectField label={t('fieldHealth')} help={t('fieldHealthHelp')} value={healthOverride} onChange={(e) => setHealthOverride(e.target.value)}>
-          <option value="">{t('healthAuto')}</option>
-          {HEALTH_STATES.map((h) => <option key={h} value={h}>{t(`health_${h}`)}</option>)}
-        </SelectField>
-      </div>
-      <div className="u-flex u-gap-3 u-flex-wrap">
-        <TextField label={t('fieldOwner')} value={owner} onChange={(e) => setOwner(e.target.value)} />
-        <TextField label={t('fieldExec')} value={exec} onChange={(e) => setExec(e.target.value)} />
-      </div>
-      <div className="action-bar u-justify-between">
-        <button type="button" className="btn-primary btn-sm" disabled={busy || !title.trim()} onClick={() => void save()}><CheckIcon size={13} /> {busy ? t('common:saving') : t('common:save')}</button>
-        <div className="action-bar u-gap-2">
-          {/* Shared/org strategies can be archived (reversible: hidden from the
-              active portfolio). Hard-delete is offered for every strategy — the
-              backend gates it to the creator or an org admin (requireConfig
-              authority); an unauthorized caller gets a 403 surfaced as a notice. */}
-          {strategy.scope !== 'user' ? (
-            <button type="button" className="ghost btn-sm" disabled={busy || strategy.status === 'archived'} onClick={() => setConfirm('archive')}>{t('archive')}</button>
-          ) : null}
-          <button type="button" className="secondary u-text-danger btn-sm" disabled={busy} onClick={() => setConfirm('delete')}><TrashIcon size={13} /> {t('common:delete')}</button>
-        </div>
-      </div>
-
-      {confirm ? (
-        <ConfirmDialog
-          title={t(confirm === 'delete' ? 'confirmDeleteTitle' : 'confirmArchiveTitle', { title: strategy.title })}
-          body={t(confirm === 'delete' ? 'confirmDelete' : 'confirmArchive')}
-          confirmLabel={confirm === 'delete' ? t('common:delete') : t('archive')}
-          confirmIcon={confirm === 'delete' ? <TrashIcon size={14} /> : undefined}
-          danger={confirm === 'delete'}
-          busy={busy}
-          onConfirm={() => void (confirm === 'delete' ? hardDelete() : archive())}
-          onCancel={() => setConfirm(null)}
-        />
-      ) : null}
-    </div>
-  );
-}
-
-function ObjectivesEditor({ strategy, onChanged, onError, t }: { strategy: Strategy; onChanged: () => void | Promise<void>; onError: (m: string) => void; t: TFn }): JSX.Element {
-  const [objectives, setObjectives] = useState<StrategyObjective[]>(() => structuredClone(strategy.objectives));
-  const [busy, setBusy] = useState(false);
-
-  const addObjective = (): void => setObjectives((p) => [...p, { id: uid(), title: '', keyResults: [] }]);
-  const removeObjective = (oid: string): void => setObjectives((p) => p.filter((o) => o.id !== oid));
-  const setObjTitle = (oid: string, title: string): void => setObjectives((p) => p.map((o) => (o.id === oid ? { ...o, title } : o)));
-  const addKR = (oid: string): void => setObjectives((p) => p.map((o) => (o.id === oid ? { ...o, keyResults: [...o.keyResults, { id: uid(), title: '' }] } : o)));
-  const removeKR = (oid: string, kid: string): void => setObjectives((p) => p.map((o) => (o.id === oid ? { ...o, keyResults: o.keyResults.filter((k) => k.id !== kid) } : o)));
-  const setKR = (oid: string, kid: string, field: 'title' | 'target' | 'current', value: string): void =>
-    setObjectives((p) => p.map((o) => (o.id === oid ? { ...o, keyResults: o.keyResults.map((k) => (k.id === kid ? { ...k, [field]: value } : k)) } : o)));
-
-  const save = async (): Promise<void> => {
-    setBusy(true);
-    try { await updateStrategy(strategy.id, { objectives: objectives.filter((o) => o.title.trim()).map((o) => ({ ...o, keyResults: o.keyResults.filter((k) => k.title.trim()) })) }); await onChanged(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
-    finally { setBusy(false); }
-  };
-
-  return (
-    <div className="u-flex u-flex-col u-gap-3">
-      {objectives.length === 0 ? <StateCard icon={<FlagIcon />} title={t('noObjectives')} /> : null}
-      {objectives.map((o) => (
-        <div key={o.id} className="surface-card">
-          <div className="u-flex u-gap-2 u-items-end">
-            <TextField label={t('objectiveTitle')} value={o.title} onChange={(e) => setObjTitle(o.id, e.target.value)} className="u-flex-1" />
-            <button type="button" className="ghost btn-sm" aria-label={t('removeObjective')} onClick={() => removeObjective(o.id)}><TrashIcon size={13} /></button>
-          </div>
-          <div className="u-flex u-flex-col u-gap-2 u-mt-2 u-ml-2">
-            {o.keyResults.map((k, ki) => (
-              <div key={k.id} className="u-flex u-gap-2 u-items-end u-flex-wrap" role="group" aria-label={t('krGroupLabel', { n: ki + 1 })}>
-                <TextField label={t('krTitle')} value={k.title} onChange={(e) => setKR(o.id, k.id, 'title', e.target.value)} className="u-flex-2" />
-                <TextField label={t('krTarget')} value={k.target ?? ''} onChange={(e) => setKR(o.id, k.id, 'target', e.target.value)} className="u-flex-1" />
-                <TextField label={t('krCurrent')} value={k.current ?? ''} onChange={(e) => setKR(o.id, k.id, 'current', e.target.value)} className="u-flex-1" />
-                <button type="button" className="ghost btn-sm" aria-label={t('removeKr')} onClick={() => removeKR(o.id, k.id)}><XIcon size={13} /></button>
-              </div>
-            ))}
-            <div><button type="button" className="ghost btn-sm" onClick={() => addKR(o.id)}><PlusIcon size={12} /> {t('addKr')}</button></div>
-          </div>
-        </div>
-      ))}
-      <div className="action-bar u-justify-between">
-        <button type="button" className="ghost btn-sm" onClick={addObjective}><PlusIcon size={13} /> {t('addObjective')}</button>
-        <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => void save()}>{busy ? t('common:saving') : t('common:save')}</button>
-      </div>
-    </div>
-  );
-}
-
-function InitiativesEditor({ strategy, onChanged, onError, t }: { strategy: Strategy; onChanged: () => void | Promise<void>; onError: (m: string) => void; t: TFn }): JSX.Element {
-  const [initiatives, setInitiatives] = useState<StrategyInitiative[]>(() => structuredClone(strategy.initiatives));
-  const [busy, setBusy] = useState(false);
-  const add = (): void => setInitiatives((p) => [...p, { id: uid(), title: '' }]);
-  const remove = (id: string): void => setInitiatives((p) => p.filter((i) => i.id !== id));
-  const setField = (id: string, field: 'title' | 'ownerUserId', value: string): void => setInitiatives((p) => p.map((i) => (i.id === id ? { ...i, [field]: value } : i)));
-
-  const save = async (): Promise<void> => {
-    setBusy(true);
-    try { await updateStrategy(strategy.id, { initiatives: initiatives.filter((i) => i.title.trim()) }); await onChanged(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
-    finally { setBusy(false); }
-  };
-
-  return (
-    <div className="u-flex u-flex-col u-gap-3">
-      {initiatives.length === 0 ? <StateCard icon={<FlagIcon />} title={t('noInitiatives')} /> : null}
-      {initiatives.map((i) => (
-        <div key={i.id} className="u-flex u-gap-2 u-items-end u-flex-wrap">
-          <TextField label={t('initiativeTitle')} value={i.title} onChange={(e) => setField(i.id, 'title', e.target.value)} className="u-flex-2" />
-          <TextField label={t('initiativeOwner')} value={i.ownerUserId ?? ''} onChange={(e) => setField(i.id, 'ownerUserId', e.target.value)} className="u-flex-1" />
-          <button type="button" className="ghost btn-sm" aria-label={t('removeInitiative')} onClick={() => remove(i.id)}><TrashIcon size={13} /></button>
-        </div>
-      ))}
-      <div className="action-bar u-justify-between">
-        <button type="button" className="ghost btn-sm" onClick={add}><PlusIcon size={13} /> {t('addInitiative')}</button>
-        <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => void save()}>{busy ? t('common:saving') : t('common:save')}</button>
-      </div>
-    </div>
-  );
-}
-
-function AlignmentEditor({ strategy, projects, onChanged, onError, t }: { strategy: Strategy; projects: ProjectRef[]; onChanged: () => void | Promise<void>; onError: (m: string) => void; t: TFn }): JSX.Element {
-  const [links, setLinks] = useState<StrategyLink[]>(() => structuredClone(strategy.links));
-  const [projectId, setProjectId] = useState('');
-  const [busy, setBusy] = useState(false);
-
-  const linkedProjectIds = new Set(links.filter((l) => l.kind === 'project').map((l) => (l as { projectId: string }).projectId));
-  const addable = projects.filter((p) => !linkedProjectIds.has(p.id));
-
-  const addProject = (): void => { if (projectId) { setLinks((p) => [...p, { kind: 'project', projectId }]); setProjectId(''); } };
-  const removeLink = (idx: number): void => setLinks((p) => p.filter((_, i) => i !== idx));
-
-  const save = async (): Promise<void> => {
-    setBusy(true);
-    try { await replaceLinks(strategy.id, links); await onChanged(); }
-    catch (e) { onError(e instanceof Error ? e.message : t('saveFailed')); }
-    finally { setBusy(false); }
-  };
-
-  const proj = (id: string): ProjectRef | undefined => projects.find((p) => p.id === id);
-
-  return (
-    <div className="u-flex u-flex-col u-gap-3">
-      <p className="muted u-fs-13">{t('alignmentLede')}</p>
-      {links.length === 0 ? <StateCard icon={<FlagIcon />} title={t('noLinks')} /> : (
-        <ul className="u-flex u-flex-col u-gap-2 u-list-none u-p-0">
-          {links.map((l, idx) => {
-            const p = l.kind === 'project' ? proj(l.projectId) : undefined;
-            const label = l.kind === 'project' ? (p?.name ?? l.projectId) : l.kind === 'priority-idea' ? `${l.listId} · ${l.cardId}` : l.kind === 'priority-list' ? l.listId : l.kind === 'advisory-board' ? l.boardId : l.documentId;
-            return (
-              <li key={`${l.kind}-${idx}`} className="u-flex u-items-center u-justify-between u-gap-2 surface-card u-py-2">
-                <span className="u-flex u-items-center u-gap-2 u-flex-wrap">
-                  <LinkIcon size={13} />
-                  <span className="chip chip--accent">{t(`linkKind_${l.kind}`)}</span>
-                  <span>{label}</span>
-                  {p?.status ? <span className="chip chip--muted u-fs-11">{p.status}</span> : null}
-                  {p?.health ? <span className={`chip u-fs-11 ${PROJECT_HEALTH_CHIP[p.health] ?? 'chip--muted'}`}>{p.health}</span> : null}
-                </span>
-                <button type="button" className="ghost btn-sm" aria-label={t('removeLink')} onClick={() => removeLink(idx)}><TrashIcon size={13} /></button>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      <div className="u-flex u-gap-2 u-items-end u-flex-wrap">
-        <SelectField label={t('linkProject')} value={projectId} onChange={(e) => setProjectId(e.target.value)} className="u-flex-1">
-          <option value="">{addable.length ? t('selectProject') : t('noMoreProjects')}</option>
-          {addable.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-        </SelectField>
-        <button type="button" className="ghost btn-sm" disabled={!projectId} onClick={addProject}><PlusIcon size={13} /> {t('addLink')}</button>
-      </div>
-      <div className="action-bar u-justify-end">
-        <button type="button" className="btn-primary btn-sm" disabled={busy} onClick={() => void save()}>{busy ? t('common:saving') : t('saveAlignment')}</button>
-      </div>
-    </div>
   );
 }

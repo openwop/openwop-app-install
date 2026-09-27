@@ -38,7 +38,7 @@ beforeAll(async () => {
     enableConsoleTracer: false,
   });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
 });
 
@@ -97,7 +97,7 @@ describe('user-authored agents — POST /v1/host/openwop-app/agents', () => {
     // packName carries the synthetic `user:<tenant>` prefix per phase E1.
     expect(r.body.packName).toMatch(/^user:/);
     // agentId shape: `user.<tenant>.<persona-slug>`.
-    expect(r.body.agentId).toMatch(/^user\..+\.test-reviewer$/);
+    expect(r.body.agentId).toMatch(/^user\.test-reviewer$/);
   });
 
   it('rejects missing persona (400)', async () => {
@@ -343,14 +343,14 @@ describe('legacy `_anon` tenant migration — loadUserAgentsIntoRegistry', () =>
 
       // Durable rewrite: tenant moves, the immutable agentId keeps its
       // legacy `user._anon.` prefix.
-      const migrated = await storage.getUserAgent('user._anon.legacy-probe');
+      const migrated = await storage.getUserAgent('default', 'user._anon.legacy-probe');
       expect(migrated?.tenantId).toBe('default');
       expect((await storage.listUserAgents('default')).some((r) => r.agentId === 'user._anon.legacy-probe')).toBe(true);
       expect((await storage.listUserAgents('_anon')).length).toBe(0);
 
       // Second boot: nothing left to migrate, registration still succeeds.
       await loadUserAgentsIntoRegistry(storage);
-      expect((await storage.getUserAgent('user._anon.legacy-probe'))?.tenantId).toBe('default');
+      expect((await storage.getUserAgent('default', 'user._anon.legacy-probe'))?.tenantId).toBe('default');
     } finally {
       await storage.close();
     }

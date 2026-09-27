@@ -36,8 +36,8 @@
       ],
       "memoryShape": {
         "scratchpad": true,
-        "conversation": true,
-        "longTerm": true
+        "conversation": false,
+        "longTerm": false
       },
       "handoff": {
         "taskSchemaRef": "schemas/support-resolver.task.schema.json",

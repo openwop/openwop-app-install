@@ -1,0 +1,53 @@
+{
+  "name": "feature.users.nodes",
+  "version": "1.0.1",
+  "description": "Users feature node pack (ADR 0617 D2) — the host-account lifecycle over the ctx.features.users surface. deactivate disables THIS workspace's own durable account (ends its live sessions, ADR 0621) and reactivate re-enables one. Both are side-effects gated on the run's acting user holding host:members:manage in the run's tenant — the same predicate the /users admin routes use; a system run (schedule, webhook, host-event-started) fails closed. Ids-only inputs and outputs. The offboarding step people-hr.offboarding's `deprovision-host` composes.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "users",
+    "identity",
+    "offboarding",
+    "lifecycle"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0 <2.0.0"
+  },
+  "nodes": [
+    {
+      "typeId": "feature.users.nodes.deactivate",
+      "version": "1.0.1",
+      "label": "Users: Deactivate Account",
+      "description": "Disables one durable account in the run's tenant over ctx.features.users (status → disabled; its live sessions end on their next request). Requires an acting user holding host:members:manage; refuses the acting user's own row (self_lockout). Side-effecting: a replay/fork is served the recorded outcome, never re-executed. Emits host.users.user.deactivated (reason: workflow) on the transition only, stamped with the run's origin (workflow + chain lineage) so a binding to that event cannot re-trigger the executing workflow or a sibling instance of its chain. The target comes from inputs.userId, else the host.users.user.* event payload that started the run (never a manual run's inputs), else the frozen config.userId.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "configSchemaRef": "schemas/deactivate.config.json",
+      "inputSchemaRef": "schemas/deactivate.input.json",
+      "outputSchemaRef": "schemas/deactivate.output.json"
+    },
+    {
+      "typeId": "feature.users.nodes.reactivate",
+      "version": "1.0.1",
+      "label": "Users: Reactivate Account",
+      "description": "Re-enables one disabled durable account in the run's tenant over ctx.features.users (status → active; old sessions stay dead — the user signs in again). Requires an acting user holding host:members:manage. Side-effecting: a replay/fork is served the recorded outcome. Emits host.users.user.reactivated (reason: workflow) on the transition only.",
+      "category": "integration",
+      "role": "side-effect",
+      "capabilities": [
+        "side-effectful"
+      ],
+      "configSchemaRef": "schemas/reactivate.config.json",
+      "inputSchemaRef": "schemas/reactivate.input.json",
+      "outputSchemaRef": "schemas/reactivate.output.json"
+    }
+  ],
+  "runtime": {
+    "language": "javascript",
+    "format": "esm",
+    "entry": "./index.mjs",
+    "minRuntimeVersion": "node>=20"
+  }
+}

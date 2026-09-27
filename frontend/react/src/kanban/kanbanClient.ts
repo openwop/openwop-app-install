@@ -1,13 +1,14 @@
 /**
  * Kanban host-extension client (RFCS/0086 "named workflow agents" demo).
  *
- *   GET    /v1/host/openwop-app/kanban/boards                  → { boards }
- *   POST   /v1/host/openwop-app/kanban/boards                  → board
- *   GET    /v1/host/openwop-app/kanban/boards/:boardId         → { board, cards }
- *   DELETE /v1/host/openwop-app/kanban/boards/:boardId
- *   POST   /v1/host/openwop-app/kanban/boards/:boardId/cards   → card
- *   PATCH  /v1/host/openwop-app/kanban/cards/:cardId           → { card, triggeredRunId }
- *   DELETE /v1/host/openwop-app/kanban/cards/:cardId
+ *   GET    /host/openwop-app/kanban/boards                  → { boards }
+ *   POST   /host/openwop-app/kanban/boards                  → board
+ *   GET    /host/openwop-app/kanban/boards/:boardId         → { board, cards, workItems }
+ *   POST   /host/openwop-app/kanban/boards/:id/work-items/:id/run → normal run
+ *   DELETE /host/openwop-app/kanban/boards/:boardId
+ *   POST   /host/openwop-app/kanban/boards/:boardId/cards   → card
+ *   PATCH  /host/openwop-app/kanban/cards/:cardId           → { card, triggeredRunId }
+ *   DELETE /host/openwop-app/kanban/cards/:cardId
  *
  * Tenant scoping is the backend's job (board ownership from the caller's
  * principal); the client never sends a tenantId. A `columnId` change on
@@ -23,6 +24,8 @@ export interface KanbanColumn {
   triggerWorkflowId?: string;
   /** ADR 0049 — the board's terminal (Done) lane. A card here is complete. */
   terminal?: boolean;
+  /** KB-R2-5 — soft WIP limit: a visual count/limit signal that NEVER blocks. */
+  wipLimit?: number;
 }
 
 export type KanbanCardSource = 'human' | 'workflow' | 'agent' | 'discord' | 'schedule' | 'api';
@@ -51,7 +54,36 @@ export interface KanbanCard {
   assigneeRole?: string;
   /** ADR 0049 — set when the card first entered a terminal column. */
   completedAt?: string;
+  /** Optional reusable work-item aggregate behind this card. Legacy cards omit it. */
+  workItemId?: string;
   order: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A redacted, board-facing projection of the reusable core WorkItem. It is
+ * deliberately source/canvas neutral: an App Builder plan, a CRM playbook, or
+ * another canvas type can all use the same board interaction and API shape. */
+export interface KanbanWorkItem {
+  workItemId: string;
+  boardId: string;
+  cardId: string;
+  /** Safe board projection: extension-defined ids and references remain in the
+   * authoritative work item, not every board reader's browser. */
+  scope: { kind: string };
+  source: { kind: string };
+  dependencyCount: number;
+  workflowId?: string;
+  state: 'proposed' | 'ready' | 'running' | 'blocked' | 'completed' | 'cancelled';
+  order: number;
+  execution: {
+    mode: 'manual' | 'auto';
+    maxAttempts: number;
+    attempts: number;
+    status: 'idle' | 'starting' | 'running' | 'failed' | 'succeeded';
+    runId?: string;
+    lastError?: string;
+  };
   createdAt: string;
   updatedAt: string;
 }
@@ -70,7 +102,7 @@ export interface KanbanBoard {
   updatedAt: string;
 }
 
-const base = `${config.baseUrl}/v1/host/openwop-app/kanban`;
+const base = `${config.baseUrl}/host/openwop-app/kanban`;
 const jsonHeaders = (): HeadersInit => authedHeaders({ 'content-type': 'application/json' });
 
 export async function listBoards(): Promise<KanbanBoard[]> {
@@ -100,10 +132,22 @@ export async function createBoard(input: {
   return (await res.json()) as KanbanBoard;
 }
 
-export async function getBoard(boardId: string): Promise<{ board: KanbanBoard; cards: KanbanCard[] }> {
+export async function getBoard(boardId: string): Promise<{ board: KanbanBoard; cards: KanbanCard[]; workItems: KanbanWorkItem[] }> {
   const res = await fetch(`${base}/boards/${encodeURIComponent(boardId)}`, fetchOpts({ headers: authedHeaders() }));
   if (!res.ok) throw new Error(`getBoard returned ${res.status}`);
-  return (await res.json()) as { board: KanbanBoard; cards: KanbanCard[] };
+  return (await res.json()) as { board: KanbanBoard; cards: KanbanCard[]; workItems: KanbanWorkItem[] };
+}
+
+/** Start a manually-dispatched reusable WorkItem. The selected workflow remains
+ * a tenant-owned Builder workflow; the backend reserves and delivers it through
+ * the normal run lifecycle instead of creating a Kanban-specific runner. */
+export async function runWorkItem(boardId: string, workItemId: string): Promise<{ workItem: KanbanWorkItem; runId: string }> {
+  const res = await fetch(
+    `${base}/boards/${encodeURIComponent(boardId)}/work-items/${encodeURIComponent(workItemId)}/run`,
+    fetchOpts({ method: 'POST', headers: jsonHeaders() }),
+  );
+  if (!res.ok) throw new Error(`runWorkItem returned ${res.status}`);
+  return (await res.json()) as { workItem: KanbanWorkItem; runId: string };
 }
 
 /** ADR 0025 — the caller's personal "My Board", ensured server-side (idempotent).
@@ -122,6 +166,17 @@ export async function patchBoard(boardId: string, input: { name: string }): Prom
     method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify(input),
   }));
   if (!res.ok) throw new Error(`patchBoard returned ${res.status}`);
+  return (await res.json()) as KanbanBoard;
+}
+
+/** KB-R2-5 — set (1–999) or clear (null) a column's soft WIP limit. The one
+ *  mutable column field, on its own narrow route (the board PATCH still
+ *  rejects column edits). */
+export async function setColumnLimit(boardId: string, columnId: string, wipLimit: number | null): Promise<KanbanBoard> {
+  const res = await fetch(`${base}/boards/${encodeURIComponent(boardId)}/columns/${encodeURIComponent(columnId)}/limit`, fetchOpts({
+    method: 'PATCH', headers: jsonHeaders(), body: JSON.stringify({ wipLimit }),
+  }));
+  if (!res.ok) throw new Error(`setColumnLimit returned ${res.status}`);
   return (await res.json()) as KanbanBoard;
 }
 
@@ -163,6 +218,10 @@ export async function patchCard(
     description?: string;
     workflowId?: string;
     columnId?: string;
+    /** Core relative position. A canvas may use this without owning a second
+     * ordered-list implementation; omit both to append to the lane. */
+    beforeCardId?: string;
+    afterCardId?: string;
     source?: KanbanCardSource;
     sourceLabel?: string;
     priority?: 'low' | 'normal' | 'high';

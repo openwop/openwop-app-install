@@ -13,7 +13,7 @@ describe('reconstructConversation', () => {
   it('folds opened + exchanged + closed turns in turnIndex order', () => {
     const events: RunEvent[] = [
       { type: 'conversation.opened', payload: { conversationId: 'c', initialTurn: turn({ messageId: 'c:0:system', role: 'system', turnIndex: 0, from: 'system' }) } },
-      { type: 'node.message', payload: {} }, // unrelated, ignored
+      { type: 'openwop-app.node.message', payload: {} }, // unrelated, ignored
       { type: 'conversation.exchanged', payload: { conversationId: 'c', turn: turn({ messageId: 'c:1:user', role: 'user', turnIndex: 1, from: 'user', content: 'hi @devon', to: 'a:devon' }) } },
       { type: 'conversation.exchanged', payload: { conversationId: 'c', turn: turn({ messageId: 'c:2:agent', role: 'agent', turnIndex: 2, from: 'a:devon', content: 'Hey!', agent: { agentId: 'a:devon' } }) } },
       { type: 'conversation.closed', payload: { conversationId: 'c', finalTurn: turn({ messageId: 'c:3:system', role: 'system', turnIndex: 3, from: 'system' }) } },

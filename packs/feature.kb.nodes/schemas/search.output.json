@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.kb.nodes/1.2.0/search.output.json",
+  "title": "KbSearchOutput",
+  "type": "object",
+  "required": [
+    "results"
+  ],
+  "properties": {
+    "results": {
+      "type": "array",
+      "description": "Ranked chunk hits \u2014 `{chunkId, documentId, title, text, score, headingPath, contentTrust}`. EMPTY is a legitimate answer (nothing matched); a refusal is a node FAILURE, not an empty list.",
+      "items": {
+        "type": "object",
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/core.openwop.ai/1.1.2/chat-completion.config.json",
+  "$id": "https://packs.openwop.dev/core.openwop.ai/1.4.1/chat-completion.config.json",
   "title": "ChatCompletionConfig",
   "type": "object",
   "required": [
@@ -15,7 +15,7 @@
     "model": {
       "type": "string",
       "minLength": 1,
-      "description": "Provider-specific model id. The pack does NOT validate this — the host's aiProviders surface returns `model_not_supported` if the host can't route."
+      "description": "Provider-specific model id. The pack does NOT validate this \u2014 the host's aiProviders surface returns `model_not_supported` if the host can't route."
     },
     "systemPrompt": {
       "type": "string",
@@ -41,6 +41,10 @@
       },
       "maxItems": 8,
       "description": "Optional stop sequences. Provider-specific limit (Anthropic: 4, OpenAI: 4); hosts MAY truncate."
+    },
+    "modelClass": {
+      "type": "string",
+      "description": "Abstract model tier resolved to a concrete (provider, model) at workflow-registration time by the app-builder post-process, which then deletes the key. Honoured before the node ever sees it. Declared per ADR 0525 (GRD-8)."
     }
   },
   "additionalProperties": false

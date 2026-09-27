@@ -13,6 +13,7 @@
  */
 
 import { createLogger } from '../observability/logger.js';
+import { assertEffectAllowed } from '../host/runEffectContext.js';
 
 const log = createLogger('subRunDispatcher');
 
@@ -32,7 +33,7 @@ const POLL_INTERVAL_MS = 250;
  * literal — there a real service principal MUST be provisioned. A plain
  * `NODE_ENV=production` cookie-per-visitor deploy is NOT bearer-enforcing, so
  * the dev literal survives there (it isn't honored as a wildcard API key in
- * prod regardless — readValidKeys withdraws it — so the round-trip falls
+ * prod regardless — readKeyTenants withdraws it — so the round-trip falls
  * through to an anonymous principal, exactly as before this hardening).
  */
 export function resolveInternalToken(): string {
@@ -48,7 +49,7 @@ export function resolveInternalToken(): string {
   // bearer enforcement) is NOT enforcing auth: there the dev literal is the
   // intended internal round-trip token and throwing would break sub-run
   // dispatch. (`dev-token` isn't honored as a wildcard API key in prod anyway —
-  // readValidKeys withdraws it — so the sub-run falls through to anon.)
+  // readKeyTenants withdraws it — so the sub-run falls through to anon.)
   if (process.env.OPENWOP_AUTH_ENFORCE_BEARER === 'true') {
     throw new Error(
       'sub-run dispatch requires a service credential: set OPENWOP_INTERNAL_TOKEN (or OPENWOP_API_KEYS) — refusing to fall back to a guessable literal under OPENWOP_AUTH_ENFORCE_BEARER',
@@ -95,6 +96,13 @@ interface RunSnapshot {
 }
 
 export async function dispatchSubRun(req: SubRunRequest): Promise<SubRunResult> {
+  // ADR 0533 / `replay.md` §"Side-effect suppression in replay" rule 6 — a
+  // dispatch to a peer is an outbound network call, hence an external side
+  // effect. `OPENWOP_INTERNAL_BASE_URL` makes this genuinely cross-host, and a
+  // replay re-dispatching would start a real second child run. Guarded ONCE for
+  // the whole dispatch (create + status poll + event poll are one logical
+  // effect, so the counter reports one).
+  assertEffectAllowed('dispatch', `sub-run ${req.workflowId}`);
   const baseUrl = process.env.OPENWOP_INTERNAL_BASE_URL ?? `http://localhost:${process.env.PORT ?? 8080}`;
   // Resolve a real service credential (fails closed under enforced auth
   // instead of presenting a guessable literal — see resolveInternalToken).
@@ -157,7 +165,9 @@ export async function dispatchSubRun(req: SubRunRequest): Promise<SubRunResult> 
         if (evRes.ok) {
           const body = (await evRes.json()) as { events: Array<{ type: string; payload: Record<string, unknown> }> };
           const completed = body.events.find((e) => e.type === 'run.completed');
-          const output = completed?.payload?.output ?? null;
+          // `outputs` is the contract key; `output` is what era-2 logs on this host
+          // carry (emitter bug, fixed at the source). Read both, never rewrite.
+          const output = completed?.payload?.outputs ?? completed?.payload?.output ?? null;
           return { status: 'completed', runId, output };
         }
       } catch {

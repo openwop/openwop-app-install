@@ -20,8 +20,18 @@
 export type PersonaKind = 'historical' | 'fictional' | 'original' | 'living';
 
 /** A board's visibility within its workspace (ADR 0040 — server-authoritative).
- *  `private` = only the creator may read/convene; `shared` = any workspace member
- *  with `workspace:read`. (A public capability-token link is a deferred follow-on.) */
+ *  `private` = hidden from the workspace board list; `shared` = listed for any workspace
+ *  member with `workspace:read`. (A public capability-token link is a deferred follow-on.)
+ *
+ *  ADR 0665 D3 — this said "`private` = only the creator may read/convene", which
+ *  `resolveBoardAccess` does not deliver and was never meant to: an org `workspace:write`
+ *  holder has authority over the board SUBJECT regardless of visibility. That is the
+ *  documented cross-feature rule (ADR 0054 D5 / ADR 0045, "membership never grants write"),
+ *  implemented identically by `projectsService.levelFor` — so the docblock was the thing
+ *  that was wrong, not the rule.
+ *
+ *  NOTE: `canRead`'s own "`private` ⇒ only the creator" docblock is CORRECT as scoped to the
+ *  row lane (list/get) and is deliberately unchanged. */
 export type BoardVisibility = 'private' | 'shared';
 
 export type { TurnPolicy } from '../../host/turnPolicy.js';
@@ -53,13 +63,34 @@ export interface AdvisoryBoard {
   moderatorRosterId?: string;
   /** Selected strategy context the advisors receive (ADR 0079 Phase 5). */
   contextRefs?: AdvisoryContextRef[];
+  /** ADR 0277 P2 — the shareable-KB kinds this board shares with its advisors
+   *  (the STORED intent behind the "Shared knowledge" toggles). Previously
+   *  sharedness was DERIVED (all advisors bound), so a cohort change silently
+   *  flipped the toggle off and removed advisors kept their bindings forever.
+   *  This field is the source of truth `updateBoard` reconciles bindings from. */
+  sharedKbKinds?: string[];
   visibility: BoardVisibility;
   /** Likeness governance: the dominant persona kind in the cohort. When `living`,
-   *  `livingPersonaAck` MUST be set before the board can convene. */
+   *  `livingPersonaAck` MUST be set before the board can convene — enforced by
+   *  `assertBoardConvenable` on BOTH convene lanes (ADR 0588 D5). Note this is a
+   *  self-declaration, so EVERY kind now yields a disclaimer (`disclaimerFor` is
+   *  total): a board of living-figure simulations declared `original` used to
+   *  ship with no disclaimer and no acknowledgement at all. */
   personaKind: PersonaKind;
   /** Explicit acknowledgement that simulating a living individual is understood to
-   *  be a non-endorsed simulation (right-of-publicity / defamation guard). */
+   *  be a non-endorsed simulation (right-of-publicity / defamation guard).
+   *
+   *  ADR 0588 D5 — this is a record of a HUMAN decision, so it is ATTRIBUTED. A
+   *  bare `true` with no `livingPersonaAckBy` is a pre-0588 row whose author is
+   *  unknown and is deliberately NOT back-filled: for a seeded board that was
+   *  later adopted, nothing distinguishes "the owner acknowledged" from "the seed
+   *  did", and writing a name onto it would manufacture the fiction this field
+   *  exists to prevent. A record that can be true-by-default is not a record. */
   livingPersonaAck?: boolean;
+  /** The subject who made the acknowledgement. Never inherited across adoption. */
+  livingPersonaAckBy?: string;
+  /** When it was made (ISO-8601). */
+  livingPersonaAckAt?: string;
   /** Turn policy — bounded for cost (ADR 0040 § Open questions: fan-out caps).
    *  The shared `TurnPolicy` primitive (ADR 0054 D6) — same validator + cadence
    *  planner a project's group chat uses. */

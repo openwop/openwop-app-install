@@ -113,19 +113,61 @@ export async function detectAndRecordReplayDivergence(
   replayRunId: string,
   fromSeq: number,
 ): Promise<DivergenceResult> {
-  const source = await reader.listEvents(sourceRunId, { fromSeq });
-  const replay = await reader.listEvents(replayRunId);
+  // The comparison covers the events the replay RE-EXECUTES — `sequence >= fromSeq`
+  // (`replay.md` §Endpoint) — but the storage cursor is EXCLUSIVE (`sequence >
+  // fromSeq`), so the cursor for "at or after fromSeq" is `fromSeq - 1`. Passing
+  // `fromSeq` straight through dropped the event AT the boundary; with 0-based
+  // numbering (RFC 0171 §A.3) that is `run.started` on a full replay, so every
+  // deterministic full replay reported `replay.diverged`.
+  const source = await reader.listEvents(sourceRunId, { fromSeq: fromSeq - 1 });
+  // THE SAME CURSOR ON BOTH SIDES — this line used to read the replay from the
+  // BEGINNING while the source was read from `fromSeq`, and the asymmetry made a
+  // spurious divergence unavoidable on every mid-sequence replay.
+  //
+  // A replay fork's log is `[inherited prefix 0..fromSeq-1] ++ [re-executed tail]`
+  // (§"Replay-from-event-log internals" 3). Reading it from 0 therefore put the
+  // PREFIX's `run.started` at replay index 0 and compared it against the source's
+  // event at `fromSeq` — so the comparison reported `expected node.started@c,
+  // actual run.started` for a run whose nodes are three `core.noop`s and could not
+  // diverge from anything.
+  //
+  // The fix above this one (the duplicate `run.started`, executor.ts) was
+  // necessary but NOT sufficient, and the two are easy to conflate: removing the
+  // duplicate leaves the tail correct, while this read still starts 5 events too
+  // early. Both had to move for a mid-sequence replay to compare like with like.
+  //
+  // Note the comment on the source line: it records fixing exactly this
+  // off-by-one on the SOURCE side, and the replay side was left as it was. A
+  // half-applied fix reads as a considered asymmetry, which is why it survived.
+  const replay = await reader.listEvents(replayRunId, { fromSeq: fromSeq - 1 });
   const result = compareObservableSequences(source, replay);
   if (result.diverged) {
     await appender.append({
       runId: replayRunId,
       type: 'replay.diverged',
       payload: {
-        originalEventId: result.originalEventId ?? null,
-        replayEventId: result.replayEventId ?? null,
-        divergencePoint: result.index ?? null,
-        expected: result.expected ?? null,
-        actual: result.actual ?? null,
+        // `$defs/replayDiverged` requires `sourceRunId` + `atSequence`; this
+        // payload carried NEITHER (REP-3). `sourceRunId` has no envelope carrier
+        // — the envelope's `runId` is the REPLAY run — so the event announced a
+        // divergence without naming what it diverged FROM.
+        sourceRunId,
+        // ADR 0725 — `atSequence` is `integer ≥ 0` and `originalEventId` an
+        // eventId on the def; a `null` under either was a type violation, not
+        // an absence. Absent keys are absent.
+        ...(typeof result.index === 'number' ? { atSequence: result.index } : {}),
+        ...(result.originalEventId !== undefined ? { originalEventId: result.originalEventId } : {}),
+        ...(result.replayEventId !== undefined ? { replayEventId: result.replayEventId } : {}),
+        // `divergencePoint` was REMOVED rather than retained. Canonically it is a
+        // `RunEventType` STRING naming which event-emission diverged (RFC 0027 §F,
+        // e.g. "prompt.composed"); this host emitted a numeric sequence index
+        // under the same name — a semantic AND type collision on a field the
+        // corpus defines, which is worse than omitting it, because a conformant
+        // consumer reading it gets an integer where an event name is specified.
+        // The number it carried is exactly `atSequence`, now emitted correctly.
+        // Safe to drop: nothing reads it (`runs.ts` logs `div.index` directly,
+        // not the payload), and it was never conformant to begin with.
+        ...(result.expected !== undefined ? { expected: result.expected } : {}),
+        ...(result.actual !== undefined ? { actual: result.actual } : {}),
       },
     });
   }

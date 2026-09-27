@@ -24,7 +24,10 @@ function normalizeShape(raw, index) {
   if (Array.isArray(raw.points)) {
     const points = raw.points
       .filter((p) => p && typeof p.x === 'number' && typeof p.y === 'number' && Number.isFinite(p.x) && Number.isFinite(p.y))
-      .slice(0, 200)
+      // ADR 0333 Phase 3: points 200→600 — mirror of validateDrawingDoc MAX_POINTS
+      // + the artifactTypes schema (`maxItems: 600`). A pre-Phase-3 200 here
+      // SILENTLY truncated a schema-legal 201..600-point polyline.
+      .slice(0, 600)
       .map((p) => ({ x: p.x, y: p.y }));
     if (points.length) out.points = points;
   }
@@ -37,7 +40,9 @@ export async function render(ctx) {
 
   const shapesIn = Array.isArray(d.shapes) ? d.shapes : null;
   if (!shapesIn || shapesIn.length === 0) throw fail('`shapes` is required — a non-empty array of typed shapes');
-  if (shapesIn.length > 500) throw fail('a drawing may have at most 500 shapes');
+  // ADR 0333 Phase 3: shapes 500→2000 — mirror of validateDrawingDoc MAX_SHAPES
+  // + the artifactTypes schema (`maxItems: 2000`). Ratchet-up-only (ADR 0333).
+  if (shapesIn.length > 2000) throw fail('a drawing may have at most 2000 shapes');
 
   const payload = { shapes: shapesIn.map(normalizeShape) };
   const title = str(d.title, 200); if (title) payload.title = title;

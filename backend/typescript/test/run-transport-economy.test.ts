@@ -13,7 +13,6 @@ import http from 'node:http';
 import * as zlib from 'node:zlib';
 import { gunzipSync, brotliDecompressSync } from 'node:zlib';
 import { createApp } from '../src/index.js';
-import { getEventLog } from '../src/executor/eventLog.js';
 
 /** Decode a Content-Encoding back to identity bytes (mirrors the encoders). */
 function decode(enc: string, body: Buffer): Buffer {
@@ -29,6 +28,7 @@ function decode(enc: string, body: Buffer): Buffer {
 let server: http.Server;
 let BASE: string;
 const TOKEN = 'dev-token';
+let appStorage: import('../src/storage/storage.js').Storage;
 
 beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
@@ -40,8 +40,9 @@ beforeAll(async () => {
     serviceVersion: '0.0.1',
     enableConsoleTracer: false,
   });
+  appStorage = app.locals.storage as typeof appStorage;
   await new Promise<void>((res) => {
-    server = app.listen(0, () => {
+    server = app.listen(0, '127.0.0.1', () => {
       BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
       res();
     });
@@ -130,8 +131,11 @@ describe('RFC 0115 — conditional GET on /v1/runs/{runId}', () => {
     expect((await rawGet(`/v1/runs/${runId}`)).headers['etag']).toBe(before);
 
     // Advance the run's persisted event log (same storage the handler reads
-    // its sequence from) → the sequence-derived ETag MUST change.
-    await getEventLog().append({ runId, type: 'host.test.tick', payload: { n: 1 } });
+    // its sequence from) → the sequence-derived ETag MUST change. Written to the
+    // STORE directly: the run is terminal, and RFC 0194 closes its log to live
+    // appends (eventLog.ts). What this pins is the handler reading the stored
+    // sequence, not the append path.
+    await appStorage.appendEvent({ eventId: `tick-${runId}`, runId, type: 'host.test.tick', payload: { n: 1 }, timestamp: new Date().toISOString() });
 
     const after = (await rawGet(`/v1/runs/${runId}`)).headers['etag'] as string;
     expect(after).not.toBe(before);

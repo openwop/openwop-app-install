@@ -1,6 +1,6 @@
 /**
  * Compat (self-hosted / OpenAI-compatible) endpoint client — RFC 0108 + ADR 0121.
- * Wraps the host-extension `/v1/host/openwop-app/compat-endpoints` surface (config
+ * Wraps the host-extension `/host/openwop-app/compat-endpoints` surface (config
  * that rides the BYOK/Connections area, NOT a feature-package).
  *
  * The whole surface 404s when the operator opt-in `OPENWOP_COMPAT_PROVIDER_ENABLED`
@@ -36,7 +36,7 @@ export interface CompatCreateInput {
   models?: string[];
 }
 
-const BASE = `${config.baseUrl}/v1/host/openwop-app/compat-endpoints`;
+const BASE = `${config.baseUrl}/host/openwop-app/compat-endpoints`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 /** An error carrying the HTTP status, so callers can branch on 403 (no scope) etc. */

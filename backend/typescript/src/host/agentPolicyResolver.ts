@@ -149,7 +149,7 @@ export function resolveAgentPolicy(args: {
 
   // 4b. Effective level `auto` — the ROSTER autonomy level (`roster.autonomyLevel`,
   //     owned by the Edit-details modal, read by the heartbeat via `autonomyOf`)
-  //     is now the SINGLE autonomy source of truth (ADR 0101). At `auto` the
+  //     is now the SINGLE autonomy source of truth (ADR 0493). At `auto` the
   //     `withinPolicyActions` allowlist is the ONLY gate, keyed on that level —
   //     NOT on the (decoupled, now display-only) `profile.autonomy.specLevel`:
   //       - a NON-EMPTY allowlist RESTRICTS auto: on-list → auto, off-list → review;

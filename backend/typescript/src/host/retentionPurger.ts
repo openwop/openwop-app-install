@@ -16,6 +16,7 @@
 
 import { createLogger } from '../observability/logger.js';
 import type { DataClassification } from './dataClassification.js';
+import { getRetentionHold } from './retentionHold.js';
 
 const log = createLogger('host.retentionPurger');
 
@@ -87,13 +88,27 @@ export interface PurgeResult { feature: string; deleted: number; failed: number;
 /** Fan out a retention purge to every registered feature for one (tenant, classification,
  *  cutoff). Best-effort: a thrown purger is logged + reported `ok:false` (with its error),
  *  never blocks the rest; a purger that completes but could not delete some matched rows is
- *  reported `ok:true` with `failed>0`. Returns per-feature results for the daemon to audit. */
+ *  reported `ok:true` with `failed>0`. Returns per-feature results for the daemon to audit.
+ *
+ *  CONS-4 / WF-CONS-1 — SKIPS entirely for a tenant under LEGAL HOLD. Unlike
+ *  `eraseSubject` this lane is a background TIME sweep with no operator waiting on
+ *  it, so the honest shape is skip-and-COUNT rather than throw (the run-retention
+ *  sweeper made the same call — `skippedHold` is one of its counters, and its
+ *  docblock says why: "a hold that silently disables retention is itself an audit
+ *  finding"). The skip is therefore LOGGED at warn and returns a single
+ *  attributed result, never a bare empty array that would read as "no purgers
+ *  registered". */
 export async function purgeRetained(
   tenantId: string,
   classification: DataClassification,
   cutoffIso: string,
 ): Promise<PurgeResult[]> {
   if (!tenantId) return []; // fail-closed — no ambiguous-tenant sweep
+  const hold = await getRetentionHold(tenantId);
+  if (hold) {
+    log.warn('retention_purge_skipped_legal_hold', { tenantId, classification, reason: hold.reason, since: hold.createdAt });
+    return [{ feature: 'legal-hold', deleted: 0, failed: 0, ok: false, error: `legal_hold:${hold.reason}` }];
+  }
   const results: PurgeResult[] = [];
   for (const p of purgers) {
     try {

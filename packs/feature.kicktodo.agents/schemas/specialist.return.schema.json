@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KickTodo specialist handoff result",
+  "description": "The bounded ADVISORY result a convened specialist returns (ADR 0442 P5) — a proposal for KickBot to relay to the participant. It commits NO domain state; enrolling, plan revisions, and check-ins ride the governed KickTodo surfaces, never a specialist return.",
+  "type": "object",
+  "required": ["summary"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A short plain-language summary of the specialist's advice."
+    },
+    "recommendations": {
+      "type": "array",
+      "description": "Zero or more concrete, proposed next steps (advisory — the participant decides).",
+      "items": { "type": "string" }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "The specialist's confidence in its advice (0-1)."
+    }
+  },
+  "additionalProperties": false
+}

@@ -31,6 +31,53 @@ export interface ConversationTurn {
   turnIndex: number;
 }
 
+/**
+ * ADR 0173 — a non-blocking, host-internal (non-persisted) advisory the
+ * conversation-exchange result may carry when a BYOK chat dispatch crosses its
+ * org's soft-warning threshold. The turn still succeeded; the client surfaces it
+ * without blocking. NOT a wire field — it rides the exchange POST's ack body.
+ */
+export interface ByokBudgetNotice {
+  code: 'byok_budget_warning';
+  usedPct: number;
+  cap: number;
+}
+
+/**
+ * XCH-GRP-3 — the @mentioned agent declared a DEEP investigation, but the room
+ * spent its deep-run budget for the window, so the turn degraded to a normal
+ * reply (no `workflow_run` bubble). Same non-blocking, non-wire posture.
+ */
+export interface DeepRunBudgetNotice {
+  code: 'deep_run_budget_exceeded';
+  limit: number;
+}
+
+export type ExchangeNotice = ByokBudgetNotice | DeepRunBudgetNotice;
+
+/** Result of one `exchange` — carries an optional non-blocking notice (ADR 0173). */
+export interface ExchangeResult {
+  notice?: ExchangeNotice;
+}
+
+/** Narrow the exchange/resolve ack body to a known notice, or undefined.
+ *  Unknown codes are DROPPED (forward-compatible: a newer backend's notice must
+ *  never crash an older client). */
+export function exchangeNoticeOf(body: unknown): ExchangeNotice | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const n = (body as { notice?: unknown }).notice;
+  if (!n || typeof n !== 'object') return undefined;
+  const { code, usedPct, cap, limit } = n as { code?: unknown; usedPct?: unknown; cap?: unknown; limit?: unknown };
+  if (code === 'byok_budget_warning' && typeof usedPct === 'number' && typeof cap === 'number') {
+    return { code, usedPct, cap };
+  }
+  if (code === 'deep_run_budget_exceeded' && typeof limit === 'number') {
+    return { code, limit };
+  }
+  return undefined;
+}
+
+
 /** A run event as surfaced by the run event stream / debug bundle. */
 export interface RunEvent {
   type?: string;
@@ -68,8 +115,8 @@ export async function openConversation(input: {
  *  event on the run's stream. `exchangeKey` (ADR 0067 §Phase 2) is a stable
  *  per-attempt idempotency key: replaying it (double-submit, retry) returns the
  *  already-appended turns instead of duplicating them. */
-export async function exchange(runId: string, nodeId: string, input: { content: unknown; to?: string; exchangeKey?: string; webSearch?: boolean; model?: string; provider?: string; permissionMode?: 'safe' | 'bypass' }): Promise<void> {
-  await resolveByRun(runId, nodeId, {
+export async function exchange(runId: string, nodeId: string, input: { content: unknown; to?: string; exchangeKey?: string; webSearch?: boolean; model?: string; provider?: string; permissionMode?: 'safe' | 'bypass' }): Promise<ExchangeResult> {
+  const res = await resolveByRun(runId, nodeId, {
     operation: 'exchange',
     turn: { content: input.content, ...(input.to ? { to: input.to } : {}) },
     ...(input.exchangeKey ? { exchangeKey: input.exchangeKey } : {}),
@@ -85,6 +132,8 @@ export async function exchange(runId: string, nodeId: string, input: { content: 
     // mode for THIS turn; `bypass` lets the agent act without an approval card.
     ...(input.permissionMode ? { permissionMode: input.permissionMode } : {}),
   });
+  const notice = exchangeNoticeOf(res);
+  return notice ? { notice } : {};
 }
 
 /** Close the conversation (resumes + completes the run). */

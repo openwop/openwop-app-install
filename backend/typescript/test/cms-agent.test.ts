@@ -17,7 +17,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, res); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', res); });
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
 
@@ -30,12 +30,15 @@ describe('feature.cms.agents.localizer', () => {
     expect(agent!.systemPrompt).toContain('Localizer');
   });
 
-  it('is tool-allowlisted to the CMS feature nodes only', async () => {
+  it('is tool-allowlisted to the CMS feature agent tools only (CFP-1)', async () => {
     const agent = await getAgentRegistry().resolve('feature.cms.agents.localizer');
     const allow = (agent!.toolAllowlist ?? []) as string[];
-    expect(allow).toContain('openwop:feature.cms.nodes.get-page');
-    expect(allow).toContain('openwop:feature.cms.nodes.translate-section');
+    // CFP-1: the allowlist moved off the WORKFLOW-node typeIds
+    // (`openwop:feature.cms.nodes.*`, which never resolved at chat dispatch) to
+    // the registered `openwop:cms.*` agent tools over the same surface owner.
+    expect(allow).toContain('openwop:cms.get-page');
+    expect(allow).toContain('openwop:cms.translate-section');
     // No tool outside the CMS feature surface.
-    expect(allow.every((t) => t.startsWith('openwop:feature.cms.nodes.'))).toBe(true);
+    expect(allow.every((t) => t.startsWith('openwop:cms.'))).toBe(true);
   });
 });

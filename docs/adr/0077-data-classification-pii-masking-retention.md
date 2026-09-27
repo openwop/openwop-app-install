@@ -127,3 +127,38 @@ storage for the registry.
 ## RFC verdict
 
 **Host-internal — no new RFC.** Classification, log masking, and retention are entirely host-side; no wire shape, capability, or event changes.
+
+---
+
+## § Correction (2026-09-19, ADR 0733) — clause (b) read wider than it was, and the blind spot was real
+
+The Phase-2 correction above says the log masking is **"fields-only"**, because masking
+the `msg` string "would need value-content regex, **the rejected alternative**". Two
+things about that sentence need fixing, and neither is the `msg` boundary itself, which
+still holds.
+
+**1. It is not what Alternatives rejected.** The rejected entry is *"mask everything by
+regex (no classification)"* — regex **instead of** classification. ADR 0733 adds a
+value-content scan **within** the classification walk, on string leaves the key pass has
+already declined to mask. That is an extension of this ADR's own Decision §2, which
+already contemplated it: *"(b) optional pattern masking (email/phone regex) behind a
+flag"* — accepted here, never implemented. 0733 implements the email half of it.
+
+**2. Reading (b) as a blanket ban left a measured hole.** Because the mask keys on field
+NAMES, an address inside the VALUE of an operational field was never masked. Witnessed
+before 0733 was written: a field named `email` is masked; `error: 'unique violation:
+alice@example.com'` is not, because `looksLikePiiName('error')` is `false`. MEASURED:
+233 files carry `error: <err>.message` across ~530 log payloads.
+
+**3. Two current-state claims in the code were falsified and are corrected in 0733's PR.**
+`observability/logger.ts` and `host/dataClassification.ts` both stated the pass "cannot
+over-mask" operational fields. With the value pass that is no longer strictly true — it
+rewrites email-shaped RUNS inside operational fields, substring-scoped and email-only.
+
+**4. The test that encodes this rule does not notice it changing.**
+`test/pii-log-masking.test.ts` pins the `msg`-vs-fields boundary and stays green either
+way, because it pins `msg`, not fields. A ratchet that cannot observe the invariant it
+was written for is the trap this repo keeps finding; 0733 adds explicit boundary tests
+for the new behaviour rather than relying on that file.
+
+The `msg` boundary, clause (a), and clause (c) are unchanged and still correct.

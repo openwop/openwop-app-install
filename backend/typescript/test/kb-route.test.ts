@@ -23,7 +23,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'kb']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -233,3 +233,42 @@ async function fetchPatch(c: Client, path: string, body: unknown): Promise<Res> 
   const out = res.status === 204 ? undefined : await res.json().catch(() => undefined);
   return { status: res.status, body: out };
 }
+
+// ── DEBT-2 — bounded prefix-scan listings (kbService listByPrefix conversion) ──
+// KB keys are `${tenantId}:${orgId}:${id}`, so collection/document listings now
+// ride an exact storage-level prefix scan of one org's slice instead of a full
+// cross-tenant `list()` + in-memory filter. Pin cross-tenant blindness through
+// the converted reads: a foreign tenant's collections/documents never appear.
+describe('kb — DEBT-2 tenant-bounded listings', () => {
+  const tenantOwner = async (): Promise<{ c: Client; orgId: string; tenantId: string }> => {
+    const c = client();
+    const tenantId = `debt2-kb-${Date.now()}-${n++}`;
+    await signup(c, { tenantId });
+    const org = await c.post('/v1/host/openwop-app/orgs', { name: 'Acme' });
+    expect(org.status).toBe(201);
+    return { c, orgId: org.body.orgId, tenantId };
+  };
+
+  it('collection + document listings are tenant-blind', async () => {
+    const a = await tenantOwner();
+    const b = await tenantOwner();
+    const colA = await a.c.post(u(a.orgId, '/collections'), { name: 'A-only' });
+    expect(colA.status, JSON.stringify(colA.body)).toBe(201);
+    await a.c.post(u(a.orgId, `/collections/${colA.body.collectionId}/documents`), { title: 'A doc', text: 'alpha content only for tenant A' });
+    const colB = await b.c.post(u(b.orgId, '/collections'), { name: 'B-only' });
+    expect(colB.status).toBe(201);
+    // Tenant B lists ONLY its own collection — never tenant A's.
+    const listB = await b.c.get(u(b.orgId, '/collections'));
+    expect(listB.status).toBe(200);
+    const namesB = listB.body.collections.map((c: any) => c.name);
+    expect(namesB).toContain('B-only');
+    expect(namesB).not.toContain('A-only');
+    // Tenant A's document listing holds exactly its own doc.
+    const docsA = await a.c.get(u(a.orgId, `/collections/${colA.body.collectionId}/documents`));
+    expect(docsA.status).toBe(200);
+    expect(docsA.body.documents.map((d: any) => d.title)).toEqual(['A doc']);
+    // Tenant B cannot enumerate tenant A's collection's documents at all (fail-closed).
+    const cross = await b.c.get(u(b.orgId, `/collections/${colA.body.collectionId}/documents`));
+    expect(cross.status).toBe(404);
+  });
+});

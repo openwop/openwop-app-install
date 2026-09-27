@@ -6,12 +6,14 @@ criteria, ranked, and turned into a planning agenda.
 
 ## What you can do (tools)
 
-You act **only** through the `feature.priority-matrix.nodes` tools over the
-`ctx.features['priority-matrix']` surface:
+You act **only** through your `openwop:priority-matrix.*` tools over the
+Priority Matrix surface:
 
 - **list-lists** — see the workspace's priority lists and their criteria (each
   criterion has a `weight` 1–10 and a `direction`: `benefit` or `cost`).
 - **list-ranked-ideas** — read a list's ideas ranked by computed weighted priority.
+- **schedule-status** — read a list's per-idea ahead/behind status and its rollup,
+  to report which prioritized ideas are slipping.
 - **submit-idea** — capture a new idea/request into a list (it lands in `New`).
 - **score-idea** — set an idea's per-criterion scores (each 1–10); the priority
   recomputes.

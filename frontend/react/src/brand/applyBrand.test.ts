@@ -5,9 +5,14 @@
  * and that the build-time singleton merges a runtime override.
  */
 import { afterEach, describe, expect, it } from 'vitest';
-import { applyBrandIdentity, hydrateBrandSingleton, readCachedIdentity, cacheIdentity, BRAND_CACHE_KEY } from './applyBrand.js';
+import { readFileSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { applyBrandIdentity, hydrateBrandSingleton, readCachedIdentity, cacheIdentity, BRAND_CACHE_KEY, GENERATOR_OWNED_TOKENS, splitGeneratorOwnedOverride } from './applyBrand.js';
 import { brand } from './brand.js';
 import { BRAND_DEFAULTS } from './defaults.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 afterEach(() => {
   document.documentElement.removeAttribute('style');
@@ -66,5 +71,40 @@ describe('identity cache', () => {
     cacheIdentity({ productName: 'Acme' });
     expect(readCachedIdentity()).toEqual({ productName: 'Acme' });
     expect(localStorage.getItem(BRAND_CACHE_KEY)).toContain('Acme');
+  });
+});
+
+describe('splitGeneratorOwnedOverride (ADR 0510 §5)', () => {
+  it('keeps category tokens and drops generator-owned tokens, naming them', () => {
+    const { kept, dropped } = splitGeneratorOwnedOverride({
+      light: { '--clay': '#123456', '--cat-ai': '#654321' },
+      dark: { '--paper': '#000', '--cat-data': '#fff' },
+    });
+    expect(kept).toEqual({ light: { '--cat-ai': '#654321' }, dark: { '--cat-data': '#fff' } });
+    expect(dropped).toEqual(['--clay', '--paper']);
+  });
+
+  it('returns undefined kept when everything is generator-owned', () => {
+    const { kept, dropped } = splitGeneratorOwnedOverride({ light: { '--ink': '#000' } });
+    expect(kept).toBeUndefined();
+    expect(dropped).toEqual(['--ink']);
+  });
+
+  it('passes through an absent override untouched', () => {
+    expect(splitGeneratorOwnedOverride(undefined)).toEqual({ kept: undefined, dropped: [] });
+  });
+
+  it('MIRROR CONTRACT: matches the backend GENERATOR_OWNED_TOKENS byte-for-byte', () => {
+    // The backend set is the fail-closed floor (brandService drops these on
+    // save); this mirror is what makes the editor honest about it. Parse the
+    // backend source so drift is a red test, not a silent divergence.
+    const src = readFileSync(
+      join(__dirname, '../../../../backend/typescript/src/features/brand/types.ts'),
+      'utf8',
+    );
+    const body = src.match(/export const GENERATOR_OWNED_TOKENS = \[([\s\S]*?)\] as const;/)?.[1] ?? '';
+    expect(body, 'backend GENERATOR_OWNED_TOKENS not found — the mirror contract moved').not.toBe('');
+    const backendTokens = [...body.matchAll(/'([^']+)'/g)].map((x) => x[1]).sort();
+    expect([...GENERATOR_OWNED_TOKENS].sort()).toEqual(backendTokens);
   });
 });

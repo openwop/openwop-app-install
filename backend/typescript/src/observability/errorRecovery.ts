@@ -47,7 +47,15 @@ export interface ClassifiedError {
    *  carried a `Retry-After` value or a documented backoff. Omitted
    *  when no concrete duration is known. */
   retryAfterMs?: number;
-  /** Short, user-safe sentence. Localizable later; today plain ASCII. */
+  /** Short, user-safe sentence. Localizable later; today plain ASCII.
+   *
+   *  KEEP IT TITLE-LENGTH — ONE sentence. The SPA renders this as the
+   *  ErrorCard's TITLE (`chat/ErrorCard.tsx`: bold, `u-text-danger`), and the
+   *  card's `detail` slot is never populated from the backend, so a
+   *  multi-sentence message renders as a wall of bold red text. The error
+   *  `code` is rendered separately beneath it, so the message does not need to
+   *  restate it. Since ADR 0532 this string is ALSO the RFC 0053 dead-letter
+   *  `reason`, which wants the same thing: one concise, redaction-safe line. */
   userMessage: string;
 }
 
@@ -153,6 +161,28 @@ function classifyAiProviderError(err: AiProviderError): ClassifiedError {
       action: 'wait',
       retryAfterMs: msUntilNextUtcMidnight(),
       userMessage: 'You have hit the free-tier daily limit. It resets at 00:00 UTC, or add your own API key to keep going.',
+    };
+  }
+  if (codeString === 'replay_source_missing') {
+    // ADR 0531 — a replay reached a side effect it must not fire. Same shape as
+    // the three above: a host condition, not a provider one, so it is not in
+    // the `AiProviderErrorCode` union and would otherwise render as the generic
+    // "Something went wrong" default arm.
+    //
+    // This matters more than the usual ErrorCard case because THREE surfaces
+    // read this one string — the SPA's ErrorCard, the run-failure
+    // notification, and (since ADR 0532) the RFC 0053 dead-letter `reason`. A
+    // sink built for inspectability whose reason says "check the logs" is not
+    // inspectable.
+    //
+    // `abort`, not `retry`: retrying a replay reproduces the same refusal. The
+    // fix is to inspect the source run, or to classify the node so the ADR 0341
+    // fast path serves its recorded outcome instead of executing it.
+    return {
+      category: 'config',
+      action: 'abort',
+      userMessage:
+        'This replay stopped rather than repeat a real action the original run already performed.',
     };
   }
   if (codeString === 'managed_unavailable') {

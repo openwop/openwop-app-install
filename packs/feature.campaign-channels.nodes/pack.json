@@ -1,7 +1,7 @@
 {
   "name": "feature.campaign-channels.nodes",
-  "version": "1.0.0",
-  "description": "Campaign Studio channel-generation node pack (ADR 0157 / ADR 0014). One parameterized `generate` node turns a brief's messaging kernel into a channel deliverable (landing page / ad variants / email sequence / creative briefs / social posts) — grounded in the KB (kb.rag citations) + brand voice (ctx.features.brand) via the run-scoped provider — plus a `content.quality.check` node. Drives the five channel child workflows the orchestration (ADR 0158) fans out.",
+  "version": "1.12.0",
+  "description": "Campaign Studio channel-generation node pack. One parameterized `generate` node turns a brief's messaging kernel into a channel deliverable (landing page / ad variants / email sequence / creative briefs / social posts) — grounded in the KB (kb.rag citations) + brand voice (ctx.features.brand) via the run-scoped provider — plus a `content.quality.check` node. Drives the five channel child workflows the orchestration fans out.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "campaign-channels", "generation", "marketing", "grounding"],
@@ -9,18 +9,18 @@
   "nodes": [
     {
       "typeId": "feature.campaign-channels.nodes.generate",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Channel: Generate",
-      "description": "Generates a channel deliverable from a brief's kernel + KB grounding + brand voice. Inputs: { briefId, channel, provider?, model? }. Output: { draft }. channel ∈ {landing_page, ad_variants, email_sequence, creative_briefs, social_posts}.",
+      "description": "Generates a channel deliverable from a brief's kernel + KB grounding (strict grounding floors retrieval at minScore 0.25) + brand voice. The kb.rag contexts are retained for deterministic per-claim verdicts (ADR 0355 decision 2): each cited claim is verified against the retrieved chunks (supported/unsupported/uncited); under groundingPolicy:'strict' any unsupported claim FAILS the node closed (grounding_insufficient). Ad-variant prompts solicit Google/Meta/LinkedIn/TikTok; managed creative-brief creation is idempotent on (campaignBriefId, title) and counts failures into briefCreateErrors. Inputs: { briefId, channel, provider?, model?, refineOp?, priorDraft?, personaId? }. Output: { draft, qualityReport (with claimVerdicts when grounded), complianceReport, grounding, briefCreateErrors? }. channel ∈ {landing_page, ad_variants, email_sequence, creative_briefs, social_posts}.",
       "category": "integration",
       "role": "action",
       "capabilities": []
     },
     {
       "typeId": "feature.campaign-channels.nodes.content-quality-check",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Channel: Content Quality Check",
-      "description": "Scores a generated channel draft (0-100) on citation presence, length vs the channel cap, and kernel echo. Non-blocking — the report flows to the approval gate. Inputs: { draft, channel, maxLength? }. Output: { report }.",
+      "description": "Scores a generated channel draft (0-100) on citation presence, per-field claim verdicts (uncited/unsupported/supported vs the retrieved KB contexts when available, else [src_N]-presence only — ADR 0355 decision 2), near-duplicate variants, A/B pair shape (when attempted), and length vs the channel cap. Non-blocking — the report flows to the approval gate. Inputs: { draft, channel, maxLength? }. Output: { report }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -40,14 +40,14 @@
       "label": "Channel: Publish Email Sequence",
       "description": "Publishes an email_sequence draft as real DRAFT email entities (ADR 0162) via ctx.features.email.createDraftCampaign — one draft template + one draft campaign per email step. Never sends; idempotent on deterministic ids. Inputs: { draft, briefId? | orgId?, stage? }. Output: { campaign }.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     },
     {
       "typeId": "feature.campaign-channels.nodes.publish-ad-variants",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Channel: Publish Ad Copy",
-      "description": "Publishes an ad_variants draft as a DRAFT 'campaign-ad-copy' document (ADR 0166) via ctx.features.documents.createDraftDocument — Markdown, one section per platform with a variant table. A handoff packet (no live ad dispatch — that's RFC-gated). Idempotent. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
+      "description": "Publishes an ad_variants draft. With an adAccountId + a connected ad platform it dispatches a REAL created-PAUSED campaign via ctx.ads (ADR 0167/0223): platform ∈ {meta, google, tiktok, linkedin} (default meta). meta REQUIRES pageId (the Facebook Page behind object_story_spec — fails closed missing_page_id); google REQUIRES landingUrl (finalUrls — missing_landing_url); tiktok REQUIRES identityId (missing_identity_id). Optional mediaAssetId uploads a media-library asset platform-side; mediaKind ∈ {image (default), video} picks the surface — image → Meta image_hash / TikTok image_ids; video (ADR 0411 §P3c) → Meta advideos/video_data / TikTok SINGLE_VIDEO, where dryRun previews the plan but a live video dispatch fails closed video_dispatch_live_pending (live-smoke-pending). dryRun returns the exact payload plan with zero platform calls. No account/connection ⇒ falls back to the DRAFT 'campaign-ad-copy' document handoff (ADR 0166). Idempotent (fork-stable). Inputs: { draft, briefId? | orgId?, adAccountId?, platform?, pageId?, identityId?, mediaAssetId?, mediaKind?, landingUrl?, campaignName?, objective?, dailyBudgetMinor?, dryRun? }. Output: { dispatched } | { preview } | { document }.",
       "category": "integration",
       "role": "action",
       "capabilities": []
@@ -66,6 +66,15 @@
       "version": "1.0.0",
       "label": "Channel: Publish Social Calendar",
       "description": "Publishes a social_posts draft as a DRAFT 'campaign-social-calendar' document (ADR 0166) via ctx.features.documents.createDraftDocument — Markdown, posts grouped by platform with hashtags. A handoff packet (no live social dispatch — RFC-gated). Idempotent. Inputs: { draft, briefId? | orgId? }. Output: { document }.",
+      "category": "integration",
+      "role": "action",
+      "capabilities": []
+    },
+    {
+      "typeId": "feature.campaign-channels.nodes.render-concepts",
+      "version": "1.1.0",
+      "label": "Channel: Render Concept Images",
+      "description": "OPTIONAL rendered-concept leg for a creative_briefs draft (ADR 0229 / campaign gap plan D3) — NOT on the channel child workflow spine (the generate → approve flow is unchanged); an agent/chain-callable verb. Renders up to maxImages (1-3, default 1) concept images, one per brief direction, via the host image seam (ctx.callImageGenerator, the same delegate as core.openwop.ai.image-generate — no pack HTTP). Honest-off host_capability_missing when no image provider is wired; the per-tenant daily image budget (ADR 0115 Phase 5) is enforced inside the seam. Each image is stored as a durable Media-Library asset WITH lineage (generatedBy:'ai', prompt, model) via ctx.features.media; outputs carry the asset REF only \u2014 never a serve token or serve URL, which are auth-exempt byte credentials and this output is recorded in the tenant-readable run log. Resolve a ref to bytes through the media routes, which check who is asking. When briefId resolves a campaign, the generated concepts are registered as the campaign's durable assets (CS-DATA-5, best-effort) via ctx.features['campaign-orchestration'].attachAssets. Inputs: { draft, briefId? | orgId?, maxImages?, provider?, model?, size?, credentialRef?, derivedFromAssetId? }. Output: { concepts: [{ assetId, prompt, format }], count }.",
       "category": "integration",
       "role": "action",
       "capabilities": []

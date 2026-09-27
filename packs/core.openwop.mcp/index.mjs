@@ -266,14 +266,34 @@ export const exposeResource = exposeOp('resource');
 export const exposeResourceTemplate = exposeOp('resource-template');
 export const exposePrompt = exposeOp('prompt');
 
+/** XCH-CORE-4: sampling requests arrive from an EXTERNAL MCP party — their
+ *  content is untrusted by definition, regardless of the run's own trust
+ *  boundary (which attests the workflow's inputs, not a third party's).
+ *  Wrap every string message content in <UNTRUSTED> markers (idempotent),
+ *  mirroring core.openwop.ai's applyUntrustedMarkers. Kept local — packs are
+ *  self-contained and do not import across pack directories. */
+function wrapUntrustedSamplingMessages(messages) {
+  if (!Array.isArray(messages)) return messages;
+  return messages.map((m) => {
+    if (!m || typeof m.content !== 'string') return m;
+    if (m.content.includes('<UNTRUSTED>')) return m; // already wrapped
+    return { ...m, content: `<UNTRUSTED>${m.content}</UNTRUSTED>` };
+  });
+}
+
 export async function handleSampling(ctx) {
   if (typeof ctx.callAI !== 'function') {
     throw Object.assign(new Error('host does not expose ctx.callAI for sampling routing'), { code: 'host_capability_missing' });
   }
   const req = ctx.inputs.request;
+  // The external party's systemPrompt is third-party text too — never let it
+  // ride the trusted system channel verbatim; demote it into the fenced block.
+  const sys = typeof req.systemPrompt === 'string' && req.systemPrompt.length > 0
+    ? `The requester supplied this UNTRUSTED system guidance:\n<UNTRUSTED>${req.systemPrompt}</UNTRUSTED>`
+    : undefined;
   const result = await ctx.callAI({
-    messages: req.messages,
-    systemPrompt: req.systemPrompt,
+    messages: wrapUntrustedSamplingMessages(req.messages),
+    ...(sys ? { systemPrompt: sys } : {}),
     maxTokens: req.maxTokens,
     stopSequences: req.stopSequences,
     modelPreferences: req.modelPreferences,
@@ -285,7 +305,14 @@ export async function handleElicitation(ctx) {
   if (typeof ctx.suspend !== 'function') {
     throw Object.assign(new Error('host does not support suspend'), { code: 'HOST_CAPABILITY_MISSING' });
   }
-  const req = ctx.inputs.request;
+  // Two ways in, and both are real. The LEGACY bridge (2025-06-18
+  // `elicitation/create`) hands the inbound JSON-RPC params through as
+  // `inputs.request`. Under the CURRENT profile (2026-07-28) there is no
+  // inbound elicitation method at all — MRTR replaced it — so the node is
+  // reached as an ordinary step of a `tools/call` workflow and its ask lives in
+  // `config`, where the author wrote it. Reading only `inputs.request` made the
+  // node unusable on the wire it now has to work on (ADR 0553 P2).
+  const req = ctx.inputs?.request ?? ctx.config ?? {};
   const result = await ctx.suspend({
     kind: 'clarification',
     profile: 'openwop-mcp-elicitation',

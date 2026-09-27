@@ -146,12 +146,30 @@ describe('publish-ad-variants — real dispatch branch (ADR 0167) vs document fa
     expect(captured.copy).toMatchObject({ headline: 'Pick faster', ctaText: 'LEARN_MORE' });
   });
 
-  it('routes platform by an explicit allow-set: google→google, tiktok→tiktok, anything-else→meta (never silently wrong)', async () => {
+  it('threads the ADR 0223 creative-affecting inputs (pageId / identityId / mediaAssetId) through to ctx.ads', async () => {
+    let captured: any;
+    const ads = { publishAd: async (a: any) => { captured = a; return { outcome: 'published', platform: 'meta', platformCampaignId: 'c1', platformAdSetId: 's1', platformAdId: 'a1', reviewStatus: 'pending_review', paused: true, reused: false }; } };
+    const out = await publishAd({
+      features: { documents: { createDraftDocument: async () => ({}) }, 'campaign-brief': briefSurface('o1') }, ads,
+      inputs: { draft: adWithMeta, adAccountId: '12345', pageId: 'page-77', identityId: 'ident-9', mediaAssetId: 'masset:1' }, runId: 'r1', nodeId: 'n1',
+    });
+    expect(out.status).toBe('success');
+    expect(captured.pageId).toBe('page-77');
+    expect(captured.identityId).toBe('ident-9');
+    expect(captured.mediaAssetId).toBe('masset:1');
+  });
+
+  it('routes platform by an explicit allow-set: known pass, EMPTY→meta, a non-empty typo FAILS (grade-code AUDIT-10)', async () => {
     const seen: string[] = [];
     const ads = { publishAd: async (a: any) => { seen.push(a.platform); return { outcome: 'published', platform: a.platform, platformCampaignId: 'c', platformAdSetId: 's', platformAdId: 'a', reviewStatus: 'pending_review', paused: true, reused: false }; } };
     const run = (platform: any) => publishAd({ features: { documents: { createDraftDocument: async () => ({}) }, 'campaign-brief': briefSurface('o1') }, ads, inputs: { draft: adWithMeta, adAccountId: '12345', platform }, runId: 'r1', nodeId: 'n1' });
-    await run('google'); await run('tiktok'); await run('TikTok'); await run('bogus'); await run(undefined);
-    expect(seen).toEqual(['google', 'tiktok', 'tiktok', 'meta', 'meta']); // a bad/missing value falls back to meta, never to the wrong platform
+    await run('google'); await run('tiktok'); await run('TikTok'); await run('linkedin'); await run(undefined); await run('');
+    expect(seen).toEqual(['google', 'tiktok', 'tiktok', 'linkedin', 'meta', 'meta']); // known + empty/missing → meta
+    // A NON-EMPTY typo must FAIL (not silently dispatch to meta) — the fix.
+    const bad = await run('bogus');
+    expect(bad.status).toBe('failed');
+    expect(bad.error?.code).toBe('unknown_platform');
+    expect(seen).toHaveLength(6); // the typo never reached the adapter
   });
 
   it('falls back to the document handoff when ctx.ads reports no_connection (honest degradation)', async () => {

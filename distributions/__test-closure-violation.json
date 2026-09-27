@@ -1,0 +1,5 @@
+{
+  "name": "__test-closure-violation",
+  "description": "TEST FIXTURE ONLY (gen-distribution.test.ts): excludes 'commerce' without 'discovery', which hard-depends on it — must FAIL closure validation. Never build this.",
+  "exclude": ["commerce"]
+}

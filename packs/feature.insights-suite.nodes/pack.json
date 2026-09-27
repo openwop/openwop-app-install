@@ -1,7 +1,7 @@
 {
   "name": "feature.insights-suite.nodes",
-  "version": "1.0.0",
-  "description": "Insights & Drafting Agent Suite node pack (ADR 0078) — pure compute building blocks the suite's meta-workflows use. variance-compute (Actual-vs-Plan for store sales/margin/labor/shrink, flags off-plan metrics) and talent-score (9-box performance×potential readiness). No host surface, no external egress — deterministic math, replay-safe.",
+  "version": "1.2.0",
+  "description": "Insights & Drafting Agent Suite node pack — pure compute building blocks the suite's meta-workflows use. variance-compute (Actual-vs-Plan for store sales/margin/labor/shrink, flags off-plan metrics) and talent-score (9-box performance×potential readiness). No host surface, no external egress — deterministic math, replay-safe.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "insights-suite", "variance", "talent", "9-box"],
@@ -9,18 +9,18 @@
   "nodes": [
     {
       "typeId": "feature.insights-suite.nodes.variance-compute",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Variance: Actual vs Plan",
-      "description": "Computes Actual-vs-Plan deltas + percentages for a business unit's sales/margin/labor/shrink and flags metrics beyond a threshold. Pure compute.",
+      "description": "Computes Actual-vs-Plan deltas + percentages for a business unit's sales/margin/labor/shrink and flags metrics beyond a threshold. Accepts explicit actuals/plan metric maps OR a tabular rows set carrying metric/actual/plan columns. FAILS CLOSED with insufficient_data when zero metrics could be evaluated, and again when every metric read has a plan of 0 — an empty or uncomparable variance set is never reported as 'on_plan'. A NULL/blank/boolean cell is an absence, never a zero (ADR 0599 §3 + §Correction 1). Pure compute.",
       "category": "data",
       "role": "pure",
       "capabilities": ["cacheable"]
     },
     {
       "typeId": "feature.insights-suite.nodes.talent-score",
-      "version": "1.0.0",
+      "version": "1.2.0",
       "label": "Talent: 9-box readiness",
-      "description": "Maps a person's performance (1-3) × potential (1-3) to a 9-box cell + a readiness category. Pure compute.",
+      "description": "Maps a person's performance (1-3) × potential (1-3) to a 9-box cell + a readiness category. Ratings come from explicit inputs (clamped into 1-3) or a rows review set matched on subjectId (NOT clamped — the source scale is unknowable to the node). FAILS CLOSED with insufficient_data when either rating is absent, ambiguous_data when the review rows disagree across cycles, and unknown_scale when a row rating falls outside 1-3 — a named person is never placed in a 9-box cell from missing, arbitrary or mis-scaled data (ADR 0599 §3 + §Correction 1/4). Pure compute.",
       "category": "data",
       "role": "pure",
       "capabilities": ["cacheable"]

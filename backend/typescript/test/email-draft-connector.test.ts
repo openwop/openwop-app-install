@@ -23,15 +23,19 @@ function makeCtx(over: Partial<NodeContext>): NodeContext {
 }
 
 describe('ADR 0076 §2 — microsoft-graph provider (draft, never send)', () => {
-  it('is pinned to graph.microsoft.com with Mail.ReadWrite and NO Mail.Send', () => {
+  it('is pinned to graph.microsoft.com with Mail.ReadWrite for drafts + a SEPARATE Mail.Send group (ADR 0193 P2)', () => {
     const g = getProvider('microsoft-graph');
     expect(g).toBeTruthy();
     expect(g?.apiHosts).toContain('graph.microsoft.com');
-    const writeScopes = (g?.scopes.write ?? []).flatMap((s) => s.scopes);
-    expect(writeScopes).toContain('https://graph.microsoft.com/Mail.ReadWrite');
-    // Honesty + safety: drafting is a WRITE scope, but NEVER the send scope.
-    const allScopes = [...(g?.scopes.read ?? []), ...(g?.scopes.write ?? [])].flatMap((s) => s.scopes);
-    expect(allScopes.some((s) => /Mail\.Send/i.test(s))).toBe(false);
+    // Draft scope + send scope are DISTINCT write groups so a user grants send
+    // explicitly ("grant write"); drafting still requests only Mail.ReadWrite.
+    const draftGroup = (g?.scopes.write ?? []).find((s) => s.key === 'mail.readwrite');
+    const sendGroup = (g?.scopes.write ?? []).find((s) => s.key === 'mail.send');
+    expect(draftGroup?.scopes).toEqual(['https://graph.microsoft.com/Mail.ReadWrite']);
+    expect(sendGroup?.scopes).toEqual(['https://graph.microsoft.com/Mail.Send']);
+    // ADR 0193 P2 — the default consent (defaultScopes) is still draft-only:
+    // Mail.Send is offerable, not auto-requested.
+    expect(g?.defaultScopes.some((s) => /Mail\.Send/i.test(s))).toBe(false);
   });
 });
 

@@ -4,6 +4,7 @@
  * kinds, so we expose batch ops instead).
  */
 
+import { Button } from '../../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { useBuilderStore } from '../store/builderStore.js';
 
@@ -23,42 +24,42 @@ export function MultiSelectInspector({ ids }: { ids: string[] }) {
       <div className="builder-inspector-divider" />
       <div className="builder-inspector-section-label">{t('arrange')}</div>
       <div className="form-row builder-inspector-btn-row">
-        <button className="secondary" onClick={() => alignNodes(ids, 'left')}>
+        <Button variant="secondary" onClick={() => alignNodes(ids, 'left')}>
           {t('alignLeft')}
-        </button>
-        <button className="secondary" onClick={() => alignNodes(ids, 'top')}>
+        </Button>
+        <Button variant="secondary" onClick={() => alignNodes(ids, 'top')}>
           {t('alignTop')}
-        </button>
+        </Button>
       </div>
       <div className="form-row builder-inspector-btn-row">
-        <button
-          className="secondary"
+        <Button
+          variant="secondary"
           disabled={ids.length < 3}
           aria-label={t('distributeHorizontally')}
           onClick={() => alignNodes(ids, 'distribute-h')}
         >
           {t('distribute')} ↔
-        </button>
-        <button
-          className="secondary"
+        </Button>
+        <Button
+          variant="secondary"
           disabled={ids.length < 3}
           aria-label={t('distributeVertically')}
           onClick={() => alignNodes(ids, 'distribute-v')}
         >
           {t('distribute')} ↕
-        </button>
+        </Button>
       </div>
       <div className="muted builder-inspector-help">
         {t('distributeHelp')}
       </div>
 
       <div className="builder-inspector-divider" />
-      <button className="secondary" onClick={() => cloneNodes(ids)}>
+      <Button variant="secondary" onClick={() => cloneNodes(ids)}>
         {t('duplicateAll', { count: ids.length })}
-      </button>
-      <button className="secondary u-mt-2" onClick={deleteAll}>
+      </Button>
+      <Button variant="secondary" className="u-mt-2" onClick={deleteAll}>
         {t('deleteAll', { count: ids.length })}
-      </button>
+      </Button>
     </aside>
   );
 }

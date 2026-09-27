@@ -1,3 +1,4 @@
+import { Button } from '../ui/Button.js';
 import { useId, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { resolveByRun } from '../client/interruptsClient.js';
@@ -50,11 +51,11 @@ export function RefinementForm({ runId, nodeId, data, onResolved }: Props) {
       <h2 id={headingId}>{t('refinementRequested')}</h2>
       <p className="muted">{t('refinementHelp')}</p>
       <TextareaField label={t('draftLabel')} ref={draftRef} rows={8} value={draft} onChange={(e) => setDraft(e.target.value)} spellCheck={false} />
-      {error && <div className="alert error">{error}</div>}
+      {error && <div role="alert" className="alert error">{error}</div>}
       <div className="button-row">
-        <button onClick={submit} disabled={submitting}>
+        <Button variant="primary" onClick={submit} disabled={submitting}>
           {submitting ? t('submitting') : t('submitRefinement')}
-        </button>
+        </Button>
       </div>
     </div>
   );

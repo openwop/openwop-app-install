@@ -157,3 +157,30 @@ the builtin grant only stops the gate from blocking the platform's own safe tool
       naming no longer over-promises. **Revisit trigger:** a tool-catalog side-effect tag
       (e.g. a future RFC 0069 extension or a host-side classification) — at which point the
       evaluator gates `write`-class tools against `write` only, with no schema change.
+
+## Enforcement-flip playbook (CS-TL-1, conversation-stack audit 2026-07-09)
+
+The gate still ships **shadow-only** (`OPENWOP_AGENT_TOOL_PERMISSIONS_ENABLED`
+default OFF — denies are logged as `agent_tool_permission_denied`, never
+enforced). The flip is **operator-gated on production evidence**, not on more
+code. The playbook:
+
+1. **Deploy current `main`** so the shadow logs include the ADR 0315
+   default-on baseline + ADR 0324 voice-parity traffic (both changed which
+   tools agents actually call).
+2. **Observe ≥7 days** of prod logs:
+   `gcloud logging read 'jsonPayload.msg="agent_tool_permission_denied"' …`
+   — every hit is a WOULD-DENY. Triage each: a legit flow that would break ⇒
+   fix the agentProfile permissions (or the evaluator) BEFORE flipping.
+3. **Flip per-tenant first** (David's tenant), via the incremental env update
+   (never `--set-env-vars`):
+   `gcloud run services update openwop-app-backend --update-env-vars OPENWOP_AGENT_TOOL_PERMISSIONS_ENABLED=true --region us-central1 --project openwop-dev`
+   (the flag is host-global today — the "per-tenant" step is a staging window
+   on the single-tenant-dominant prod, not a per-tenant key).
+4. **Watch one more week** for `agent_tool_permission_denied` transitioning
+   from shadow to enforced (the same log line now implies a blocked call);
+   rollback = revert the env var (no deploy).
+5. Update this ADR's Status note when enforced-by-default.
+
+Prereq blocker recorded 2026-07-09: the deploy in step 1 needs `gcloud`
+re-auth (operator action).

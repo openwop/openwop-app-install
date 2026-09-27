@@ -44,3 +44,36 @@ describe('AppearancePanel', () => {
     expect(await screen.findByText(/super-admin/i)).toBeTruthy();
   });
 });
+
+describe('AppearancePanel — AA save gate (ADR 0510 §5, DSA-014)', () => {
+  it('refuses to persist a below-AA override, with the refusal reachable and announced', async () => {
+    // --cat-* tokens survive the generator-owned filter but are NOT contrast
+    // pairs, so force a failing pair via a hostile generated seed instead:
+    // a near-invisible accent makes the primary-button pair fail.
+    getAppBrand.mockResolvedValue({
+      id: 'brand:host-app', name: 'App identity',
+      identity: { theme: { accentSeed: 'oklch(99% 0.01 90)' } },
+    });
+    render(<AppearancePanel />);
+    await screen.findByRole('heading', { name: 'Appearance' });
+    const save = screen.getByRole('button', { name: /Save/ });
+    expect((save as HTMLButtonElement).disabled).toBe(false); // reachable, never a dead button
+    fireEvent.click(save);
+    await waitFor(() => expect(putAppBrand).not.toHaveBeenCalled());
+    expect(screen.getAllByText(/WCAG AA/).length).toBeGreaterThan(0); // visible refusal reason
+  });
+
+  it('strips generator-owned tokens from a loaded legacy override and says so', async () => {
+    getAppBrand.mockResolvedValue({
+      id: 'brand:host-app', name: 'App identity',
+      identity: { theme: { accentSeed: 'oklch(58% 0.13 40)', override: { light: { '--clay': '#123456', '--cat-ai': '#654321' } } } },
+    });
+    render(<AppearancePanel />);
+    await screen.findByRole('heading', { name: 'Appearance' });
+    expect(screen.getByText(/--clay/)).toBeTruthy(); // the dropped token is NAMED visibly
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(putAppBrand).toHaveBeenCalledTimes(1));
+    const sent = putAppBrand.mock.calls[0]?.[0] as { identity?: { theme?: { override?: { light?: Record<string, string> } } } };
+    expect(sent.identity?.theme?.override?.light).toEqual({ '--cat-ai': '#654321' }); // generator-owned key never sent
+  });
+});

@@ -23,7 +23,7 @@
 
 import { lazy, Suspense, useCallback, useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { GlobeIcon, WrenchIcon, KeyIcon } from '../../ui/icons/index.js';
+import { GlobeIcon, WrenchIcon, KeyIcon, AlertIcon } from '../../ui/icons/index.js';
 import { CapabilityScopeButton } from '../../conversationTools/CapabilityScopePanel.js';
 import { buildAvailableTools } from '../lib/availableTools.js';
 import type { ModelChoice } from '../ModelSwitcher.js';
@@ -103,10 +103,16 @@ export function useComposerModifiers({ sessionId, supportsWebSearch, supportsToo
         title={bypassEnabled ? t('permissionBypassTitle') : t('permissionSafeTitle')}
         aria-pressed={bypassEnabled}
         aria-label={t('togglePermissionMode')}
-        className="composer-modifier"
+        className={bypassEnabled ? 'composer-modifier is-bypass' : 'composer-modifier'}
       >
-        <KeyIcon size={13} /> {bypassEnabled ? t('permissionBypassLabel') : t('permissionSafeLabel')}
+        {bypassEnabled ? <AlertIcon size={13} /> : <KeyIcon size={13} />} {bypassEnabled ? t('permissionBypassLabel') : t('permissionSafeLabel')}
       </button>
+      {/* ADR 0724 / PMU-1 — the consequence of bypass, INLINE (the tooltip is hover-only,
+          so a keyboard/touch user could enable a security switch without seeing it).
+          `role="status"` announces the change to a screen reader as it happens. */}
+      {bypassEnabled && (
+        <span className="composer-modifier-hint" role="status" data-testid="permission-bypass-hint">{t('permissionBypassHint')}</span>
+      )}
       {/* ADR 0132 — per-conversation tool scope/approvals, moved here from
           the header as a settings affordance beside the tools modifier. */}
       <CapabilityScopeButton sessionId={sessionId} />

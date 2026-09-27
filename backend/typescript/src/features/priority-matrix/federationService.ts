@@ -22,9 +22,10 @@ import { randomUUID } from 'node:crypto';
 import { fetch as undiciFetch } from 'undici';
 import { DurableCollection } from '../../host/hostExtPersistence.js';
 import { OpenwopError } from '../../types.js';
-import { cleanString } from '../../host/boundedStrings.js';
-import { isDeniedWebhookHost, webhookPrivateEgressAllowed, webhookEgressDispatcher } from '../../host/webhookEgressGuard.js';
+import { cleanString, cleanBearerToken } from '../../host/boundedStrings.js';
+import { assertEgressSchemeAllowed, assertEgressUrlAllowed, EgressUrlRejectedError, webhookEgressDispatcher } from '../../host/webhookEgressGuard.js';
 import { setSecret, resolveSecret, removeSecret } from '../../byok/secretResolver.js';
+import { registerCredentialRefConsumer } from '../../host/credentialRefRegistry.js';
 import { coalesce, invalidateWhere } from './federationCache.js';
 import type { PortfolioItem } from './priorityMatrixService.js';
 
@@ -85,11 +86,22 @@ export function validateBaseUrl(raw: unknown): string {
   if (!s) throw new OpenwopError('validation_error', 'Field `baseUrl` is required.', 400, { field: 'baseUrl' });
   let url: URL;
   try { url = new URL(s); } catch { throw new OpenwopError('validation_error', '`baseUrl` must be a valid URL.', 400, { field: 'baseUrl' }); }
-  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
-    throw new OpenwopError('validation_error', '`baseUrl` must be http(s).', 400, { field: 'baseUrl' });
-  }
-  if (!webhookPrivateEgressAllowed() && isDeniedWebhookHost(url.hostname)) {
-    throw new OpenwopError('validation_error', '`baseUrl` host is in a blocked range (loopback / private / link-local). Set OPENWOP_WEBHOOK_ALLOW_PRIVATE for local testing.', 400, { field: 'baseUrl' });
+  // ADR 0607 — the ordered arms are shared. This surface carried the same
+  // pre-ADR-0606 shape as webhooks and A2A push: http(s) family + denied host,
+  // ACCEPTING plaintext `http:`. It is the worst of the three to leave open,
+  // because `rawPeerGet` sends `authorization: Bearer ${token}` — a peer
+  // credential, in the clear, to a tenant-configured host.
+  try {
+    assertEgressUrlAllowed(url.href, { honorDevFlag: true });
+  } catch (e) {
+    if (!(e instanceof EgressUrlRejectedError)) throw e;
+    const message =
+      e.reason === 'denied_host'
+        ? '`baseUrl` host is in a blocked range (loopback / private / link-local). Set OPENWOP_WEBHOOK_ALLOW_PRIVATE for local testing.'
+        : e.reason === 'insecure_scheme'
+          ? '`baseUrl` must use https: (a peer fetch carries a bearer token).'
+          : '`baseUrl` must be http(s).';
+    throw new OpenwopError('validation_error', message, 400, { field: 'baseUrl' });
   }
   return url.origin;
 }
@@ -155,8 +167,14 @@ export async function setPeerCredential(
 ): Promise<void> {
   const peer = await peers.get(`${tenantId}::${peerId}`);
   if (!peer || peer.tenantId !== tenantId) throw new OpenwopError('not_found', 'Peer not found.', 404, { peerId });
-  const value = cleanString(token, 4096);
-  if (!value) throw new OpenwopError('validation_error', 'Field `token` is required.', 400, { field: 'token' });
+  // PMX-1 (ADR 0590) — the bearer is a CREDENTIAL, not free text: it must
+  // NEVER ride the secret-shaped scrub (`cleanString` replaced every ≥40-char
+  // base64url run with `[REDACTED:secret-shaped]`, destroying the token at
+  // save while the PUT returned 204 — the whole ADR 0062 lane was
+  // non-functional for production-shaped tokens). RFC 6750 token68 grammar,
+  // verbatim storage, loud refusal on anything else.
+  const value = cleanBearerToken(token, 4096);
+  if (!value) throw new OpenwopError('validation_error', 'Field `token` must be a valid bearer credential (RFC 6750 token68: letters, digits, `-._~+/` and trailing `=`).', 400, { field: 'token' });
   if (scope === 'user') {
     if (!actingUserId) throw new OpenwopError('validation_error', 'A per-user credential requires an authenticated caller.', 400, {});
     await setSecret(peerUserCredentialRef(peerId, actingUserId), value, { tenantId });
@@ -169,6 +187,17 @@ export async function setPeerCredential(
 }
 
 // ─── peer registry (per-tenant; NON-secret) ────────────────────────────────────
+
+// ADR 0499 — `pm-peer:<id>` is the outbound credential for a federated peer.
+registerCredentialRefConsumer({
+  id: 'priority-matrix:peer',
+  async describe(tenantId, ref) {
+    if (!ref.startsWith('pm-peer:')) return [];
+    const peers = await listPeers(tenantId);
+    const id = ref.slice('pm-peer:'.length);
+    return peers.filter((p) => p.id === id).map((p) => `federated peer "${p.label || p.id}"`);
+  },
+});
 
 export async function listPeers(tenantId: string): Promise<FederatedPeer[]> {
   return (await peers.listByPrefix(`${tenantId}::`))
@@ -185,6 +214,17 @@ export async function addPeer(tenantId: string, createdBy: string, body: Record<
   }
   const peer: FederatedPeer = { id: `peer-${randomUUID().slice(0, 12)}`, tenantId, label, baseUrl, createdBy, createdAt: nowIso() };
   await peers.put(peer);
+  // PMX-D3 (ADR 0590) — the read-then-write cap race: two concurrent adds could
+  // both pass the pre-check and exceed the cap by one, forever. Post-write
+  // re-check, FAIL-CLOSED: any racer that observes an overshoot deletes ITS OWN
+  // row and refuses. (A same-timestamp tie has no happened-before order, so
+  // electing a single deterministic loser can point at an innocent established
+  // row — witnessed while building this guard. Worst case both racers refuse at
+  // the boundary and a retry succeeds; the cap invariant always converges.)
+  if ((await listPeers(tenantId)).length > PEER_CAP) {
+    await peers.delete(`${tenantId}::${peer.id}`);
+    throw new OpenwopError('validation_error', `This workspace already has the maximum ${PEER_CAP} federated peers.`, 400, { cap: PEER_CAP });
+  }
   return peer;
 }
 
@@ -276,7 +316,13 @@ const peerCacheKey = (tenantId: string, peerId: string, topN: number, identity: 
  *  resolved by {@link cachedPeerFetch}, which also owns the cache key). */
 async function rawPeerGet(peer: FederatedPeer, topN: number, token: string | undefined): Promise<PeerFetchResult> {
   try {
+    // A PEER host's extension API (not a link this host emits): the peer may not serve the RFC 0181
+    // canonical root yet, so the call stays on the /v1 twin through the overlap (ADR 0656 class 5).
     const url = `${peer.baseUrl}/v1/host/openwop-app/priority-matrix/portfolio?topN=${encodeURIComponent(String(topN))}`;
+    // ADR 0607 — delivery-time scheme re-check. `peer.baseUrl` rows stored
+    // before the registration arm existed still reach here, and this fetch
+    // carries the bearer token.
+    assertEgressSchemeAllowed(url, { honorDevFlag: true });
     const res = await undiciFetch(url, {
       method: 'GET',
       // `identity` encoding removes the decompression-bomb vector (undici advisory
@@ -354,6 +400,13 @@ export async function buildFederatedPortfolio(
   });
   items.sort((a, b) => b.computedPriority - a.computedPriority);
   return { items: items.slice(0, Math.max(1, topN)), peers: status };
+}
+
+/** PMX-3 (ADR 0590) — the erasure seam's accessor (the `__pmStoresForErasure`
+ *  convention): `FederatedPeer.createdBy` is a user id in the NINTH
+ *  subject-keyed store this feature owns. */
+export function __federationStoreForErasure(): typeof peers {
+  return peers;
 }
 
 /** Test-only: drop all peers. */

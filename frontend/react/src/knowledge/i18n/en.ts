@@ -8,6 +8,9 @@
 export const messages = {
   // SubjectKnowledgePanel — errors / notices
   loadError: 'Failed to load knowledge.',
+  orgsFailed: 'Your workspaces could not be loaded, so this is not an empty list — it is unknown.',
+  orgsFailedInline: 'Pick a workspace once the list loads.',
+  orgsNoneYet: 'No workspaces yet — create one to add a knowledge source.',
   actionError: 'Action failed.',
   sourceCreated: 'Knowledge source created.',
   documentAdded: 'Document added.',
@@ -46,4 +49,12 @@ export const messages = {
   syncedNotice: 'This collection is kept in sync with your {{source}} items. Manage them on that page; documents here are read-only.',
   syncedSource_strategy: 'Strategy',
   'syncedSource_priority-matrix': 'Priority Matrix',
+  deleteDocConfirm: 'Delete this document?',
+  unbindConfirm: 'Unbind this source?',
+  // KB-UX-3 / ADR 0583 — a source that FAULTED is named, never folded into "no matches".
+  retrievePartial: 'Part of this knowledge could not be searched, so this answer is incomplete.',
+  retrievePartialSources: 'Unsearched: {{sources}}',
+  retrieveSource_kb: 'documents',
+  retrieveSource_memory: 'notes',
+  errorAnnounce: 'The knowledge panel reported a problem — the details are on screen.',
 } as const;

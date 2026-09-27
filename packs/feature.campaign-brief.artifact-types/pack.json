@@ -1,0 +1,118 @@
+{
+  "name": "feature.campaign-brief.artifact-types",
+  "version": "1.0.0",
+  "kind": "artifact-type",
+  "description": "Market-intel artifact types for the Campaign Brief pipeline (ADR 0403): citation-carrying VOC evidence, proof-grounded ad angles, org hook-bank entries, and platform targeting packs. Each schema is pinned to its TypeScript SSoT by a parity test.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["artifact-type", "campaign-brief", "market-intel", "voc"],
+  "engines": { "openwop": ">=1.1.0 <2.0.0" },
+  "artifactTypes": [
+    {
+      "artifactTypeId": "campaign-brief.voc-evidence",
+      "title": "VOC Evidence",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["quote", "sourceRef", "theme", "sentiment"],
+        "properties": {
+          "quote": { "type": "string", "minLength": 1, "maxLength": 2000, "description": "Verbatim customer language, original language — never paraphrased or translated." },
+          "sourceRef": {
+            "type": "object",
+            "required": ["documentId", "sourceKind", "locator", "contentHash"],
+            "properties": {
+              "documentId": { "type": "string", "minLength": 1, "maxLength": 500 },
+              "sourceKind": { "enum": ["kb", "notebook", "web", "manual"] },
+              "locator": { "type": "string", "minLength": 1, "maxLength": 300 },
+              "contentHash": { "type": "string", "minLength": 1, "maxLength": 128, "description": "sha256 of the resolved source text at extraction time." }
+            },
+            "additionalProperties": false
+          },
+          "theme": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "sentiment": { "enum": ["pain", "desire", "objection", "praise"] },
+          "personaHint": { "type": "string", "maxLength": 120 }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "campaign-brief.ad-angle",
+      "title": "Ad Angle",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["claim", "positioningLens", "proofRefs", "hookVariants"],
+        "properties": {
+          "claim": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "positioningLens": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "proofRefs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": { "type": "string" },
+            "description": "Stored campaign-brief.voc-evidence ids proving the claim — never empty (the grounding invariant)."
+          },
+          "hookVariants": {
+            "type": "array",
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "required": ["text", "format"],
+              "properties": {
+                "text": { "type": "string", "minLength": 1, "maxLength": 300 },
+                "format": { "type": "string", "maxLength": 60 }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "campaign-brief.hook",
+      "title": "Hook Bank Entry",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["text", "format", "status"],
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 300 },
+          "format": { "type": "string", "maxLength": 60 },
+          "angleId": { "type": "string" },
+          "status": { "enum": ["candidate", "tested", "retired"] },
+          "metricRef": { "type": "string", "maxLength": 200, "description": "Advisory pointer at a campaign-intel performance artifact." }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    },
+    {
+      "artifactTypeId": "campaign-brief.targeting-pack",
+      "title": "Targeting Pack",
+      "schema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "required": ["platform", "audiences", "interests", "keywords", "rationale", "evidenceRefs"],
+        "properties": {
+          "platform": { "enum": ["meta", "google", "linkedin", "tiktok"] },
+          "audiences": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 200 } },
+          "interests": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 200 } },
+          "keywords": { "type": "array", "maxItems": 40, "items": { "type": "string", "maxLength": 200 } },
+          "rationale": { "type": "string", "minLength": 1, "maxLength": 4000 },
+          "evidenceRefs": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 30,
+            "items": { "type": "string" },
+            "description": "Stored campaign-brief.voc-evidence ids the recommendations derive from — never empty."
+          }
+        },
+        "additionalProperties": true
+      },
+      "export": []
+    }
+  ]
+}

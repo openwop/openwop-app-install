@@ -151,6 +151,27 @@ const tenantCachePrefix = (tenantId: string) => `${tenantId}::`;
 const tenantCacheKey = (tenantId: string, ref: string) => `${tenantCachePrefix(tenantId)}${ref}`;
 
 /**
+ * Storage/cache key for the LEGACY flat path (no KMS, no ephemeral). (2026-07
+ * vuln-scan M3) When a caller scope carries a tenantId, the key is tenant-prefixed
+ * (`${tenantId}::${ref}`, matching `tenantCacheKey`'s convention) so two tenants
+ * storing the same ref are ISOLATED — the prior code keyed by bare `ref`, silently
+ * dropping the tenant and letting non-`user:`/`ws:` tenants read each other's secrets.
+ * A SCOPELESS call (host-global refs — `loadSecretsFromEnv`/`sealHostSecret`) keeps
+ * the bare-ref key, so host config stays in the global namespace.
+ */
+const flatKey = (credentialRef: string, scope?: SecretScope): string => {
+  // GRADE-PASS 2026-07-17 (DATA-8): on the UNSCOPED (host-global) path the raw
+  // ref IS the storage key — a crafted ref containing '::' would byte-collide
+  // with another tenant's prefixed key, letting a host-bucket caller reach a
+  // tenant's flat-path secrets. No legitimate host ref contains '::' (the host
+  // listing filter has always excluded them), so refuse outright.
+  if (!scope?.tenantId && credentialRef.includes('::')) {
+    throw new Error(`credentialRef must not contain '::' (reserved tenant-prefix separator): ${credentialRef}`);
+  }
+  return scope?.tenantId ? `${scope.tenantId}::${credentialRef}` : credentialRef;
+};
+
+/**
  * Wire the resolver to the storage backend + master-key location.
  * Called once at boot from index.ts.
  */
@@ -204,21 +225,54 @@ export function openHostSecret(record: EncryptedRecord): string {
 export async function loadSecretsFromEnv(): Promise<number> {
   const raw = process.env.OPENWOP_BOOT_SECRETS ?? process.env.OPENWOP_SAMPLE_SECRETS;
   if (!raw) return 0;
+  // PARSE and WRITE are reported separately, and this is load-bearing.
+  //
+  // One `try` used to wrap both, so ANY `setSecret` throw surfaced as
+  // "OPENWOP_BOOT_SECRETS parse failed" — telling an operator with perfectly valid
+  // JSON that their JSON was broken. The throw that actually fires in practice is
+  // ephemeral mode's `setSecret in ephemeral mode requires scope.tenantId` (these
+  // writes are scopeless by design), so under `OPENWOP_BYOK_EPHEMERAL=true` every
+  // boot secret silently fails and the log points at the one thing that is fine.
+  //
+  // The shared catch also discarded `count`, so a failure on secret 3 of 5
+  // returned 0 and hid the two that DID land — an under-report that reads as
+  // "nothing loaded" while storage says otherwise.
+  let parsed: Record<string, string>;
   try {
-    const parsed = JSON.parse(raw) as Record<string, string>;
-    let count = 0;
-    for (const [ref, value] of Object.entries(parsed)) {
-      await setSecret(ref, value);
-      count++;
-    }
-    log.info('loaded BYOK secrets from env', { count });
-    return count;
+    parsed = JSON.parse(raw) as Record<string, string>;
   } catch (err) {
     log.warn('OPENWOP_BOOT_SECRETS parse failed; secrets disabled', {
       error: err instanceof Error ? err.message : String(err),
     });
     return 0;
   }
+
+  let count = 0;
+  const failed: string[] = [];
+  for (const [ref, value] of Object.entries(parsed)) {
+    try {
+      await setSecret(ref, value);
+      count++;
+    } catch (err) {
+      // Per-secret, so one bad ref cannot mask the rest. The REF is logged, never
+      // the value.
+      failed.push(ref);
+      log.error('OPENWOP_BOOT_SECRETS: could not store secret', {
+        credentialRef: ref,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  if (failed.length > 0) {
+    log.warn('OPENWOP_BOOT_SECRETS: some secrets were NOT stored', {
+      stored: count,
+      failed: failed.length,
+      failedRefs: failed,
+    });
+  } else {
+    log.info('loaded BYOK secrets from env', { count });
+  }
+  return count;
 }
 
 export async function resolveSecret(credentialRef: string, scope?: SecretScope): Promise<string | null> {
@@ -238,17 +292,26 @@ export async function resolveSecret(credentialRef: string, scope?: SecretScope):
     return ephemeralBucket(scope.tenantId).get(credentialRef) ?? null;
   }
 
-  const cached = plaintextCache.get(credentialRef);
+  // (2026-07 vuln-scan M3) The flat path is now keyed by `${tenantId}::${ref}` for a
+  // scoped caller (was: bare `ref`, which leaked secrets across non-user/-ws tenants).
+  // UPGRADE NOTE: a self-host on the local-AES flat posture (no KMS, no ephemeral) with
+  // EXISTING scoped secrets must re-enter them once — an automatic bare-key fallback is
+  // deliberately NOT done, because a bare-keyed row is indistinguishable from a genuine
+  // HOST-GLOBAL secret (loadSecretsFromEnv/sealHostSecret), so a fallback would leak
+  // host-global secrets to a tenant (a worse regression). The reference deploys
+  // (KMS for user:/ws:, ephemeral for anon:, re-seedable demo/conformance) never hit this.
+  const key = flatKey(credentialRef, scope);
+  const cached = plaintextCache.get(key);
   if (cached !== undefined) return cached;
 
   const { storage, masterKey } = requireConfigured();
-  const encryptedJson = await storage.getEncryptedSecret(credentialRef);
+  const encryptedJson = await storage.getEncryptedSecret(key);
   if (!encryptedJson) return null;
 
   try {
     const record = JSON.parse(encryptedJson) as EncryptedRecord;
     const plaintext = decrypt(record, masterKey);
-    plaintextCache.set(credentialRef, plaintext);
+    plaintextCache.set(key, plaintext);
     return plaintext;
   } catch (err) {
     log.error('failed to decrypt BYOK secret', {
@@ -275,7 +338,9 @@ async function resolveTenantSecret(tenantId: string, credentialRef: string): Pro
 
   try {
     const record = JSON.parse(encryptedJson) as KmsEncryptedRecord;
-    const plaintext = await kmsDecrypt(record);
+    // v3 AAD is reconstructed from the row's OWN (tenant, ref) — a storage misroute
+    // that returned another tenant's row fails the GCM auth-tag check (M2).
+    const plaintext = await kmsDecrypt(record, { tenantId, credentialRef });
     tenantPlaintextCache.set(cacheKey, plaintext);
     return plaintext;
   } catch (err) {
@@ -294,7 +359,7 @@ export async function setSecret(credentialRef: string, value: string, scope?: Se
       throw new Error('signed-in tenant cannot set secret: KMS not configured');
     }
     const { storage } = requireConfigured();
-    const record = await kmsEncrypt(value);
+    const record = await kmsEncrypt(value, { tenantId: scope!.tenantId, credentialRef });
     await storage.upsertTenantSecret(
       scope!.tenantId,
       credentialRef,
@@ -317,10 +382,11 @@ export async function setSecret(credentialRef: string, value: string, scope?: Se
     return;
   }
   const { storage, masterKey } = requireConfigured();
+  const key = flatKey(credentialRef, scope);
   const record = encrypt(value, masterKey);
-  await storage.upsertEncryptedSecret(credentialRef, JSON.stringify(record), new Date().toISOString());
-  plaintextCache.set(credentialRef, value);
-  log.info('secret_set', { credentialRef, tier: 'local-aes', actor: scope?.actorId });
+  await storage.upsertEncryptedSecret(key, JSON.stringify(record), new Date().toISOString());
+  plaintextCache.set(key, value);
+  log.info('secret_set', { credentialRef, tenantId: scope?.tenantId, tier: 'local-aes', actor: scope?.actorId });
 }
 
 /** Remove a secret. Called by DELETE /v1/host/openwop-app/byok/secrets/:ref. */
@@ -339,9 +405,10 @@ export async function removeSecret(credentialRef: string, scope?: SecretScope): 
     return;
   }
   const { storage } = requireConfigured();
-  await storage.deleteSecret(credentialRef);
-  plaintextCache.delete(credentialRef);
-  log.info('secret_removed', { credentialRef, tier: 'local-aes', actor: scope?.actorId });
+  const key = flatKey(credentialRef, scope);
+  await storage.deleteSecret(key);
+  plaintextCache.delete(key);
+  log.info('secret_removed', { credentialRef, tenantId: scope?.tenantId, tier: 'local-aes', actor: scope?.actorId });
 }
 
 /** Return all stored credentialRefs for the given scope. NEVER returns values. */
@@ -355,7 +422,16 @@ export async function listSecretRefs(scope?: SecretScope): Promise<readonly stri
     return Array.from(ephemeralBucket(scope.tenantId).keys());
   }
   const { storage } = requireConfigured();
-  return storage.listSecretRefs();
+  const all = await storage.listSecretRefs();
+  // (2026-07 vuln-scan M3) A scoped caller sees ONLY its own tenant-prefixed refs
+  // (stripped back to the bare ref) — never another tenant's ref NAMES. Flat/demo
+  // scale, so an in-memory filter is correct + avoids a storage prefix-scan.
+  if (scope?.tenantId) {
+    const prefix = `${scope.tenantId}::`;
+    return all.filter((k) => k.startsWith(prefix)).map((k) => k.slice(prefix.length));
+  }
+  // Scopeless (host-global/admin) — the un-prefixed refs only.
+  return all.filter((k) => !k.includes('::'));
 }
 
 /**

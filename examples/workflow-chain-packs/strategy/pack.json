@@ -1,0 +1,113 @@
+{
+  "name": "vendor.openwop-app.workflows.strategy",
+  "version": "1.0.4",
+  "kind": "workflow-chain",
+  "description": "Strategy operating-rhythm workflows (RFC 0013, ADR 0231). The KR measurement cadence: a weekly check-in nudge that finds measured key results with no recent confirmed check-in and notifies their owners, a metric-sync pass that refreshes every sourced key result from its configured data owner (CRM deal totals, analytics conversions) through the one governed check-in path, and a board-pack pre-read that drafts an MBR/QBR memo into a board-update Document. All THREE are scheduled via the strategy cadence config (GET/PUT /v1/host/openwop-app/strategy/cadence) — no auto-boot jobs. All writes ride ctx.features.strategy.checkIn: agent writes are structurally proposals; sync writes are confirmed only by a human-configured measure.source (fail-closed).",
+  "author": "openwop-app",
+  "license": "Apache-2.0",
+  "engines": { "openwop": ">=1.0.0" },
+  "keywords": ["Strategy"],
+  "chains": [
+    {
+      "chainId": "strategy.weekly-checkin",
+      "version": "1.1.0",
+      "label": "Strategy: Weekly Check-in Nudge",
+      "description": "Find measured key results with no confirmed check-in inside the staleness window (default 14 days) across active shared strategies, compose a per-owner digest, and deliver it as a notification deep-linking the Strategy page. Read-only over strategy data — no approval gate needed.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [],
+        "properties": {
+          "staleDays": { "type": "number", "default": 14, "description": "The staleness window in days." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "stale", "typeId": "feature.strategy.nodes.list-stale-krs", "name": "Stale key results", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": { "staleDays": "{{params.staleDays}}" } },
+          { "id": "digest", "typeId": "core.ai.chatCompletion", "name": "Compose digest", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "You are a chief of staff running the strategy operating rhythm. From the stale key-result list, write a SHORT check-in nudge: group by strategy, name each stale key result, and ask its owner for a value + one-line note this week. If the list is empty, say the portfolio is fully checked in. Plain text, no markdown headers.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Deliver nudge", "position": { "x": 640, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Strategy: Weekly Check-in Nudge" } }
+        ],
+        "edges": [
+          { "from": "stale", "to": "digest" },
+          { "from": "digest.content", "to": "deliver.message" }
+        ]
+      },
+      "outputs": {
+        "digest": { "type": "string", "description": "The check-in nudge digest." }
+      }
+    },
+    {
+      "chainId": "strategy.board-pack",
+      "version": "1.1.0",
+      "label": "Strategy: Board Pack Pre-read",
+      "description": "Compose an MBR/QBR-shaped pre-read from the live portfolio: health verdicts with their signals (weighted progress, stale key results, pending agent proposals, execution links), synthesized into a board-update Document and delivered as a notification. Reporting as composition — no dashboard, no parallel store (ADR 0233/0082). Insights-suite variance stays chat-drivable rather than statically composed (a chain must not reference a maybe-off feature's nodes).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["orgId"],
+        "properties": {
+          "orgId": { "type": "string", "description": "The organization whose Documents the board-update memo files into." },
+          "audience": { "type": "string", "default": "the executive team", "description": "Who the pre-read addresses." },
+          "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+          "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+        }
+      },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "health", "typeId": "feature.strategy.nodes.get-health", "name": "Portfolio health", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "memo", "typeId": "core.ai.chatCompletion", "name": "Compose pre-read", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "You are a chief of staff writing a board pre-read for {{params.audience}}. From the portfolio health rows and their signals, write a concise MBR/QBR-shaped markdown memo: 1) headline progress (weighted KR progress where measured), 2) strategies at risk or off-track and WHY (use the signals — never invent numbers), 3) stale measurements and pending agent proposals needing decisions, 4) asks. Ground every claim in the provided signals.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "persist", "typeId": "feature.strategy.nodes.create-board-memo", "name": "Persist board-update", "position": { "x": 640, "y": 0 }, "config": { "orgId": "{{params.orgId}}", "title": "Board pre-read" }, "inputs": {} },
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Deliver pre-read", "position": { "x": 960, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Strategy: Board Pack Pre-read" } }
+        ],
+        "edges": [
+          { "from": "health", "to": "memo" },
+          { "from": "memo.content", "to": "persist.markdown" },
+          { "from": "persist", "to": "deliver" },
+          { "from": "memo.content", "to": "deliver.message" }
+        ]
+      },
+      "outputs": {
+        "documentId": { "type": "string", "description": "The persisted board-update Document (when the documents feature is on)." }
+      }
+    },
+    {
+      "chainId": "strategy.metric-sync",
+      "version": "1.1.0",
+      "label": "Strategy: Sync Sourced Metrics",
+      "description": "Refresh every sourced key result from its configured data owner through the governed check-in path (confirmed only by the human-configured measure.source; everything else fail-closed), then summarize the honest synced/skipped matrix as a notification. The run output is the sync-health record.",
+      "parameters": { "type": "object", "additionalProperties": false, "required": [], "properties": {
+        "provider": { "type": "string", "default": "anthropic", "description": "AI provider id for this chain's LLM nodes. Frozen into this chain's AI nodes when the workflow is created (ADR 0498 — a concrete provider is what keeps replay deterministic). Override at instantiation to use a different vendor or your own BYOK provider; whichever you pick, the workspace needs a key for it — the workflow will not fall back to another provider on its own." },
+        "model": { "type": "string", "default": "claude-sonnet-4-6", "description": "Model id for this chain's LLM nodes. Must be advertised by `provider` in the host catalog; override at instantiation." }
+      } },
+      "capabilities": ["side-effectful"],
+      "dag": {
+        "nodes": [
+          { "id": "sync", "typeId": "feature.strategy.nodes.sync-metrics", "name": "Sync sourced KRs", "position": { "x": 0, "y": 0 }, "config": {}, "inputs": {} },
+          { "id": "summary", "typeId": "core.ai.chatCompletion", "name": "Summarize sync", "position": { "x": 320, "y": 0 }, "config": { "systemPrompt": "Summarize this strategy metric sync in 3 lines or fewer: how many key results synced, how many skipped and the dominant skip reasons. Plain text.",
+            "provider": "{{params.provider}}",
+            "model": "{{params.model}}"
+          }, "inputs": {} },
+          { "id": "deliver", "typeId": "feature.notifications.nodes.notify", "name": "Deliver summary", "position": { "x": 640, "y": 0 }, "config": { "audience": "tenant" }, "inputs": { "title": "Strategy: Sync Sourced Metrics" } }
+        ],
+        "edges": [
+          { "from": "sync", "to": "summary" },
+          { "from": "summary.content", "to": "deliver.message" }
+        ]
+      },
+      "outputs": {
+        "synced": { "type": "array", "description": "KRs refreshed this pass." },
+        "skipped": { "type": "array", "description": "KRs skipped, with honest reasons." }
+      }
+    }
+  ]
+}

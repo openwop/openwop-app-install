@@ -37,7 +37,7 @@ beforeAll(async () => {
   delete process.env.OPENWOP_AUTHORIZATION_ENFORCEMENT;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   const def = getToggleDefault('users');
   if (def) await saveConfig({ ...def, status: 'on' }, 'test');
@@ -258,7 +258,7 @@ describe('RBAC Phase 3 — enforcement ON (capability honored)', () => {
   // integrations. Without it, every API-key caller (no accessControl membership)
   // would 403, and enforcement could never be turned on for the demo.
   it('wildcard bearer (operator API key) is full-access on the protocol surface under enforcement', async () => {
-    process.env.OPENWOP_API_KEY = 'test-operator-escape-hatch-key';
+    process.env.OPENWOP_API_KEY = 'test-operator-escape-hatch-key:*'; // ADR 0561 — the escape hatch is the wildcard, now written explicitly
     ENFORCE();
     try {
       const r = await fetch(`${BASE}/v1/runs`, { headers: { authorization: 'Bearer test-operator-escape-hatch-key' } });

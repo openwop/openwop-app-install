@@ -22,7 +22,10 @@ let BASE: string;
 // The host-global seeder steps that are ensured at boot (NOT per-tenant), so they are
 // present from the start — the system home page (cms-homepage) + the public Features page
 // (features-page, #849/#850). Both are marked `hostGlobal:true` in exampleDataSeeders.ts.
-const HOST_GLOBAL = new Set(['cms-homepage', 'features-page']);
+// HOST-GLOBAL seeder steps are ensured at BOOT, so they are already non-empty
+// before any per-tenant seeding runs. `comparison-page` (ADR 0485, #2499) is one
+// and was never added here, which failed this gate on main.
+const HOST_GLOBAL = new Set(['cms-homepage', 'features-page', 'comparison-page', 'marketing-content-pages']);
 
 const TOKEN = 'dev-token';
 async function api<T>(path: string, init?: RequestInit): Promise<{ status: number; body: T }> {
@@ -44,7 +47,7 @@ beforeAll(async () => {
   const app = await createApp({
     port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
   });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -107,9 +110,11 @@ describe('demo-seeder registry', () => {
     const { body } = await api<RunResult>('/v1/host/openwop-app/example-data/clear', { method: 'POST', body: JSON.stringify({}) });
     expect(body.success).toBe(true);
     const status = await api<{ steps: Step[] }>('/v1/host/openwop-app/example-data/status');
-    // Per-tenant seeders clear to zero; the host-global pages (cms-homepage,
-    // features-page) are deployment-wide and never cleared per-tenant.
-    const hostGlobal = new Set(['cms-homepage', 'features-page']);
+    // Per-tenant seeders clear to zero; host-global content is deployment-wide
+    // and never cleared per-tenant. Derived from the ONE `HOST_GLOBAL` set above
+    // plus the legal pages — this used to be a second hand-maintained literal,
+    // and both copies missed `comparison-page` when ADR 0485 added it.
+    const hostGlobal = new Set([...HOST_GLOBAL, 'marketing-legal-pages']);
     expect(status.body.steps.filter((s) => !hostGlobal.has(s.id)).every((s) => s.count === 0)).toBe(true);
   });
 });

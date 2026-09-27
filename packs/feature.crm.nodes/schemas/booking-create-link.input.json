@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.crm.nodes/1.10.0/booking-create-link.input.json",
+  "title": "CrmCreateBookingLinkInput",
+  "description": "Read from the merged `{ ...ctx.config, ...ctx.inputs }` bag (inputs win) — chain-authored config and DAG-forwarded inputs are both legal sources, so nothing is `required` here; the SURFACE refuses a missing key with a typed `validation_error` (a node failure, never success-with-empty).",
+  "type": "object",
+  "properties": {
+    "bookingLinkId": {
+      "type": "string",
+      "description": "Explicit `booking-link:`-prefixed id (ADR 0162). Omitted, the node derives `booking-link:${runId}:${nodeId}` — a PER-RUN dedupe key (a retried node converges), not a cross-run fork guard; the `side-effect` classification is the guard.",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "orgId": {
+      "type": "string",
+      "description": "Owning org."
+    },
+    "title": {
+      "type": "string",
+      "description": "Public title."
+    },
+    "timezone": {
+      "type": "string",
+      "description": "IANA timezone."
+    },
+    "weeklyHours": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "day",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "day": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 6
+          },
+          "start": {
+            "type": "string"
+          },
+          "end": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "durations": {
+      "type": "array",
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "description": "Offered durations in minutes."
+    },
+    "description": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "description": "`draft` | `published`."
+    },
+    "ownerUserId": {
+      "type": "string"
+    },
+    "location": {
+      "type": "string"
+    },
+    "videoLink": {
+      "type": "string"
+    },
+    "bufferBeforeMin": {
+      "type": "number",
+      "description": "Minutes."
+    },
+    "bufferAfterMin": {
+      "type": "number",
+      "description": "Minutes."
+    },
+    "minNoticeMin": {
+      "type": "number",
+      "description": "Minutes."
+    },
+    "maxAdvanceDays": {
+      "type": "number",
+      "description": "Days."
+    },
+    "slug": {
+      "type": "string",
+      "description": "Public slug."
+    }
+  },
+  "additionalProperties": true
+}

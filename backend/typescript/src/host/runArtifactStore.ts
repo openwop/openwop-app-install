@@ -15,7 +15,9 @@
  *      bare serve token).
  *   4. INLINE CONTENT (text/markdown/json) → a run-event artifact, size-capped (~1 MB).
  *
- * Host-internal (a `DurableCollection`); NO normative `artifact.created` run event is emitted.
+ * Host-internal (a `DurableCollection`). This module emits no run event itself; since ADR
+ * 0746 a node that announces an artifact on the wire (`artifact.created`) persists it here
+ * via `persistAnnouncedArtifact`, and `getArtifact` reads it back.
  * Replay-safe: keyed on the DETERMINISTIC `${runId}:${nodeId}` and insert-only via
  * compare-and-swap (first-write-wins) — so retries/re-dispatch never duplicate or re-mint
  * (including the non-deterministic media mint: a bookkeeping row records the minted
@@ -66,6 +68,10 @@ export interface RunArtifactRecord {
    *  `interactive.mermaid`, `code.execution-result`). Surfaced to the workbench,
    *  whose renderer dispatches on it. Set only when the type is host-registered. */
   artifactTypeId?: string;
+  /** ADR 0746 — the wire `artifact.created.artifactType` of an ANNOUNCED artifact
+   *  (`persistAnnouncedArtifact`), registered or not. Absent on rows the executor
+   *  derived from a node output, which are announced nowhere. */
+  announcedType?: string;
   createdBy: string; // the run id (createdBy.kind === 'run')
   createdAt: string;
   /** When set, this row is BOOKKEEPING ONLY (idempotency): the output was resolved to an
@@ -142,7 +148,19 @@ export function detectTypedArtifact(value: unknown, nodeId: string): { artifactT
   // IART-3: validate the payload against the registered schema — a malformed typed payload
   // (e.g. a chart missing `chartType`, a non-string where raw text is required) falls through
   // to the generic content path rather than minting a typed artifact that can't render.
-  if (!validateArtifact(e.artifactTypeId, e.payload).valid) return null;
+  const validation = validateArtifact(e.artifactTypeId, e.payload);
+  if (!validation.valid) {
+    // ADR 0708 D1 — the downgrade is deliberate; its SILENCE was not. This used to be a
+    // bare `return null`, so a typed emission the model believed in became an anonymous
+    // blob with nothing said to the model, the operator, or the logs.
+    //
+    // Two facts made that a defect rather than a preference: the sibling branch below
+    // ALREADY logs (`run_artifact_typed_too_large`) for the same class — a typed
+    // artifact we decline to mint — and `validateArtifact` has ALREADY computed the Ajv
+    // messages this discarded (`host/artifactTypes.ts` returns `errors[]`, capped at 10).
+    log.warn('run_artifact_typed_invalid', { nodeId, artifactTypeId: e.artifactTypeId, errors: validation.errors ?? [] });
+    return null;
+  }
   const derived = deriveArtifact(e.payload, nodeId);
   return { artifactTypeId: e.artifactTypeId, ...derived, ...(typeof e.title === 'string' && e.title.trim() ? { title: e.title.trim() } : {}) };
 }
@@ -272,6 +290,7 @@ async function writeRow(input: PersistRunArtifactInput, row: Partial<RunArtifact
     status: input.role === 'deliverable' ? 'final' : 'in-review',
     content: row.content ?? '',
     ...(row.artifactTypeId ? { artifactTypeId: row.artifactTypeId } : {}),
+    ...(row.announcedType ? { announcedType: row.announcedType } : {}),
     createdBy: input.runId,
     createdAt: input.now,
     ...(row.linkedArtifactId ? { linkedArtifactId: row.linkedArtifactId } : {}),
@@ -396,11 +415,18 @@ export async function persistRunArtifact(input: PersistRunArtifactInput): Promis
     //     document/asset still links; replay-safe (writeRow insert-only).
     const typed = detectTypedArtifact(value, input.nodeId);
     if (typed) {
-      const tContent = typed.content.length > MAX_INLINE_BYTES
-        ? `${typed.content.slice(0, MAX_INLINE_BYTES)}\n\n…[truncated]`
-        : typed.content;
-      if (tContent.length === 0) return null;
-      return await writeRow(input, { artifactKey, content: tContent, kind: typed.kind, format: typed.format, title: typed.title, artifactTypeId: typed.artifactTypeId });
+      // ADR 0333 grade pass DATA-D2: a typed artifact is STRUCTURED (schema-
+      // validated JSON) — mid-string truncation would corrupt it into
+      // unparseable JSON that then fails silently in the canvas seeder. Never
+      // truncate typed artifacts; reject-with-log if one exceeds the inline
+      // ceiling (the schema caps already bound legitimate payloads).
+      const typedBytes = Buffer.byteLength(typed.content, 'utf8');
+      if (typedBytes > MAX_INLINE_BYTES) {
+        log.warn('run_artifact_typed_too_large', { runId: input.runId, nodeId: input.nodeId, artifactTypeId: typed.artifactTypeId, bytes: typedBytes });
+        return null;
+      }
+      if (typed.content.length === 0) return null;
+      return await writeRow(input, { artifactKey, content: typed.content, kind: typed.kind, format: typed.format, title: typed.title, artifactTypeId: typed.artifactTypeId });
     }
 
     // 4) INLINE CONTENT (text/markdown/json), size-capped.
@@ -414,6 +440,54 @@ export async function persistRunArtifact(input: PersistRunArtifactInput): Promis
     log.warn('run_artifact_persist_failed', { runId: input.runId, nodeId: input.nodeId, error: err instanceof Error ? err.message : String(err) });
     return null;
   }
+}
+
+/**
+ * ADR 0746 (RFC 0205) — persist an artifact a node ANNOUNCES on the wire via
+ * `artifact.created`, so `getArtifact` can read it back. Same insert-only row and
+ * same writer as {@link persistRunArtifact} (the executor's later terminal persist
+ * for the same `${runId}:${nodeId}` loses the CAS to this row), so the artifact
+ * shares the run's delete / retention cascade instead of needing a store of its own.
+ *
+ * `announcedType` records the wire `artifactType` even when it is NOT
+ * host-registered; `artifactTypeId` is never set here (ADR 0755 WIT-ART-1). Returns
+ * the wire artifactId (`run-event:<key>`) — the same id the Library projects.
+ */
+export async function persistAnnouncedArtifact(input: {
+  tenantId: string;
+  runId: string;
+  nodeId: string;
+  artifactType: string;
+  payload: unknown;
+  title?: string;
+  now: string;
+}): Promise<{ artifactId: string; revisionId: string }> {
+  const artifactKey = runArtifactKey(input.runId, input.nodeId);
+  const content = JSON.stringify(input.payload ?? null, null, 2);
+  // A BYTE ceiling measured in bytes (ADR 0755, WIT-ART-10): `.length` counts
+  // UTF-16 code units, so a multi-byte payload passed a check it exceeded.
+  const bytes = Buffer.byteLength(content, 'utf8');
+  if (bytes > MAX_INLINE_BYTES) {
+    throw new Error(`announced artifact payload is ${bytes} bytes; the inline ceiling is ${MAX_INLINE_BYTES}`);
+  }
+  return writeRow(
+    { tenantId: input.tenantId, runId: input.runId, nodeId: input.nodeId, role: 'deliverable', output: input.payload, now: input.now },
+    {
+      artifactKey,
+      content,
+      kind: 'data',
+      format: 'application/json',
+      title: input.title?.trim() || `${input.nodeId} output`,
+      // ADR 0755 (WIT-ART-1) — `announcedType` ONLY, never `artifactTypeId`. The
+      // one caller is the conformance-only `conformance.artifact.emit`, which the
+      // reference deploy DOES register (DEPLOY.md opts in) and which nothing stops
+      // a tenant workflow from naming: stamping a host-registered type here let an
+      // arbitrary `config.data` appear in the Library as a typed deliverable of
+      // that type, with no validation against its schema. `getArtifact` reads
+      // `announcedType` first, so the wire answer is unchanged.
+      announcedType: input.artifactType,
+    },
+  );
 }
 
 /** Read one run-artifact by its key. */

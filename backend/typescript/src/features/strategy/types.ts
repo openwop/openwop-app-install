@@ -1,4 +1,17 @@
 /**
+ * The `strategy` feature-toggle id, EXPORTED (ADR 0676 D3).
+ *
+ * It was module-local in `routes.ts`, which is why the cadence lane could not gate its
+ * scheduled jobs on it. It matters that this is the exported one: the only other exported
+ * toggle constant in this feature is `STRATEGY_GATE_TOGGLE_ID = 'strategy-approval-gate'`
+ * (`activationApproval.ts`), whose default is `status:'off'` — passing THAT as a job's
+ * `featureId` would make `resolveOne` answer disabled for every tenant and silently stop
+ * every strategy cadence job, with one `log.info` at `scheduleDaemon.ts:120`. Leg (b) of
+ * `strategy-cadence-feature-gate.test.ts` exists to catch exactly that substitution.
+ */
+export const STRATEGY_TOGGLE_ID = 'strategy';
+
+/**
  * Strategy types (ADR 0079). An executive **strategy portfolio**: a declarative
  * planning record (narrative rationale + OKR-compatible objectives/key-results +
  * initiatives + horizon + governance fields) that LINKS existing host entities
@@ -38,12 +51,48 @@ export interface StrategyKeyResult {
   current?: string;
   unit?: string;
   status?: StrategyStatus;
+  /** ADR 0231 — typed measurement (progress derives from confirmed check-ins). */
+  measure?: KrMeasure;
+  /** ADR 0231 — contribution weight in the objective rollup (1–10, default 1). */
+  weight?: number;
+}
+
+/** ADR 0231 §C3 — a standing, human-configured metric source. Setting it on a
+ *  KR is the authorization that lets the sync chain write CONFIRMED check-ins
+ *  for that KR; values are read via EXISTING surfaces only. */
+export type MetricSourceKind = 'crm-deal-total' | 'analytics-conversions' | 'commerce-revenue' | 'bigquery';
+export const METRIC_SOURCE_KINDS: readonly MetricSourceKind[] = ['crm-deal-total', 'analytics-conversions', 'commerce-revenue', 'bigquery'];
+export interface MetricSource {
+  kind: MetricSourceKind;
+  /** The org whose data feeds this KR (the RBAC anchor for the read). */
+  orgId: string;
+  /** Source-specific selector (e.g. a BigQuery SQL string, an analytics event name). */
+  query?: string;
+}
+
+export type KrMeasureKind = 'numeric' | 'percent' | 'currency' | 'boolean';
+export const KR_MEASURE_KINDS: readonly KrMeasureKind[] = ['numeric', 'percent', 'currency', 'boolean'];
+export type KrDirection = 'increase' | 'decrease';
+export const KR_DIRECTIONS: readonly KrDirection[] = ['increase', 'decrease'];
+
+/** ADR 0231 §C1 — typed measurement, ADDITIVE beside the legacy free-text
+ *  `target`/`current` (no migration; unmeasured KRs stay valid). */
+export interface KrMeasure {
+  kind: KrMeasureKind;
+  baseline?: number;
+  target?: number;
+  /** Which way is good. Default 'increase'. */
+  direction?: KrDirection;
+  unit?: string;
+  source?: MetricSource;
 }
 
 export interface StrategyObjective {
   id: string;
   title: string;
   keyResults: StrategyKeyResult[];
+  /** ADR 0231 — contribution weight in the strategy rollup (1–10, default 1). */
+  weight?: number;
 }
 
 export interface StrategyInitiative {
@@ -52,6 +101,14 @@ export interface StrategyInitiative {
   ownerUserId?: string;
   status?: StrategyStatus;
   linkedProjectIds?: string[];
+  /** ADR 0234 §C6 — timeline plotting (strict YYYY-MM-DD). */
+  startDate?: string;
+  endDate?: string;
+  /** Same-strategy initiative ids this one depends on (validated at write). */
+  dependsOn?: string[];
+  /** ADR 0235 §D2 — the investment/capacity FLOOR (plan-vs-actual sums roll
+   *  into health signals at read; no cost plans / rate cards / FX — non-goals). */
+  plan?: InitiativePlan;
 }
 
 /**
@@ -68,7 +125,16 @@ export type StrategyLink =
   | { kind: 'document'; documentId: string };
 
 export const STRATEGY_LINK_KINDS = ['project', 'priority-list', 'priority-idea', 'advisory-board', 'document'] as const;
-export type StrategyLinkKind = (typeof STRATEGY_LINK_KINDS)[number];
+
+/** ADR 0235 §D2 — a deliberately-modest plan block. Mixed-currency portfolios
+ *  sum numerically with the first currency labeled (a floor, documented). */
+export interface InitiativePlan {
+  budgetAmount?: number;
+  budgetCurrency?: string;
+  capacityPoints?: number;
+  actualAmount?: number;
+  actualPoints?: number;
+}
 
 export interface StrategyPeriod {
   label: string;
@@ -76,7 +142,10 @@ export interface StrategyPeriod {
   endDate?: string;
 }
 
-/** The executive planning record (DurableCollection, keyed `${tenantId}::${id}`). */
+/** The executive planning record (DurableCollection, keyed `${tenantId}::${id}`).
+ *  ADR 0235 §D3 — `parentStrategyId` is a ONE-level grouping lens (a parent may
+ *  not itself have a parent; same-org; validated at write; read-time grouping
+ *  drops silently to ungrouped when the parent is archived/unreadable). */
 export interface Strategy {
   id: string;
   tenantId: string;
@@ -97,6 +166,8 @@ export interface Strategy {
   /** Manual health override (ADR 0080). When set it wins over the computed
    *  rollup; cleared (undefined) ⇒ the verdict reverts to "Auto" (derived). */
   healthOverride?: StrategyHealthState;
+  /** ADR 0235 §D3 — the one-level grouping lens. */
+  parentStrategyId?: string;
   objectives: StrategyObjective[];
   initiatives: StrategyInitiative[];
   links: StrategyLink[];
@@ -141,6 +212,29 @@ export interface StrategyHealthSignals {
   objectiveCount: number;
   /** Objectives are declared but nothing executable is linked (no projects/priorities). */
   hasExecution: boolean;
+  /** ADR 0231 — 0..1 weighted KR progress from confirmed check-ins; absent when unmeasured. */
+  progress?: number;
+  /** ADR 0231 — measured KRs with no confirmed check-in inside the staleness window. */
+  staleKrCount?: number;
+  measuredKrCount?: number;
+  /** ADR 0231 — agent-proposed check-ins awaiting a human decision. */
+  proposedCheckInCount?: number;
+  /** ADR 0235 §D2 — read-time plan-vs-actual sums over initiatives with a plan
+   *  block (absent when none carry one). */
+  budgetPlanned?: number;
+  budgetActual?: number;
+  budgetCurrency?: string;
+  /**
+   * R2 STR2-M1 — the initiatives carrying a plan disagree on currency, so `budgetPlanned`
+   * / `budgetActual` / `budgetCurrency` are WITHHELD: money in different currencies is
+   * not additive, and the old first-wins label made the sum indistinguishable from a real
+   * single-currency total on a row that reaches both the console and the analyst agent.
+   * `budgetCurrencies` names which ones, so the reader knows what to ask.
+   */
+  budgetMixedCurrency?: boolean;
+  budgetCurrencies?: string[];
+  capacityPlanned?: number;
+  capacityActual?: number;
 }
 
 export interface StrategyHealth {
@@ -178,11 +272,11 @@ export interface StrategyHealthRow {
   title: string;
   health: StrategyHealthState;
   signals?: StrategyHealthSignals;
+  /** ADR 0235 §D3 — carried verbatim for FE grouping (ungrouped when the
+   *  parent is archived/unreadable — the caller's concern, not stored). */
+  parentStrategyId?: string;
 }
 
-export interface StrategyContextPacket {
-  strategies: StrategyContextEntry[];
-}
 
 /** A compact strategy reference projected into a consumer surface (chips). */
 export interface StrategyRef {

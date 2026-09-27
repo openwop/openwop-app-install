@@ -28,7 +28,7 @@ beforeAll(async () => {
   process.env.OPENWOP_STORAGE_DSN = 'memory://';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
   await __clearToggleStore();
-  server = app.listen(0);
+  server = app.listen(0, '127.0.0.1');
 });
 afterAll(async () => {
   await new Promise<void>((res) => server.close(() => res()));

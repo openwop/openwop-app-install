@@ -27,23 +27,25 @@ describe('Storage.appendEventsBatch (sqlite)', () => {
       ev('a3', 'r1', 3),
       ev('b2', 'r2', 2),
     ]);
+    // RFC 0171 §A.3: the first event of a run is sequence 0 (this file pinned the
+    // host's old 1-based numbering, which both schemas have always contradicted).
     expect(out.map((e) => [e.runId, e.sequence])).toEqual([
+      ['r1', 0],
+      ['r2', 0],
       ['r1', 1],
-      ['r2', 1],
       ['r1', 2],
-      ['r1', 3],
-      ['r2', 2],
+      ['r2', 1],
     ]);
     // persisted + ordered per run
-    expect((await storage.listEvents('r1')).map((e) => e.sequence)).toEqual([1, 2, 3]);
-    expect((await storage.listEvents('r2')).map((e) => e.sequence)).toEqual([1, 2]);
+    expect((await storage.listEvents('r1')).map((e) => e.sequence)).toEqual([0, 1, 2]);
+    expect((await storage.listEvents('r2')).map((e) => e.sequence)).toEqual([0, 1]);
   });
 
   it('continues from the run current max (matches appendEvent)', async () => {
     const storage = openSqliteStorage(':memory:');
-    await storage.appendEvent(ev('x1', 'r1', 1)); // seq 1 via the single path
+    await storage.appendEvent(ev('x1', 'r1', 1)); // seq 0 via the single path
     const out = await storage.appendEventsBatch([ev('x2', 'r1', 2), ev('x3', 'r1', 3)]);
-    expect(out.map((e) => e.sequence)).toEqual([2, 3]);
+    expect(out.map((e) => e.sequence)).toEqual([1, 2]);
     expect((await storage.listEvents('r1')).map((e) => e.eventId)).toEqual(['x1', 'x2', 'x3']);
   });
 

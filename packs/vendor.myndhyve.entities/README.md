@@ -11,7 +11,7 @@ MyndHyve entities + validation + asset-decision + messaging primitives. 5 nodes.
 | typeId | role | what it does |
 |---|---|---|
 | `core.entities.projectCreate` | side-effect | Create a Project for a given Canvas Type. Idempotency-keyed via `ctx.sideEffects` when available. |
-| `core.validation.crossStageCheck` | gate | Deterministic field comparison across two artifacts. No LLM. Compare modes: equal / gte / lte / exists / count-match. |
+| `core.validation.crossStageCheck` | pure | Deterministic field comparison across two artifacts. No LLM. Compare modes: equal / gte / lte / exists / count-match. Advisory — NOT a fail-closed gate (see below). |
 | `core.workflow.assetDecisionGate` | gate | HITL — pick a workspace asset (brand / persona / KB) or request a new one. Auto-resolves when the inheritance variable is already set. |
 | `messaging.chatSend` | side-effect | Send a message to an explicitly targeted connector + conversation. |
 | `messaging.chatReply` | side-effect | Reply to the message that triggered the run (reads `_ingressEnvelope` from run variables). |
@@ -59,7 +59,9 @@ inputs:
   targetArtifact: { ... Plan ... }
 ```
 
-`failOnMismatch:false` returns `success:true` even when warnings exist (warnings-only mode). `failOnMismatch:true` flips `success` to `false` on any mismatch — workflow authors branch on `.success` to halt the run.
+`crossStageCheck` is a **pure advisory validator** (`role:"pure"`), NOT a fail-closed gate — the true gate nodes in this corpus (`core.chat.approvalGate`, `core.ai.awaitEnvelope`, …) pause a run for a human/async decision; this one is a synchronous deterministic comparison.
+
+`failOnMismatch:false` (the default) returns `success:true` even when warnings exist (warnings-only mode — validate-and-proceed). **This means an author who wires `{truthy success}` expecting the check to BLOCK on a mismatch gets a silent pass.** To hard-block a run, set `failOnMismatch:true` (then `success` flips to `false` on any mismatch) and branch on `{falsy success}`. Either way, `.warnings` carries the per-check detail.
 
 ## assetDecisionGate auto-resolution
 

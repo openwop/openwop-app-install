@@ -19,6 +19,8 @@ import { resolveConnectionCredential } from '../features/connections/connections
 import { getProvider } from '../features/connections/providerRegistry.js';
 import { hostMatchesApi, type ConnectionUseProvenance } from './connectionInjection.js';
 import { isDeniedWebhookHost, webhookEgressDispatcher, webhookPrivateEgressAllowed } from './webhookEgressGuard.js';
+import { assertEgressAllowed, evaluateEgress, getEgressRules } from './egressPolicy.js';
+import { assertEffectAllowed } from './runEffectContext.js';
 
 const TIMEOUT_MS = 10_000;
 
@@ -31,6 +33,12 @@ export interface BrokeredEgressDeps {
   actingUserId?: string;
   orgId?: string;
 }
+
+/** The subset the egress SPINE itself reads (`storage`/`runId` feed caller-side
+ *  provenance stamping only) — run-less callers (e.g. the KB external reranker)
+ *  pass just this; adapter callers keep passing their full BrokeredEgressDeps
+ *  (the optional halves let a full-deps literal type-check unchanged). */
+export type BrokeredCallDeps = Pick<BrokeredEgressDeps, 'tenantId' | 'actingUserId' | 'orgId'> & Partial<Pick<BrokeredEgressDeps, 'storage' | 'runId'>>;
 
 export type BrokeredPostOutcome =
   | { outcome: 'no_connection' }
@@ -60,7 +68,7 @@ function authHeader(scheme: AuthScheme, secret: string): string {
  * send isn't recorded as a use.
  */
 export async function brokeredPost(
-  deps: BrokeredEgressDeps,
+  deps: BrokeredCallDeps,
   opts: {
     provider: string;
     /** A fixed URL, or a builder over the resolved secret for providers whose
@@ -82,6 +90,9 @@ export async function brokeredPost(
     extraHeaders?: Record<string, string>;
   },
 ): Promise<BrokeredPostOutcome> {
+  // ADR 0531 — fail closed BEFORE the credential is resolved: a replay must not
+  // even touch the secret, let alone dial.
+  assertEffectAllowed('network-egress', `brokeredPost ${opts.provider}`);
   const resolved = await resolveConnectionCredential({
     tenantId: deps.tenantId,
     provider: opts.provider,
@@ -90,6 +101,8 @@ export async function brokeredPost(
   });
   if (!resolved) return { outcome: 'no_connection' };
   const url = typeof opts.url === 'function' ? opts.url(resolved.secret) : opts.url;
+  // ADR 0187 — enforce the tenant egress firewall (+ SSRF baseline) before dial.
+  await assertEgressAllowed(deps.tenantId, url);
   // Token over https only — loopback http allowed only when private egress is
   // explicitly enabled (local dev / tests).
   if (!url.startsWith('https://') && !webhookPrivateEgressAllowed()) {
@@ -138,7 +151,7 @@ export type BrokeredFetchOutcome =
   | { outcome: 'sent'; res: Awaited<ReturnType<typeof undiciFetch>>; provenance: ConnectionUseProvenance };
 
 export async function brokeredFetch(
-  deps: BrokeredEgressDeps,
+  deps: BrokeredCallDeps,
   opts: {
     provider: string;
     url: string;
@@ -152,8 +165,25 @@ export async function brokeredFetch(
      *  `apiHosts`-pinned host; the caller MUST fetch the `Location` un-credentialed
      *  (the token is never sent to the redirect target). Default keeps `'error'`. */
     redirect?: 'manual';
+    /** Additional STATIC, non-secret headers the caller needs (e.g. NetSuite
+     *  SuiteQL's required `Prefer: transient`, or a SOAP `SOAPAction`). The broker
+     *  remains the SOLE authority for the credential + content-type: any
+     *  case-variant of `authorization` / `content-type` here is stripped before
+     *  merge, so a caller can never override the broker's token or content-type.
+     *  MUST be hardcoded strategy constants, never caller/agent-derived. */
+    extraHeaders?: Record<string, string>;
+    /** ADR 0627 D5 — pin the credential to ONE connection row (EXACT, at the
+     *  broker's selection choke): returned iff `active`, this provider, and
+     *  owned by the acting user / org-shared with `connections:use`. A pin that
+     *  fails is `no_connection` — never the user→org→workspace fall-through. */
+    connectionId?: string;
   },
 ): Promise<BrokeredFetchOutcome> {
+  // ADR 0531 — a replay never dials. Deliberately THROWS rather than returning a
+  // `host_not_allowed` outcome: a policy denial is a normal result callers handle,
+  // whereas reaching here during a replay is a classification BUG that must be
+  // loud (`executor/sideEffects.ts` should have short-circuited this node).
+  assertEffectAllowed('network-egress', `brokeredFetch ${opts.provider}`);
   // Resolve the destination host up front so we can pin it BEFORE resolving a
   // credential (fail closed on a bad URL without ever touching the secret).
   let parsed: URL;
@@ -177,6 +207,13 @@ export async function brokeredFetch(
     return { outcome: 'host_not_allowed', host: parsed.hostname };
   }
 
+  // ADR 0187 — the tenant egress firewall layers on top of the provider apiHosts
+  // restriction (a tenant may denylist even a provider host). Non-throwing here:
+  // map a policy denial to the existing `host_not_allowed` outcome.
+  if (!evaluateEgress(opts.url, await getEgressRules(deps.tenantId)).allowed) {
+    return { outcome: 'host_not_allowed', host: parsed.hostname };
+  }
+
   // Token over https only — loopback http allowed only when private egress is on.
   if (parsed.protocol !== 'https:' && !webhookPrivateEgressAllowed()) {
     return { outcome: 'insecure_base' };
@@ -187,14 +224,27 @@ export async function brokeredFetch(
     provider: opts.provider,
     ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
     ...(deps.orgId ? { orgId: deps.orgId } : {}),
+    ...(opts.connectionId !== undefined ? { connectionId: opts.connectionId } : {}), // '' is a (refused) pin, not an un-pin
   });
   if (!resolved) return { outcome: 'no_connection' };
+
+  // The broker owns `authorization` + `content-type`. Strip every case-variant of
+  // those from caller extras before merge (undici lowercases at send, so an
+  // unstripped variant would survive as a SECOND auth header) — the same guard
+  // brokeredPost applies. Everything else (e.g. `Prefer`, `SOAPAction`) passes.
+  const safeExtra = Object.fromEntries(
+    Object.entries(opts.extraHeaders ?? {}).filter(([k]) => {
+      const n = k.trim().toLowerCase();
+      return n !== 'authorization' && n !== 'content-type';
+    }),
+  );
 
   try {
     const res = await undiciFetch(opts.url, {
       method: opts.method ?? 'GET',
       headers: {
         ...(opts.body !== undefined ? { 'content-type': opts.contentType ?? 'application/json; charset=utf-8' } : {}),
+        ...safeExtra,
         authorization: authHeader(opts.authScheme ?? 'bearer', resolved.secret),
       },
       ...(opts.body !== undefined ? { body: opts.body } : {}),

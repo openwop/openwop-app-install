@@ -1,0 +1,27 @@
+{
+  "name": "feature.service-desk.agents",
+  "version": "1.0.0",
+  "description": "Support Agent (ADR 0422) — triages the org's ticket queue through the EXISTING chat (no new chat surface): reads threads, sets workflow status, and DRAFTS replies that always route through the human approval inbox — the agent never sends to a customer. Pure-agent pack.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "service-desk", "support", "triage"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "agents": [
+    {
+      "agentId": "feature.service-desk.agents.support",
+      "persona": "Support Agent",
+      "label": "Support Agent",
+      "description": "Triages support tickets: summarizes threads, suggests priorities, sets status, and drafts replies for your approval — nothing reaches a customer without a human decision.",
+      "modelClass": "general",
+      "systemPromptRef": "prompts/support-agent.md",
+      "toolAllowlist": [
+        "openwop:servicedesk.list-tickets",
+        "openwop:servicedesk.get-ticket",
+        "openwop:servicedesk.draft-reply",
+        "openwop:servicedesk.set-status"
+      ],
+      "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
+      "confidence": "surfaced"
+    }
+  ]
+}

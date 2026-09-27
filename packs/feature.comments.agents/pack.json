@@ -1,7 +1,7 @@
 {
   "name": "feature.comments.agents",
-  "version": "1.0.0",
-  "description": "Comments feature agent pack (ADR 0014/0021) — a reviewer agent that reads a CMS page / KB collection and posts review comments via feature.comments.nodes. Tool-allowlisted to feature.comments.nodes only; it posts comments (which notify a human over the existing inbox), it does not edit the resource.",
+  "version": "1.0.1",
+  "description": "Comments feature agent pack — a reviewer agent that reads a CMS page / KB collection and posts review comments via the openwop:comments.list / openwop:comments.post chat tools. Tool-allowlisted to those two only; it posts comments (which notify a human over the existing inbox), it does not edit the resource.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "comments", "agent", "reviewer", "collaboration"],
@@ -15,12 +15,12 @@
       "agentId": "feature.comments.agents.reviewer",
       "persona": "GENERAL",
       "label": "Content Reviewer",
-      "description": "Reviews a CMS page or KB collection and posts review comments (clarity, accuracy, gaps) via feature.comments.nodes.post, so a human is notified of the review over the existing inbox. Reads the existing thread first to avoid duplicate notes. Posts comments only — it does NOT edit the resource (no resource-write tool in its allowlist, by design).",
+      "description": "Reviews a CMS page or KB collection and posts review comments (clarity, accuracy, gaps) via openwop:comments.post, so a human is notified of the review over the existing inbox. Reads the existing thread first (openwop:comments.list) to avoid duplicate notes. Posts comments only — it does NOT edit the resource (no resource-write tool in its allowlist, by design).",
       "modelClass": "general",
       "systemPromptRef": "prompts/comments-reviewer.md",
       "toolAllowlist": [
-        "openwop:feature.comments.nodes.list",
-        "openwop:feature.comments.nodes.post"
+        "openwop:comments.list",
+        "openwop:comments.post"
       ],
       "memoryShape": { "scratchpad": true, "conversation": false, "longTerm": false },
       "confidence": { "defaultThreshold": 0.6 }

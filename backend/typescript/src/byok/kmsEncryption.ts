@@ -42,12 +42,24 @@ const TAG_BYTES = 16;
 const ALGO = 'aes-256-gcm' as const;
 
 export interface KmsEncryptedRecord {
-  v: 2;
+  /** v2 — legacy, inner AES-GCM has NO AAD (pre-2026-07). v3 — inner AES-GCM is
+   *  bound to the record's (tenantId, credentialRef) via setAAD (vuln-scan M2), so a
+   *  storage-layer row misroute fails the GCM auth-tag check instead of leaking a
+   *  cross-tenant secret. Both are decryptable (v2 without AAD); new writes are v3. */
+  v: 2 | 3;
   iv: string;            // base64 12B
   ct: string;            // base64 ciphertext
   tag: string;           // base64 16B
   wrappedDek: string;    // base64 KMS-wrapped DEK
   kmsKeyName: string;    // for key rotation / auditing
+}
+
+/** The tenant-binding context for the v3 inner-GCM AAD. Canonical fixed-delimiter
+ *  string (NOT JSON — key-order/whitespace drift would make stored secrets
+ *  undecryptable); `\x1f` (unit separator) cannot appear in a tenantId/ref. */
+export interface KmsAadContext { tenantId: string; credentialRef: string }
+function aadOf(ctx: KmsAadContext): Buffer {
+  return Buffer.from(`${ctx.tenantId}\x1f${ctx.credentialRef}`, 'utf-8');
 }
 
 /**
@@ -58,6 +70,19 @@ export interface KmsClient {
   encrypt(plaintextDek: Buffer): Promise<Buffer>;
   decrypt(wrappedDek: Buffer): Promise<Buffer>;
   keyName(): string;
+  /**
+   * Resolve the backend's SDK without performing a KMS operation, so boot can
+   * tell whether this client could EVER work (ADR 0024 follow-up).
+   *
+   * Each cloud SDK is an optionalDependency loaded by a lazy `import()` on first
+   * encrypt/decrypt. That deferral meant `bootstrapKmsFromEnv` logged
+   * "BYOK KMS configured" for a backend it had never loaded — and when the Azure
+   * dependency tree turned out to be incomplete (npm does not reliably install
+   * the transitive deps OF an optionalDependency), the app booted clean, claimed
+   * success, and only failed at the first secret operation. Optional so a test
+   * stub need not implement it; absent ⇒ nothing to preflight.
+   */
+  preflight?(): Promise<void>;
 }
 
 let configuredClient: KmsClient | null = null;
@@ -95,6 +120,7 @@ export function createGoogleCloudKmsClient(keyName: string): KmsClient {
   // client structurally so the file does not statically depend on the
   // optional package's types either.
   interface GcpKmsClient {
+    initialize?(): Promise<unknown>;
     encrypt(req: { name: string; plaintext: Buffer }): Promise<[{ ciphertext?: unknown }]>;
     decrypt(req: { name: string; ciphertext: Buffer }): Promise<[{ plaintext?: unknown }]>;
   }
@@ -113,12 +139,31 @@ export function createGoogleCloudKmsClient(keyName: string): KmsClient {
               'or use a different BYOK backend (local-AES / AWS KMS / Azure Key Vault). ' +
               `Underlying error: ${(err as Error).message}`,
           );
+        })
+        // Initialize HERE, awaited. Every generated gax method does
+        // `this.initialize().catch(err => { throw err; })` — a re-throw inside a
+        // catch mints a NEW rejected promise nobody handles. So when credentials
+        // are unavailable, the first encrypt() failed twice: once to our await
+        // (fine) and once as an unhandledRejection, which the process policy turns
+        // into drain-and-exit. MEASURED 2026-09-26: one POST /webhooks on a host
+        // with no GCP identity took the whole server down. Awaiting initialize()
+        // first means a credential failure throws in THIS chain and the gax
+        // methods never run on a failed stub.
+        .then(async (client) => {
+          await client.initialize?.();
+          return client;
         });
+      // A failed init is not cached forever: the next call retries (a transient
+      // metadata-server blip must not wedge sealing until restart). Handled here,
+      // so resetting it creates no unhandled rejection of its own.
+      clientPromise.catch(() => { clientPromise = null; });
     }
     return clientPromise;
   }
   return {
     keyName: () => keyName,
+    // ADR 0024 follow-up: resolve the SDK without a KMS round-trip.
+    preflight: async () => { await getClient(); },
     async encrypt(plaintextDek) {
       const client = await getClient();
       const [resp] = await client.encrypt({ name: keyName, plaintext: plaintextDek });
@@ -164,18 +209,21 @@ export function createLocalAesKmsClient(testKey: Buffer, label = 'test/local-aes
   };
 }
 
-/** Envelope-encrypt a UTF-8 plaintext string. Returns the record. */
-export async function kmsEncrypt(plaintext: string): Promise<KmsEncryptedRecord> {
+/** Envelope-encrypt a UTF-8 plaintext string. Always writes a v3 record whose inner
+ *  AES-GCM is bound to `ctx` (tenantId, credentialRef) via AAD — a misrouted row
+ *  decrypts to nothing under a different tenant's AAD (vuln-scan M2). */
+export async function kmsEncrypt(plaintext: string, ctx: KmsAadContext): Promise<KmsEncryptedRecord> {
   const client = requireKmsClient();
   const dek = randomBytes(DEK_BYTES);
   try {
     const iv = randomBytes(IV_BYTES);
     const cipher = createCipheriv(ALGO, dek, iv);
+    cipher.setAAD(aadOf(ctx)); // v3 tenant binding
     const ct = Buffer.concat([cipher.update(plaintext, 'utf-8'), cipher.final()]);
     const tag = cipher.getAuthTag();
     const wrappedDek = await client.encrypt(dek);
     return {
-      v: 2,
+      v: 3,
       iv: iv.toString('base64'),
       ct: ct.toString('base64'),
       tag: tag.toString('base64'),
@@ -188,9 +236,12 @@ export async function kmsEncrypt(plaintext: string): Promise<KmsEncryptedRecord>
   }
 }
 
-/** Envelope-decrypt a record. Throws on tamper or KMS denial. */
-export async function kmsDecrypt(record: KmsEncryptedRecord): Promise<string> {
-  if (record.v !== 2) throw new Error(`unsupported KMS record version: ${record.v}`);
+/** Envelope-decrypt a record. Throws on tamper or KMS denial. `ctx` supplies the v3
+ *  AAD (reconstructed from the row's own tenant + ref) — a row whose stored
+ *  (tenant, ref) don't match the requested ones fails the GCM auth-tag check. v2
+ *  records (legacy, no AAD) decrypt without it. */
+export async function kmsDecrypt(record: KmsEncryptedRecord, ctx: KmsAadContext): Promise<string> {
+  if (record.v !== 2 && record.v !== 3) throw new Error(`unsupported KMS record version: ${record.v}`);
   const client = requireKmsClient();
   const wrappedDek = Buffer.from(record.wrappedDek, 'base64');
   const iv = Buffer.from(record.iv, 'base64');
@@ -202,6 +253,7 @@ export async function kmsDecrypt(record: KmsEncryptedRecord): Promise<string> {
   try {
     if (dek.length !== DEK_BYTES) throw new Error(`bad DEK length: ${dek.length}`);
     const decipher = createDecipheriv(ALGO, dek, iv);
+    if (record.v === 3) decipher.setAAD(aadOf(ctx)); // must match the encrypt-side AAD
     decipher.setAuthTag(tag);
     const pt = Buffer.concat([decipher.update(ct), decipher.final()]);
     return pt.toString('utf-8');
@@ -223,8 +275,21 @@ export function bootstrapKmsFromEnv(): boolean {
   const keyName = process.env.OPENWOP_BYOK_KMS_KEY;
   if (!keyName) return false;
   const nonGcp = matchNonGcpKmsBackend(keyName);
-  configureKmsClient(nonGcp ?? createGoogleCloudKmsClient(keyName));
+  const client = nonGcp ?? createGoogleCloudKmsClient(keyName);
+  configureKmsClient(client);
   log.info('BYOK KMS configured', { kmsKeyName: keyName });
+  // Preflight the SDK so the line above stops being a claim we have not checked.
+  // Deliberately does NOT block or fail boot: a backend that cannot load is a
+  // deploy-time misconfiguration, not a reason to refuse to start (the operator
+  // may not have exercised BYOK yet), and every secret operation still fails
+  // CLOSED with the honest error. What changes is that the failure is announced
+  // ONCE, loudly, at boot instead of being discovered by the first customer write.
+  void client.preflight?.().catch((err: unknown) => {
+    log.error('BYOK KMS backend cannot load — secret operations WILL fail', {
+      kmsKeyName: keyName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
   return true;
 }
 

@@ -1,5 +1,5 @@
 /**
- * UI-1 (CODEBASE-ASSESSMENT.md): the AppGate (a security-relevant surface) was
+ * UI-1 (docs/steward/CODEBASE-ASSESSMENT.md): the AppGate (a security-relevant surface) was
  * untested. Covers the password-gate accept/reject path + persistence and the
  * "no password configured" disabled state. The mode/password come from `brand`,
  * mocked here so the test is deployment-independent.

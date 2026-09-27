@@ -77,7 +77,7 @@ describe('replay round-trip (end-to-end)', () => {
     const app = await createApp({
       port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false,
     });
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
   afterAll(async () => {
     await new Promise<void>((res) => server.close(() => res()));
@@ -99,10 +99,28 @@ describe('replay round-trip (end-to-end)', () => {
     return 'timeout';
   };
 
-  it('advertises replay.supported = true (and fork = false) honestly', async () => {
+  it('advertises the replay family honestly — supported, both modes, fork', async () => {
+    // FLIPPED 2026-08-08 (ADR 0326 flip trigger). This previously asserted
+    // `fork: false`, which was the honest advert while mid-run BRANCH forks
+    // were implemented (ADR 0326 P3b) but had no conformance witness. The
+    // witness now exists — 10 passed / 7 skipped / 0 failed across the
+    // conformance replay-fork set against a pack-clean local boot, with the
+    // branch case confirmed non-vacuous — so the advert was raised.
+    //
+    // What this test still guards: that the advert stays HONEST, i.e. that it
+    // never claims more than the witness covers.
+    //
+    // CORRECTED — this said "Mid-sequence `replay` remains a 501
+    // (`fork_from_seq_unsupported`)". It does not: the fork route now derives
+    // `snapshotFromEventPrefix` for BOTH modes, which is the same mechanism
+    // `branch` already used, so the prefix never re-executes and the refusal's
+    // only stated reason no longer applies. See `v2-replay-midseq-fork.test.ts`
+    // for the behavioural witness. The narrower `fork_checkpoint_unsupported`
+    // (a prefix ending on an open interrupt) is GONE too since ADR 0751: the
+    // fork inherits the open gate as state instead of refusing.
     const { body } = await jf<Record<string, unknown>>('/.well-known/openwop');
     // recursively locate the `replay` capability block
-    let replay: { supported?: boolean; fork?: boolean } | undefined;
+    let replay: { supported?: boolean; fork?: boolean; modes?: string[] } | undefined;
     const visit = (o: unknown): void => {
       if (!o || typeof o !== 'object') return;
       for (const [k, v] of Object.entries(o)) {
@@ -112,7 +130,8 @@ describe('replay round-trip (end-to-end)', () => {
     };
     visit(body);
     expect(replay?.supported).toBe(true);
-    expect(replay?.fork).toBe(false);
+    expect(replay?.fork).toBe(true);
+    expect(replay?.modes).toEqual(['replay', 'branch']);
   });
 
   it('advertises the experimental x-host-openwop-workforce block (gated, honest)', async () => {

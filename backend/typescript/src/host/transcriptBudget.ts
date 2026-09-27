@@ -16,7 +16,16 @@
  *    describes the ORCHESTRATOR's per-turn event-log window; this app's
  *    orchestrator runs no real model turns, so that capability is deliberately
  *    NOT advertised — advertising it would be a dishonest wire claim). See the
- *    ADR 0148 Phase 3 correction note.
+ *    ADR 0148 Phase 3 correction note. The same condition governs RFC 0111
+ *    `multiAgentExecution.contextBudget`.
+ *
+ *    THAT NON-ADVERT IS NOW ENFORCED, NOT JUST DOCUMENTED (ADR 0537). On
+ *    2026-08-09 this paragraph was correct, current, and still failed to prevent
+ *    `contextBudget` being claimed as in-flight host work — it is prose, so it
+ *    cannot go red. `test/rfc0111-context-budget-non-advert.test.ts` now pins
+ *    both halves: that no `contextBudget`/`transcriptWindow` is advertised on any
+ *    surface, AND the premise (the supervisor reaches no model turn). Change the
+ *    orchestrator and that test tells you to revisit the advert.
  *  - NO model-summarization here: an LLM rolling-summary in the hot path carries
  *    replay + cost risk and must pair with the verifier (deferred).
  *

@@ -5,8 +5,38 @@
  * lives here — Drive/Gmail/Calendar reads and mail sends are the existing core
  * packs (core.openwop.{mcp,http,integration}), composed in the loop workflows.
  *
- * role:"action" nodes read/write the tenant graph (recorded → replay/fork read the
- * recorded output). prioritize is role:"pure" (deterministic, cacheable).
+ * REPLAY, CORRECTED (WF-COS-3, 2026-08-19). This header used to assert that
+ * `role:"action"` nodes are "recorded → replay/fork read the recorded output".
+ * THAT WAS NEVER TRUE OF ANY HOST: the executor does not read a node's `role` at
+ * all — `git grep "role === 'action'" -- backend/typescript/src/executor/`
+ * returns zero, and the only readers are the catalog builder, the review
+ * projector and the compose tool, all presentational. What actually governs a
+ * replay is `isSideEffectingNode`, which consults `module.sideEffecting` (not
+ * reachable from a pack `.mjs`), the derived `MANIFEST_FAST_PATH_SERVED` set
+ * (which reads `role: "side-effect"` / the `side-effectful` capability from
+ * pack.json), and an explicit `SIDE_EFFECTING_TYPE_PATTERNS` entry. A
+ * past-tense safety claim that outlived its mechanism, on the surface an author
+ * reads before trusting the node.
+ *
+ * So the classification is now declared rather than asserted:
+ *   - `compose-briefing` and `enqueue-action` are `role:"side-effect"` +
+ *     `side-effectful`. Each MINTS a fresh durable row (a `notificationId` /
+ *     `act:<uuid>` + a host approval) and emits a user-visible notification, so
+ *     a `:fork` re-briefs and re-drafts. Both legs of the #2871 fix ship
+ *     together — the manifest declaration AND an explicit
+ *     `SIDE_EFFECTING_TYPE_PATTERNS` entry — because a pack `.mjs` node cannot
+ *     set `module.sideEffecting` and the two prove different paths.
+ *   - the other graph writers (`upsert-commitment`, `ingest-commitments`,
+ *     `log-decision`, `record-meeting`, `upsert-stakeholder`,
+ *     `set-commitment-card`, `populate-board`) stay `role:"action"` as a STATED
+ *     JUDGEMENT, not an omission: every id is a content hash folded over the
+ *     tenant, so re-execution CONVERGES on the same row, mints nothing and
+ *     notifies nobody. `populate-board` is the closest call and converges via
+ *     the commitment's durable `kanbanCardId` back-ref (a human-deleted card is
+ *     never resurrected). This is the `feature.comments.nodes.resolve`
+ *     precedent. Revisit any of them the moment it emits a notification or
+ *     mints a random id.
+ *   - `prioritize` / `prepare-action-request` are `role:"pure"`.
  * Pure-JS, Node-20 stdlib only.
  */
 
@@ -478,6 +508,25 @@ export async function ingestCommitments(ctx) {
   const cap = Math.max(1, numOr(cfg.maxItemsPerTick, 25));
   // Upstream `core.openwop.http.fetch` outputs {status, headers, body}.
   const body = i && typeof i === 'object' && 'body' in i ? i.body : i;
+
+  // ADR 0662 D3 — an ingest that could not LOOK must never report that it looked and
+  // found nothing. `core.openwop.http` returns `status:'success'` on 4xx/5xx and
+  // `status:0 + networkError` on a transport failure, and this node used to read only
+  // `body`. So an expired token yielded `items: []` → `created: 0` → a GREEN tick on
+  // `recordJobRun`, forever: both ingest loops could die silently and permanently.
+  //
+  // The http node does NOT swallow the error — it RETURNS the status, and the
+  // `fetch → ingest` edge passes the whole outputs object — so reading it here is
+  // sufficient and no core-pack change is needed.
+  if (i && typeof i === 'object' && 'status' in i) {
+    const httpStatus = Number(i.status);
+    if (i.networkError) {
+      throw Object.assign(new Error(`assistant ingest could not reach the provider: ${str(i.networkError)}`), { code: 'upstream_unavailable' });
+    }
+    if (Number.isFinite(httpStatus) && (httpStatus === 0 || httpStatus >= 400)) {
+      throw Object.assign(new Error(`assistant ingest failed upstream (HTTP ${httpStatus}) — the credential may have expired`), { code: 'upstream_unavailable' });
+    }
+  }
   const listed = sourceKind === 'calendar' ? body?.items : body?.files;
   const items = Array.isArray(listed) ? listed : [];
   const capturedAt = new Date().toISOString();
@@ -595,9 +644,14 @@ export async function confirmActionSend(ctx) {
   );
 }
 
-// ── Memory-graph reads (ADR 0023) — role:"action": they read the tenant graph
-//    (a side-effect), so the engine records each output and replay/fork read the
-//    recorded result rather than re-querying. Thin wrappers over ctx.features.assistant.
+// ── Memory-graph reads (ADR 0023) — role:"action". WHAT THAT DOES AND DOES NOT
+//    MEAN: see the header's REPLAY, CORRECTED block. `role` is presentational —
+//    the executor never reads it — so this block does NOT mean "recorded, and
+//    replay/fork read the recorded result". These are graph READS; they are not
+//    in `MANIFEST_FAST_PATH_SERVED` and carry no `SIDE_EFFECTING_TYPE_PATTERNS`
+//    entry, so a replay/fork RE-QUERIES the graph and sees its state at replay
+//    time. That is correct for a read and is why they stay `role:"action"`.
+//    Thin wrappers over ctx.features.assistant.
 export async function listProjects(ctx) {
   const a = ensureAssistant(ctx);
   const out = await a.listProjects({});
@@ -652,8 +706,14 @@ export async function listPendingActions(ctx) {
   return { status: 'success', outputs: { pendingActions: out.pendingActions ?? [] } };
 }
 
-// ── Memory-graph writes (ADR 0023) — role:"action": outputs recorded, so a
-//    replay/fork reads the recorded result rather than re-issuing the write.
+// ── Memory-graph writes (ADR 0023) — role:"action", which again does NOT mean
+//    "outputs recorded, so a replay/fork reads the recorded result rather than
+//    re-issuing the write" (the header's REPLAY, CORRECTED block). A replay/fork
+//    DOES re-issue these writes. They are safe to re-issue — the STATED
+//    JUDGEMENT in the header — because every id is a content hash folded over
+//    the tenant, so re-execution converges on the same row, mints nothing and
+//    notifies nobody. That is the property to re-check when adding a node here;
+//    the classification is not doing the work.
 export async function setCommitmentCard(ctx) {
   const a = ensureAssistant(ctx);
   const i = I(ctx);

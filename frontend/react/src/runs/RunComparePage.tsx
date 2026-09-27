@@ -9,6 +9,7 @@
  * not yet filed) — this does not attempt a semantic diff.
  */
 
+import { Button } from '../ui/Button.js';
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
@@ -70,7 +71,7 @@ export function RunComparePage() {
         >
           <input value={aIn} onChange={(e) => setAIn(e.target.value)} placeholder={t('runIdAPlaceholder')} aria-label={t('runIdAPlaceholder')} className="u-flex-1" />
           <input value={bIn} onChange={(e) => setBIn(e.target.value)} placeholder={t('runIdBPlaceholder')} aria-label={t('runIdBPlaceholder')} className="u-flex-1" />
-          <button type="submit">{t('compare')}</button>
+          <Button variant="primary" type="submit">{t('compare')}</Button>
         </form>
       </div>
 
@@ -101,7 +102,7 @@ function CompareColumn({ runId, side }: { runId: string; side: Side }) {
           </div>
           {side.error && <Notice variant="error">{side.error}</Notice>}
           {!side.snapshot && !side.error && (
-            <div aria-busy="true" aria-label={t('common:loading')} className="u-grid u-gap-2">
+            <div role="status" aria-busy="true" aria-label={t('common:loading')} className="u-grid u-gap-2">
               <Skeleton width="60%" />
               <Skeleton width="85%" />
               <Skeleton width="70%" />

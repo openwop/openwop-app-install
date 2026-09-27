@@ -1,6 +1,6 @@
 /**
  * ADR 0133 Phase 4 — client for the read-only task deck
- * (GET /v1/host/openwop-app/tasks). Backend is authority (toggle + ownership
+ * (GET /host/openwop-app/tasks). Backend is authority (toggle + ownership
  * filter there); a 404 means the task-deck feature is off.
  */
 import { authedHeaders, config, fetchOpts } from '../client/config.js';
@@ -27,7 +27,7 @@ export interface TaskDeck {
 
 export async function getTaskDeck(conversationRunId?: string): Promise<TaskDeck> {
   const qs = conversationRunId ? `?conversationRunId=${encodeURIComponent(conversationRunId)}` : '';
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/tasks${qs}`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/tasks${qs}`, fetchOpts({ headers: authedHeaders() }));
   if (!res.ok) {
     let detail = '';
     try { detail = ((await res.json()) as { message?: string })?.message ?? ''; } catch { /* non-JSON */ }

@@ -5,12 +5,14 @@ export const messages = {
   eyebrow: 'Accès et données',
   title: 'Accès',
   lede: 'Gérez les identifiants, les connexions et les autorisations, le tout au même endroit.',
+  anonSignInPrompt: 'Vous êtes dans une session de démonstration anonyme — les connexions et clés ajoutées ici sont réinitialisées après 24 heures. Connectez-vous pour les conserver.',
 
   scopeLabel: 'Portée',
   scope_workspace: 'Espace de travail',
   scope_personal: 'Personnel',
 
   tablistLabel: 'Sections d’accès',
+  panelRegion: 'Panneau d’accès {{panel}}',
 
   tab_keys: 'Clés',
   tab_connections: 'Connexions',

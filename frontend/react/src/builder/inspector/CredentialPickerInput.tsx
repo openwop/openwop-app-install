@@ -14,6 +14,8 @@ import { useTranslation } from 'react-i18next';
 import { listStoredRefs } from '../../byok/lib/byokClient.js';
 
 interface Props {
+  /** Associates the control with ConfigInput's <label htmlFor> (A11Y-3). */
+  id?: string | undefined;
   value: string | undefined;
   onChange(next: string | undefined): void;
   /** When set, filters the picker to refs starting with `<providerFilter>:`. */
@@ -21,7 +23,7 @@ interface Props {
   required?: boolean | undefined;
 }
 
-export function CredentialPickerInput({ value, onChange, providerFilter, required }: Props): JSX.Element {
+export function CredentialPickerInput({ value, onChange, providerFilter, required, id }: Props): JSX.Element {
   const { t } = useTranslation('builder');
   const [refs, setRefs] = useState<readonly string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,6 +64,7 @@ export function CredentialPickerInput({ value, onChange, providerFilter, require
   return (
     <div className="u-flex u-gap-1-5 u-items-center">
       <select
+        {...(id ? { id } : {})}
         value={value ?? ''}
         required={required}
         onChange={(e) => onChange(e.target.value || undefined)}

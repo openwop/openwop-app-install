@@ -39,12 +39,23 @@ export const toolOutputCompactionFeature: BackendFeature = {
   // Phase 3 (ADR 0014) — `ctx.features['tool-output-compaction'].compact`, the
   // explicit mid-graph compaction surface the node pack delegates to.
   surface: { id: TOGGLE_ID, build: buildToolOutputCompactionSurface },
-  requiredPacks: [{ name: 'feature.tool-output-compaction.nodes', version: '1.0.0' }],
+  requiredPacks: [{ name: 'feature.tool-output-compaction.nodes', version: '1.2.0' }],
   toggleDefault: {
     id: TOGGLE_ID,
     label: 'Tool-output compaction',
+    // ADR 0604 — the description an operator reads before flipping this on. It
+    // used to promise "structure-preserving (drops empty fields, minifies)",
+    // which advertised the DEFECT as the feature: dropping an empty field is
+    // not structure-preserving, and it was the only thing producing savings.
+    // The honest version says what the default mode does and where the savings
+    // actually are, because an operator who enables this on the old copy would
+    // be buying token savings with silently-altered tool output.
     description:
-      'Compact verbose JSON tool outputs before they reach the model — cuts BYOK token spend. Structure-preserving (drops empty fields, minifies); deterministic and replay-safe.',
+      'Compact verbose JSON tool outputs before they reach the model. The default mode only DELETES '
+      + 'INSIGNIFICANT WHITESPACE and changes no other byte — on already-minified tool output that saves '
+      + 'little. Real savings need the '
+      + 'per-agent lossy opt-in, which elides long arrays and drops empty fields, each disclosed in the payload. '
+      + 'Deterministic and replay-safe: the mode is frozen when a run is created and never re-resolved on :fork.',
     category: 'Platform',
     status: 'off',
     bucketUnit: 'tenant',

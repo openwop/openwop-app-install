@@ -13,15 +13,18 @@ const routes: FeatureRoute[] = [
   {
     path: '/campaign-intelligence',
     element: <CampaignIntelPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Intelligence',
+      label: 'Intelligence', labelKey: 'campaignIntelLabel',
       icon: SparklesIcon,
-      hint: 'Budget & forecast recommendations',
+      hint: 'Budget & forecast recommendations', hintKey: 'campaignIntelHint',
       order: 50,
       featureId: 'campaign-intel',
+      // ADR 0200 Phase 2 — collapse into the Campaign Studio console when `campaigns` is on.
+      hiddenWhenFeature: 'campaigns',
     },
+    hubTab: { hub: 'campaigns', order: 4, featureId: 'campaign-intel' },
   },
 ];
 

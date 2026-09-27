@@ -29,7 +29,7 @@ beforeAll(async () => {
   process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
   process.env.OPENWOP_TEST_SEAM_ENABLED = 'true';
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
 });
 afterAll(async () => {
   delete process.env.OPENWOP_TEST_SEAM_ENABLED;
@@ -43,7 +43,7 @@ describe('RFC 0117 — live ui-plugin witness', () => {
     };
     expect(doc.uiPlugins?.supported).toBe(true);
     expect(doc.uiPlugins?.isolation).toBe('cross-origin-iframe');
-    expect(doc.uiPlugins?.hostApi).toEqual(['artifact.read', 'artifact.write', 'host.toast', 'host.navigate']);
+    expect(doc.uiPlugins?.hostApi).toEqual(['artifact.read', 'artifact.write', 'host.toast', 'host.navigate', 'host.announce']);
     expect(doc.uiPlugins?.maxEntryBytes).toBe(2_097_152);
   });
 

@@ -45,7 +45,7 @@ Typed I/O contract fixture. Ships `handoff.taskSchemaRef` + `handoff.returnSchem
 
 ### `core.openwop.agent-examples.tool-caller`
 
-Non-empty `toolAllowlist` fixture. Allowlists `openwop:core.http.fetch` + `openwop:core.data.jsonpath-query`. Exercises the runtime's tool-allowlist enforcement boundary established by safety-fix `OPENWOP-AUDIT-2026-003` (`SECURITY/invariants.yaml#agents-run-no-raw-handler`). Requires the host to advertise `host.agentRuntime` per RFC 0007. `memoryShape.scratchpad: true` for per-task tool-result tracking.
+Non-empty `toolAllowlist` fixture. Allowlists `openwop:core.openwop.http.fetch` + `openwop:core.openwop.data.jsonpath-query`. Exercises the runtime's tool-allowlist enforcement boundary established by safety-fix `OPENWOP-AUDIT-2026-003` (`SECURITY/invariants.yaml#agents-run-no-raw-handler`). Requires the host to advertise `host.agentRuntime` per RFC 0007. `memoryShape.scratchpad: true` for per-task tool-result tracking.
 
 ## Workflow usage
 

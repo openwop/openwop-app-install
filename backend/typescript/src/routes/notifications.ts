@@ -166,6 +166,70 @@ export function registerNotificationRoutes(app: Express, deps: Deps): void {
     }
   });
 
+  // R3 IB-R2-2 — the scoped bulk verbs (Notion "Archive read" / Linear
+  // delete-all-read shape: bulk value with ZERO selection furniture), each ONE
+  // request — the honest fix for the client-side N-sequential-loops objection
+  // that re-deferred this in R2.
+  //
+  // `:archive-read` archives every READ row in the caller's recipient scope —
+  // `read` is a SERVER concept, so no client tab predicate is duplicated
+  // server-side (the promptCatalogParity drift lesson).
+  app.post(new RegExp(`^${BASE.replace(/\//g, '\\/')}:archive-read$`), async (req, res, next) => {
+    try {
+      const tenantId = resolveTenantFromReq(req);
+      if (!tenantId) {
+        res.json({ updated: 0 });
+        return;
+      }
+      const recipient = recipientFilter(req);
+      const rows = await storage.listNotifications({
+        tenantId,
+        ...(recipient ? { recipientUserId: recipient, recipientRoles: await callerTenantRoles(req) } : {}),
+        status: ['read'],
+        includeArchived: false,
+        limit: 500,
+      });
+      const now = new Date().toISOString();
+      let updated = 0;
+      for (const n of rows) {
+        if (await storage.updateNotificationStatus(n.notificationId, 'archived', now)) updated++;
+      }
+      res.json({ updated });
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  // `:bulk-read` marks an EXPLICIT id set read (the tab's loaded rows) — the
+  // client owns the tab predicate, the server only enforces ownership per row.
+  // Silently skips rows that vanished or are not the caller's (`updated` tells
+  // the truth); caps the set to the list route's own max.
+  app.post(new RegExp(`^${BASE.replace(/\//g, '\\/')}:bulk-read$`), async (req, res, next) => {
+    try {
+      const body = (req.body ?? {}) as { ids?: unknown };
+      if (!Array.isArray(body.ids) || body.ids.length === 0 || body.ids.length > 500
+        || !body.ids.every((i) => typeof i === 'string')) {
+        throw new OpenwopError('validation_error', 'Field `ids` must be 1..500 notification ids.', 400, {});
+      }
+      const now = new Date().toISOString();
+      let updated = 0;
+      for (const id of body.ids as string[]) {
+        const existing = await storage.getNotification(id);
+        if (!existing) continue;
+        try {
+          await assertTenantOwnership(req, existing);
+        } catch {
+          continue; // not the caller's row — skip, never 403 the whole batch
+        }
+        if (existing.status !== 'unread') continue; // already read/archived
+        if (await storage.updateNotificationStatus(id, 'read', now)) updated++;
+      }
+      res.json({ updated });
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.delete(`${BASE}/:id`, async (req, res, next) => {
     try {
       const existing = await storage.getNotification(req.params.id);

@@ -24,7 +24,9 @@ async function seed(tenantId: string, n: number): Promise<void> {
   for (let i = 1; i <= n; i++) {
     await persistRunArtifact({
       tenantId, runId: 'run', nodeId: `n${i}`, role: 'deliverable',
-      output: `# Artifact ${i}`, now: `2026-06-20T00:00:0${i}.000Z`,
+      // Asset-class run artifacts (kind:'file' via a serve ref) so they survive the
+      // Library's asset filter (ADR 0083 §Amendment); `alt` becomes the title.
+      output: { image: { url: `https://cdn.test/a${i}.png`, alt: `Artifact ${i}` } }, now: `2026-06-20T00:00:0${i}.000Z`,
     });
   }
 }
@@ -33,18 +35,18 @@ describe('ART-1 — Library keyset pagination', () => {
   it('caps a page to `limit`, returns a cursor, and walks the full set newest-first without gaps/dupes', async () => {
     await seed('t', 5);
     const full = await listArtifacts('t', undefined); // the full sorted set (newest-first)
-    expect(full.map((a) => a.title)).toEqual(['# Artifact 5', '# Artifact 4', '# Artifact 3', '# Artifact 2', '# Artifact 1']);
+    expect(full.map((a) => a.title)).toEqual(['Artifact 5', 'Artifact 4', 'Artifact 3', 'Artifact 2', 'Artifact 1']);
 
     const p1 = await listArtifactsPage('t', undefined, { limit: 2 });
-    expect(p1.artifacts.map((a) => a.title)).toEqual(['# Artifact 5', '# Artifact 4']);
+    expect(p1.artifacts.map((a) => a.title)).toEqual(['Artifact 5', 'Artifact 4']);
     expect(p1.nextCursor).toBeTruthy();
 
     const p2 = await listArtifactsPage('t', undefined, { limit: 2, cursor: p1.nextCursor });
-    expect(p2.artifacts.map((a) => a.title)).toEqual(['# Artifact 3', '# Artifact 2']);
+    expect(p2.artifacts.map((a) => a.title)).toEqual(['Artifact 3', 'Artifact 2']);
     expect(p2.nextCursor).toBeTruthy();
 
     const p3 = await listArtifactsPage('t', undefined, { limit: 2, cursor: p2.nextCursor });
-    expect(p3.artifacts.map((a) => a.title)).toEqual(['# Artifact 1']);
+    expect(p3.artifacts.map((a) => a.title)).toEqual(['Artifact 1']);
     expect(p3.nextCursor).toBeUndefined(); // last page — no cursor
 
     // No gaps / no duplicates across the walk.

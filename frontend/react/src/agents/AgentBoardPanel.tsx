@@ -18,9 +18,10 @@ import {
   type KanbanBoard,
   type KanbanCard,
 } from '../kanban/kanbanClient.js';
-import { KanbanBoardView, type NewCardInput } from '../kanban/KanbanBoardView.js';
+import { KanbanBoardView, type CardPatch, type NewCardInput } from '../kanban/KanbanBoardView.js';
 import { Notice } from '../ui/Notice.js';
 import { AgentAvatar } from './AgentAvatar.js';
+import { AgentUpNextPanel } from './AgentUpNextPanel.js';
 import type { RoleTheme } from './roleTemplates.js';
 
 export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workflows, refreshSignal, onChanged, intro }: { boardId: string; persona: string; avatarUrl?: string | undefined; roleTheme?: RoleTheme | undefined; workflows?: string[] | undefined; refreshSignal?: number | undefined; onChanged?: (() => void) | undefined; intro?: JSX.Element | undefined }): JSX.Element {
@@ -88,7 +89,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
     setNotice(null);
     try {
       const { triggeredRunId } = await patchCard(cardId, { columnId: toColumnId });
-      if (triggeredRunId) setNotice('Started a run — dropping a card into a trigger lane fires its workflow.');
+      if (triggeredRunId) setNotice(t('boardStartedRunNotice'));
       await refresh();
       onChanged?.();
     } catch (err) {
@@ -108,6 +109,17 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
     }
   };
 
+  // KB-R2-1 — in-place edit, same changed-fields-only contract as /boards.
+  const onEditCard = async (cardId: string, patch: CardPatch) => {
+    try {
+      await patchCard(cardId, patch);
+      await refresh();
+      onChanged?.();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
   if (!board) {
     return error
       ? <Notice variant="error">{error}</Notice>
@@ -117,7 +129,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
   return (
     <div>
       {error ? <Notice variant="error">{error}</Notice> : null}
-      {notice ? <Notice variant="success">{notice}</Notice> : null}
+      {notice ? <Notice variant="success" announce={notice}>{notice}</Notice> : null}
       <div className="u-flex u-gap-2 u-items-center u-mb-2">
         {roleTheme ? (
           <AgentAvatar persona={persona} avatarUrl={avatarUrl} roleTheme={roleTheme} size={28} showBadge={false} alt={`${persona}'s photo`} />
@@ -129,6 +141,12 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
           </p>
         )}
       </div>
+      {/* ADR 0534 P5 — above the board, because it explains what the agent will
+          do next; the board below is what a human arranges. Renders nothing when
+          ranked selection is off for this workspace. */}
+      <div className="u-mb-2">
+        <AgentUpNextPanel boardId={boardId} refreshSignal={refreshSignal} />
+      </div>
       <KanbanBoardView
         board={board}
         cards={cards}
@@ -137,6 +155,7 @@ export function AgentBoardPanel({ boardId, persona, avatarUrl, roleTheme, workfl
         onMoveCard={(cardId, toColumnId) => void onMoveCard(cardId, toColumnId)}
         onCreateCard={(columnId, input) => void onCreateCard(columnId, input)}
         onDeleteCard={(cardId) => void onDeleteCard(cardId)}
+        onEditCard={(cardId, patch) => void onEditCard(cardId, patch)}
       />
     </div>
   );

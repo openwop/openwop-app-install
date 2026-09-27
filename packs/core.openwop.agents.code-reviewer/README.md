@@ -7,7 +7,7 @@ Code review agent. Reviews diffs or files for correctness, security, style, and 
 | Engine | OpenWOP `>=1.1.0 <2.0.0` |
 | Runtime | `language: remote` |
 | Agents | 1 |
-| Required host capabilities | `aiProviders`, `host.agentRuntime`, `host.fs` (for `openwop:core.files.fs-read`) |
+| Required host capabilities | `aiProviders`, `host.agentRuntime`, `host.fs` (for `openwop:core.files.read`) |
 | License | Apache-2.0 |
 
 ## What it does
@@ -20,7 +20,7 @@ Receives either a unified diff OR a list of files (with contents). Produces a li
 - `message` — one-line summary
 - `suggestion` — optional concrete fix
 
-May fetch related files via `openwop:core.files.fs-read` to reason about cross-file impact (e.g., follow an import to see what's being used).
+May fetch related files via `openwop:core.files.read` to reason about cross-file impact (e.g., follow an import to see what's being used).
 
 ## Severity rubric
 

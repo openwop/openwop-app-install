@@ -1,10 +1,10 @@
 # ADR 0151 — AI conversation auto-titling (LLM-generated session names)
 
-**Status:** implemented — 2026-06-27 (all 4 phases). Phase→artifact: **P1** package+toggle+data-model — `src/features/chat-autotitle/{feature,titleGenerator,binding}.ts`, `chat-autotitle` toggle (ON, `user`), `ChatSessionRecord.titleSource` + sqlite mig 32 / postgres mig 29; **P2** first-exchange binding — `maybeAutotitleOnFirstExchange` fired from `conversationExchange.finishExchange` (gated on `titleSource==='default'`, fail-closed, TOCTOU re-check); **P3** `conversation.titled` event + FE `titledFromEvent` consumed in `useChatSession`; **P4** admin (toggle auto-surfaces in `FeatureTogglePanel`) + i18n (title is in the conversation's language ⇒ no new app keys; manual-rename PATCH stamps `titleSource='user'`). Tests: `chat-autotitle-sanitize` (6) + `chat-autotitle-binding` (7) + FE `titledFromEvent` (2); storage-parity 60 + chat-session routes 28 green; backend tsc + FE build gate clean. `/architect` (pre-phase seam audit, with one call-site correction: bind at the first exchange, not close), `/code-review`, `/ux-review` clean.
+**Status:** implemented — 2026-06-27 (all 4 phases). Phase→artifact: **P1** package+toggle+data-model — `src/features/chat-autotitle/{feature,titleGenerator,binding}.ts`, `chat-autotitle` toggle (ON, `user`), `ChatSessionRecord.titleSource` + sqlite mig 32 / postgres mig 29; **P2** first-exchange binding — `maybeAutotitleOnFirstExchange` fired from `conversationExchange.finishExchange` (gated on `titleSource==='default'`, fail-closed, TOCTOU re-check); **P3** `openwop-app.conversation.titled` event + FE `titledFromEvent` consumed in `useChatSession`; **P4** admin (toggle auto-surfaces in `FeatureTogglePanel`) + i18n (title is in the conversation's language ⇒ no new app keys; manual-rename PATCH stamps `titleSource='user'`). Tests: `chat-autotitle-sanitize` (6) + `chat-autotitle-binding` (7) + FE `titledFromEvent` (2); storage-parity 60 + chat-session routes 28 green; backend tsc + FE build gate clean. `/architect` (pre-phase seam audit, with one call-site correction: bind at the first exchange, not close), `/code-review`, `/ux-review` clean.
 
 **Correction note (impl):** §Phase 2 cites mirroring `maybeExtractMemoryOnClose`, which fires at conversation **close**. The title must fire on the **first exchange**, so the binding is called from inside `finishExchange` (after both turns are durable), not from the close path — the *pattern* (fire-and-forget + fail-closed + idempotent-once) is reused, the *call site* differs. Idempotency keys on `titleSource==='default'` (not a turn count), which also structurally fixes the multi-tab `messages.length===0` regression §13 describes.
 **Toggle:** new feature-package `chat-autotitle` · default **ON** (product decision 2026-06-27 — auto-naming is expected default behavior; per-user opt-out via the toggle, `bucketUnit: user`). The substring placeholder remains the fallback when OFF or on any failure.
-**Surface:** host-extension only — a first-exchange LLM side-effect that writes the existing chat-session **title** and emits a non-normative `conversation.titled` event on the run SSE. **No new wire** (see RFC verdict).
+**Surface:** host-extension only — a first-exchange LLM side-effect that writes the existing chat-session **title** and emits a non-normative `openwop-app.conversation.titled` event on the run SSE. **No new wire** (see RFC verdict).
 **Composes:** the chat-session title store + route (`routes/chatSessions.ts` `PATCH /v1/host/openwop-app/chat/sessions/:id`), the managed/BYOK chat dispatch (`dispatchManagedChat` + the BYOK adapter), the conversation primitive's exchange hook (`conversationExchange.ts`), and the ADR 0120 / ADR 0130 first-exchange side-effect pattern.
 **Source plan:** the in-conversation deep-dive (2026-06-27) on LLM topic-aware session naming, researched against LibreChat (`titleConvo`/`titleTiming: immediate`/`titleMethod`/`titlePrompt`), ChatGPT, and the Vercel AI SDK.
 
@@ -36,7 +36,7 @@ This ADR replaces the substring with a **cheap, parallel, in-language LLM title 
 
 ## Decision
 
-Ship a minimal feature-package **`src/features/chat-autotitle/`** that, **on the first exchange of a conversation whose title is still the default placeholder and whose owning user has the `chat-autotitle` toggle enabled**, fires a **fire-and-forget, fail-closed** cheap-model title call (the LibreChat `immediate` + `completion` pattern), writes the result to the chat-session title, and emits a `conversation.titled` host event the FE consumes to update the rail/tab live.
+Ship a minimal feature-package **`src/features/chat-autotitle/`** that, **on the first exchange of a conversation whose title is still the default placeholder and whose owning user has the `chat-autotitle` toggle enabled**, fires a **fire-and-forget, fail-closed** cheap-model title call (the LibreChat `immediate` + `completion` pattern), writes the result to the chat-session title, and emits a `openwop-app.conversation.titled` host event the FE consumes to update the rail/tab live.
 
 ### Data model
 - **No new entity.** The title is the existing `chat_sessions.title` (ADR 0043/0102). Add an internal marker so we title **once** and never clobber a manual rename — `chat_sessions.titleSource: 'default' | 'auto' | 'user'` (additive; default `'default'`; `PATCH` rename sets `'user'`; the auto pass sets `'auto'` and only runs when `titleSource === 'default'`).
@@ -46,6 +46,7 @@ Ship a minimal feature-package **`src/features/chat-autotitle/`** that, **on the
 - **Method `completion`** (plain text out, host trims whitespace/quotes), **not** structured/function-calling — the free MiniMax tier's tool-calling is unreliable (see the code-exec saga, ADR 0146), and a title never needs a schema.
 - **Prompt** (adapted from LibreChat's default, localized): *"Detect the conversation's language and return a concise title in that language — 5 words or fewer, no punctuation or quotation marks, no preamble."* + a flattened `User: {first user msg}\nAI: {first reply}` transcript (≤ ~1 KB).
 - **Model:** the cheapest fast model on the active credential — managed MiniMax for the free tier, or the user's BYOK model; `temperature 0`, `max_tokens ~16`. Counts against the ADR 0106 per-tenant managed daily token cap (≈ ≤ 30 output tokens/chat).
+  > **Correction note (2026-09-17, `ATC-5`):** the shipped generator (`titleGenerator.ts`) rides `dispatchManagedChat`, which exposes NO temperature field, so `temperature 0` was never sent; `maxTokens` is 24 (not ~16) for multi-byte headroom, and a feature-owned 15 s abort bounds the call (`ATC-2`). The prose above is the design intent; the code is the contract.
 - **Trigger (DECISION — open to revision, OQ-3):** fire on the **first exchange**, in **parallel** with the agent reply, using the **first user message** as context (LibreChat `immediate`). Title lands in ~1–2 s. (Feeding the first *reply* too improves topic accuracy on terse openers but costs one reply's latency — see OQ-3.)
 
 ---
@@ -56,7 +57,7 @@ Ship a minimal feature-package **`src/features/chat-autotitle/`** that, **on the
 |---|---|---|
 | **1 — package + toggle** | `src/features/chat-autotitle/{feature.ts,titleGenerator.ts,binding.ts}`; toggle `chat-autotitle` (OFF, `user`); append to `BACKEND_FEATURES`. `titleGenerator` runs the completion-method dispatch + trim. | toggle resolves server-authoritatively; honest-off when no credential. |
 | **2 — first-exchange binding** | `maybeAutotitleOnFirstExchange(run, turns)` called from `conversationExchange.ts` (mirroring `maybeExtractMemoryOnClose`): fail-closed on toggle/owner, gated on `titleSource === 'default'`, fire-and-forget (never blocks the turn), writes the title via the chatSessions service, sets `titleSource='auto'`. | never blocks/throws into the exchange; idempotent (runs once). |
-| **3 — `conversation.titled` event + FE** | Emit a non-normative `conversation.titled` host event on the run SSE; FE consumes it in `useChatSession`/the rail/tab to replace the placeholder live. Keep `slice(0,60)` as the instant placeholder; this also repairs the `messages.length===0` regression. | rail/tab updates within ~2 s; no flicker; manual rename wins. |
+| **3 — `openwop-app.conversation.titled` event + FE** | Emit a non-normative `openwop-app.conversation.titled` host event on the run SSE; FE consumes it in `useChatSession`/the rail/tab to replace the placeholder live. Keep `slice(0,60)` as the instant placeholder; this also repairs the `messages.length===0` regression. | rail/tab updates within ~2 s; no flicker; manual rename wins. |
 | **4 — admin + i18n** | `FeatureTogglePanel` entry; the prompt + any UI strings localized (en/pt-BR/es/fr) — the title is generated *in the conversation's language*, so no app-string leakage. | i18n parity gate green. |
 
 ### Core-app extension surface
@@ -76,18 +77,18 @@ Ship a minimal feature-package **`src/features/chat-autotitle/`** that, **on the
 | 2 | Toggle + admin | `chat-autotitle`, **OFF**, `bucketUnit: user`; `FeatureTogglePanel`-managed; graduation-to-ON is OQ-1. |
 | 3 | Workflow surface (0014) | **None** (internal side-effect). |
 | 4 | Node pack | **None.** |
-| 5 | AI-chat envelopes | **None**; emits host event `conversation.titled` (non-normative). |
+| 5 | AI-chat envelopes | **None**; emits host event `openwop-app.conversation.titled` (non-normative). |
 | 6 | Agent pack | **None.** |
 | 7 | Public surface | **None.** |
 | 8 | RBAC + isolation (0006) | The write rides the existing owner-scoped `chatSessions` gate; the binding runs in the run's tenant + acting-user scope; fail-closed (no toggle/owner ⇒ no call). |
 | 9 | Replay / fork | Host-extension, **non-replay** — title on the session store, never a run-event/`run.metadata`; the LLM call is a side-effect outside replay. Packs: n/a (no pack). |
-| 10 | Frontend | `useChatSession` consumes `conversation.titled`; placeholder retained; rail/tab update; tokens/a11y unchanged (text-only). |
+| 10 | Frontend | `useChatSession` consumes `openwop-app.conversation.titled`; placeholder retained; rail/tab update; tokens/a11y unchanged (text-only). |
 
 ---
 
 ## PRD-vs-architecture corrections
 
-1. **Deep-dive proposed an FE-initiated `POST …/autotitle` route the client calls.** → **Corrected:** fire from `conversationExchange` (the `maybeExtractMemoryOnClose` seam) instead — the backend already sees the first exchange, so no new FE round-trip; it emits a `conversation.titled` event the FE already-has-a-stream for. Cleaner, matches the established precedent, and avoids a client race.
+1. **Deep-dive proposed an FE-initiated `POST …/autotitle` route the client calls.** → **Corrected:** fire from `conversationExchange` (the `maybeExtractMemoryOnClose` seam) instead — the backend already sees the first exchange, so no new FE round-trip; it emits a `openwop-app.conversation.titled` event the FE already-has-a-stream for. Cleaner, matches the established precedent, and avoids a client race.
 2. **Deep-dive left `structured` vs `completion` open.** → **Decided `completion`** — the free MiniMax tier can't be trusted to emit clean structured/tool output (ADR 0146 saga); a title needs no schema.
 3. **Replay** — the deep-dive correctly flagged host-extension/non-replay; codified here (title on the session store, not the run log).
 
@@ -111,7 +112,7 @@ Ship a minimal feature-package **`src/features/chat-autotitle/`** that, **on the
 
 ## RFC verdict (Step 5)
 
-**Host-extension — NO new RFC.** The title is a host-side display label on the chat-session store; `conversation.titled` is a **non-normative host event** on the run SSE (the same class as the host's other chat-session events); nothing touches the OpenWOP wire (no run-event field, capability flag, normative MUST, or endpoint contract). It rides the **already-Accepted RFC 0005** conversation primitive as host work — exactly like ADR 0120 (memory-extract) and ADR 0130 (model-router stamp). `OPENWOP_REQUIRE_BEHAVIOR=true` is unaffected (no new advertisement).
+**Host-extension — NO new RFC.** The title is a host-side display label on the chat-session store; `openwop-app.conversation.titled` is a **non-normative host event** on the run SSE (the same class as the host's other chat-session events); nothing touches the OpenWOP wire (no run-event field, capability flag, normative MUST, or endpoint contract). It rides the **already-Accepted RFC 0005** conversation primitive as host work — exactly like ADR 0120 (memory-extract) and ADR 0130 (model-router stamp). `OPENWOP_REQUIRE_BEHAVIOR=true` is unaffected (no new advertisement).
 
 ## Consequences
 

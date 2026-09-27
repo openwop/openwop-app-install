@@ -1,0 +1,5 @@
+{
+  "name": "no-sales",
+  "description": "Phase-4 include-mode proof: core + the commerce and crm bundles (commerce hard-depends on crm — the dependsOn closure must be included). Under Phase-4 semantics the excludable universe is `registered − core`, so EVERY other grouping (sales, marketing, …) AND every standalone feature (kb, evals, …) is excluded; only core + the two named bundles ship.",
+  "bundles": ["commerce", "crm"]
+}

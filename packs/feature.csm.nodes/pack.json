@@ -1,7 +1,7 @@
 {
   "name": "feature.csm.nodes",
-  "version": "1.0.0",
-  "description": "CSM feature node pack (ADR 0014) — read/health nodes over the ctx.features.csm surface shipped by the CSM feature package. health-read lists at-risk accounts; health-set updates an existing account's score (idempotent, replay-safe).",
+  "version": "1.4.0",
+  "description": "CSM feature node pack (extends health-set) — read/health nodes over the ctx.features.csm surface shipped by the CSM feature package. health-read lists at-risk accounts; health-set updates an existing account's score (idempotent, replay-safe) and now also accepts a `deals`/`tasks` CRM fan-in (the csm-ops.health-from-crm chain) to compute a documented default healthScore + healthFactors breakdown, or an explicit `factors` array (which MUST be accompanied by the healthScore it computed — the service fails closed on factors alone) ADR 0582: the computed path refuses to score an absent, partial or unscopeable CRM fan-in rather than treating it as measured zeros.",
   "author": "OpenWOP App",
   "license": "Apache-2.0",
   "keywords": ["feature", "csm", "customer-success", "health"],
@@ -18,12 +18,12 @@
     },
     {
       "typeId": "feature.csm.nodes.health-set",
-      "version": "1.0.0",
+      "version": "1.4.0",
       "label": "CSM Health Set",
-      "description": "Sets healthScore/name on an EXISTING account by id, over ctx.features.csm. Tenant-guarded + idempotent (update-only — replay/fork safe).",
+      "description": "Sets healthScore/name on an EXISTING account by id, over ctx.features.csm. Tenant-guarded + idempotent (update-only — replay/fork safe). ADR 0212 §2/§3: accepts an optional `factors` array WITH its computed healthScore (marks the set as COMPUTED, stamping healthComputedAt; factors without healthScore are rejected fail-closed), or `deals`/`tasks` fan-in from feature.crm.nodes read nodes — from which it derives a documented default healthScore + factors (tunable via a `weights` config). A bare healthScore with neither clears any prior computed factors/stamp. ADR 0582 §4/§5: the COMPUTED path REFUSES rather than defaults — BOTH fan-ins and a non-empty `companyId` are required (a partial fan-in used to score the unmeasured side as zero open rows and stamp it as computed), the company is checked against the account's crmRef by the service, unattributed CRM rows are no longer counted against every account, the stored breakdown carries the arithmetic that produced it, and a refusal is recorded on the account as healthMeasureFailedAt/Reason instead of being scored as 100. ADR 0582 §15: an explicit `factors` breakdown MUST also name its `method` — the node no longer defaults it to `penalty-sum`, which mislabelled an upstream weighted-mean breakdown as arithmetic it had not run; only the deals/tasks fan-in path hardcodes `penalty-sum`, because that path actually performs it. ADR 0582 §16: the fan-in scores ONLY rows whose `companyId` matches the account's linked company. `Task.companyId` is optional and the sibling `create-task` node never sets it, so `openTasks` reads 0 for most tenants today — correct (the alternative charged every account for every unattributed row) but indistinguishable from a measured zero, so the breakdown also carries unweighted `dealsAttributed`/`dealsSeen`/`tasksAttributed`/`tasksSeen` counts. They have `weight: 0` and can never move the score; they exist so a reader can tell \"nothing is open\" from \"nothing is attributable\". A non-numeric healthScore is a typed validation_error, never a silent no-op write that returns success.",
       "category": "integration",
-      "role": "action",
-      "capabilities": []
+      "role": "side-effect",
+      "capabilities": ["side-effectful"]
     }
   ],
   "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }

@@ -16,6 +16,7 @@
  */
 
 import { createConnectorInvoker } from './connectorInvoker.js';
+import { resolveProviderForCapability, resolveProvidersForCapability } from '../features/connections/connectionsService.js';
 import type { BrokeredEgressDeps, AuthScheme } from './brokeredEgress.js';
 
 export interface ConnectorsAdapter {
@@ -25,7 +26,21 @@ export interface ConnectorsAdapter {
     body?: string;
     contentType?: string;
     authScheme?: AuthScheme;
+    extraHeaders?: Record<string, string>;
+    /** ADR 0627 D5 — exact connection pin (see `ConnectorInvokeArgs.request.connectionId`). */
+    connectionId?: string;
   }): Promise<{ ok: boolean; status?: number; data?: unknown; error?: string }>;
+  /** Resolve the acting human's connected provider for a capability CATEGORY
+   *  ("email-calendar" / "hr" / "ticketing" / …) — the Phase-2 capability binding
+   *  (ADR 0186 capability-dispatch). Returns the provider id to hand back to
+   *  `invoke`, or `null` when the tenant has no authorized connection of that
+   *  category, so a capability node degrades gracefully instead of hard-coding one
+   *  vendor. Runs through the same authorization choke point as every connection. */
+  resolveForCapability(capability: string): Promise<string | null>;
+  /** All authorized providers for a capability category, precedence-ordered — for a
+   *  node that supports only a SUBSET of a coarse category and must pick one it can
+   *  actually serve (ADR 0186). */
+  resolveAllForCapability(capability: string): Promise<string[]>;
 }
 
 export function makeConnectorsAdapter(deps: BrokeredEgressDeps): ConnectorsAdapter {
@@ -40,6 +55,22 @@ export function makeConnectorsAdapter(deps: BrokeredEgressDeps): ConnectorsAdapt
           ...(deps.orgId ? { orgId: deps.orgId } : {}),
         },
         request,
+      });
+    },
+    resolveForCapability(capability) {
+      return resolveProviderForCapability({
+        tenantId: deps.tenantId,
+        capability,
+        ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
+        ...(deps.orgId ? { orgId: deps.orgId } : {}),
+      });
+    },
+    resolveAllForCapability(capability) {
+      return resolveProvidersForCapability({
+        tenantId: deps.tenantId,
+        capability,
+        ...(deps.actingUserId ? { actingUserId: deps.actingUserId } : {}),
+        ...(deps.orgId ? { orgId: deps.orgId } : {}),
       });
     },
   };

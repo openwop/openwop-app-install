@@ -34,18 +34,61 @@ export function memoryBudgetConfig(): MemoryBudgetConfig {
   return { maxChars: Number.isFinite(n) && n > 0 ? n : DEFAULT_MEMORY_MAX_CHARS };
 }
 
+/** Policy knob for the ONE budget algorithm below. See `budgetByChars`. */
+export interface BudgetByCharsOptions {
+  /**
+   * Whether a lone first item that ALONE exceeds `maxChars` is kept anyway.
+   *
+   * `true` (the default, ADR 0148 A4 semantics) — a SOFT budget: never emit an
+   * empty context when items exist, because starving a turn of all retrieved
+   * context is worse for the product than overshooting a soft cap.
+   *
+   * `false` (RFC 0113 §"Injection budget" clause 1) — a HARD budget: *"A single
+   * entry exceeding the budget on its own MUST be omitted (not truncated
+   * mid-entry)."* A host advertising `memory.injectionBudget.supported` MUST
+   * honour this, so the RFC 0004 memory read passes `false`.
+   */
+  readonly keepAtLeastOne?: boolean;
+}
+
 /**
  * Keep the highest-priority items (input order is priority order) whose
- * cumulative `sizeOf` stays within `maxChars`. Always keeps the first item even
- * if it alone exceeds the budget (never drop everything). Pure + non-mutating.
+ * cumulative `sizeOf` stays within `maxChars`. Pure + non-mutating.
+ *
+ * ONE algorithm, TWO named policies — see `BudgetByCharsOptions.keepAtLeastOne`.
+ * The policies are genuinely different requirements over the same computation
+ * (ADR 0148 A4 wants a soft cap that never starves a turn; RFC 0113 mandates a
+ * hard cap), so they are expressed as a named option rather than as two budget
+ * models or as a post-filter at one call site. Defaulted so every pre-existing
+ * caller is byte-identical.
+ *
+ * CORRECTION (H49, 2026-08-17): this helper previously kept the first item
+ * unconditionally, with no way to opt out — and `listMemoryEntries` consumed it
+ * on the path this host advertises as `memory.injectionBudget.supported: true`.
+ * So `GET /v1/host/openwop-app/memory?tokenBudget=N` could return a set whose
+ * cumulative size EXCEEDED `N` whenever the most-recent entry was over-budget:
+ * a live over-claim on the wire, reachable with no fixture involved. The old
+ * `test/rfc0113-memory-budget.test.ts` case *"always keeps ≥1 entry even when
+ * the first alone exceeds the budget"* PINNED that violation — it had been
+ * written from this primitive's contract rather than from RFC 0113, so it
+ * agreed with the bug. It is inverted there now.
  */
-export function budgetByChars<T>(items: readonly T[], maxChars: number, sizeOf: (item: T) => number): T[] {
+export function budgetByChars<T>(
+  items: readonly T[],
+  maxChars: number,
+  sizeOf: (item: T) => number,
+  options: BudgetByCharsOptions = {},
+): T[] {
   if (items.length === 0) return [];
+  const keepAtLeastOne = options.keepAtLeastOne ?? true;
   const kept: T[] = [];
   let chars = 0;
   for (const item of items) {
     const size = Math.max(0, sizeOf(item));
-    if (kept.length > 0 && chars + size > maxChars) break;
+    // The first item is exempt from the cap ONLY under the soft policy. Under
+    // the hard policy an over-budget lone entry is dropped whole, and an empty
+    // result is the correct, conformant answer.
+    if ((kept.length > 0 || !keepAtLeastOne) && chars + size > maxChars) break;
     kept.push(item);
     chars += size;
   }

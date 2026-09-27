@@ -15,12 +15,12 @@ const routes: FeatureRoute[] = [
   {
     path: '/brand',
     element: <BrandPage />,
-    tier: 'workspace',
+    tier: 'workspace', archetype: 'standard-index',
     nav: {
       group: 'Marketing',
-      label: 'Brand',
+      label: 'Brand', labelKey: 'brandLabel',
       icon: MegaphoneIcon,
-      hint: 'Define & enforce brand voice',
+      hint: 'Define & enforce brand voice', hintKey: 'brandHint',
       order: 10,
     },
   },

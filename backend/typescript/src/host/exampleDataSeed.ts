@@ -24,13 +24,16 @@
  * @see RFCS/0086-standing-agent-roster-and-workflow-portfolio.md
  */
 
-import { createRosterEntry, listRoster, type RosterEntry } from './rosterService.js';
+import { demoAutoIngestSubscriptionId } from './triggerBridgeService.js';
+import { enterprisePosture } from './deployPosture.js';
+import { createRosterEntry, getRosterEntry, listRoster, type RosterEntry } from './rosterService.js';
 import { upsertAgentProfile, getAgentProfile, type AgentProfileInput } from './agentProfileService.js';
 import { createBoard, createCard, listBoards, type KanbanBoard, type KanbanColumn, type KanbanCardSource } from './kanbanService.js';
 import { getJob, registerJob } from './schedulingService.js';
 import { registerSubscription } from './triggerBridgeService.js';
 import { getChart, putChart, type OrgDepartment, type OrgMember } from './orgChartService.js';
 import { deleteRosterMemberCascade } from './rosterCascade.js';
+import { deleteConversationMeta } from './conversationStore.js';
 import { seedWorkforceEntities, seedWorkforceHistory } from './workforceService.js';
 import { exampleWorkflowsForRole, type ExampleRoleKey } from './exampleWorkflows.js';
 import { createLogger } from '../observability/logger.js';
@@ -38,6 +41,7 @@ import { ensureUserAgentRegistered } from '../routes/userAgents.js';
 import type { Storage } from '../storage/storage.js';
 import type { UserAgentRecord } from '../types.js';
 import demoAgentSeed from './seed-data/exampleAgents.json';
+import { seedAgentDepth } from './demoAgentDepthSeed.js';
 
 /** Lowercase-kebab slug from a persona name — must match the frontend's
  *  `slugify` in `chat/lib/agentMentions.ts` so the `@`-mention slug a user
@@ -113,6 +117,17 @@ interface SeedAgent {
    *  for the approval inbox instead of running. Lets a white-label operator
    *  author review-mode agents declaratively in the seed (WHITE-LABEL.md §4). */
   autonomyLevel?: 'auto' | 'guided' | 'review';
+  /** ADR 0031 Phase 8 "employable agent depth" — all OPTIONAL + additive (a
+   *  persona without them seeds exactly as before). Seeded, keyed by the new
+   *  member's rosterId, by {@link seedAgentDepth} last in the create/heal path.
+   *  Because `SeedAgent` fields are typed, a malformed edit in the JSON fails
+   *  `tsc` at the `as readonly SeedAgent[]` assertion. */
+  /** Durable role facts / working preferences / relationships to other seeded
+   *  entities by name (respects NOTE_CAP=200; 6–12 each). */
+  memories?: string[];
+  /** One bound knowledge collection per persona (auto-activates the `knowledge`
+   *  capability); 3–6 docs of playbooks / one-pagers / process docs. */
+  knowledge?: { collections: { name: string; description?: string; documents: { title: string; content: string }[] }[] };
 }
 
 /** The four canonical agent lanes (PRD §7). To Do is the trigger column. */
@@ -182,8 +197,14 @@ async function pruneRetiredDemoPersonas(tenantId: string, storage: Storage): Pro
  * agents/boards/schedules (a clean tenant for a branded deployment). Defaults
  * on, preserving the reference app's first-use experience.
  */
-function exampleDataSeedEnabled(): boolean {
-  return process.env.OPENWOP_DEMO_SEED_ENABLED !== 'false';
+export function exampleDataSeedEnabled(): boolean {
+  const explicit = process.env.OPENWOP_DEMO_SEED_ENABLED;
+  if (explicit === 'true') return true;
+  if (explicit === 'false') return false;
+  // DUR-3 (ADR 0195): default ON for the reference/demo/dev experience, but
+  // OPT-IN in the enterprise (auth) posture — a hardened deploy ships with no
+  // seeding capability unless the operator explicitly enables it.
+  return !enterprisePosture();
 }
 
 /** Per-tenant "demo data has been initialized once" marker key. Its presence
@@ -191,11 +212,6 @@ function exampleDataSeedEnabled(): boolean {
  *  user's curation" (deletions stick); the explicit `heal` path ignores it. */
 function seedMarkerKey(tenantId: string): string {
   return `demo:seed-claimed:${tenantId}`;
-}
-
-/** Test-only: drop a tenant's first-seed marker so a fresh seed re-populates. */
-export async function __resetDemoSeedMarker(storage: Storage, tenantId: string): Promise<void> {
-  await storage.kvDelete(seedMarkerKey(tenantId));
 }
 
 export interface SeedResult {
@@ -268,7 +284,14 @@ async function seedAgentBoard(
   }
 }
 
-/** Register one of a persona's standing schedules (skips an out-of-range index). */
+/** Register one of a persona's standing schedules (skips an out-of-range index).
+ *
+ *  ANONYMOUS tenants get their schedules seeded DISABLED: every anon visitor is
+ *  its own tenant with its own autonomous-run budget, so enabled seeds
+ *  accumulate into an unbounded background fleet no budget ever catches —
+ *  1,054 enabled anon cron jobs (~2.9k runs/day, 47k runs total) were found
+ *  firing in prod on 2026-07-14. The schedules stay VISIBLE in the demo UI;
+ *  a curious visitor can toggle one on and their own budget then applies. */
 async function seedAgentSchedule(
   tenantId: string,
   workflowIds: string[],
@@ -278,7 +301,15 @@ async function seedAgentSchedule(
 ): Promise<void> {
   const workflowId = workflowIds[sched.workflowIndex];
   if (!workflowId) return;
-  await registerJob({ jobId: `${rosterId}:${sched.slug}`, tenantId, cronExpr: sched.cronExpr, workflowId, rosterId, agentId, metadata: { label: sched.label } });
+  const enabled = !tenantId.startsWith('anon:');
+  // ADR 0379 P2 — the jobId carries the TENANT: deterministic rosterIds repeat
+  // across tenants, so a bare `${rosterId}:${slug}` would collide in the
+  // jobId-keyed store (two tenants' seeds overwriting each other's schedules).
+  const r = await registerJob({ jobId: `${tenantId}:${rosterId}:${sched.slug}`, tenantId, cronExpr: sched.cronExpr, workflowId, rosterId, agentId, enabled, metadata: { label: sched.label } });
+  // Grade-pass fix: never swallow a jobid_conflict — an explicit-jobId route
+  // caller could pre-register (squat) a deterministic seeded id; the seed
+  // can't fix that, but silence would make the missing schedule undiagnosable.
+  if (!r.ok) log.warn('seed_schedule_register_failed', { tenantId, jobId: `${tenantId}:${rosterId}:${sched.slug}`, code: r.error.code });
 }
 
 /** Resolve a spec's authored profile into a full {@link AgentProfileInput},
@@ -318,7 +349,7 @@ function workflowIdsForSpec(spec: SeedAgent): string[] {
  *  spec. */
 async function createSeededRosterMember(tenantId: string, storage: Storage, spec: SeedAgent): Promise<RosterEntry> {
   const workflowIds = workflowIdsForSpec(spec);
-  const chatAgentId = `user.${tenantId}.${personaSlug(spec.persona)}`;
+  const chatAgentId = `user.${personaSlug(spec.persona)}`; // ADR 0379 P2 — persona-scoped, tenant in the ROW only
   await ensureUserAgentRegistered(storage, {
     agentId: chatAgentId,
     tenantId,
@@ -331,6 +362,10 @@ async function createSeededRosterMember(tenantId: string, storage: Storage, spec
     memoryShape: { scratchpad: true, conversation: true, longTerm: false },
     createdAt: new Date().toISOString(),
   });
+  // Grade-pass fix: the deterministic `host:<slug>` mint 409s when the slot is
+  // occupied — reachable on heal when a seeded persona was RENAMED (byPersona
+  // misses; the slot still holds the renamed entry). Reuse the occupant (it IS
+  // this persona's entry) instead of aborting the whole seed mid-heal.
   const entry = await createRosterEntry({
     tenantId,
     persona: spec.persona,
@@ -340,6 +375,10 @@ async function createSeededRosterMember(tenantId: string, storage: Storage, spec
     description: spec.description,
     autonomyLevel: spec.autonomyLevel,
     roleKey: spec.roleKey,
+  }).catch(async (err) => {
+    const occupant = await getRosterEntry(tenantId, `host:${personaSlug(spec.persona).slice(0, 40) || 'agent'}`);
+    if (occupant) return occupant;
+    throw err;
   });
   await seedAgentBoard(tenantId, spec, workflowIds, entry.rosterId);
   for (const sched of spec.schedules) {
@@ -349,6 +388,9 @@ async function createSeededRosterMember(tenantId: string, storage: Storage, spec
   // (ADR 0031 §1c). Last in the create path so a profile-less spec still seeds
   // a complete member; the profile is purely additive.
   await seedAgentProfile(tenantId, spec, entry.rosterId);
+  // ADR 0031 Phase 8: employable depth (memories / knowledge / kickoff thread),
+  // keyed by the new rosterId. Idempotent — additive to the create path.
+  await seedAgentDepth(tenantId, spec, entry.rosterId);
   return entry;
 }
 
@@ -368,6 +410,18 @@ export async function ensureSeededAgentByRole(
 ): Promise<RosterEntry | null> {
   const existing = (await listRoster(tenantId)).find((e) => e.roleKey === roleKey);
   if (existing) return existing;
+  // ADR 0434 Phase 5 — deliberately NOT gated on `exampleDataSeedEnabled()`,
+  // unlike `seedExampleAgents` below. An audit flagged the asymmetry as a hole
+  // in the LEAK-7 kill-switch; it is not one. This path creates exactly ONE
+  // functional roster entry + its user-agent registration (see
+  // `createSeededRosterMember` — no boards, cards, schedules, or demo depth),
+  // and it is the assistant CAPABILITY's required bootstrap: its sole caller
+  // `ensureAssistantAgent` THROWS `assistant_capability_bootstrap_missing` on
+  // null, so gating this would disable the assistant on every hardened deploy.
+  // The spec is sourced from `exampleAgents.json` only because the seeder owns
+  // roster creation (the "use the seeding method" rule) — provenance, not
+  // demo content. Residual: the bootstrapped agent carries a sample persona
+  // label on a white-label install; that is a branding item, not data leakage.
   const spec = SEED_AGENTS.find((s) => s.roleKey === roleKey);
   if (!spec) return null;
   const key = `${tenantId}:${roleKey}`;
@@ -464,7 +518,7 @@ export async function seedExampleAgents(
     // roster entries) so an explicit "Load demo agents" re-seed heals tenants
     // seeded before this feature. Idempotent: insert-if-absent + last-write-wins
     // registry register.
-    const chatAgentId = `user.${tenantId}.${personaSlug(spec.persona)}`;
+    const chatAgentId = `user.${personaSlug(spec.persona)}`; // ADR 0379 P2 — persona-scoped, tenant in the ROW only
     const userAgentRecord: UserAgentRecord = {
       agentId: chatAgentId,
       tenantId,
@@ -505,7 +559,13 @@ export async function seedExampleAgents(
         healedBoards += 1;
       }
       for (const sched of spec.schedules) {
-        if (await getJob(`${entry.rosterId}:${sched.slug}`)) continue;
+        // ADR 0379 P2 — new mints are tenant-qualified; the old bare shape is
+        // still probed so pre-P2 tenants' existing schedules aren't re-seeded.
+        // Grade-pass fix: verify the probed job actually BELONGS to this
+        // tenant — getJob is by-id, and a squatter's cross-tenant row must not
+        // suppress the heal (registerJob's conflict guard will log it instead).
+        const probed = (await getJob(`${tenantId}:${entry.rosterId}:${sched.slug}`)) ?? (await getJob(`${entry.rosterId}:${sched.slug}`));
+        if (probed && probed.tenantId === tenantId) continue;
         await seedAgentSchedule(tenantId, workflowIds, entry.rosterId, entry.agentRef.agentId, sched);
         healedSchedules += 1;
       }
@@ -516,6 +576,11 @@ export async function seedExampleAgents(
         await seedAgentProfile(tenantId, spec, entry.rosterId);
         healedProfiles += 1;
       }
+      // Backfill employable depth for a persona seeded before Phase 8 (or whose
+      // depth write failed partway). Idempotent: seeds only what's missing, so a
+      // second heal restores nothing (the healed-shape invariant is unchanged —
+      // depth is not counted into the `healed` result).
+      await seedAgentDepth(tenantId, spec, entry.rosterId);
     }
 
     // Org-chart membership is rebuilt from every demo persona that now has a
@@ -575,7 +640,12 @@ export async function seedExampleAgents(
   // registers its own subscription WITH a signing secret.
   if (allowCreate) {
     await registerSubscription({
-      subscriptionId: `demo:agent-knowledge:auto-ingest:${tenantId}`,
+      // ADR 0722 — grammar-safe id. The old `demo:agent-knowledge:auto-ingest:<tenant>`
+      // carried `:` twice (thrice for an anon tenant), which `ids.schema.json#opaque`
+      // forbids, and `subscriptionId` is on the v2 wire raw. Deterministic per
+      // tenant, so the seed stays idempotent; migration 21 re-keys existing rows
+      // so a re-seed finds the row instead of registering a second one.
+      subscriptionId: demoAutoIngestSubscriptionId(tenantId),
       tenantId,
       source: 'webhook',
       // Matches AUTO_INGEST_WORKFLOW_ID in features/agent-knowledge/feature.ts —
@@ -610,12 +680,6 @@ export async function seedExampleAgents(
   };
 }
 
-/** The display names of the built-in demo personas (the seeder registry uses
- *  this to count + clear only the demo roster, never a user's own agents). */
-export function examplePersonaNames(): string[] {
-  return SEED_AGENTS.map((a) => a.persona);
-}
-
 /** How many of the built-in demo personas currently exist in the tenant's
  *  roster. Used by the `/demo-data` dashboard's live "N present" count. */
 export async function countExampleAgents(tenantId: string): Promise<number> {
@@ -646,6 +710,17 @@ export async function clearExampleAgents(tenantId: string, storage: Storage): Pr
     if (!demo.has(entry.persona.toLowerCase())) continue;
     await deleteRosterMemberCascade(tenantId, storage, entry.rosterId);
     cleared += 1;
+  }
+  // Sweep any leftover seeded kickoff chat threads. The demo no longer seeds
+  // these (they polluted each agent's real chat history), but existing tenants
+  // carry orphaned `demo-kickoff:*` sessions the roster cascade never reached.
+  // Prefix-scoped, so a user's own chats are never touched; the session delete
+  // cascades its messages (chat_messages FK ON DELETE CASCADE) and we drop the
+  // KV conversation meta too.
+  for (const s of await storage.listChatSessions(tenantId, 100_000)) {
+    if (!s.sessionId.startsWith('demo-kickoff:')) continue;
+    if (await storage.deleteChatSession(tenantId, s.sessionId)) cleared += 1;
+    await deleteConversationMeta(tenantId, s.sessionId).catch(() => undefined);
   }
   return { cleared };
 }

@@ -43,11 +43,14 @@ export function parseFactLines(raw: string): string[] {
 /** Managed-LLM fact extraction. The key is resolved host-side; the conversation text
  *  is capped. Returns [] on any provider error (extraction is best-effort, never
  *  blocks the turn). */
-export async function llmExtractFacts(tenantId: string, conversationText: string): Promise<string[]> {
+export async function llmExtractFacts(tenantId: string, conversationText: string, actingSubject?: string): Promise<string[]> {
   try {
     const r = await dispatchManagedChat({
       userFacingProvider: MANAGED_PROVIDER,
       tenantId,
+      // ADR 0721 — extraction is work done FOR a person and must meter to them.
+      // The caller already has the subject in the same expression.
+      ...(actingSubject ? { actingSubject } : {}),
       messages: [
         { role: 'system', content: EXTRACT_PROMPT },
         { role: 'user', content: conversationText.slice(0, MAX_INPUT_CHARS) },

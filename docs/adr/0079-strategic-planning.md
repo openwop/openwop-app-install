@@ -270,6 +270,17 @@ rationale) · **Alignment** (linked projects/priorities/documents/boards) · **B
 `PageHeader`, chip/card tokens, `ui/icons` (no emoji-as-icon). No raw hex / no undefined
 `var(--token)` (the `check-css-tokens` / `check-tsx-color-literals` gates).
 
+> **Correction (2026-07-09, routing):** the "one page with a Portfolio/<title>
+> tablist" shape above shipped, but it made the open strategy a transient
+> in-page state — no shareable URL, no back/forward, and a two-item tab row that
+> read as broken chrome. The detail editor now lives at its own route,
+> **`/strategy/:strategyId`** (`StrategyDetailPage.tsx`), the established
+> `/projects/:projectId` pattern: `PageHeader` with the strategy title + a
+> "Back to portfolio" ghost link replaces the outer tablist, the inner
+> Overview/Objectives/Initiatives/Alignment/Timeline tabs bind to `?tab=`
+> (`useUrlTab`), and portfolio cards/rows are real `<Link>`s. The rest of this
+> section (packages, gating, reuse rules) is unchanged.
+
 ### Public surface
 
 **None.** Strategy is an internal planning surface; no entry in `PUBLIC_PATH_PREFIXES`.

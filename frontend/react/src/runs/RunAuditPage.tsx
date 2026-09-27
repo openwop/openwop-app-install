@@ -20,7 +20,9 @@
  * 500'ing on the `audit.verify` call.
  */
 
+import { Button } from '../ui/Button.js';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Skeleton } from '../ui/Skeleton.js';
 import { useTranslation } from 'react-i18next';
 import { Link, useParams } from 'react-router-dom';
 import type { AuditVerifyResult, RunEventDoc } from '@openwop/openwop';
@@ -47,14 +49,35 @@ export function RunAuditPage() {
   // Gate the page on the host advertising openwop-audit-log-integrity.
   // Without the profile the audit.verify endpoint 404s, so it's better
   // to render a friendly explainer than to surface a network error.
+  //
+  // UX-RUN-1 — but the `.catch` used to reach that explainer too, and the
+  // explainer says "Host does not advertise openwop-audit-log-integrity." That
+  // is a definitive claim about the HOST, made when we merely failed to ASK it.
+  // On an audit-integrity page that is the worst possible thing to be wrong
+  // about: an operator checking whether their audit log is tamper-evident would
+  // be told their host cannot do it, and might go re-provision something that
+  // was working. The comment above justifies the explainer by "the profile is
+  // absent" — a case the failed-read path is NOT. `auditProfile` stays null
+  // (neither arm renders) and the failure gets its own state.
+  const [capsFailed, setCapsFailed] = useState(false);
+  const loadCaps = useCallback(() => {
+    setCapsFailed(false);
+    setAuditProfile(null);
+    return getCapabilities()
+      .then((caps) => {
+        const profiles = ((caps.auth as { profiles?: string[] } | undefined)?.profiles) ?? [];
+        setAuditProfile(profiles.includes('openwop-audit-log-integrity'));
+      })
+      .catch(() => { setCapsFailed(true); });
+  }, []);
   useEffect(() => {
     let cancelled = false;
-    getCapabilities()
+    void getCapabilities()
       .then((caps) => {
         const profiles = ((caps.auth as { profiles?: string[] } | undefined)?.profiles) ?? [];
         if (!cancelled) setAuditProfile(profiles.includes('openwop-audit-log-integrity'));
       })
-      .catch(() => { if (!cancelled) setAuditProfile(false); });
+      .catch(() => { if (!cancelled) setCapsFailed(true); });
     return () => { cancelled = true; };
   }, []);
 
@@ -130,6 +153,19 @@ export function RunAuditPage() {
         {t('auditIntroPre')}<code>openwop-audit-log-integrity</code>{t('auditIntroMid1')}<code>client.audit.verify(0, {lastSeq})</code>{t('auditIntroMid2')}<code>AuditVerifyResult</code>{t('auditIntroMid3')}<code>scripts/verify-audit-checkpoints.mjs</code>{t('auditIntroPost')}
       </p>
 
+      {/* UX-RUN-1 — "we couldn't ask" is not "the host can't do it". */}
+      {capsFailed && (
+        <Notice variant="warning" announce={t('auditCapsUnknown')}>
+          <strong>{t('auditCapsUnknown')}</strong>{' '}
+          {t('auditCapsUnknownBody')}{' '}
+          <Button variant="quiet" size="sm" onClick={() => void loadCaps()}>{t('common:retry')}</Button>
+        </Notice>
+      )}
+
+      {/* NOT announced, deliberately. `announce()` has ONE polite slot, so a second
+          call clobbers the first — and this notice is not a failed read. It is the
+          host's REAL answer that it lacks the profile, which is a fact rather than
+          an unknown. The capsFailed notice above IS the unknown, so it takes the slot. */}
       {auditProfile === false && (
         <Notice variant="warning">
           <strong>{t('auditProfileMissingPre')}<code>openwop-audit-log-integrity</code>{t('auditProfileMissingPost')}</strong>{' '}
@@ -140,12 +176,12 @@ export function RunAuditPage() {
       {auditProfile === true && (
         <>
           <div className="action-bar u-mb-3">
-            <button type="button" onClick={() => void runVerify()} disabled={verifying || lastSeq === 0}>
+            <Button variant="primary" onClick={() => void runVerify()} disabled={verifying || lastSeq === 0}>
               {verifying ? t('verifying') : t('reVerify')}
-            </button>
-            <button type="button" className="secondary" onClick={onDownload} disabled={!result}>
+            </Button>
+            <Button variant="secondary" onClick={onDownload} disabled={!result}>
               {t('downloadCheckpoints')}
-            </button>
+            </Button>
           </div>
 
           {error && <Notice variant="error">{error}</Notice>}
@@ -180,9 +216,9 @@ export function RunAuditPage() {
                   <table className="audit-anomaly-table">
                     <thead>
                       <tr>
-                        <th>{t('anomalyColAtSeq')}</th>
-                        <th>{t('anomalyColExpected')}</th>
-                        <th>{t('anomalyColActual')}</th>
+                        <th scope="col">{t('anomalyColAtSeq')}</th>
+                        <th scope="col">{t('anomalyColExpected')}</th>
+                        <th scope="col">{t('anomalyColActual')}</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -231,9 +267,11 @@ export function RunAuditPage() {
           )}
 
           {!result && !error && auditProfile === true && (
-            <p className="muted u-fs-13">
-              {lastSeq === 0 ? t('loadingRunEvents') : t('runningInitialVerification')}
-            </p>
+            <div role="status" aria-label={lastSeq === 0 ? t('loadingRunEvents') : t('runningInitialVerification')}>
+              <Skeleton width="45%" />
+              <Skeleton width="80%" />
+              <p className="muted u-fs-12">{lastSeq === 0 ? t('loadingRunEvents') : t('runningInitialVerification')}</p>
+            </div>
           )}
         </>
       )}

@@ -6,6 +6,17 @@
 > "ADR 0014"; this file + its references are the corrected number.
 
 **Status:** implemented (Phases 0–5, incl. the role-preview lens + the wildcard-bearer enforcement escape hatch — see "Deployment postures" below)
+
+> **Correction note (2026-08-01) — this ADR's personal/active split was never
+> propagated into the org-scoped RBAC guard.** `requireOrgScope`
+> (`features/featureRoute.ts:185`) predates this ADR and still compares the path
+> org against the caller's HOME tenant, while `POST /orgs` files orgs under the
+> ACTIVE one. The result is that **every org-scoped feature route is unreachable
+> inside every shared `ws:` workspace** — org-native features and the B2B tenancy
+> this ADR introduced do not compose today. Reproduced on `main` through the
+> production path. The original rationale below stands and is not edited; the gap
+> is that the guard never inherited it. See **ADR 0508** for the finding, the
+> measurement, and why the two-line fix is unsafe to ship on its own.
 **Date:** 2026-06-09
 **Depends on:** ADR 0002 (Users), ADR 0003 (Canonical identity — esp. its deferred
 Phase 4), ADR 0004 (Org invitations), ADR 0006 (RBAC).

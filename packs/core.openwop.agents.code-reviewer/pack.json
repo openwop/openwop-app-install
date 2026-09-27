@@ -1,6 +1,6 @@
 {
   "name": "core.openwop.agents.code-reviewer",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Code review agent. Reviews diffs or files for correctness, style, security, and design. Diff-aware prompting; cites file:line in findings. Pure-agent pack.",
   "author": "OpenWOP Working Group",
   "license": "Apache-2.0",
@@ -25,11 +25,10 @@
       "agentId": "core.openwop.agents.code-reviewer.default",
       "persona": "Code Reviewer",
       "label": "Code Reviewer Agent",
-      "description": "Reviews a diff or set of files for correctness, security, style, and design issues. Cites file:line for every finding. Severity-classifies findings (blocking / important / nit). Optionally fetches related files via openwop:core.files.fs-read to reason about cross-file impact.",
+      "description": "Reviews a diff or set of files for correctness, security, style, and design issues. Cites file:line for every finding. Severity-classifies findings (blocking / important / nit). Reasons over the diff and files supplied in the task payload; may fetch external API docs via openwop:core.openwop.http.fetch.",
       "modelClass": "coding",
       "systemPromptRef": "prompts/code-reviewer.md",
       "toolAllowlist": [
-        "openwop:core.files.read",
         "openwop:core.openwop.http.fetch"
       ],
       "memoryShape": {

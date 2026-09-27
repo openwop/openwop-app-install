@@ -25,6 +25,7 @@ import { createDurableQueue, createDurableQueueBus } from './durableQueue.js';
 import { createDurableVector, createDurableSearch, createDurableNosql } from './durableData.js';
 import { createDurableFs } from './durableFs.js';
 import { createDurableSql, setDurableSqlDir } from './durableSql.js';
+import { createDurableMemory } from './durableMemory.js';
 
 /** Backend id the durable adapters register under (OPENWOP_SURFACE_*=durable). */
 export const DURABLE_BACKEND_ID = 'durable';
@@ -69,6 +70,11 @@ export function initDurableSurfaces(storage: Storage, opts: { sqlDir?: string } 
   registerSurfaceAdapter('nosql', DURABLE_BACKEND_ID, createDurableNosql);
   registerSurfaceAdapter('fs', DURABLE_BACKEND_ID, createDurableFs);
   registerSurfaceAdapter('sql', DURABLE_BACKEND_ID, createDurableSql);
+  // RFC 0004 agent memory (DUR-2, ADR 0195) — consumed via the module-level
+  // memory API in inMemorySurfaces.ts, not the run bundle; registration here
+  // makes the seam's env selection, boot assertions, and honest advertisement
+  // apply to it uniformly.
+  registerSurfaceAdapter('memory', DURABLE_BACKEND_ID, createDurableMemory);
 }
 
 /** Test affordance — set the Storage ref directly without registering. */

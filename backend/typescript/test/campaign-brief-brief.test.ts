@@ -25,7 +25,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true';
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const d = getToggleDefault('campaign-brief'); if (d) await saveConfig({ ...d, status: 'on' }, 'test');
 });
 afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -63,6 +63,20 @@ describe('campaign-brief briefs — CRUD + validate', () => {
     expect(r.body.brief.channels).toHaveLength(5);
     expect(r.body.brief.channels.every((c: any) => c.enabled === false)).toBe(true);
     expect(r.body.brief.status).toBe('draft');
+  });
+
+  it('R2 CB-SP-3: budget currency stores only ISO-4217-shaped codes — a malformed code is dropped, never the budget', async () => {
+    const { owner, orgId } = await ownerWithOrg();
+    const created = await owner.post(B, { orgId, name: 'Camp', productName: 'FlashPick' });
+    const id = created.body.brief.id;
+    // The old sanitizer kept any <=8-char string ("DOLLARS") from agent/workflow
+    // writes; money renders downstream key off this code.
+    const bad = await owner.patch(`${B}/${id}`, { budget: { totalMinor: 5000, currency: 'DOLLARS' } });
+    expect(bad.status).toBe(200);
+    expect(bad.body.brief.budget.totalMinor).toBe(5000); // the budget survives
+    expect(bad.body.brief.budget.currency).toBeUndefined(); // the junk code does not
+    const good = await owner.patch(`${B}/${id}`, { budget: { totalMinor: 5000, currency: 'jpy' } });
+    expect(good.body.brief.budget.currency).toBe('JPY'); // shaped codes normalize + store
   });
 
   it('validate reports completeness issues and the enabled channel set', async () => {

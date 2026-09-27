@@ -12,14 +12,15 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { Request, Response } from 'express';
 import { openSseChannel, _resetSseStreamCounts } from '../src/host/sseChannel.js';
 
-function mockReq(opts: string | { tenantId?: string; tenants?: string[] } = {}): Request & { _close: () => void } {
+function mockReq(opts: string | { tenantId?: string; tenants?: string[]; destroyed?: boolean } = {}): Request & { _close: () => void } {
   const o = typeof opts === 'string' ? { tenantId: opts } : opts;
   const closeCbs: Array<() => void> = [];
   return {
     tenantId: o.tenantId,
     principal: o.tenants ? { principalId: 'p', tenants: o.tenants } : undefined,
+    destroyed: o.destroyed ?? false,
     header: () => undefined,
-    socket: { remoteAddress: '127.0.0.1' },
+    socket: { remoteAddress: '127.0.0.1', destroyed: o.destroyed ?? false },
     on: (event: string, cb: () => void) => { if (event === 'close') closeCbs.push(cb); },
     _close: () => closeCbs.forEach((c) => c()),
   } as unknown as Request & { _close: () => void };
@@ -105,5 +106,25 @@ describe('sseChannel concurrent-stream cap', () => {
     process.env.OPENWOP_SSE_MAX_STREAMS_PER_TENANT = '0';
     for (let i = 0; i < 50; i++) open('tenant-A');
     expect(() => open('tenant-A')).not.toThrow();
+  });
+
+  it('refuses a request whose client already disconnected (pre-open abort)', () => {
+    // The client aborted during the route's pre-open auth awaits: 'close' has
+    // already been emitted, so the teardown listener would never fire. Opening
+    // anyway would consume a slot FOREVER (the 2026-07-14 leak window).
+    expect(() => openSseChannel(mockReq({ tenantId: 'tenant-A', destroyed: true }), mockRes())).toThrowError(
+      expect.objectContaining({ code: 'invalid_request', httpStatus: 408 }),
+    );
+  });
+
+  it('a pre-destroyed request consumes NO slot — the cap stays free for live streams', () => {
+    // Hammer with aborted-before-open requests well past the cap…
+    for (let i = 0; i < 10; i++) {
+      expect(() => openSseChannel(mockReq({ tenantId: 'tenant-A', destroyed: true }), mockRes())).toThrow();
+    }
+    // …then a healthy client still gets its full cap (2): no slots leaked.
+    expect(() => open('tenant-A')).not.toThrow();
+    expect(() => open('tenant-A')).not.toThrow();
+    expect(() => open('tenant-A')).toThrow();
   });
 });

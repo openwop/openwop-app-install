@@ -7,7 +7,7 @@
 export const messages = {
   // MemoryBrowser — errors
   loadError: 'Échec du chargement des mémoires.',
-  addError: 'Échec de l\'ajout de la mémoire.',
+  addError: 'Échec de l’ajout de la mémoire.',
   removeError: 'Échec de la suppression de la mémoire.',
   // MemoryBrowser — add form
   addLabel: 'Ajouter une mémoire',
@@ -17,20 +17,25 @@ export const messages = {
   addMemory: 'Ajouter une mémoire',
   // MemoryBrowser — list / states
   loadingTitle: 'Chargement des mémoires…',
-  emptyTitle: 'Aucune mémoire pour l\'instant',
-  emptyBodyDefault: 'Ajoutez ici des faits et des préférences ; ils sont rappelés lorsque c\'est pertinent.',
+  emptyTitle: 'Aucune mémoire pour l’instant',
+  emptyBodyDefault: 'Ajoutez ici des faits et des préférences ; ils sont rappelés lorsque c’est pertinent.',
   externalUnverified: 'Externe · non vérifiée',
   externalUnverifiedTitle: 'Importée depuis une source externe — traitée comme non fiable (ADR 0038 §C).',
+  autoLearned: 'Apprise automatiquement',
+  autoLearnedTitle: 'Votre assistant l\'a déduite d\'une conversation — vous ne l\'avez pas saisie, elle est donc considérée comme non vérifiée.',
+  learnedOn: 'Apprise le {{date}}',
+  recallOnlyDisclosure_one: '{{n}} autre élément a été retenu d\'une conversation et ne figure pas ici. Votre assistant peut toujours s\'en souvenir ; il n\'est pas modifiable depuis cette liste.',
+  recallOnlyDisclosure_other: '{{n}} autres éléments ont été retenus de conversations et ne figurent pas ici. Votre assistant peut toujours s\'en souvenir ; ils ne sont pas modifiables depuis cette liste.',
   removeMemory: 'Supprimer la mémoire',
   // MemoryInspectorPage — header
   eyebrow: 'Mémoire',
   inspectorTitle: 'Inspecteur de mémoire',
   inspectorLedePrefix:
-    "Parcourez le registre de mémoire du locataire. Les entrées sont écrites en interne par l'hôte — l'exécuteur écrit un résumé de l'exécution à la fin. Les lectures et les suppressions sont limitées à vos identifiants côté serveur ; l'inspecteur ne peut pas voir la mémoire d'un autre locataire.",
+    "Parcourez le registre de mémoire du locataire. Les entrées sont écrites en interne par l’hôte — l’exécuteur écrit un résumé de l’exécution à la fin. Les lectures et les suppressions sont limitées à vos identifiants côté serveur ; l’inspecteur ne peut pas voir la mémoire d’un autre locataire.",
   inspectorLedeShowing: 'Affichage',
   // MemoryInspectorPage — redaction
   redactedBadge: 'expurgée',
-  redactedTitle: 'Contient du contenu secret expurgé par l\'hôte (SR-1)',
+  redactedTitle: 'Contient du contenu secret expurgé par l’hôte (SR-1)',
   // MemoryInspectorPage — search / filter
   searchLabel: 'Rechercher',
   searchHint: '(contenu ou étiquettes)',
@@ -46,16 +51,16 @@ export const messages = {
   expiresTitle: 'Expire le {{date}}',
   // MemoryInspectorPage — delete
   deleteEntryTitle: 'Supprimer cette entrée de mémoire',
-  deleteEntryAria: 'Supprimer l\'entrée de mémoire {{id}}',
-  confirmDelete: 'Supprimer l\'entrée de mémoire « {{id}} » ? Cette action est irréversible.',
+  deleteEntryAria: 'Supprimer l’entrée de mémoire {{id}}',
+  confirmDelete: 'Supprimer l’entrée de mémoire « {{id}} » ? Cette action est irréversible.',
   confirmBulkDelete_one: 'Supprimer {{n}} entrée de mémoire ? Cette action est irréversible.',
   confirmBulkDelete_other: 'Supprimer {{n}} entrées de mémoire ? Cette action est irréversible.',
   deleteSuccess: 'Entrée de mémoire supprimée.',
-  deleteError: 'Impossible de supprimer l\'entrée de mémoire.',
+  deleteError: 'Impossible de supprimer l’entrée de mémoire.',
   bulkDeleteSuccess_one: '{{n}} entrée de mémoire supprimée.',
   bulkDeleteSuccess_other: '{{n}} entrées de mémoire supprimées.',
-  bulkDeleteError_one: '{{n}} entrée n\'a pas pu être supprimée.',
-  bulkDeleteError_other: '{{n}} entrées n\'ont pas pu être supprimées.',
+  bulkDeleteError_one: '{{n}} entrée n’a pas pu être supprimée.',
+  bulkDeleteError_other: '{{n}} entrées n’ont pas pu être supprimées.',
   deleteSelected: 'Supprimer la sélection',
   // MemoryInspectorPage — count line
   entryCount_one: '{{n}} entrée',
@@ -64,10 +69,16 @@ export const messages = {
   // MemoryInspectorPage — table / empty
   tableCaption: 'Entrées de mémoire',
   emptyNoMatchTitle: 'Aucune entrée de mémoire correspondante',
-  emptyNoEntriesTitle: 'Aucune entrée de mémoire pour l\'instant',
-  emptyNoMatchBody: 'Aucune entrée ne correspond à la recherche ou au filtre par étiquette actuels. Effacez les filtres pour voir l\'intégralité du registre.',
-  emptyNoEntriesBody: 'Les entrées sont écrites en interne par l\'hôte — l\'exécuteur écrit un résumé de l\'exécution à la fin. Lancez un workflow pour alimenter le registre.',
+  emptyNoEntriesTitle: 'Aucune entrée de mémoire pour l’instant',
+  emptyNoMatchBody: 'Aucune entrée ne correspond à la recherche ou au filtre par étiquette actuels. Effacez les filtres pour voir l’intégralité du registre.',
+  clearFilters: 'Effacer les filtres',
+  emptyNoEntriesBody: 'Les entrées sont écrites en interne par l’hôte — l’exécuteur écrit un résumé de l’exécution à la fin. Lancez un workflow pour alimenter le registre.',
   // memoryClient — errors
   getEntryError: 'getMemoryEntry a renvoyé {{status}}',
   deleteEntryRequestError: 'deleteMemoryEntry a renvoyé {{status}}',
+  removeMemoryConfirmBody: 'Supprimer cette mémoire ? L’agent ne s’en souviendra plus.',
+  storedUnknown: "Mémoires enregistrées : inconnu",
+  loadFailedTitle: "Impossible de charger ces mémoires",
+  loadFailedBody: "C’est une lecture en échec, pas une mémoire vide : ce qui est enregistré est toujours là.",
+  retry: "Réessayer",
 } as const;

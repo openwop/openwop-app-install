@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-crew/1.0.0/research-director.task.schema.json",
+  "$id": "https://packs.openwop.dev/vendor.myndhyve.market-intel-crew/1.0.1/research-director.task.schema.json",
   "title": "ResearchDirectorTask",
   "type": "object",
   "required": [

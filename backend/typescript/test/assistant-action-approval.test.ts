@@ -17,10 +17,11 @@ import http from 'node:http';
 import { createApp } from '../src/index.js';
 import { __clearToggleStore } from '../src/host/featureToggles/service.js';
 import { __resetAssistantStore, getPendingAction } from '../src/features/assistant/assistantService.js';
+import { contentHashOf } from '../src/features/assistant/actionApproval.js';
 import { enqueueActionWithApproval } from '../src/features/assistant/actionApproval.js';
 import { getApproval, __resetApprovalStore } from '../src/host/approvalService.js';
 import { getRosterEntry } from '../src/host/rosterService.js';
-import { findChiefOfStaff } from '../src/features/assistant/chiefOfStaff.js';
+import { findAssistantAgent } from '../src/features/assistant/capability.js';
 
 let BASE: string;
 const TOKEN = 'dev-token';
@@ -36,7 +37,7 @@ beforeAll(async () => {
   await __resetAssistantStore();
   await __resetApprovalStore();
   await new Promise<void>((res) => {
-    server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
+    server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); });
   });
   const on = await jf('/v1/host/openwop-app/feature-toggles/admin/configs/assistant', {
     method: 'PUT',
@@ -89,12 +90,12 @@ describe('enqueue → the single approval loop', () => {
 
     // ADR 0023 (corrected) — the approval is attributed to the REAL
     // Chief-of-Staff roster member, not the old `rosterId:'assistant'` phantom.
-    const cos = await findChiefOfStaff(TENANT);
+    const cos = await findAssistantAgent(TENANT);
     expect(cos, 'enqueue ensured a Chief-of-Staff roster member').not.toBeNull();
     expect(approval!.rosterId).toBe(cos!.rosterId);
     expect(approval!.rosterId).not.toBe('assistant');
     expect(approval!.persona).toBe(cos!.persona);
-    expect(getRosterEntry(approval!.rosterId)).resolves.not.toBeNull(); // resolves to a real entry
+    expect(getRosterEntry(approval!.tenantId, approval!.rosterId)).resolves.not.toBeNull(); // resolves to a real entry
 
     // The "Waiting on me" surface sees it — same queue as run proposals.
     const inbox = await jf<{ items: Array<{ approvalId: string; actionId?: string }> }>('/v1/host/openwop-app/approvals?status=pending');
@@ -144,6 +145,61 @@ describe('enqueue → the single approval loop', () => {
     expect(row!.action!.payload).not.toHaveProperty('internalToken');
   });
 
+  /**
+   * ADR 0662 D2 — approve-what-you-see. Born red: before this decision the approve route
+   * took no hash at all, so an action edited after the approver read it executed with the
+   * new content and no indication.
+   *
+   * The second half is the part that matters and is easy to get wrong: ADR 0473 §(d) puts
+   * the definitive check AFTER the CAS, so by the time a mismatch is found the approval is
+   * consumed and the action row is already marked `approved`. Reopening only ONE side
+   * leaves the other lying — an action marked approved that never executed and never
+   * reported failure. Both rows must come back to `pending`.
+   */
+  it('a stale expectedContentHash is refused 409 and BOTH rows return to pending', async () => {
+    const action = await enqueueActionWithApproval(TENANT, draftEmail());
+    const before = (await getPendingAction(TENANT, action.actionId))!;
+    const staleHash = contentHashOf(before);
+
+    // Someone edits the action after the approver read it.
+    const edited = await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ draft: 'Completely different text the approver never saw.' }),
+    });
+    expect(edited.status).toBe(200);
+
+    const refused = await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ expectedContentHash: staleHash }),
+    });
+    expect(refused.status).toBe(409);
+
+    // Both sides restored — neither may be left resolved.
+    const afterAction = await getPendingAction(TENANT, action.actionId);
+    expect(afterAction?.status, 'the action row must be back to pending, not left approved').toBe('pending');
+    const { getApproval } = await import('../src/host/approvalService.js');
+    const afterApproval = await getApproval(action.approvalId!);
+    expect(afterApproval?.status, 'the approval must be reopened too').toBe('pending');
+
+    // …and the CURRENT hash is accepted, so this is a refusal to guess, not a dead end.
+    const fresh = (await getPendingAction(TENANT, action.actionId))!;
+    const ok = await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ expectedContentHash: contentHashOf(fresh) }),
+    });
+    expect(ok.status).toBe(200);
+  });
+
+  it('approve without expectedContentHash is refused 400 — an optional guard is an unguarded guard', async () => {
+    const action = await enqueueActionWithApproval(TENANT, draftEmail());
+    const r = await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, { method: 'POST', body: '{}' });
+    expect(r.status).toBe(400);
+    expect((await getPendingAction(TENANT, action.actionId))?.status).toBe('pending');
+    // A REJECT needs no hash: refusing something that changed is still a refusal.
+    const rej = await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/reject`, { method: 'POST', body: '{}' });
+    expect(rej.status).toBe(200);
+  });
+
   it('claim from the approvals inbox approves the action; a second decision 409s (CAS)', async () => {
     const action = await enqueueActionWithApproval(TENANT, draftEmail());
     const claim = await jf<{ status: string; actionId: string }>(`/v1/host/openwop-app/approvals/${action.approvalId}/claim`, {
@@ -188,7 +244,11 @@ describe('enqueue → the single approval loop', () => {
     expect(edited.body.editedAt).toBeTruthy();
     expect(edited.body.derivedFromUntrusted).toBe(true); // taint never launders on edit
 
-    await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, { method: 'POST', body: '{}' });
+    // ADR 0662 D2 — the hash is of the EDITED row (the edit above changed the draft), which
+    // is the point: approving the pre-edit hash is now refused.
+    const { contentHashOf } = await import('../src/features/assistant/actionApproval.js');
+    const freshRow = (await getPendingAction(TENANT, action.actionId))!;
+    await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}/approve`, { method: 'POST', body: JSON.stringify({ expectedContentHash: contentHashOf(freshRow) }) });
     const postDecide = await jf(`/v1/host/openwop-app/assistant/pending-actions/${action.actionId}`, {
       method: 'PATCH',
       body: JSON.stringify({ draft: 'too late' }),

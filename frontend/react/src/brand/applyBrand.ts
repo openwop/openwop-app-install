@@ -1,6 +1,6 @@
 /**
  * Runtime brand application (ADR 0170 Phase 5). Applies the app identity returned
- * by `GET /v1/host/openwop-app/public-brand` to the live DOM — `:root` CSS tokens
+ * by `GET /host/openwop-app/public-brand` to the live DOM — `:root` CSS tokens
  * (colors + typography), document title, favicon, and the fonts `<link>` — and
  * merges it onto the build-time `brand` singleton so React consumers reflect a
  * super-admin override.
@@ -38,7 +38,7 @@ export interface PublicBrandIdentity {
   instanceName?: string;
   assistantName?: string;
   documentTitle?: string;
-  logo?: { markSrc?: string; lockupSrc?: string; faviconSrc?: string };
+  logo?: { markSrc?: string; lockupSrc?: string; faviconSrc?: string; markSrcDark?: string; lockupSrcDark?: string };
   colors?: Partial<Record<'accent' | 'paper' | 'paper2' | 'ink' | 'ink2' | 'rule' | 'themeColor', string>>;
   typography?: { serif?: string; sans?: string; mono?: string; fontsHref?: string };
   /** Theme: mode + generative inputs + advanced override (ADR 0171). Mirrors the
@@ -55,6 +55,41 @@ export interface PublicBrandIdentity {
   };
   domains?: { primaryDomain?: string; homeUrl?: string; repoUrl?: string };
   chromePolicy?: { showPoweredBy?: boolean; customFooter?: string; customCopyright?: string };
+}
+
+/** Contrast-bearing tokens are GENERATOR-OWNED (ADR 0510 §5): the ADR 0171
+ *  generator solves their WCAG-AA relationships, so an advanced override may not
+ *  set them. MIRROR: backend `features/brand/types.ts` `GENERATOR_OWNED_TOKENS`
+ *  must stay byte-identical — the backend silently drops these on save, so the
+ *  editor must reject them VISIBLY here or the preview lies about what persists. */
+export const GENERATOR_OWNED_TOKENS: ReadonlySet<string> = new Set([
+  '--clay', '--clay-soft', '--clay-text', '--clay-strong', '--clay-rule', '--clay-wash', '--clay-glow', '--clay-bg-hi',
+  '--paper', '--paper-2', '--rule', '--rule-2', '--ink', '--ink-2', '--ink-3', '--star-glow',
+  '--color-success', '--color-warning', '--color-danger', '--color-ai', '--color-info',
+  '--color-success-text', '--color-warning-text', '--color-danger-text', '--color-ai-text', '--color-info-text',
+]);
+
+/** Split a per-mode override map into the entries the server will keep vs the
+ *  generator-owned keys it will drop (ADR 0510 §5). Used by the Appearance editor
+ *  to keep the preview honest and to name rejected keys in a visible notice. */
+export function splitGeneratorOwnedOverride(
+  override: { light?: Record<string, string>; dark?: Record<string, string> } | undefined,
+): { kept: { light?: Record<string, string>; dark?: Record<string, string> } | undefined; dropped: string[] } {
+  if (!override) return { kept: undefined, dropped: [] };
+  const dropped = new Set<string>();
+  const filterMode = (map: Record<string, string> | undefined): Record<string, string> | undefined => {
+    if (!map) return undefined;
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(map)) {
+      if (GENERATOR_OWNED_TOKENS.has(k)) dropped.add(k);
+      else out[k] = v;
+    }
+    return Object.keys(out).length ? out : undefined;
+  };
+  const light = filterMode(override.light);
+  const dark = filterMode(override.dark);
+  const kept = light || dark ? { ...(light ? { light } : {}), ...(dark ? { dark } : {}) } : undefined;
+  return { kept, dropped: [...dropped].sort() };
 }
 
 /** localStorage key the inline pre-paint script + the provider share. */
@@ -157,8 +192,16 @@ export function toThemeInputs(theme: PublicBrandIdentity['theme']): ThemeInputs 
 }
 
 /** Inject a generated token set into the live DOM via a single `<style>` element —
- *  `:root { …light… }` + `:root.theme-dark { …dark… }` — so light/dark toggling works
- *  without the generator. Idempotent (replaces the element's contents). */
+ *  light + dark for BOTH dark entry points: the forced `.theme-dark` class AND the
+ *  default `system` mode's `@media (prefers-color-scheme: dark)` (UX-ASSESSMENT
+ *  DS-1 — without the media block, a dark-OS user in system mode fell through to
+ *  global.css's stock dark tokens and lost the AA-solved palette). Selectors are
+ *  deliberately over-specified (`:root:root…`) so the injected rules beat the
+ *  same-token stock blocks in global.css regardless of where this `<style>`
+ *  element sits relative to the bundled stylesheet (the pre-paint mirror in
+ *  index.html creates it early in <head>, BEFORE the CSS link — on equal
+ *  specificity the stock sheet would win that tie). Idempotent (replaces the
+ *  element's contents). */
 export function applyGeneratedTokens(light: Record<string, string>, dark: Record<string, string>): void {
   const rule = (sel: string, map: Record<string, string>): string => {
     const decls = Object.entries(map)
@@ -167,7 +210,11 @@ export function applyGeneratedTokens(light: Record<string, string>, dark: Record
       .join(';');
     return decls ? `${sel}{${decls}}` : '';
   };
-  const css = `${rule(':root', light)}\n${rule(':root.theme-dark', dark)}`;
+  const css = [
+    rule(':root:root', light),
+    rule(':root:root.theme-dark', dark),
+    `@media (prefers-color-scheme: dark){${rule(':root:root:not(.theme-light)', dark)}}`,
+  ].join('\n');
   let el = document.getElementById('openwop-brand-theme') as HTMLStyleElement | null;
   if (!el) {
     el = document.createElement('style');
@@ -212,7 +259,9 @@ export function hydrateBrandSingleton(identity: PublicBrandIdentity): void {
     brand.markSrc = identity.logo.markSrc;
     brand.logoSrc = identity.logo.markSrc;
   }
+  if (identity.logo?.markSrcDark !== undefined) brand.markSrcDark = identity.logo.markSrcDark;
   if (identity.logo?.lockupSrc) brand.lockupSrc = identity.logo.lockupSrc;
+  if (identity.logo?.lockupSrcDark !== undefined) brand.lockupSrcDark = identity.logo.lockupSrcDark;
   if (identity.theme?.defaultMode) brand.defaultTheme = identity.theme.defaultMode;
   if (identity.domains?.homeUrl) brand.homeUrl = identity.domains.homeUrl;
   if (identity.domains?.repoUrl) brand.repoUrl = identity.domains.repoUrl;

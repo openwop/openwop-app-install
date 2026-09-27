@@ -1,0 +1,14 @@
+{
+  "name": "feature.service-desk.nodes",
+  "version": "1.0.0",
+  "description": "Service-desk ticket reads over ctx.features['service-desk'] (ADR 0422): list the org queue and read one ticket incl. its thread, so SLA/escalation workflows can branch on ticket state. Writes stay on the approval lane (draft-reply) and the reply-approved event binding — never a node. role:action (recorded).",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": ["feature", "service-desk", "tickets", "support"],
+  "engines": { "openwop": ">=1.0.0 <2.0.0" },
+  "nodes": [
+    { "typeId": "feature.service-desk.nodes.list-tickets", "version": "1.0.0", "label": "Service Desk: List Tickets", "description": "Lists the org's tickets (id/subject/status/priority/channel/message count) over ctx.features['service-desk'].listTickets. Inputs: { orgId, status? }. Output: { tickets }. Tenant-guarded read.", "category": "integration", "role": "action", "capabilities": [] },
+    { "typeId": "feature.service-desk.nodes.get-ticket", "version": "1.0.0", "label": "Service Desk: Get Ticket", "description": "Reads one ticket incl. the message thread over ctx.features['service-desk'].getTicket. Inputs: { ticketId }. Output: { ticket | null }. Tenant-guarded read.", "category": "integration", "role": "action", "capabilities": [] }
+  ],
+  "runtime": { "language": "javascript", "format": "esm", "entry": "./index.mjs", "minRuntimeVersion": "node>=20" }
+}

@@ -1,0 +1,1234 @@
+{
+  "name": "core.openwop.workflows.mcp-tool-projections",
+  "version": "1.0.1",
+  "kind": "workflow-chain",
+  "description": "MCP tool-projection workflows (core.openwop.mcp.expose-tool → backing node), migrated from the deprecated builtinWorkflows seam (ADR 0472 P4). chainIds keep the original *.mcp.* ids; registered chain-backed with the EXACT original metadata (the ADR 0087 mcp gates) restored, and the MCP mount enumerates them.",
+  "keywords": [
+    "MCP",
+    "Tools"
+  ],
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "chains": [
+    {
+      "chainId": "commerce.ucp.mcp.catalog-search",
+      "version": "1.0.0",
+      "label": "ucp-catalog-search",
+      "description": "MCP tool projection ucp-catalog-search.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The merchant org id."
+          },
+          "q": {
+            "type": "string",
+            "description": "Optional search query."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "ucp-catalog-search",
+              "description": "Browse a merchant’s UCP shopping catalog (name/price/availability). Inputs: { orgId, q? }.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "orgId": {
+                    "type": "string"
+                  },
+                  "q": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "orgId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.commerce.nodes.list-products",
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "q": "{{params.q}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "commerce.ucp.mcp.place-order",
+      "version": "1.0.0",
+      "label": "ucp-place-order",
+      "description": "MCP tool projection ucp-place-order.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId",
+          "lines"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The merchant org id."
+          },
+          "lines": {
+            "type": "array",
+            "description": "Order lines."
+          },
+          "contactId": {
+            "type": "string",
+            "description": "Optional CRM contact id."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "ucp-place-order",
+              "description": "Place an order against a merchant (demo-mode: creates a PENDING, unpaid order — no charge; payment is a separate step). Inputs: { orgId, lines:[{productId,quantity}], contactId? }.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "orgId": {
+                    "type": "string"
+                  },
+                  "lines": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "productId": {
+                          "type": "string"
+                        },
+                        "quantity": {
+                          "type": "integer",
+                          "minimum": 1
+                        }
+                      },
+                      "required": [
+                        "productId",
+                        "quantity"
+                      ],
+                      "additionalProperties": false
+                    },
+                    "minItems": 1
+                  },
+                  "contactId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "orgId",
+                  "lines"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.commerce.nodes.create-order",
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "lines": "{{params.lines}}",
+              "contactId": "{{params.contactId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "docs.mcp.docs_search",
+      "version": "1.0.1",
+      "label": "docs_search",
+      "description": "MCP tool projection docs_search.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "The search query."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Max hits to return (default 8, max 20)."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "docs_search",
+              "description": "Search the published product documentation. Returns ranked hits with a title, snippet, public /docs URL, and relevance score.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "query": {
+                    "type": "string",
+                    "description": "The search query."
+                  },
+                  "limit": {
+                    "type": "number",
+                    "description": "Max hits to return (default 8, max 20)."
+                  }
+                },
+                "required": [
+                  "query"
+                ]
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.docs.nodes.search",
+            "inputs": {
+              "query": "{{params.query}}",
+              "limit": "{{params.limit}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "docs.mcp.docs_get",
+      "version": "1.0.1",
+      "label": "docs_get",
+      "description": "MCP tool projection docs_get.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "slug"
+        ],
+        "properties": {
+          "slug": {
+            "type": "string",
+            "description": "The docs page slug (as shown in its /docs/<slug> URL)."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "docs_get",
+              "description": "Fetch one published documentation page by its slug. Returns the title, full text, and public /docs URL.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "slug": {
+                    "type": "string",
+                    "description": "The docs page slug (as shown in its /docs/<slug> URL)."
+                  }
+                },
+                "required": [
+                  "slug"
+                ]
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.docs.nodes.get",
+            "inputs": {
+              "slug": "{{params.slug}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.list",
+      "version": "1.0.0",
+      "label": "notebook-list",
+      "description": "MCP tool projection notebook-list.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-list",
+              "description": "List the research notebooks you can access in this workspace.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.notebooks.nodes.list-notebooks"
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.get",
+      "version": "1.0.0",
+      "label": "notebook-get",
+      "description": "MCP tool projection notebook-get.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook id."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-get",
+              "description": "Get one research notebook by id (name + bound collection).",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "notebookId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "notebookId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.notebooks.nodes.get-notebook",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.list-sources",
+      "version": "1.0.0",
+      "label": "notebook-list-sources",
+      "description": "MCP tool projection notebook-list-sources.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook id."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-list-sources",
+              "description": "List a notebook's sources (each with its per-source context level).",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "notebookId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "notebookId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.notebooks.nodes.list-sources",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.list-notes",
+      "version": "1.0.0",
+      "label": "notebook-list-notes",
+      "description": "MCP tool projection notebook-list-notes.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook id."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-list-notes",
+              "description": "List a notebook's notes.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "notebookId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "notebookId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.notebooks.nodes.list-notes",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.search",
+      "version": "1.0.1",
+      "label": "notebook-search",
+      "description": "MCP tool projection notebook-search.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "query"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook id."
+          },
+          "query": {
+            "type": "string",
+            "description": "The search/ask query."
+          },
+          "topK": {
+            "type": "number",
+            "description": "Max results."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-search",
+              "description": "Semantic search over a notebook's sources — ranked hits + citations.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "notebookId": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "topK": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50
+                  }
+                },
+                "required": [
+                  "notebookId",
+                  "query"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.notebooks.nodes.search",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "query": "{{params.query}}",
+              "topK": "{{params.topK}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.ask",
+      "version": "1.0.1",
+      "label": "notebook-ask",
+      "description": "MCP tool projection notebook-ask.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "query"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook id."
+          },
+          "query": {
+            "type": "string",
+            "description": "The search/ask query."
+          },
+          "topK": {
+            "type": "number",
+            "description": "Max results."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-ask",
+              "description": "Grounded retrieval over a notebook — returns a fenced, cited context block for your model to answer from.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "notebookId": {
+                    "type": "string"
+                  },
+                  "query": {
+                    "type": "string"
+                  },
+                  "topK": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 50
+                  }
+                },
+                "required": [
+                  "notebookId",
+                  "query"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "feature.notebooks.nodes.ask",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "query": "{{params.query}}",
+              "topK": "{{params.topK}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.add-source",
+      "version": "1.0.0",
+      "label": "notebook-add-source",
+      "description": "MCP tool projection notebook-add-source.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "text"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook id."
+          },
+          "title": {
+            "type": "string",
+            "description": "Source title."
+          },
+          "text": {
+            "type": "string",
+            "description": "Source text to ingest."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-add-source",
+              "description": "Add a text source to a notebook (requires human approval).",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "notebookId": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "notebookId",
+                  "text"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "approval",
+            "typeId": "core.hitl.approval-request",
+            "inputs": {
+              "prompt": {
+                "type": "static",
+                "value": "An MCP client requests adding a source to this notebook. Approve?"
+              }
+            }
+          },
+          {
+            "id": "write",
+            "typeId": "feature.notebooks.nodes.mcp-add-source",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "title": "{{params.title}}",
+              "text": "{{params.text}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "approval._order",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "approval.decision",
+            "to": "write.decision",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "notebooks.mcp.create-note",
+      "version": "1.0.0",
+      "label": "notebook-create-note",
+      "description": "MCP tool projection notebook-create-note.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "notebookId",
+          "content"
+        ],
+        "properties": {
+          "notebookId": {
+            "type": "string",
+            "description": "The notebook id."
+          },
+          "content": {
+            "type": "string",
+            "description": "The note content."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "notebook-create-note",
+              "description": "Add a note to a notebook (requires human approval).",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "notebookId": {
+                    "type": "string"
+                  },
+                  "content": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "notebookId",
+                  "content"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "approval",
+            "typeId": "core.hitl.approval-request",
+            "inputs": {
+              "prompt": {
+                "type": "static",
+                "value": "An MCP client requests creating a note in this notebook. Approve?"
+              }
+            }
+          },
+          {
+            "id": "write",
+            "typeId": "feature.notebooks.nodes.mcp-create-note",
+            "inputs": {
+              "notebookId": "{{params.notebookId}}",
+              "content": "{{params.content}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "approval._order",
+            "triggerRule": "all_success"
+          },
+          {
+            "from": "approval.decision",
+            "to": "write.decision",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "app-builder.mcp.create-project",
+      "version": "1.0.0",
+      "label": "app-builder-create-project",
+      "description": "MCP tool projection app-builder-create-project.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Project name."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "app-builder-create-project",
+              "description": "Create a blank App Builder project (a draft design canvas). Returns { canvasId, version, url }.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "description": "Project name."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "app-builder.mcp-node.create-project",
+            "inputs": {
+              "name": "{{params.name}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "app-builder.mcp.open-project",
+      "version": "1.0.0",
+      "label": "app-builder-open-project",
+      "description": "MCP tool projection app-builder-open-project.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "canvasId": {
+            "type": "string",
+            "description": "The App Builder canvas id."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "app-builder-open-project",
+              "description": "Open an App Builder project by id (returns its canvasId + current version — the CAS basis), or omit canvasId to LIST the workspace’s projects.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "canvasId": {
+                    "type": "string",
+                    "description": "The App Builder canvas id."
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "app-builder.mcp-node.open-project",
+            "inputs": {
+              "canvasId": "{{params.canvasId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "app-builder.mcp.get-design",
+      "version": "1.0.0",
+      "label": "app-builder-get-design",
+      "description": "MCP tool projection app-builder-get-design.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "canvasId"
+        ],
+        "properties": {
+          "canvasId": {
+            "type": "string",
+            "description": "The App Builder canvas id."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "app-builder-get-design",
+              "description": "Read the CURRENT app design JSON (and its version) for an App Builder canvas. Call before modifying so you edit what actually exists; pass the returned version as baseVersion when rendering an update.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "canvasId": {
+                    "type": "string",
+                    "description": "The App Builder canvas id."
+                  }
+                },
+                "required": [
+                  "canvasId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "app-builder.mcp-node.get-design",
+            "inputs": {
+              "canvasId": "{{params.canvasId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "app-builder.mcp.catalog",
+      "version": "1.0.0",
+      "label": "app-builder-catalog",
+      "description": "MCP tool projection app-builder-catalog.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "app-builder-catalog",
+              "description": "Get the CLOSED component catalog for app designs — every component type with its props, enums, defaults, and container child-constraints. Types outside this catalog are rejected.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "app-builder.mcp-node.catalog"
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "app-builder.mcp.render-design",
+      "version": "1.0.0",
+      "label": "app-builder-render-design",
+      "description": "MCP tool projection app-builder-render-design.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "app"
+        ],
+        "properties": {
+          "app": {
+            "type": "object",
+            "description": "The app design document."
+          },
+          "canvasId": {
+            "type": "string",
+            "description": "Existing canvas to update."
+          },
+          "baseVersion": {
+            "type": "number",
+            "description": "CAS basis for an update."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "app-builder-render-design",
+              "description": "Render a composed app design into a REAL App Builder canvas (normalize → closed-world validate → versioned persist). Pass the full design as `app` (component types come ONLY from the catalog tool). To update, pass canvasId + the baseVersion you read via get-design. Validation errors return as typed failures — fix and call again.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "app": {
+                    "type": "object",
+                    "description": "The full app design document (see the catalog tool for component schemas)."
+                  },
+                  "canvasId": {
+                    "type": "string",
+                    "description": "Existing canvas to update (omit to create a new one)."
+                  },
+                  "baseVersion": {
+                    "type": "number",
+                    "description": "The version the update is based on (from get-design) — required with canvasId."
+                  }
+                },
+                "required": [
+                  "app"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "app-builder.mcp-node.render-design",
+            "inputs": {
+              "app": "{{params.app}}",
+              "canvasId": "{{params.canvasId}}",
+              "baseVersion": "{{params.baseVersion}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "app-builder.mcp.get-preview-url",
+      "version": "1.0.0",
+      "label": "app-builder-get-preview-url",
+      "description": "MCP tool projection app-builder-get-preview-url.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "canvasId"
+        ],
+        "properties": {
+          "canvasId": {
+            "type": "string",
+            "description": "The App Builder canvas id."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "app-builder-get-preview-url",
+              "description": "Get the editor + preview URLs for an App Builder project, with a SANITIZED design summary (share projection — no secrets, no data-source rows).",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "canvasId": {
+                    "type": "string",
+                    "description": "The App Builder canvas id."
+                  }
+                },
+                "required": [
+                  "canvasId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "app-builder.mcp-node.get-preview-url",
+            "inputs": {
+              "canvasId": "{{params.canvasId}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    },
+    {
+      "chainId": "app-builder.mcp.resolve-paused-task",
+      "version": "1.0.0",
+      "label": "app-builder-resolve-paused-task",
+      "description": "MCP tool projection app-builder-resolve-paused-task.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "interruptId"
+        ],
+        "properties": {
+          "interruptId": {
+            "type": "string",
+            "description": "The interrupt id."
+          },
+          "value": {
+            "type": "object",
+            "description": "Resume value."
+          }
+        }
+      },
+      "dag": {
+        "nodes": [
+          {
+            "id": "expose",
+            "typeId": "core.openwop.mcp.expose-tool",
+            "config": {
+              "name": "app-builder-resolve-paused-task",
+              "description": "Resolve a paused app-builder design-chain task (a per-screen review or clarification interrupt raised by YOUR build run). Only app-builder chain interrupts in this workspace can be resolved — never other workflows’ approvals.",
+              "inputSchema": {
+                "type": "object",
+                "properties": {
+                  "interruptId": {
+                    "type": "string",
+                    "description": "The paused task’s interrupt id."
+                  },
+                  "value": {
+                    "type": "object",
+                    "description": "The resume value (e.g. the review decision)."
+                  }
+                },
+                "required": [
+                  "interruptId"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          {
+            "id": "backing",
+            "typeId": "app-builder.mcp-node.resolve-paused-task",
+            "inputs": {
+              "interruptId": "{{params.interruptId}}",
+              "value": "{{params.value}}"
+            }
+          }
+        ],
+        "edges": [
+          {
+            "from": "expose.handle",
+            "to": "backing._order",
+            "triggerRule": "all_success"
+          }
+        ]
+      }
+    }
+  ]
+}

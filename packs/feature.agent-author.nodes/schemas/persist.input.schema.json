@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://packs.openwop.dev/feature.agent-author.nodes/1.1.0/persist.input.schema.json",
+  "title": "Agent Author Persist Input",
+  "type": "object",
+  "required": ["draft"],
+  "properties": {
+    "draft": { "$ref": "./draft.io.schema.json" },
+    "mode": {
+      "type": "string",
+      "enum": ["create", "draft"],
+      "description": "create (default) writes the roster; draft stashes the VALIDATED draft for the manual wizard's prefill (ADR 0514 OQ1) — nothing is created."
+    }
+  },
+  "additionalProperties": false
+}

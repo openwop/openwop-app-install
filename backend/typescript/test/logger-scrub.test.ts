@@ -68,3 +68,46 @@ describe('logger SEC-8 scrubber', () => {
     expect(out).toContain('logFieldsError');
   });
 });
+
+/**
+ * ADR 0733 — the SINK WIRING. `adr0733-log-pii-value-shape.test.ts` proves the
+ * `maskPiiDeep` mechanism, but it never constructs a logger: review finding 5 measured
+ * that deleting `values: MASK_PII_VALUES` from `logger.ts` left all of its tests green.
+ * These three tests are the ones that red when the wiring goes, not the mechanism.
+ */
+describe('ADR 0733 — value-shaped PII actually reaches the sink masked', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('masks an address embedded in an operational field on the way to stdout', () => {
+    const log = createLogger('test.pii');
+    const out = capture('stdout', () => log.info('insert failed', { error: 'unique violation: alice@example.com' }));
+    expect(out).not.toContain('alice@example.com');
+    expect(out).toMatch(/pii_[0-9a-f]{10}/);
+    expect(out).toContain('unique violation:'); // substring-scoped — the rest still debuggable
+  });
+
+  it('masks it in the emit() CATCH branch too — the line that bypasses scrubFields', () => {
+    const log = createLogger('test.pii');
+    const boom = { toJSON() { throw new Error('row alice@example.com failed'); } };
+    const out = capture('stdout', () => log.info('write failed', { row: boom }));
+    expect(out).toContain('logFieldsError'); // we really took the fallback path
+    expect(out).not.toContain('alice@example.com');
+    expect(out).toMatch(/pii_[0-9a-f]{10}/);
+  });
+
+  it('OPENWOP_LOG_MASK_PII_VALUES=off returns the address — the flag is real, not decorative', async () => {
+    const prev = process.env.OPENWOP_LOG_MASK_PII_VALUES;
+    process.env.OPENWOP_LOG_MASK_PII_VALUES = 'off';
+    vi.resetModules(); // the flag is read once at module load
+    try {
+      const { createLogger: freshLogger } = await import('../src/observability/logger.js');
+      const log = freshLogger('test.pii');
+      const out = capture('stdout', () => log.info('insert failed', { error: 'unique violation: alice@example.com' }));
+      expect(out).toContain('alice@example.com');
+    } finally {
+      if (prev === undefined) delete process.env.OPENWOP_LOG_MASK_PII_VALUES;
+      else process.env.OPENWOP_LOG_MASK_PII_VALUES = prev;
+      vi.resetModules();
+    }
+  });
+});

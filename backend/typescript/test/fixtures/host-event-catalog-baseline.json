@@ -1,0 +1,22 @@
+{
+  "_comment": "ADR 0617 D4 \u2014 SHRINK-ONLY baseline for test/host-event-catalog-parity.test.ts. `missingTypes`: emitted host-event types the frontend KNOWN_HOST_EVENT_TYPES catalog does not yet list (the ADR 0584 docblock's known misses, seeded 2026-09-02 on dc8b7c9bf). Remove a row when its type is added to the catalog; NEVER add a row for a new emitter \u2014 add the type to the catalog instead. `uncoveredComputedPrefixes`: template-built emit sites (`host.<x>.${...}`) with no catalog entry under the prefix; expand their suffix sets into the catalog to shrink this. `computedSiteCount` pins the number of distinct computed prefixes. The sweep that drains this file is filed as UAUWF-6.",
+  "missingTypes": [
+    "host.environments.applied",
+    "host.environments.promoted",
+    "host.goals.closed",
+    "host.goals.evaluated"
+  ],
+  "uncoveredComputedPrefixes": [
+    "host.app-builder.sync.",
+    "host.commission.",
+    "host.dealer.",
+    "host.priority.",
+    "host.servicedesk.ticket.",
+    "host.strategy.",
+    "host.territory.",
+    "host.webinar.",
+    "host.whatsapp.consent."
+  ],
+  "computedSiteCount": 11,
+  "_computedSiteCountNote": "10 -> 11 on ADR 0643 D3 (2026-09-04): features/kb/emit.ts is a NEW template-built emit site (`host.kb.${entity}.${verb}`, the crm/emit.ts shape) and is pinned both ways by the KB leg of the parity test; `host.kb.document.updated` left `missingTypes` in the same change (catalogued, not re-baselined)."
+}

@@ -19,18 +19,35 @@ function normalizeChannel(raw, index) {
   if (!raw || typeof raw !== 'object') throw fail(`channel ${index} is not an object`);
   const name = str(raw.name, 120);
   if (!name) throw fail(`channel ${index} needs a name`);
-  const type = CHANNEL_TYPES.has(raw.type) ? raw.type : 'content';
-  const out = { name, type };
+  // R2 CS-SP-2 — an unknown type used to be silently rewritten to 'content',
+  // so the closed-world validator downstream never saw the bad value and the
+  // tool's promised "fix and call again" repair loop never fired: a "tiktok"
+  // channel returned ok:true as "content". Unknown enums are now TYPED
+  // failures the model can repair.
+  if (!CHANNEL_TYPES.has(raw.type)) {
+    throw fail(`channel ${index} ("${name}") has unknown type "${String(raw.type)}" — use one of: ${[...CHANNEL_TYPES].join(', ')}`);
+  }
+  const out = { name, type: raw.type };
   const tactic = str(raw.tactic, 400); if (tactic) out.tactic = tactic;
   if (typeof raw.budget === 'number' && Number.isFinite(raw.budget) && raw.budget >= 0) out.budget = raw.budget;
   return out;
 }
 
 function normalizeStage(raw) {
-  const stage = STAGES.has(raw?.stage) ? raw.stage : 'awareness';
-  const out = { stage };
+  // R2 CS-SP-2 — same rule as channel type: unknown stages are typed
+  // failures, never silently substituted with 'awareness'.
+  if (!STAGES.has(raw?.stage)) {
+    throw fail(`funnel stage has unknown value "${String(raw?.stage)}" — use one of: ${[...STAGES].join(', ')}`);
+  }
+  const out = { stage: raw.stage };
   const description = str(raw?.description, 600); if (description) out.description = description;
   if (Array.isArray(raw?.kpis)) { const kpis = raw.kpis.map((k) => str(k, 120)).filter(Boolean).slice(0, 8); if (kpis.length) out.kpis = kpis; }
+  // R2 CS-SP-1 — the ADR 0360 board coordinates were DROPPED here, so every
+  // agent revision of an existing campaign silently reset the user's board
+  // arrangement to the auto-grid (even though get-design had returned the
+  // positions). Preserve them when finite.
+  if (typeof raw?.x === 'number' && Number.isFinite(raw.x)) out.x = raw.x;
+  if (typeof raw?.y === 'number' && Number.isFinite(raw.y)) out.y = raw.y;
   return out;
 }
 

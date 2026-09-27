@@ -18,12 +18,16 @@
  */
 
 import { useMemo, useState } from 'react';
+import { Notice } from '../ui/Notice.js';
 import { useTranslation } from 'react-i18next';
 import type { RunEventDoc } from '@openwop/openwop';
 import { MessageSquareIcon, WrenchIcon, ScaleIcon } from '../ui/icons/index.js';
 import { formatPercent } from '../i18n/format.js';
 
 interface Props {
+  /** Heading level follows the embedding context — RunStepInspector nests
+   *  this under an h3, where a fixed h2 broke the outline (BLD-10). */
+  headingLevel?: 'h2' | 'h3' | undefined;
   events: readonly RunEventDoc[];
 }
 
@@ -131,16 +135,17 @@ function jsonStr(v: unknown): string {
   try { return JSON.stringify(v, null, 2); } catch { return String(v); }
 }
 
-export function RunAgentTrace({ events }: Props) {
+export function RunAgentTrace({ events, headingLevel = 'h2' }: Props) {
   const { t } = useTranslation('runs');
   const steps = useMemo(() => buildSteps(events), [events]);
   if (steps.length === 0) return null;
 
   // Group consecutive steps by agent to render per-agent lanes while
   // preserving overall sequence order.
+  const Heading = headingLevel;
   return (
     <div className="card">
-      <h2>{t('agentActivity')}</h2>
+      <Heading>{t('agentActivity')}</Heading>
       <div className="agent-trace">
         {steps.map((step) => (
           <div className="agent-trace-step" key={`${step.kind}-${step.seq}`}>
@@ -186,7 +191,7 @@ function ToolStepView({ step }: { step: ToolStep }) {
             <details><summary className="muted">{t('toolOutcome')}</summary><pre>{jsonStr(step.outcome)}</pre></details>
           )}
           {isError && step.error && (
-            <div className="alert error">{step.error.code}: {step.error.message}</div>
+            <Notice variant="error">{step.error.code}: {step.error.message}</Notice>
           )}
         </div>
       )}

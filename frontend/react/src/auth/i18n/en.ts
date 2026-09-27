@@ -45,7 +45,7 @@ export const messages = {
 
   // SignInButton — sign-in error copy
   signInCancelled: 'Sign-in was cancelled.',
-  popupBlocked: 'Your browser blocked the sign-in popup. Allow popups for app.openwop.dev and try again.',
+  popupBlocked: 'Your browser blocked the sign-in popup. Allow popups for {{domain}} and try again.',
   providerNotEnabled: 'This provider isn\'t enabled for the deployment. The maintainer needs to turn it on in the Firebase Console.',
   networkErrorIdp: 'Network error reaching the identity provider. Check your connection and try again.',
   signInFailed: 'Sign-in failed: {{code}}.',
@@ -53,6 +53,7 @@ export const messages = {
   // SignInButton — provider names
   providerGoogle: 'Google',
   providerGithub: 'GitHub',
+  providerMicrosoft: 'Microsoft',
   providerPassword: 'email + password',
 
   // SignInButton — account linking
@@ -65,8 +66,11 @@ export const messages = {
   // SignInButton — sign-in modal
   continueWithGoogle: 'Continue with Google',
   continueWithGithub: 'Continue with GitHub',
+  continueWithMicrosoft: 'Continue with Microsoft',
   signInToSaveTitle: 'Sign in to <0>save your work</0>',
   signInToSaveLede: 'Workflows + BYOK keys you add after signing in persist across sessions. Anonymous session state is wiped every 24h.',
+  signInIdentityTitle: 'Sign in to <0>your workspace</0>',
+  signInIdentityLede: 'Use your account to access your workflows, agents, and keys.',
 
   // SignInButton — account fallback name
   accountFallbackName: 'Account',
@@ -98,7 +102,27 @@ export const messages = {
   errNetworkRequestFailed: 'Network error — check your connection and retry.',
   errGeneric: 'Something went wrong.',
 
+  // TOTP multi-factor (ADR 0389 P1 — firebase.ts)
+  errInvalidMfaCode: 'That code didn\'t match — check your authenticator app and try again.',
+  errRequiresRecentLogin: 'This change needs a recent sign-in. Sign out and back in, then retry.',
+  mfaCodeRequired: 'Enter the 6-digit code from your authenticator app to finish signing in.',
+  mfaCodeLabel: 'Authenticator code',
+  mfaFactorLabel: 'Authenticator device',
+  mfaFactorUnnamed: 'Authenticator {{index}}',
+  mfaNoPendingEnrollment: 'No enrollment in progress — start again from the Security page.',
+  mfaNoPendingChallenge: 'No sign-in awaiting a code — sign in again.',
+  mfaNoTotpFactor: 'This account has no authenticator-app factor enrolled.',
+  errNotSignedIn: 'Not signed in.',
+
   // ExistingProviderSignInError message (firebase.ts)
   existingProviderKnown: '{{email}} is already signed up with {{providers}}. Sign in with {{providers}} to link your {{attempted}} account.',
   existingProviderUnknown: '{{email}} is already signed up with another provider. Sign in with that provider to link your {{attempted}} account.',
+  signingInRedirect: 'Signing in… you may be redirected to your provider.',
+
+  // ADR 0621 D5 — the sign-in modal's reason after a mid-session hard sign-out
+  // (`sessionRefused_${code}`; the fourth is the self-service "everywhere").
+  sessionRefused_account_disabled: 'Your account has been disabled by an administrator, so you were signed out. Contact your workspace admin to restore access.',
+  sessionRefused_account_erased: 'Your account has been removed, so you were signed out. It can no longer be used to sign in.',
+  sessionRefused_session_revoked: 'You were signed out on every device. Sign in again to continue.',
+  sessionRefused_self_revoked: 'You signed out of every device, including this one. Sign in again to continue.',
 } as const;

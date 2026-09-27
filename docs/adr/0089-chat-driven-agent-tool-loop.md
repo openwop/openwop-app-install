@@ -195,7 +195,7 @@ review before, `/code-review` + `/ux-review` after, fixes applied).
 | 1 — tool loop in conversation | ✅ implemented | Extracted the shared `runChatToolLoop` (one owner of §A14 + RFC 0064 events); `runToolLoop` delegates. New `host/conversationToolLoop` runs it for a tool-bearing @mentioned agent, reusing the SAME policy-enforcing adapter + tool executor; falls back to single completion otherwise. | `conversation-agent-tool-loop.test.ts` (loop exec / §A14 / invalid-args / provider-error / onEvent / fallbacks); 323 agent+conversation tests green |
 | 2 — live tool progress | ✅ implemented | `toolActivityFromEvent` (pure, replay-guarded) → the existing `agentEvents.toolCalls` cards (`ToolCallCard`, Running→done/error). No new component/stream. | `conversationTransport.test.ts` (mapping + replay guard); FE build gate + 158 chat tests green |
 | 3 — allowlist / budget / BYOK | ✅ implemented | Confirmed §A14 + round budget + BYOK ride inside the shared loop; added a `maxRounds` budget test + the `OPENWOP_CONVERSATION_MAX_TOOL_ROUNDS` ops knob. | budget-bound test |
-| 4 — Option B (nested agentic run) | ✅ **implemented** (2026-06-22) | Backend MVP — a tool-bearing agent that declares `investigationDepth:'deep'` (default-off) dispatches its loop as a SEPARATE persisted run when @mentioned, embedded as a `workflow_run` bubble; non-opted agents keep the inline path unchanged. New `local.openwop-app.agent-runner` node (enters the GATED `runAgentDispatchLive` — no second executor) + the synthetic `openwop-app.agent-mention` workflow + a `conversationExchange` depth branch + route wiring. Per architect→code-review cadence: review caught a BYOK-credential-not-threaded bug (nested run needs `configurable.credentialRefs`) — fixed via `agentMentionConfigurable`. **Ops note:** a deep @mention spawns a second run (extra SSE/read fan-out) — watch `OPENWOP_RATELIMIT_IP_REQS_PER_MIN`. FE "Run as investigation" toggle deferred (agent-declared opt-in used). | `conversation-deep-investigation.test.ts` (8: opt-in truth table, deep→nested vs non-opted→inline-unchanged, runner→gated-owner + events + fail-closed, BYOK-ref registration); full suite 2640 green |
+| 4 — Option B (nested agentic run) | ✅ **implemented** (2026-06-22); **reachable since 2026-07-15** via ADR 0373 — see the correction note below | Backend MVP — a tool-bearing agent that declares `investigationDepth:'deep'` (default-off) dispatches its loop as a SEPARATE persisted run when @mentioned, embedded as a `workflow_run` bubble; non-opted agents keep the inline path unchanged. New `local.openwop-app.agent-runner` node (enters the GATED `runAgentDispatchLive` — no second executor) + the synthetic `openwop-app.agent-mention` workflow + a `conversationExchange` depth branch + route wiring. Per architect→code-review cadence: review caught a BYOK-credential-not-threaded bug (nested run needs `configurable.credentialRefs`) — fixed via `agentMentionConfigurable`. **Ops note:** a deep @mention spawns a second run (extra SSE/read fan-out) — watch `OPENWOP_RATELIMIT_IP_REQS_PER_MIN`. FE "Run as investigation" toggle deferred (agent-declared opt-in used). | `conversation-deep-investigation.test.ts` (8: opt-in truth table, deep→nested vs non-opted→inline-unchanged, runner→gated-owner + events + fail-closed, BYOK-ref registration); full suite 2640 green |
 
 **Phase 4 deferral (architect decision, 2026-06-21).** Option B (a first-class
 nested agentic *run* embedded as a `workflow_run` bubble) is a UX enhancement,
@@ -245,6 +245,47 @@ that must not be rushed.
   (or a BYOK `web-search` secret) — configure a search provider for real
   research results (§Q1).
 
+
+
+### Correction note (2026-07-15) — Phase 4 was implemented but NOT REACHABLE; ADR 0373 activated it
+
+The Phase-4 row above claims a tool-bearing agent "that declares
+`investigationDepth:'deep'`" dispatches a nested run. **No shipped agent can
+declare it**, so the branch has never executed outside tests:
+
+- `packs/agentLoader.ts` builds `ResolvedAgentManifest` field-by-field and never
+  copies `investigationDepth` off the raw manifest (nor does `RawAgentManifest`
+  list it); `routes/userAgents.ts` + `routes/agents.ts` don't set it either. The
+  only writer is a direct `registry.register()` — which is what
+  `test/conversation-deep-investigation.test.ts` does, so the 8 tests prove the
+  BRANCH, not the FEATURE.
+- Zero packs in `packs/` declare the field.
+- It cannot simply be added to the loader: `schemas/agent-manifest.schema.json`
+  is the SPEC schema (`$id: https://openwop.dev/spec/v1/agent-manifest.schema.json`,
+  vendored from `../openwop`, re-projected onto the wire by
+  `routes/packs.ts:projectAgentManifest`) and is `additionalProperties: false`
+  WITHOUT `investigationDepth`. A pack declaring it would violate the spec
+  schema. **Making it manifest-declarable is a WIRE change ⇒ RFC gate**
+  (CLAUDE.md). The cheaper, correct alternative is a HOST-EXTENSION activation
+  (agentProfile / an ADR 0104-style override under `/v1/host/openwop-app/*`,
+  non-normative, no RFC) — consistent with "capabilities at core, activated via
+  agentProfile".
+
+**RESOLVED 2026-07-15 — [ADR 0373](0373-deep-investigation-activation.md) Phase 1.**
+Activation is now the host-ext `AgentProfile.capabilities` seam: a tenant
+activates `'deep-investigation'` on a named agent and the `@mention` dispatches
+the nested run. The manifest field survives as a VESTIGIAL fallback (checked
+SECOND — the profile is primary), so this ADR's original tests still pin the
+branch; making the manifest field itself real remains an OpenWOP RFC, not host
+work. The path is bounded by the XCH-GRP-3 per-room budget (PR #1868, degrades
+to the inline turn) and is default-OFF per (tenant, agent).
+
+The latent defect this note recorded is FIXED in the same phase that made it
+reachable: `conversationDeepInvestigationEligible` now takes
+`exchangeModelOverride`, and the dispatch resolves the nested run's model
+through the ONE `resolveConversationModelTarget` resolver instead of reading
+`run.inputs` raw — which also picks up the `metadata.modelRoute` stamp the raw
+read silently ignored.
 
 ## § Follow-on — Escalation Choreographer (innovation strategy, 2026-06-24)
 

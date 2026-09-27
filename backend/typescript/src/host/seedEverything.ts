@@ -16,10 +16,12 @@
 
 import { seedExampleAgents, type SeedOptions, type SeedResult } from './exampleDataSeed.js';
 import { seedAdvisoryBoards } from './advisoryBoardSeed.js';
+import { seedZeroConfigWorkflows } from './seedWorkflows.js';
 import { listRoster } from './rosterService.js';
 import { listBoardsWithCards } from './kanbanService.js';
 import { listJobs } from './schedulingService.js';
 import { getChart } from './orgChartService.js';
+import { listOwned } from './workflowOwnership.js';
 import { createLogger } from '../observability/logger.js';
 import type { Storage } from '../storage/storage.js';
 
@@ -28,6 +30,7 @@ const log = createLogger('seed-everything');
 export const EXAMPLE_SEED_DOMAINS = [
   'user-agents',
   'roster',
+  'workflows',
   'boards',
   'cards',
   'schedules',
@@ -48,6 +51,7 @@ async function verifyDomains(tenantId: string, storage: Storage): Promise<Exampl
   const checks: Record<ExampleSeedDomain, boolean> = {
     'user-agents': (await storage.listUserAgents(tenantId)).length > 0,
     roster: (await listRoster(tenantId)).length > 0,
+    workflows: (await listOwned(tenantId)).length > 0,
     boards: boards.length > 0,
     cards: boards.some((b) => b.cards.length > 0),
     schedules: (await listJobs(tenantId)).length > 0,
@@ -62,6 +66,12 @@ export async function seedEverything(
   opts: SeedOptions = {},
 ): Promise<SeedEverythingResult> {
   const result = await seedExampleAgents(tenantId, storage, opts);
+  // Owned dashboard workflows (2026-07-16) — idempotent, deterministic-id;
+  // replaces the deleted silent frontend preload. Best-effort: never break the
+  // core demo seed if a chain fails to expand.
+  await seedZeroConfigWorkflows(tenantId).catch((err) =>
+    log.warn('workflow_seed_failed', { tenantId, error: String(err) }),
+  );
   // Board of Advisors (ADR 0040) — best-effort + gated on the `advisory-board`
   // toggle. A failure here (e.g. no org yet) must NOT break the core demo seed.
   await seedAdvisoryBoards(tenantId, storage, opts).catch((err) =>

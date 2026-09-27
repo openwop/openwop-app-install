@@ -20,7 +20,9 @@ import { OpenwopError } from '../../types.js';
 import { tenantOf, requireFeatureEnabled, optionalString } from '../featureRoute.js';
 import { appendStreamChunk, closeSessionBuffers, closeStreamBuffer, openStreamBuffer, wireStreamAudioResolver } from './voiceBuffers.js';
 import { advanceVoiceSession, closeVoiceSession, createVoiceSession, getOpenVoiceSession, resolveAgentVoice } from './voiceSession.js';
+import { getRealtimeConfig, walkieProviderCredential } from './realtime/config.js';
 import { beginSpeak, cancelSpeak, dropSpeak, endSpeak, isSpeakCancelled } from './voiceTurns.js';
+import { sendError } from '../../middleware/errorEnvelope.js';
 
 const BASE = '/v1/host/openwop-app/voice/session';
 /** Host default voice when an agent has no `agentProfile.configParameters.voice.voiceId` (P3). */
@@ -86,16 +88,22 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
       });
 
       const body = (req.body ?? {}) as { languageCode?: unknown };
+      // ADR 0322 — BYOK STT: the host has no managed Google/OpenAI STT key, so
+      // transcribe on the tenant's OWN realtime-voice credential (the Gemini/OpenAI
+      // key they already configured). Absent → callTranscriber falls to the managed
+      // path and honestly reports `transcription_unsupported`.
+      const sttCred = walkieProviderCredential(await getRealtimeConfig(tenantId));
       let result;
       try {
         result = await adapter.callTranscriber({
           audio: { streamRef: session.streamRef },
           ...(optionalString(body.languageCode) ? { languageCode: optionalString(body.languageCode) } : {}),
+          ...(sttCred ? { provider: sttCred.provider, credentialRef: sttCred.credentialRef } : {}),
         });
       } catch (err) {
         if (err instanceof AiProviderError) {
           const clientError = err.code === 'invalid_request' || err.code === 'transcription_unsupported';
-          res.status(clientError ? 400 : 502).json({ error: { code: err.code, message: err.message, details: err.details } });
+          sendError(res, clientError ? 400 : 502, err.code, err.message, err.details);
           return;
         }
         throw err;
@@ -121,25 +129,36 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
       const tenantId = tenantOf(req);
       const session = await getOpenVoiceSession(tenantId, req.params.sessionId);
       if (!deps.hostSuite) throw new OpenwopError('host_capability_missing', 'aiProviders adapter not wired.', 503, {});
-      const body = (req.body ?? {}) as { text?: unknown; voiceId?: unknown; provider?: unknown; credentialRef?: unknown };
+      const body = (req.body ?? {}) as { text?: unknown; voiceId?: unknown; provider?: unknown; credentialRef?: unknown; agentId?: unknown };
       const text = (req.body as { text?: unknown })?.text;
       if (typeof text !== 'string' || text.trim().length === 0) {
         throw new OpenwopError('validation_error', '`text` (the reply to speak) is required.', 400, { field: 'text' });
       }
       // Per-agent voice (P3 / user ask): resolve { provider, voiceId, credentialRef } from the
-      // session agent's profile (the ADR 0031 agent-config seam).
-      const agentVoice = await resolveAgentVoice(tenantId, session.agentId);
+      // session agent's profile (the ADR 0031 agent-config seam). ADR 0304 P1 — a board voice
+      // session speaks turns from DIFFERENT advisors, so the optional per-turn `agentId` names
+      // THIS turn's speaker; its voice resolves tenant-scoped exactly like the session agent's
+      // (it selects a voiceId + tenant-bound credentialRef — no tool or context grant).
+      const speakerAgentId = optionalString(body.agentId) ?? session.agentId;
+      const agentVoice = await resolveAgentVoice(tenantId, speakerAgentId);
       // W6 (architect #6): when the session is scoped to an agent that has a configured voice,
       // the AGENT voice is AUTHORITATIVE — a client cannot override it per call. An unscoped
       // session (no agent voice) honors the client's request; else the host default.
       const agentAuthoritative = !!(agentVoice && (agentVoice.provider || agentVoice.voiceId));
       const voiceId = (agentAuthoritative ? agentVoice?.voiceId : optionalString(body.voiceId)) ?? DEFAULT_VOICE_ID;
-      const provider = agentAuthoritative ? agentVoice?.provider : optionalString(body.provider);
+      // ADR 0322 — BYOK TTS fallback: when neither the agent nor the request names a
+      // TTS provider/key, speak on the tenant's realtime-voice credential (their
+      // Gemini/OpenAI key). Google TTS maps an unknown voiceId to its default voice,
+      // so a non-Google default voiceId is safe. Absent → honest speech_synthesis_unsupported.
+      const ttsCred = walkieProviderCredential(await getRealtimeConfig(tenantId));
       // W1: a non-managed provider (ElevenLabs/OpenAI/Google) needs a BYOK credentialRef, or
       // callSpeechSynthesizer fails honestly with `speech_synthesis_unsupported`. Resolved
       // tenant-scoped (secretResolver) — a client can only reference its own tenant's secrets.
-      const credentialRef = agentAuthoritative ? agentVoice?.credentialRef : optionalString(body.credentialRef);
-      const useMock = process.env.OPENWOP_TEST_SEAM_ENABLED === 'true';
+      const provider = (agentAuthoritative ? agentVoice?.provider : optionalString(body.provider)) ?? ttsCred?.provider;
+      const credentialRef = (agentAuthoritative ? agentVoice?.credentialRef : optionalString(body.credentialRef)) ?? ttsCred?.credentialRef;
+      // Voice mocks key on their own flag, NOT the conformance-seam flag prod keeps on
+      // (else prod TTS is silently mocked — see geminiLive.ts header / ADR 0141 correction).
+      const useMock = process.env.OPENWOP_VOICE_MOCK === 'true';
 
       const turnId = randomUUID();
       beginSpeak(session.sessionId, turnId);
@@ -179,7 +198,13 @@ export function registerVoiceRoutes(deps: RouteDeps): void {
         endSpeak(session.sessionId, turnId);
         if (err instanceof AiProviderError) {
           const clientError = err.code === 'invalid_request' || err.code === 'content_too_long' || err.code === 'media_budget_exceeded' || err.code === 'speech_synthesis_unsupported';
-          res.status(clientError ? (err.code === 'media_budget_exceeded' ? 429 : 400) : 502).json({ error: { code: err.code, message: err.message, details: err.details } });
+          sendError(
+            res,
+            clientError ? (err.code === 'media_budget_exceeded' ? 429 : 400) : 502,
+            err.code,
+            err.message,
+            err.details,
+          );
           return;
         }
         throw err;

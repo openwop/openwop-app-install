@@ -1,0 +1,226 @@
+{
+  "name": "feature.kicktodo.agents",
+  "version": "1.9.0",
+  "description": "KickTodo specialist-skill pack (ADR 0414 P4; PRD §8.5) — mostly HANDOFF workers, not named agents: bounded task-scoped skills KickBot and the KickTodo workflows invoke. Scratchpad-only memory, typed task/return contracts, tool-allowlisted to the registered read tools; domain writes always pass through governed nodes/surfaces. ONE roster-bound EXCEPTION (ADR 0458): `challenge-author` (Challenge Author) is a named conversational agent the creator talks to in the ONE chat to drive the Challenge Factory — it carries per-run conversation memory and its own action tools, not the handoff task/return contract. The persistent named KickBot instance is a roster/profile agent provisioned by the host (kickbotService) — NOT defined here. v1.5.0 (ADR 0458 P2): the three simulation personas (Sim: Newcomer/Time-poor/Skeptic) return a typed closed-world verdict via `schemas/sim-verdict.schema.json` — the factory's evaluation stage reads a structured pass/flag/block, never free prose it must re-parse. v1.6.0 (ADR 0459 P1): the `replan-composer` HANDOFF skill turns a participant's stated intent into a typed closed-world plan revision via `schemas/plan-revision.schema.json`, composed ONLY from the ADR 0429 lanes (schedule / publisher-declared substitution / recovery) grounded in the real state it reads with its two READ tools — it commits nothing; the replan builtin validates it and the participant approves it at their own gate. v1.7.0 (ADR 0463): `plan-revision.schema.json` gains an OPTIONAL `clarification` arm (ASK XOR ACT) — when the intent falls in the ADR 0429 lanes but is under-specified, the composer returns EMPTY `commands` PLUS a structured `clarification` ({ question, field: a day-1-catalog select/date, pendingCommand shell }) so the replan builtin can raise a single A2UI clarification form in the participant's own conversation and fold the answer into the pending command, instead of the composer guessing.",
+  "author": "OpenWOP App",
+  "license": "Apache-2.0",
+  "keywords": [
+    "feature",
+    "kicktodo",
+    "skills",
+    "plan-builder",
+    "safety",
+    "verifier"
+  ],
+  "engines": {
+    "openwop": ">=1.1.0 <2.0.0"
+  },
+  "peerDependencies": {
+    "aiProviders": "supported",
+    "agents.manifestRuntime": "supported"
+  },
+  "agents": [
+    {
+      "agentId": "feature.kicktodo.agents.challenge-author",
+      "persona": "AUTHOR",
+      "label": "Challenge Author",
+      "description": "The roster-bound named agent a creator converses with in the ONE chat to build a challenge (ADR 0458). Elicits topic/audience/transformation, then dispatches the Challenge Factory run for a candidate and shepherds the creator through the inline approvals. It SUBMITS a challenge for a separation-of-duties publish decision — it never publishes. Unlike the handoff skills in this pack it is conversational (per-run dialogue memory) and holds its own action tools; authorization is the authoring route's shared predicate, so a participant reaching it cannot drive the factory.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/challenge-author.md",
+      "toolAllowlist": [
+        "openwop:kicktodo.candidates",
+        "openwop:kicktodo.factory.run"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": true,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.plan-builder",
+      "persona": "RESEARCH",
+      "label": "Plan Builder",
+      "description": "Personalizes a challenge plan within the publisher's adaptation policy: proposes schedule/intensity/substitution adjustments from the participant's stated constraints. PROPOSES only — the participant approves; enrollment/goal writes ride the governed surface.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/plan-builder.md",
+      "handoff": {
+        "taskSchemaRef": "schemas/specialist.task.schema.json",
+        "returnSchemaRef": "schemas/specialist.return.schema.json"
+      },
+      "toolAllowlist": [
+        "openwop:kicktodo.today",
+        "openwop:kicktodo.progress"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.replan-composer",
+      "persona": "RESEARCH",
+      "label": "Replan Composer",
+      "description": "Turns a participant's stated intent into a typed, closed-world plan revision (ADR 0459 P1). Reads the enrollment's REAL state with its two READ tools, then composes ONLY the ADR 0429 flexibility lanes — schedule preference, publisher-declared substitution, missed-window recovery — returning a `plan-revision` object. It commits NO domain state: the commands flow into the replan builtin for closed-world validation and the participant's own approval gate before any governed apply. An intent it cannot honestly express in the lanes yields an EMPTY commands array with the rationale saying so — it never invents an activity, touches an evidence policy, or forces a wrong command.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/replan-composer.md",
+      "handoff": {
+        "returnSchemaRef": "schemas/plan-revision.schema.json"
+      },
+      "toolAllowlist": [
+        "openwop:kicktodo.today",
+        "openwop:kicktodo.progress"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.safety-reviewer",
+      "persona": "RESEARCH",
+      "label": "Safety Reviewer",
+      "description": "Independently reviews a proposed plan change for safety: overload, contraindicated intensity ramps, guilt mechanics, or scope that needs a qualified human. Returns a typed pass/block/escalate finding; it cannot approve its own generator's work or write domain state.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/safety-reviewer.md",
+      "handoff": {
+        "taskSchemaRef": "schemas/specialist.task.schema.json",
+        "returnSchemaRef": "schemas/specialist.return.schema.json"
+      },
+      "toolAllowlist": [
+        "openwop:kicktodo.progress"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.7
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.progress-verifier",
+      "persona": "RESEARCH",
+      "label": "Progress Verifier",
+      "description": "Explains a judged progress verdict to the participant (what counted, what remains) from the frozen evidence metrics. The VERDICT itself is the deterministic host judge through the standing-goals owner — this skill narrates, it never judges or closes goals.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/progress-verifier.md",
+      "handoff": {
+        "taskSchemaRef": "schemas/specialist.task.schema.json",
+        "returnSchemaRef": "schemas/specialist.return.schema.json"
+      },
+      "toolAllowlist": [
+        "openwop:kicktodo.progress",
+        "openwop:kicktodo.today"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.accountability-steward",
+      "persona": "RESEARCH",
+      "label": "Accountability Steward",
+      "description": "Drafts privacy-filtered progress updates for the user's circles/partners from the PROJECTED feeds (grant scopes always applied upstream). Drafts and suggests only — it can never expand grants, invite members, or read beyond the allowlisted tools.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/accountability-steward.md",
+      "handoff": {
+        "taskSchemaRef": "schemas/specialist.task.schema.json",
+        "returnSchemaRef": "schemas/specialist.return.schema.json"
+      },
+      "toolAllowlist": [
+        "openwop:kicktodo.circles",
+        "openwop:kicktodo.progress"
+      ],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.sim-newcomer",
+      "persona": "REVIEW",
+      "label": "Sim: Newcomer",
+      "description": "A simulated FIRST-TIME participant with low domain knowledge and high motivation. Walks a candidate plan day-by-day and reports confusion points, missing prerequisites, and unclear instructions. READ-ONLY: reports findings as scratchpad output for the factory's evaluation stage — never writes domain state.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/sim-newcomer.md",
+      "handoff": {
+        "returnSchemaRef": "schemas/sim-verdict.schema.json"
+      },
+      "toolAllowlist": [],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.sim-time-poor",
+      "persona": "REVIEW",
+      "label": "Sim: Time-poor",
+      "description": "A simulated participant with 20 minutes/day and unpredictable interruptions. Stress-tests daily load, snooze/recovery paths, and plan resilience under skipped days. READ-ONLY scratchpad reporter for the factory's evaluation stage.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/sim-time-poor.md",
+      "handoff": {
+        "returnSchemaRef": "schemas/sim-verdict.schema.json"
+      },
+      "toolAllowlist": [],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    },
+    {
+      "agentId": "feature.kicktodo.agents.sim-skeptic",
+      "persona": "REVIEW",
+      "label": "Sim: Skeptic",
+      "description": "A simulated evidence-demanding participant. Reads the plan WITH the evidence it cites (claim ids, sources, each day's claimRefs — ADR 0458 §2.2 correction) and challenges every claim's sourcing, flags unsupported transformation promises and safety gaps. READ-ONLY scratchpad reporter for the factory's evaluation stage.",
+      "modelClass": "research",
+      "systemPromptRef": "prompts/sim-skeptic.md",
+      "handoff": {
+        "returnSchemaRef": "schemas/sim-verdict.schema.json"
+      },
+      "toolAllowlist": [],
+      "memoryShape": {
+        "scratchpad": true,
+        "conversation": false,
+        "longTerm": false
+      },
+      "confidence": {
+        "defaultThreshold": 0.6
+      }
+    }
+  ],
+  "runtime": {
+    "language": "remote",
+    "entry": "pack.json"
+  }
+}

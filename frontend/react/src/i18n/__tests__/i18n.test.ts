@@ -1,11 +1,31 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
-  formatNumber, formatCurrency, formatPercent, formatList,
+  formatNumber, formatCurrency, formatCurrencyMinor, formatPercent, formatList,
   formatRelativeTime, formatBytes, getFormatLocale, setFormatLocale,
 } from '../format.js';
 import { resolveLocale, directionFor, SUPPORTED_LOCALES, DEFAULT_LOCALE } from '../locales.js';
 import { pseudoLocalize } from '../pseudo.js';
-import { resourcesByLocale, NAMESPACES } from '../resources.js';
+import { resourcesByLocale, NAMESPACES, loadLocaleResources, lazyLocaleNamespaces, loadLocaleNamespace } from '../resources.js';
+
+/**
+ * A locale's FULL resources = its shell chunk + its deferred feature namespaces.
+ * The locale follow-up to ADR 0490 split the latter out, so a test that wants
+ * cross-locale key parity has to reassemble both halves — comparing a full `en`
+ * against a shell-only locale would report every deferred namespace as missing,
+ * which is a fact about chunking, not about translation coverage.
+ */
+async function fullLocale(locale: string): Promise<Record<string, Record<string, unknown>> | null> {
+  const shell = await loadLocaleResources(locale);
+  if (!shell) return null;
+  const out: Record<string, Record<string, unknown>> = { ...shell };
+  await Promise.all(
+    lazyLocaleNamespaces(locale).map(async (ns) => {
+      const messages = await loadLocaleNamespace(locale, ns);
+      if (messages) out[ns] = messages;
+    }),
+  );
+  return out;
+}
 
 describe('Intl formatting layer', () => {
   beforeEach(() => setFormatLocale('en-US'));
@@ -20,6 +40,13 @@ describe('Intl formatting layer', () => {
   });
   it('localizes currency while keeping the amount', () => {
     setFormatLocale('en-US'); expect(formatCurrency(1234.5, 'USD')).toBe('$1,234.50');
+  });
+  it('formats MINOR-unit amounts with the currency’s own decimals (not a bare /100)', () => {
+    setFormatLocale('en-US');
+    expect(formatCurrencyMinor(123456, 'USD')).toBe('$1,234.56'); // 2 dp
+    expect(formatCurrencyMinor(123456, 'JPY')).toBe('¥123,456');  // 0 dp — /100 would be 100x wrong
+    // 3-dp currency (BHD): 123456 minor = 123.456
+    expect(formatCurrencyMinor(123456, 'BHD')).toMatch(/123\.456/);
   });
   it('formats percent from a 0-1 ratio', () => {
     expect(formatPercent(0.42)).toBe('42%');
@@ -63,20 +90,24 @@ describe('pseudo-localization', () => {
 });
 
 describe('catalogs', () => {
-  it('aggregated en + pt-BR across all namespaces', () => {
+  // ADR 0329 — only `en` is eager; every other locale (pt-BR included) loads
+  // through the lazy per-locale path, so these tests exercise that loader.
+  it('aggregates en eagerly across all namespaces; pt-BR is lazy-only', () => {
     expect(NAMESPACES.length).toBeGreaterThan(40);
-    expect(Object.keys(resourcesByLocale)).toEqual(expect.arrayContaining(['en', 'pt-BR']));
+    expect(Object.keys(resourcesByLocale)).toEqual(['en']);
   });
-  it('pt-BR has exact key parity with en in every namespace (no fallback leak)', () => {
+  it('lazy pt-BR has exact key parity with en in every namespace (no fallback leak)', async () => {
     const en = resourcesByLocale.en;
-    const pt = resourcesByLocale['pt-BR'];
+    const pt = await fullLocale('pt-BR');
+    expect(pt).not.toBeNull();
     for (const ns of Object.keys(en)) {
-      expect(Object.keys(pt[ns] ?? {}).sort(), `namespace '${ns}' parity`)
+      expect(Object.keys(pt![ns] ?? {}).sort(), `namespace '${ns}' parity`)
         .toEqual(Object.keys(en[ns]).sort());
     }
   });
-  it('pt-BR actually translates the shared vocabulary (not copied)', () => {
-    const ptCommon = resourcesByLocale['pt-BR'].common as Record<string, string>;
+  it('lazy pt-BR actually translates the shared vocabulary (not copied)', async () => {
+    const pt = await fullLocale('pt-BR');
+    const ptCommon = pt!.common as Record<string, string>;
     expect(ptCommon.save).toBe('Salvar');
     expect(ptCommon.cancel).toBe('Cancelar');
   });

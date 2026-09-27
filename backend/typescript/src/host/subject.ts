@@ -17,9 +17,11 @@
  */
 
 /** What a subject fundamentally IS. `'project'` is reserved for ADR 0046 Phase 3;
- *  memory/knowledge already accept it (forward-compatible). The "what it can DO"
- *  axis (cognition / advisor / …) lives separately on `capabilities[]`. */
-export type SubjectKind = 'agent' | 'user' | 'project';
+ *  memory/knowledge already accept it (forward-compatible). `'board'` (ADR 0278)
+ *  is an ADVISORY board (Board of Advisors — never host.kanban), giving each
+ *  board ONE canonical conversation via `subjectConversationId`. The "what it
+ *  can DO" axis (cognition / advisor / …) lives separately on `capabilities[]`. */
+export type SubjectKind = 'agent' | 'user' | 'project' | 'board';
 
 /** The owner of a work surface — a `kind` + an opaque `id`. */
 export interface Subject {

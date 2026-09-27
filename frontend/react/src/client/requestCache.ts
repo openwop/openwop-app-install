@@ -17,6 +17,8 @@
  * use a real TTL only for reads that don't change within a session. After a
  * mutation that changes a cached resource, call `invalidate(key)`.
  */
+import { onAuthChange } from './config.js';
+
 interface Entry<T> {
   value: T;
   expiresAt: number;
@@ -24,6 +26,15 @@ interface Entry<T> {
 
 const inflight = new Map<string, Promise<unknown>>();
 const cache = new Map<string, Entry<unknown>>();
+
+// Deferred Phase D (SHELL-8): the coalesce cache holds tenant reads
+// (agents/roster/boards/model-caps/voice-config) — drop everything whenever
+// the identity OR the bound tenant changes (fireAuthChanged on switch). The
+// generation counter keeps a load that was ALREADY in flight at clear time
+// from re-populating the cache with old-tenant data when it resolves — the
+// invariant the staged reload-removal (PLAN-DEFERRED D.3) depends on.
+let generation = 0;
+onAuthChange(() => { generation += 1; cache.clear(); inflight.clear(); });
 
 export async function cachedRead<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
   if (ttlMs > 0) {
@@ -34,13 +45,19 @@ export async function cachedRead<T>(key: string, ttlMs: number, loader: () => Pr
   const pending = inflight.get(key) as Promise<T> | undefined;
   if (pending) return pending;
 
-  const p = (async () => {
+  const gen = generation;
+  // Definite-assignment: the finally below runs strictly after p is assigned
+  // (the closure first awaits the loader).
+  let p!: Promise<T>;
+  p = (async () => {
     try {
       const value = await loader();
-      if (ttlMs > 0) cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+      // A tenant change while this load was in flight → the result belongs to
+      // the OLD tenant; hand it to the original caller but never cache it.
+      if (ttlMs > 0 && gen === generation) cache.set(key, { value, expiresAt: Date.now() + ttlMs });
       return value;
     } finally {
-      inflight.delete(key);
+      if (inflight.get(key) === p) inflight.delete(key);
     }
   })();
   inflight.set(key, p);

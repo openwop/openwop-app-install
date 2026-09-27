@@ -98,6 +98,37 @@ memory half already serves humans (ADR 0041). The doc half needs (a) a binding s
   "personal" abstraction. A per-user implicit collection (keyed on the personal tenant's default
   org) would close it later if wanted.
 
+> **Correction note (2026-08-01) — ADR 0015 changed the world around this ADR, and
+> the gap is deliberate, not a defect.** This ADR predates shared `ws:` workspaces.
+> Profile knowledge is scoped to the caller's HOME tenant throughout — the candidate
+> lookup (`listAllTenantCollections(user.tenantId)`), the local org-scope check
+> (`features/profile-memory/knowledgeRoutes.ts:43`), and every data call. So **a shared
+> workspace's org collections cannot be bound into a profile**. That was investigated
+> as a suspected tenancy defect during the ADR 0508 program (tracked as `GC-7`) and
+> **closed as BY DESIGN**: the trade-off above already accepts that "personal"
+> knowledge inherits org RBAC, and the store shape settles the rest —
+> `features/profiles/profilesService.ts:121` keys the Profile by `userId` ALONE, and
+> `getOrCreateProfile:187-193` 404s a foreign-tenant profile, so there is exactly ONE
+> profile per user globally. Per-(user, workspace) knowledge is not a tuning question;
+> it would be a re-key of that store.
+>
+> **⚠️ If you ever widen this to span workspaces, fix the READ path FIRST.**
+> `profileKnowledgeService.ts:80-94` resolves bound ids against
+> `listAllTenantCollections(tenantId)`, treats a miss as *deleted* (`:85`), and then
+> **rewrites the profile without it** (`:92-94`, the self-heal). Today that is coherent
+> because candidates, resolution and prune all agree on one tenant. Widen the candidate
+> set alone and the self-heal becomes a **data-loss machine**: bind a workspace
+> collection, read your profile from any tenant that cannot see it, and the binding is
+> silently and permanently destroyed — "not visible from here" is indistinguishable
+> from "gone".
+>
+> Required order if pursued: (1) make resolution distinguish GONE from NOT-VISIBLE and
+> stop pruning on the latter; (2) add a per-read authorization re-check, because a
+> cross-tenant pointer must not outlive membership — a removed member would otherwise
+> keep reading workspace documents through their profile, and these feed AI retrieval;
+> (3) only then widen candidates. That sequence is a revision of THIS ADR, not a bug
+> fix. See ADR 0508 for the org-scope tenancy work that surfaced it.
+
 ## Implementation status
 
 | Phase | Status | Commit / test |

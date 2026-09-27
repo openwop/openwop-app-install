@@ -23,7 +23,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   for (const id of ['users', 'cms', 'publishing']) {
     const d = getToggleDefault(id);
     if (d) await saveConfig({ ...d, status: 'on' }, 'test');
@@ -170,6 +170,25 @@ describe('publishing — public surface (unauthenticated)', () => {
     expect(feed.contentType).toContain('rss');
     expect(feed.text).toContain('<rss');
     expect(feed.text).toContain('Blog Post One');
+  });
+
+  it('nav list (ADR 0486): lists published pages (slug + title), EXCLUDES noindex pages', async () => {
+    const { owner, orgId } = await ownerWithMember('viewer');
+    const anon = client();
+    const shown = await publishedPage(owner, orgId, 'Company');
+    const hidden = await publishedPage(owner, orgId, 'Secret Landing');
+    // A `noindex` page is kept out of the sitemap; it MUST likewise stay out of
+    // the PRIMARY visible menu (a more prominent surface than the sitemap).
+    const seo = await owner.put(seoUrl(orgId, hidden.pageId), { noindex: true });
+    expect(seo.status, seo.text).toBe(200);
+
+    const res = await anon.get(pub(orgId, '/pages'));
+    expect(res.status).toBe(200);
+    const pages = res.body.pages as { slug: string; title: string }[];
+    const slugs = pages.map((p) => p.slug);
+    expect(slugs).toContain(shown.slug);
+    expect(slugs).not.toContain(hidden.slug);            // noindex → hidden from the menu
+    expect(pages.every((p) => p.slug && p.title)).toBe(true);
   });
 
   it('sanitizes an attacker-influenced X-Forwarded-Host (no injection into sitemap)', async () => {

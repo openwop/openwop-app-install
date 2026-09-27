@@ -12,13 +12,17 @@ function feat(
   path: string,
   tier: FeatureTier,
   group: string,
-  opts: { label?: string; order?: number; featureId?: string } = {},
+  opts: { label?: string; order?: number; featureId?: string; superadminOnly?: boolean; requiredScope?: string } = {},
 ): FeatureRoute {
   return {
     path,
     element: createElement('div'),
     tier,
-    nav: { group, label: opts.label ?? path, icon, hint: '', order: opts.order, featureId: opts.featureId },
+    nav: {
+      group, label: opts.label ?? path, icon, hint: '', order: opts.order, featureId: opts.featureId,
+      ...(opts.superadminOnly !== undefined ? { superadminOnly: opts.superadminOnly } : {}),
+      ...(opts.requiredScope ? { requiredScope: opts.requiredScope } : {}),
+    },
   };
 }
 
@@ -115,14 +119,43 @@ describe('resolveNav — visibility overrides', () => {
   });
 });
 
-describe('resolveNav — tier + group moves', () => {
-  it('moves an item between menus (workspace → admin)', () => {
+describe('resolveNav — boundary-safe group moves', () => {
+  it('ignores legacy cross-tier overrides while preserving an in-tier group move', () => {
     const features = [feat('/x', 'workspace', 'Workspace')];
     const user = cfg({ items: { '/x': { tier: 'admin', group: 'Platform' } } });
     const r = resolveNav({ features, user, access: allow });
-    expect(r.workspace).toEqual([]);
-    expect(r.admin.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/x']);
-    expect(r.admin[0]!.id).toBe('Platform');
+    expect(r.workspace.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/x']);
+    expect(r.workspace[0]!.id).toBe('Platform');
+    expect(r.admin).toEqual([]);
+  });
+
+  it('projects admin and superadmin authority before grouping', () => {
+    const features = [
+      feat('/work', 'workspace', 'Workspace'),
+      feat('/admin', 'admin', 'Admin'),
+      feat('/root', 'admin', 'Platform', { superadminOnly: true }),
+    ];
+    const member = resolveNav({ features, access: allow, authority: { admin: false, superadmin: false, scopes: [] } });
+    expect(member.workspace.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/work']);
+    expect(member.admin).toEqual([]);
+
+    const admin = resolveNav({ features, access: allow, authority: { admin: true, superadmin: false, scopes: [] } });
+    expect(admin.admin.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/admin']);
+
+    const root = resolveNav({ features, access: allow, authority: { admin: true, superadmin: true, scopes: [] } });
+    expect(root.admin.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/admin', '/root']);
+  });
+
+  it('removes scope-specific destinations without widening superadmin access', () => {
+    const features = [
+      feat('/runs', 'admin', 'Operations', { requiredScope: 'runs:read' }),
+      feat('/boards', 'admin', 'Operations', { requiredScope: 'workspace:read' }),
+    ];
+    const scoped = resolveNav({ features, access: allow, authority: { admin: true, superadmin: false, scopes: ['runs:read'] } });
+    expect(scoped.admin.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/runs']);
+
+    const root = resolveNav({ features, access: allow, authority: { admin: true, superadmin: true, scopes: [] } });
+    expect(root.admin.flatMap((g) => g.items.map((i) => i.to))).toEqual(['/runs', '/boards']);
   });
 
   it('re-homes an item under a different built-in header', () => {

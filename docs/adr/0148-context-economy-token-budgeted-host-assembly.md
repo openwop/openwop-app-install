@@ -141,13 +141,13 @@ Gzip JSON responses; leave SSE and the wire event-shape alone.
 
 > **Correction note (2026-06-26, implementation — Phase 5).** The original draft
 > said "gzip the JSON **+ SSE** responses and strip optional `meta` from
-> `ai.message.chunk` frames." Implementation narrowed both on honesty/architecture
+> `output.chunk` frames." Implementation narrowed both on honesty/architecture
 > grounds:
 > - **SSE gzip — REJECTED.** `host/sseChannel.ts` deliberately sets
 >   `Cache-Control: no-transform` + `X-Accel-Buffering: no` and disables proxy
 >   buffering so frames flush live; gzipping the stream re-introduces exactly that
 >   buffering. SSE stays uncompressed.
-> - **A7 "strip `ai.message.chunk` meta" — DEFERRED to Tier B.** The SSE-serialized
+> - **A7 "strip `output.chunk` meta" — DEFERRED to Tier B.** The SSE-serialized
 >   run event (`routes/streams.ts` `data: ${JSON.stringify(ev)}`) **is** the
 >   governed wire shape SDK clients parse; stripping envelope fields is a
 >   wire-shape divergence needing an RFC (the deck's own Tier-B "compact
@@ -212,9 +212,34 @@ with fixes applied; 44 new unit tests; backend `tsc` + full vitest green at each
    re-emit). A5 ships no code. See the A5 section.
 2. **Default `k` and budget ceilings** — pick from measured runs (15-turn agent,
    20-tool surface is the review's reference shape), not a priori.
-3. **Cross-provider cache hints** — A2 maps cleanly to Anthropic ephemeral cache;
-   confirm the equivalent for the other managed/BYOK providers before claiming the
-   lever universally (honest per-provider gating otherwise).
+3. ~~**Cross-provider cache hints**~~ — **RESOLVED (2026-07-07):** confirmed for
+   the OpenAI-compatible providers (MiniMax — the managed free tier — and OpenAI).
+   They do AUTOMATIC prefix caching: no `cache_control` markers, fires on
+   ≥512-token prefixes ordered tools → system → messages, hits reported in
+   `usage.prompt_tokens_details.cached_tokens` (MiniMax docs; contrast Anthropic's
+   explicit ephemeral markers). No enablement code was needed — the ADR 0315
+   default-on tool loop already keeps the system-prompt + tool surface byte-stable
+   across rounds, so rounds 2..N hit the cache in prod. We now PARSE
+   `cached_tokens` into `cachedReadTokens` on both OpenAI-compat paths (tool round
+   + streaming chat), thread it through the managed result, and log
+   `managed_prompt_cache` so the win is observable; a regression test
+   (`minimax-prompt-cache.test.ts`) pins the byte-stable prefix so a future
+   refactor can't silently kill the caching. Gemini's `cachedContent` (explicit,
+   TTL'd) is the one still-unmapped managed provider — deferred until it matters.
+
+   **Wire-emission correction (grade-code, 2026-07-07):** the initial "never on the
+   wire" framing was inaccurate for the BYOK path. On the BYOK/`aiProvidersHost`
+   route, the emit site forwards `cachedReadTokens` into the RFC 0026/0116
+   `provider.usage` event (`cacheHit` + `cacheReadTokens`) — so any BYOK
+   OpenAI/MiniMax/compat run with a ≥512-token stable prefix now reports cache
+   hits it previously didn't. Both are RFC-accepted fields, so this is honest
+   usage reporting, not an un-gated advert — but it IS a behavior expansion (code
+   comments corrected to say so). The MANAGED path never emits `provider.usage`,
+   so there `cachedReadTokens` genuinely stays internal (the `managed_prompt_cache`
+   log). **Cross-provider semantics caveat:** Anthropic's `cache_read_input_tokens`
+   is DISJOINT from `inputTokens`, whereas OpenAI/MiniMax's `cached_tokens` is a
+   SUBSET of `prompt_tokens`; a wire consumer MUST NOT blindly compute
+   `inputTokens + cacheReadTokens` across providers (documented at the field).
 4. **Tier B hand-off** — once A2/A3 are proven here, the compact tool projection
    (`?view=compact`) and declarable `cachePrefixId` become candidate RFCs in
    `../openwop`. Authored separately; this ADR does not pre-commit the wire.

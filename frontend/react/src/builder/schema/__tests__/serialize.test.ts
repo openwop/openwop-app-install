@@ -1,5 +1,5 @@
 /**
- * BLD-1 (CODEBASE-ASSESSMENT.md): the workflow builder's serialize/deserialize
+ * BLD-1 (docs/steward/CODEBASE-ASSESSMENT.md): the workflow builder's serialize/deserialize
  * layer is the correctness backbone (cycle detection, edge integrity,
  * id-mapping, round-trip) yet was untested. These are pure functions — cheap,
  * high-value coverage.
@@ -19,6 +19,32 @@ function edge(source: string, target: string): BuilderEdge {
 function wf(nodes: BuilderNode[], edges: BuilderEdge[]): SavedWorkflow {
   return { id: 'wf1', name: 'Test', version: '1.0.0', nodes, edges, createdAt: 'now', updatedAt: 'now' };
 }
+
+describe('inputSchema publishing (ADR 0197 / Deferred Phase E.2)', () => {
+  it('emits definition.inputSchema only when the draft parses to an object', () => {
+    const a = node('noop', 'Start');
+    const schema = '{"type":"object","properties":{"city":{"type":"string"}}}';
+    const withSchema = serializeWorkflow({ ...wf([a], []), inputSchema: schema });
+    expect(withSchema.inputSchema).toEqual({ type: 'object', properties: { city: { type: 'string' } } });
+  });
+
+  it('omits a half-typed / non-object draft (never publishes a broken schema)', () => {
+    const a = node('noop', 'Start');
+    for (const draft of ['{"type":', '[1,2]', '"just a string"', '', '   ']) {
+      const out = serializeWorkflow({ ...wf([node('noop')], []), inputSchema: draft });
+      expect(out.inputSchema, `draft=${draft}`).toBeUndefined();
+    }
+    void a;
+  });
+
+  it('round-trips through the canonical deserializer as a pretty JSON string', () => {
+    const res = fromCanonicalDefinition({
+      workflowId: 'w', nodes: [{ nodeId: 'n1', typeId: 'core.noop' }], edges: [],
+      inputSchema: { type: 'object', properties: { n: { type: 'number' } } },
+    });
+    expect(JSON.parse(res.inputSchema)).toEqual({ type: 'object', properties: { n: { type: 'number' } } });
+  });
+});
 
 describe('serializeWithIdMap', () => {
   it('serializes a linear workflow + returns a builder→backend id map', () => {

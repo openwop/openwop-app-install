@@ -5,11 +5,13 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom'; // LeaderboardPage now carries the arena <Link> (ADR 0123 P4c)
 
+import { makeFeatureAccess } from '../../../featureToggles/__testing__/makeFeatureAccess.js';
 vi.mock('../../../client/evalsClient.js', () => ({ listOrgs: vi.fn(), fetchLeaderboard: vi.fn() }));
 let enabled = true;
 vi.mock('../../../featureToggles/FeatureAccessContext.js', () => ({
-  useFeatureAccess: () => ({ enabled, status: enabled ? 'on' : 'off', isBeta: false, variant: null }),
+  useFeatureAccess: () => makeFeatureAccess({ enabled, status: enabled ? 'on' : 'off', isBeta: false, variant: null }),
 }));
 
 import { listOrgs, fetchLeaderboard, type LeaderboardRow } from '../../../client/evalsClient.js';
@@ -27,14 +29,14 @@ afterEach(cleanup);
 describe('LeaderboardPage (ADR 0123 Phase 4b)', () => {
   it('renders the per-model ranking rows', async () => {
     mockLb.mockResolvedValue([row('opus', { elo: 1600 }), row('gpt', { elo: 1400 })]);
-    render(<LeaderboardPage />);
+    render(<MemoryRouter><LeaderboardPage /></MemoryRouter>);
     expect(await screen.findByText('opus')).toBeTruthy();
     expect(screen.getByText('gpt')).toBeTruthy();
   });
 
   it('shows an empty state when there are no rated turns', async () => {
     mockLb.mockResolvedValue([]);
-    render(<LeaderboardPage />);
+    render(<MemoryRouter><LeaderboardPage /></MemoryRouter>);
     expect(await screen.findByText('No rated turns yet.')).toBeTruthy();
   });
 
@@ -42,7 +44,7 @@ describe('LeaderboardPage (ADR 0123 Phase 4b)', () => {
     // evals re-graduated to toggle-gated (PR #895): the page reads
     // useFeatureAccess('evals') and must skip the network when disabled.
     enabled = false;
-    render(<LeaderboardPage />);
+    render(<MemoryRouter><LeaderboardPage /></MemoryRouter>);
     expect(mockOrgs).not.toHaveBeenCalled();
     expect(mockLb).not.toHaveBeenCalled();
   });

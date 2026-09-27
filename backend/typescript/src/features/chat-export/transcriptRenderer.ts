@@ -54,20 +54,45 @@ function roleLabel(role: string): string {
   }
 }
 
+/** ADR 0698 D2a (`CXC-5`) — a heading is a single LINE. A title carrying newlines
+ *  (or leading `#`) injects arbitrary document structure into the export, and an
+ *  imported conversation's title is attacker-supplied. Collapse to one line and
+ *  neutralize a leading hash; the title is data, not markup. */
+function safeHeadingText(raw: string): string {
+  return raw.replace(/[\r\n]+/g, ' ').replace(/^#+\s*/, '').trim().slice(0, 200);
+}
+
+/** ADR 0698 D2a (`CXC-5`) — a body containing a literal ``` run CLOSES the fence we
+ *  wrap it in, and everything after it renders as document structure rather than as
+ *  content. This is the mechanism by which imported content controls the SHAPE of
+ *  the exported artifact, not merely its text (see ADR 0698 D3 for why that matters
+ *  across the export-as-Document boundary).
+ *
+ *  Widen the fence instead of escaping the body: pick a backtick run LONGER than any
+ *  run the content contains, which is the CommonMark-sanctioned way to embed
+ *  backticks and — unlike escaping — leaves the payload byte-identical, so the
+ *  `openwop-v1` JSON round trip still reproduces the original exactly. */
+function fenceFor(content: string): string {
+  let longest = 0;
+  for (const run of content.match(/`+/g) ?? []) longest = Math.max(longest, run.length);
+  return '`'.repeat(Math.max(3, longest + 1));
+}
+
 /** Render the transcript as Markdown. Deterministic — message order preserved. */
 export function transcriptToMarkdown(session: ChatSessionRecord, messages: readonly ChatMessageRecord[]): string {
   const lines: string[] = [];
-  lines.push(`# ${session.title || 'Conversation'}`);
+  lines.push(`# ${safeHeadingText(session.title || '') || 'Conversation'}`);
   lines.push('');
   lines.push(`> Exported from OpenWOP · conversation \`${session.sessionId}\` · ${messages.length} message(s)`);
   lines.push('');
   for (const m of messages) {
-    lines.push(`## ${roleLabel(m.role)} — ${m.createdAt}`);
+    lines.push(`## ${safeHeadingText(`${roleLabel(m.role)} — ${m.createdAt}`)}`);
     lines.push('');
     if (isStructured(m.content)) {
-      lines.push('```json');
+      const fence = fenceFor(m.content);
+      lines.push(`${fence}json`);
       lines.push(m.content);
-      lines.push('```');
+      lines.push(fence);
     } else {
       lines.push(messageText(m.content));
     }

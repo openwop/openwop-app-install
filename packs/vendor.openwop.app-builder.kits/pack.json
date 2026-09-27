@@ -1,0 +1,289 @@
+{
+  "name": "vendor.openwop.app-builder.kits",
+  "version": "1.1.0",
+  "kind": "canvas-content",
+  "description": "Multi-screen kits for the app-builder canvas (ADR 0347 5a): connected screen flows with typed template variables, instantiated into the ONE canvas document with collision-safe id remapping.",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "kits": [
+    {
+      "kitId": "app-builder.auth-flow",
+      "version": "1.1.0",
+      "label": "Authentication flow",
+      "description": "Sign in, register, and password-reset screens, pre-connected with realistic form fields and navigation.",
+      "canvasTypeId": "canvas.app-builder",
+      "variables": [
+        {
+          "name": "appName",
+          "type": "string",
+          "label": "App name",
+          "default": "My App",
+          "description": "Shown on every auth screen heading."
+        },
+        {
+          "name": "accentColor",
+          "type": "color",
+          "label": "Accent color",
+          "default": "#7c5cff",
+          "description": "The primary button/heading color."
+        }
+      ],
+      "catalogDependencies": [
+        "stack",
+        "heading",
+        "text",
+        "textInput",
+        "checkbox",
+        "button",
+        "link",
+        "divider",
+        "alert"
+      ],
+      "screens": [
+        {
+          "id": "kit-signin",
+          "name": "Sign in",
+          "route": "/signin",
+          "x": 80,
+          "y": 80,
+          "components": [
+            {
+              "type": "stack",
+              "props": {
+                "direction": "vertical",
+                "gap": "md",
+                "padding": "lg"
+              },
+              "children": [
+                {
+                  "type": "heading",
+                  "props": {
+                    "text": "Sign in to {{appName}}",
+                    "level": "1",
+                    "color": "{{accentColor}}"
+                  }
+                },
+                {
+                  "type": "form",
+                  "props": {},
+                  "children": [
+                    {
+                      "type": "textInput",
+                      "props": {
+                        "label": "Email",
+                        "kind": "email",
+                        "placeholder": "you@example.com"
+                      }
+                    },
+                    {
+                      "type": "textInput",
+                      "props": {
+                        "label": "Password",
+                        "kind": "password"
+                      }
+                    },
+                    {
+                      "type": "checkbox",
+                      "props": {
+                        "label": "Keep me signed in",
+                        "checked": false
+                      }
+                    },
+                    {
+                      "type": "button",
+                      "props": {
+                        "label": "Sign in",
+                        "variant": "primary"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "link",
+                  "props": {
+                    "label": "Forgot your password?",
+                    "navigateTo": "kit-reset"
+                  }
+                },
+                {
+                  "type": "link",
+                  "props": {
+                    "label": "Create an account",
+                    "navigateTo": "kit-register"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "kit-register",
+          "name": "Create account",
+          "route": "/register",
+          "x": 420,
+          "y": 80,
+          "components": [
+            {
+              "type": "stack",
+              "props": {
+                "direction": "vertical",
+                "gap": "md",
+                "padding": "lg"
+              },
+              "children": [
+                {
+                  "type": "heading",
+                  "props": {
+                    "text": "Join {{appName}}",
+                    "level": "1",
+                    "color": "{{accentColor}}"
+                  }
+                },
+                {
+                  "type": "form",
+                  "props": {},
+                  "children": [
+                    {
+                      "type": "textInput",
+                      "props": {
+                        "label": "Full name"
+                      }
+                    },
+                    {
+                      "type": "textInput",
+                      "props": {
+                        "label": "Email",
+                        "kind": "email"
+                      }
+                    },
+                    {
+                      "type": "textInput",
+                      "props": {
+                        "label": "Password",
+                        "kind": "password"
+                      }
+                    },
+                    {
+                      "type": "button",
+                      "props": {
+                        "label": "Create account",
+                        "variant": "primary"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "link",
+                  "props": {
+                    "label": "Already have an account? Sign in",
+                    "navigateTo": "kit-signin"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "kit-reset",
+          "name": "Reset password",
+          "route": "/reset",
+          "x": 760,
+          "y": 80,
+          "components": [
+            {
+              "type": "stack",
+              "props": {
+                "direction": "vertical",
+                "gap": "md",
+                "padding": "lg"
+              },
+              "children": [
+                {
+                  "type": "heading",
+                  "props": {
+                    "text": "Reset your password",
+                    "level": "2"
+                  }
+                },
+                {
+                  "type": "text",
+                  "props": {
+                    "text": "Enter the email you signed up with and we will send a reset link."
+                  }
+                },
+                {
+                  "type": "form",
+                  "props": {},
+                  "children": [
+                    {
+                      "type": "textInput",
+                      "props": {
+                        "label": "Email",
+                        "kind": "email"
+                      }
+                    },
+                    {
+                      "type": "button",
+                      "props": {
+                        "label": "Send reset link",
+                        "variant": "primary"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "alert",
+                  "props": {
+                    "text": "Check your inbox for the reset link.",
+                    "variant": "info"
+                  }
+                },
+                {
+                  "type": "link",
+                  "props": {
+                    "label": "Back to sign in",
+                    "navigateTo": "kit-signin"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "connectors": [
+        {
+          "from": "kit-signin",
+          "to": "kit-register",
+          "trigger": "click",
+          "transition": "push",
+          "label": "Create account"
+        },
+        {
+          "from": "kit-signin",
+          "to": "kit-reset",
+          "trigger": "click",
+          "transition": "push",
+          "label": "Forgot password"
+        },
+        {
+          "from": "kit-register",
+          "to": "kit-signin",
+          "trigger": "click",
+          "transition": "replace",
+          "label": "Back"
+        },
+        {
+          "from": "kit-reset",
+          "to": "kit-signin",
+          "trigger": "click",
+          "transition": "replace",
+          "label": "Back"
+        }
+      ]
+    }
+  ]
+}

@@ -12,7 +12,7 @@
  * overwrote the previous one, leaving only the *last* writer's view
  * in the stored snapshot.
  *
- * Symptom in the event log: N × `node.interrupt.resolved`, but only
+ * Symptom in the event log: N × `interrupt.resolved`, but only
  * 1-2 × `run.resumed` + `node.completed`. The run stays "Running"
  * forever from the user's perspective.
  *
@@ -134,7 +134,7 @@ describe('parallel resume — race regression', () => {
 
     // The actual race reproducer: fire all 4 resolves in parallel.
     // Pre-fix, 2-3 of these would silently no-op (only
-    // node.interrupt.resolved, no run.resumed / node.completed).
+    // interrupt.resolved, no run.resumed / node.completed).
     await Promise.all(
       interruptIds.map((id) =>
         __resolveAndResumeForTests(storage, hostSuite, id, { action: 'approve' }),
@@ -155,7 +155,7 @@ describe('parallel resume — race regression', () => {
     expect(events.some((e) => e.type === 'run.completed')).toBe(true);
 
     // And the per-interrupt resolve event fired for each.
-    const resolved = events.filter((e) => e.type === 'node.interrupt.resolved').map((e) => e.nodeId);
+    const resolved = events.filter((e) => e.type === 'interrupt.resolved').map((e) => e.nodeId);
     expect(new Set(resolved)).toEqual(new Set(['a1', 'a2', 'a3', 'a4']));
 
     // Run record reflects terminal status.

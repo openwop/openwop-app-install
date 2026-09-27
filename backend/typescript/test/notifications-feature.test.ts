@@ -28,7 +28,7 @@ beforeAll(async () => {
   process.env.OPENWOP_TEST_AUTH_ENABLED = 'true'; // mint authenticated users (ADR 0026)
   delete process.env.OPENWOP_AUTH_DISABLE_COOKIES;
   const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
-  await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+  await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   const u = getToggleDefault('users');
   if (u) await saveConfig({ ...u, status: 'on' }, 'test');
 });
@@ -117,5 +117,59 @@ describe('notifications feature — durable preferences (Phase 2)', () => {
   it('requires sign-in (anonymous cannot read prefs)', async () => {
     const anon = client();
     expect((await anon.get(`${BASE_PATH}/preferences`)).status).toBe(401);
+  });
+});
+
+describe('R3 IB-R2-2 — scoped bulk verbs (:archive-read / :bulk-read), one request each', () => {
+  it('archive-read touches ONLY the caller-visible READ rows; bulk-read flips only caller-owned unread ids', async () => {
+    const { getNotificationEmitter } = await import('../src/notifications/emitter.js');
+    const tenantId = `org:blk-${Date.now()}-${n++}`;
+    const c = client();
+    const login = await c.post('/v1/host/openwop-app/test/login', { email: `blk-${Date.now()}@acme.test`, tenantId });
+    expect(login.status, JSON.stringify(login.body)).toBe(201);
+    const me = login.body.user.userId as string;
+    const other = client();
+    const olog = await other.post('/v1/host/openwop-app/test/login', { email: `blk-o-${Date.now()}@acme.test`, tenantId });
+    const otherId = olog.body.user.userId as string;
+
+    const emit = (recipientUserId: string, status: 'unread' | 'read' | 'archived', title: string) =>
+      getNotificationEmitter().emit({
+        tenantId, recipientUserId, status, type: 'system', priority: 'normal',
+        title, message: title, metadata: {},
+      });
+    const mineUnread = await emit(me, 'unread', 'mine unread');
+    const mineRead = await emit(me, 'read', 'mine read');
+    await emit(me, 'archived', 'mine archived');
+    const otherUnread = await emit(otherId, 'unread', 'other unread');
+    const otherRead = await emit(otherId, 'read', 'other read');
+
+    // :archive-read — server-scoped to the CALLER's read rows: exactly one.
+    const ar = await c.post(`${BASE_PATH}:archive-read`);
+    expect(ar.status).toBe(200);
+    expect(ar.body.updated).toBe(1);
+    const mine = await c.get(`${BASE_PATH}?includeArchived=true`);
+    const byId = new Map((mine.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    expect(byId.get(mineRead.notificationId)).toBe('archived');
+    expect(byId.get(mineUnread.notificationId)).toBe('unread'); // unread untouched
+    // The other user's READ row survived the caller's sweep.
+    const theirs = await other.get(`${BASE_PATH}?includeArchived=true`);
+    const tById = new Map((theirs.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    expect(tById.get(otherRead.notificationId)).toBe('read');
+
+    // :bulk-read — explicit ids; a foreign id and a missing id are SKIPPED,
+    // never a batch-wide 403/404 (updated tells the truth).
+    const br = await c.post(`${BASE_PATH}:bulk-read`, { ids: [mineUnread.notificationId, otherUnread.notificationId, 'nope'] });
+    expect(br.status).toBe(200);
+    expect(br.body.updated).toBe(1);
+    const mine2 = await c.get(`${BASE_PATH}?includeArchived=true`);
+    const b2 = new Map((mine2.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    expect(b2.get(mineUnread.notificationId)).toBe('read');
+    const theirs2 = await other.get(`${BASE_PATH}`);
+    const t2 = new Map((theirs2.body.notifications as { notificationId: string; status: string }[]).map((r) => [r.notificationId, r.status]));
+    expect(t2.get(otherUnread.notificationId)).toBe('unread'); // foreign row untouched
+
+    // Validation: empty / non-array ids → 400.
+    expect((await c.post(`${BASE_PATH}:bulk-read`, { ids: [] })).status).toBe(400);
+    expect((await c.post(`${BASE_PATH}:bulk-read`, {})).status).toBe(400);
   });
 });

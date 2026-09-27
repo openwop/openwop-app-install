@@ -33,8 +33,7 @@ import {
   listDeliveries,
   makeDedupKey,
   registerSubscription,
-  setSubscriptionState,
-} from '../src/host/triggerBridgeService.js';
+  setSubscriptionState, hostDerivedSubscriptionId } from '../src/host/triggerBridgeService.js';
 
 describe('trigger-bridge service (pure, RFC 0083 §C)', () => {
   const storage = openSqliteStorage(':memory:');
@@ -115,7 +114,7 @@ describe('trigger-bridge read surface + Kanban bridge (sqlite memory app)', () =
     process.env.OPENWOP_AUTH_DISABLE_COOKIES = 'true';
     const app = await createApp({ port: 0, storageDsn: 'memory://', serviceName: 'test', serviceVersion: '0.0.1', enableConsoleTracer: false });
     await __resetTriggerBridgeStore();
-    await new Promise<void>((res) => { server = app.listen(0, () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
+    await new Promise<void>((res) => { server = app.listen(0, '127.0.0.1', () => { BASE = `http://127.0.0.1:${(server.address() as AddressInfo).port}`; res(); }); });
   });
 
   afterAll(async () => { await new Promise<void>((res) => server.close(() => res())); });
@@ -153,7 +152,8 @@ describe('trigger-bridge read surface + Kanban bridge (sqlite memory app)', () =
 
     // The board's subscription is visible with a delivered delivery.
     const subs = await jsonFetch<{ subscriptions: { subscriptionId: string; source: string; state: string }[] }>('/v1/trigger-subscriptions');
-    const sub = subs.body.subscriptions.find((s) => s.subscriptionId === `host:kanban:${boardId}`);
+    // ADR 0726 — the kanban subscription id is inside the corpus opaque grammar now.
+    const sub = subs.body.subscriptions.find((s) => s.subscriptionId === hostDerivedSubscriptionId('kanban', boardId).id);
     expect(sub?.source).toBe('queue');
     expect(sub?.state).toBe('active');
     const detail = await jsonFetch<{ deliveries: { outcome: string; runId?: string }[] }>(`/v1/trigger-subscriptions/${encodeURIComponent(sub!.subscriptionId)}`);

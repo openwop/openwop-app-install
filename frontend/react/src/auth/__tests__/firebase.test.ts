@@ -3,7 +3,9 @@ import {
   isAuthConfigured,
   getCurrentUser,
   getCurrentIdToken,
+  getPendingMfaHints,
   onAuthChanged,
+  selectTotpHint,
   signInWithGoogle,
   signInWithGithub,
 } from '../firebase.js';
@@ -43,5 +45,41 @@ describe('firebase auth (not configured)', () => {
   it('sign-in rejects with a friendly not-configured error', async () => {
     await expect(signInWithGoogle()).rejects.toThrow(/not configured/i);
     await expect(signInWithGithub()).rejects.toThrow(/not configured/i);
+  });
+});
+
+/**
+ * USERS-UX-1 — multi-device TOTP challenge. `selectTotpHint` is the PURE
+ * selection seam `completeMfaSignIn` routes through; asserting only the first
+ * hint locked out a user who lost device #1 but still holds #2. The live
+ * resolver path needs a real Firebase challenge and is exercised manually.
+ */
+describe('MFA factor selection (USERS-UX-1)', () => {
+  const hints = [
+    { uid: 'factor-1', displayName: 'Old phone' },
+    { uid: 'factor-2', displayName: 'New phone' },
+  ] as const;
+
+  it('no pending challenge → no hints', () => {
+    expect(getPendingMfaHints()).toEqual([]);
+  });
+
+  it('defaults to the single/first hint when no factorUid is given', () => {
+    expect(selectTotpHint(hints)?.uid).toBe('factor-1');
+    expect(selectTotpHint([hints[1]])?.uid).toBe('factor-2');
+  });
+
+  it('an explicit factorUid selects EXACTLY that hint', () => {
+    expect(selectTotpHint(hints, 'factor-2')?.uid).toBe('factor-2');
+    expect(selectTotpHint(hints, 'factor-1')?.uid).toBe('factor-1');
+  });
+
+  it('an unknown factorUid resolves null — never silently a different device', () => {
+    expect(selectTotpHint(hints, 'factor-gone')).toBeNull();
+  });
+
+  it('no hints at all resolves null (typed failure upstream, not a crash)', () => {
+    expect(selectTotpHint([])).toBeNull();
+    expect(selectTotpHint([], 'factor-1')).toBeNull();
   });
 });

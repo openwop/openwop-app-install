@@ -45,7 +45,7 @@ export const messages = {
 
   // SignInButton — sign-in error copy
   signInCancelled: 'Se ha cancelado el inicio de sesión.',
-  popupBlocked: 'Su navegador ha bloqueado la ventana emergente de inicio de sesión. Permita las ventanas emergentes para app.openwop.dev e inténtelo de nuevo.',
+  popupBlocked: 'Su navegador ha bloqueado la ventana emergente de inicio de sesión. Permita las ventanas emergentes para {{domain}} e inténtelo de nuevo.',
   providerNotEnabled: 'Este proveedor no está activado para el despliegue. El responsable debe activarlo en la consola de Firebase.',
   networkErrorIdp: 'Error de red al contactar con el proveedor de identidad. Compruebe su conexión e inténtelo de nuevo.',
   signInFailed: 'El inicio de sesión ha fallado: {{code}}.',
@@ -53,6 +53,7 @@ export const messages = {
   // SignInButton — provider names
   providerGoogle: 'Google',
   providerGithub: 'GitHub',
+  providerMicrosoft: 'Microsoft',
   providerPassword: 'correo electrónico + contraseña',
 
   // SignInButton — account linking
@@ -65,8 +66,11 @@ export const messages = {
   // SignInButton — sign-in modal
   continueWithGoogle: 'Continuar con Google',
   continueWithGithub: 'Continuar con GitHub',
+  continueWithMicrosoft: 'Continuar con Microsoft',
   signInToSaveTitle: 'Inicie sesión para <0>guardar su trabajo</0>',
   signInToSaveLede: 'Los flujos de trabajo y las claves BYOK que añada tras iniciar sesión se conservan entre sesiones. El estado de una sesión anónima se borra cada 24 h.',
+  signInIdentityTitle: 'Inicie sesión en <0>su espacio de trabajo</0>',
+  signInIdentityLede: 'Use su cuenta para acceder a sus flujos de trabajo, agentes y claves.',
 
   // SignInButton — account fallback name
   accountFallbackName: 'Cuenta',
@@ -98,7 +102,26 @@ export const messages = {
   errNetworkRequestFailed: 'Error de red — compruebe su conexión y vuelva a intentarlo.',
   errGeneric: 'Algo ha salido mal.',
 
+  // TOTP multi-factor (ADR 0389 P1 — firebase.ts)
+  errInvalidMfaCode: 'Ese código no coincide — compruebe su aplicación de autenticación y vuelva a intentarlo.',
+  errRequiresRecentLogin: 'Este cambio requiere un inicio de sesión reciente. Cierre la sesión, vuelva a entrar e inténtelo de nuevo.',
+  mfaCodeRequired: 'Introduzca el código de 6 dígitos de su aplicación de autenticación para terminar de iniciar sesión.',
+  mfaCodeLabel: 'Código de autenticación',
+  mfaFactorLabel: 'Dispositivo de autenticación',
+  mfaFactorUnnamed: 'Autenticador {{index}}',
+  mfaNoPendingEnrollment: 'No hay ninguna inscripción en curso — empiece de nuevo desde la página de Seguridad.',
+  mfaNoPendingChallenge: 'No hay ningún inicio de sesión esperando un código — inicie sesión de nuevo.',
+  mfaNoTotpFactor: 'Esta cuenta no tiene ningún factor de aplicación de autenticación inscrito.',
+  errNotSignedIn: 'No ha iniciado sesión.',
+
   // ExistingProviderSignInError message (firebase.ts)
   existingProviderKnown: '{{email}} ya está registrado con {{providers}}. Inicie sesión con {{providers}} para vincular su cuenta de {{attempted}}.',
   existingProviderUnknown: '{{email}} ya está registrado con otro proveedor. Inicie sesión con ese proveedor para vincular su cuenta de {{attempted}}.',
+  signingInRedirect: 'Iniciando sesión… es posible que se te redirija a tu proveedor.',
+
+  // ADR 0621 D5 — motivo mostrado en el modal de inicio de sesión tras un cierre forzado
+  sessionRefused_account_disabled: 'Un administrador desactivó tu cuenta, así que se cerró tu sesión. Contacta con el administrador de tu espacio de trabajo para recuperar el acceso.',
+  sessionRefused_account_erased: 'Tu cuenta fue eliminada, así que se cerró tu sesión. Ya no se puede usar para iniciar sesión.',
+  sessionRefused_session_revoked: 'Se cerró tu sesión en todos los dispositivos. Inicia sesión de nuevo para continuar.',
+  sessionRefused_self_revoked: 'Cerraste la sesión en todos los dispositivos, incluido este. Inicia sesión de nuevo para continuar.',
 } as const;

@@ -10,6 +10,8 @@ export const messages = {
   accepted: 'Abrindo o autor de fluxos…',
   loadOrgsFailed: 'Falha ao carregar as organizações.',
   loadFailed: 'Falha ao carregar as sugestões.',
+  loadFailedTitle: 'Não foi possível carregar os padrões de trabalho',
+  retry: 'Tentar novamente',
   refreshFailed: 'Falha ao escanear as execuções.',
   dismissFailed: 'Falha ao descartar a sugestão.',
   acceptFailed: 'Falha ao abrir o autor de fluxos.',
@@ -24,4 +26,13 @@ export const messages = {
   statusAccepted: 'aceito',
   makeWorkflow: 'Criar um fluxo',
   dismiss: 'Descartar',
+
+  // §4.5 collection kit — suggestions status facet
+  statusSuggested: 'sugerido',
+  filterGroup: 'Filtros',
+  filterStatusLabel: 'Filtrar por status',
+  allStatuses: 'Todos os status',
+  noMatchTitle: 'Sem correspondências',
+  noMatchBody: 'Nada corresponde ao filtro atual.',
+  clearFilters: 'Limpar filtros',
 };

@@ -14,6 +14,7 @@
  */
 
 import { useEffect, useState } from 'react'; // useState used by both AgentDetailPage (state) and AgentDetail (delete-in-flight + error)
+import { Button } from '../ui/Button.js';
 import { useTranslation } from 'react-i18next';
 import { confirm } from '../ui/confirm.js';
 import { slugify } from './agentUi.js';
@@ -56,7 +57,7 @@ export function AgentDetailPage(): JSX.Element {
   }, [agentId]);
 
   return (
-    <section aria-labelledby="agent-detail-heading">
+    <section data-walkthrough="agents-templates.page" aria-labelledby="agent-detail-heading">
       <div className="u-mb-3">
         <Link to="/agents/templates" className="u-fs-12 u-ink-3">
           <ArrowLeftIcon size={12} /> {t('detailBack')}
@@ -133,24 +134,22 @@ function AgentDetail({ agent }: { agent: AgentEntry }): JSX.Element {
           </p>
         )}
         <div className="u-flex u-gap-2 u-mt-3 u-items-center">
-          <button
-            type="button"
-            className="secondary"
+          <Button
+            variant="secondary"
             onClick={() => navigate(`/agents/fork?fork=${encodeURIComponent(agent.agentId)}`)}
             title={t('detailForkTitle')}
           >
             {t('detailFork')}
-          </button>
+          </Button>
           {isUserAuthored ? (
-            <button
-              type="button"
-              className="secondary u-text-danger"
+            <Button
+              variant="danger"
               onClick={() => void onDelete()}
               disabled={isDeleting}
               title={t('detailDeleteTitle')}
             >
               {isDeleting ? t('detailDeleting') : t('detailDelete')}
-            </button>
+            </Button>
           ) : (
             <span className="muted agentdetail-pack-note">
               {t('detailNotDeletable')}
@@ -259,7 +258,7 @@ function DetailSection({
     <section
       className="agentdetail-section"
       style={{
-        border: `1px solid ${tone === 'warning' ? 'var(--color-warning)' : 'var(--color-border)'}`,
+        border: `1px solid ${tone === 'warning' ? 'var(--color-warning)' : 'var(--rule)'}`,
       }}
     >
       <h3
@@ -302,9 +301,9 @@ function MemoryBadge({ label, enabled }: { label: string; enabled: boolean }): J
     <span
       className="agentdetail-memory-badge"
       style={{
-        background: enabled ? 'var(--clay-wash)' : 'var(--color-surface-2)',
+        background: enabled ? 'var(--clay-wash)' : 'var(--paper-2)',
         color: enabled ? 'var(--clay)' : 'var(--ink-3)',
-        border: `1px solid ${enabled ? 'var(--clay-rule)' : 'var(--color-border)'}`,
+        border: `1px solid ${enabled ? 'var(--clay-rule)' : 'var(--rule)'}`,
       }}
     >
       {enabled ? <CheckIcon size={12} /> : <CircleIcon size={12} />} {label}

@@ -34,7 +34,7 @@ export function BrandProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     void (async () => {
       try {
-        const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/public-brand`, { credentials: 'omit' });
+        const res = await fetch(`${config.baseUrl}/host/openwop-app/public-brand`, { credentials: 'omit' });
         if (!res.ok || cancelled) return;
         const body = (await res.json()) as { identity?: PublicBrandIdentity };
         const identity = body.identity ?? {};

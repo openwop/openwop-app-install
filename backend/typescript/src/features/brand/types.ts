@@ -49,6 +49,9 @@ export interface ToneRegister {
 
 /** Per-channel voice override (LinkedIn = thought leadership, Meta = casual, …). */
 export interface ChannelVoiceRule {
+  /** ADR 0354 P4 — optional persona binding: a rule with a personaId wins over
+   *  the channel-generic rule when the caller passes that persona. */
+  personaId?: string;
   channel: BrandChannel;
   tone: string;
   /** Optional formality override for this channel (1–5). */
@@ -100,6 +103,11 @@ export interface BrandGovernance {
   allowedEditors: string[];
   /** When true, downstream publish flows SHOULD gate on approval (ADR 0157). */
   requireApproval: boolean;
+  /** ADR 0354 P1 — compliance ENFORCEMENT at the ads-dispatch edge. `off`
+   *  (default) = today's advisory scoring; `critical` = a banned-phrase hit
+   *  forces requires_approval; `threshold` = score < blockThreshold does.
+   *  Scorer errors under a non-off policy fail CLOSED (requires_approval). */
+  compliance?: { blockPublish: 'off' | 'critical' | 'threshold'; blockThreshold?: number };
 }
 
 /** The closed set of brandable color tokens (ADR 0170 token contract). Each maps
@@ -121,6 +129,20 @@ export const THEMEABLE_TOKENS = [
   '--cat-flow', '--cat-data', '--cat-control', '--cat-ai', '--cat-integration',
 ] as const;
 export type ThemeableToken = (typeof THEMEABLE_TOKENS)[number];
+
+/** Contrast-bearing tokens are GENERATOR-OWNED (ADR 0510 §5): the ADR 0171
+ *  generator solves their WCAG-AA relationships, so accepting arbitrary values
+ *  here would let a client bypass the AA guard and persist an unreadable app.
+ *  Overrides may only touch the non-contrast category palette.
+ *  MIRROR: `frontend/react/src/brand/applyBrand.ts` `GENERATOR_OWNED_TOKENS`
+ *  must stay byte-identical (the Appearance panel rejects these client-side
+ *  with a visible notice; this set is the fail-closed floor). */
+export const GENERATOR_OWNED_TOKENS = [
+  '--clay', '--clay-soft', '--clay-text', '--clay-strong', '--clay-rule', '--clay-wash', '--clay-glow', '--clay-bg-hi',
+  '--paper', '--paper-2', '--rule', '--rule-2', '--ink', '--ink-2', '--ink-3', '--star-glow',
+  '--color-success', '--color-warning', '--color-danger', '--color-ai', '--color-info',
+  '--color-success-text', '--color-warning-text', '--color-danger-text', '--color-ai-text', '--color-info-text',
+] as const;
 
 /** Per-mode token override maps (advanced tier) — keys ⊆ THEMEABLE_TOKENS, values
  *  CSS-grammar-validated. Injected to `:root`/`.theme-dark` at runtime (ADR 0170). */
@@ -160,7 +182,10 @@ export interface BrandIdentity {
   assistantName?: string;
   documentTitle?: string;
   /** Logo assets — URL / root-relative / small `data:image` (validated). */
-  logo?: { markSrc?: string; lockupSrc?: string; faviconSrc?: string };
+  /** ADR 0510 §6 (additive) — `markSrcDark`/`lockupSrcDark` are the DARK-mode
+   *  variants a custom brand may supply; the base fields remain the light/only
+   *  source (compatibility window: URL fields stay readable). */
+  logo?: { markSrc?: string; lockupSrc?: string; faviconSrc?: string; markSrcDark?: string; lockupSrcDark?: string };
   /** Brandable colors, closed key set → `:root` tokens. CSS-grammar-validated. */
   colors?: Partial<Record<BrandColorKey, string>>;
   typography?: { serif?: string; sans?: string; mono?: string; fontsHref?: string };

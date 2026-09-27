@@ -1,6 +1,6 @@
 # ADR 0073 - Embeddable conversation view (one chat, reused everywhere)
 
-**Status:** Accepted
+**Status:** implemented (status advanced 2026-07-22 — `chat/EmbeddedChatPanel.tsx` shipped and is the documented turnkey drop-in per CLAUDE.md, consumed by `builder/CreateWithAiPanel`, the ADR 0461 Studio embeds, and the chat-widget gateway; the line had never moved past Accepted)
 **Date:** 2026-06-19
 **Depends on / composes:** the chat surface (`frontend/react/src/chat/`), RFC 0005 conversation primitive, ADR 0058 (chat-drivability = agent + nodes), ADR 0072 (AI Workflow Author), ADR 0054 (`ProjectChatTab` deep-link precedent).
 **Surface:** frontend only — a refactor of the chat surface into a reusable inner component + the chrome that wraps it. No wire change, no new RFC.

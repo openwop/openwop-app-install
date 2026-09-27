@@ -40,8 +40,18 @@ export interface ImportPlan {
   order: string[]; // refs in dependency order
 }
 
+/** Per-item apply outcome (LEAK-12 real import — additive next to the original
+ *  `{imported, refs}` shape; `imported` counts only actually-materialized items). */
+export interface ImportItemResult {
+  ref: string;
+  kind: ExportKind;
+  status: 'imported' | 'skipped' | 'failed';
+  message?: string;
+}
+
 export interface ImportResult {
   dryRun: false;
   imported: number;
   refs: string[];
+  items: ImportItemResult[];
 }

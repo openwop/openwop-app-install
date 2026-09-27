@@ -1,0 +1,131 @@
+{
+  "name": "core.openwop.workflows.campaign-sync",
+  "version": "1.1.2",
+  "kind": "workflow-chain",
+  "description": "Campaign Studio metrics-sync chain (RFC 0013; campaign gap plan C2 on ADR 0159). Pulls yesterday's ad metrics for every dispatched campaign through the acting user's platform connection (ctx.ads, window-scoped so rows never double-count) into the unified performance store, then delivers a short sync summary as a notification. Schedule it daily on the ONE scheduler, or run it ad hoc — the 15-minute cooldown makes overlapping fires harmless. Also carries the daily budget-pacing check (ADR 0220).",
+  "author": "openwop",
+  "license": "Apache-2.0",
+  "engines": {
+    "openwop": ">=1.0.0"
+  },
+  "keywords": [
+    "Marketing",
+    "Campaign Studio"
+  ],
+  "chains": [
+    {
+      "chainId": "campaign-sync.daily-metrics",
+      "version": "1.0.0",
+      "label": "Daily Ad-Metrics Sync",
+      "description": "Pull yesterday's spend/impressions/clicks for every dispatched campaign on one ad platform (meta or google) into the performance store — per-campaign best-effort, deduped, cooldown-guarded — and notify with the result. Pair with a daily schedule for hands-off freshness (feeds the KPI cards, budget recommendations, and the attribution join).",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The org whose performance store receives the rows."
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "meta",
+              "google"
+            ],
+            "default": "meta",
+            "description": "The ad platform to pull (the two with live metrics readers)."
+          }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "sync",
+            "typeId": "feature.campaign-connectors.nodes.sync",
+            "name": "Pull yesterday's metrics",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}",
+              "platform": "{{params.platform}}"
+            }
+          },
+          {
+            "id": "notify",
+            "typeId": "feature.notifications.nodes.notify",
+            "name": "Deliver sync summary",
+            "position": {
+              "x": 300,
+              "y": 0
+            },
+            "config": { "audience": "tenant" },
+            "inputs": { "title": "Daily Ad-Metrics Sync" }
+          }
+        ],
+        "edges": [
+          {
+            "from": "sync",
+            "to": "notify"
+          }
+        ]
+      },
+      "outputs": {
+        "outcome": {
+          "type": "string",
+          "description": "synced | cooldown | no_dispatches."
+        }
+      }
+    },
+    {
+      "chainId": "campaign-sync.pacing-check",
+      "version": "1.0.0",
+      "label": "Daily Budget Pacing Check",
+      "description": "Compare every campaign's actual spend (performance store) against its budget plan and notify on band escalations (80% warning / 100% over) — once per escalation, never per run. Pair with a daily schedule after the metrics sync.",
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "orgId"
+        ],
+        "properties": {
+          "orgId": {
+            "type": "string",
+            "description": "The org whose campaigns are paced."
+          }
+        }
+      },
+      "capabilities": [],
+      "dag": {
+        "nodes": [
+          {
+            "id": "pace",
+            "typeId": "feature.campaign-intel.nodes.pacing-check",
+            "name": "Check budget pacing",
+            "position": {
+              "x": 0,
+              "y": 0
+            },
+            "config": {},
+            "inputs": {
+              "orgId": "{{params.orgId}}"
+            }
+          }
+        ],
+        "edges": []
+      },
+      "outputs": {
+        "alerted": {
+          "type": "array",
+          "description": "Band escalations that raised a notification."
+        }
+      }
+    }
+  ]
+}

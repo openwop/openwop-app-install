@@ -1,17 +1,17 @@
 /**
- * Site client (ADR 0027). The homepage is the host-level SYSTEM site page, edited
- * by the super admin — so this is just the on/off switch + the home-page editor.
+ * Site client (ADR 0027). The homepage is the host-level SYSTEM site page. Its
+ * CONTENT is edited through the standard CMS routes on the reserved `host-site`
+ * org (a super admin reaches them via `requireCmsScope` — the "Front page" scope
+ * in the CMS Page Builder); this client owns only the on/off switch + the public
+ * pointer.
  *
  * - `resolveFrontPage()` — PUBLIC (unauthed) read: is the front page on, and the
  *   fixed system-site pointer to fetch.
  * - `getSiteConfig` / `putSiteConfig` — superadmin on/off toggle.
- * - `getSitePage` / `putSitePage` — superadmin home-page editor (host-level,
- *   cross-tenant by super-admin authority; never via org-scoped CMS).
  */
 import { authedHeaders, config, fetchOpts } from '../../client/config.js';
-import type { Page, Section } from '../cms/cmsClient.js';
 
-const root = `${config.baseUrl}/v1/host/openwop-app`;
+const root = `${config.baseUrl}/host/openwop-app`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 export interface FrontPagePointer { enabled: boolean; orgId: string; slug: string }
@@ -64,16 +64,4 @@ export async function getSiteConfig(): Promise<SiteConfig> {
 export async function putSiteConfig(input: { enabled: boolean }): Promise<SiteConfig> {
   const res = await fetch(`${root}/site-config`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(input) }));
   return asJson<SiteConfig>(res, 'putSiteConfig');
-}
-
-/** The system home page's working copy (superadmin). */
-export async function getSitePage(): Promise<Page> {
-  const res = await fetch(`${root}/site-page`, fetchOpts({ headers: authedHeaders() }));
-  return (await asJson<{ page: Page }>(res, 'getSitePage')).page;
-}
-
-/** Edit + re-publish the system home page (superadmin). */
-export async function putSitePage(patch: { title?: string; sections?: Section[] }): Promise<Page> {
-  const res = await fetch(`${root}/site-page`, fetchOpts({ method: 'PUT', headers: jsonHeaders(), body: JSON.stringify(patch) }));
-  return (await asJson<{ page: Page }>(res, 'putSitePage')).page;
 }

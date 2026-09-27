@@ -1,7 +1,7 @@
 /**
  * ADR 0130 Phase 5 — client for the rule-based model-router config (admin).
  * Backend is authority (toggle + `requireOrgScope`); a 404 means the feature is off.
- * Wraps the existing `/v1/host/openwop-app/model-router/orgs/:orgId/config` GET/PUT
+ * Wraps the existing `/host/openwop-app/model-router/orgs/:orgId/config` GET/PUT
  * + `/enable` surface (Phase 2). No new backend.
  *
  * @see docs/adr/0130-rule-based-model-router.md
@@ -14,7 +14,15 @@ export type RuleCondition =
   | { kind: 'always' }
   | { kind: 'attachment' }
   | { kind: 'tokensOver'; threshold: number }
-  | { kind: 'intentIs'; intent: string };
+  // ADR 0130 Phase 4 (`intentIs`) was RETIRED — CHAT-FIRST-PORT-AUDIT A8 (dead:
+  // the ignition site never populated the intent + the classifier had zero
+  // callers). The backend tolerates a legacy stored rule (drops it, inert).
+  // ADR 0130 Phase 5 — composite difficulty tier (was backend-only until the
+  // 2026-07-07 grade pass closed the FE drift: a stored rule rendered blank).
+  | { kind: 'difficultyAtLeast'; level: 'low' | 'medium' | 'high' }
+  // ADR 0130 Phase 6 — server-fed conversation kind ('group' = board/multi-agent
+  // rooms): lets a tenant route those rooms to a stronger model.
+  | { kind: 'conversationKind'; value: 'group' | 'workspace' | 'channel' };
 
 export interface RoutingRule { when: RuleCondition; target: RoutingTarget }
 
@@ -35,7 +43,7 @@ export interface StoredRouterConfig {
 export interface Org { orgId: string; name: string }
 
 const baseFor = (orgId: string): string =>
-  `${config.baseUrl}/v1/host/openwop-app/model-router/orgs/${encodeURIComponent(orgId)}/config`;
+  `${config.baseUrl}/host/openwop-app/model-router/orgs/${encodeURIComponent(orgId)}/config`;
 const jsonHeaders = (): Record<string, string> => authedHeaders({ 'content-type': 'application/json' });
 
 async function asJson<T>(res: Response, ctx: string): Promise<T> {
@@ -48,7 +56,7 @@ async function asJson<T>(res: Response, ctx: string): Promise<T> {
 }
 
 export async function listOrgs(): Promise<Org[]> {
-  const res = await fetch(`${config.baseUrl}/v1/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
+  const res = await fetch(`${config.baseUrl}/host/openwop-app/orgs`, fetchOpts({ headers: authedHeaders() }));
   return (await asJson<{ orgs: Org[] }>(res, 'listOrgs')).orgs;
 }
 

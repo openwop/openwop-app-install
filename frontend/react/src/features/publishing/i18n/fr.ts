@@ -6,29 +6,36 @@
 export const messages = {
   // Page chrome
   eyebrow: 'Plateforme',
+  orgsEmptyClause: 'Les pages du site et leur SEO appartiennent à une organisation',
+  orgsFailedClause: 'La liste des pages n’a jamais été demandée',
   title: 'Publication et SEO',
   lede: 'Publiez des pages CMS sur un site public avec des métadonnées SEO, un sitemap et un flux RSS.',
+  status_draft: 'brouillon',
+  status_in_review: 'en relecture',
+  status_published: 'publiée',
+  status_archived: 'archivée',
+  filterPlaceholder: 'Filtrer les pages…',
+  filterAria: 'Filtrer les pages par titre ou slug',
+  noMatchBody: 'Aucune page ne correspond à votre recherche.',
+  clearSearch: 'Effacer la recherche',
 
   // Gating / empty states
-  notEnabledTitle: 'La publication n\'est pas activée',
-  notEnabledBody: 'Demandez à un administrateur d\'activer la fonctionnalité Publication et SEO pour ce locataire.',
-  noOrgsTitle: 'Aucune organisation',
-  noOrgsBody: 'Créez d\'abord une organisation — un site appartient à une organisation.',
+  notEnabledTitle: 'La publication n’est pas activée',
+  notEnabledBody: 'Demandez à un administrateur d’activer la fonctionnalité Publication et SEO pour ce locataire.',
   selectPageTitle: 'Sélectionnez une page',
   selectPageBody: 'Choisissez une page pour modifier ses métadonnées SEO. Les pages publiées obtiennent une URL publique.',
 
   // aria-labels
-  orgPickerLabel: 'Organisation',
 
   // Page list + site links
   pages: 'Pages',
-  noPages: 'Aucune page CMS pour l\'instant.',
+  noPages: 'Aucune page CMS pour l’instant.',
   publicSite: 'Site public',
-  copySitemapUrl: 'Copier l\'URL du sitemap.xml',
-  copyFeedUrl: 'Copier l\'URL du feed.rss',
+  copySitemapUrl: 'Copier l’URL du sitemap.xml',
+  copyFeedUrl: 'Copier l’URL du feed.rss',
 
   // SEO editor header
-  copyPublicUrl: 'Copier l\'URL publique',
+  copyPublicUrl: 'Copier l’URL publique',
   publishToGoLive: 'Publiez dans le CMS pour mettre en ligne',
 
   // SEO editor field labels
@@ -57,5 +64,5 @@ export const messages = {
   // Toasts / errors
   loadPagesFailed: 'Échec du chargement des pages.',
   loadSeoFailed: 'Échec du chargement du SEO.',
-  saveFailed: 'Échec de l\'enregistrement.',
+  saveFailed: 'Échec de l’enregistrement.',
 } as const;

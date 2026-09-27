@@ -15,6 +15,10 @@ import type { BackendFeature } from '../types.js';
 import { registerChatWidgetRoutes } from './routes.js';
 import { registerChatWidgetPublicGateway } from './publicGateway.js';
 import { presentationEnabled } from '../../host/hostProfile.js';
+import { onRosterMemberDeleted } from '../../host/rosterLifecycle.js';
+import { disableWidgetsForDeletedAgent, purgeTenantWidgetTokens } from './widgetService.js';
+import { registerAnonSurfaceWriteGate } from '../../host/anonymousActor.js';
+import { registerTenantPurgeHook } from '../../host/hostExtPersistence.js';
 
 export const chatWidgetFeature: BackendFeature = {
   id: 'chat-widget',
@@ -27,5 +31,20 @@ export const chatWidgetFeature: BackendFeature = {
   registerRoutes: (deps) => {
     registerChatWidgetRoutes(deps);
     if (presentationEnabled('chatWidget')) registerChatWidgetPublicGateway(deps);
+    // ADR 0469 A4 — the deferred-execution handler for a HELD anon write. Registered
+    // unconditionally (not behind the presentation gate): an approval created while the
+    // public surface was live must remain decidable even in headless mode.
+    registerAnonSurfaceWriteGate();
+    // ADR 0288 — disable (never delete) this feature's widgets when their roster
+    // member is deleted: a widget is a live public credential; serving stops,
+    // the authored config survives for re-assignment.
+    onRosterMemberDeleted('chat-widget', async ({ tenantId, rosterId, agentId }) => {
+      await disableWidgetsForDeletedAgent(tenantId, { rosterId, ...(agentId ? { agentId } : {}) });
+    });
+    // ADR 0590 tenant-teardown pre-hook: the token index (`chatwidget:tokenidx`)
+    // keys by the opaque capability token with no tenant, so the generic
+    // purgeTenantHostExt walk cannot reach it. This enumerates the tenant's
+    // widgets (while they still resolve) and drops each one's token-index entry.
+    registerTenantPurgeHook('chat-widget', purgeTenantWidgetTokens);
   },
 };
